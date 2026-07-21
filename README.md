@@ -48,3 +48,19 @@ AIstudy 是一个面向备考学习者的云端优先学习决策平台。它不
 pc-sync.sh push AIstudy
 pc-sync.sh pull AIstudy
 ```
+
+## GitHub 一键同步
+
+首次登录 GitHub 后，在项目目录执行：
+
+```bash
+./sync.sh
+```
+
+也可以直接指定提交说明：
+
+```bash
+./sync.sh "docs: update project plan"
+```
+
+脚本会自动检查 GitHub 登录状态、提交当前变更并推送到 `origin` 的当前分支。它不保存 Token，认证由 GitHub CLI 管理。
