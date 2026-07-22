@@ -46,6 +46,15 @@ export default defineConfig({
           environment: "node",
         },
       },
+      {
+        resolve: { alias },
+        test: {
+          name: "contract",
+          include: ["tests/contract/**/*.test.ts"],
+          exclude: sharedExclude,
+          environment: "node",
+        },
+      },
       "spikes/*/vitest.config.ts",
     ],
   },

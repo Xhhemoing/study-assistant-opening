@@ -21,6 +21,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [当前实施计划：终身学习平台](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
 - [ADR-001：技术栈锁定](docs/decisions/ADR-001-stack.md)
+- [CI 说明](docs/operations/ci.md)
 - [项目章程与产品规格](docs/product/PRD.md)
 - [场景预设与学习策略](docs/product/SCENARIOS.md)
 - [界面信息层级与 AI 交互规则](docs/product/UX_AND_AI_POLICY.md)
@@ -32,20 +33,19 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Phase 0 / Local Infra`：
+当前仓库处于 `Phase 0 / CI Ready`：
 
-- 系统实现架构（TypeScript 模块化单体 + Worker）已批准：`docs/plans/2026-07-22-system-architecture-rethink-design.md`
-- Task 1–2 完成：栈锁定 + monorepo 脚手架
-- Task 3 完成：Compose、`.env.example`、env 校验、依赖健康检查
+- Task 1–3 完成：栈锁定、monorepo、本地 infra/health
+- Task 4 完成：GitHub Actions CI + 契约校验
 
 ```bash
 cp .env.example .env
 npm run compose:up    # 需要 Docker
-npm run db:migrate
+npm run verify:ci
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：Task 4 CI。
+下一步：Task 5 — Workspace 与统一资产契约（Phase 1）。
 
 ## 预定技术方向
 
