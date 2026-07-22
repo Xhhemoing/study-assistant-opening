@@ -8,6 +8,7 @@ const alias = {
   "@aistudy/domain": path.resolve(root, "packages/domain/src/index.ts"),
   "@aistudy/contracts": path.resolve(root, "packages/contracts/src/index.ts"),
   "@aistudy/database": path.resolve(root, "packages/database/src/index.ts"),
+  "@aistudy/database/migrate": path.resolve(root, "packages/database/src/migrate.ts"),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),

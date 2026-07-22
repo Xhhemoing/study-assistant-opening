@@ -9,9 +9,18 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./migrate": {
+      "types": "./src/migrate.ts",
+      "default": "./src/migrate.ts"
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aistudy/contracts": "0.0.0",
+    "drizzle-orm": "0.44.7",
+    "postgres": "3.4.7"
   }
 }

@@ -33,19 +33,21 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Phase 1 / Asset Contracts`：
+当前仓库处于 `Phase 1 / Library Persistence`：
 
 - Phase 0 完成：栈、monorepo、infra、CI
-- Task 5 完成：Workspace 与统一资产契约（lifecycle / types）
+- Task 5 完成：Workspace 与统一资产契约
+- Task 6 完成：Document/Block/Revision/Relation/Property 持久化与仓储
 
 ```bash
 cp .env.example .env
 npm run compose:up    # 需要 Docker
-npm run verify:ci
+npm run db:migrate
+npm run test:integration
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：Task 6 — Document / Block / Relation / Property / Revision 库表与仓储。
+下一步：Task 7 — 跨课程稳定资产身份（Course + AssetMembership）。
 
 ## 预定技术方向
 
