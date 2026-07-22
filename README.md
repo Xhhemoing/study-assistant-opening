@@ -19,6 +19,8 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 - [已批准：终身学习平台调整设计](docs/plans/2026-07-21-lifelong-learning-design.md)
 - [当前实施计划：终身学习平台](docs/plans/2026-07-21-lifelong-learning-implementation.md)
+- [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
+- [ADR-001：技术栈锁定](docs/decisions/ADR-001-stack.md)
 - [项目章程与产品规格](docs/product/PRD.md)
 - [场景预设与学习策略](docs/product/SCENARIOS.md)
 - [界面信息层级与 AI 交互规则](docs/product/UX_AND_AI_POLICY.md)
@@ -30,9 +32,13 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Approved Design / Implementation Planning` 阶段：终身学习产品设计和第一阶段 TDD 实施顺序已经批准，尚未创建应用代码和生产基础设施。
+当前仓库处于 `Phase 0 / Stack Validated`：
 
-下一步执行 `docs/plans/2026-07-21-lifelong-learning-implementation.md` 的 Task 1，完成技术验证和版本锁定。
+- 系统实现架构（TypeScript 模块化单体 + Worker）已批准：`docs/plans/2026-07-22-system-architecture-rethink-design.md`
+- Task 1 技术 Spike 已通过，版本锁定见 `docs/decisions/ADR-001-stack.md` 与 `spikes/`
+- 尚未创建 `apps/*` 产品脚手架（Task 2）
+
+下一步执行 `docs/plans/2026-07-21-lifelong-learning-implementation.md` 的 Task 2：npm workspace 产品 monorepo 与质量门。
 
 ## 预定技术方向
 
@@ -43,7 +49,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - 部署：容器化云部署；后期提供 Docker Compose 自托管
 - 测试：Vitest + Playwright + API/Schema 契约测试
 
-具体版本在 Milestone 0 通过官方文档和最小技术验证锁定，不在规格阶段凭空固定。
+具体版本已在 Task 1 Spike 中锁定，见 `docs/decisions/ADR-001-stack.md`。
 
 ## 本地项目同步
 

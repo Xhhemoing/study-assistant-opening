@@ -1,0 +1,16 @@
+{
+  "name": "@aistudy/spike-storage",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.832.0",
+    "@aws-sdk/s3-request-presigner": "3.832.0"
+  }
+}

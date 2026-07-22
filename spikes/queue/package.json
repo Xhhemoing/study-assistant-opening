@@ -1,0 +1,16 @@
+{
+  "name": "@aistudy/spike-queue",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  },
+  "dependencies": {
+    "bullmq": "5.56.10",
+    "ioredis": "5.6.1"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "aistudy",
+  "private": true,
+  "version": "0.0.0",
+  "description": "AIstudy lifelong learning platform",
+  "workspaces": [
+    "spikes/*"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "test:spikes": "npm test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
