@@ -12,6 +12,12 @@ export {
 } from "./schema/library";
 
 export {
+  courseSchema,
+  courses,
+  courseAssetMemberships,
+} from "./schema/courses";
+
+export {
   createLibraryRepository,
   LibraryError,
   type LibraryRepository,
@@ -22,6 +28,19 @@ export {
   type PropertyRecord,
   type BlockInput,
 } from "./repositories/library";
+
+export {
+  createCourseMembershipRepository,
+  CourseMembershipError,
+  type CourseMembershipRepository,
+  type CourseMembershipErrorCode,
+  type CourseRecord,
+  type AssetMembershipRecord,
+  type CourseAssetListItem,
+  type CourseForAsset,
+  type CourseRole,
+  type CourseVisibility,
+} from "./repositories/course-membership";
 
 export {
   applyMigrations,
