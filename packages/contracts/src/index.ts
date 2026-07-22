@@ -1,5 +1,24 @@
 import { z } from "zod";
 
+export {
+  workspaceIdSchema,
+  workspaceSchema,
+  type WorkspaceId,
+  type Workspace,
+} from "./workspace";
+
+export {
+  assetTypeSchema,
+  assetLifecycleSchema,
+  assetSchema,
+  canTransitionLifecycle,
+  assertLifecycleTransition,
+  LifecycleTransitionError,
+  type AssetType,
+  type AssetLifecycle,
+  type Asset,
+} from "./assets";
+
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),
   latencyMs: z.number().nonnegative().optional(),

@@ -33,10 +33,10 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Phase 0 / CI Ready`：
+当前仓库处于 `Phase 1 / Asset Contracts`：
 
-- Task 1–3 完成：栈锁定、monorepo、本地 infra/health
-- Task 4 完成：GitHub Actions CI + 契约校验
+- Phase 0 完成：栈、monorepo、infra、CI
+- Task 5 完成：Workspace 与统一资产契约（lifecycle / types）
 
 ```bash
 cp .env.example .env
@@ -45,7 +45,7 @@ npm run verify:ci
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：Task 5 — Workspace 与统一资产契约（Phase 1）。
+下一步：Task 6 — Document / Block / Relation / Property / Revision 库表与仓储。
 
 ## 预定技术方向
 
