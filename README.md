@@ -32,13 +32,14 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Phase 0 / Stack Validated`：
+当前仓库处于 `Phase 0 / Workspace Scaffolded`：
 
 - 系统实现架构（TypeScript 模块化单体 + Worker）已批准：`docs/plans/2026-07-22-system-architecture-rethink-design.md`
-- Task 1 技术 Spike 已通过，版本锁定见 `docs/decisions/ADR-001-stack.md` 与 `spikes/`
-- 尚未创建 `apps/*` 产品脚手架（Task 2）
+- Task 1 技术 Spike 与 ADR-001 已完成：`docs/decisions/ADR-001-stack.md`、`spikes/`
+- Task 2 monorepo 脚手架已就绪：`apps/web`、`apps/worker`、`packages/*`
+- 质量门：`npm run lint && npm run typecheck && npm test && npm run build`
 
-下一步执行 `docs/plans/2026-07-21-lifelong-learning-implementation.md` 的 Task 2：npm workspace 产品 monorepo 与质量门。
+下一步执行 `docs/plans/2026-07-21-lifelong-learning-implementation.md` 的 Task 3：本地基础设施与健康检查。
 
 ## 预定技术方向
 
