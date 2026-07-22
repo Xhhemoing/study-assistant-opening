@@ -1,14 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@aistudy/domain": ["../../packages/domain/src/index.ts"],
+      "@aistudy/contracts": ["../../packages/contracts/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"],
-  "references": [
-    { "path": "../../packages/domain" },
-    { "path": "../../packages/contracts" }
-  ]
+  "exclude": ["src/**/*.test.ts"]
 }

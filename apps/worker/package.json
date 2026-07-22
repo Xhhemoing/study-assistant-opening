@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -b tsconfig.json",
-    "start": "node dist/index.js",
-    "typecheck": "tsc -b tsconfig.json --pretty false",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

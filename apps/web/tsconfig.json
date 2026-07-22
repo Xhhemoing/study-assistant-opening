@@ -13,7 +13,8 @@
     "paths": {
       "@/*": ["./src/*"],
       "@aistudy/domain": ["../../packages/domain/src/index.ts"],
-      "@aistudy/contracts": ["../../packages/contracts/src/index.ts"]
+      "@aistudy/contracts": ["../../packages/contracts/src/index.ts"],
+      "@aistudy/config": ["../../packages/config/src/index.ts"]
     }
   },
   "include": [

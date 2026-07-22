@@ -7,3 +7,5 @@ export function getNodeEnv(
   if (env.NODE_ENV === "test") return "test";
   return "development";
 }
+
+export { EnvValidationError, loadEnv, type AppEnv } from "./env";

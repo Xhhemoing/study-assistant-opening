@@ -12,12 +12,15 @@
     "dev": "npm run dev -w @aistudy/web",
     "worker:dev": "npm run dev -w @aistudy/worker",
     "lint": "eslint .",
-    "typecheck": "tsc -b --pretty false && npm run typecheck -w @aistudy/web",
+    "typecheck": "tsc -p packages/domain/tsconfig.json --noEmit && tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p packages/config/tsconfig.json --noEmit && tsc -p packages/database/tsconfig.json --noEmit && tsc -p packages/ai/tsconfig.json --noEmit && tsc -p packages/ui/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web",
     "test": "vitest run",
     "test:integration": "vitest run --project integration",
     "test:e2e": "echo \"e2e not configured yet\" && exit 0",
-    "build": "tsc -b --pretty false && npm run build -w @aistudy/web",
-    "build:packages": "tsc -b --pretty false"
+    "build": "npm run build -w @aistudy/worker && npm run build -w @aistudy/web",
+    "compose:up": "docker compose -f infra/docker/compose.yml up -d",
+    "compose:down": "docker compose -f infra/docker/compose.yml down",
+    "compose:ps": "docker compose -f infra/docker/compose.yml ps",
+    "db:migrate": "node ./scripts/db-migrate.mjs"
   },
   "engines": {
     "node": ">=20"
