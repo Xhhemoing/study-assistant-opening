@@ -14,7 +14,8 @@
       "@/*": ["./src/*"],
       "@aistudy/domain": ["../../packages/domain/src/index.ts"],
       "@aistudy/contracts": ["../../packages/contracts/src/index.ts"],
-      "@aistudy/config": ["../../packages/config/src/index.ts"]
+      "@aistudy/config": ["../../packages/config/src/index.ts"],
+      "@aistudy/database": ["../../packages/database/src/index.ts"]
     }
   },
   "include": [

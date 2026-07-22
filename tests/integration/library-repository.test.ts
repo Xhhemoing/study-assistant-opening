@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  applyMigrations,
+  createIdentityRepository,
   createLibraryRepository,
+  createSqlClient,
   LibraryError,
+  type IdentityRepository,
   type LibraryRepository,
 } from "@aistudy/database";
-import { applyMigrations, createSqlClient } from "@aistudy/database";
 
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -14,35 +17,42 @@ const databaseUrl =
 describe("library repository foundation", () => {
   const sql = createSqlClient(databaseUrl);
   let repo: LibraryRepository;
+  let identity: IdentityRepository;
   let workspaceA: string;
   let workspaceB: string;
 
   beforeAll(async () => {
     await applyMigrations(sql);
     repo = createLibraryRepository(sql);
+    identity = createIdentityRepository(sql);
   });
 
   beforeEach(async () => {
-    // Isolate each test on fresh workspaces; truncate library tables only.
     await sql`TRUNCATE
+      course_asset_memberships,
+      courses,
       library_properties,
       library_relations,
       library_revisions,
       library_blocks,
       library_documents,
-      workspaces
+      sessions,
+      workspaces,
+      users
       RESTART IDENTITY CASCADE`;
 
-    workspaceA = randomUUID();
-    workspaceB = randomUUID();
-    await repo.createWorkspace({
-      id: workspaceA,
-      ownerUserId: randomUUID(),
+    const userA = await identity.createUserWithWorkspace({
+      email: `lib-a-${randomUUID()}@example.com`,
+      displayName: "Lib A",
+      passwordHash: "scrypt$not-used",
     });
-    await repo.createWorkspace({
-      id: workspaceB,
-      ownerUserId: randomUUID(),
+    const userB = await identity.createUserWithWorkspace({
+      email: `lib-b-${randomUUID()}@example.com`,
+      displayName: "Lib B",
+      passwordHash: "scrypt$not-used",
     });
+    workspaceA = userA.workspace.id;
+    workspaceB = userB.workspace.id;
   });
 
   afterAll(async () => {

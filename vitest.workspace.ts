@@ -8,7 +8,10 @@ const alias = {
   "@aistudy/domain": path.resolve(root, "packages/domain/src/index.ts"),
   "@aistudy/contracts": path.resolve(root, "packages/contracts/src/index.ts"),
   "@aistudy/database": path.resolve(root, "packages/database/src/index.ts"),
-  "@aistudy/database/migrate": path.resolve(root, "packages/database/src/migrate.ts"),
+  "@aistudy/database/migrate": path.resolve(
+    root,
+    "packages/database/src/migrate.ts",
+  ),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),
@@ -30,10 +33,7 @@ export default defineConfig({
         resolve: { alias },
         test: {
           name: "unit",
-          include: [
-            "packages/*/src/**/*.test.ts",
-            "apps/*/src/**/*.test.ts",
-          ],
+          include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
           exclude: sharedExclude,
           environment: "node",
         },
@@ -45,6 +45,7 @@ export default defineConfig({
           include: ["tests/integration/**/*.test.ts"],
           exclude: sharedExclude,
           environment: "node",
+          fileParallelism: false,
         },
       },
       {
@@ -54,6 +55,16 @@ export default defineConfig({
           include: ["tests/contract/**/*.test.ts"],
           exclude: sharedExclude,
           environment: "node",
+        },
+      },
+      {
+        resolve: { alias },
+        test: {
+          name: "e2e",
+          include: ["tests/e2e/**/*.spec.ts", "tests/e2e/**/*.test.ts"],
+          exclude: sharedExclude,
+          environment: "node",
+          testTimeout: 60_000,
         },
       },
       "spikes/*/vitest.config.ts",

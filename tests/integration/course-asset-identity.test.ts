@@ -3,10 +3,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations,
   createCourseMembershipRepository,
+  createIdentityRepository,
   createLibraryRepository,
   createSqlClient,
   CourseMembershipError,
   type CourseMembershipRepository,
+  type IdentityRepository,
   type LibraryRepository,
 } from "@aistudy/database";
 
@@ -18,6 +20,7 @@ describe("course asset identity invariant", () => {
   const sql = createSqlClient(databaseUrl);
   let library: LibraryRepository;
   let courses: CourseMembershipRepository;
+  let identity: IdentityRepository;
   let workspaceId: string;
   let otherWorkspaceId: string;
 
@@ -25,6 +28,7 @@ describe("course asset identity invariant", () => {
     await applyMigrations(sql);
     library = createLibraryRepository(sql);
     courses = createCourseMembershipRepository(sql);
+    identity = createIdentityRepository(sql);
   });
 
   beforeEach(async () => {
@@ -36,19 +40,23 @@ describe("course asset identity invariant", () => {
       library_revisions,
       library_blocks,
       library_documents,
-      workspaces
+      sessions,
+      workspaces,
+      users
       RESTART IDENTITY CASCADE`;
 
-    workspaceId = randomUUID();
-    otherWorkspaceId = randomUUID();
-    await library.createWorkspace({
-      id: workspaceId,
-      ownerUserId: randomUUID(),
+    const userA = await identity.createUserWithWorkspace({
+      email: `course-a-${randomUUID()}@example.com`,
+      displayName: "Course A",
+      passwordHash: "scrypt$not-used",
     });
-    await library.createWorkspace({
-      id: otherWorkspaceId,
-      ownerUserId: randomUUID(),
+    const userB = await identity.createUserWithWorkspace({
+      email: `course-b-${randomUUID()}@example.com`,
+      displayName: "Course B",
+      passwordHash: "scrypt$not-used",
     });
+    workspaceId = userA.workspace.id;
+    otherWorkspaceId = userB.workspace.id;
   });
 
   afterAll(async () => {

@@ -24,6 +24,18 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((v) => v === "true"),
+  AUTH_SECRET: z
+    .string()
+    .min(32, "AUTH_SECRET must be at least 32 characters"),
+  SESSION_TTL_SECONDS: z
+    .string()
+    .optional()
+    .default("604800")
+    .transform((v) => Number.parseInt(v, 10))
+    .refine((n) => Number.isFinite(n) && n >= 60, {
+      message: "SESSION_TTL_SECONDS must be an integer >= 60",
+    }),
+  AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
 });
 
 export type AppEnv = {
@@ -31,6 +43,9 @@ export type AppEnv = {
   databaseUrl: string;
   redisUrl: string;
   publicBaseUrl: string;
+  authSecret: string;
+  sessionTtlSeconds: number;
+  authCookieName: string;
   s3: {
     endpoint: string;
     region: string;
@@ -45,6 +60,7 @@ export type AppEnv = {
     databaseConfigured: boolean;
     redisConfigured: boolean;
     storageConfigured: boolean;
+    authConfigured: boolean;
   };
 };
 
@@ -64,6 +80,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     databaseUrl: data.DATABASE_URL,
     redisUrl: data.REDIS_URL,
     publicBaseUrl: data.PUBLIC_BASE_URL,
+    authSecret: data.AUTH_SECRET,
+    sessionTtlSeconds: data.SESSION_TTL_SECONDS,
+    authCookieName: data.AUTH_COOKIE_NAME,
     s3: {
       endpoint: data.S3_ENDPOINT,
       region: data.S3_REGION,
@@ -83,6 +102,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
           data.S3_BUCKET.length > 0 &&
           data.S3_ACCESS_KEY_ID.length > 0 &&
           data.S3_SECRET_ACCESS_KEY.length > 0,
+        authConfigured: data.AUTH_SECRET.length >= 32,
       };
     },
   };

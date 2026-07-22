@@ -17,6 +17,8 @@ export {
   courseAssetMemberships,
 } from "./schema/courses";
 
+export { identitySchema, users, sessions } from "./schema/identity";
+
 export {
   createLibraryRepository,
   LibraryError,
@@ -41,6 +43,17 @@ export {
   type CourseRole,
   type CourseVisibility,
 } from "./repositories/course-membership";
+
+export {
+  createIdentityRepository,
+  IdentityError,
+  hashSessionToken,
+  type IdentityRepository,
+  type IdentityErrorCode,
+  type UserRecord,
+  type SessionRecord,
+  type WorkspaceOwnerRecord,
+} from "./repositories/identity";
 
 export {
   applyMigrations,

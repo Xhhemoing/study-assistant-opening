@@ -19,6 +19,17 @@ export {
   type Asset,
 } from "./assets";
 
+export {
+  registerRequestSchema,
+  loginRequestSchema,
+  authUserSchema,
+  authErrorSchema,
+  type RegisterRequest,
+  type LoginRequest,
+  type AuthUser,
+  type AuthErrorBody,
+} from "./auth";
+
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),
   latencyMs: z.number().nonnegative().optional(),
