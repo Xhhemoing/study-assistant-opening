@@ -1,5 +1,7 @@
 # 核心数据模型与预测系统
 
+> **更新说明：**本文件中的不可变学习事件、派生评价和预测分层继续有效。资产根模型已由 [终身学习平台调整设计](../plans/2026-07-21-lifelong-learning-design.md) 扩展为 `Document/Block/Relation/Property/Revision`、`Exploration/PromotionRecord`、长期 `Course`、多目标和时间窗口；后续实现以新设计为准。
+
 ## 1. 数据设计原则
 
 1. 共享内容、个人状态和班级状态物理或逻辑分表；

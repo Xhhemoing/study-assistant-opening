@@ -1,32 +1,38 @@
 # AIstudy
 
-AIstudy 是一个面向备考学习者的云端优先学习决策平台。它不追求把所有知识强制拆成卡片，而是围绕具体考试目标，将资料、考点、练习、错因、复习和模考连接为可调整的学习闭环。
+AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标学习、自由探索、笔记与知识库为三个平等入口，通过长期课程、多个阶段目标和统一资产层连接资料、思考、创作、练习、记忆与考试。
 
 ## 产品原则
 
 - 默认界面只显示少量结果：状态、关键数据、下一步行动。
 - 点击结果可展开原因、证据和解决路径；完整参数仅在开发者设置中显示。
+- 用户无需创建课程或考试目标即可开始自由探索、笔记和知识整理。
+- 课程是可选的长期容器，可同时承载多个目标、时间窗口和不同能力要求。
 - 期末考试、高考、考研和自定义目标使用版本化场景预设，用户可覆盖预设。
+- 探索内容默认保留为草稿，由用户选择性沉淀为笔记、关系、卡片、题目或课程任务。
+- 原生建设强笔记、探索、练习和 SRS；深度阅读、数据库视图和白板分阶段增强。
 - 首发为连接云端服务器的 Web 应用；后续开放自托管，并提供具备少量离线能力的客户端。
 - 共享学习内容、个人学习状态和班级协作状态从数据层分离。
 - AI 负责降低机械成本和提出建议；关键知识判断、正式作答和高影响变更由用户确认。
 
 ## 文档入口
 
+- [已批准：终身学习平台调整设计](docs/plans/2026-07-21-lifelong-learning-design.md)
+- [当前实施计划：终身学习平台](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [项目章程与产品规格](docs/product/PRD.md)
 - [场景预设与学习策略](docs/product/SCENARIOS.md)
 - [界面信息层级与 AI 交互规则](docs/product/UX_AND_AI_POLICY.md)
 - [系统架构](docs/architecture/ARCHITECTURE.md)
 - [核心数据模型与预测系统](docs/architecture/DATA_MODEL_AND_PREDICTION.md)
 - [资源平台、开源与商业化](docs/business/OPEN_SOURCE_AND_MARKETPLACE.md)
-- [可执行实施计划](docs/roadmap/EXECUTION_PLAN.md)
+- [旧版备考中心实施计划，仅作历史参考](docs/roadmap/EXECUTION_PLAN.md)
 - [Hermes 执行计划](.hermes/plans/2026-07-21_191637-aistudy-project-plan.md)
 
 ## 当前阶段
 
-当前仓库处于 `Specification Baseline` 阶段：产品边界、核心架构、数据契约和实施顺序已经建立，尚未创建应用代码和生产基础设施。
+当前仓库处于 `Approved Design / Implementation Planning` 阶段：终身学习产品设计和第一阶段 TDD 实施顺序已经批准，尚未创建应用代码和生产基础设施。
 
-下一步执行 `docs/roadmap/EXECUTION_PLAN.md` 的 Milestone 0，完成技术验证和项目脚手架。
+下一步执行 `docs/plans/2026-07-21-lifelong-learning-implementation.md` 的 Task 1，完成技术验证和版本锁定。
 
 ## 预定技术方向
 
