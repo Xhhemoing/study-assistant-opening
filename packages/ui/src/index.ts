@@ -10,3 +10,13 @@ export const designTokens = {
     lg: "1.5rem",
   },
 } as const;
+
+export {
+  WorkspaceNavigation,
+  getWorkspaceEntry,
+  workspaceNavigationItems,
+} from "./workspace-navigation";
+export type {
+  WorkspaceEntry,
+  WorkspaceNavigationPlacement,
+} from "./workspace-navigation";
