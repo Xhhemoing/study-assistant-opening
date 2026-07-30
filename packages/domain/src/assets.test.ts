@@ -1,5 +1,4 @@
 import { describe, it, expect, assert } from "vitest";
-import { z } from "zod";
 import {
   assetTypeSchema,
   assetLifecycleSchema,
@@ -9,7 +8,7 @@ import {
   LifecycleTransitionError,
   canTransitionLifecycle,
   assertLifecycleTransition,
-} from "./assets";
+} from "@aistudy/contracts";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 

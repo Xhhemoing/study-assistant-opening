@@ -114,6 +114,10 @@ export type LibraryRepository = {
     includeDeleted?: boolean;
   }): Promise<DocumentRecord>;
 
+  listDocuments(input: {
+    workspaceId: string;
+  }): Promise<DocumentRecord[]>;
+
   updateDocument(input: {
     workspaceId: string;
     documentId: string;
@@ -514,6 +518,35 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         },
         blocks,
       );
+    },
+
+    async listDocuments(input) {
+      await ensureWorkspace(input.workspaceId);
+      const rows = await sql`
+        SELECT *
+        FROM library_documents
+        WHERE workspace_id = ${input.workspaceId}
+          AND deleted_at IS NULL
+        ORDER BY updated_at DESC, id ASC
+      `;
+      return Promise.all(rows.map(async (row) => {
+        const documentId = row.id as string;
+        const blocks = await loadBlocks(input.workspaceId, documentId);
+        return mapDocRow(
+          row as {
+            id: string;
+            workspace_id: string;
+            title: string;
+            lifecycle: string;
+            schema_version: number;
+            current_revision_number: number;
+            created_at: Date | string;
+            updated_at: Date | string;
+            deleted_at: Date | string | null;
+          },
+          blocks,
+        );
+      }));
     },
 
     async updateDocument(input) {

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { BookOpen, Compass, Library } from "lucide-react";
 
 export const workspaceNavigationItems = [
   { href: "/learn", label: "Learn", key: "learn" },
@@ -38,11 +39,20 @@ export function WorkspaceNavigation({
         <a
           key={item.key}
           href={item.href}
+          aria-label={item.label}
           data-entry={item.key}
           aria-current={item.key === activeEntry ? "page" : undefined}
         >
-          <span aria-hidden="true">{item.key === "learn" ? "L" : item.key === "explore" ? "E" : "K"}</span>
-          {item.label}
+          <span className="workspace-navigation__icon" aria-hidden="true">
+            {item.key === "learn" ? (
+              <BookOpen size={20} strokeWidth={1.8} />
+            ) : item.key === "explore" ? (
+              <Compass size={20} strokeWidth={1.8} />
+            ) : (
+              <Library size={20} strokeWidth={1.8} />
+            )}
+          </span>
+          <span className="workspace-navigation__label">{item.label}</span>
         </a>
       ))}
     </nav>

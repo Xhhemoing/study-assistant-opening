@@ -5,16 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --port 3000",
-    "build": "next build",
+    "build": "bash ../../scripts/run-heavy.sh next build",
     "start": "next start --port 3000",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "typecheck": "bash ../../scripts/run-heavy.sh tsc -p tsconfig.json --noEmit",
+    "test": "bash ../../scripts/run-heavy.sh vitest run"
   },
   "dependencies": {
     "@aistudy/config": "0.0.0",
     "@aistudy/contracts": "0.0.0",
     "@aistudy/database": "0.0.0",
     "@aistudy/domain": "0.0.0",
+    "@aistudy/ui": "^0.0.0",
     "@aws-sdk/client-s3": "3.832.0",
     "ioredis": "5.6.1",
     "jose": "^6.2.4",

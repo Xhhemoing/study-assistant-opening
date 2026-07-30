@@ -338,6 +338,17 @@ export async function getDocumentForPrincipal(
   }
 }
 
+export async function listDocumentsForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+) {
+  assertAuthorized(principal, "document.read", {
+    type: "document",
+    workspaceId: principal.workspaceId,
+  });
+  return runtime.library.listDocuments({ workspaceId: principal.workspaceId });
+}
+
 export async function updateDocumentForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,

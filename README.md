@@ -17,6 +17,9 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 文档入口
 
+- [Brainstorm 研究与算法候选库](docs/brainstorm/README.md)
+- [Brainstorm 研究索引](docs/brainstorm/INDEX.md)
+- [项目算法与工程做法地图](docs/brainstorm/ALGORITHM_MAP.md)
 - [已批准：终身学习平台调整设计](docs/plans/2026-07-21-lifelong-learning-design.md)
 - [当前实施计划：终身学习平台](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)

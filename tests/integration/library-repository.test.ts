@@ -114,6 +114,48 @@ describe("library repository foundation", () => {
     expect(revisions[0]?.blocks[0]?.id).toBe(blockA);
   });
 
+  it("lists active workspace documents newest first with their blocks", async () => {
+    const older = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Older note",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "older" } }],
+    });
+    const newer = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Newer note",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "newer" } }],
+    });
+    const deleted = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Deleted note",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "deleted" } }],
+    });
+    await repo.createDocument({
+      workspaceId: workspaceB,
+      title: "Other workspace note",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "other" } }],
+    });
+    await repo.softDeleteDocument({ workspaceId: workspaceA, documentId: deleted.id });
+    await sql`
+      UPDATE library_documents
+      SET updated_at = CASE
+        WHEN id = ${older.id} THEN '2026-01-01T00:00:00Z'::timestamptz
+        WHEN id = ${newer.id} THEN '2026-01-02T00:00:00Z'::timestamptz
+        ELSE updated_at
+      END
+      WHERE workspace_id = ${workspaceA}
+    `;
+
+    const documents = await repo.listDocuments({ workspaceId: workspaceA });
+
+    expect(documents.map((document) => document.title)).toEqual([
+      "Newer note",
+      "Older note",
+    ]);
+    expect(documents[0]?.blocks[0]?.content).toEqual({ text: "newer" });
+    expect(documents.every((document) => document.workspaceId === workspaceA)).toBe(true);
+  });
+
   it("keeps block IDs stable across edits and appends a new revision", async () => {
     const blockA = randomUUID();
     const blockB = randomUUID();

@@ -1,18 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
-import { chromium, type Browser, type APIRequestContext } from "playwright";
+import { chromium, type Browser } from "playwright";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://aistudy:***@127.0.0.1:5432/aistudy";
+const databaseUrl = process.env.DATABASE_URL;
 const baseURL = process.env.E2E_BASE_URL;
 
 describe("workspace navigation", () => {
-  const sql = createSqlClient(databaseUrl);
+  const sql = databaseUrl ? createSqlClient(databaseUrl) : undefined;
   let browser: Browser | undefined;
 
   beforeAll(async () => {
+    if (!baseURL) return;
+    if (!sql) {
+      throw new Error("DATABASE_URL is required when E2E_BASE_URL is set");
+    }
+
     await applyMigrations(sql);
     await sql`TRUNCATE
       course_asset_memberships,
@@ -34,7 +37,7 @@ describe("workspace navigation", () => {
 
   afterAll(async () => {
     await browser?.close();
-    await sql.end({ timeout: 5 });
+    await sql?.end({ timeout: 5 });
   });
 
   it("keeps Learn, Explore, and Library equally available across viewport sizes", async () => {
@@ -50,14 +53,14 @@ describe("workspace navigation", () => {
       return;
     }
 
-    const context: APIRequestContext = (await browser!.newContext({ baseURL })).request;
+    const context = await browser!.newContext({ baseURL });
     const email = `navigation-${randomUUID()}@example.com`;
-    const registered = await context.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", {
       data: { email, password: "password123", displayName: "Navigation User" },
     });
     expect(registered.ok()).toBe(true);
 
-    const page = await (await browser!.newContext({ baseURL })).newPage();
+    const page = await context.newPage();
     for (const viewport of [
       { width: 320, height: 800 },
       { width: 768, height: 900 },
@@ -75,6 +78,6 @@ describe("workspace navigation", () => {
     await expect(page).toHaveURL(/\/explore$/);
     await page.reload();
     await expect(page).toHaveURL(/\/explore$/);
-    await page.close();
+    await context.close();
   });
 });

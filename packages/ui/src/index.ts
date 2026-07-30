@@ -20,3 +20,4 @@ export type {
   WorkspaceEntry,
   WorkspaceNavigationPlacement,
 } from "./workspace-navigation";
+export { AppShell } from "./app-shell";
