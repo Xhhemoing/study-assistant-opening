@@ -61,4 +61,19 @@ export {
   listMigrationFiles,
   migrateFromUrl,
   type MigrationResult,
+  type ApplyMigrationsOptions,
+  type Legacy0003Attestation,
+  type MigrationRegistryErrorCode,
+  MigrationRegistryError,
 } from "./migrate";
+
+export {
+  applyIdentityOwnerMappings,
+  assertIdentityMigrationReady,
+  getIdentityDatabaseFingerprint,
+  inspectIdentityMigration,
+  prepareIdentityOwnerMappings,
+  IdentityMigrationPreflightError,
+  IDENTITY_ORPHAN_WORKSPACES,
+  type OrphanWorkspaceSummary,
+} from "./migration-preflight";

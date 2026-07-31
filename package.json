@@ -20,7 +20,7 @@
     "compose:up": "docker compose -f infra/docker/compose.yml up -d",
     "compose:down": "docker compose -f infra/docker/compose.yml down",
     "compose:ps": "docker compose -f infra/docker/compose.yml ps",
-    "db:migrate": "node ./scripts/db-migrate.mjs",
+    "db:migrate": "tsx ./scripts/db-migrate.ts",
     "verify:ci": "node ./scripts/verify-ci.mjs"
   },
   "engines": {
