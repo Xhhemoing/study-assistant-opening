@@ -224,7 +224,7 @@ npm run lint
 **Files:**
 
 - Modify: `packages/database/src/migrate.ts`
-- Modify: `scripts/db-migrate.mjs`（只调用 canonical runner，不保留第二套实现）
+- Modify: `scripts/db-migrate.ts`（只调用 canonical runner，不保留第二套实现）
 - Modify: `.env.example`
 - Modify: `infra/docker/compose.yml`（仅当连接参数需要统一）
 - Modify: `tests/integration/test-database.ts`
@@ -254,7 +254,7 @@ npm run test:integration -- migration-order
 
 ### Step 3：实现最小规则
 
-- migration runner 以数字版本排序并校验 `^([0-9]{4})_[a-z0-9-]+\\.sql$`；
+- migration runner 以数字版本排序并校验 `^([0-9]{4})_[a-z0-9_-]+\\.sql$`；
 - 每个文件在独立事务中执行并写入 `schema_migrations`；
 - runner 通过向 `schema_migrations` 新增 nullable `checksum`、`verification_state` 和 `recorded_at` 字段演进 registry；历史行保持 `checksum IS NULL`、`verification_state = 'legacy-unverified'`，新执行行写入 SHA-256 和 `verification_state = 'verified'`；这个 registry 演进由 runner 的向后兼容 bootstrap 完成，不能修改 `0001_library.sql`；
 - 文件名版本唯一；
@@ -293,8 +293,8 @@ npm run db:migrate
 
 至少覆盖：
 
-- `candidate -> draft` 合法；
-- `draft -> published` 合法；
+- `candidate -> confirmed` 合法；
+- `confirmed -> published` 合法；
 - `published -> candidate` 非法；
 - 非法转换不会改 lifecycle、updatedAt 或追加 revision；
 - 旧文档没有显式 lifecycle 时使用明确默认值。
@@ -314,6 +314,7 @@ npm test -- packages/contracts/src/assets.test.ts tests/integration/library-repo
 - 在同一事务内拒绝非法转换；
 - 使用机器可识别错误码；
 - 不在 database package 重写一套迁移规则；本 Gate 只在 repository 层强制既有领域契约，不新增数据库约束 migration。
+- Task 10 的编辑器/API 暴露 lifecycle 更新时，必须转发 `lifecycle` 并覆盖非法转换的 handler 级 `409`；本 Gate 不引入未接线的 API 分支。
 - 历史 migration（包括 `0001_library.sql`）绝不修改；若未来确有数据库级 guard 的证据，应另行设计、使用下一个唯一编号 corrective migration，并同步升级 fixture 与 registry。
 
 ### Step 4：确认 GREEN
