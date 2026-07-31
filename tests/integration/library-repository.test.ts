@@ -10,9 +10,10 @@ import {
   type LibraryRepository,
 } from "@aistudy/database";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://aistudy:aistudy@127.0.0.1:5432/aistudy";
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required for library repository tests");
+}
 
 describe("library repository foundation", () => {
   const sql = createSqlClient(databaseUrl);
@@ -250,6 +251,57 @@ describe("library repository foundation", () => {
 
     expect(after).toEqual(before);
     expect(after.blocks[0]?.content).toEqual({ text: "first" });
+  });
+
+  it("enforces lifecycle transitions without changing an invalid document", async () => {
+    const doc = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Lifecycle document",
+      lifecycle: "candidate",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "v1" } }],
+    });
+
+    const confirmed = await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: doc.id,
+      lifecycle: "confirmed",
+      blocks: doc.blocks,
+      reason: "confirm",
+    });
+    const published = await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: doc.id,
+      lifecycle: "published",
+      blocks: confirmed.blocks,
+      reason: "publish",
+    });
+    const revisionsBeforeInvalidTransition = await repo.listRevisions({
+      workspaceId: workspaceA,
+      documentId: doc.id,
+    });
+
+    await expect(
+      repo.updateDocument({
+        workspaceId: workspaceA,
+        documentId: doc.id,
+        lifecycle: "candidate",
+        blocks: published.blocks,
+        reason: "invalid-demotion",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_LIFECYCLE_TRANSITION" });
+
+    const current = await repo.getDocument({
+      workspaceId: workspaceA,
+      documentId: doc.id,
+    });
+    const revisionsAfterInvalidTransition = await repo.listRevisions({
+      workspaceId: workspaceA,
+      documentId: doc.id,
+    });
+    expect(current.lifecycle).toBe("published");
+    expect(current.updatedAt).toEqual(published.updatedAt);
+    expect(current.blocks).toEqual(published.blocks);
+    expect(revisionsAfterInvalidTransition).toEqual(revisionsBeforeInvalidTransition);
   });
 
   it("creates typed relations between documents and blocks", async () => {

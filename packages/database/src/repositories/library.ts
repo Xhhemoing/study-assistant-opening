@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   assetLifecycleSchema,
+  assertLifecycleTransition,
+  LifecycleTransitionError,
   type AssetLifecycle,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
@@ -22,6 +24,7 @@ export type LibraryErrorCode =
   | "VALIDATION"
   | "WORKSPACE_MISMATCH"
   | "CROSS_WORKSPACE_REFERENCE"
+  | "INVALID_LIFECYCLE_TRANSITION"
   | "CONFLICT";
 
 export class LibraryError extends Error {
@@ -582,6 +585,14 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         const nextLifecycle = (input.lifecycle ??
           current.lifecycle) as AssetLifecycle;
         assertLifecycle(nextLifecycle);
+        try {
+          assertLifecycleTransition(current.lifecycle as AssetLifecycle, nextLifecycle);
+        } catch (error) {
+          if (error instanceof LifecycleTransitionError) {
+            throw new LibraryError("INVALID_LIFECYCLE_TRANSITION", error.message);
+          }
+          throw error;
+        }
         if (!nextTitle.trim()) {
           throw new LibraryError("VALIDATION", "Document title is required");
         }

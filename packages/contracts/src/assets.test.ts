@@ -118,6 +118,11 @@ describe("asset contract", () => {
       expect(() => assertLifecycleTransition("published", "discarded")).toThrow(LifecycleTransitionError);
     });
 
+    it("rejects published → candidate", () => {
+      expect(canTransitionLifecycle("published", "candidate")).toBe(false);
+      expect(() => assertLifecycleTransition("published", "candidate")).toThrow(LifecycleTransitionError);
+    });
+
     it("allows archived → confirmed", () => {
       expect(canTransitionLifecycle("archived", "confirmed")).toBe(true);
     });
