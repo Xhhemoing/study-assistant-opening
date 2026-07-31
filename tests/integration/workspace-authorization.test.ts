@@ -22,9 +22,10 @@ import { GET as listCourseAssets } from "../../apps/web/src/app/api/courses/[id]
 import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://aistudy:aistudy@127.0.0.1:5432/aistudy";
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required for workspace authorization tests");
+}
 
 const AUTH_SECRET = "test-auth-secret-at-least-32-characters-long";
 const COOKIE = "aistudy_session";

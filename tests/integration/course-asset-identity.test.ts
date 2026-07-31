@@ -12,9 +12,10 @@ import {
   type LibraryRepository,
 } from "@aistudy/database";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://aistudy:aistudy@127.0.0.1:5432/aistudy";
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required for course asset identity tests");
+}
 
 describe("course asset identity invariant", () => {
   const sql = createSqlClient(databaseUrl);

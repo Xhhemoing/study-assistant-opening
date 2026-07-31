@@ -6,9 +6,10 @@ import {
   checkStorage,
 } from "../../apps/web/src/server/dependency-checks";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://aistudy:aistudy@127.0.0.1:5432/aistudy";
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required for dependency checks tests");
+}
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
 describe("live dependency probes", () => {
