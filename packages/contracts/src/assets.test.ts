@@ -1,5 +1,4 @@
-import { describe, it, expect, assert } from "vitest";
-import { z } from "zod";
+import { describe, it, expect } from "vitest";
 import {
   assetTypeSchema,
   assetLifecycleSchema,
