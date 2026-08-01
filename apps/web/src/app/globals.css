@@ -1,3 +1,5 @@
+@import "@blocknote/core/style.css";
+
 :root {
   color-scheme: dark;
   --background: #0d1117;
@@ -509,12 +511,205 @@ textarea {
   margin-bottom: 16px;
 }
 
-.library-new-note:disabled {
-  border-color: var(--border);
-  background: var(--surface-raised);
-  color: var(--text-muted);
-  opacity: 1;
+.library-new-note:hover {
+  background: var(--accent-strong);
+  color: #07101c;
 }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.editor-page {
+  min-height: 100vh;
+  background: var(--background);
+}
+
+.editor-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 640px) minmax(180px, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(13, 17, 23, 0.96);
+  backdrop-filter: blur(10px);
+}
+
+.editor-toolbar__leading,
+.editor-toolbar__actions,
+.editor-back,
+.editor-save-status {
+  display: flex;
+  align-items: center;
+}
+
+.editor-toolbar__leading {
+  min-width: 0;
+  gap: 12px;
+}
+
+.editor-back {
+  min-height: 40px;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+
+.editor-back:hover {
+  color: var(--text);
+}
+
+.editor-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
+
+.editor-mode {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.editor-title-label {
+  min-width: 0;
+}
+
+.editor-title {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.editor-title:hover,
+.editor-title:focus {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.editor-toolbar__actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.editor-save-status {
+  min-width: 0;
+  gap: 5px;
+  margin-right: 4px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.editor-save {
+  min-height: 40px;
+  padding-inline: 12px;
+}
+
+.editor-main {
+  width: min(100%, 1000px);
+  margin: 0 auto;
+  padding: 26px 32px 80px;
+}
+
+.editor-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+.editor-page-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+
+.editor-page-header p:last-child {
+  max-width: 430px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  text-align: right;
+}
+
+.editor-notice {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.editor-surface {
+  min-height: calc(100vh - 160px);
+  padding: 22px 30px 50px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #111821;
+}
+
+.editor-surface .bn-container {
+  min-height: 560px;
+  background: transparent;
+}
+
+.editor-surface .bn-editor {
+  min-height: 560px;
+  padding: 8px 0;
+  color: var(--text);
+}
+
+.editor-loading {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  color: var(--text-muted);
+}
+
 
 .library-loading {
   padding: 32px 0;
@@ -649,6 +844,24 @@ textarea {
     font-size: 0.78rem;
   }
 
+  .editor-toolbar {
+    grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.4fr) minmax(120px, 1fr);
+    gap: 10px;
+    padding-inline: 16px;
+  }
+
+  .editor-main {
+    padding-inline: 20px;
+  }
+
+  .editor-surface {
+    padding-inline: 22px;
+  }
+
+  .editor-save-status {
+    display: none;
+  }
+
   .workspace-page {
     padding: 30px 18px 48px;
   }
@@ -685,6 +898,64 @@ textarea {
 
   .auth-panel {
     padding: 26px 20px;
+  }
+
+  .editor-toolbar {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 10px 12px;
+  }
+
+  .editor-toolbar__leading {
+    flex: 1 1 auto;
+  }
+
+  .editor-title-label {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .editor-title {
+    text-align: left;
+  }
+
+  .editor-toolbar__actions {
+    flex: 0 0 auto;
+  }
+
+  .editor-mode {
+    display: none;
+  }
+
+  .editor-main {
+    padding: 18px 12px 36px;
+  }
+
+  .editor-page-header {
+    display: block;
+    margin-bottom: 16px;
+  }
+
+  .editor-page-header p:last-child {
+    max-width: none;
+    margin-top: 8px;
+    text-align: left;
+  }
+
+  .editor-surface {
+    min-height: calc(100vh - 180px);
+    padding: 16px 14px 36px;
+  }
+
+  .editor-surface .bn-container,
+  .editor-surface .bn-editor {
+    min-height: 480px;
+  }
+
+  .editor-notice {
+    font-size: 0.75rem;
   }
 
   .onboarding-page {

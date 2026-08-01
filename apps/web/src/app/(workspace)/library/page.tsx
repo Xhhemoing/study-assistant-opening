@@ -1,4 +1,5 @@
 import { FilePlus2, Search } from "lucide-react";
+import Link from "next/link";
 import { LibraryDocumentList } from "../../../features/workspace/library-document-list";
 
 export default function LibraryPage() {
@@ -19,9 +20,9 @@ export default function LibraryPage() {
             <Search aria-hidden="true" size={17} /> 搜索
           </button>
         </div>
-        <button className="button library-new-note" type="button" disabled title="块编辑器将在后续任务开放">
-          <FilePlus2 aria-hidden="true" size={17} /> 新建笔记（即将开放）
-        </button>
+        <Link className="button library-new-note" href="/library/new">
+          <FilePlus2 aria-hidden="true" size={17} /> 新建笔记
+        </Link>
         <LibraryDocumentList />
       </section>
     </div>
