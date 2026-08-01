@@ -3,16 +3,20 @@ import {
   createIdentityRepository,
   createLibraryRepository,
   createSqlClient,
+  createWorkspacePreferencesRepository,
   CourseMembershipError,
   IdentityError,
   LibraryError,
+  WorkspacePreferencesError,
   type CourseMembershipRepository,
   type IdentityRepository,
   type LibraryRepository,
+  type WorkspacePreferencesRepository,
 } from "@aistudy/database";
 import {
   loginRequestSchema,
   registerRequestSchema,
+  workspacePreferenceUpdateSchema,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import {
@@ -29,6 +33,7 @@ export type AuthRuntime = {
   identity: IdentityRepository;
   library: LibraryRepository;
   courses: CourseMembershipRepository;
+  preferences: WorkspacePreferencesRepository;
   sessions: SessionService;
   authCookieName: string;
   sessionCookieSecure: boolean;
@@ -47,6 +52,7 @@ export function createAuthRuntime(input: {
   const identity = createIdentityRepository(sql);
   const library = createLibraryRepository(sql);
   const courses = createCourseMembershipRepository(sql);
+  const preferences = createWorkspacePreferencesRepository(sql);
   const sessions = createSessionService({
     sql,
     authSecret: input.authSecret,
@@ -58,6 +64,7 @@ export function createAuthRuntime(input: {
     identity,
     library,
     courses,
+    preferences,
     sessions,
     authCookieName: input.authCookieName,
     sessionCookieSecure: input.sessionCookieSecure,
@@ -115,7 +122,11 @@ export function mapDomainError(error: unknown): ApiError {
       return new ApiError("NOT_FOUND", error.message, 404);
     }
   }
-  if (error instanceof LibraryError || error instanceof CourseMembershipError) {
+  if (
+    error instanceof LibraryError
+    || error instanceof CourseMembershipError
+    || error instanceof WorkspacePreferencesError
+  ) {
     if (error.code === "WORKSPACE_MISMATCH" || error.code === "CROSS_WORKSPACE_REFERENCE") {
       return new ApiError("WORKSPACE_FORBIDDEN", error.message, 403);
     }
@@ -284,6 +295,36 @@ export async function requirePrincipal(
     throw new ApiError("UNAUTHENTICATED", "Authentication required", 401);
   }
   return principal;
+}
+
+export async function getWorkspacePreferenceForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+) {
+  const workspaceId = boundWorkspaceId(principal);
+  assertAuthorized(principal, "workspace.preference.read", {
+    type: "workspace",
+    workspaceId,
+  });
+  return runtime.preferences.getDefaultEntry(workspaceId);
+}
+
+export async function setWorkspacePreferenceForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  body: unknown,
+) {
+  const parsed = workspacePreferenceUpdateSchema.parse(body);
+  const workspaceId = boundWorkspaceId(principal);
+  assertAuthorized(principal, "workspace.preference.update", {
+    type: "workspace",
+    workspaceId,
+  });
+  const preference = await runtime.preferences.setDefaultEntry(
+    workspaceId,
+    parsed.defaultEntry,
+  );
+  return preference.defaultEntry;
 }
 
 /** Document helpers — always bind principal workspace. */
