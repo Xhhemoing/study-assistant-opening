@@ -121,10 +121,10 @@ GitHub 仓库是 Source，commit/release 可形成 Snapshot；“待读、试用
 
 ## 10. 正式化路径
 
-批准后应在当前应用壳独立完成的前提下：
+批准后应在当前应用壳与现有对象搜索独立完成的前提下：
 
 1. 新增正式采集闭环设计；
 2. 修订 PRD 的日常流程和验收场景；
-3. 在现有 Task 12 前补来源、采集和 LearningIntent 基础任务；
+3. 不阻塞 Task 9–12；在 Task 12 后新增独立的来源、采集和 LearningIntent 纵向切片，并在 Task 21 前固定其与学习事件的边界；
 4. 明确 Source/Intent/Task/Event/Artifact 契约与数据库边界；
 5. 为连接器失败、版本更新、重复捕获和验证规则建立 TDD 场景。
