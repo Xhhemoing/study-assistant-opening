@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { readDefaultEntry } from "./entry-preference";
+
+type PreferenceResponse = { defaultEntry: "learn" | "explore" | "library" | null };
 
 export function RootRedirect() {
   const router = useRouter();
@@ -10,7 +11,7 @@ export function RootRedirect() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/auth/me", { cache: "no-store" })
+    fetch("/api/workspace/preferences", { cache: "no-store" })
       .then(async (response) => {
         if (!active) return;
         if (response.status === 401) {
@@ -18,9 +19,8 @@ export function RootRedirect() {
           return;
         }
         if (!response.ok) throw new Error();
-        const body = await response.json() as { user: { id: string } };
-        const entry = readDefaultEntry(window.localStorage, body.user.id);
-        router.replace(entry ? `/${entry}` : "/onboarding");
+        const body = await response.json() as PreferenceResponse;
+        router.replace(`/${body.defaultEntry ?? "learn"}`);
       })
       .catch(() => {
         if (active) setError("暂时无法连接学习空间，请检查网络后重试。");

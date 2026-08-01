@@ -4,7 +4,6 @@ import type { WorkspaceEntry } from "@aistudy/ui";
 import { BookOpen, Compass, Library, type LucideIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { writeDefaultEntry } from "./entry-preference";
 
 const choices: Array<{
   entry: WorkspaceEntry;
@@ -20,7 +19,7 @@ const choices: Array<{
 export function Onboarding() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
-  const [userId, setUserId] = useState("");
+  const [choicePending, setChoicePending] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -28,16 +27,32 @@ export function Onboarding() {
       .then(async (response) => {
         if (response.status === 401) return router.replace("/login");
         if (!response.ok) throw new Error();
-        const body = await response.json() as { user: { id: string } };
-        setUserId(body.user.id);
+        await response.json();
         setReady(true);
       })
       .catch(() => setError("暂时无法准备学习空间，请检查网络后重试。"));
   }, [router]);
 
-  function choose(entry: WorkspaceEntry) {
-    writeDefaultEntry(window.localStorage, userId, entry);
-    router.replace(`/${entry}`);
+  async function choose(entry: WorkspaceEntry) {
+    setChoicePending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/workspace/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ defaultEntry: entry }),
+      });
+      if (response.status === 401) {
+        router.replace("/login");
+        return;
+      }
+      if (!response.ok) throw new Error();
+      router.replace(`/${entry}`);
+    } catch {
+      setError("暂时无法保存默认首页，请检查网络后重试。");
+    } finally {
+      setChoicePending(false);
+    }
   }
 
   if (error) return (
@@ -53,11 +68,17 @@ export function Onboarding() {
       <header className="onboarding-header">
         <span className="auth-brand">AIstudy</span>
         <h1>你想从哪里开始？</h1>
-        <p>这里只决定默认首页。之后可以随时切换，也不需要先创建课程或目标。</p>
+        <p>这里只决定默认首页。之后可以直接在 Learn、Explore 和 Library 之间切换，也不需要先创建课程或目标。</p>
       </header>
       <div className="entry-choices">
         {choices.map(({ entry, title, description, icon: Icon }) => (
-          <button key={entry} className="entry-choice" type="button" onClick={() => choose(entry)}>
+          <button
+            key={entry}
+            className="entry-choice"
+            type="button"
+            disabled={choicePending}
+            onClick={() => choose(entry)}
+          >
             <Icon aria-hidden="true" size={26} strokeWidth={1.7} />
             <strong>{title}</strong>
             <span>{description}</span>
