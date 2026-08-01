@@ -43,6 +43,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - Task 6 完成：Document/Block/Revision/Relation/Property 持久化
 - Task 7 完成：跨课程稳定资产身份（Course + AssetMembership）
 - Task 8 完成：认证、可吊销会话、Workspace 级服务端授权
+- Task 9 完成：三入口应用壳、workspace 级服务端默认入口偏好与真实浏览器验收
 
 ```bash
 cp .env.example .env
@@ -54,7 +55,7 @@ npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：Task 9 — 三入口应用壳（目标学习 / 自由探索 / 笔记与知识库）。
+下一步：Task 10 — 版本化 block 笔记编辑器。
 
 ## 预定技术方向
 

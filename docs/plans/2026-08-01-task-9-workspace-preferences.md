@@ -2,7 +2,11 @@
 
 > **For implementer:** Use TDD throughout. Write one failing test first, observe the expected failure, then implement the smallest change that makes it pass.
 
-**Status:** approved for implementation
+**Status:** completed — 2026-08-01
+
+**Implementation commits:** `22d16db`, `76ea0e9`, `37286d7`
+
+**Verification:** Contract 3/3, preference repository 5/5, preference handler 5/5, migration compatibility 14/14, and real browser navigation 3/3 passed before final full-suite validation.
 
 **Goal:** Persist each workspace's default application entry on the server so the root route can redirect an authenticated user to Learn, Explore, or Library across browsers and devices.
 

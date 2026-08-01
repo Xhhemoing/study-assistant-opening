@@ -417,6 +417,8 @@ npm run build
 
 **目的：** 将导航 contract 变成真实 workspace 应用壳。
 
+**执行状态：**已完成（2026-08-01）。三入口路由与响应式导航沿用既有实现；Task 9 补充了 `0005_workspace_preferences.sql`、session-scoped preference API、服务端根路由重定向和真实 browser 回归。无偏好 workspace 明确回退到 `/learn`，onboarding 选择则持久化到 workspace-scoped 数据库记录。
+
 **Files:**
 
 - Create: `apps/web/src/app/(workspace)/layout.tsx`
