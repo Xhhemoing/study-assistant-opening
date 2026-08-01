@@ -12,6 +12,7 @@ export function getAuthRuntime(): AuthRuntime {
   cached = createAuthRuntime({
     databaseUrl: env.databaseUrl,
     authSecret: env.authSecret,
+    sessionCookieSecure: env.sessionCookieSecure,
     sessionTtlSeconds: env.sessionTtlSeconds,
     authCookieName: env.authCookieName,
   });

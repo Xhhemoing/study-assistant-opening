@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { defineConfig, defineProject } from "vitest/config";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,11 +25,10 @@ const sharedExclude = [
 ];
 
 export default defineConfig({
-  resolve: { alias },
   test: {
-    exclude: sharedExclude,
+    maxWorkers: 1,
     projects: [
-      {
+      defineProject({
         resolve: { alias },
         test: {
           name: "unit",
@@ -37,18 +36,28 @@ export default defineConfig({
           exclude: sharedExclude,
           environment: "node",
         },
-      },
-      {
+      }),
+      defineProject({
         resolve: { alias },
         test: {
-          name: "integration",
-          include: ["tests/integration/**/*.test.ts"],
+          name: "handler",
+          include: ["tests/integration/handler/**/*.test.ts"],
           exclude: sharedExclude,
           environment: "node",
           fileParallelism: false,
         },
-      },
-      {
+      }),
+      defineProject({
+        resolve: { alias },
+        test: {
+          name: "integration",
+          include: ["tests/integration/**/*.test.ts"],
+          exclude: [...sharedExclude, "**/tests/integration/handler/**"],
+          environment: "node",
+          fileParallelism: false,
+        },
+      }),
+      defineProject({
         resolve: { alias },
         test: {
           name: "contract",
@@ -56,17 +65,7 @@ export default defineConfig({
           exclude: sharedExclude,
           environment: "node",
         },
-      },
-      {
-        resolve: { alias },
-        test: {
-          name: "e2e",
-          include: ["tests/e2e/**/*.spec.ts", "tests/e2e/**/*.test.ts"],
-          exclude: sharedExclude,
-          environment: "node",
-          testTimeout: 60_000,
-        },
-      },
+      }),
       "spikes/*/vitest.config.ts",
     ],
   },

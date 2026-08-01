@@ -27,6 +27,7 @@ const envSchema = z.object({
   AUTH_SECRET: z
     .string()
     .min(32, "AUTH_SECRET must be at least 32 characters"),
+  SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   SESSION_TTL_SECONDS: z
     .string()
     .optional()
@@ -44,6 +45,7 @@ export type AppEnv = {
   redisUrl: string;
   publicBaseUrl: string;
   authSecret: string;
+  sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
   s3: {
@@ -81,6 +83,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     redisUrl: data.REDIS_URL,
     publicBaseUrl: data.PUBLIC_BASE_URL,
     authSecret: data.AUTH_SECRET,
+    sessionCookieSecure:
+      data.SESSION_COOKIE_SECURE === undefined
+        ? data.NODE_ENV === "production"
+        : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
     s3: {

@@ -25,6 +25,15 @@ describe("loadEnv", () => {
     expect(env.nodeEnv).toBe("test");
     expect(env.authSecret).toBe(valid.AUTH_SECRET);
     expect(env.sessionTtlSeconds).toBe(604800);
+    expect(env.sessionCookieSecure).toBe(false);
+  });
+
+  it("uses secure session cookies by default in production and accepts an explicit override", () => {
+    expect(loadEnv({ ...valid, NODE_ENV: "production" }).sessionCookieSecure).toBe(true);
+    expect(
+      loadEnv({ ...valid, NODE_ENV: "production", SESSION_COOKIE_SECURE: "false" })
+        .sessionCookieSecure,
+    ).toBe(false);
   });
 
   it("rejects missing AUTH_SECRET", () => {

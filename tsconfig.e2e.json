@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "@playwright/test"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": [
+    "playwright.config.ts",
+    "scripts/db-reset-e2e.ts",
+    "tests/e2e/**/*.ts"
+  ]
+}

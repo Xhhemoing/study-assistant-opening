@@ -27,8 +27,11 @@ const required = [
   "npm run typecheck",
   "npm test",
   "npm run test:integration",
+  "npm run test:handler",
+  "npm run test:browser",
   "npm run build",
   "postgres:",
+  "postgres-e2e:",
   "redis:",
 ];
 

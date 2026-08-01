@@ -6,21 +6,21 @@ import {
   createSqlClient,
   hashSessionToken,
 } from "@aistudy/database";
-import { POST as register } from "../../apps/web/src/app/api/auth/register/route";
-import { POST as login } from "../../apps/web/src/app/api/auth/login/route";
-import { POST as logout } from "../../apps/web/src/app/api/auth/logout/route";
-import { GET as me } from "../../apps/web/src/app/api/auth/me/route";
-import { POST as createDocument } from "../../apps/web/src/app/api/documents/route";
+import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
+import { POST as login } from "../../../apps/web/src/app/api/auth/login/route";
+import { POST as logout } from "../../../apps/web/src/app/api/auth/logout/route";
+import { GET as me } from "../../../apps/web/src/app/api/auth/me/route";
+import { POST as createDocument } from "../../../apps/web/src/app/api/documents/route";
 import {
   GET as getDocument,
   PATCH as patchDocument,
-} from "../../apps/web/src/app/api/documents/[id]/route";
-import { GET as listRevisions } from "../../apps/web/src/app/api/documents/[id]/revisions/route";
-import { POST as createCourse } from "../../apps/web/src/app/api/courses/route";
-import { POST as addMembership } from "../../apps/web/src/app/api/courses/[id]/memberships/route";
-import { GET as listCourseAssets } from "../../apps/web/src/app/api/courses/[id]/assets/route";
-import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
-import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
+} from "../../../apps/web/src/app/api/documents/[id]/route";
+import { GET as listRevisions } from "../../../apps/web/src/app/api/documents/[id]/revisions/route";
+import { POST as createCourse } from "../../../apps/web/src/app/api/courses/route";
+import { POST as addMembership } from "../../../apps/web/src/app/api/courses/[id]/memberships/route";
+import { GET as listCourseAssets } from "../../../apps/web/src/app/api/courses/[id]/assets/route";
+import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
+import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -51,6 +51,7 @@ describe("workspace authorization via direct API access", () => {
     runtime = createAuthRuntime({
       databaseUrl,
       authSecret: AUTH_SECRET,
+      sessionCookieSecure: false,
       sessionTtlSeconds: 3600,
       authCookieName: COOKIE,
     });

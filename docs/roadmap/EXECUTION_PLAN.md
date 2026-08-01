@@ -34,7 +34,8 @@ npm run lint
 npm run typecheck
 npm run test
 npm run test:integration
-npm run test:e2e
+npm run test:handler
+npm run test:browser
 npm run build
 npm run db:migrate
 npm run db:seed

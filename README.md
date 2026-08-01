@@ -49,7 +49,8 @@ cp .env.example .env
 npm run compose:up    # 需要 Docker
 npm run db:migrate
 npm run test:integration
-npm run test:e2e
+npm run test:handler
+npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 

@@ -11,7 +11,7 @@ describe("CI workflow contract", () => {
     expect(existsSync(workflowPath)).toBe(true);
   });
 
-  it("runs install, lint, typecheck, test, integration, and build gates", () => {
+  it("runs install, lint, typecheck, test, handler, browser, integration, and build gates", () => {
     const yaml = readFileSync(workflowPath, "utf8");
 
     expect(yaml).toMatch(/name:\s*CI/i);
@@ -25,6 +25,8 @@ describe("CI workflow contract", () => {
       "npm run typecheck",
       "npm test",
       "npm run test:integration",
+      "npm run test:handler",
+      "npm run test:browser",
       "npm run build",
     ]) {
       expect(yaml).toContain(command);
@@ -32,6 +34,8 @@ describe("CI workflow contract", () => {
 
     expect(yaml).toMatch(/services:/);
     expect(yaml).toMatch(/postgres:/i);
+    expect(yaml).toMatch(/postgres-e2e:/i);
+    expect(yaml).toMatch(/5433:5432/);
     expect(yaml).toMatch(/redis:/i);
     expect(yaml).toMatch(/minio/i);
 

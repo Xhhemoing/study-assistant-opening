@@ -16,6 +16,23 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-e2e:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aistudy
+      POSTGRES_PASSWORD: aistudy
+      POSTGRES_DB: aistudy_e2e
+    ports:
+      - "5433:5432"
+    volumes:
+      - aistudy_pg_e2e_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aistudy -d aistudy_e2e"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -61,5 +78,6 @@ services:
 
 volumes:
   aistudy_pg_data:
+  aistudy_pg_e2e_data:
   aistudy_redis_data:
   aistudy_minio_data:

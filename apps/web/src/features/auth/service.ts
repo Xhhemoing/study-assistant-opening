@@ -31,6 +31,7 @@ export type AuthRuntime = {
   courses: CourseMembershipRepository;
   sessions: SessionService;
   authCookieName: string;
+  sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   close: () => Promise<void>;
 };
@@ -38,6 +39,7 @@ export type AuthRuntime = {
 export function createAuthRuntime(input: {
   databaseUrl: string;
   authSecret: string;
+  sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
 }): AuthRuntime {
@@ -58,6 +60,7 @@ export function createAuthRuntime(input: {
     courses,
     sessions,
     authCookieName: input.authCookieName,
+    sessionCookieSecure: input.sessionCookieSecure,
     sessionTtlSeconds: input.sessionTtlSeconds,
     close: async () => {
       await sql.end({ timeout: 5 });
@@ -239,7 +242,7 @@ export function sessionCookieHeader(
     "SameSite=Lax",
     `Expires=${expiresAt.toUTCString()}`,
   ];
-  if (process.env.NODE_ENV === "production") {
+  if (runtime.sessionCookieSecure) {
     parts.push("Secure");
   }
   return parts.join("; ");
