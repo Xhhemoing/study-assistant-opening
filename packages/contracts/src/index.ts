@@ -30,6 +30,15 @@ export {
   type AuthErrorBody,
 } from "./auth";
 
+export {
+  workspaceDefaultEntrySchema,
+  workspacePreferenceUpdateSchema,
+  workspacePreferenceResponseSchema,
+  type WorkspaceDefaultEntry,
+  type WorkspacePreferenceUpdate,
+  type WorkspacePreferenceResponse,
+} from "./workspace-preferences";
+
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),
   latencyMs: z.number().nonnegative().optional(),

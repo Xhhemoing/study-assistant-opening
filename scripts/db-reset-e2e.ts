@@ -26,6 +26,7 @@ export async function resetE2eDatabase(databaseUrl: string): Promise<void> {
       library_blocks,
       library_documents,
       sessions,
+      workspace_preferences,
       workspaces,
       users
       RESTART IDENTITY CASCADE`;

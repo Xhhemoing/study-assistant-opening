@@ -20,6 +20,11 @@ export {
 export { identitySchema, users, sessions } from "./schema/identity";
 
 export {
+  preferencesSchema,
+  workspacePreferences,
+} from "./schema/preferences";
+
+export {
   createLibraryRepository,
   LibraryError,
   type LibraryRepository,
@@ -54,6 +59,14 @@ export {
   type SessionRecord,
   type WorkspaceOwnerRecord,
 } from "./repositories/identity";
+
+export {
+  createWorkspacePreferencesRepository,
+  WorkspacePreferencesError,
+  type WorkspacePreferencesRepository,
+  type WorkspacePreferencesErrorCode,
+  type WorkspacePreferenceRecord,
+} from "./repositories/preferences";
 
 export {
   applyMigrations,

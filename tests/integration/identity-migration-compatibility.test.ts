@@ -170,7 +170,11 @@ describe("identity migration compatibility", () => {
 
     const result = await applyMigrations(sql);
 
-    expect(result.applied).toEqual(["0003_identity.sql", "0004_identity_repair.sql"]);
+    expect(result.applied).toEqual([
+      "0003_identity.sql",
+      "0004_identity_repair.sql",
+      "0005_workspace_preferences.sql",
+    ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
     `;
@@ -209,7 +213,11 @@ describe("identity migration compatibility", () => {
 
     const result = await applyMigrations(sql);
 
-    expect(result.applied).toEqual(["0003_identity.sql", "0004_identity_repair.sql"]);
+    expect(result.applied).toEqual([
+      "0003_identity.sql",
+      "0004_identity_repair.sql",
+      "0005_workspace_preferences.sql",
+    ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
     `;
@@ -504,7 +512,10 @@ describe("identity migration compatibility", () => {
       legacy0003Attestation: await legacy0003Attestation(),
     });
 
-    expect(result.applied).toEqual(["0004_identity_repair.sql"]);
+    expect(result.applied).toEqual([
+      "0004_identity_repair.sql",
+      "0005_workspace_preferences.sql",
+    ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations
       WHERE migration_id = '0003_identity.sql'
