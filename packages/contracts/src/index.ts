@@ -39,6 +39,72 @@ export {
   type WorkspacePreferenceResponse,
 } from "./workspace-preferences";
 
+export {
+  scenarioPresetSchema,
+  studyGoalSchema,
+  studyGoalInputSchema,
+  type ScenarioPreset,
+  type StudyGoal,
+  type StudyGoalInput,
+} from "./goals";
+
+export {
+  abilitySliceSchema,
+  practiceItemKindSchema,
+  practiceItemSchema,
+  errorCauseSchema,
+  attemptEventSchema,
+  type AbilitySlice,
+  type PracticeItemKind,
+  type PracticeItem,
+  type ErrorCause,
+  type AttemptEvent,
+} from "./attempts";
+
+export {
+  statusWordSchema,
+  summaryMetricSchema,
+  recommendedActionSchema,
+  statusResultSchema,
+  type StatusWord,
+  type SummaryMetric,
+  type RecommendedAction,
+  type StatusResult,
+} from "./assessment";
+
+export {
+  plannedTaskKindSchema,
+  plannedTaskSchema,
+  planOptionSchema,
+  todayPlanSchema,
+  type PlannedTaskKind,
+  type PlannedTask,
+  type PlanOption,
+  type TodayPlan,
+} from "./plan";
+
+export {
+  reviewGradeSchema,
+  reviewCardSchema,
+  reviewStateSchema,
+  type ReviewGrade,
+  type ReviewCard,
+  type ReviewState,
+} from "./srs";
+
+export {
+  aiRoleSchema,
+  explorationSchema,
+  chatTurnSchema,
+  promotionCandidateSchema,
+  type AIRole,
+  type Exploration,
+  type ChatTurn,
+  type PromotionCandidate,
+} from "./exploration";
+
+export { diagnosticsSchema, type Diagnostics } from "./diagnostics";
+
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),
   latencyMs: z.number().nonnegative().optional(),

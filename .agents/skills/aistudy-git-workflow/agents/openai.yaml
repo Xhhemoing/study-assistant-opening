@@ -1,0 +1,7 @@
+interface:
+  display_name: "AIstudy Git Workflow"
+  short_description: "AIstudy 项目 Git 拉取提交合并与编译测试质量门禁流程"
+  default_prompt: "Use $aistudy-git-workflow to pull, commit, merge, build, and test this AIstudy repository."
+
+policy:
+  allow_implicit_invocation: true

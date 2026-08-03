@@ -2,7 +2,8 @@
 
 import { AppShell, getWorkspaceEntry } from "@aistudy/ui";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { CommandPalette } from "../search/command-palette";
 
 export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -11,6 +12,9 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const [userLabel, setUserLabel] = useState("");
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
@@ -41,9 +45,18 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AppShell activeEntry={activeEntry} userLabel={userLabel} onLogout={logout} logoutPending={logoutPending}>
-      {logoutError ? <div className="app-shell__logout-error" role="alert">{logoutError}</div> : null}
-      {children}
-    </AppShell>
+    <>
+      <AppShell
+        activeEntry={activeEntry}
+        logoutPending={logoutPending}
+        onLogout={logout}
+        onOpenCommandPalette={openPalette}
+        userLabel={userLabel}
+      >
+        {logoutError ? <div className="app-shell__logout-error" role="alert">{logoutError}</div> : null}
+        {children}
+      </AppShell>
+      <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
+    </>
   );
 }

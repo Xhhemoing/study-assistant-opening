@@ -16,9 +16,9 @@ export default function LibraryPage() {
       <section className="workspace-section workspace-section--wide">
         <div className="workspace-section__heading">
           <h2>全部笔记</h2>
-          <button className="button button--secondary" type="button" disabled title="全文搜索将在后续任务开放">
+          <Link className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text-dim transition-colors hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/search?q=">
             <Search aria-hidden="true" size={17} /> 搜索
-          </button>
+          </Link>
         </div>
         <Link className="button library-new-note" href="/library/new">
           <FilePlus2 aria-hidden="true" size={17} /> 新建笔记

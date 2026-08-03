@@ -1,5 +1,5 @@
-import { LocalNoteEditor } from "../../../../features/editor/local-note-editor";
+import { NewDocument } from "../../../../features/editor/new-document";
 
 export default function NewLibraryNotePage() {
-  return <LocalNoteEditor />;
+  return <NewDocument />;
 }

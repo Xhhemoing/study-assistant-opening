@@ -26,3 +26,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# Graphify generated output (per AGENTS.md: keep graph output out of commits)
+graphify-out/
