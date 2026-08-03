@@ -23,6 +23,14 @@ describe("rankResults", () => {
     expect(hits[0].score).toBe(3); // tag 2 + body 1
   });
 
+  it("normalizes full-width query text before matching tags", () => {
+    const hits = rankResults(" ＴＯＰＩＣ ", [
+      doc({ id: "tagged", title: "专题笔记", tags: ["TOPIC"] }),
+    ]);
+
+    expect(hits[0]?.id).toBe("tagged");
+  });
+
   it("returns [] for an empty query and drops zero-score docs", () => {
     expect(rankResults("   ", [doc({ id: "a", title: "导数" })])).toEqual([]);
     const hits = rankResults("积分", [doc({ id: "a", title: "导数" })]);

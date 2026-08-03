@@ -30,7 +30,8 @@
 | **学习记忆与上下文**：Memory Fabric、AI | 来源/用户/事件/任务/能力分层，作用域过滤，按需 ContextPack | 混合记忆召回、时间失效、冲突图、上下文预算优化 | 来源支持率、过期命中率、跨域泄漏=0、用户纠正率；不允许自动记忆替代领域事实 |
 | **探索与 AI 候选**：Explore、`packages/ai` | typed result contract、来源引用、候选审核、角色化提示 | 多阶段检索-生成-核验、模型路由、工具计划 | 引用支持率、候选接受/修订率、幻觉率、成本/延迟；始终保留无 AI 手工闭环 |
 | **AI 学习支架与依赖控制**：`AIRolePolicy/AssistanceTrace`、Task 14/22 | 先尝试、分层提示、保留原答、重做和迁移验证；AI 介入不自动成为能力证据 | 按构念/任务自适应支架、保守策略学习 | 延迟独立表现、迁移、提示依赖、绕过率和负担；即时满意度或完成率不能单独触发升级 |
-| **自适应学习决策闭环**：[专项提案](2026-08-02-adaptive-learning-decision-governance.md)、Learn/Planner/Assessment/AI | 规则状态投影、固定模型路由、确定性计划与完整决策账本 | 分层质量后验、低风险受控探索、混合记忆检索、帕累托计划、代理/北极星联合校准 | 7/30 天独立与迁移、预算、校准、公平、快照完整率和回滚；校准版本必须经过治理层，不能直接改线上策略 |
+| **自适应学习决策闭环**：[系统提案](2026-08-02-adaptive-learning-decision-governance.md)、Learn/Planner/Assessment/AI | 规则状态投影、固定模型路由、确定性计划、PII 前置与最小耐久决策账本 | 分层质量后验、VoI 预算、低风险缓存/探索、混合记忆、帕累托计划和分级门禁 | 7/30 天独立与迁移、预算、校准、公平、快照完整率和回滚；策略版本经治理，后验只在批准边界内自动更新 |
+| **延迟成果测量与实验有效性**：[测量提案](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md)、Assessment/Experiment | ConstructMap、锚题、独立探针、平行题组、人工金标和纯测量试点 | 分层测量模型、缺失敏感性、序贯实验、cluster/switchback 和策略束级归因 | 探针响应率、form 等值、构念一致性、testing effect、MDE、ITT 和 7/30 天结果；测量门失败时不得用北极星升级策略 |
 | **学习意图与任务**：`LearningIntent/Task/PlanItem`、Learn | 截止、优先级、风险、预计时间和用户固定项的确定性排序 | 约束优化、上下文 bandit、保守策略学习 | 单位时间完成有效产出、逾期、计划扰动和用户覆盖率；不以停留时间为目标 |
 | **复习调度**：Card/Review/SRS | 明确版本的规则调度，提示后作答降权 | FSRS 参数拟合；特殊能力采用专用调度 | 延迟回忆、校准、每日负荷和遗忘成本；回放/前瞻实验优于基线后才切换 |
 | **能力评价**：Attempt/Artifact/Feedback/Assessment | 能力切片、规则证据计分和 reason codes | Beta-Binomial、Logistic+校准；数据充分后 IRT/BKT | Brier、Log Loss、ECE、分场景误差；禁止输出无明确定义的单一掌握度 |

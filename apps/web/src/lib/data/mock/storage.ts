@@ -9,14 +9,32 @@ export function mockKey(userId: string, domain: string): string {
 }
 
 export function loadDomain<T>(storage: StorageLike, userId: string, domain: string, fallback: T): T {
-  const raw = storage.getItem(mockKey(userId, domain));
+  const key = mockKey(userId, domain);
+  let raw: string | null;
+  try {
+    raw = storage.getItem(key);
+  } catch {
+    return fallback;
+  }
   if (raw === null) return fallback;
   try {
     return JSON.parse(raw) as T;
   } catch {
+    try {
+      storage.removeItem(key);
+    } catch {
+      // A storage failure should not prevent the fallback path.
+    }
     return fallback;
   }
 }
+
+const volatileValues = new Map<string, string>();
+const volatileStorage: StorageLike = {
+  getItem: (key) => volatileValues.get(key) ?? null,
+  setItem: (key, value) => volatileValues.set(key, value),
+  removeItem: (key) => volatileValues.delete(key),
+};
 
 export function saveDomain<T>(storage: StorageLike, userId: string, domain: string, value: T): void {
   storage.setItem(mockKey(userId, domain), JSON.stringify(value));
@@ -29,8 +47,12 @@ export function resetDomains(storage: StorageLike, userId: string, domains: stri
 }
 
 export function browserStorage(): StorageLike {
-  if (typeof window === "undefined" || !window.localStorage) {
-    throw new Error("browserStorage 只能在浏览器环境中使用");
+  if (typeof window === "undefined") return volatileStorage;
+  try {
+    if (!window.localStorage) return volatileStorage;
+    window.localStorage.getItem("aistudy:storage:probe");
+    return window.localStorage;
+  } catch {
+    return volatileStorage;
   }
-  return window.localStorage;
 }

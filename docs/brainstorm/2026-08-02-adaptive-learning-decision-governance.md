@@ -1,6 +1,7 @@
 ---
 title: 自适应学习决策、记忆与持续校准系统
 date: 2026-08-02
+updated: 2026-08-03
 status: proposed
 scope:
   - Learn / Planner / Assessment / AI / Worker
@@ -12,6 +13,7 @@ related:
   - ALGORITHM_MAP.md
   - 2026-07-29-learning-memory-and-plugin-ingestion.md
   - 2026-07-30-project-research-agenda-and-decision-gates.md
+  - 2026-08-03-adaptive-learning-measurement-and-experiment-validity.md
 promotion_target:
   - PRD 中的学习结果与试点验收指标
   - Planner / Assessment / Memory / AI 设计
@@ -37,6 +39,18 @@ promotion_target:
 8. 系统“进化”表现为数据、Prompt、检索器、路由器、校准器和策略的受控版本演进，不允许线上模型读取反馈后自行修改自身规则或权重。
 
 这一路径先解决可观测、可回放、可解释和可回滚，再由真实数据证明是否需要 contextual bandit、因果 uplift 或受约束策略学习。初期不直接建设完整 Constrained MDP。
+
+### 0.1 两轮评审后的处理原则
+
+| 评审建议 | 处理 | 原因 |
+|---|---|---|
+| 把测量设计提升为 Phase 0 核心 | 采纳并拆成[专项测量协议](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md) | 构念、探针、缺失、功效和因果分析需要独立验证 |
+| 在模型前增加语义缓存 | 有条件采纳 | 必须在 TaskSpec、权限和脱敏之后，只缓存低风险候选并重新校验 |
+| 只把 DecisionIntent 异步写队列 | 修正 | 高影响建议展示前必须有同步耐久的最小决策信封，完整富化可异步 |
+| 群体先验全面使用差分隐私 | 作为准备项 | 内部小样本直接加噪可能损害校准；跨 workspace、外部发布或训练时再按隐私预算启用 |
+| 强制自我解释或冷却时间 | 修正为用户可控干预 | 不从行为诊断心理状态，不用强制阻断替代自主性和无障碍设计 |
+| 隐式学习效用并最终只给一个方案 | 部分采纳 | 可高亮默认项，但隐式偏好不能静默隐藏帕累托取舍或覆盖显式目标 |
+| 立即推进 Phase 0 实施 | 暂不自动提升 | `proposed` 仍需用户批准、正式设计和试点资源评估 |
 
 ## 1. 决策问题
 
@@ -76,11 +90,15 @@ Outcome(u, H) = [
 
 其中：
 
-- `independent` 表示没有看答案，提示和外部工具使用不超过预先定义的资格规则，并达到任务量规；
+- `independent` 在产品中首先表示 `in_app_independent`：没有看答案，应用内提示/AI 使用不超过预先定义的资格规则，并达到任务量规；
+- 系统无法可靠观测其他设备、外部 AI 或他人帮助，因此不能把应用内独立宣称为绝对独立；自报或明确同意的受控验证只用于效度敏感性分析；
 - `same_task` 是同一能力构念的未见过样本，不能是训练题的轻微改写；
 - `transfer` 要改变表面情境或组合方式，同时保留可审计的构念映射；
-- 7 天和 30 天窗口允许合理容差，但实验开始前必须固定，不能看到结果后修改；
+- same/near/far transfer 由版本化 `ConstructMap` 定义，不能由评分模型临时解释；
+- 7 天和 30 天窗口的目标小时数、容差和时区策略必须在实验开始前固定，不能看到结果后修改；
 - 同一实验若必须生成单一主指标，应预注册权重或主次顺序，不能在结果出来后选择更好看的组合。
+
+自然复习结果与独立测量结果必须分层。前者用于状态更新，后者按预注册构念空间、平行题组和稀疏探针支持实验归因，详细规则见[专项测量协议](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md)。
 
 ### 3.2 领先代理与次级指标
 
@@ -98,6 +116,7 @@ Outcome(u, H) = [
 
 - 用户自主性：高影响计划变化需要确认，用户可以固定、跳过、纠正和撤销；
 - 隐私与目的限制：数据按业务、质量、实验和模型改进用途分区，未经授权不得复用；
+- PII 前置防护：自由文本、附件元数据和日志在事件写入或进入 AI Context 前经过数据分类、扫描与脱敏；原始敏感负载默认不进入通用事件和模型上下文；
 - 安全与权限：先做 workspace、来源和字段级权限过滤，再构建 AI 上下文；
 - 公平性：群体先验不能把敏感属性或历史偏差固化为个体结论；
 - 可解释性：关键决策输出受控 `reason_codes`、证据引用和版本快照；
@@ -133,17 +152,17 @@ flowchart LR
 
 ```text
 1. 接收 Goal、时间预算、当前请求和 consent scope
-2. 校验并追加新 LearningEvent，增量更新用户状态投影
-3. 权限过滤后构建知识、状态和记忆 Context Pack
-4. 将请求编译为版本化 TaskSpec
-5. 按风险、能力、成本、延迟和不确定性选择执行链
-6. AI/算法生成结构化诊断与候选行动，不直接写正式状态
-7. 规则验证证据支持、预算、依赖、重复、风险和权限
-8. 生成可行计划集合并求 epsilon-Pareto 前沿
-9. 展示 2 至 3 个代表方案，应用用户选择或允许的默认项
-10. 写入 DecisionLedger，包含候选、选择概率、版本和证据引用
-11. 关联即时结果、会话结果、1 至 3 天与 7/30 天延迟结果
-12. 离线更新质量后验和候选策略，经治理门后才能生效
+2. 做数据分类、PII 扫描/脱敏和 Schema 校验，再追加 LearningEvent
+3. 将请求、目标和允许用途编译为版本化 TaskSpec
+4. 按 TaskSpec 权限和模态预算构建安全的 Context Pack
+5. 对允许缓存的低风险任务查询版本化语义缓存，命中后仍做证据/规则校验
+6. 未命中时按风险、信息价值、成本、延迟和不确定性选择执行链
+7. AI/算法生成结构化诊断与候选行动，不直接写正式状态
+8. 规则验证证据支持、预算、依赖、重复、风险和权限
+9. 生成可行计划集合并求 epsilon-Pareto 前沿
+10. 同步持久化最小 DecisionEnvelope，再展示候选并应用用户选择
+11. 异步富化完整 DecisionLedger，关联即时、1 至 3 天与 7/30 天结果
+12. 在批准的自动更新边界内更新后验；结构或策略版本经相应治理门后生效
 ```
 
 ## 5. 已验证事实、假设与提案
@@ -161,7 +180,10 @@ flowchart LR
 |---|---|---|
 | 会话级代理能预测 7/30 天表现 | 优化代理后发生 Goodhart 效应 | 按用户和时间切分的滚动预测、校准与实验复核 |
 | 用户愿意完成延迟验证 | 标签缺失并且非随机 | 小样本试点，比较不同提醒与任务长度，记录缺失机制 |
+| same/near/far transfer 能稳定测量 | 构念漂移会污染北极星 | ConstructMap 专家一致性、锚题、平行题组和实证区分度 |
+| 早期样本能检测有意义的 30 天效果 | 数月后仍只有无结论结果 | Phase 0 估计响应率、方差、MDE 和运营成本 |
 | 混合记忆检索优于权限过滤后的全文基线 | 增加延迟、噪声和泄漏面 | 固定查询集做 Recall@k、引用支持率、P95 和消融实验 |
+| 语义缓存能降低成本且不传播过期/投毒结果 | 跨用户泄漏、错误复用和反馈自强化 | 限定 TaskSpec、版本键、租户边界、TTL、重校验和缓存消融 |
 | 2 至 3 个帕累托方案比单计划更利于自主性和执行 | 选择负担可能上升 | 比较单默认项与代表方案组的理解、覆盖、扰动和延迟表现 |
 | 分层群体先验能改善冷启动 | 错误群组会放大偏差 | 预注册切片、最小样本门槛、跨群体一致性和校准误差 |
 | 多模型级联能以更低成本保持质量 | 验证器可能和生成器共错 | 独立金标、模型族切片、失败相关性和成本收益分析 |
@@ -187,6 +209,7 @@ flowchart LR
 - 多模型路由与低风险受控探索降低成本并积累反事实证据；
 - 帕累托优化保留用户可见取舍；
 - 所有变更经过离线、影子、灰度和延迟结果验证。
+- 干预和计划策略只有在 Phase 0 测量门成立后，才使用 7/30 天结果做正式升级。
 
 它能渐进扩展，并且每一层都保留基线和回退。
 
@@ -216,16 +239,24 @@ flowchart LR
 | 对象 | 作用 | 事实还是投影 |
 |---|---|---|
 | `LearningEvent` | 保存发生了什么及证据资格上下文 | 保留期内的事实事件 |
+| `RedactionManifest` | 记录哪些字段被检测、掩码、隔离或允许保留 | 安全审计事实，不保存被删除的原值 |
 | `UserStateClaim` | 表达某项状态、偏好或假设及其依据 | 可撤销、可替代的派生声明 |
 | `UserStateSnapshot` | 决策时的状态视图 | 可重建投影 |
 | `MemoryRecord` | 可检索的情景、语义、程序或偏好记忆 | 派生记录或正式对象引用 |
 | `VectorProjection` | 某内容版本在某 Embedding 下的向量 | 可重建投影 |
 | `TaskSpec` | 描述一次模型/算法任务的输入输出和风险 | 版本化调用契约 |
+| `ConstructMap` | 定义能力切片和 same/near/far transfer | 版本化测量契约 |
+| `MeasurementPlan` | 固定探针、窗口、缺失和分析规则 | 实验期间不可变的计划 |
+| `PolicyBundleVersion` | 组合路由、支架、计划、检索和相关 UI 行为 | 策略效果的主要评估单元 |
 | `CandidateAction` | 待验证的诊断、提示、任务或计划项 | 候选，不是事实 |
 | `ConfigurationSnapshot` | 决策时所有生效组件的不可变组合 | 审计快照 |
+| `DecisionEnvelope` | 主链路先持久化的最小决策事实 | 不可变、耐久、可异步富化 |
 | `DecisionLedger` | 候选、分数、选择概率、选择和原因 | 决策事实 |
 | `OutcomeObservation` | 与决策关联的即时或延迟结果 | 观察事实，带资格与缺失状态 |
 | `CohortPriorSnapshot` | 某适用范围的群体先验及质量报告 | 可重建、版本化投影 |
+| `SemanticCacheEntry` | 低风险任务的已验证候选及适用边界 | 可失效、可删除的投影 |
+| `GoldenSetVersion` | 人工评估与 Judge 校准样本 | 隔离的版本化评测资产 |
+| `DatasetManifest` | 记录聚合、训练和评测快照的数据谱系 | 删除和重算的审计索引 |
 
 `event_id` 记录行为，`decision_id` 记录系统为何采取某行动，`outcome_id` 记录后来观察到什么。三者必须可连接，但不能混成一个万能 JSON。
 
@@ -243,11 +274,20 @@ flowchart LR
   "model_route_version": "router@0.4.0",
   "model_version": "provider/model@snapshot",
   "policy_version": "learning-policy@0.8.0",
+  "policy_bundle_version": "policy-bundle@0.2.0",
   "ruleset_version": "plan-validator@1.2.0",
   "evaluator_version": "delayed-transfer@0.3.0",
+  "construct_map_version": "algebra-transfer@0.1.0",
+  "measurement_plan_version": "measurement@0.1.0",
+  "cache_policy_version": "semantic-cache@0.1.0",
+  "ui_policy_version": "learn-ui@0.6.0",
   "event_schema_version": 3,
   "state_schema_version": 2,
   "feature_schema_version": 5,
+  "randomness": {
+    "selection_seed": "opaque-seed-id",
+    "tie_breaker_version": "stable-hash@1"
+  },
   "code_revision": "git-sha",
   "effective_from": "timestamp"
 }
@@ -263,12 +303,20 @@ flowchart LR
   "user_state_snapshot_id": "uuid",
   "configuration_snapshot_id": "uuid",
   "context_manifest_id": "uuid",
+  "eligible_universe_hash": "sha256",
+  "presentation": {
+    "shown_order": ["candidate-id"],
+    "default_highlight": "candidate-id",
+    "set_propensity": 0.25,
+    "choice_model_version": "choice-model@0.1.0"
+  },
   "candidate_set": [
     {
       "candidate_id": "uuid",
       "score_components": {"quality": 0.78, "cost": 0.04, "risk": 0.02},
       "eligible": true,
-      "propensity": 0.25,
+      "inclusion_propensity": 0.25,
+      "estimated_choice_probability": 0.4,
       "shown": true
     }
   ],
@@ -281,6 +329,8 @@ flowchart LR
 
 日志必须包含未展示候选、选择概率和不合格原因，才能评估曝光偏差。只保留最终建议无法支持可靠的反事实评估。
 
+用户在环时，`set_propensity` 表示系统展示某个集合/顺序/默认项的概率，`estimated_choice_probability` 表示给定展示后用户选择某项的条件模型。二者不能合成一个 propensity。OPE 只能在 ruleset 和行动空间版本可比、且两层都有支持的窗口内进行。
+
 ### 7.4 可回放边界
 
 系统只能承诺：
@@ -290,6 +340,38 @@ flowchart LR
 - 通过固定响应夹具复现下游流程。
 
 不能承诺再次调用同名外部模型会得到相同输出。供应商模型可能静默更新，采样、工具和外部知识也可能变化，因此“完美重放”不是可靠承诺。
+
+### 7.5 高并发写入与耐久边界
+
+不采用“只把 DecisionIntent 丢进队列、稍后再补账本”的设计，因为用户已经看到建议但账本尚未耐久时，会形成无法审计的窗口。推荐使用同步最小信封 + Transactional Outbox + 异步富化：
+
+```text
+request
+-> resolve content-addressed ConfigurationSnapshot ID
+-> transactionally write DecisionEnvelope + outbox record
+-> return/show eligible candidate
+-> worker idempotently enriches full DecisionLedger and analytics projections
+```
+
+`DecisionEnvelope` 至少包含 `decision_id`、用户/workspace 作用域、TaskSpec、配置快照、候选摘要哈希、选择 actor、自动化等级和创建时间。完整 Context 清单、评分分解和供应商响应可以异步写入。
+
+- Configuration Snapshot 使用 canonical serialization + cryptographic hash 去重，主链路只写引用；
+- 消费者按 `decision_id` 幂等，队列实现可以是现有 Outbox/Worker，不预先绑定 Kafka；
+- 高影响建议若最小信封写入失败则 fail closed；
+- 低风险任务可退回不依赖 AI 的确定性结果，但不能无账本继续执行 AI 高影响动作；
+- 异步富化失败进入重试/死信并告警，不能把未完成账本当成完整训练样本。
+
+### 7.6 事件规模与冷热分层
+
+存储分层按访问模式和保留策略设计，不改变事实/投影边界：
+
+- 热层：近期 LearningEvent、DecisionEnvelope、当前状态和待关联 Outcome，支持产品主链路与幂等更新；
+- 温层：完整 DecisionLedger、ContextManifest、实验和近期回放窗口，使用分区、压缩和列裁剪；
+- 冷层：超过在线回放窗口但仍在合法保留期内的审计/研究快照，默认不参与用户请求和 AI Context；
+- 可重建层：向量、摘要、缓存、特征和群体先验可按版本重算，不因访问少就把事实误删；
+- `DatasetManifest` 记录分区、对象范围、内容哈希、保留/删除状态和依赖聚合，支持删除传播和选择性重算。
+
+进入正式设计前，先用真实事件大小、决策频率、Context 清单规模和 7/30 天关联窗口估算日增量、索引成本、回放吞吐与恢复时间；没有规模证据时不预先引入 Kafka、数据湖或独立 CQRS 服务。
 
 ## 8. TaskSpec 与模型调用规范
 
@@ -303,6 +385,10 @@ required_evidence / allowed_memory_scopes
 risk_level / automation_level
 latency_slo / token_budget / cost_budget
 tool_allowlist / provider_data_class
+modality_manifest / modality_required / degradation_policy
+pii_policy / redaction_manifest_required
+cache_scope / cache_ttl / cache_validation_policy
+judge_rubric / golden_set_version
 abstention_contract / validation_rules
 quality_metric / delayed_outcome_mapping
 ```
@@ -316,9 +402,29 @@ quality_metric / delayed_outcome_mapping
 5. 高风险输出必须经过独立规则或不同失败模式的验证器，不能把同一提示重复询问当成独立验证；
 6. 模型不得直接写入能力事实、长期偏好、正式知识或高影响计划；
 7. Prompt injection 内容与系统指令、工具权限和用户记忆分区隔离；
-8. 每次调用记录“实际提供了哪些记忆”和“输出引用了哪些证据”。
+8. 图片、OCR、音频转写和文档中的指令同样视为不可信内容，不能获得系统/工具权限；
+9. 每次调用记录“实际提供了哪些记忆”和“输出引用了哪些证据”；
+10. Judge 任务必须引用版本化量规和隔离金标，不能把另一个 LLM 的自由评分当成真值。
 
 模型规范的目标不是追求一份万能 Prompt，而是缩小每项任务的自由度，使其能够测量、替换和降级。
+
+### 8.1 多模态预算与降级
+
+`ContextManifest` 对每个部分记录 `modality`、原始来源、内容版本、解析器、token/时长/像素成本、质量置信度和是否为任务必要模态。
+
+- 图片和音频预算使用供应商实际计费单位与本地预估双重记录，不强行换算成一个伪精确文本 token；
+- 公式、图表、版面和语音韵律分别记录解析保真度，OCR 文本不能默认等价于原始模态；
+- 不支持某模态的模型只有在 `degradation_policy` 允许时，才能使用 OCR、带来源的 alt-text、公式标记或转写降级；
+- 若被剥离模态对任务结论必要，路由器必须升级到支持模型或 `abstain`，不能静默生成不完整诊断；
+- 降级产物是版本化派生投影，保留原始锚点和质量 reason codes。
+
+### 8.2 LLM-as-a-Judge 边界
+
+- 人工 `GoldenSetVersion` 与 Judge TaskSpec 一起冻结，并从普通检索、缓存、few-shot 生成和训练候选中隔离；
+- 分类评分使用 Kappa/混淆矩阵，有序或连续评分使用 weighted Kappa、ICC 或 Krippendorff's alpha；
+- 通过答案顺序随机化、长度/格式对照和模型族切片检测偏好；
+- Judge 与生成器共享模型族时单独报告共错风险；
+- Judge 漂移或人工一致性不足时，相关自动分数停止成为高影响证据。
 
 ## 9. 模型路由算法
 
@@ -335,7 +441,32 @@ quality_metric / delayed_outcome_mapping
 
 多 AI 的价值来自职责分离和按需升级，不来自固定串联更多模型。若便宜模型已经通过质量门，就不再调用昂贵模型。
 
-### 9.2 候选资格过滤
+在具体模型选择前，路由链允许查询语义缓存，但前提是 TaskSpec 已编译、PII 已处理、权限和 Context scope 已固定。缓存不绕过执行链与验证规则。
+
+### 9.2 语义缓存拦截器
+
+缓存只适用于低风险、重复度高、输出可验证且 TaskSpec 明确允许的任务，例如公共概念解释、稳定内容摘要和基础分类。个体能力诊断、开放式评分、高影响计划和含敏感状态的回答默认不跨用户复用。
+
+```text
+cache lookup key =
+  task_spec_version
+  + canonical safe context digest
+  + content/evidence version set
+  + prompt/retriever/ruleset/output schema versions
+  + locale and modality digest
+  + workspace/user cache scope
+  + redaction class
+```
+
+- 先精确缓存，再使用经阈值校准的语义近似缓存；
+- 不对原始 PII 或完整用户历史生成跨域缓存向量；
+- 命中返回 `CandidateAction` 和原证据清单，必须重新执行当前权限、stale、规则和 Schema 校验；
+- 配置、内容、权限、删除、Embedding、量规或安全策略变化会使条目失效；
+- 新来源和低信任内容不能直接种入共享缓存；
+- 记录 hit、bypass、validation failure、节省成本和后续结果，定期做无缓存对照与投毒检查；
+- 缓存不可用时直接进入正常路由，不影响手工/规则降级。
+
+### 9.3 候选资格过滤
 
 模型 `m` 只有同时满足下列条件才进入候选集合 `M_eligible`：
 
@@ -349,7 +480,7 @@ estimated cost fits all remaining budgets
 model and route are not frozen or tripped
 ```
 
-### 9.3 分层质量后验
+### 9.4 分层质量后验
 
 对模型在任务上的质量不要只用一个全局平均数。早期可使用经验贝叶斯收缩：
 
@@ -362,7 +493,7 @@ global prior
 
 二元验证结果可从 Beta-Binomial 开始；连续质量可用带校准的回归或分桶统计。样本不足时具体 TaskSpec 后验自动向任务族和全局均值收缩，避免一次高分把新模型抬得过高，也避免新组合永远没有流量。
 
-### 9.4 路由分数与受控探索
+### 9.5 路由分数与受控探索
 
 在已通过硬过滤的模型中计算：
 
@@ -377,7 +508,9 @@ route_score(m, t) =
 
 最后一项是类似 UCB 的探索奖励，只能在低风险、可回退、已获实验授权的任务中启用，并随有效样本量增加而衰减。高风险任务使用保守下界或固定批准模型，不做在线随机探索。
 
-### 9.5 预算与降级
+`lambda_cost/latency/risk` 是版本化的 TaskSpec 影子价格，由预算、SLO、风险等级和公平用量约束确定。它们按预注册周期复核，不能让线上优化器自由调整后又用同一数据证明自己更优。
+
+### 9.6 预算与降级
 
 预算按以下层级同时检查：
 
@@ -399,17 +532,37 @@ route_score(m, t) =
 
 不得在预算耗尽后静默降低安全检查或证据要求。
 
-### 9.6 路由伪代码
+### 9.7 基于信息价值的动态计算预算
+
+高不确定性不自动等于值得调用更强模型。只有不确定性可被当前调用减少、且可能改变行动时，才增加预算：
+
+```text
+net_value_of_computation =
+  expected_decision_loss_before
+  - expected_decision_loss_after
+  - marginal_model_cost
+  - marginal_latency_cost
+  - privacy_and_failure_risk
+```
+
+输入至少包含：决策重要性、状态不确定性、可减少程度、候选行动差异、截止时间和剩余预算。冷启动但当前只需低风险摘要时仍用便宜模型；关键构念首次诊断、两个计划取舍接近且更多信息会改变计划时才升级。所有动态预算仍受 TaskSpec、会话、用户、workspace 和全局硬上限约束。
+
+### 9.8 路由伪代码
 
 ```text
 route(taskSpec, context, budgets):
+  cached = semantic_cache.lookup(taskSpec, context.safe_manifest)
+  if cached and validate(cached, taskSpec).pass:
+    return cached.as_candidate()
+
   eligible = registry.filter(hard_constraints(taskSpec, context, budgets))
   if eligible is empty:
     return deterministic_fallback(taskSpec)
 
+  compute_budget = allocate_by_net_information_value(taskSpec, context, budgets)
   for model in eligible:
     posterior = quality_store.posterior(model, taskSpec, context.allowed_slice)
-    score[model] = utility(posterior, model.cost, model.latency, model.risk)
+    score[model] = utility(posterior, model.cost, model.latency, model.risk, compute_budget)
 
   selected = controlled_select(score, taskSpec.exploration_policy)
   result = invoke(selected, bounded_context(context, taskSpec))
@@ -495,6 +648,20 @@ project(event):
 
 不按年龄、学历或其他敏感/代理属性直接分配能力先验。系统只在“一个答案会明显改变计划，且行为数据短期内无法回答”时发起一个低负担问题，即使用近似 Value of Information 控制主动采集频率。
 
+### 10.6 元认知状态与干预
+
+信心校准是具体构念、任务和量表下的测量，不是“谦虚/自信”的人格标签。只有在达到最小合格样本并排除题目、量表和提示变化后，才生成短 TTL 的校准声明：
+
+```text
+calibration_gap = reported_probability - empirical_success_probability
+```
+
+- 稳定高估候选：优先邀请用户在揭示答案前写一句可选的预测依据或自我解释；
+- 稳定低估候选：展示具体已验证成功和不确定区间，不使用心理诊断词；
+- 用户可跳过、关闭或改为更轻的反思形式；
+- 自我解释文本默认只用于当次学习，不自动写入长期人格记忆；
+- 评价干预看后续校准、独立表现和负担，不能用“写得更长”作为成功。
+
 ## 11. 低负担学习数据采集
 
 ### 11.1 优先记录自然工作流中的高价值事件
@@ -508,18 +675,37 @@ project(event):
 | `feedback.corrected` | 被纠正对象、原因码、可选文本 | 用户纠正优先更新相关声明 |
 | `plan.option_selected` | 候选集合、默认项、选择项 | 同时记录是否主动覆盖默认项 |
 | `task.skipped/deferred` | 受控原因、剩余预算 | 跳过可能是计划问题，不等于能力弱 |
-| `delayed_probe.completed` | 7/30 天窗口、独立资格、迁移级别 | 必须防止题目泄漏和重复曝光 |
+| `policy_practice.completed` | 自然复习、构念、提示和计划来源 | 可更新状态，不作为实验主结果 |
+| `measurement_probe.assigned/completed` | MeasurementPlan、form、窗口、独立资格、迁移级别 | 独立抽样、平行题组、防泄漏和曝光控制 |
 
 ### 11.2 采集策略
 
 - 被动采集结构化交互，不用频繁问卷打断学习；
 - 信心、困难原因和满意度只在高信息价值节点做一键选择，可选文本不是必填；
-- 延迟测验短而代表性强，优先嵌入自然复习，不制造额外大型考试；
-- 缺失的延迟结果显式记录 `missing_reason`，不能默认当失败或成功；
+- 政策相关复习可自然嵌入；用于实验归因的独立探针必须按 MeasurementPlan 稀疏抽样，不能由当前策略挑题；
+- 缺失结果显式记录 `missing_reason`，并按 ITT、响应模型和敏感性边界分析，不能默认当失败或成功；
 - 不把点击、滚动、停留时间单独解释成学习、动机或人格；
 - 内容、UI、模型和策略版本必须随事件记录，否则无法区分用户变化与系统变化。
 
-### 11.3 选择偏差与反事实日志
+### 11.3 PII 写入前管道
+
+```text
+raw input in memory
+-> data class and consent check
+-> deterministic detectors (phone/email/ID/account patterns)
+-> bounded NER/classifier for contextual entities
+-> redact/tokenize/quarantine decision
+-> schema validation
+-> persist sanitized event + RedactionManifest
+```
+
+- 默认只持久化脱敏文本和不可逆占位符；必须保留原值时进入独立加密敏感负载，不进入通用事件、日志、向量或 AI Context；
+- 姓名、学校等上下文实体存在误报，允许用户预览/纠正，但纠正不会自动放宽全局规则；
+- 检测器、掩码规则、漏检/误报金标和版本进入安全监控；
+- 对附件的 EXIF、文件名、OCR、语音转写和模型错误日志执行同类检查；
+- 管道故障时敏感自由文本 fail closed 或仅本地暂存，不能先落盘再补脱敏。
+
+### 11.4 选择偏差与反事实日志
 
 系统观察到的结果来自自己先前展示的建议，因此天然存在选择偏差。低风险场景可保留小比例、预注册的受控随机化，并记录完整候选集和每个候选的展示概率。
 
@@ -549,13 +735,14 @@ project(event):
 ### 12.2 检索流程与成本上限
 
 ```text
-1. 解析 TaskSpec 的允许作用域和 Context 预算
+1. 解析 TaskSpec 的允许作用域、PII 策略和 Context 预算
 2. 先按 workspace、用户、来源、用途、保留状态做权限过滤
-3. 在小候选窗内并行执行全文、向量、关系和近期事件召回
-4. 去重并应用 stale、失效、冲突和内容版本过滤
-5. 用可解释融合分数排序
-6. 按 token、延迟和来源多样性装配 Context Pack
-7. 写入 context_manifest，记录召回、入选、引用和裁剪原因
+3. 应用来源信任、隔离区、注入和 PII 过滤
+4. 在小候选窗内并行执行全文、向量、关系和近期事件召回
+5. 去重并应用 stale、失效、冲突和内容版本过滤
+6. 用可解释融合分数排序
+7. 按模态、token、延迟和来源多样性装配 Context Pack
+8. 写入 context_manifest，记录召回、入选、引用和裁剪原因
 ```
 
 为每个通道设置 `top_k`、超时和 token 配额。若全文高置信命中且已经满足证据要求，可以提前停止昂贵通道；任一高级通道超时都退回权限过滤后的全文和近期事件基线。
@@ -589,6 +776,8 @@ fusion_score =
 
 长期未被有效使用的投影可降权或归档，但不能仅因未被模型引用就删除正式事实。
 
+`w_usefulness` 存在“更常入选 -> 更常被引用 -> 权重更高”的自参考风险。系统应按预注册的小预算周期执行 Context 消融/替换探针，估计没有该记忆时的候选或结果差异；未经随机或准随机对照的引用次数只能作为诊断特征，不能直接累积成正反馈。
+
 ### 12.4 向量版本与遗忘
 
 - 向量键至少包含 `source_version_id + chunk_id + embedding_version`；
@@ -596,6 +785,14 @@ fusion_score =
 - 重建新向量后做召回回归测试，再切换别名；
 - 删除请求先阻止检索，再清除向量、缓存、派生摘要和训练候选引用；
 - 向量是可重建投影，不是独立真相，也不会自行让基础模型“进化”。
+
+### 12.5 记忆投毒防御
+
+- 摄取时为来源记录 authority、ownership、provenance、首次出现时间和审核状态；
+- 新来源和含指令型文本先进入隔离区，以保守权重召回，不直接进入共享语义缓存或长期偏好；
+- 检索时检测单条记忆突然高频入选、跨无关 TaskSpec 扩散、与高权威来源矛盾和异常 embedding 邻域；
+- 被模型引用不提升来源权威，只有人工确认、独立来源支持或受控消融结果才能改变信任；
+- 发生污染时可按 source/version 反向查找所有 Context、缓存、决策和派生投影，批量 tombstone 并重算。
 
 ## 13. 删除、纠正与记忆变更
 
@@ -609,7 +806,9 @@ fusion_score =
 4. 删除正式存储中的敏感负载、向量、摘要、缓存和训练候选副本；
 5. 必要时执行 crypto-shredding，销毁密钥后旧密文不可读；
 6. 备份按已公开的保留窗口自然过期或执行支持的删除流程，并记录完成状态；
-7. 审计仅保留法律和安全所需的最小非敏感证明。
+7. 通过 `DatasetManifest` 找到受影响的群体先验、评测集和训练快照，标记 tainted，并按影响级别立即重算、从下次训练排除或停止发布；
+8. 已发布且无法做机器遗忘的模型必须记录残留风险、停止后续使用或走重新训练治理，不能宣称单记录已从权重中精确删除；
+9. 审计仅保留法律和安全所需的最小非敏感证明。
 
 是否允许保留密文或最小审计记录取决于适用政策与法域，不能笼统宣称“保留所有不可变事件”同时满足删除权。
 
@@ -634,6 +833,7 @@ posterior(u, s) = update(
 群体先验必须同时满足：
 
 - 达到按任务预注册的最小有效样本量和用户数；
+- 对外输出满足 k-style 最小独立用户门槛，低于门槛不返回统计而不是只隐藏显示；
 - 群体内方差、缺失率和样本代表性处于允许范围；
 - 训练与评估按用户和时间隔离；
 - 在相邻群体/情境中完成校准和一致性检查；
@@ -642,7 +842,16 @@ posterior(u, s) = update(
 
 任何一项失败时，退回更宽层级或全局保守先验。群体规模不能只看事件条数，必须看独立用户和有效证据。
 
-### 14.3 区分个体问题、内容问题和系统问题
+### 14.3 隐私保护与共享边界
+
+- workspace 内部先验先采用数据最小化、访问控制、最小用户门槛和输出抑制；
+- 跨 workspace 共享、外部统计发布或模型训练必须单独批准用途和适用范围；
+- 需要差分隐私时，为每个发布/训练管道定义邻接关系、裁剪、噪声机制、组合方式和 `privacy_budget_ledger`；
+- 简单计数/率可研究 Laplace/Gaussian 机制，未来梯度训练才讨论 DP-SGD；
+- DP 不是匿名化同义词，也不能替代权限、删除、目的限制和小样本抑制；
+- 若噪声使校准或公平性明显恶化，停止跨域共享或扩大聚合层级，而不是降低隐私保护。
+
+### 14.4 区分个体问题、内容问题和系统问题
 
 对每次结果计算“相对当前预测的残差”，再按以下维度监控异常：
 
@@ -679,6 +888,7 @@ forgetting_risk / failure_risk
 burden / context_switch_cost
 evidence_quality / uncertainty
 user_fixed / user_excluded
+goal_override / exam_deadline
 ```
 
 收益预测必须关联具体结果事件和模型版本。没有数据时使用保守规则值与宽不确定区间，不伪造精确收益。
@@ -716,13 +926,42 @@ minimize disruption from the accepted plan
 
 名称是候选 UX 文案，不是固定产品要求。默认项优先依据用户当前显式目标和设置；行为推断只能作为可撤销的低置信假设。展示每个方案的预计时间、主要收益、主要代价和不确定性，不展示虚假精确小数。
 
-### 15.4 MVP 求解器与升级路径
+系统可在给定情境下学习用户对非支配方案的选择倾向，但这是一项局部效用假设，不是全局性格：
+
+```text
+utility_context =
+  explicit goal and deadline
+  + available time and session state
+  + prior choices among comparable Pareto sets
+  + prior overrides and reversals
+```
+
+- 首先使用用户显式选择；历史行为只形成带 TTL、置信度和作用域的 `UserStateClaim`；
+- 默认高亮可以随考试周、平时学习或精力变化，但始终允许展开全部代表方案；
+- 不在仅有少量选择时自动缩成单一“最优解”，也不隐藏主要取舍；
+- 持续记录默认项效应和用户覆盖，避免模型只学到界面诱导；
+- 决策疲劳通过减少重复确认、稳定默认项和渐进披露解决，不通过取消用户控制解决。
+
+### 15.4 外部截止与目标优先级
+
+考试、交付等显式截止以字典序约束或用户级目标覆盖建模，不能让全局 30 天保持权重覆盖用户当前真实目标：
+
+```text
+1. safety / permission / user-fixed hard constraints
+2. meet explicit deadline readiness floor
+3. within remaining feasible set, optimize delayed independent and transfer outcomes
+4. minimize burden, cost and plan disruption
+```
+
+`goal_override` 必须来自用户显式设置、带有效期并可撤销。实验预注册权重用于比较策略，不替代个人计划中的显式目标。
+
+### 15.5 MVP 求解器与升级路径
 
 MVP 使用确定性资格过滤、按 deadline/ability gap/forgetting risk 的可解释贪心和局部交换，生成一个可靠基线。候选规模增大后可使用动态规划、beam search 或约束求解器生成组合，再做帕累托筛选。
 
 只有当离线回放证明当前求解器经常错过高价值可行组合，且运行时间满足交互 SLO 时才引入更复杂求解器。策略学习不能绕过硬约束求解器。
 
-### 15.5 重规划的稳定性
+### 15.6 重规划的稳定性
 
 每个新事件都重排会让用户失去控制，因此需要：
 
@@ -731,6 +970,19 @@ MVP 使用确定性资格过滤、按 deadline/ability gap/forgetting risk 的�
 - 把“保持已接受计划”作为显式目标；
 - 小调整批量汇总，高影响调整必须解释并确认；
 - 始终支持恢复到用户上次接受的计划版本。
+
+### 15.7 认知负荷保护与挫败熔断
+
+系统只能根据可观察行为和用户自报识别“当前任务可能不合适”，不能把快速点击或多次失败诊断为焦虑、情绪障碍或动机问题。
+
+候选触发信号包括：连续合格尝试失败、提示层级快速上升、异常短时重复提交、用户主动报告负荷过高，以及时长显著超过个人/任务保守区间。触发后：
+
+1. 暂停该能力切片继续产生高风险能力降级证据，标记 `assessment_suppressed_due_to_context`；
+2. 解释“当前任务可能不适合继续测量”，不归因于用户品质；
+3. 提供三个清楚选择：更小的先修任务、保存进度后休息、继续当前任务；
+4. 若用户选择低负荷任务，使用已掌握内容或最小支架，但不伪造高质量能力证据；
+5. 只有安全或考试规则明确要求时才使用强制冷却，普通学习默认由用户决定；
+6. 监控误触发、绕过率、恢复后表现、无障碍影响和用户投诉。
 
 ## 16. 反馈如何驱动系统演进
 
@@ -743,6 +995,8 @@ MVP 使用确定性资格过滤、按 deadline/ability gap/forgetting risk 的�
 ```
 
 用户点击“建议有用”可以改善候选解释或偏好假设，但不能直接证明学习效果；7/30 天结果可以评价干预，却不能在没有内容/版本控制时直接归因给模型。
+
+正式发布效果以 `PolicyBundleVersion` 为主要处理单元。一次延迟结果通常承载一段时间内多次路由、提示、计划和复习的混合影响；`decision_id -> outcome` 只用于诊断、异质性和预注册信用规则，不把单次建议宣传为 30 天效果的独立原因。
 
 ### 16.2 版本演进而非线上自我修改
 
@@ -775,6 +1029,21 @@ events + decisions + outcomes
 - 候选集合、propensity 和用户覆盖；
 - 延迟结果缺失机制。
 
+实验分桶由 `experiment_id + salt + randomization_unit_id` 的稳定哈希产生。默认按用户或 `user x goal episode`；班级、共享 workspace、公共题库或内容传播会产生干扰时，按 cluster 或 switchback 设计。不同实验臂使用经等值验证的平行题组，禁止把高敏感评估题放入普通检索、缓存或 few-shot。
+
+分析默认 ITT；用户覆盖、改目标或退出不从主分析中静默删除。序贯查看使用预注册 alpha-spending/always-valid 或贝叶斯边界，大量探索切片使用 FDR/分层报警预算。具体测量、缺失和干扰协议见[专项测量协议](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md)。
+
+### 16.4 有界自动更新区
+
+治理批准的是更新器及其护栏，而不是每个新样本产生的数值：
+
+- 可自动：在固定数据资格、特征、模型族、衰减、最小/最大权重和回退阈值内更新质量后验、延迟和成本统计；
+- 需轻量门：重校准、cache threshold 或 route lambda 在批准范围内的候选参数更新，经离线/影子和 SLO 门；
+- 需完整门：新模型、特征、TaskSpec、ConstructMap、行动空间、策略目标、自动化权限或用户可见干预；
+- 禁止自动：安全/权限/删除规则放宽、敏感数据用途扩大和高影响动作授权。
+
+自动更新必须保留参数版本、输入窗口、样本数、前后值和触发原因；超出批准边界时冻结在最近可靠参数，不允许临时扩大范围。
+
 ## 17. 监控、漂移与治理
 
 ### 17.1 监控面
@@ -785,9 +1054,13 @@ events + decisions + outcomes
 | 输入漂移 | 任务、内容、用户构成和 Context 特征变化 | 重新切片评估、降低群体先验权重 |
 | 质量漂移 | 事实、引用、校准、规则通过和人工一致性下降 | 冻结版本、升级验证、回滚 |
 | 学习效果 | 1 至 3 天代理或 7/30 天结果恶化 | 停止放量、恢复基线 |
+| 测量有效性 | 响应率、form 难度差、探针反应性、MDE 和构念一致性 | 停止因果解释、回到测量试点 |
 | 公平性 | 群体间错误率、校准和收益差异异常 | 禁用相关先验/策略、人工审查 |
 | 成本/SLO | 单决策成本、P95、Provider 错误、配额 | 降级模型、缩小 Context、熔断 |
 | 自主性 | 覆盖率、撤销率、投诉、计划扰动 | 降低自动化等级、修正规则 |
+| 认知负荷保护 | 连续失败、提示升级、异常提交、用户自报、熔断误触发 | 暂停高压评估，提供降负荷/休息/继续选项 |
+| 安全与记忆 | PII 漏检、隔离绕过、异常高频召回、缓存验证失败 | 隔离来源、失效缓存、追踪并重算派生结果 |
+| 供应商静默漂移 | 固定 golden probes 输出分布、Schema、风格和 Judge 一致性变化 | 冻结路由，将后验收缩/重置为先验并告警 |
 
 ### 17.2 漂移触发
 
@@ -795,6 +1068,7 @@ events + decisions + outcomes
 
 - 固定滚动窗口或最小季度复核；
 - 模型、Embedding、Prompt、检索、内容或 UI 主版本变化；
+- 供应商在相同模型标识下的 golden probe 分布显著变化；
 - 输入分布、校准误差、代理与北极星关系超出控制界限；
 - 新群体进入、群体样本代表性变化或缺失率突变；
 - 发生安全、隐私、公平或大规模用户纠正事件。
@@ -833,6 +1107,27 @@ stateDiagram-v2
 
 质量收益不足但没有安全风险时，可等待预注册样本量和置信区间。回滚恢复整个 `ConfigurationSnapshot`，不能只回滚模型而保留不兼容的 Prompt 或检索器。
 
+实验期间出现安全补丁时：若补丁改变处理、资格、输出或用户体验，则创建新 `PolicyBundleVersion`，原实验臂停止或分段；只有可证明与处理无关的纯运维修复才能保持原臂，并在账本中记录。不得在实验进行中静默改变配置。
+
+### 17.5 变更类别与门禁映射
+
+| 变更类别 | 最低验证 | 是否等待 7/30 天 | 自动更新 |
+|---|---|---:|---:|
+| 安全/权限规则收紧 | Contract、恶意样本、canary | 否，安全优先 | 否 |
+| 安全/权限规则放宽、数据用途扩大 | 威胁/隐私审查、正式批准 | 不以学习收益替代批准 | 禁止 |
+| 同等能力 Provider/模型替换 | golden、Schema、引用、影子、成本/SLO | 若不改变干预内容可不等 | 否 |
+| Prompt/解析/缓存阈值 | 离线、消融、影子、canary | 只影响质量/SLO时不等 | 批准边界内可候选更新 |
+| 质量后验参数 | 数据质量、校准、漂移护栏 | 否 | 有界自动 |
+| ConstructMap/量规/测量模型 | 专家效度、锚题、平行 form、金标 | 需重新建立可比窗 | 否 |
+| 计划/提示/元认知干预策略 | 回放、负担、安全、受控实验 | 是 | 否 |
+| 自动化等级或高影响权限 | UX/安全/产品批准和用户确认 | 学习收益不能单独批准 | 禁止 |
+
+### 17.6 最小可行治理
+
+不可推迟：证据资格、TaskSpec、PII/权限过滤、最小耐久 DecisionEnvelope、配置快照引用、Outcome 关联、删除传播、规则回退和高影响确认。
+
+可由证据触发后建设：精细多路路由、完整漂移平台、差分隐私训练、黑盒 reranker、复杂 OPE 和策略学习。先用小型仪表盘、定期回放和明确 runbook，不把建设治理平台本身当作学习价值。
+
 ## 18. 验证矩阵与升级门槛
 
 ### 18.1 分层验证
@@ -849,9 +1144,12 @@ stateDiagram-v2
 ### 18.2 指标建议
 
 - 状态与预测：Brier Score、Log Loss、校准曲线、分切片误差、coverage；
+- 测量：探针响应率、平行 form 等值、构念/标注一致性、testing effect、MDE 和缺失敏感性边界；
 - 检索：Recall@k、nDCG/MRR、引用支持率、过期命中率、权限泄漏率、P95；
+- 缓存：精确/语义命中率、重校验失败、stale/删除传播、成本/延迟节省和无缓存对照质量；
 - 路由：验证通过率、升级率、各 TaskSpec 质量后验、成本/成功、失败相关性；
-- 计划：预算违规率、可行率、计划扰动、用户覆盖、单位时间延迟收益；
+- 计划：预算违规率、可行率、时长 MAE/P90 coverage、计划扰动、用户覆盖、单位时间延迟收益；
+- 元认知/负荷：信心校准变化、反思跳过率、熔断误触发、恢复后表现和负担；
 - 学习：7/30 天独立同类与迁移完成率、提示依赖、首次回忆；
 - 治理：快照完整率、可回放率、回滚耗时、删除覆盖率、实验归因完整率。
 
@@ -881,7 +1179,8 @@ stateDiagram-v2
 任一条件成立时，停止相关模型或策略放量并回退：
 
 - 无法稳定关联 `decision_id -> configuration -> candidate -> outcome`；
-- 延迟结果缺失严重且不同实验组缺失机制不可比；
+- Phase 0 证明探针响应率、MDE、构念区分或平行题组不足以支持现实可行的 7/30 天比较；
+- 延迟结果缺失严重、组间响应差异越界或敏感性分析在合理假设下反转结论；
 - 代理改善但北极星连续不改善或恶化；
 - 群体先验在关键切片失准，且无法通过扩大层级解决；
 - 用户纠正、撤销或计划扰动显著增加；
@@ -890,35 +1189,41 @@ stateDiagram-v2
 
 ## 20. 推荐实施顺序
 
-### Phase 0：定义可测结果
+### Phase 0：纯测量试点与投资门
 
-- 固定独立完成、迁移和提示资格语义；
-- 定义 7/30 天标签窗口、缺失状态和最小延迟任务；
-- 建立规则计划和人工评估基线。
+- 版本化 ConstructMap，固定 `in_app_independent`、same/near/far transfer 和提示资格；
+- 建立锚题、平行 forms、金标与最小时长模型基线；
+- 不发自适应干预，试测 1 至 3 天、7 天和 30 天探针；
+- 测量响应率、缺失机制、testing effect、基线方差、MDE 和运营成本；
+- 结果决定是否、以何种规模进入自适应路由和策略实验。
 
 ### Phase 1：闭合审计链
 
-- 增加 TaskSpec、Configuration Snapshot、Decision Ledger 和 Outcome 关联契约；
-- 记录候选集、reason codes、版本和用户覆盖；
+- 增加 TaskSpec、Configuration Snapshot、DecisionEnvelope/Ledger、PolicyBundle 和 Outcome 关联契约；
+- 在事件入口实施数据分类、PII 脱敏和 RedactionManifest；
+- 记录候选集、两层 propensity、reason codes、随机化版本和用户覆盖；
 - 实现确定性回放与外部模型响应快照边界。
 
 ### Phase 2：动态状态与低成本 Context
 
 - 实现带 TTL/来源/冲突的状态声明；
 - 先做权限过滤后的全文与近期事件检索；
-- 建立 Context token、延迟和成本预算。
+- 建立多模态 Context、动态 VoI、延迟和成本预算；
+- 完成来源隔离、记忆投毒检测和删除到 DatasetManifest 的传播。
 
 ### Phase 3：受治理的模型路由与帕累托计划
 
 - 建立固定路由基线和模型注册表；
 - 上线级联、分层质量后验和预算降级；
-- 从确定性计划基线升级到约束组合与帕累托代表方案。
+- 在低风险 TaskSpec 试点语义缓存并保留无缓存对照；
+- 从确定性计划基线升级到约束组合、效用默认高亮与帕累托代表方案；
+- 建立有界自动更新区和变更类别门禁。
 
 ### Phase 4：延迟反馈与群体校准
 
-- 运行 1 至 3 天和 7/30 天小规模试点；
+- 只在 Phase 0 测量门成立后运行策略束级 7/30 天实验；
 - 验证代理、群体先验、内容异常和个体问题的区分能力；
-- 建立影子、灰度、熔断、回滚与删除演练。
+- 建立公平审计路径、Judge/golden 漂移、影子、灰度、熔断、回滚与删除演练。
 
 ### Phase 5：保守策略优化
 
@@ -932,6 +1237,7 @@ stateDiagram-v2
 获批后需要更新：
 
 - [ ] PRD：北极星、次级指标、试点用户和用户自主性验收
+- [ ] 测量协议：ConstructMap、平行题组、缺失、功效、ITT、序贯和归因窗口
 - [ ] UX 与 AI 权限政策：多方案选择、状态纠正、自动化等级和撤销
 - [ ] Planner / Assessment / Memory / AI 设计
 - [ ] ADR：事件与删除、配置快照、实验治理、模型路由
@@ -945,4 +1251,5 @@ stateDiagram-v2
 
 | 日期 | 状态 | 变化 | 依据 |
 |---|---|---|---|
+| 2026-08-03 | proposed | 第二轮优化；拆分测量协议，补充 ConstructMap、平行探针、PII 前置、多模态、语义缓存、耐久账本、VoI 预算、元认知、负荷保护、两层 propensity、有界自动更新和门禁映射 | 两份综合评审与项目边界核对 |
 | 2026-08-02 | proposed | 首次记录；补充治理层、分层路由、配置快照、状态冲突、反事实日志、记忆生命周期、群体质量门、帕累托计划和多时间尺度反馈 | 用户目标确认与方案反馈；现有数据模型、AI 政策和算法地图 |

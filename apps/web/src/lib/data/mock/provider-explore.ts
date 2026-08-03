@@ -115,6 +115,7 @@ export function setCandidateStatus(
   const candidates = readDomain<PromotionCandidate[]>(state, "candidates", []);
   const current = candidates.find((candidate) => candidate.id === candidateId);
   if (!current) throw new Error("沉淀候选不存在");
+  if (current.status !== "pending") return current;
   const next = { ...current, status, promotedTargetId: promotedTargetId ?? current.promotedTargetId };
   writeDomain(state, "candidates", candidates.map((candidate) => candidate.id === candidateId ? next : candidate));
   return next;
@@ -130,8 +131,9 @@ function buildSearchDocs(state: MockProviderState, remote: SearchableDocument[])
   const cards = readDomain<ReviewCard[]>(state, "reviewCards", []);
   const explorations = readDomain<Exploration[]>(state, "explorations", []);
   const turns = readDomain<ChatTurn[]>(state, "chatTurns", []);
+  const documentTags = readDomain<Record<string, string[]>>(state, "documentTags", {});
   return [
-    ...remote.map((document) => ({ id: document.id, type: "document" as const, title: document.title, body: documentBody(document), tags: document.tags ?? [] })),
+    ...remote.map((document) => ({ id: document.id, type: "document" as const, title: document.title, body: documentBody(document), tags: [...new Set([...(document.tags ?? []), ...(documentTags[document.id] ?? [])])] })),
     ...cards.filter((card) => !card.archived).map((card) => ({ id: card.id, type: "card" as const, title: card.front, body: card.back, tags: card.tags })),
     ...items.map((item) => ({ id: item.id, type: "practice" as const, title: item.stem, body: `${item.answer} ${item.hints.join(" ")}`, tags: [] })),
     ...explorations.map((exploration) => ({
@@ -153,7 +155,13 @@ export function getDocumentTags(state: MockProviderState, documentId: string): s
 }
 
 export function setDocumentTags(state: MockProviderState, documentId: string, tags: string[]): string[] {
-  const normalized = [...new Set(tags.map((tag) => tag.trim()).filter(Boolean))];
+  const seen = new Set<string>();
+  const normalized = tags.map((tag) => tag.normalize("NFKC").trim().replace(/\s+/gu, " ")).filter((tag) => {
+    const key = tag.toLocaleLowerCase();
+    if (!tag || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const values = readDomain<Record<string, string[]>>(state, "documentTags", {});
   values[documentId] = normalized;
   writeDomain(state, "documentTags", values);

@@ -84,6 +84,8 @@ export type CourseMembershipRepository = {
     courseId: string;
   }): Promise<CourseRecord>;
 
+  listCourses(input: { workspaceId: string }): Promise<CourseRecord[]>;
+
   addAssetMembership(input: {
     workspaceId: string;
     courseId: string;
@@ -333,6 +335,17 @@ export function createCourseMembershipRepository(
 
     async getCourse(input) {
       return loadCourse(input.workspaceId, input.courseId);
+    },
+
+    async listCourses(input) {
+      await ensureWorkspace(input.workspaceId);
+      const rows = await sql`
+        SELECT * FROM courses
+        WHERE workspace_id = ${input.workspaceId}
+          AND archived_at IS NULL
+        ORDER BY title ASC, created_at ASC
+      `;
+      return rows.map((row) => mapCourse(row as Record<string, unknown>));
     },
 
     async addAssetMembership(input) {

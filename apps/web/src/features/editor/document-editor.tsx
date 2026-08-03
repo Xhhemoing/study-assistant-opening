@@ -2,7 +2,7 @@
 
 import { zh } from "@blocknote/core/locales";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
-import { ArrowLeft, Check, Clock3, Redo2, Save, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, Clock3, Redo2, RefreshCw, Save, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { createEditorApi, type EditorDocument } from "./editor-api";
@@ -29,12 +29,14 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
   const [document, setDocument] = useState<EditorDocument | null>(null);
   const [draft, setDraft] = useState<LocalNoteDraft | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>("saving");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
     let active = true;
+    setLoadError("");
     api.fetchDocument(documentId)
       .then((nextDocument) => {
         if (!active) return;
@@ -50,7 +52,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
         if (active) setLoadError("暂时无法读取这篇笔记，请稍后重试。");
       });
     return () => { active = false; };
-  }, [api, documentId]);
+  }, [api, documentId, reloadToken]);
 
   const initialContent = useMemo(
     () => (draft ? draftBlocksToEditorBlocks(draft.blocks) : undefined),
@@ -119,9 +121,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
     }
   }
 
-  if (loadError) {
-    return <div className="flex min-h-screen items-center justify-center bg-ink p-6 text-danger" role="alert">{loadError}</div>;
-  }
+  if (loadError) return <DocumentLoadError message={loadError} onRetry={() => setReloadToken((value) => value + 1)} />;
   if (!document || !draft) {
     return <div className="flex min-h-screen items-center justify-center bg-ink p-6 text-text-dim" role="status">正在准备编辑器...</div>;
   }
@@ -175,4 +175,8 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
     </div>
   );
+}
+
+export function DocumentLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <main className="flex min-h-screen items-center justify-center bg-ink p-6"><section className="space-y-4" role="alert"><p className="text-danger">{message}</p><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={onRetry} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button></section></main>;
 }

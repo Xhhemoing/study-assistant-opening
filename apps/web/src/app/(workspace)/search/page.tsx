@@ -1,6 +1,6 @@
 "use client";
 
-import { Search } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import type { SearchHit } from "@aistudy/domain";
@@ -16,6 +16,7 @@ export default function SearchPage() {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => setQuery(urlQuery), [urlQuery]);
 
@@ -29,6 +30,7 @@ export default function SearchPage() {
     let active = true;
     setLoading(true);
     setError("");
+    setHits([]);
     provider.searchAll(query, 40)
       .then((nextHits) => {
         if (active) setHits(nextHits);
@@ -42,7 +44,7 @@ export default function SearchPage() {
     return () => {
       active = false;
     };
-  }, [provider, query]);
+  }, [provider, query, reloadToken]);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -77,7 +79,7 @@ export default function SearchPage() {
 
       <div aria-live="polite">
         {loading ? <p className="border-t border-line py-8 text-sm text-text-dim">正在搜索…</p> : null}
-        {error ? <p className="border-t border-line py-8 text-sm text-danger" role="alert">{error}</p> : null}
+        {error ? <div className="flex items-center gap-3 border-t border-line py-8" role="alert"><p className="text-sm text-danger">{error}</p><button aria-label="重试搜索" className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setReloadToken((value) => value + 1)} title="重试搜索" type="button"><RefreshCw aria-hidden="true" size={14} />重试</button></div> : null}
         {!loading && !error ? <SearchResults hits={hits} query={query} /> : null}
       </div>
     </div>

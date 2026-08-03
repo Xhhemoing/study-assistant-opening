@@ -1,4 +1,5 @@
 import {
+  todayPlanSchema,
   attemptEventSchema,
   practiceItemSchema,
   reviewCardSchema,
@@ -35,6 +36,7 @@ import type {
   SubmissionResult,
   StatusCorrection,
 } from "../types";
+import { isPracticeAnswerCorrect } from "../practice-answers";
 
 function statusForPoint(state: MockProviderState, pointId: string, now: Date): StatusResult {
   const events = readDomain<AttemptEvent[]>(state, "attemptEvents", []);
@@ -67,9 +69,12 @@ function applyOverlay(plan: TodayPlan, overlays: Record<string, PlanOverlay>): T
 
 function planForDate(state: MockProviderState, date: string): TodayPlan {
   const goal = listGoals(state)[0];
-  const snapshots = readPlanSnapshots(state);
-  const snapshot: PlanSnapshot = snapshots[date] ?? { overlays: {}, lastPlan: null };
   if (!goal) throw new Error("请先创建一个学习目标");
+  const snapshots = readPlanSnapshots(state);
+  const storedSnapshot = snapshots[date];
+  const snapshot: PlanSnapshot = storedSnapshot && storedSnapshot.goalId === goal.id
+    ? storedSnapshot
+    : { goalId: goal.id, overlays: {}, lastPlan: null };
   const lockedTasks = (snapshot.lastPlan?.tasks ?? []).filter((task) => snapshot.overlays[task.id]?.locked);
   const lockedRefs = new Set(lockedTasks.map((task) => task.refId));
   const items = readDomain<import("@aistudy/contracts").PracticeItem[]>(state, "practiceItems", []);
@@ -97,50 +102,42 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     lockedTasks,
   });
   const applied = applyOverlay(plan, snapshot.overlays);
-  snapshots[date] = { overlays: snapshot.overlays, lastPlan: applied };
+  snapshots[date] = { goalId: goal.id, overlays: snapshot.overlays, lastPlan: applied };
   writePlanSnapshots(state, snapshots);
   return applied;
 }
 
 export function getTodayPlan(state: MockProviderState, date?: string): TodayPlan {
-  return planForDate(state, date ?? todayKey(state.now()));
+  return todayPlanSchema.parse(planForDate(state, date ?? todayKey(state.now())));
 }
 
 function setOverlay(state: MockProviderState, date: string, taskId: string, patch: PlanOverlay): TodayPlan {
   const current = planForDate(state, date);
   const snapshots = readPlanSnapshots(state);
-  const snapshot = snapshots[date] ?? { overlays: {}, lastPlan: current };
-  snapshot.overlays[taskId] = { ...snapshot.overlays[taskId], ...patch };
-  snapshots[date] = snapshot;
+  const goal = listGoals(state)[0];
+  if (!goal) throw new Error("请先创建一个学习目标");
+  const snapshot = snapshots[date] ?? { goalId: goal.id, overlays: {}, lastPlan: current };
+  snapshots[date] = {
+    ...snapshot,
+    overlays: { ...snapshot.overlays, [taskId]: { ...snapshot.overlays[taskId], ...patch } },
+    lastPlan: current,
+  };
   writePlanSnapshots(state, snapshots);
   return planForDate(state, date);
 }
 
 export function setTaskStatus(state: MockProviderState, date: string, taskId: string, status: PlannedTask["status"]): TodayPlan {
-  return setOverlay(state, date, taskId, { status });
+  return todayPlanSchema.parse(setOverlay(state, date, taskId, { status }));
 }
 
 export function toggleTaskLock(state: MockProviderState, date: string, taskId: string): TodayPlan {
   const current = planForDate(state, date);
   const task = current.tasks.find((candidate) => candidate.id === taskId);
-  return task ? setOverlay(state, date, taskId, { locked: !task.locked }) : current;
+  return task ? todayPlanSchema.parse(setOverlay(state, date, taskId, { locked: !task.locked })) : todayPlanSchema.parse(current);
 }
 
 export function getPracticeItem(state: MockProviderState, id: string) {
   return readDomain<import("@aistudy/contracts").PracticeItem[]>(state, "practiceItems", []).find((item) => item.id === id) ?? null;
-}
-
-function normalized(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, "");
-}
-
-function isCorrect(answer: string, item: import("@aistudy/contracts").PracticeItem): boolean {
-  if (item.kind === "checkpoint") {
-    const actual = new Set(answer.split(",").map((value) => value.trim()).filter(Boolean));
-    const expected = new Set(item.answer.split(",").map((value) => value.trim()));
-    return actual.size === expected.size && [...actual].every((value) => expected.has(value));
-  }
-  return normalized(answer) === normalized(item.answer) || (item.kind === "short_answer" && normalized(answer).includes(normalized(item.answer)));
 }
 
 export function submitAttempt(state: MockProviderState, input: AttemptInput): SubmissionResult {
@@ -151,7 +148,7 @@ export function submitAttempt(state: MockProviderState, input: AttemptInput): Su
   if (existing) return { event: existing, status: statusForPoint(state, item.syllabusPointId, state.now()) };
   const event = attemptEventSchema.parse({
     id: newId(), ownerUserId: state.userId, practiceItemId: item.id, syllabusPointId: item.syllabusPointId,
-    idempotencyKey: input.idempotencyKey, answer: input.answer, correct: isCorrect(input.answer, item),
+    idempotencyKey: input.idempotencyKey, answer: input.answer, correct: isPracticeAnswerCorrect(item, input.answer),
     assisted: input.assisted, durationMs: input.durationMs, hintCount: input.hintCount, confidence: input.confidence,
     errorCause: input.errorCause, abilitySlice: item.abilitySlice, contentVersion: item.contentVersion,
     schemaVersion: 1, createdAt: state.now().toISOString(),

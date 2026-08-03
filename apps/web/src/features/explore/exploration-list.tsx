@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, FileText, Lightbulb, Link as LinkIcon } from "lucide-react";
+import { ArrowUp, FileText, Lightbulb, Link as LinkIcon, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
@@ -38,6 +38,10 @@ function ExplorationStatus({ status }: { status: Exploration["status"] }) {
       {explorationStatusLabel(status)}
     </span>
   );
+}
+
+export function ExplorationLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <section className="space-y-3 border-y border-line py-8" role="alert"><p className="text-sm text-danger">{message}</p><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={onRetry} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button></section>;
 }
 
 export function ExplorationList() {
@@ -139,7 +143,7 @@ export function ExplorationList() {
           {!loading && !loadError ? <span className="text-xs text-text-dim">{explorations.length} 个</span> : null}
         </div>
         {loading ? <p className="border-y border-line py-8 text-sm text-text-dim">正在加载探索…</p> : null}
-        {loadError ? <p className="border-y border-line py-8 text-sm text-danger" role="alert">{loadError}</p> : null}
+        {loadError ? <ExplorationLoadError message={loadError} onRetry={() => void loadExplorations()} /> : null}
         {!loading && !loadError && explorations.length === 0 ? (
           <EmptyState title="还没有探索" description="输入一个主题，或先选择上面的起点。" />
         ) : null}

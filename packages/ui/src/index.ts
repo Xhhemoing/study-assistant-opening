@@ -21,4 +21,6 @@ export type {
   WorkspaceNavigationPlacement,
 } from "./workspace-navigation";
 export { AppShell } from "./app-shell";
+export { getFocusTrapTarget } from "./focus-trap-model";
+export type { FocusDirection } from "./focus-trap-model";
 export { Card, Drawer, EmptyState, Field, StatusBadge } from "./primitives";

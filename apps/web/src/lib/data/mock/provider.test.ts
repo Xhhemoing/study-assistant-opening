@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StorageLike } from "./storage";
 import { createMockProvider } from "./provider";
+import { mockKey } from "./storage";
 
 const USER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const NOW = new Date("2026-08-02T08:00:00.000Z");
@@ -57,6 +58,38 @@ describe("MockStudyDataProvider", () => {
     expect(updated.tasks[0]).toMatchObject({ id: firstTask.id, locked: true, status: "done" });
   });
 
+  it("recovers from a malformed goals domain instead of crashing", async () => {
+    const storage = createMemoryStorage();
+    storage.setItem(mockKey(USER_ID, "goals"), "{}");
+    const provider = createMockProvider({ userId: USER_ID, now: NOW, delayMs: 0, storage });
+
+    await expect(provider.listGoals()).resolves.toHaveLength(1);
+  });
+
+  it("does not carry a locked task from an archived goal into the next goal", async () => {
+    const provider = createProvider();
+    const initialGoal = (await provider.listGoals())[0];
+    const initialPlan = await provider.getTodayPlan("2026-08-02");
+    const lockedTask = initialPlan.tasks[0];
+    expect(initialGoal).toBeDefined();
+    expect(lockedTask).toBeDefined();
+    if (!initialGoal || !lockedTask) return;
+
+    await provider.toggleTaskLock("2026-08-02", lockedTask.id);
+    await provider.archiveGoal(initialGoal.id);
+    await provider.createGoal({
+      title: "第二个学习目标",
+      scenario: "custom",
+      examDate: null,
+      subjects: ["数学"],
+      dailyMinutes: 45,
+      courseId: null,
+    });
+
+    const nextPlan = await provider.getTodayPlan("2026-08-02");
+    expect(nextPlan.tasks.find((task) => task.refId === lockedTask.refId)?.locked).not.toBe(true);
+  });
+
   it("deduplicates attempts by idempotency key and recomputes status", async () => {
     const provider = createProvider();
     const item = await provider.getPracticeItem("22222222-2222-4222-8222-222222222201");
@@ -80,6 +113,43 @@ describe("MockStudyDataProvider", () => {
     expect(first.status.syllabusPointId).toBe(item.syllabusPointId);
   });
 
+  it("normalizes full-width answers and checkpoint ordering before recording correctness", async () => {
+    const provider = createProvider();
+    const choice = await provider.getPracticeItem("22222222-2222-4222-8222-222222222201");
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+
+    const first = await provider.submitAttempt({
+      practiceItemId: choice.id,
+      answer: "　ａ ",
+      durationMs: 1,
+      hintCount: 0,
+      confidence: 4,
+      errorCause: null,
+      assisted: false,
+      idempotencyKey: "attempt-full-width-001",
+    });
+    expect(first.event.correct).toBe(true);
+
+    const checkpoint = await provider.createPracticeItem({
+      kind: "checkpoint",
+      stem: "步骤",
+      answer: "0,2",
+      options: ["第一步", "第二步", "第三步"],
+    });
+    const second = await provider.submitAttempt({
+      practiceItemId: checkpoint.id,
+      answer: " ２，０ ",
+      durationMs: 1,
+      hintCount: 0,
+      confidence: 4,
+      errorCause: null,
+      assisted: false,
+      idempotencyKey: "attempt-checkpoint-order-001",
+    });
+    expect(second.event.correct).toBe(true);
+  });
+
   it("grades due cards, supports silent turns, and creates a candidate on every second user turn", async () => {
     const provider = createProvider();
     const due = await provider.listDueCards();
@@ -94,6 +164,20 @@ describe("MockStudyDataProvider", () => {
     const silent = await provider.sendExplorationMessage(exploration.id, "先只记录这个问题", "silent");
     expect(silent.aiTurn).toBeNull();
     expect(silent.candidate?.kind).toBe("note");
+  });
+
+  it("keeps candidate promotion status idempotent", async () => {
+    const provider = createProvider();
+    const exploration = (await provider.listExplorations())[0];
+    expect(exploration).toBeDefined();
+    if (!exploration) return;
+    const candidate = (await provider.getExploration(exploration.id))?.candidates[0];
+    expect(candidate).toBeDefined();
+    if (!candidate) return;
+
+    const promoted = await provider.setCandidateStatus(candidate.id, "promoted", "target-1");
+    const repeated = await provider.setCandidateStatus(candidate.id, "promoted", "target-2");
+    expect(repeated).toEqual(promoted);
   });
 
   it("uses the selected role template and rotates it by user turn count", async () => {
@@ -151,5 +235,14 @@ describe("MockStudyDataProvider", () => {
     expect(await provider.listBacklinks("目标笔记")).toEqual([
       expect.objectContaining({ sourceDocumentId: "doc-1", sourceTitle: "源笔记" }),
     ]);
+  });
+
+  it("includes user-managed document tags in search and deduplicates case variants", async () => {
+    const provider = createProvider();
+    await provider.setDocumentTags("remote-1", ["专题", " 专题 ", "ＴＯＰＩＣ", "topic"]);
+
+    await expect(provider.getDocumentTags("remote-1")).resolves.toEqual(["专题", "TOPIC"]);
+    const hits = await provider.searchAll(" ＴＯＰＩＣ ");
+    expect(hits.find((hit) => hit.id === "remote-1")?.type).toBe("document");
   });
 });

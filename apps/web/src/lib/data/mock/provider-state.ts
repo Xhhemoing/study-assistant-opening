@@ -25,6 +25,7 @@ export interface PlanOverlay {
 }
 
 export interface PlanSnapshot {
+  goalId: string;
   overlays: Record<string, PlanOverlay>;
   lastPlan: TodayPlan | null;
 }
@@ -62,8 +63,9 @@ export function createProviderState(options: MockProviderOptions): MockProviderS
 }
 
 export function ensureSeed(state: MockProviderState): void {
-  const existing = loadDomain<StudyGoal[] | null>(state.storage, state.userId, "goals", null);
-  if (existing !== null) return;
+  const existing = loadDomain<unknown>(state.storage, state.userId, "goals", null);
+  if (Array.isArray(existing)) return;
+  if (existing !== null) state.storage.removeItem(mockKey(state.userId, "goals"));
   const bundle = buildSeedBundle(state.userId, state.now());
   saveDomain(state.storage, state.userId, "goals", [bundle.goal]);
   saveDomain(state.storage, state.userId, "practiceItems", bundle.practiceItems);

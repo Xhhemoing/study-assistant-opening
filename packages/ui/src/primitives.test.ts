@@ -18,6 +18,7 @@ describe("shared UI primitives", () => {
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-modal="true"');
     expect(html).toContain('data-drawer-backdrop="true"');
+    expect(html).toContain('tabindex="-1"');
     expect(html).toContain("详情");
   });
 

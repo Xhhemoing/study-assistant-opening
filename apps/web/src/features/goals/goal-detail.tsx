@@ -3,7 +3,7 @@
 import { Archive, ArrowLeft, Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStudyProvider } from "../../lib/data/react";
 import { clampDailyMinutes, goalDraftFromGoal, normalizeGoalTitle, type GoalDraft } from "./goal-model";
 import { DailyMinutesField, ExamDateField, ScenarioPicker, SubjectPicker } from "./goal-form-fields";
@@ -18,27 +18,35 @@ export function GoalDetail({ id }: { id: string }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
+  const requestVersion = useRef(0);
 
   const loadGoal = useCallback(async () => {
+    const version = ++requestVersion.current;
     if (!provider) {
       setLoading(true);
+      setDraft(null);
       return;
     }
     setLoading(true);
     setError("");
     try {
       const nextGoal = await provider.getGoal(id);
+      if (version !== requestVersion.current) return;
       setDraft(nextGoal ? goalDraftFromGoal(nextGoal) : null);
       if (!nextGoal) setError("找不到这个学习目标。");
     } catch {
+      if (version !== requestVersion.current) return;
       setError("目标读取失败，请重试。");
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [id, provider]);
 
   useEffect(() => {
     void loadGoal();
+    return () => {
+      requestVersion.current += 1;
+    };
   }, [loadGoal, reloadToken]);
 
   function updateDraft<K extends keyof GoalDraft>(key: K, value: GoalDraft[K]) {

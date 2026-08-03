@@ -105,6 +105,12 @@ export {
 
 export { diagnosticsSchema, type Diagnostics } from "./diagnostics";
 
+export {
+  searchableDocumentSchema,
+  searchableDocumentsResponseSchema,
+  type SearchableDocument,
+} from "./search";
+
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),
   latencyMs: z.number().nonnegative().optional(),

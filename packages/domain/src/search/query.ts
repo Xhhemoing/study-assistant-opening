@@ -17,6 +17,10 @@ export interface SearchHit {
 const SNIPPET_LENGTH = 60;
 const SNIPPET_CONTEXT = 30;
 
+export function normalizeSearchText(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+}
+
 function buildSnippet(body: string, loweredBody: string, tokens: string[]): string {
   let firstIdx = -1;
   for (const token of tokens) {
@@ -31,17 +35,16 @@ function buildSnippet(body: string, loweredBody: string, tokens: string[]): stri
 }
 
 export function rankResults(query: string, docs: SearchDoc[], limit = 20): SearchHit[] {
-  const tokens = query
-    .toLowerCase()
-    .split(/\s+/)
+  const tokens = normalizeSearchText(query)
+    .split(" ")
     .filter((t) => t.length > 0);
   if (tokens.length === 0) return [];
 
   const hits: SearchHit[] = [];
   for (const doc of docs) {
-    const title = doc.title.toLowerCase();
-    const body = doc.body.toLowerCase();
-    const tags = doc.tags.map((t) => t.toLowerCase());
+    const title = normalizeSearchText(doc.title);
+    const body = normalizeSearchText(doc.body);
+    const tags = doc.tags.map(normalizeSearchText);
     let score = 0;
     for (const token of tokens) {
       if (title.includes(token)) score += 3;

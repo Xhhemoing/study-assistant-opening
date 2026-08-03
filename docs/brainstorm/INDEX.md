@@ -6,7 +6,8 @@
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
-| 2026-08-02 | [自适应学习决策、记忆与持续校准系统](2026-08-02-adaptive-learning-decision-governance.md) | proposed | Learn、Planner、Assessment、AI、Worker、数据治理 | 采用规则、统计估计和 AI 候选生成的受治理混合架构；以 7/30 天独立与迁移为北极星，经配置快照、低风险探索、帕累托计划和灰度回滚持续校准 | PRD 指标、Planner/Assessment/Memory/AI 设计、事件与决策契约、实验治理 ADR |
+| 2026-08-03 | [延迟学习成果的测量、实验与因果有效性](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md) | proposed | Assessment、Learn、Experiment、Worker、ConstructMap | 路由和策略优化前先运行纯测量试点；分离政策题与独立探针，以构念版本、平行题组、缺失敏感性、MDE 和策略束级 ITT 验证 7/30 天北极星是否可用 | PRD 指标、Assessment/Experiment 设计、测量与实验 ADR、Probe/Outcome 契约 |
+| 2026-08-02 | [自适应学习决策、记忆与持续校准系统](2026-08-02-adaptive-learning-decision-governance.md) | proposed | Learn、Planner、Assessment、AI、Worker、数据治理 | 采用受治理混合架构；先验证 7/30 天测量，再经 PII 前置、耐久账本、动态预算、缓存、帕累托计划和分级门禁持续校准 | PRD 指标、Planner/Assessment/Memory/AI 设计、事件与决策契约、实验治理 ADR |
 | 2026-07-30 | [项目设定调研总图与实施决策门](2026-07-30-project-research-agenda-and-decision-gates.md) | proposed | 产品定位、大学/终身学习、AI、学习证据、数据治理、可靠性、生态 | Task 9–11 可继续；Task 14/21/24 前分别完成 AI 数据边界、事件/作品语义和能力评价研究；高级能力按证据触发 | PRD/场景、AI 与数据治理设计、学习事件/评价契约、实施计划研究门 |
 | 2026-07-30 | [Migration Registry 的可验证升级与并发安全](2026-07-30-migration-registry-reliability.md) | promoted | Database migration、CI、发布运维、Gate 0.2 | PostgreSQL registry 状态机、numeric parser、checksum、advisory lock 与唯一 canonical runner | Phase 1 Gate 0.2、runner、CLI 与运维手册 |
 | 2026-07-30 | [身份迁移的数据保全与预检策略](2026-07-30-identity-migration-safety.md) | promoted | Workspace ownership、Database migration、Gate 0.1 | 以确定性 fail-closed 预检和可审计人工映射保证零删除、零误归属 | Phase 1 Gate 0.1、迁移运维文档与 preflight 实现 |

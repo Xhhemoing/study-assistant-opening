@@ -4,6 +4,108 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260803-001] rg-negative-search-in-parallel-validation
+
+**Logged**: 2026-08-03T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: docs
+
+### Summary
+Expected `rg` no-match results returned exit code 1 and caused parallel read or validation batches to be reported as failed.
+
+### Error
+```text
+Script failed with exit code 1 when an exact graph vocabulary or learning-entry search found no matches.
+```
+
+### Context
+- An exact vocabulary pattern was too restrictive even though relevant substring tokens existed.
+- A later negative search for an existing learning entry repeated the same batch failure.
+- Neither failure indicated a repository or document defect.
+
+### Suggested Fix
+Use `Select-String` for optional PowerShell searches, or explicitly normalize `rg` exit code 1 when no-match is the expected success condition. Inspect actual vocabulary samples before anchoring an exact pattern.
+
+### Metadata
+- Reproducible: yes
+- Related Files: graphify-out/.vocab.txt, docs/brainstorm/2026-08-02-adaptive-learning-decision-governance.md
+- Pattern-Key: tooling.rg_negative_search_exit
+- Recurrence-Count: 2
+- First-Seen: 2026-08-03
+- Last-Seen: 2026-08-03
+
+### Resolution
+- **Resolved**: 2026-08-03T00:00:00+08:00
+- **Notes**: Subsequent optional searches use PowerShell branching and treat no-match as an explicit result.
+
+---
+
+## [ERR-20260803-002] apply-patch-large-multifile-write
+
+**Logged**: 2026-08-03T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: docs
+
+### Summary
+A large multi-file patch matched its context but failed while writing the main brainstorm document; equivalent small single-file patches succeeded.
+
+### Error
+```text
+Failed to write file E:\Project\AIstudy\docs\brainstorm\2026-08-02-adaptive-learning-decision-governance.md
+```
+
+### Context
+- File ACL, free disk space, read-only state and current content were normal.
+- The prior patch failure was separately caused by an exact context mismatch (`DecisionLedger` versus `Decision Ledger`).
+- Splitting the verified change into smaller patches wrote successfully.
+
+### Suggested Fix
+For large evolving Markdown files, inspect exact current lines and apply small single-file patches. Do not retry a broad patch after a write failure without checking file state.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: docs/brainstorm/2026-08-02-adaptive-learning-decision-governance.md
+
+### Resolution
+- **Resolved**: 2026-08-03T00:00:00+08:00
+- **Notes**: Applied the same intended edits as smaller exact patches and verified the target content afterward.
+
+---
+
+## [ERR-20260803-003] powershell-colon-variable-interpolation
+
+**Logged**: 2026-08-03T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: docs
+
+### Summary
+PowerShell parsed a colon immediately after an interpolated variable name as scoped-variable syntax.
+
+### Error
+```text
+Variable reference is not valid. ':' was not followed by a valid variable name character.
+```
+
+### Context
+- A validation status string used `"$file: no trailing whitespace"`.
+- The error occurred in the validation script before the parallel batch could be trusted.
+
+### Suggested Fix
+Use the format operator (`'{0}: ...' -f $file`) or `${file}: ...` whenever punctuation immediately follows an interpolated PowerShell variable.
+
+### Metadata
+- Reproducible: yes
+- Related Files: docs/brainstorm/2026-08-02-adaptive-learning-decision-governance.md
+
+### Resolution
+- **Resolved**: 2026-08-03T00:00:00+08:00
+- **Notes**: Re-ran the full validation batch with format strings.
+
+---
+
 ## [ERR-20260802-014] skill-root-mismatch-current-session
 
 **Logged**: 2026-08-02T00:00:00+08:00

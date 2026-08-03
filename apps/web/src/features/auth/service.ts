@@ -449,6 +449,34 @@ export async function createCourseForPrincipal(
   });
 }
 
+export async function listCoursesForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+) {
+  assertAuthorized(principal, "course.read", {
+    type: "course",
+    workspaceId: principal.workspaceId,
+  });
+  return runtime.courses.listCourses({ workspaceId: principal.workspaceId });
+}
+
+export async function getCourseForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  courseId: string,
+) {
+  const course = await runtime.courses.getCourse({
+    workspaceId: principal.workspaceId,
+    courseId,
+  });
+  assertAuthorized(principal, "course.read", {
+    type: "course",
+    workspaceId: course.workspaceId,
+    courseId: course.id,
+  });
+  return course;
+}
+
 export async function addMembershipForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,

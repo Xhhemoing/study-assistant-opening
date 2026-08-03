@@ -1,9 +1,10 @@
 "use client";
 
-import { Command, Search, X } from "lucide-react";
+import { Command, RefreshCw, Search, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { SearchHit } from "@aistudy/domain";
+import { getFocusTrapTarget } from "@aistudy/ui";
 import { useStudyProvider } from "../../lib/data/react";
 import {
   PALETTE_COMMANDS,
@@ -46,11 +47,14 @@ export function CommandPalette({
   const router = useRouter();
   const provider = useStudyProvider();
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [retryToken, setRetryToken] = useState(0);
   const options = useMemo(() => buildOptions(hits), [hits]);
 
   useEffect(() => {
@@ -70,12 +74,30 @@ export function CommandPalette({
 
   useEffect(() => {
     if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setQuery("");
     setHits([]);
     setActiveIndex(0);
     setError("");
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const elements = Array.from(dialogRef.current.querySelectorAll<HTMLElement>("button, input, [href], [tabindex]")).filter((element) => !element.hasAttribute("disabled") && element.tabIndex >= 0);
+      if (elements.length === 0) return;
+      const activeIndex = elements.indexOf(document.activeElement as HTMLElement);
+      const targetIndex = getFocusTrapTarget(activeIndex, event.shiftKey ? "backward" : "forward", elements.length);
+      if (targetIndex !== null) {
+        event.preventDefault();
+        elements[targetIndex]?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+      if (previousFocusRef.current && document.contains(previousFocusRef.current)) previousFocusRef.current.focus();
+      previousFocusRef.current = null;
+    };
   }, [open]);
 
   useEffect(() => {
@@ -88,6 +110,7 @@ export function CommandPalette({
     let active = true;
     setLoading(true);
     setError("");
+    setHits([]);
     const timer = window.setTimeout(() => {
       provider.searchAll(query, 12)
         .then((nextHits) => {
@@ -104,7 +127,7 @@ export function CommandPalette({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [open, provider, query]);
+  }, [open, provider, query, retryToken]);
 
   useEffect(() => {
     setActiveIndex((current) => Math.min(current, Math.max(options.length - 1, 0)));
@@ -140,6 +163,7 @@ export function CommandPalette({
         aria-labelledby="command-palette-title"
         aria-modal="true"
         className="mx-auto w-full max-w-2xl overflow-hidden rounded-xl border border-line bg-surface shadow-2xl shadow-ink/50"
+        ref={dialogRef}
         role="dialog"
       >
         <div className="flex items-center gap-3 border-b border-line px-4">
@@ -184,7 +208,7 @@ export function CommandPalette({
             </button>
           ))}
           {loading ? <p className="px-3 py-3 text-sm text-text-dim">正在搜索…</p> : null}
-          {error ? <p className="px-3 py-3 text-sm text-danger" role="alert">{error}</p> : null}
+          {error ? <div className="flex items-center justify-between gap-3 px-3 py-3" role="alert"><p className="text-sm text-danger">{error}</p><button aria-label="重试搜索" className="inline-grid size-9 shrink-0 place-items-center rounded-md border border-line text-text-dim hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setRetryToken((value) => value + 1)} title="重试搜索" type="button"><RefreshCw aria-hidden="true" size={15} /></button></div> : null}
           {query.trim() && !loading && !error && hits.length === 0 ? <p className="px-3 py-3 text-sm text-text-dim">没有匹配内容</p> : null}
         </div>
       </section>

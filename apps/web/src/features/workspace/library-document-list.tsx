@@ -1,6 +1,7 @@
 "use client";
 
 import { FileText, RefreshCw } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type LibraryDocument = {
@@ -66,11 +67,10 @@ export function LibraryDocumentList() {
     <ul className="document-list" aria-label="笔记列表">
       {documents.map((document) => (
         <li key={document.id} className="document-list__item">
-          <FileText aria-hidden="true" size={19} />
-          <div>
-            <strong>{document.title}</strong>
-            <span>{lifecycleLabels[document.lifecycle] ?? document.lifecycle} · 更新于 {new Date(document.updatedAt).toLocaleDateString("zh-CN")}</span>
-          </div>
+          <Link className="flex min-w-0 flex-1 items-start gap-3 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href={`/library/${encodeURIComponent(document.id)}`}>
+            <FileText aria-hidden="true" size={19} />
+            <span className="min-w-0"><strong className="block truncate">{document.title}</strong><span className="block">{lifecycleLabels[document.lifecycle] ?? document.lifecycle} · 更新于 {new Date(document.updatedAt).toLocaleDateString("zh-CN")}</span></span>
+          </Link>
         </li>
       ))}
     </ul>

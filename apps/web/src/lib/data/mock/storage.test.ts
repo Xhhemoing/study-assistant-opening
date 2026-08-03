@@ -37,6 +37,7 @@ describe("mock storage", () => {
     expect(loadDomain(storage, "u1", "missing", "fb")).toBe("fb");
     storage.setItem(mockKey("u1", "broken"), "{not-json");
     expect(loadDomain(storage, "u1", "broken", "fb")).toBe("fb");
+    expect(storage.getItem(mockKey("u1", "broken"))).toBeNull();
   });
 
   it("namespaces per user", () => {
