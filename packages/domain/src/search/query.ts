@@ -1,9 +1,13 @@
+import type { AssetLifecycle } from "@aistudy/contracts";
+
 export interface SearchDoc {
   id: string;
   type: "document" | "exploration" | "card" | "course" | "practice";
   title: string;
   body: string;
   tags: string[];
+  lifecycle?: AssetLifecycle;
+  courseMemberships?: Array<{ id: string; title: string }>;
 }
 
 export interface SearchHit {
@@ -12,6 +16,8 @@ export interface SearchHit {
   title: string;
   snippet: string;
   score: number;
+  lifecycle?: AssetLifecycle;
+  courseMemberships?: Array<{ id: string; title: string }>;
 }
 
 const SNIPPET_LENGTH = 60;
@@ -58,6 +64,8 @@ export function rankResults(query: string, docs: SearchDoc[], limit = 20): Searc
       title: doc.title,
       snippet: buildSnippet(doc.body, body, tokens),
       score,
+      lifecycle: doc.lifecycle,
+      courseMemberships: doc.courseMemberships,
     });
   }
 

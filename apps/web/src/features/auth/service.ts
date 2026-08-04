@@ -1,23 +1,39 @@
+import { EnvValidationError } from "@aistudy/config";
 import {
   createCourseMembershipRepository,
+  createExplorationRepository,
   createIdentityRepository,
   createLibraryRepository,
   createSqlClient,
   createWorkspacePreferencesRepository,
   CourseMembershipError,
+  ExplorationRepositoryError,
   IdentityError,
   LibraryError,
   WorkspacePreferencesError,
   type CourseMembershipRepository,
+  type ExplorationRepository,
   type IdentityRepository,
   type LibraryRepository,
   type WorkspacePreferencesRepository,
 } from "@aistudy/database";
 import {
+  createDocumentRelationRequestSchema,
+  documentTagsUpdateSchema,
+  documentPropertiesResponseSchema,
+  indexDocumentLinksRequestSchema,
   loginRequestSchema,
   registerRequestSchema,
+  searchRequestSchema,
   workspacePreferenceUpdateSchema,
+  normalizeDocumentTags,
+  updateDocumentRelationRequestSchema,
+  type DocumentPropertiesResponse,
+  type KnowledgeLink,
+  type ManagedRelation,
+  type SearchHit,
 } from "@aistudy/contracts";
+import { rankResults, type SearchDoc } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import {
   AuthorizationError,
@@ -34,6 +50,7 @@ export type AuthRuntime = {
   library: LibraryRepository;
   courses: CourseMembershipRepository;
   preferences: WorkspacePreferencesRepository;
+  explorations: ExplorationRepository;
   sessions: SessionService;
   authCookieName: string;
   sessionCookieSecure: boolean;
@@ -53,6 +70,7 @@ export function createAuthRuntime(input: {
   const library = createLibraryRepository(sql);
   const courses = createCourseMembershipRepository(sql);
   const preferences = createWorkspacePreferencesRepository(sql);
+  const explorations = createExplorationRepository(sql);
   const sessions = createSessionService({
     sql,
     authSecret: input.authSecret,
@@ -65,6 +83,7 @@ export function createAuthRuntime(input: {
     library,
     courses,
     preferences,
+    explorations,
     sessions,
     authCookieName: input.authCookieName,
     sessionCookieSecure: input.sessionCookieSecure,
@@ -81,7 +100,8 @@ export type ApiErrorCode =
   | "NOT_FOUND"
   | "VALIDATION"
   | "CONFLICT"
-  | "INVALID_CREDENTIALS";
+  | "INVALID_CREDENTIALS"
+  | "CONFIGURATION";
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
@@ -104,6 +124,13 @@ export function jsonError(error: ApiError): Response {
 
 export function mapDomainError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
+  if (error instanceof EnvValidationError) {
+    return new ApiError(
+      "CONFIGURATION",
+      "服务暂不可用，请检查服务器配置。",
+      503,
+    );
+  }
   if (error instanceof AuthorizationError) {
     return new ApiError(
       error.code,
@@ -126,6 +153,7 @@ export function mapDomainError(error: unknown): ApiError {
     error instanceof LibraryError
     || error instanceof CourseMembershipError
     || error instanceof WorkspacePreferencesError
+    || error instanceof ExplorationRepositoryError
   ) {
     if (error.code === "WORKSPACE_MISMATCH" || error.code === "CROSS_WORKSPACE_REFERENCE") {
       return new ApiError("WORKSPACE_FORBIDDEN", error.message, 403);
@@ -139,6 +167,12 @@ export function mapDomainError(error: unknown): ApiError {
     if (error.code === "CONFLICT" || error.code === "DUPLICATE_MEMBERSHIP") {
       return new ApiError("CONFLICT", error.message, 409);
     }
+    if (error.code === "INVALID_TRANSITION") {
+      return new ApiError("CONFLICT", error.message, 409);
+    }
+  }
+  if (error instanceof SyntaxError) {
+    return new ApiError("VALIDATION", "Invalid JSON request body", 400);
   }
   if (error instanceof Error && error.name === "ZodError") {
     return new ApiError("VALIDATION", "Invalid request body", 400);
@@ -393,6 +427,373 @@ export async function listDocumentsForPrincipal(
   return runtime.library.listDocuments({ workspaceId: principal.workspaceId });
 }
 
+function summaryText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const text = value.map(summaryText).filter(Boolean).join(" ").trim();
+    return text || null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const parts = Object.entries(record)
+    .filter(([key]) => key !== "id" && key !== "type")
+    .map(([, child]) => summaryText(child))
+    .filter((child): child is string => Boolean(child));
+  const text = parts.join(" ").trim();
+  return text || null;
+}
+
+async function enrichKnowledgeEndpoint(
+  runtime: AuthRuntime,
+  workspaceId: string,
+  type: "document" | "block",
+  id: string,
+) {
+  try {
+    if (type === "document") {
+      const document = await runtime.library.getDocument({
+        workspaceId,
+        documentId: id,
+        includeDeleted: true,
+      });
+      if (document.deletedAt) {
+        return { type, id, documentId: document.id, title: null, text: null, status: "broken" as const };
+      }
+      return { type, id, documentId: document.id, title: document.title, text: null, status: "available" as const };
+    }
+    const block = await runtime.library.getBlock({
+      workspaceId,
+      blockId: id,
+      includeDeleted: true,
+    });
+    if (block.document.deletedAt) {
+      return { type, id, documentId: block.document.id, title: null, text: null, status: "broken" as const };
+    }
+    return {
+      type,
+      id,
+      documentId: block.document.id,
+      title: block.document.title,
+      text: summaryText(block.content),
+      status: "available" as const,
+    };
+  } catch (error) {
+    if (error instanceof LibraryError && error.code === "WORKSPACE_MISMATCH") {
+      throw new ApiError("WORKSPACE_FORBIDDEN", "Access to another workspace is forbidden", 403);
+    }
+    if (error instanceof LibraryError && error.code === "NOT_FOUND") {
+      return { type, id, documentId: null, title: null, text: null, status: "broken" as const };
+    }
+    throw error;
+  }
+}
+
+export async function listKnowledgeLinksForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+): Promise<KnowledgeLink[]> {
+  const hostDocument = await getDocumentForPrincipal(runtime, principal, documentId);
+  assertAuthorized(principal, "document.read", {
+    type: "document",
+    workspaceId: principal.workspaceId,
+    documentId,
+  });
+  const relationSets = await Promise.all([
+    runtime.library.listRelations({
+      workspaceId: principal.workspaceId,
+      subjectType: "document",
+      subjectId: documentId,
+    }),
+    ...hostDocument.blocks.map((block) => runtime.library.listRelations({
+      workspaceId: principal.workspaceId,
+      subjectType: "block",
+      subjectId: block.id,
+    })),
+  ]);
+  const relations = [...new Map(
+    relationSets.flat().map((relation) => [relation.id, relation]),
+  ).values()];
+  const hostBlockIds = new Set(hostDocument.blocks.map((block) => block.id));
+  const links = await Promise.all(relations.map(async (relation) => ({
+    id: relation.id,
+    relationType: relation.relationType as KnowledgeLink["relationType"],
+    isIncoming: relation.toType === "document"
+      ? relation.toId === documentId
+      : hostBlockIds.has(relation.toId),
+    from: await enrichKnowledgeEndpoint(runtime, principal.workspaceId, relation.fromType, relation.fromId),
+    to: await enrichKnowledgeEndpoint(runtime, principal.workspaceId, relation.toType, relation.toId),
+    createdAt: relation.createdAt.toISOString(),
+  })));
+  return links;
+}
+
+function relationToManagedLink(
+  runtime: AuthRuntime,
+  workspaceId: string,
+  relation: {
+    id: string;
+    relationType: string;
+    fromType: "document" | "block";
+    fromId: string;
+    toType: "document" | "block";
+    toId: string;
+    createdAt: Date;
+  },
+): Promise<ManagedRelation> {
+  return Promise.all([
+    enrichKnowledgeEndpoint(runtime, workspaceId, relation.fromType, relation.fromId),
+    enrichKnowledgeEndpoint(runtime, workspaceId, relation.toType, relation.toId),
+  ]).then(([from, to]) => ({
+    id: relation.id,
+    relationType: relation.relationType as ManagedRelation["relationType"],
+    from,
+    to,
+    createdAt: relation.createdAt.toISOString(),
+  }));
+}
+
+async function requireOutgoingDocumentRelation(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  relationId: string,
+) {
+  try {
+    const relation = await runtime.library.getRelation({
+      workspaceId: principal.workspaceId,
+      relationId,
+    });
+    if (relation.fromType !== "document" || relation.fromId !== documentId) {
+      throw new LibraryError("NOT_FOUND", `Relation ${relationId} not found`);
+    }
+    return relation;
+  } catch (error) {
+    if (error instanceof LibraryError && error.code === "WORKSPACE_MISMATCH") {
+      throw new LibraryError("NOT_FOUND", `Relation ${relationId} not found`);
+    }
+    throw error;
+  }
+}
+
+export async function listManagedDocumentRelationsForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+): Promise<ManagedRelation[]> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  const relations = await runtime.library.listRelations({
+    workspaceId: principal.workspaceId,
+    subjectType: "document",
+    subjectId: documentId,
+  });
+  return Promise.all(relations
+    .filter((relation) => relation.fromType === "document" && relation.fromId === documentId)
+    .map((relation) => relationToManagedLink(runtime, principal.workspaceId, relation)));
+}
+
+export async function createDocumentRelationForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  body: unknown,
+): Promise<ManagedRelation> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  const parsed = createDocumentRelationRequestSchema.parse(body);
+  if (parsed.to.type === "document" && parsed.to.id === documentId) {
+    throw new LibraryError("VALIDATION", "A document cannot relate to itself");
+  }
+  const target = parsed.to.type === "document"
+    ? await runtime.library.getDocument({ workspaceId: principal.workspaceId, documentId: parsed.to.id })
+    : await runtime.library.getBlock({ workspaceId: principal.workspaceId, blockId: parsed.to.id });
+  if (("deletedAt" in target ? target.deletedAt : target.document.deletedAt) !== null) {
+    throw new LibraryError("NOT_FOUND", "Relation target is not available");
+  }
+  const relation = await runtime.library.createRelation({
+    workspaceId: principal.workspaceId,
+    fromType: "document",
+    fromId: documentId,
+    toType: parsed.to.type,
+    toId: parsed.to.id,
+    relationType: parsed.relationType,
+  });
+  return relationToManagedLink(runtime, principal.workspaceId, relation);
+}
+
+export async function updateDocumentRelationForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  relationId: string,
+  body: unknown,
+): Promise<ManagedRelation> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  await requireOutgoingDocumentRelation(runtime, principal, documentId, relationId);
+  const parsed = updateDocumentRelationRequestSchema.parse(body);
+  const relation = await runtime.library.updateRelationType({
+    workspaceId: principal.workspaceId,
+    relationId,
+    relationType: parsed.relationType,
+  });
+  return relationToManagedLink(runtime, principal.workspaceId, relation);
+}
+
+export async function deleteDocumentRelationForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  relationId: string,
+): Promise<void> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  await requireOutgoingDocumentRelation(runtime, principal, documentId, relationId);
+  await runtime.library.deleteRelation({ workspaceId: principal.workspaceId, relationId });
+}
+
+export async function listDocumentPropertiesForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+): Promise<DocumentPropertiesResponse> {
+  const document = await getDocumentForPrincipal(runtime, principal, documentId);
+  const [documentProperties, blockProperties] = await Promise.all([
+    runtime.library.listProperties({
+      workspaceId: principal.workspaceId,
+      subjectType: "document",
+      subjectId: documentId,
+    }),
+    Promise.all(document.blocks.map(async (block) => ({
+      block,
+      properties: await runtime.library.listProperties({
+        workspaceId: principal.workspaceId,
+        subjectType: "block",
+        subjectId: block.id,
+      }),
+    }))),
+  ]);
+  const propertyView = (property: { id: string; key: string; valueType: "string" | "number" | "boolean" | "json"; value: unknown; updatedAt: Date }) => ({
+    id: property.id,
+    key: property.key,
+    valueType: property.valueType,
+    value: property.value,
+    updatedAt: property.updatedAt.toISOString(),
+  });
+  return documentPropertiesResponseSchema.parse({
+    document: documentProperties.filter((property) => property.key !== "tags").map(propertyView),
+    blocks: blockProperties
+      .map(({ block, properties }) => ({
+        blockId: block.id,
+        blockType: block.type,
+        text: summaryText(block.content),
+        properties: properties.filter((property) => property.key !== "tags").map(propertyView),
+      }))
+      .filter((group) => group.properties.length > 0),
+  });
+}
+
+export async function indexDocumentLinksForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  body: unknown,
+): Promise<{ indexed: number }> {
+  const parsed = indexDocumentLinksRequestSchema.parse(body);
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  const titles = [...new Set(parsed.targetTitles.map((title) => title.trim()))];
+  const documents = await runtime.library.listDocuments({ workspaceId: principal.workspaceId });
+  const byTitle = new Map(documents.map((document) => [document.title, document]));
+  const targetDocumentIds = titles.flatMap((title) => {
+    const target = byTitle.get(title);
+    return !target || target.id === documentId || target.deletedAt ? [] : [target.id];
+  });
+  return runtime.library.syncWikiLinkRelations({
+    workspaceId: principal.workspaceId,
+    documentId,
+    targetDocumentIds,
+  });
+}
+
+export async function searchForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  query: string,
+  limit?: number,
+): Promise<{ hits: SearchHit[] }> {
+  const parsed = searchRequestSchema.parse({ q: query, limit });
+  const rows = await runtime.library.searchLibrary({
+    workspaceId: principal.workspaceId,
+    query: parsed.q,
+    limit: parsed.limit,
+  });
+  const docs: SearchDoc[] = rows.map((row) => ({
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    body: row.body,
+    tags: row.tags,
+    lifecycle: row.lifecycle,
+    courseMemberships: row.courseMemberships,
+  }));
+  const hits = rankResults(parsed.q, docs, parsed.limit ?? 20);
+  return {
+    hits: hits.filter((hit): hit is SearchHit =>
+      hit.type === "document" || hit.type === "course",
+    ),
+  };
+}
+
+function normalizedTags(tags: string[]): string[] {
+  try {
+    return normalizeDocumentTags(tags);
+  } catch (error) {
+    throw new LibraryError(
+      "VALIDATION",
+      error instanceof Error ? error.message : "Invalid document tags",
+    );
+  }
+}
+
+export async function getDocumentTagsForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+): Promise<string[]> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  const properties = await runtime.library.listProperties({
+    workspaceId: principal.workspaceId,
+    subjectType: "document",
+    subjectId: documentId,
+  });
+  const property = properties.find((item) => item.key === "tags");
+  if (!property) return [];
+  if (property.valueType !== "json" || !Array.isArray(property.value) || !property.value.every((tag) => typeof tag === "string")) {
+    throw new LibraryError("VALIDATION", "Document tags property has an invalid value");
+  }
+  return normalizedTags(property.value);
+}
+
+export async function setDocumentTagsForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  documentId: string,
+  body: unknown,
+): Promise<string[]> {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  const parsed = documentTagsUpdateSchema.parse(body);
+  const tags = normalizedTags(parsed.tags);
+  const property = await runtime.library.setProperty({
+    workspaceId: principal.workspaceId,
+    subjectType: "document",
+    subjectId: documentId,
+    key: "tags",
+    valueType: "json",
+    value: tags,
+  });
+  if (!Array.isArray(property.value) || !property.value.every((tag) => typeof tag === "string")) {
+    throw new LibraryError("VALIDATION", "Document tags property has an invalid value");
+  }
+  return normalizedTags(property.value);
+}
+
 export async function updateDocumentForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
@@ -400,6 +801,7 @@ export async function updateDocumentForPrincipal(
   body: {
     title?: string;
     blocks: Array<{ id: string; type: string; content: Record<string, unknown> }>;
+    expectedRevisionNumber: number;
     reason?: string;
   },
 ) {
@@ -408,6 +810,7 @@ export async function updateDocumentForPrincipal(
   return runtime.library.updateDocument({
     workspaceId: principal.workspaceId,
     documentId,
+    expectedRevisionNumber: body.expectedRevisionNumber,
     title: body.title,
     blocks: body.blocks,
     reason: body.reason,

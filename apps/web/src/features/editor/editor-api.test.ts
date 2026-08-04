@@ -61,6 +61,7 @@ describe("editor API client", () => {
       title: "线性代数笔记",
       blocks,
       reason: "manual-save",
+      expectedRevisionNumber: 1,
     })).resolves.toEqual(documentPayload);
     expect(queue.calls[0]).toMatchObject({
       input: "/api/documents/document-1",
@@ -70,6 +71,7 @@ describe("editor API client", () => {
       title: "线性代数笔记",
       blocks,
       reason: "manual-save",
+      expectedRevisionNumber: 1,
     });
   });
 
@@ -95,6 +97,19 @@ describe("editor API client", () => {
       code: "NOT_FOUND",
       status: 404,
       message: "Document missing",
+    });
+  });
+
+  it("preserves a structured conflict API error", async () => {
+    const queue = createFetchQueue([
+      jsonResponse({ error: { code: "CONFLICT", message: "Document changed elsewhere" } }, 409),
+    ]);
+    const api = createEditorApi(queue.fetchImpl);
+
+    await expect(api.fetchDocument("document-1")).rejects.toMatchObject({
+      code: "CONFLICT",
+      status: 409,
+      message: "Document changed elsewhere",
     });
   });
 });

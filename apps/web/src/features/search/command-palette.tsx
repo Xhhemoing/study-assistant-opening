@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { SearchHit } from "@aistudy/domain";
 import { getFocusTrapTarget } from "@aistudy/ui";
-import { useStudyProvider } from "../../lib/data/react";
 import {
   PALETTE_COMMANDS,
   SEARCH_DEBOUNCE_MS,
@@ -13,6 +12,7 @@ import {
   getPaletteKeyAction,
 } from "./command-palette-model";
 import { searchHitHref, searchHitTypeLabel } from "./search-results-model";
+import { createSearchApi } from "./search-api";
 
 interface PaletteOption {
   id: string;
@@ -28,7 +28,7 @@ function buildOptions(hits: SearchHit[]): PaletteOption[] {
     ...hits.map((hit) => ({
       id: `result-${hit.type}-${hit.id}`,
       label: hit.title,
-      description: `${searchHitTypeLabel(hit.type)} · ${hit.snippet || "暂无摘要"}`,
+      description: `${searchHitTypeLabel(hit.type)} · ${hit.snippet || "暂无摘要"}${hit.lifecycle ? ` · ${hit.lifecycle}` : ""}${hit.courseMemberships?.length ? ` · ${hit.courseMemberships.map((course) => course.title).join("、")}` : ""}`,
       href: searchHitHref(hit),
       kind: "result" as const,
     })),
@@ -45,7 +45,7 @@ export function CommandPalette({
   onClose: () => void;
 }) {
   const router = useRouter();
-  const provider = useStudyProvider();
+  const searchApi = useMemo(() => createSearchApi(), []);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -101,7 +101,7 @@ export function CommandPalette({
   }, [open]);
 
   useEffect(() => {
-    if (!open || !provider || !query.trim()) {
+    if (!open || !query.trim()) {
       setHits([]);
       setLoading(false);
       setError("");
@@ -112,7 +112,7 @@ export function CommandPalette({
     setError("");
     setHits([]);
     const timer = window.setTimeout(() => {
-      provider.searchAll(query, 12)
+      searchApi.search(query, 12)
         .then((nextHits) => {
           if (active) setHits(nextHits);
         })
@@ -127,7 +127,7 @@ export function CommandPalette({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [open, provider, query, retryToken]);
+  }, [open, query, retryToken, searchApi]);
 
   useEffect(() => {
     setActiveIndex((current) => Math.min(current, Math.max(options.length - 1, 0)));
@@ -173,12 +173,14 @@ export function CommandPalette({
             aria-activedescendant={options[activeIndex] ? `command-option-${options[activeIndex].id}` : undefined}
             ref={inputRef}
             aria-controls="command-palette-options"
+            aria-expanded="true"
             aria-label="搜索笔记和操作"
             autoComplete="off"
             className="min-w-0 flex-1 bg-transparent py-4 text-sm text-text outline-none placeholder:text-text-dim"
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="搜索笔记、探索、卡片或练习"
+            role="combobox"
             value={query}
           />
           <span className="hidden items-center gap-1 text-xs text-text-dim sm:flex"><Command aria-hidden="true" size={13} />K</span>

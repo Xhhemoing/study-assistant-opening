@@ -25,6 +25,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
 - [ADR-001：技术栈锁定](docs/decisions/ADR-001-stack.md)
 - [CI 说明](docs/operations/ci.md)
+- [云端部署说明](docs/operations/cloud-deployment.md)
 - [项目章程与产品规格](docs/product/PRD.md)
 - [场景预设与学习策略](docs/product/SCENARIOS.md)
 - [界面信息层级与 AI 交互规则](docs/product/UX_AND_AI_POLICY.md)
@@ -44,6 +45,11 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - Task 7 完成：跨课程稳定资产身份（Course + AssetMembership）
 - Task 8 完成：认证、可吊销会话、Workspace 级服务端授权
 - Task 9 完成：三入口应用壳、workspace 级服务端默认入口偏好与真实浏览器验收
+- Task 10 核心完成：版本化 block 编辑器、追加式 revision、workspace 隔离、乐观 revision 冲突保护与本地草稿恢复；PostgreSQL 集成门禁待在具备数据库的环境中执行
+- Task 11A 核心完成：真实、workspace 授权的 document/block links API；wiki-link 索引、backlink、block reference 与 soft-delete broken-link 降级均已接入编辑器；PostgreSQL integration/handler/browser 门禁待执行
+- Task 11B1 核心完成：编辑器 tags 已迁移到 workspace 授权的 `library_properties` API，支持 Unicode 归一化、去重、持久化清空和失败恢复；PostgreSQL handler/browser 门禁待执行
+- Task 11B2 核心完成：编辑器可创建、重设类型和删除当前笔记发出的 typed relation，并只读展示 document/block properties；关系 source/workspace 授权、冲突及 Task 11A backlink 兼容已覆盖，PostgreSQL integration/handler/browser 门禁待执行
+- Task 13 核心完成：exploration、root/child branch 与 scratch/hypothesis/open-question block 已接入 `0008_explorations.sql`、workspace-bound repository、authenticated API 和真实 Explore UI；contracts/type/lint 与非数据库测试已验证，PostgreSQL integration/handler/browser 门禁待在具备 `DATABASE_URL`、`flock` 和 live browser server 的环境中执行
 
 ```bash
 cp .env.example .env
@@ -55,7 +61,7 @@ npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：Task 10 — 版本化 block 笔记编辑器。
+下一步：补齐 Task 10/11A/11B1/11B2/13 的 PostgreSQL integration、handler、browser 与聚合门禁，然后规划 Task 14 的 AI roles、provider-neutral jobs 与 worker 切片。
 
 ## 预定技术方向
 

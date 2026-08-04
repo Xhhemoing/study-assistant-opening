@@ -4,11 +4,13 @@ import { zh } from "@blocknote/core/locales";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
 import { ArrowLeft, Check, Clock3, Redo2, RefreshCw, Save, Undo2 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { createEditorApi, type EditorDocument } from "./editor-api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { BacklinksPanel } from "./backlinks-panel";
-import { documentToDraft, draftToApiBlocks, revisionToApiBlocks } from "./document-editor-model";
+import { createKnowledgeLinksApi } from "./knowledge-links-api";
+import { documentToDraft, draftToApiBlocks, resolveEditorSaveResult, revisionToApiBlocks } from "./document-editor-model";
 import {
+  createLocalDraftStorageKey,
   draftBlocksToEditorBlocks,
   editorBlocksToDraftBlocks,
   loadLocalDraft,
@@ -17,15 +19,16 @@ import {
 } from "./local-draft";
 import { VersionHistoryDrawer } from "./version-history-drawer";
 import type { EditorRevision } from "./version-history";
-import { useStudyProvider } from "../../lib/data/react";
 import { PropertiesPanel } from "./properties-panel";
+import { ReadOnlyPropertiesPanel } from "./read-only-properties-panel";
+import { RelationAuthoringPanel } from "./relation-authoring-panel";
 import { extractWikiLinks } from "./link-utils";
 
-type SaveState = "saved" | "unsaved" | "saving" | "error";
+type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
 export function DocumentEditor({ documentId }: { documentId: string }) {
   const api = useMemo(() => createEditorApi(), []);
-  const provider = useStudyProvider();
+  const knowledgeLinksApi = useMemo(() => createKnowledgeLinksApi(), []);
   const [document, setDocument] = useState<EditorDocument | null>(null);
   const [draft, setDraft] = useState<LocalNoteDraft | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -33,6 +36,9 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
   const [saveState, setSaveState] = useState<SaveState>("saving");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [notice, setNotice] = useState("");
+  const draftRef = useRef<LocalNoteDraft | null>(null);
+  const editVersionRef = useRef(0);
+  const linkIndexQueueRef = useRef(Promise.resolve());
 
   useEffect(() => {
     let active = true;
@@ -44,8 +50,11 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
         const serverTime = Date.parse(nextDocument.updatedAt ?? "");
         const localTime = Date.parse(local?.updatedAt ?? "");
         const usableLocal = local && (!serverTime || localTime > serverTime) ? local : null;
+        const nextDraft = usableLocal ?? documentToDraft(nextDocument);
+        draftRef.current = nextDraft;
+        editVersionRef.current += 1;
         setDocument(nextDocument);
-        setDraft(usableLocal ?? documentToDraft(nextDocument));
+        setDraft(nextDraft);
         setSaveState(usableLocal ? "unsaved" : "saved");
       })
       .catch(() => {
@@ -56,14 +65,16 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
 
   const initialContent = useMemo(
     () => (draft ? draftBlocksToEditorBlocks(draft.blocks) : undefined),
-    [draft?.draftId],
+    [draft?.draftId, reloadToken],
   );
   const editor = useCreateBlockNote(
     { dictionary: zh, initialContent, defaultStyles: true },
-    [draft?.draftId],
+    [draft?.draftId, reloadToken],
   );
 
   function updateSafetyCopy(nextDraft: LocalNoteDraft) {
+    draftRef.current = nextDraft;
+    editVersionRef.current += 1;
     setDraft(nextDraft);
     setNotice("");
     setSaveState(saveLocalDraft(documentId, nextDraft) ? "unsaved" : "error");
@@ -79,46 +90,102 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
   }
 
   async function saveDocument() {
-    if (!draft || saveState === "saving") return;
+    if (!document || !draft || saveState === "saving") return;
+    const requestVersion = editVersionRef.current;
     setSaveState("saving");
     setNotice("");
     try {
       const saved = await api.saveDocument(documentId, {
+        expectedRevisionNumber: document.currentRevisionNumber,
         title: draft.title,
         blocks: draftToApiBlocks(editorBlocksToDraftBlocks(editor.document)),
         reason: "manual-save",
       });
-      const nextDraft = documentToDraft(saved);
+      const currentDraft = draftRef.current ?? draft;
+      if (!currentDraft) return;
+      const result = resolveEditorSaveResult(
+        saved,
+        currentDraft,
+        requestVersion,
+        editVersionRef.current,
+      );
+      draftRef.current = result.draft;
       setDocument(saved);
-      setDraft(nextDraft);
-      setSaveState(saveLocalDraft(documentId, nextDraft) ? "saved" : "error");
-      void indexLinks(saved.title, nextDraft.blocks);
-    } catch {
-      setSaveState("error");
+      setDraft(result.draft);
+      setSaveState(saveLocalDraft(documentId, result.draft)
+        ? result.hasUnsavedChanges ? "unsaved" : "saved"
+        : "error");
+      if (!result.hasUnsavedChanges) {
+        queueLinkIndex(result.draft.blocks, editVersionRef.current);
+      }
+    } catch (error) {
+      setSaveState(error instanceof EditorApiError && error.code === "CONFLICT" ? "conflict" : "error");
     }
   }
 
   async function restoreRevision(revision: EditorRevision) {
-    const saved = await api.saveDocument(documentId, {
-      title: revision.title,
-      blocks: revisionToApiBlocks(revision),
-      reason: `restore-v${revision.revisionNumber}`,
-    });
-    const nextDraft = documentToDraft(saved);
-    setDocument(saved);
-    setDraft(nextDraft);
-    setSaveState(saveLocalDraft(documentId, nextDraft) ? "saved" : "error");
-    setNotice(`已恢复到 v${revision.revisionNumber}`);
-    void indexLinks(saved.title, nextDraft.blocks);
+    if (!document || saveState === "saving") return;
+    const requestVersion = editVersionRef.current;
+    setSaveState("saving");
+    setNotice("");
+    try {
+      const saved = await api.saveDocument(documentId, {
+        expectedRevisionNumber: document.currentRevisionNumber,
+        title: revision.title,
+        blocks: revisionToApiBlocks(revision),
+        reason: `restore-v${revision.revisionNumber}`,
+      });
+      const currentDraft = draftRef.current ?? draft;
+      if (!currentDraft) return;
+      const result = resolveEditorSaveResult(
+        saved,
+        currentDraft,
+        requestVersion,
+        editVersionRef.current,
+      );
+      draftRef.current = result.draft;
+      setDocument(saved);
+      setDraft(result.draft);
+      setSaveState(saveLocalDraft(documentId, result.draft)
+        ? result.hasUnsavedChanges ? "unsaved" : "saved"
+        : "error");
+      setNotice(result.hasUnsavedChanges ? "版本已恢复，本地修改仍待保存" : `已恢复到 v${revision.revisionNumber}`);
+      if (!result.hasUnsavedChanges) {
+        queueLinkIndex(result.draft.blocks, editVersionRef.current);
+      }
+    } catch (error) {
+      if (error instanceof EditorApiError && error.code === "CONFLICT") {
+        setSaveState("conflict");
+      } else {
+        setSaveState("error");
+      }
+      throw error;
+    }
   }
 
-  async function indexLinks(title: string, blocks: LocalNoteDraft["blocks"]) {
-    if (!provider) return;
+  function reloadLatestDocument() {
     try {
-      await provider.indexDocumentLinks(documentId, title, extractWikiLinks(blocks));
+      window.localStorage.removeItem(createLocalDraftStorageKey(documentId));
     } catch {
-      // Link indexing is auxiliary; it must not turn a successful document save into an error.
+      // A reload still gives the user the latest server document if storage is unavailable.
     }
+    setDocument(null);
+    setDraft(null);
+    setNotice("");
+    setSaveState("saving");
+    setReloadToken((value) => value + 1);
+  }
+
+  function queueLinkIndex(blocks: LocalNoteDraft["blocks"], version: number) {
+    const task = linkIndexQueueRef.current.then(async () => {
+      if (version !== editVersionRef.current) return;
+      try {
+        await knowledgeLinksApi.index(documentId, extractWikiLinks(blocks));
+      } catch {
+        // Link indexing is auxiliary; it must not turn a successful document save into an error.
+      }
+    });
+    linkIndexQueueRef.current = task.catch(() => undefined);
   }
 
   if (loadError) return <DocumentLoadError message={loadError} onRetry={() => setReloadToken((value) => value + 1)} />;
@@ -131,6 +198,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
     unsaved: "有未同步修改",
     saving: "正在保存...",
     error: "本地副本或服务器保存失败",
+    conflict: "服务器已有更新版本，当前修改尚未覆盖",
   }[saveState];
 
   return (
@@ -154,6 +222,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
           <button className="rounded-md p-2 text-text-dim hover:bg-surface-2 hover:text-text disabled:opacity-40" type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={17} /></button>
           <button className="rounded-md p-2 text-text-dim hover:bg-surface-2 hover:text-text disabled:opacity-40" type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={17} /></button>
           <button className="rounded-md p-2 text-text-dim hover:bg-surface-2 hover:text-text" type="button" onClick={() => setHistoryOpen(true)} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={17} /></button>
+          {saveState === "conflict" ? <button className="inline-flex items-center gap-2 rounded-md border border-primary px-3 py-2 text-sm font-semibold text-text hover:bg-surface-2" type="button" onClick={reloadLatestDocument}><RefreshCw aria-hidden="true" size={16} />重新加载最新版本</button> : null}
           <button className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-ink hover:bg-primary/85 disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={saveDocument} disabled={saveState === "saving"}><Save aria-hidden="true" size={16} />保存</button>
         </div>
       </header>
@@ -167,9 +236,11 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
         <section className="rounded-lg border border-line bg-surface p-3 shadow-2xl shadow-black/20 sm:p-6" aria-label="笔记编辑器">
           <BlockNoteViewRaw editor={editor} theme="dark" onChange={(nextEditor) => updateBlocks(nextEditor.document)} />
         </section>
-        <div className="mt-5 grid gap-4 md:grid-cols-2">
-          <PropertiesPanel documentId={documentId} provider={provider} />
-          <BacklinksPanel targetTitle={draft.title} provider={provider} />
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <PropertiesPanel documentId={documentId} />
+          <ReadOnlyPropertiesPanel documentId={documentId} />
+          <RelationAuthoringPanel documentId={documentId} />
+          <BacklinksPanel documentId={documentId} />
         </div>
       </main>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />

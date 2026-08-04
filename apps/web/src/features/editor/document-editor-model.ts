@@ -30,6 +30,18 @@ export function documentToDraft(document: EditorDocument): LocalNoteDraft {
   };
 }
 
+export function resolveEditorSaveResult(
+  savedDocument: EditorDocument,
+  currentDraft: LocalNoteDraft,
+  requestVersion: number,
+  currentVersion: number,
+): { draft: LocalNoteDraft; hasUnsavedChanges: boolean } {
+  if (requestVersion !== currentVersion) {
+    return { draft: currentDraft, hasUnsavedChanges: true };
+  }
+  return { draft: documentToDraft(savedDocument), hasUnsavedChanges: false };
+}
+
 export function draftToApiBlocks(blocks: LocalDraftBlock[]) {
   return blocks.map((block) => ({
     id: block.id,

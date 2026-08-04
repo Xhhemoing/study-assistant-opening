@@ -6,7 +6,7 @@ import { groupSearchHits, searchHitHref } from "./search-results-model";
 
 export function SearchResults({ query, hits }: { query: string; hits: SearchHit[] }) {
   if (!query.trim()) {
-    return <EmptyState title="输入关键词开始搜索" description="搜索笔记、探索、卡片、课程和练习。" />;
+    return <EmptyState title="输入关键词开始搜索" description="搜索笔记和课程。" />;
   }
 
   const groups = groupSearchHits(hits);
@@ -40,6 +40,14 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
                       <span className="block line-clamp-2 text-sm leading-6 text-text-dim">
                         {hit.snippet || "暂无摘要"}
                       </span>
+                      {hit.lifecycle || hit.courseMemberships?.length ? (
+                        <span className="block text-xs text-text-dim">
+                          {[
+                            hit.lifecycle,
+                            hit.courseMemberships?.map((course) => course.title).join("、"),
+                          ].filter(Boolean).join(" · ")}
+                        </span>
+                      ) : null}
                     </span>
                     <ArrowUpRight aria-hidden="true" className="mt-0.5 shrink-0 text-text-dim group-hover:text-primary" size={16} />
                   </Link>

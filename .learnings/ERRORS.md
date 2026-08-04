@@ -1,5 +1,37 @@
 # Errors
 
+## [ERR-20260804-PI1] duplicate-subagent-extension-fix
+
+**Logged**: 2026-08-04T06:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: config
+
+### Summary
+The first verification of the global extension fallback failed because the newly added project-path guard used `fs` and `path` without importing them.
+
+### Error
+```text
+Failed to load extension ...: path is not defined
+```
+
+### Context
+- Added a project-local precedence guard to the global `subagent` extension.
+- The guard was correct, but the global extension did not previously import the Node standard-library modules.
+
+### Suggested Fix
+Import `node:fs` and `node:path` before using the guard.
+
+### Metadata
+- Reproducible: yes
+- Related Files: C:/Users/86080/.pi/agent/extensions/subagent/index.ts
+
+### Resolution
+- **Resolved**: 2026-08-04T06:00:00Z
+- **Notes**: Added the missing imports and reran startup verification.
+
+---
+
 Command failures and integration errors.
 
 ---
@@ -393,8 +425,9 @@ did not find executable at 'C:\Users\86080\AppData\Local\Microsoft\WindowsApps\P
 ```
 
 ### Context
-- `graphify-out/graph.json` exists and the update command was run from the repository root after provider changes.
-- No graph output was updated by the failed command.
+- `graphify-out/graph.json` exists; both `graphify update .` and later `graphify reflect --if-stale` reproduced the stale interpreter failure.
+- The discovered `C:\tmp\aistudy-worker-venv\Scripts\python.exe` launcher points to the same missing base interpreter, so it cannot repair the graph cache.
+- No graph output was updated by the failed commands.
 
 ### Suggested Fix
 Use an available workspace Python runtime, rewrite `graphify-out/.graphify_python`, and rerun `graphify update .`.
@@ -402,6 +435,43 @@ Use an available workspace Python runtime, rewrite `graphify-out/.graphify_pytho
 ### Metadata
 - Reproducible: yes
 - Related Files: graphify-out/.graphify_python
+- Pattern-Key: tooling.graphify_stale_python_runtime
+- Recurrence-Count: 3
+- First-Seen: 2026-08-02
+- Last-Seen: 2026-08-03
+
+---
+
+## [ERR-20260803-004] powershell-sort-object-multiple-properties
+
+**Logged**: 2026-08-03T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+A read-only Graphify fallback traversal failed because `Sort-Object Score -Descending, Label` is not valid PowerShell syntax for mixed multi-property ordering.
+
+### Error
+```text
+Missing argument in parameter list.
+```
+
+### Context
+- The traversal was reading `graphify-out/graph.json` after the cached Graphify Python runtime proved unavailable.
+- No project or graph data was modified by the failed command.
+
+### Suggested Fix
+Use calculated properties: `Sort-Object @{Expression='Score';Descending=$true}, @{Expression='Label';Descending=$false}`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: graphify-out/graph.json
+- Pattern-Key: tooling.powershell_sort_mixed_direction
+
+### Resolution
+- **Resolved**: 2026-08-03T00:00:00+08:00
+- **Notes**: The corrected calculated-property form completed the BFS traversal successfully.
 
 ---
 

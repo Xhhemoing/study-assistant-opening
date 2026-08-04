@@ -95,10 +95,39 @@ export {
 export {
   aiRoleSchema,
   explorationSchema,
+  persistedExplorationSchema,
+  explorationStatusSchema,
+  explorationBlockKindSchema,
+  explorationBranchSchema,
+  explorationBlockSchema,
+  createExplorationRequestSchema,
+  createExplorationBranchRequestSchema,
+  createExplorationBlockRequestSchema,
+  explorationStatusRequestSchema,
+  explorationListResponseSchema,
+  explorationDetailResponseSchema,
+  explorationCreateResponseSchema,
+  explorationBranchResponseSchema,
+  explorationBlockResponseSchema,
+  explorationStatusResponseSchema,
   chatTurnSchema,
   promotionCandidateSchema,
   type AIRole,
   type Exploration,
+  type PersistedExploration,
+  type ExplorationBranch,
+  type ExplorationBlock,
+  type CreateExplorationRequest,
+  type CreateExplorationBranchRequest,
+  type CreateExplorationBlockRequest,
+  type ExplorationStatus,
+  type ExplorationBlockKind,
+  type ExplorationListResponse,
+  type ExplorationDetailResponse,
+  type ExplorationCreateResponse,
+  type ExplorationBranchResponse,
+  type ExplorationBlockResponse,
+  type ExplorationStatusResponse,
   type ChatTurn,
   type PromotionCandidate,
 } from "./exploration";
@@ -110,6 +139,58 @@ export {
   searchableDocumentsResponseSchema,
   type SearchableDocument,
 } from "./search";
+
+export {
+  searchRequestSchema,
+  searchHitSchema,
+  searchResponseSchema,
+  type SearchHit,
+  type SearchRequest,
+  type SearchResponse,
+} from "./search";
+
+export {
+  documentTagSchema,
+  documentTagsSchema,
+  documentTagsResponseSchema,
+  documentTagsUpdateSchema,
+  normalizeDocumentTags,
+  type DocumentTags,
+  type DocumentTagsUpdate,
+} from "./tags";
+
+export {
+  propertyValueTypeSchema,
+  readOnlyPropertySchema,
+  blockPropertyGroupSchema,
+  documentPropertiesResponseSchema,
+  type ReadOnlyProperty,
+  type BlockPropertyGroup,
+  type DocumentPropertiesResponse,
+} from "./properties";
+
+export {
+  relationTypeSchema,
+  relationEndpointSchema,
+  knowledgeLinkSchema,
+  knowledgeLinksResponseSchema,
+  indexDocumentLinksRequestSchema,
+  relationMutationTargetSchema,
+  createDocumentRelationRequestSchema,
+  updateDocumentRelationRequestSchema,
+  managedRelationSchema,
+  managedRelationsResponseSchema,
+  type RelationType,
+  type RelationEndpoint,
+  type KnowledgeLink,
+  type KnowledgeLinksResponse,
+  type IndexDocumentLinksRequest,
+  type RelationMutationTarget,
+  type CreateDocumentRelationRequest,
+  type UpdateDocumentRelationRequest,
+  type ManagedRelation,
+  type ManagedRelationsResponse,
+} from "./relations";
 
 export const dependencyStatusSchema = z.object({
   status: z.enum(["up", "down"]),

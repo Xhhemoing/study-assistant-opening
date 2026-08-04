@@ -25,6 +25,13 @@ export {
 } from "./schema/preferences";
 
 export {
+  explorationSchema,
+  explorations,
+  explorationBranches,
+  explorationBlocks,
+} from "./schema/explorations";
+
+export {
   createLibraryRepository,
   LibraryError,
   type LibraryRepository,
@@ -33,6 +40,7 @@ export {
   type RevisionRecord,
   type RelationRecord,
   type PropertyRecord,
+  type SearchLibraryRow,
   type BlockInput,
 } from "./repositories/library";
 
@@ -67,6 +75,17 @@ export {
   type WorkspacePreferencesErrorCode,
   type WorkspacePreferenceRecord,
 } from "./repositories/preferences";
+
+export {
+  createExplorationRepository,
+  ExplorationRepositoryError,
+  type ExplorationRepository,
+  type ExplorationErrorCode,
+  type ExplorationRecord,
+  type ExplorationDetailRecord,
+  type ExplorationBranchRecord,
+  type ExplorationBlockRecord,
+} from "./repositories/explorations";
 
 export {
   applyMigrations,

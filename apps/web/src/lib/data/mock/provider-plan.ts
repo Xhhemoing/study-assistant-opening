@@ -67,42 +67,57 @@ function applyOverlay(plan: TodayPlan, overlays: Record<string, PlanOverlay>): T
   };
 }
 
+function activeGoal(state: MockProviderState) {
+  return listGoals(state).find((goal) => goal.archivedAt === null);
+}
+
 function planForDate(state: MockProviderState, date: string): TodayPlan {
-  const goal = listGoals(state)[0];
+  const goal = activeGoal(state);
   if (!goal) throw new Error("请先创建一个学习目标");
   const snapshots = readPlanSnapshots(state);
   const storedSnapshot = snapshots[date];
   const snapshot: PlanSnapshot = storedSnapshot && storedSnapshot.goalId === goal.id
     ? storedSnapshot
     : { goalId: goal.id, overlays: {}, lastPlan: null };
-  const lockedTasks = (snapshot.lastPlan?.tasks ?? []).filter((task) => snapshot.overlays[task.id]?.locked);
-  const lockedRefs = new Set(lockedTasks.map((task) => task.refId));
+  const previousLockedTasks = (snapshot.lastPlan?.tasks ?? []).filter((task) => snapshot.overlays[task.id]?.locked);
   const items = readDomain<import("@aistudy/contracts").PracticeItem[]>(state, "practiceItems", []);
   const statuses = listStatuses(state);
   const points = SEED_SYLLABUS.flatMap((point) => {
     const item = items.find((candidate) => candidate.syllabusPointId === point.id);
     const status = statuses.find((candidate) => candidate.syllabusPointId === point.id);
-    if (!item || !status || lockedRefs.has(item.id)) return [];
+    if (!item || !status) return [];
     return [{ pointId: point.id, title: point.title, status: status.status, estimatedMinutes: item.estimatedMinutes, practiceItemId: item.id }];
   });
   const cards = readDomain<import("@aistudy/contracts").ReviewCard[]>(state, "reviewCards", []);
   const states = readDomain<ReviewState[]>(state, "reviewStates", []);
   const nowMs = state.now().getTime();
-  const dueReviews = states.filter((item) => !lockedRefs.has(item.cardId) && Date.parse(item.dueAt) <= nowMs).flatMap((stateItem) => {
+  const dueReviews = states.filter((item) => Date.parse(item.dueAt) <= nowMs).flatMap((stateItem) => {
     const card = cards.find((candidate) => candidate.id === stateItem.cardId);
     return card && !card.archived ? [{ cardId: card.id, front: card.front, estimatedMinutes: 5 }] : [];
   });
-  const plan = buildTodayPlan({
+  const plannerInput = {
     ownerUserId: state.userId,
     date,
     budgetMinutes: goal.dailyMinutes,
     scenario: goal.scenario,
     points,
     dueReviews,
+  };
+  const baselinePlan = buildTodayPlan({ ...plannerInput, lockedTasks: [] });
+  const baselineTaskIds = new Set(baselinePlan.tasks.map((task) => task.id));
+  const lockedTasks = previousLockedTasks.filter((task) => baselineTaskIds.has(task.id));
+  const lockedRefs = new Set(lockedTasks.map((task) => task.refId));
+  const plan = buildTodayPlan({
+    ...plannerInput,
+    points: points.filter((point) => !lockedRefs.has(point.practiceItemId)),
+    dueReviews: dueReviews.filter((review) => !lockedRefs.has(review.cardId)),
     lockedTasks,
   });
-  const applied = applyOverlay(plan, snapshot.overlays);
-  snapshots[date] = { goalId: goal.id, overlays: snapshot.overlays, lastPlan: applied };
+  const overlays = Object.fromEntries(
+    Object.entries(snapshot.overlays).filter(([taskId]) => plan.tasks.some((task) => task.id === taskId)),
+  );
+  const applied = applyOverlay(plan, overlays);
+  snapshots[date] = { goalId: goal.id, overlays, lastPlan: applied };
   writePlanSnapshots(state, snapshots);
   return applied;
 }
@@ -114,7 +129,7 @@ export function getTodayPlan(state: MockProviderState, date?: string): TodayPlan
 function setOverlay(state: MockProviderState, date: string, taskId: string, patch: PlanOverlay): TodayPlan {
   const current = planForDate(state, date);
   const snapshots = readPlanSnapshots(state);
-  const goal = listGoals(state)[0];
+  const goal = activeGoal(state);
   if (!goal) throw new Error("请先创建一个学习目标");
   const snapshot = snapshots[date] ?? { goalId: goal.id, overlays: {}, lastPlan: current };
   snapshots[date] = {

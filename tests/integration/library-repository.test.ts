@@ -173,6 +173,7 @@ describe("library repository foundation", () => {
     const updated = await repo.updateDocument({
       workspaceId: workspaceA,
       documentId: created.id,
+      expectedRevisionNumber: 1,
       title: "Draft v2",
       blocks: [
         { id: blockA, type: "paragraph", content: { text: "v2 edited" } },
@@ -221,6 +222,43 @@ describe("library repository foundation", () => {
     expect(rev2.reason).toBe("user-edit");
   });
 
+  it("rejects stale document writes without mutating the projection or history", async () => {
+    const blockId = randomUUID();
+    const created = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Concurrency",
+      blocks: [{ id: blockId, type: "paragraph", content: { text: "v1" } }],
+    });
+
+    const firstSave = {
+      workspaceId: workspaceA,
+      documentId: created.id,
+      expectedRevisionNumber: 1,
+      title: "Concurrency v2",
+      blocks: [{ id: blockId, type: "paragraph", content: { text: "v2" } }],
+      reason: "first-save",
+    };
+    await repo.updateDocument(firstSave);
+
+    await expect(
+      repo.updateDocument({
+        ...firstSave,
+        title: "Stale overwrite",
+        blocks: [{ id: blockId, type: "paragraph", content: { text: "stale" } }],
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const current = await repo.getDocument({ workspaceId: workspaceA, documentId: created.id });
+    expect(current).toMatchObject({
+      title: "Concurrency v2",
+      currentRevisionNumber: 2,
+      blocks: [{ id: blockId, content: { text: "v2" } }],
+    });
+    expect(current.updatedAt.getTime()).toBeGreaterThanOrEqual(created.updatedAt.getTime());
+    const revisions = await repo.listRevisions({ workspaceId: workspaceA, documentId: created.id });
+    expect(revisions.map((revision) => revision.revisionNumber)).toEqual([1, 2]);
+  });
+
   it("does not mutate historical revision rows when editing", async () => {
     const blockId = randomUUID();
     const doc = await repo.createDocument({
@@ -238,6 +276,7 @@ describe("library repository foundation", () => {
     await repo.updateDocument({
       workspaceId: workspaceA,
       documentId: doc.id,
+      expectedRevisionNumber: 1,
       blocks: [
         { id: blockId, type: "paragraph", content: { text: "second" } },
       ],
@@ -264,6 +303,7 @@ describe("library repository foundation", () => {
     const confirmed = await repo.updateDocument({
       workspaceId: workspaceA,
       documentId: doc.id,
+      expectedRevisionNumber: 1,
       lifecycle: "confirmed",
       blocks: doc.blocks,
       reason: "confirm",
@@ -271,6 +311,7 @@ describe("library repository foundation", () => {
     const published = await repo.updateDocument({
       workspaceId: workspaceA,
       documentId: doc.id,
+      expectedRevisionNumber: 2,
       lifecycle: "published",
       blocks: confirmed.blocks,
       reason: "publish",
@@ -284,6 +325,7 @@ describe("library repository foundation", () => {
       repo.updateDocument({
         workspaceId: workspaceA,
         documentId: doc.id,
+        expectedRevisionNumber: 3,
         lifecycle: "candidate",
         blocks: published.blocks,
         reason: "invalid-demotion",
@@ -364,6 +406,199 @@ describe("library repository foundation", () => {
       "embeds",
       "references",
     ]);
+
+    const repeated = await repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "document",
+      toId: target.id,
+      relationType: "references",
+    });
+    expect(repeated.id).toBe(docLink.id);
+    expect((await repo.listRelations({
+      workspaceId: workspaceA,
+      subjectType: "document",
+      subjectId: source.id,
+    })).filter((relation) => relation.relationType === "references")).toHaveLength(1);
+  });
+
+  it("synchronizes wiki-link relations without deleting manual relations and reports only inserts", async () => {
+    const source = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Wiki source",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "source" } }],
+    });
+    const firstTarget = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Wiki first target",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "target" } }],
+    });
+    const secondTarget = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Wiki second target",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "target" } }],
+    });
+    await repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "document",
+      toId: firstTarget.id,
+      relationType: "references",
+    });
+
+    await expect(repo.syncWikiLinkRelations({
+      workspaceId: workspaceA,
+      documentId: source.id,
+      targetDocumentIds: [firstTarget.id, secondTarget.id, secondTarget.id],
+    })).resolves.toEqual({ indexed: 1 });
+
+    const firstSync = await repo.listRelations({
+      workspaceId: workspaceA,
+      subjectType: "document",
+      subjectId: source.id,
+    });
+    expect(firstSync).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toId: firstTarget.id, source: "manual" }),
+      expect.objectContaining({ toId: secondTarget.id, source: "wiki-link" }),
+    ]));
+
+    await expect(repo.syncWikiLinkRelations({
+      workspaceId: workspaceA,
+      documentId: source.id,
+      targetDocumentIds: [firstTarget.id],
+    })).resolves.toEqual({ indexed: 0 });
+
+    const secondSync = await repo.listRelations({
+      workspaceId: workspaceA,
+      subjectType: "document",
+      subjectId: source.id,
+    });
+    expect(secondSync).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toId: firstTarget.id, source: "manual" }),
+    ]));
+    expect(secondSync).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ toId: secondTarget.id }),
+    ]));
+  });
+
+  it("updates and deletes relations without crossing workspace or merging type collisions", async () => {
+    const source = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Relation source",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "source" } }],
+    });
+    const target = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Relation target",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "target" } }],
+    });
+    const first = await repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "document",
+      toId: target.id,
+      relationType: "references",
+    });
+    const second = await repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "document",
+      toId: target.id,
+      relationType: "supports",
+    });
+
+    await expect(repo.updateRelationType({
+      workspaceId: workspaceA,
+      relationId: first.id,
+      relationType: "related",
+    })).resolves.toMatchObject({
+      id: first.id,
+      fromId: source.id,
+      toId: target.id,
+      relationType: "related",
+      createdAt: first.createdAt,
+    });
+    await expect(repo.updateRelationType({
+      workspaceId: workspaceA,
+      relationId: first.id,
+      relationType: "supports",
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.getRelation({ workspaceId: workspaceA, relationId: second.id })).resolves.toMatchObject({ relationType: "supports" });
+
+    await repo.deleteRelation({ workspaceId: workspaceA, relationId: first.id });
+    await expect(repo.getRelation({ workspaceId: workspaceA, relationId: first.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.getRelation({ workspaceId: workspaceB, relationId: second.id })).rejects.toMatchObject({ code: "WORKSPACE_MISMATCH" });
+    await expect(repo.deleteRelation({ workspaceId: workspaceB, relationId: second.id })).rejects.toMatchObject({ code: "WORKSPACE_MISMATCH" });
+  });
+
+  it("rejects relations whose endpoints belong to a soft-deleted document", async () => {
+    const source = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Live source",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "source" } }],
+    });
+    const targetBlock = randomUUID();
+    const target = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Deleted target",
+      blocks: [{ id: targetBlock, type: "paragraph", content: { text: "target" } }],
+    });
+    await repo.softDeleteDocument({ workspaceId: workspaceA, documentId: target.id });
+
+    await expect(repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "document",
+      toId: target.id,
+      relationType: "references",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "document",
+      fromId: source.id,
+      toType: "block",
+      toId: targetBlock,
+      relationType: "references",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("keeps block relations addressable after the source document is soft-deleted", async () => {
+    const sourceBlock = randomUUID();
+    const targetBlock = randomUUID();
+    const source = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Deleted source",
+      blocks: [{ id: sourceBlock, type: "paragraph", content: { text: "source" } }],
+    });
+    await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Target",
+      blocks: [{ id: targetBlock, type: "paragraph", content: { text: "target" } }],
+    });
+    await repo.createRelation({
+      workspaceId: workspaceA,
+      fromType: "block",
+      fromId: sourceBlock,
+      toType: "block",
+      toId: targetBlock,
+      relationType: "supports",
+    });
+    await repo.softDeleteDocument({ workspaceId: workspaceA, documentId: source.id });
+
+    await expect(repo.getBlock({
+      workspaceId: workspaceA,
+      blockId: sourceBlock,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.getBlock({
+      workspaceId: workspaceA,
+      blockId: sourceBlock,
+      includeDeleted: true,
+    })).resolves.toMatchObject({ document: { id: source.id, deletedAt: expect.any(Date) } });
   });
 
   it("attaches typed properties to documents and blocks", async () => {
@@ -524,6 +759,7 @@ describe("library repository foundation", () => {
       repo.updateDocument({
         workspaceId: workspaceB,
         documentId: docA.id,
+        expectedRevisionNumber: 1,
         title: "hijack",
         blocks: [
           { id: blockInA, type: "paragraph", content: { text: "nope" } },

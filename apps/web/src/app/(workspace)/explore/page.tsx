@@ -1,5 +1,5 @@
-import { ExplorationList } from "../../../features/explore/exploration-list";
+import { ExplorationWorkspaceList } from "../../../features/exploration/exploration-workspace";
 
 export default function ExplorePage() {
-  return <ExplorationList />;
+  return <ExplorationWorkspaceList />;
 }

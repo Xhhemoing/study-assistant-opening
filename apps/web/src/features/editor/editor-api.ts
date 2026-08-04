@@ -39,6 +39,7 @@ export type CreateDocumentInput = {
 };
 
 export type UpdateDocumentInput = {
+  expectedRevisionNumber: number;
   title?: string;
   blocks: EditorBlockInput[];
   reason?: string;

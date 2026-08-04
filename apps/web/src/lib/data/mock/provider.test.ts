@@ -66,6 +66,74 @@ describe("MockStudyDataProvider", () => {
     await expect(provider.listGoals()).resolves.toHaveLength(1);
   });
 
+  it("recovers from a wrong-shaped goals collection", async () => {
+    const storage = createMemoryStorage();
+    storage.setItem(mockKey(USER_ID, "goals"), JSON.stringify([{}]));
+    const provider = createMockProvider({ userId: USER_ID, now: NOW, delayMs: 0, storage });
+
+    await expect(provider.listGoals()).resolves.toHaveLength(1);
+  });
+
+  it("does not seed a valid empty goals collection", async () => {
+    const storage = createMemoryStorage();
+    storage.setItem(mockKey(USER_ID, "goals"), "[]");
+    const provider = createMockProvider({ userId: USER_ID, now: NOW, delayMs: 0, storage });
+
+    await expect(provider.listGoals()).resolves.toEqual([]);
+    expect(storage.getItem(mockKey(USER_ID, "practiceItems"))).toBeNull();
+  });
+
+  it("rejects plan generation when every goal is archived", async () => {
+    const provider = createProvider();
+    const [goal] = await provider.listGoals();
+    expect(goal).toBeDefined();
+    if (!goal) return;
+
+    await provider.archiveGoal(goal.id);
+    await expect(provider.getTodayPlan("2026-08-02")).rejects.toThrow("请先创建一个学习目标");
+  });
+
+  it("prunes overlays for tasks omitted from a regenerated plan", async () => {
+    const storage = createMemoryStorage();
+    const provider = createMockProvider({ userId: USER_ID, now: NOW, delayMs: 0, storage });
+    const date = "2026-08-02";
+    const goal = (await provider.listGoals())[0];
+    const initialPlan = await provider.getTodayPlan(date);
+    const omittedTask = initialPlan.tasks.at(-1);
+    expect(goal).toBeDefined();
+    expect(omittedTask).toBeDefined();
+    if (!goal || !omittedTask) return;
+
+    await provider.setTaskStatus(date, omittedTask.id, "done");
+    await provider.updateGoal(goal.id, { dailyMinutes: 5 });
+    const regeneratedPlan = await provider.getTodayPlan(date);
+    const snapshots = JSON.parse(storage.getItem(mockKey(USER_ID, "plans")) ?? "{}") as Record<
+      string,
+      { overlays: Record<string, unknown> }
+    >;
+
+    expect(regeneratedPlan.tasks.some((task) => task.id === omittedTask.id)).toBe(false);
+    expect(snapshots[date]?.overlays).not.toHaveProperty(omittedTask.id);
+  });
+
+  it("prunes a locked task when it is omitted from the regenerated plan", async () => {
+    const provider = createProvider();
+    const date = "2026-08-02";
+    const initialPlan = await provider.getTodayPlan(date);
+    const lockedTask = initialPlan.tasks.at(-1);
+    expect(lockedTask).toBeDefined();
+    if (!lockedTask) return;
+
+    await provider.toggleTaskLock(date, lockedTask.id);
+    const goal = (await provider.listGoals())[0];
+    expect(goal).toBeDefined();
+    if (!goal) return;
+    await provider.updateGoal(goal.id, { dailyMinutes: 5 });
+
+    const regeneratedPlan = await provider.getTodayPlan(date);
+    expect(regeneratedPlan.tasks.some((task) => task.id === lockedTask.id)).toBe(false);
+  });
+
   it("does not carry a locked task from an archived goal into the next goal", async () => {
     const provider = createProvider();
     const initialGoal = (await provider.listGoals())[0];

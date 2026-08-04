@@ -7,8 +7,8 @@ import {
 import { getAuthRuntime } from "../../../../server/runtime";
 
 export async function GET(request: Request): Promise<Response> {
-  const runtime = getAuthRuntime();
   try {
+    const runtime = getAuthRuntime();
     const principal = await requirePrincipal(runtime, request);
     const user = await runtime.identity.findUserById(principal.userId);
     if (!user) {

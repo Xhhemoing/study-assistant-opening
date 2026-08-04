@@ -2,15 +2,15 @@
 
 import { RefreshCw, Search } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { SearchHit } from "@aistudy/domain";
-import { useStudyProvider } from "../../../lib/data/react";
 import { SearchResults } from "../../../features/search/search-results";
+import { createSearchApi } from "../../../features/search/search-api";
 
 export default function SearchPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const provider = useStudyProvider();
+  const searchApi = useMemo(() => createSearchApi(), []);
   const urlQuery = searchParams.get("q") ?? "";
   const [query, setQuery] = useState(urlQuery);
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -21,7 +21,7 @@ export default function SearchPage() {
   useEffect(() => setQuery(urlQuery), [urlQuery]);
 
   useEffect(() => {
-    if (!provider || !query.trim()) {
+    if (!query.trim()) {
       setHits([]);
       setLoading(false);
       setError("");
@@ -31,7 +31,7 @@ export default function SearchPage() {
     setLoading(true);
     setError("");
     setHits([]);
-    provider.searchAll(query, 40)
+    searchApi.search(query, 40)
       .then((nextHits) => {
         if (active) setHits(nextHits);
       })
@@ -44,7 +44,7 @@ export default function SearchPage() {
     return () => {
       active = false;
     };
-  }, [provider, query, reloadToken]);
+  }, [query, reloadToken, searchApi]);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -56,7 +56,7 @@ export default function SearchPage() {
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold tracking-[-0.02em] text-text">全局搜索</h1>
-        <p className="max-w-prose text-sm leading-6 text-text-dim">从一个入口查找你的笔记、探索、卡片、课程和练习。</p>
+        <p className="max-w-prose text-sm leading-6 text-text-dim">从一个入口查找你的笔记和课程。</p>
       </header>
 
       <form className="flex flex-col gap-3 sm:flex-row" onSubmit={submitSearch} role="search">

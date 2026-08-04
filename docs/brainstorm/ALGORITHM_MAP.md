@@ -32,6 +32,7 @@
 | **AI 学习支架与依赖控制**：`AIRolePolicy/AssistanceTrace`、Task 14/22 | 先尝试、分层提示、保留原答、重做和迁移验证；AI 介入不自动成为能力证据 | 按构念/任务自适应支架、保守策略学习 | 延迟独立表现、迁移、提示依赖、绕过率和负担；即时满意度或完成率不能单独触发升级 |
 | **自适应学习决策闭环**：[系统提案](2026-08-02-adaptive-learning-decision-governance.md)、Learn/Planner/Assessment/AI | 规则状态投影、固定模型路由、确定性计划、PII 前置与最小耐久决策账本 | 分层质量后验、VoI 预算、低风险缓存/探索、混合记忆、帕累托计划和分级门禁 | 7/30 天独立与迁移、预算、校准、公平、快照完整率和回滚；策略版本经治理，后验只在批准边界内自动更新 |
 | **延迟成果测量与实验有效性**：[测量提案](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md)、Assessment/Experiment | ConstructMap、锚题、独立探针、平行题组、人工金标和纯测量试点 | 分层测量模型、缺失敏感性、序贯实验、cluster/switchback 和策略束级归因 | 探针响应率、form 等值、构念一致性、testing effect、MDE、ITT 和 7/30 天结果；测量门失败时不得用北极星升级策略 |
+| **成果驱动自主学习自动驾驶**：[体验与指标提案](2026-08-03-self-directed-student-artifact-autopilot.md)、Onboarding/Learn/Explore/Planner/Assessment | 目标原文 + 来源 -> 版本化作品规格 -> 确定性首个真实任务；结果优先、帮助留痕、用户纠正和高影响确认 | 增量资料审计、信息价值提问、可撤销自动重排、作品量规和嵌入式 1/7/30 天迁移验证 | 首个有效动作/成果时间、配置占比、自动动作撤销/意外变化、作品量规、独立重做和 7/30 天迁移；未确认高影响变化和原始事实覆盖=0 |
 | **学习意图与任务**：`LearningIntent/Task/PlanItem`、Learn | 截止、优先级、风险、预计时间和用户固定项的确定性排序 | 约束优化、上下文 bandit、保守策略学习 | 单位时间完成有效产出、逾期、计划扰动和用户覆盖率；不以停留时间为目标 |
 | **复习调度**：Card/Review/SRS | 明确版本的规则调度，提示后作答降权 | FSRS 参数拟合；特殊能力采用专用调度 | 延迟回忆、校准、每日负荷和遗忘成本；回放/前瞻实验优于基线后才切换 |
 | **能力评价**：Attempt/Artifact/Feedback/Assessment | 能力切片、规则证据计分和 reason codes | Beta-Binomial、Logistic+校准；数据充分后 IRT/BKT | Brier、Log Loss、ECE、分场景误差；禁止输出无明确定义的单一掌握度 |

@@ -680,7 +680,7 @@ Commit：`feat: search and create across the learning workspace`
 
 ## Task 13：Persist Explorations, Branches, and Scratch Blocks
 
-**Migration：** `0006_explorations.sql`，使用 Gate 0.2 的唯一 registry，不得复用已存在的 `0003` 或 corrective `0004`。
+**Migration：** `0008_explorations.sql`，使用 Gate 0.2 的唯一 registry，不得复用已存在的 `0001` 至 `0007`。
 
 **Files:**
 
@@ -729,6 +729,8 @@ npm run db:migrate
 ### Step 5：审查与提交
 
 Commit：`feat: support goal-free learning explorations`
+
+**Execution status (2026-08-04):** Implemented the persisted exploration contracts, PostgreSQL schema/repository, principal-bound handlers, and real Explore UI. Direct contract/typecheck/targeted lint and existing Explore model tests passed; PostgreSQL repository/handler suites are blocked by missing `DATABASE_URL`, and wrapper/browser gates are blocked by the host missing `flock` (the Playwright spec is discoverable with two tests). No commit was created.
 
 ---
 

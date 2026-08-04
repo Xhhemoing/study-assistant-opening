@@ -90,6 +90,7 @@ export const libraryRelations = pgTable("library_relations", {
   toType: text("to_type").notNull(),
   toId: uuid("to_id").notNull(),
   relationType: text("relation_type").notNull(),
+  source: text("source").notNull().default("manual"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

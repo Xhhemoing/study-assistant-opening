@@ -8,6 +8,32 @@ import { useStudyProvider } from "../../lib/data/react";
 import { clampDailyMinutes, goalDraftFromGoal, normalizeGoalTitle, type GoalDraft } from "./goal-model";
 import { DailyMinutesField, ExamDateField, ScenarioPicker, SubjectPicker } from "./goal-form-fields";
 
+export interface GoalRequestGuard {
+  mount(): void;
+  unmount(): void;
+  start(): number;
+  canApply(version: number): boolean;
+}
+
+export function createGoalRequestGuard(): GoalRequestGuard {
+  let mounted = false;
+  let currentVersion = 0;
+  return {
+    mount: () => {
+      mounted = true;
+    },
+    unmount: () => {
+      mounted = false;
+      currentVersion += 1;
+    },
+    start: () => {
+      currentVersion += 1;
+      return currentVersion;
+    },
+    canApply: (version) => mounted && version === currentVersion,
+  };
+}
+
 export function GoalDetail({ id }: { id: string }) {
   const router = useRouter();
   const provider = useStudyProvider();
@@ -18,10 +44,12 @@ export function GoalDetail({ id }: { id: string }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
-  const requestVersion = useRef(0);
+  const requestGuard = useRef<GoalRequestGuard | null>(null);
+  if (!requestGuard.current) requestGuard.current = createGoalRequestGuard();
 
   const loadGoal = useCallback(async () => {
-    const version = ++requestVersion.current;
+    const guard = requestGuard.current as GoalRequestGuard;
+    const version = guard.start();
     if (!provider) {
       setLoading(true);
       setDraft(null);
@@ -31,22 +59,22 @@ export function GoalDetail({ id }: { id: string }) {
     setError("");
     try {
       const nextGoal = await provider.getGoal(id);
-      if (version !== requestVersion.current) return;
+      if (!guard.canApply(version)) return;
       setDraft(nextGoal ? goalDraftFromGoal(nextGoal) : null);
       if (!nextGoal) setError("找不到这个学习目标。");
     } catch {
-      if (version !== requestVersion.current) return;
+      if (!guard.canApply(version)) return;
       setError("目标读取失败，请重试。");
     } finally {
-      if (version === requestVersion.current) setLoading(false);
+      if (guard.canApply(version)) setLoading(false);
     }
   }, [id, provider]);
 
   useEffect(() => {
+    const guard = requestGuard.current as GoalRequestGuard;
+    guard.mount();
     void loadGoal();
-    return () => {
-      requestVersion.current += 1;
-    };
+    return () => guard.unmount();
   }, [loadGoal, reloadToken]);
 
   function updateDraft<K extends keyof GoalDraft>(key: K, value: GoalDraft[K]) {

@@ -174,6 +174,9 @@ describe("identity migration compatibility", () => {
       "0003_identity.sql",
       "0004_identity_repair.sql",
       "0005_workspace_preferences.sql",
+      "0006_wiki_link_relation_source.sql",
+      "0007_search_indexes.sql",
+      "0008_explorations.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -217,6 +220,9 @@ describe("identity migration compatibility", () => {
       "0003_identity.sql",
       "0004_identity_repair.sql",
       "0005_workspace_preferences.sql",
+      "0006_wiki_link_relation_source.sql",
+      "0007_search_indexes.sql",
+      "0008_explorations.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -515,6 +521,9 @@ describe("identity migration compatibility", () => {
     expect(result.applied).toEqual([
       "0004_identity_repair.sql",
       "0005_workspace_preferences.sql",
+      "0006_wiki_link_relation_source.sql",
+      "0007_search_indexes.sql",
+      "0008_explorations.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

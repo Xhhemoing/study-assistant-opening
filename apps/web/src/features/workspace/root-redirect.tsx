@@ -10,13 +10,21 @@ export function RootRedirect() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
     let active = true;
-    fetch("/api/workspace/preferences", { cache: "no-store" })
+    fetch("/api/workspace/preferences", {
+      cache: "no-store",
+      signal: controller.signal,
+    })
       .then(async (response) => {
         if (!active) return;
         if (response.status === 401) {
           router.replace("/login");
           return;
+        }
+        if (response.status === 503) {
+          throw new Error("service-unavailable");
         }
         if (!response.ok) throw new Error();
         const body = await response.json() as PreferenceResponse;
@@ -24,8 +32,13 @@ export function RootRedirect() {
       })
       .catch(() => {
         if (active) setError("暂时无法连接学习空间，请检查网络后重试。");
-      });
-    return () => { active = false; };
+      })
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [router]);
 
   if (error) {

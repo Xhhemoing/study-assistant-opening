@@ -7,8 +7,8 @@ import {
 import { getAuthRuntime } from "../../../../server/runtime";
 
 export async function POST(request: Request): Promise<Response> {
-  const runtime = getAuthRuntime();
   try {
+    const runtime = getAuthRuntime();
     const body = await request.json();
     const result = await registerUser(runtime, body);
     return Response.json(

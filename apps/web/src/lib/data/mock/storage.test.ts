@@ -40,6 +40,18 @@ describe("mock storage", () => {
     expect(storage.getItem(mockKey("u1", "broken"))).toBeNull();
   });
 
+  it("returns the fallback when storage reads fail", () => {
+    const storage: StorageLike = {
+      getItem: () => {
+        throw new Error("storage unavailable");
+      },
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    };
+
+    expect(loadDomain(storage, "u1", "goals", [])).toEqual([]);
+  });
+
   it("namespaces per user", () => {
     const storage = createMemoryStorage();
     saveDomain(storage, "u1", "goals", [1]);

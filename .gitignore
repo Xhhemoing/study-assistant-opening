@@ -29,3 +29,6 @@ Thumbs.db
 
 # Graphify generated output (per AGENTS.md: keep graph output out of commits)
 graphify-out/
+
+# Local pi agent configuration and prompts
+.pi/

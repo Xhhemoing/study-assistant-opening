@@ -127,6 +127,7 @@ describe("course asset identity invariant", () => {
     const updated = await library.updateDocument({
       workspaceId,
       documentId: document.id,
+      expectedRevisionNumber: 1,
       title: "Shared linear algebra note (revised)",
       blocks: [
         {

@@ -8,8 +8,8 @@ import {
 import { getAuthRuntime } from "../../../../server/runtime";
 
 export async function GET(request: Request): Promise<Response> {
-  const runtime = getAuthRuntime();
   try {
+    const runtime = getAuthRuntime();
     const principal = await requirePrincipal(runtime, request);
     const defaultEntry = await getWorkspacePreferenceForPrincipal(runtime, principal);
     return Response.json({ defaultEntry });
@@ -19,8 +19,8 @@ export async function GET(request: Request): Promise<Response> {
 }
 
 export async function PUT(request: Request): Promise<Response> {
-  const runtime = getAuthRuntime();
   try {
+    const runtime = getAuthRuntime();
     const principal = await requirePrincipal(runtime, request);
     const body = await request.json();
     const defaultEntry = await setWorkspacePreferenceForPrincipal(runtime, principal, body);

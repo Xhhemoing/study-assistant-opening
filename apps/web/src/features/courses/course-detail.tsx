@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { GuidanceMode } from "../../lib/data/types";
 import { useStudyProvider } from "../../lib/data/react";
-import { coursePath, type CourseAsset, type CourseSummary } from "./course-model";
+import type { CourseAsset, CourseSummary } from "./course-model";
 
 const guidanceModes: Array<{ value: GuidanceMode; label: string }> = [{ value: "direct", label: "直接讲解" }, { value: "balanced", label: "平衡" }, { value: "socratic", label: "苏格拉底式追问" }];
 

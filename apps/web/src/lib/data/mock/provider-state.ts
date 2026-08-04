@@ -1,13 +1,14 @@
-import type {
-  AttemptEvent,
-  ChatTurn,
-  Exploration,
-  PracticeItem,
-  PromotionCandidate,
-  ReviewCard,
-  ReviewState,
-  StudyGoal,
-  TodayPlan,
+import {
+  studyGoalSchema,
+  type AttemptEvent,
+  type ChatTurn,
+  type Exploration,
+  type PracticeItem,
+  type PromotionCandidate,
+  type ReviewCard,
+  type ReviewState,
+  type StudyGoal,
+  type TodayPlan,
 } from "@aistudy/contracts";
 import { buildSeedBundle } from "./seeds";
 import {
@@ -64,7 +65,8 @@ export function createProviderState(options: MockProviderOptions): MockProviderS
 
 export function ensureSeed(state: MockProviderState): void {
   const existing = loadDomain<unknown>(state.storage, state.userId, "goals", null);
-  if (Array.isArray(existing)) return;
+  const validGoals = Array.isArray(existing) && existing.every((goal) => studyGoalSchema.safeParse(goal).success);
+  if (validGoals) return;
   if (existing !== null) state.storage.removeItem(mockKey(state.userId, "goals"));
   const bundle = buildSeedBundle(state.userId, state.now());
   saveDomain(state.storage, state.userId, "goals", [bundle.goal]);

@@ -7,6 +7,11 @@ import {
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { RevisionBlockSnapshot } from "../schema/library";
+import { wrapLikePattern } from "../search-pattern";
+
+function normalizeSearchText(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+}
 
 const LIFECYCLES = new Set(assetLifecycleSchema.options);
 const RELATION_TYPES = new Set([
@@ -82,6 +87,7 @@ export type RelationRecord = {
   toType: "document" | "block";
   toId: string;
   relationType: string;
+  source: "manual" | "wiki-link";
   createdAt: Date;
 };
 
@@ -95,6 +101,16 @@ export type PropertyRecord = {
   value: unknown;
   createdAt: Date;
   updatedAt: Date;
+};
+
+export type SearchLibraryRow = {
+  id: string;
+  type: "document" | "course";
+  title: string;
+  body: string;
+  tags: string[];
+  lifecycle?: AssetLifecycle;
+  courseMemberships?: Array<{ id: string; title: string }>;
 };
 
 export type LibraryRepository = {
@@ -117,6 +133,19 @@ export type LibraryRepository = {
     includeDeleted?: boolean;
   }): Promise<DocumentRecord>;
 
+  getBlock(input: {
+    workspaceId: string;
+    blockId: string;
+    includeDeleted?: boolean;
+  }): Promise<{
+    id: string;
+    documentId: string;
+    type: string;
+    position: number;
+    content: Record<string, unknown>;
+    document: DocumentRecord;
+  }>;
+
   listDocuments(input: {
     workspaceId: string;
   }): Promise<DocumentRecord[]>;
@@ -124,6 +153,7 @@ export type LibraryRepository = {
   updateDocument(input: {
     workspaceId: string;
     documentId: string;
+    expectedRevisionNumber: number;
     title?: string;
     lifecycle?: AssetLifecycle;
     blocks: BlockInput[];
@@ -158,6 +188,7 @@ export type LibraryRepository = {
     toType: "document" | "block";
     toId: string;
     relationType: string;
+    source?: "manual" | "wiki-link";
   }): Promise<RelationRecord>;
 
   listRelations(input: {
@@ -165,6 +196,28 @@ export type LibraryRepository = {
     subjectType: "document" | "block";
     subjectId: string;
   }): Promise<RelationRecord[]>;
+
+  getRelation(input: {
+    workspaceId: string;
+    relationId: string;
+  }): Promise<RelationRecord>;
+
+  updateRelationType(input: {
+    workspaceId: string;
+    relationId: string;
+    relationType: string;
+  }): Promise<RelationRecord>;
+
+  deleteRelation(input: {
+    workspaceId: string;
+    relationId: string;
+  }): Promise<void>;
+
+  syncWikiLinkRelations(input: {
+    workspaceId: string;
+    documentId: string;
+    targetDocumentIds: string[];
+  }): Promise<{ indexed: number }>;
 
   setProperty(input: {
     workspaceId: string;
@@ -180,6 +233,12 @@ export type LibraryRepository = {
     subjectType: "document" | "block";
     subjectId: string;
   }): Promise<PropertyRecord[]>;
+
+  searchLibrary(input: {
+    workspaceId: string;
+    query: string;
+    limit?: number;
+  }): Promise<SearchLibraryRow[]>;
 };
 
 type SqlClient = Sql;
@@ -198,6 +257,21 @@ function assertLifecycle(value: string): asserts value is AssetLifecycle {
   if (!LIFECYCLES.has(value as AssetLifecycle)) {
     throw new LibraryError("VALIDATION", `Invalid lifecycle: ${value}`);
   }
+}
+
+function extractSearchableText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(extractSearchableText).join(" ").trim();
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .filter(([key]) => key !== "id" && key !== "type" && key !== "props")
+      .map(([, child]) => extractSearchableText(child))
+      .join(" ")
+      .trim();
+  }
+  return "";
 }
 
 function normalizeBlocks(blocks: BlockInput[]): RevisionBlockSnapshot[] {
@@ -448,6 +522,71 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     return rows[0]!.workspace_id as string;
   }
 
+  async function ensureLiveRelationSubject(
+    subjectType: "document" | "block",
+    subjectId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    if (subjectType === "document") {
+      const rows = await sql`
+        SELECT deleted_at
+        FROM library_documents
+        WHERE id = ${subjectId} AND workspace_id = ${workspaceId}
+        LIMIT 1
+      `;
+      if (rows[0]?.deleted_at) {
+        throw new LibraryError("NOT_FOUND", `Document ${subjectId} is deleted`);
+      }
+      return;
+    }
+
+    const rows = await sql`
+      SELECT d.deleted_at
+      FROM library_blocks b
+      JOIN library_documents d ON d.id = b.document_id
+      WHERE b.id = ${subjectId} AND b.workspace_id = ${workspaceId}
+      LIMIT 1
+    `;
+    if (rows[0]?.deleted_at) {
+      throw new LibraryError("NOT_FOUND", `Block ${subjectId} belongs to a deleted document`);
+    }
+  }
+
+  async function getRelationRecord(
+    workspaceId: string,
+    relationId: string,
+  ): Promise<RelationRecord> {
+    await ensureWorkspace(workspaceId);
+    assertUuid(relationId, "relationId");
+    const rows = await sql`
+      SELECT *
+      FROM library_relations
+      WHERE workspace_id = ${workspaceId}
+        AND id = ${relationId}
+    `;
+    if (!rows.length) {
+      const any = await sql`
+        SELECT workspace_id FROM library_relations WHERE id = ${relationId} LIMIT 1
+      `;
+      if (any.length && any[0]!.workspace_id !== workspaceId) {
+        throw new LibraryError("WORKSPACE_MISMATCH", `Relation ${relationId} is not in workspace ${workspaceId}`);
+      }
+      throw new LibraryError("NOT_FOUND", `Relation ${relationId} not found`);
+    }
+    const row = rows[0]!;
+    return {
+      id: row.id as string,
+      workspaceId: row.workspace_id as string,
+      fromType: row.from_type as "document" | "block",
+      fromId: row.from_id as string,
+      toType: row.to_type as "document" | "block",
+      toId: row.to_id as string,
+      relationType: row.relation_type as string,
+      source: (row.source ?? "manual") as "manual" | "wiki-link",
+      createdAt: new Date(row.created_at as string),
+    };
+  }
+
   return {
     async createWorkspace(input) {
       assertUuid(input.id, "workspace.id");
@@ -523,6 +662,46 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       );
     },
 
+    async getBlock(input) {
+      await ensureWorkspace(input.workspaceId);
+      const rows = await sql`
+        SELECT b.id, b.document_id, b.type, b.position, b.content
+        FROM library_blocks b
+        JOIN library_documents d ON d.id = b.document_id
+        WHERE b.id = ${input.blockId}
+          AND b.workspace_id = ${input.workspaceId}
+          ${input.includeDeleted ? sql`` : sql`AND d.deleted_at IS NULL`}
+        LIMIT 1
+      `;
+      if (!rows.length) {
+        const any = await sql`
+          SELECT d.workspace_id
+          FROM library_blocks b
+          JOIN library_documents d ON d.id = b.document_id
+          WHERE b.id = ${input.blockId}
+          LIMIT 1
+        `;
+        if (any.length && any[0]!.workspace_id !== input.workspaceId) {
+          throw new LibraryError("WORKSPACE_MISMATCH", `Block ${input.blockId} is not in workspace ${input.workspaceId}`);
+        }
+        throw new LibraryError("NOT_FOUND", `Block not found: ${input.blockId}`);
+      }
+      const row = rows[0]!;
+      const document = await this.getDocument({
+        workspaceId: input.workspaceId,
+        documentId: row.document_id as string,
+        includeDeleted: input.includeDeleted,
+      });
+      return {
+        id: row.id as string,
+        documentId: row.document_id as string,
+        type: row.type as string,
+        position: row.position as number,
+        content: row.content as Record<string, unknown>,
+        document,
+      };
+    },
+
     async listDocuments(input) {
       await ensureWorkspace(input.workspaceId);
       const rows = await sql`
@@ -554,6 +733,12 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
 
     async updateDocument(input) {
       await ensureWorkspace(input.workspaceId);
+      if (!Number.isInteger(input.expectedRevisionNumber) || input.expectedRevisionNumber <= 0) {
+        throw new LibraryError(
+          "VALIDATION",
+          "expectedRevisionNumber must be a positive integer",
+        );
+      }
       const blocks = normalizeBlocks(input.blocks);
 
       await sql.begin(async (tx) => {
@@ -581,6 +766,14 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         }
 
         const current = rows[0]!;
+        const currentRevisionNumber = current.current_revision_number as number;
+        if (input.expectedRevisionNumber !== currentRevisionNumber) {
+          throw new LibraryError(
+            "CONFLICT",
+            `Document ${input.documentId} is at revision ${currentRevisionNumber}; expected ${input.expectedRevisionNumber}`,
+          );
+        }
+
         const nextTitle = input.title ?? (current.title as string);
         const nextLifecycle = (input.lifecycle ??
           current.lifecycle) as AssetLifecycle;
@@ -597,7 +790,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           throw new LibraryError("VALIDATION", "Document title is required");
         }
 
-        const nextRevision = (current.current_revision_number as number) + 1;
+        const nextRevision = currentRevisionNumber + 1;
 
         await tx`
           UPDATE library_documents
@@ -766,20 +959,30 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           "Relation endpoints must share a workspace",
         );
       }
+      await Promise.all([
+        ensureLiveRelationSubject(input.fromType, input.fromId, input.workspaceId),
+        ensureLiveRelationSubject(input.toType, input.toId, input.workspaceId),
+      ]);
 
       const rows = await sql`
         INSERT INTO library_relations (
-          workspace_id, from_type, from_id, to_type, to_id, relation_type
+          workspace_id, from_type, from_id, to_type, to_id, relation_type, source
         ) VALUES (
           ${input.workspaceId},
           ${input.fromType},
           ${input.fromId},
           ${input.toType},
           ${input.toId},
-          ${input.relationType}
+          ${input.relationType},
+          ${input.source ?? "manual"}
         )
         ON CONFLICT (workspace_id, from_type, from_id, to_type, to_id, relation_type)
-        DO UPDATE SET relation_type = EXCLUDED.relation_type
+        DO UPDATE SET
+          relation_type = EXCLUDED.relation_type,
+          source = CASE
+            WHEN EXCLUDED.source = 'manual' THEN 'manual'
+            ELSE library_relations.source
+          END
         RETURNING *
       `;
 
@@ -792,6 +995,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         toType: row.to_type as "document" | "block",
         toId: row.to_id as string,
         relationType: row.relation_type as string,
+        source: (row.source ?? "manual") as "manual" | "wiki-link",
         createdAt: new Date(row.created_at as string),
       };
     },
@@ -816,8 +1020,122 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         toType: row.to_type as "document" | "block",
         toId: row.to_id as string,
         relationType: row.relation_type as string,
+        source: (row.source ?? "manual") as "manual" | "wiki-link",
         createdAt: new Date(row.created_at as string),
       }));
+    },
+
+    async getRelation(input) {
+      return getRelationRecord(input.workspaceId, input.relationId);
+    },
+
+    async updateRelationType(input) {
+      await ensureWorkspace(input.workspaceId);
+      assertUuid(input.relationId, "relationId");
+      if (!RELATION_TYPES.has(input.relationType as never)) {
+        throw new LibraryError("VALIDATION", `Invalid relation type: ${input.relationType}`);
+      }
+      try {
+        const rows = await sql`
+          UPDATE library_relations
+          SET relation_type = ${input.relationType},
+              source = 'manual'
+          WHERE workspace_id = ${input.workspaceId}
+            AND id = ${input.relationId}
+          RETURNING *
+        `;
+        if (!rows.length) {
+          await getRelationRecord(input.workspaceId, input.relationId);
+          throw new LibraryError("NOT_FOUND", `Relation ${input.relationId} not found`);
+        }
+        const row = rows[0]!;
+        return {
+          id: row.id as string,
+          workspaceId: row.workspace_id as string,
+          fromType: row.from_type as "document" | "block",
+          fromId: row.from_id as string,
+          toType: row.to_type as "document" | "block",
+          toId: row.to_id as string,
+          relationType: row.relation_type as string,
+          source: (row.source ?? "manual") as "manual" | "wiki-link",
+          createdAt: new Date(row.created_at as string),
+        };
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505") {
+          throw new LibraryError("CONFLICT", "A relation with these endpoints and type already exists");
+        }
+        throw error;
+      }
+    },
+
+    async deleteRelation(input) {
+      await ensureWorkspace(input.workspaceId);
+      assertUuid(input.relationId, "relationId");
+      const rows = await sql`
+        DELETE FROM library_relations
+        WHERE workspace_id = ${input.workspaceId}
+          AND id = ${input.relationId}
+        RETURNING id
+      `;
+      if (!rows.length) {
+        await getRelationRecord(input.workspaceId, input.relationId);
+        throw new LibraryError("NOT_FOUND", `Relation ${input.relationId} not found`);
+      }
+    },
+
+    async syncWikiLinkRelations(input) {
+      await ensureWorkspace(input.workspaceId);
+      assertUuid(input.documentId, "documentId");
+      const targetDocumentIds = [...new Set(input.targetDocumentIds)];
+      for (const targetDocumentId of targetDocumentIds) {
+        assertUuid(targetDocumentId, "targetDocumentId");
+      }
+      await getDocumentRow(input.workspaceId, input.documentId);
+      const targetRows = await Promise.all(targetDocumentIds.map((targetDocumentId) =>
+        getDocumentRow(input.workspaceId, targetDocumentId, { includeDeleted: true }),
+      ));
+      const liveTargetDocumentIds = targetRows
+        .filter((row) => !row.deleted_at)
+        .map((row) => row.id as string);
+
+      let indexed = 0;
+      await sql.begin(async (tx) => {
+        const existing = await tx`
+          SELECT id, to_id
+          FROM library_relations
+          WHERE workspace_id = ${input.workspaceId}
+            AND from_type = 'document'
+            AND from_id = ${input.documentId}
+            AND to_type = 'document'
+            AND relation_type = 'references'
+            AND source = 'wiki-link'
+        `;
+        const targetSet = new Set(liveTargetDocumentIds);
+        for (const row of existing) {
+          if (!targetSet.has(row.to_id as string)) {
+            await tx`
+              DELETE FROM library_relations
+              WHERE workspace_id = ${input.workspaceId} AND id = ${row.id}
+            `;
+          }
+        }
+
+        for (const targetDocumentId of liveTargetDocumentIds) {
+          const inserted = await tx`
+            INSERT INTO library_relations (
+              workspace_id, from_type, from_id, to_type, to_id, relation_type, source
+            ) VALUES (
+              ${input.workspaceId}, 'document', ${input.documentId},
+              'document', ${targetDocumentId}, 'references', 'wiki-link'
+            )
+            ON CONFLICT (workspace_id, from_type, from_id, to_type, to_id, relation_type)
+            DO NOTHING
+            RETURNING id
+          `;
+          if (inserted.length) indexed += 1;
+        }
+      });
+      return { indexed };
     },
 
     async setProperty(input) {
@@ -915,6 +1233,134 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         createdAt: new Date(row.created_at as string),
         updatedAt: new Date(row.updated_at as string),
       }));
+    },
+
+    async searchLibrary(input) {
+      await ensureWorkspace(input.workspaceId);
+      const query = input.query.trim();
+      if (!query) return [];
+      const tokens = normalizeSearchText(query).split(" ").filter(Boolean);
+      if (!tokens.length) return [];
+      const requestedLimit = input.limit ?? 20;
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
+        throw new LibraryError("VALIDATION", "Search limit must be an integer between 1 and 50");
+      }
+      const documentConditions = tokens.map((token) => {
+        const pattern = wrapLikePattern(token);
+        return sql`(
+          to_tsvector('simple', d.title) @@ plainto_tsquery('simple', ${token})
+          OR d.title ILIKE ${pattern}
+          OR EXISTS (
+            SELECT 1 FROM library_blocks b
+            WHERE b.document_id = d.id
+              AND (
+                to_tsvector('simple', b.content::text) @@ plainto_tsquery('simple', ${token})
+                OR b.content::text ILIKE ${pattern}
+              )
+          )
+          OR EXISTS (
+            SELECT 1 FROM library_properties p
+            WHERE p.workspace_id = d.workspace_id
+              AND p.subject_type = 'document'
+              AND p.subject_id = d.id
+              AND (
+                to_tsvector('simple', p.value::text) @@ plainto_tsquery('simple', ${token})
+                OR p.value::text ILIKE ${pattern}
+              )
+          )
+        )`;
+      });
+
+      const documentRows = await sql<{
+        id: string;
+        title: string;
+        lifecycle: string;
+        course_memberships: Array<{ id: string; title: string }> | null;
+        blocks: Array<{ content: Record<string, unknown> }> | null;
+        properties: Array<{ key: string; value: unknown }> | null;
+      }[]>`
+        SELECT d.id, d.title, d.lifecycle,
+          COALESCE(
+            jsonb_agg(DISTINCT jsonb_build_object('id', m.course_id, 'title', c.title))
+              FILTER (WHERE c.id IS NOT NULL),
+            '[]'::jsonb
+          ) AS course_memberships,
+          blocks.rows AS blocks,
+          properties.rows AS properties
+        FROM library_documents d
+        LEFT JOIN course_asset_memberships m
+          ON m.workspace_id = d.workspace_id
+          AND m.asset_type = 'document'
+          AND m.asset_id = d.id
+        LEFT JOIN courses c ON c.id = m.course_id
+          AND c.archived_at IS NULL
+        LEFT JOIN LATERAL (
+          SELECT jsonb_agg(jsonb_build_object('content', b.content) ORDER BY b.position) AS rows
+          FROM library_blocks b
+          WHERE b.workspace_id = d.workspace_id AND b.document_id = d.id
+        ) blocks ON true
+        LEFT JOIN LATERAL (
+          SELECT jsonb_agg(jsonb_build_object('key', p.key, 'value', p.value)) AS rows
+          FROM library_properties p
+          WHERE p.workspace_id = d.workspace_id
+            AND p.subject_type = 'document'
+            AND p.subject_id = d.id
+        ) properties ON true
+        WHERE d.workspace_id = ${input.workspaceId}
+          AND d.deleted_at IS NULL
+          AND (${documentConditions.reduce((query, condition, index) =>
+            index === 0 ? condition : sql`${query} OR ${condition}`,
+          )})
+        GROUP BY d.id, d.title, d.lifecycle, d.updated_at, blocks.rows, properties.rows
+        ORDER BY d.updated_at DESC
+      `;
+
+      const documents = documentRows.map((row) => {
+        const blocks = Array.isArray(row.blocks) ? row.blocks : [];
+        const propertyRows = Array.isArray(row.properties) ? row.properties : [];
+        const tagRow = propertyRows.find((property) => property.key === "tags");
+        const tags = Array.isArray(tagRow?.value)
+          ? tagRow.value.filter((tag): tag is string => typeof tag === "string")
+          : [];
+        return {
+          id: row.id as string,
+          type: "document" as const,
+          title: row.title as string,
+          body: blocks.map((block) => extractSearchableText(block.content)).join(" ").trim(),
+          tags,
+          lifecycle: row.lifecycle as AssetLifecycle,
+          courseMemberships: Array.isArray(row.course_memberships) ? row.course_memberships : [],
+        };
+      });
+
+      const courseConditions = tokens.map((token) => {
+        const pattern = wrapLikePattern(token);
+        return sql`(
+          to_tsvector('simple', c.title) @@ plainto_tsquery('simple', ${token})
+          OR c.title ILIKE ${pattern}
+          OR to_tsvector('simple', c.description) @@ plainto_tsquery('simple', ${token})
+          OR c.description ILIKE ${pattern}
+        )`;
+      });
+      const courseRows = await sql<{ id: string; title: string; description: string }[]>`
+        SELECT c.id, c.title, c.description
+        FROM courses c
+        WHERE c.workspace_id = ${input.workspaceId}
+          AND c.archived_at IS NULL
+          AND (${courseConditions.reduce((query, condition, index) =>
+            index === 0 ? condition : sql`${query} OR ${condition}`,
+          )})
+        ORDER BY c.updated_at DESC
+      `;
+      const courses: SearchLibraryRow[] = courseRows.map((row) => ({
+        id: row.id as string,
+        type: "course",
+        title: row.title as string,
+        body: row.description as string,
+        tags: [],
+      }));
+
+      return [...documents, ...courses];
     },
   };
 }
