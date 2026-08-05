@@ -2,6 +2,8 @@ import { EnvValidationError } from "@aistudy/config";
 import {
   createCourseMembershipRepository,
   createExplorationRepository,
+  createPromotionRepository,
+  createRevisionProposalRepository,
   createIdentityRepository,
   createLibraryRepository,
   createSqlClient,
@@ -11,8 +13,12 @@ import {
   IdentityError,
   LibraryError,
   WorkspacePreferencesError,
+  PromotionRepositoryError,
+  RevisionProposalRepositoryError,
+  type RevisionProposalRepository,
   type CourseMembershipRepository,
   type ExplorationRepository,
+  type PromotionRepository,
   type IdentityRepository,
   type LibraryRepository,
   type WorkspacePreferencesRepository,
@@ -28,6 +34,10 @@ import {
   workspacePreferenceUpdateSchema,
   normalizeDocumentTags,
   updateDocumentRelationRequestSchema,
+  createPromotionRequestSchema,
+  createRevisionProposalRequestSchema,
+  revisionProposalReviewRequestSchema,
+  revisionProposalResolveRequestSchema,
   type DocumentPropertiesResponse,
   type KnowledgeLink,
   type ManagedRelation,
@@ -51,6 +61,8 @@ export type AuthRuntime = {
   courses: CourseMembershipRepository;
   preferences: WorkspacePreferencesRepository;
   explorations: ExplorationRepository;
+  promotions: PromotionRepository;
+  revisionProposals: RevisionProposalRepository;
   sessions: SessionService;
   authCookieName: string;
   sessionCookieSecure: boolean;
@@ -71,6 +83,8 @@ export function createAuthRuntime(input: {
   const courses = createCourseMembershipRepository(sql);
   const preferences = createWorkspacePreferencesRepository(sql);
   const explorations = createExplorationRepository(sql);
+  const promotions = createPromotionRepository(sql);
+  const revisionProposals = createRevisionProposalRepository(sql);
   const sessions = createSessionService({
     sql,
     authSecret: input.authSecret,
@@ -84,6 +98,8 @@ export function createAuthRuntime(input: {
     courses,
     preferences,
     explorations,
+    promotions,
+    revisionProposals,
     sessions,
     authCookieName: input.authCookieName,
     sessionCookieSecure: input.sessionCookieSecure,
@@ -92,6 +108,83 @@ export function createAuthRuntime(input: {
       await sql.end({ timeout: 5 });
     },
   };
+}
+
+export async function listPromotionsForPrincipal(runtime: AuthRuntime, principal: Principal, explorationId: string) {
+  return runtime.promotions.list({ workspaceId: boundWorkspaceId(principal), explorationId });
+}
+
+export async function listRevisionProposalsForPrincipal(runtime: AuthRuntime, principal: Principal, documentId: string) {
+  await getDocumentForPrincipal(runtime, principal, documentId);
+  return runtime.revisionProposals.list({ workspaceId: boundWorkspaceId(principal), documentId });
+}
+
+export async function getRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, proposalId: string) {
+  const proposal = await runtime.revisionProposals.get({ workspaceId: boundWorkspaceId(principal), proposalId });
+  if (proposal.workspaceId !== boundWorkspaceId(principal)) {
+    throw new ApiError("WORKSPACE_FORBIDDEN", "Access to another workspace is forbidden", 403);
+  }
+  return proposal;
+}
+
+export async function createRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, documentId: string, body: unknown) {
+  const parsed = createRevisionProposalRequestSchema.parse(body);
+  const document = await getDocumentForPrincipal(runtime, principal, documentId);
+  const provenance = {
+    ...parsed.provenance,
+    actorUserId: principal.userId,
+    sourceRevisionNumber: document.currentRevisionNumber,
+  };
+  return runtime.revisionProposals.create({
+    workspaceId: boundWorkspaceId(principal),
+    documentId,
+    baseRevisionNumber: document.currentRevisionNumber,
+    proposedTitle: parsed.proposedTitle,
+    proposedBlocks: parsed.proposedBlocks,
+    source: parsed.source,
+    supportState: parsed.supportState,
+    provenance,
+  });
+}
+
+export async function reviewRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, proposalId: string, body: unknown) {
+  const parsed = revisionProposalReviewRequestSchema.parse(body);
+  return runtime.revisionProposals.review({
+    workspaceId: boundWorkspaceId(principal),
+    proposalId,
+    action: parsed.action,
+    selectedProposalBlockIds: parsed.selectedProposalBlockIds,
+    actorUserId: principal.userId,
+  });
+}
+
+export async function resolveRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, proposalId: string, body: unknown) {
+  const parsed = revisionProposalResolveRequestSchema.parse(body);
+  return runtime.revisionProposals.resolveConflict({
+    workspaceId: boundWorkspaceId(principal),
+    proposalId,
+    action: parsed.action,
+    selectedProposalBlockIds: parsed.selectedProposalBlockIds,
+    expectedCurrentRevisionNumber: parsed.expectedCurrentRevisionNumber,
+    actorUserId: principal.userId,
+  });
+}
+
+export async function createPromotionForPrincipal(runtime: AuthRuntime, principal: Principal, explorationId: string, body: unknown) {
+  const parsed = createPromotionRequestSchema.parse(body);
+  return runtime.promotions.create({ workspaceId: boundWorkspaceId(principal), explorationId, ...parsed });
+}
+
+export async function acceptPromotionForPrincipal(runtime: AuthRuntime, principal: Principal, promotionId: string) {
+  return runtime.promotions.accept({ workspaceId: boundWorkspaceId(principal), promotionId });
+}
+
+export async function rejectPromotionForPrincipal(runtime: AuthRuntime, principal: Principal, promotionId: string) {
+  return runtime.promotions.reject({ workspaceId: boundWorkspaceId(principal), promotionId });
+}
+
+export async function getDocumentPromotionSourceForPrincipal(runtime: AuthRuntime, principal: Principal, documentId: string) {
+  return runtime.promotions.getByDocumentTarget({ workspaceId: boundWorkspaceId(principal), documentId });
 }
 
 export type ApiErrorCode =
@@ -154,6 +247,8 @@ export function mapDomainError(error: unknown): ApiError {
     || error instanceof CourseMembershipError
     || error instanceof WorkspacePreferencesError
     || error instanceof ExplorationRepositoryError
+    || error instanceof PromotionRepositoryError
+    || error instanceof RevisionProposalRepositoryError
   ) {
     if (error.code === "WORKSPACE_MISMATCH" || error.code === "CROSS_WORKSPACE_REFERENCE") {
       return new ApiError("WORKSPACE_FORBIDDEN", error.message, 403);

@@ -46,3 +46,10 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After completing a coherent task or implementation slice, run `graphify update .` once to keep the graph current (AST-only, no API cost). Do not sync after every individual edit.
+
+## Repair and Delivery Discipline
+
+- **验证纪律 (failure → cause → fix → recheck):** 任何测试/类型/构建检查失败,先复现并给出根因假设,再实施最小修复,最后重跑同一检查;禁止仅重试而侥幸通过。完成报告需记录四步证据链。
+- **交付纪律:** 面向用户的改动合入前说明验收方式(PR/CI/手动验证);涉及数据库 migration 或破坏性变更必须记录回滚方案。本地测试通过 + agent 口头完成不是交付证据。
+- **嵌套指令:** 每个 package/模块有自己的 AGENTS.md 时,以嵌套文件为准(它拥有该包级约定与验证命令)。
+- **提交规范:** 使用 Conventional Commit 前缀;提交前按 `.agents/skills/aistudy-git-workflow/SKILL.md` 执行安全 Git 流程。

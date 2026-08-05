@@ -1,5 +1,38 @@
 # Errors
 
+## [ERR-20260805-001] pi-better-background-tasks-windows-shell
+
+**Logged**: 2026-08-05T18:36:00+08:00
+**Priority**: critical
+**Status**: resolved
+**Area**: config
+
+### Summary
+`pi-better-background-tasks` hard-coded `/bin/bash`, so a Windows background task emitted an uncaught `spawn /bin/bash ENOENT` and terminated the foreground Pi process.
+
+### Error
+```text
+Error: spawn /bin/bash ENOENT
+```
+
+### Context
+- The failing task launched a Luna Pi child through the `bg_task` extension with `shell:true`.
+- Git Bash was installed and available as `bash.exe`, but Windows has no `/bin/bash` path in the Node process namespace.
+- Windows also requires a write-mode inherited log descriptor; append-mode descriptors caused Git Bash children to exit with code 1 and no output.
+
+### Suggested Fix
+Resolve the default shell as `bash.exe` on Windows and `/bin/bash` elsewhere. Open detached Windows task logs in write mode before passing the descriptor to the child.
+
+### Metadata
+- Reproducible: yes
+- Related Files: C:/Users/86080/.pi/agent/npm/node_modules/pi-better-harness/node_modules/pi-better-background-tasks/src/process.ts
+
+### Resolution
+- **Resolved**: 2026-08-05T18:36:00+08:00
+- **Notes**: Added the platform-aware shell and Windows log-descriptor handling. Regression tests, direct shell execution, detached log capture, and a background `pi --version` task all pass.
+
+---
+
 ## [ERR-20260804-PI1] duplicate-subagent-extension-fix
 
 **Logged**: 2026-08-04T06:00:00Z
@@ -29,6 +62,93 @@ Import `node:fs` and `node:path` before using the guard.
 ### Resolution
 - **Resolved**: 2026-08-04T06:00:00Z
 - **Notes**: Added the missing imports and reran startup verification.
+
+---
+
+## [ERR-20260804-001] subagent-model-unavailable
+
+**Logged**: 2026-08-04T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+The requested `5.6-luna` subagent model was rejected by the collaboration runtime.
+
+### Error
+```text
+Unknown model '5.6-luna' for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra
+```
+
+### Context
+- Task: Task 14 AI roles and provider-neutral exploration jobs.
+- The exact requested model was attempted before substitution.
+- No repository files were changed by the failed dispatch.
+
+### Suggested Fix
+Use the explicitly reported available fallback and preserve the model substitution in the task progress record.
+
+### Metadata
+- Reproducible: yes
+- Related Files: docs/superpowers/plans/2026-08-04-task-14-ai-roles-implementation.md
+
+---
+
+## [ERR-20260805-002] luna-subagent-model-unavailable
+
+**Logged**: 2026-08-05T10:45:52+08:00
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+The required Task 16 `tokenfree-gpt/gpt-5.6-luna` implementation worker could not start because no configured account supports its resolved model.
+
+### Error
+```text
+404: {"message":"Model \"gpt-5.6-luna\" is not supported by any configured account in this group","type":"model_not_found"}
+```
+
+### Context
+- Command: project `worker` subagent dispatch from `E:/Project/AIstudy`.
+- The project worker is configured with `tokenfree-gpt/gpt-5.6-luna` in `.pi/agents/worker.md`.
+- Task: Task 16 revision-proposal implementation.
+- The request failed before the worker started; no Task 16 production or test files were created.
+
+### Suggested Fix
+Configure an account that exposes `tokenfree-gpt/gpt-5.6-luna`, then rerun the exact Task 16 worker prompt. Preserve the failed-dispatch evidence in the Task 16 execution record; do not substitute a different model without user authorization.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .pi/agents/worker.md, docs/superpowers/plans/2026-08-05-task-16-revision-proposals-luna-implementation.md
+- See Also: ERR-20260804-001
+
+---
+
+## [ERR-20260804-002] plan-input-tool-unavailable
+
+**Logged**: 2026-08-04T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+The plan-only input tool is unavailable while this thread runs in Default collaboration mode.
+
+### Error
+```text
+request_user_input is unavailable in Default mode
+```
+
+### Context
+- The user had already authorized plan execution, so no new choice was required.
+
+### Suggested Fix
+Use direct execution for the authorized task and reserve the plan input tool for sessions where it is available.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
 
 ---
 

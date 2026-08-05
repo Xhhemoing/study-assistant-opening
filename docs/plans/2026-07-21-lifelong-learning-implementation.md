@@ -585,7 +585,11 @@ git add packages/ai/src packages/contracts/src/ai-jobs.ts apps/worker/src/jobs/e
 git commit -m "feat: add switchable AI roles for exploration"
 ```
 
+**Execution status (2026-08-04):** Core implementation is present in the working tree: eight immutable role policies, a provider-neutral adapter, Zod-validated provider output, and a candidate-only exploration chat job. The `silent` role skips the provider; roles without source-retrieval permission receive no source IDs; missing provider request/cost metadata is represented as `null` rather than fabricated. Focused Vitest (10 tests), contracts/AI/worker TypeScript checks, targeted ESLint, `git diff --check`, and `graphify update .` passed. The full npm suite remains blocked in this Windows environment because Git Bash lacks `flock`; this is not a passing full-suite result.
+
 ### Task 15: Add Candidate Promotion to Long-Term Assets
+
+**Execution status (2026-08-04):** Core implementation is present in the working tree. Promotions are workspace-bound and independently terminal; accepting a note atomically creates one confirmed, editable document, while card/question/task candidates retain typed targets and provenance. The promoted note is covered by a two-course shared-identity browser flow and exposes a protected return path to its source exploration. Contracts/database/web TypeScript, the document-editor focused Vitest suite (6 tests), Playwright discovery, and `git diff --check` passed. The promotion repository/handler suites are blocked by an unset `DATABASE_URL`; the full Playwright run is blocked because PostgreSQL at `127.0.0.1:5432` refuses connections. These are pending environment gates, not passing integration/browser results.
 
 **Files:**
 - Create: `packages/database/src/schema/promotions.ts`
@@ -625,6 +629,8 @@ git commit -m "feat: selectively promote exploration insights"
 ```
 
 ### Task 16: Add AI Revision Proposals for Notes
+
+**Execution status (2026-08-05, Task 16 review repair):** Full, partial, and preserve-both proposal acceptance now centrally reject a zero-block result with `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")` before append-only projection/revision or proposal terminal mutation. The revised removal-only single-block integration assertion requires the document revision/projection and proposal to remain unchanged; selected removal remains supported when other blocks remain. Non-DB focused tests (13), domain/contracts/database typechecks, web/e2e TypeScript checks, target ESLint, `git diff --check`, and `graphify update .` completed. PostgreSQL repository/handler tests remain blocked by missing `DATABASE_URL`; no integration pass is claimed. Task 17 remains next.
 
 **Files:**
 - Create: `packages/contracts/src/revision-proposal.ts`

@@ -50,6 +50,8 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - Task 11B1 核心完成：编辑器 tags 已迁移到 workspace 授权的 `library_properties` API，支持 Unicode 归一化、去重、持久化清空和失败恢复；PostgreSQL handler/browser 门禁待执行
 - Task 11B2 核心完成：编辑器可创建、重设类型和删除当前笔记发出的 typed relation，并只读展示 document/block properties；关系 source/workspace 授权、冲突及 Task 11A backlink 兼容已覆盖，PostgreSQL integration/handler/browser 门禁待执行
 - Task 13 核心完成：exploration、root/child branch 与 scratch/hypothesis/open-question block 已接入 `0008_explorations.sql`、workspace-bound repository、authenticated API 和真实 Explore UI；contracts/type/lint 与非数据库测试已验证，PostgreSQL integration/handler/browser 门禁待在具备 `DATABASE_URL`、`flock` 和 live browser server 的环境中执行
+- Task 14 核心完成：八类 AI role policy、provider-neutral exploration-chat job、Zod 输出校验与 candidate-only 结果已接入 worker；无权检索角色不会接收 source IDs，silent role 不调用 provider，provenance 明确区分未调用与缺失 provider 元数据。10 项 focused tests、contracts/AI/worker typecheck、目标 ESLint 和 diff 检查已通过；完整 npm 门禁仍需具备 `flock` 的 Bash/WSL 环境执行。
+- Task 15 核心完成：探索候选可被独立接受或拒绝；接受 note 会原子化生成 confirmed、可编辑的 library document，card/question/task 保持 typed target 与来源信息。文档可加入两门课程而不复制，并可返回来源探索。contracts/database/web TypeScript、编辑器 focused Vitest（6 项）、Playwright 用例发现与 `git diff --check` 已通过；promotion repository/handler 和完整浏览器用例仍待 `DATABASE_URL` 与 PostgreSQL `127.0.0.1:5432` 可用后执行。
 
 ```bash
 cp .env.example .env
@@ -61,7 +63,7 @@ npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-下一步：补齐 Task 10/11A/11B1/11B2/13 的 PostgreSQL integration、handler、browser 与聚合门禁，然后规划 Task 14 的 AI roles、provider-neutral jobs 与 worker 切片。
+执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 17。
 
 ## 预定技术方向
 

@@ -24,3 +24,9 @@ export {
   type PlannerPointInput,
 } from "./planning/planner";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
+export {
+  assertNonEmptyRevisionBlocks,
+  diffRevisionBlocks,
+  selectProposalBlocks,
+  preserveBothBlocks,
+} from "./revisions/proposals";

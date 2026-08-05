@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export * from "./promotions";
+export * from "./revision-proposal";
+
 export {
   workspaceIdSchema,
   workspaceSchema,
@@ -133,6 +136,21 @@ export {
 } from "./exploration";
 
 export { diagnosticsSchema, type Diagnostics } from "./diagnostics";
+
+export {
+  aiCandidateSchema,
+  rolePolicySchema,
+  aiConversationJobRequestSchema,
+  aiProviderResponseSchema,
+  aiJobProvenanceSchema,
+  aiConversationJobResultSchema,
+  type AICandidate,
+  type RolePolicy,
+  type AIConversationJobRequest,
+  type AIProviderResponse,
+  type AIJobProvenance,
+  type AIConversationJobResult,
+} from "./ai-jobs";
 
 export {
   searchableDocumentSchema,

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@aistudy/contracts": "0.0.0",
+    "@aistudy/domain": "0.0.0",
     "drizzle-orm": "0.44.7",
     "postgres": "3.4.7"
   }

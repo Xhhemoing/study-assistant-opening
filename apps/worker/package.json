@@ -11,6 +11,7 @@
     "test": "bash ../../scripts/run-heavy.sh vitest run"
   },
   "dependencies": {
+    "@aistudy/ai": "0.0.0",
     "@aistudy/contracts": "0.0.0",
     "@aistudy/domain": "0.0.0"
   },

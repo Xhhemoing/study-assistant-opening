@@ -4,7 +4,8 @@
     "types": ["node"],
     "paths": {
       "@aistudy/domain": ["../../packages/domain/src/index.ts"],
-      "@aistudy/contracts": ["../../packages/contracts/src/index.ts"]
+      "@aistudy/contracts": ["../../packages/contracts/src/index.ts"],
+      "@aistudy/ai": ["../../packages/ai/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts"],

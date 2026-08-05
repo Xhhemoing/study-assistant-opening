@@ -6,6 +6,29 @@ Corrections, insights, and knowledge gaps captured during development.
 
 ---
 
+## [LRN-20260804-002] correction
+
+**Logged**: 2026-08-04T23:17:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+Luna delegation is available through OpenCodex injection, not the native subagent model parameter.
+
+### Details
+The native subagent model validator accepts only Sol/Terra labels, while OpenCodex injects the enabled `gpt-5.6-luna` runtime behind the compatible OCX agent type. Treating the native validation result as Luna unavailability caused an incorrect user-facing response.
+
+### Suggested Action
+Before rejecting a requested model, check `opencodex models live` and delegate through the matching OCX route when it reports the requested runtime as enabled.
+
+### Metadata
+- Source: user_feedback
+- Related Files: docs/superpowers/plans/2026-08-04-task-15-selective-promotion-implementation.md
+- Tags: subagent, opencodex, luna, model-routing
+
+---
+
 ## [LRN-20260803-001] best_practice
 
 **Logged**: 2026-08-03T00:00:00+08:00

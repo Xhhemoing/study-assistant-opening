@@ -99,6 +99,11 @@ export {
   MigrationRegistryError,
 } from "./migrate";
 
+export * from "./schema/promotions";
+export * from "./repositories/promotions";
+export * from "./schema/revision-proposals";
+export * from "./repositories/revision-proposals";
+
 export {
   applyIdentityOwnerMappings,
   assertIdentityMigrationReady,

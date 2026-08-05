@@ -1,6 +1,7 @@
 "use client";
 
 import { zh } from "@blocknote/core/locales";
+import { promotionResponseSchema } from "@aistudy/contracts";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
 import { ArrowLeft, Check, Clock3, Redo2, RefreshCw, Save, Undo2 } from "lucide-react";
 import Link from "next/link";
@@ -23,6 +24,7 @@ import { PropertiesPanel } from "./properties-panel";
 import { ReadOnlyPropertiesPanel } from "./read-only-properties-panel";
 import { RelationAuthoringPanel } from "./relation-authoring-panel";
 import { extractWikiLinks } from "./link-utils";
+import { RevisionReviewPanel } from "../revision-review/revision-review-panel";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
@@ -36,6 +38,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
   const [saveState, setSaveState] = useState<SaveState>("saving");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [notice, setNotice] = useState("");
+  const [sourceExplorationId, setSourceExplorationId] = useState<string | null>(null);
   const draftRef = useRef<LocalNoteDraft | null>(null);
   const editVersionRef = useRef(0);
   const linkIndexQueueRef = useRef(Promise.resolve());
@@ -62,6 +65,15 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
       });
     return () => { active = false; };
   }, [api, documentId, reloadToken]);
+
+  useEffect(() => {
+    let active = true;
+    fetch(`/api/documents/${documentId}/promotion-source`)
+      .then(async (response) => response.ok ? promotionResponseSchema.parse(await response.json()).promotion : null)
+      .then((promotion) => { if (active) setSourceExplorationId(promotion?.explorationId ?? null); })
+      .catch(() => { if (active) setSourceExplorationId(null); });
+    return () => { active = false; };
+  }, [documentId]);
 
   const initialContent = useMemo(
     () => (draft ? draftBlocksToEditorBlocks(draft.blocks) : undefined),
@@ -210,6 +222,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
             知识库
           </Link>
           <span className="h-5 w-px bg-line" aria-hidden="true" />
+          {sourceExplorationId ? <Link className="text-sm font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}
           <span className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">服务端编辑器</span>
           <label className="min-w-[12rem] flex-1">
             <span className="sr-only">笔记标题</span>
@@ -241,6 +254,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
           <ReadOnlyPropertiesPanel documentId={documentId} />
           <RelationAuthoringPanel documentId={documentId} />
           <BacklinksPanel documentId={documentId} />
+          <RevisionReviewPanel documentId={documentId} />
         </div>
       </main>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
