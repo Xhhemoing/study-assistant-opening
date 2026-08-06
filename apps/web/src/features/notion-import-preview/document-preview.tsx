@@ -12,9 +12,9 @@ function PropertyRow({ property }: { property: ImportedProperty }) {
   );
 }
 
-export function DocumentPreview({ page }: { page: ImportedPage }) {
+export function DocumentPreview({ fullWidth, page }: { fullWidth: boolean; page: ImportedPage }) {
   return (
-    <article className="mx-auto max-w-[46rem] px-6 pb-16 pt-10 sm:px-10">
+    <article className={`mx-auto px-6 pb-16 pt-10 sm:px-10 ${fullWidth ? "max-w-[72rem]" : "max-w-[46rem]"}`}>
       <header className="flex items-center gap-3">
         <span className="grid size-9 place-items-center rounded-lg bg-white/5 text-amber-200"><FileText aria-hidden="true" size={18} /></span>
         <h1 className="text-2xl font-semibold text-stone-50">{page.title}</h1>
