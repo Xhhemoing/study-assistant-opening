@@ -6,6 +6,7 @@
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
+| 2026-08-06 | [Notion 导入兼容、自由笔记编辑与简洁界面调研](2026-08-06-notion-import-and-freeform-editor-research.md) | exploring | Library、Editor、Portability、View | 采用 Notion HTML ZIP 保真导入 + MD/CSV 有损备路径，输出 ImportReport 并保留原始导出为证据；数据库视图首期降级表格；画布投影与数据库引擎暂不采用 | 笔记本产品设计、Portability 契约、Notion 导入器任务、编辑工作台设计 |
 | 2026-08-05 | [学习型笔记本的界面、智能编排、AI、分享与格式兼容](2026-08-05-learning-notebook-interface-and-capability-design.md) | exploring | Library、Editor、AI、Learn、Review、Portability、Publishing | 推荐“安静画布 + 上下文抽屉 + 内容/视图/学习版本分离”；AI 读取版本化块上下文并只提交 proposal；用 LearningEdition 引用原文形成教材闭环；原生备份无损、其他格式显式报告损失 | 笔记本产品设计与实施计划、内容/视图/教材/发布 ADR、Context/Sharing/Portability 契约 |
 | 2026-08-03 | [延迟学习成果的测量、实验与因果有效性](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md) | proposed | Assessment、Learn、Experiment、Worker、ConstructMap | 路由和策略优化前先运行纯测量试点；分离政策题与独立探针，以构念版本、平行题组、缺失敏感性、MDE 和策略束级 ITT 验证 7/30 天北极星是否可用 | PRD 指标、Assessment/Experiment 设计、测量与实验 ADR、Probe/Outcome 契约 |
 | 2026-08-02 | [自适应学习决策、记忆与持续校准系统](2026-08-02-adaptive-learning-decision-governance.md) | proposed | Learn、Planner、Assessment、AI、Worker、数据治理 | 采用受治理混合架构；先验证 7/30 天测量，再经 PII 前置、耐久账本、动态预算、缓存、帕累托计划和分级门禁持续校准 | PRD 指标、Planner/Assessment/Memory/AI 设计、事件与决策契约、实验治理 ADR |
