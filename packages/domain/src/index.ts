@@ -30,3 +30,15 @@ export {
   selectProposalBlocks,
   preserveBothBlocks,
 } from "./revisions/proposals";
+export {
+  REQUIREMENT_PROFILE_VERSION,
+  REQUIREMENT_PROFILES,
+  REQUIREMENT_PROFILES_BY_KIND,
+  getRequirementProfile,
+  resolveRequirementProfile,
+  listRequirementProfileKinds,
+  isAssessmentEnabled,
+  validateAbilityWeights,
+  normalizeAbilityWeights,
+  type RequirementPreset,
+} from "./courses/requirements";

@@ -178,6 +178,21 @@ export {
 } from "./tags";
 
 export {
+  requirementProfileKindSchema,
+  assessmentModeSchema,
+  abilityDimensions,
+  abilityWeightsSchema,
+  courseRequirementProfileSchema,
+  courseRequirementInputSchema,
+  type RequirementProfileKind,
+  type AssessmentMode,
+  type AbilityDimension,
+  type AbilityWeights,
+  type CourseRequirementProfile,
+  type CourseRequirementInput,
+} from "./course-requirements";
+
+export {
   propertyValueTypeSchema,
   readOnlyPropertySchema,
   blockPropertyGroupSchema,
