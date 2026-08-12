@@ -17,6 +17,12 @@ export {
   courseAssetMemberships,
 } from "./schema/courses";
 
+export {
+  goalsSchema,
+  courseGoals,
+  goalTimeWindows,
+} from "./schema/goals";
+
 export { identitySchema, users, sessions } from "./schema/identity";
 
 export {

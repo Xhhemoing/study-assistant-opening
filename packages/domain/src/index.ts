@@ -42,3 +42,14 @@ export {
   normalizeAbilityWeights,
   type RequirementPreset,
 } from "./courses/requirements";
+export {
+  EFFECTIVE_REQUIREMENTS_VERSION,
+  defaultGoalAbilities,
+  computeEffectiveRequirements,
+  type GoalKind,
+  type GoalRequirement,
+  type TimeWindow,
+  type TimeWindowPhase,
+  type UserOverride,
+  type EffectiveRequirements,
+} from "./goals/effective-requirements";
