@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import type { GuidanceMode } from "../../lib/data/types";
 import { useStudyProvider } from "../../lib/data/react";
+import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings/guidance-mode-picker";
+import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { DiagnosticsPanel } from "./diagnostics-panel";
 
 type WorkspaceEntry = "learn" | "explore" | "library";
@@ -24,6 +26,10 @@ export function SettingsView() {
   const provider = useStudyProvider();
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [guidanceMode, setGuidanceMode] = useState<GuidanceMode>("balanced");
+  const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
+    mode: defaultGuidanceMode(),
+    protectedSlots: [],
+  }));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -107,6 +113,7 @@ export function SettingsView() {
       {!loading ? <>
         <section className="space-y-4" aria-labelledby="default-entry-heading"><div><h2 className="text-base font-semibold text-text" id="default-entry-heading">默认入口</h2><p className="mt-1 text-sm text-text-dim">打开工作区首页时进入这里。</p></div><div className="grid gap-2 sm:grid-cols-3">{entries.map((entry) => <label className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-3 text-sm text-text has-[:checked]:border-primary has-[:checked]:bg-primary/10" key={entry.value}><input checked={defaultEntry === entry.value} className="accent-primary" name="default-entry" onChange={() => setDefaultEntry(entry.value)} type="radio" />{entry.label}</label>)}</div><button className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50" disabled={!defaultEntry || saving} onClick={() => void saveEntry()} type="button">{saving ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} /> : <Save aria-hidden="true" size={16} />}保存入口</button></section>
         <section className="space-y-4 border-t border-line pt-6" aria-labelledby="guidance-heading"><div><h2 className="text-base font-semibold text-text" id="guidance-heading">指导模式</h2><p className="mt-1 text-sm text-text-dim">影响探索中的模拟回复风格。</p></div><select className="min-h-10 w-full rounded-md border border-line bg-surface px-3 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/30" onChange={(event) => void saveGuidanceMode(event.target.value as GuidanceMode)} value={guidanceMode}>{guidanceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></section>
+        <section className="space-y-4 border-t border-line pt-6" aria-labelledby="autonomy-heading"><div><h2 className="text-base font-semibold text-text" id="autonomy-heading">计划自主权</h2><p className="mt-1 text-sm text-text-dim">决定系统能否自动调整计划，以及建议是否需要确认。</p></div><GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} /></section>
         <section className="space-y-3 border-t border-line pt-6" aria-labelledby="demo-heading"><div><h2 className="text-base font-semibold text-text" id="demo-heading">演示数据</h2><p className="mt-1 text-sm text-text-dim">只重置当前账号的本地 mock 学习数据。</p></div><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-danger/40 px-3 text-sm text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:opacity-50" disabled={saving} onClick={() => void resetDemoData()} type="button"><Check aria-hidden="true" size={16} />重置演示数据</button></section>
         <DiagnosticsPanel provider={provider} />
       </> : null}

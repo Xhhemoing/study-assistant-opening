@@ -53,3 +53,15 @@ export {
   type UserOverride,
   type EffectiveRequirements,
 } from "./goals/effective-requirements";
+export {
+  GUIDANCE_POLICY_VERSION,
+  getGuidancePolicy,
+  canReorderTask,
+  slotsOverlap,
+  canScheduleIntoSlot,
+  reserveProtectedSlot,
+  type GuidanceMode,
+  type GuidancePolicy,
+  type ReorderTarget,
+  type TimeSlot,
+} from "./guidance/guidance";
