@@ -52,6 +52,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - Task 13 核心完成：exploration、root/child branch 与 scratch/hypothesis/open-question block 已接入 `0008_explorations.sql`、workspace-bound repository、authenticated API 和真实 Explore UI；contracts/type/lint 与非数据库测试已验证，PostgreSQL integration/handler/browser 门禁待在具备 `DATABASE_URL`、`flock` 和 live browser server 的环境中执行
 - Task 14 核心完成：八类 AI role policy、provider-neutral exploration-chat job、Zod 输出校验与 candidate-only 结果已接入 worker；无权检索角色不会接收 source IDs，silent role 不调用 provider，provenance 明确区分未调用与缺失 provider 元数据。10 项 focused tests、contracts/AI/worker typecheck、目标 ESLint 和 diff 检查已通过；完整 npm 门禁仍需具备 `flock` 的 Bash/WSL 环境执行。
 - Task 15 核心完成：探索候选可被独立接受或拒绝；接受 note 会原子化生成 confirmed、可编辑的 library document，card/question/task 保持 typed target 与来源信息。文档可加入两门课程而不复制，并可返回来源探索。contracts/database/web TypeScript、编辑器 focused Vitest（6 项）、Playwright 用例发现与 `git diff --check` 已通过；promotion repository/handler 和完整浏览器用例仍待 `DATABASE_URL` 与 PostgreSQL `127.0.0.1:5432` 可用后执行。
+- Task 17 核心完成：六类课程需求画像（memory / mathematical-procedural / language / research-writing / programming-project / free-exploration）以 Zod 契约 + 领域预设落地，每类预设带六维能力权重（识别 / 无提示回忆 / 程序执行 / 迁移应用 / 表达输出 / 限时稳定，总和 100），支持 basic/disabled 评估模式、默认值解析、权重归一化与校验；简化设置 UI（预设卡片选择 + 禁用评估开关 + 开发者设置折叠展示权重）已就绪。domain focused Vitest（17 项）、web model Vitest（5 项）、contracts/domain/web typecheck、目标 ESLint 与 `git diff --check` 已通过；本任务无数据库改动，profile 持久化与页面挂载待后续任务。
 
 ```bash
 cp .env.example .env
@@ -63,7 +64,7 @@ npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 17。
+执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 18。
 
 ## 预定技术方向
 
