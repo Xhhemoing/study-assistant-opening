@@ -38,6 +38,8 @@ export function getGuidancePolicy(mode: GuidanceMode): GuidancePolicy {
         requiresConfirmation: false,
         blockedFeatures: [MUTATE_HISTORY, MUTATE_CONFIRMED],
       };
+    default:
+      throw new Error(`Unknown guidance mode: ${String(mode)}`);
   }
 }
 

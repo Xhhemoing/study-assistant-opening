@@ -204,4 +204,8 @@ describe("effective requirement merge", () => {
       expect(weightsSum(defaultGoalAbilities(kind))).toBe(100);
     }
   });
+
+  it("throws on an unknown goal kind", () => {
+    expect(() => defaultGoalAbilities("memory" as never)).toThrow(/Unknown goal kind/);
+  });
 });

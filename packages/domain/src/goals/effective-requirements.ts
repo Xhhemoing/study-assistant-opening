@@ -81,6 +81,8 @@ export function defaultGoalAbilities(kind: GoalKind): AbilityWeights {
       return weights(20, 35, 15, 15, 5, 10);
     case "custom":
       return weights(15, 20, 20, 20, 15, 10);
+    default:
+      throw new Error(`Unknown goal kind: ${String(kind)}`);
   }
 }
 
@@ -104,8 +106,8 @@ function applyModifier(
   const result = { ...a };
   for (const key of DIMENSIONS) {
     const delta = modifier[key];
-    if (Number.isFinite(delta)) {
-      result[key] = Math.max(0, a[key] + (delta as number));
+    if (delta !== undefined && Number.isFinite(delta)) {
+      result[key] = Math.max(0, a[key] + delta);
     }
   }
   return result;

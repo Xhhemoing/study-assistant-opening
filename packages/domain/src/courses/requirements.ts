@@ -91,6 +91,9 @@ export function getRequirementProfile(
   assessmentMode: AssessmentMode,
 ): CourseRequirementProfile {
   const preset = REQUIREMENT_PROFILES_BY_KIND[kind];
+  if (!preset) {
+    throw new Error(`Unknown requirement profile kind: ${String(kind)}`);
+  }
   return {
     kind,
     assessmentMode,
@@ -123,6 +126,7 @@ export function validateAbilityWeights(weights: AbilityWeights): boolean {
 
 /**
  * 将任意非负权重归一化到总和 100（开发者设置调整权重后调用）。
+ * 使用最大余数法（largest remainder method），保证结果总和恒为 100；
  * 非有限值视为 0；全 0 时回退到自由探索预设。
  */
 export function normalizeAbilityWeights(input: Partial<AbilityWeights>): AbilityWeights {
@@ -134,15 +138,22 @@ export function normalizeAbilityWeights(input: Partial<AbilityWeights>): Ability
   if (sum <= 0) {
     return REQUIREMENT_PROFILES_BY_KIND["free-exploration"].abilities;
   }
-  const scaled = raw.map((value) => Math.round((value * 100) / sum));
-  const head = scaled.slice(0, -1).reduce((total, value) => total + value, 0);
-  scaled[scaled.length - 1] = Math.max(0, 100 - head);
+  const exact = raw.map((value) => (value * 100) / sum);
+  const floors = exact.map((value) => Math.floor(value));
+  const remaining = 100 - floors.reduce((total, value) => total + value, 0);
+  const order = exact
+    .map((value, index) => ({ fraction: value - Math.floor(value), index }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (let i = 0; i < remaining; i += 1) {
+    const target = order[i % order.length];
+    if (target) floors[target.index] = (floors[target.index] ?? 0) + 1;
+  }
   return weights(
-    scaled[0]!,
-    scaled[1]!,
-    scaled[2]!,
-    scaled[3]!,
-    scaled[4]!,
-    scaled[5]!,
+    floors[0]!,
+    floors[1]!,
+    floors[2]!,
+    floors[3]!,
+    floors[4]!,
+    floors[5]!,
   );
 }

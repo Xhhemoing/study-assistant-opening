@@ -22,6 +22,10 @@ describe("guidance modes", () => {
     expect(GUIDANCE_POLICY_VERSION).toBe("guidance-1");
   });
 
+  it("throws on an unknown guidance mode", () => {
+    expect(() => getGuidancePolicy("bossy" as never)).toThrow(/Unknown guidance mode/);
+  });
+
   it("free mode: no auto-plan and no blocked features", () => {
     const policy = getGuidancePolicy("free");
     expect(policy.autoPlan).toBe(false);

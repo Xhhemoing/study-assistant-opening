@@ -113,6 +113,35 @@ describe("course requirement profiles", () => {
     ).toBe(100);
   });
 
+  it("normalizes round-drift edge cases to exactly 100", () => {
+    const normalized = normalizeAbilityWeights({
+      recognition: 0,
+      recall: 52,
+      procedural: 100,
+      transfer: 1,
+      expression: 1,
+      timed: 1,
+    });
+    const total =
+      normalized.recognition +
+      normalized.recall +
+      normalized.procedural +
+      normalized.transfer +
+      normalized.expression +
+      normalized.timed;
+    expect(total).toBe(100);
+    for (const value of Object.values(normalized)) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("throws on an unknown profile kind", () => {
+    expect(() =>
+      getRequirementProfile("not-a-kind" as never, "basic"),
+    ).toThrow(/Unknown requirement profile kind/);
+  });
+
   it("rejects weights that do not sum to 100", () => {
     const base = getRequirementProfile("memory", "basic").abilities;
     expect(validateAbilityWeights(base)).toBe(true);

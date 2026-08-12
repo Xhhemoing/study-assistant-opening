@@ -1,7 +1,7 @@
 "use client";
 
 import { Eye, EyeOff } from "lucide-react";
-import type { AbilityWeights } from "@aistudy/contracts";
+import { abilityDimensions, type AbilityWeights } from "@aistudy/contracts";
 import { REQUIREMENT_PROFILES_BY_KIND } from "@aistudy/domain";
 import {
   ABILITY_DIMENSION_LABELS,
@@ -95,27 +95,25 @@ export function RequirementProfilePicker({
 }
 
 function weightRows(abilities: AbilityWeights) {
-  return (Object.keys(ABILITY_DIMENSION_LABELS) as Array<keyof typeof ABILITY_DIMENSION_LABELS>).map(
-    (key) => {
-      const filled = Math.round(abilities[key] / 10);
-      return (
-        <div className="flex items-center justify-between gap-4" key={key}>
-          <span className="text-sm text-text-dim">{ABILITY_DIMENSION_LABELS[key]}</span>
-          <div className="flex items-center gap-2">
-            <div className="flex gap-0.5" aria-hidden="true">
-              {Array.from({ length: 10 }, (_, index) => (
-                <span
-                  className={`h-2 w-3 rounded-sm ${index < filled ? "bg-primary" : "bg-surface-2"}`}
-                  key={index}
-                />
-              ))}
-            </div>
-            <span className="w-8 text-right text-xs tabular-nums text-text">
-              {abilities[key]}%
-            </span>
+  return abilityDimensions.map((key) => {
+    const filled = Math.round(abilities[key] / 10);
+    return (
+      <div className="flex items-center justify-between gap-4" key={key}>
+        <span className="text-sm text-text-dim">{ABILITY_DIMENSION_LABELS[key]}</span>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-0.5" aria-hidden="true">
+            {Array.from({ length: 10 }, (_, index) => (
+              <span
+                className={`h-2 w-3 rounded-sm ${index < filled ? "bg-primary" : "bg-surface-2"}`}
+                key={index}
+              />
+            ))}
           </div>
+          <span className="w-8 text-right text-xs tabular-nums text-text">
+            {abilities[key]}%
+          </span>
         </div>
-      );
-    },
-  );
+      </div>
+    );
+  });
 }
