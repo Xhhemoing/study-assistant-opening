@@ -55,6 +55,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - Task 17 核心完成：六类课程需求画像（memory / mathematical-procedural / language / research-writing / programming-project / free-exploration）以 Zod 契约 + 领域预设落地，每类预设带六维能力权重（识别 / 无提示回忆 / 程序执行 / 迁移应用 / 表达输出 / 限时稳定，总和 100），支持 basic/disabled 评估模式、默认值解析、权重归一化与校验；简化设置 UI（预设卡片选择 + 禁用评估开关 + 开发者设置折叠展示权重）已就绪。domain focused Vitest（17 项）、web model Vitest（5 项）、contracts/domain/web typecheck、目标 ESLint 与 `git diff --check` 已通过；本任务无数据库改动，profile 持久化与页面挂载待后续任务。
 - Task 18 核心完成：一门课程可承载多个 goal（final-exam / entrance-exam / interest / maintenance / custom），`course_goals` 与 `goal_time_windows` 表（migration `0011_goals.sql`）落地，含 workspace guard、kind/phase CHECK、时间窗口排序约束与每课程每 kind 唯一约束；domain 实现确定性合并顺序（course baseline → active goal requirements → current time-window modifier → user override → 归一化到 100）。domain focused Vitest（12 项）、domain/database typecheck、目标 ESLint 与 `git diff --check` 已通过；PostgreSQL integration（`tests/integration/multi-goal-course.test.ts`）待 `DATABASE_URL` 可用后执行。
 - Task 19 核心完成：free / advisory / coach 三种自主性指导模式以领域策略（`guidance-1`）落地：free 无自动计划且不锁定功能，advisory 建议需确认，coach 可在预算内重排未来任务但锁定历史与已确认知识修改；受保护探索时段（重叠检测、调度判断、时序追加）与设置 UI（模式卡片选择 + 预留探索时间管理）已就绪并挂载到设置页。domain focused Vitest（12 项）、web model Vitest（5 项）、domain/web/e2e typecheck、目标 ESLint 与 `git diff --check` 已通过；E2E 用例（`tests/e2e/guidance-modes.spec.ts`）待 live browser server 执行。
+- Task 20 核心完成：可选 onboarding 路径落地且不阻塞探索——`onboarding-paths` 模型定义四条起点（free-exploration / goal-course / knowledge-course / promote-exploration），onboarding 页改为 Tailwind 并渲染这四条路径 + 始终可用的知识库入口；课程详情新增「学习目标」区（列出关联目标 + 「添加目标」带 `courseId` 进入目标向导）；探索候选新增「转为课程」（`candidateCourseDraft` 派生标题/slug/描述，中文标题回退 `promoted-*` slug）；目标向导支持从课程详情预填 `courseId`。onboarding/候选/目标模型 focused Vitest（共 10 项新增）、web/e2e typecheck、目标 ESLint 与 `git diff --check` 已通过；E2E 用例（`tests/e2e/onboarding-paths.spec.ts` 四路径）待 live browser server 执行。
 
 ```bash
 cp .env.example .env
@@ -66,7 +67,7 @@ npm run test:browser
 npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 20。
+执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 21（Phase 5 开工）。
 
 ## 预定技术方向
 
