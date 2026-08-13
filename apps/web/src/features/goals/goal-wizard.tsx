@@ -15,10 +15,10 @@ const STEP_COPY: Record<GoalWizardStep, { title: string; description: string }> 
   dailyMinutes: { title: "安排每日时间", description: "从一个你能持续完成的节奏开始。" },
 };
 
-export function GoalWizard() {
+export function GoalWizard({ courseId = null }: { courseId?: string | null }) {
   const router = useRouter();
   const provider = useStudyProvider();
-  const [draft, setDraft] = useState<GoalDraft>(defaultGoalInput);
+  const [draft, setDraft] = useState<GoalDraft>(() => defaultGoalInput(courseId));
   const [stepIndex, setStepIndex] = useState(0);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);

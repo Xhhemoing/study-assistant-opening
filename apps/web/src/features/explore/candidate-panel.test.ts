@@ -1,7 +1,12 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PromotionCandidate } from "@aistudy/contracts";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}));
+
 import { CandidatePanel } from "./candidate-panel";
 
 const pending: PromotionCandidate = {
@@ -32,6 +37,7 @@ describe("CandidatePanel", () => {
     expect(html).toContain("转笔记");
     expect(html).toContain("转卡片");
     expect(html).toContain("转题目");
+    expect(html).toContain("转为课程");
     expect(html).toContain("拒绝");
     expect(html).not.toContain("已拒绝");
   });

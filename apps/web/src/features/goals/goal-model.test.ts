@@ -45,6 +45,7 @@ describe("goal model", () => {
       subjects: [],
       dailyMinutes: 45,
     });
+    expect(defaultGoalInput("55555555-5555-4555-8555-555555555501").courseId).toBe("55555555-5555-4555-8555-555555555501");
   });
 
   it("normalizes goal titles and rejects blank names", () => {

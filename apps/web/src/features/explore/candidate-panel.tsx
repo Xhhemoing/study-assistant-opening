@@ -1,13 +1,15 @@
 "use client";
 
-import { BookOpen, CreditCard, HelpCircle, LoaderCircle, X } from "lucide-react";
+import { BookOpen, CreditCard, GraduationCap, HelpCircle, LoaderCircle, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { PromotionCandidate } from "@aistudy/contracts";
 import { createEditorApi } from "../editor/editor-api";
 import { useStudyProvider } from "../../lib/data/react";
-import { buildCandidateNoteBlocks, candidateKindLabel, pendingCandidates } from "./candidate-panel-model";
+import { coursePath } from "../courses/course-model";
+import { buildCandidateNoteBlocks, candidateCourseDraft, candidateKindLabel, pendingCandidates } from "./candidate-panel-model";
 
-type CandidateAction = "note" | "card" | "question";
+type CandidateAction = "note" | "card" | "question" | "course";
 
 export function CandidatePanel({
   explorationTitle,
@@ -18,6 +20,7 @@ export function CandidatePanel({
   candidates: PromotionCandidate[];
   onCandidateChange: (candidate: PromotionCandidate) => void;
 }) {
+  const router = useRouter();
   const provider = useStudyProvider();
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -46,6 +49,16 @@ export function CandidatePanel({
           tags: ["探索"],
         });
         targetId = card.id;
+      } else if (action === "course") {
+        const response = await fetch("/api/courses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(candidateCourseDraft(candidate)),
+        });
+        if (!response.ok) throw new Error();
+        const body = await response.json() as { course?: { id: string } };
+        if (!body.course?.id) throw new Error();
+        targetId = body.course.id;
       } else {
         const item = await provider.createPracticeItem({
           stem: candidate.title,
@@ -55,8 +68,9 @@ export function CandidatePanel({
         targetId = item.id;
       }
       onCandidateChange(await provider.setCandidateStatus(candidate.id, "promoted", targetId));
+      if (action === "course") router.push(coursePath(targetId));
     } catch {
-      setError("沉淀失败，请稍后重试。候选内容仍会保留。");
+      setError(action === "course" ? "创建课程失败，请稍后重试。候选内容仍会保留。" : "沉淀失败，请稍后重试。候选内容仍会保留。");
     } finally {
       setBusyKey(null);
     }
@@ -108,6 +122,9 @@ export function CandidatePanel({
                 </button>
                 <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-xs font-semibold text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "question")}>
                   {active && busyKey?.endsWith(":question") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <HelpCircle aria-hidden="true" size={14} />}转题目
+                </button>
+                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-xs font-semibold text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "course")}>
+                  {active && busyKey?.endsWith(":course") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <GraduationCap aria-hidden="true" size={14} />}转为课程
                 </button>
                 <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-transparent px-3 text-xs text-text-dim hover:border-line hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void reject(candidate)}>
                   {active && busyKey?.endsWith(":reject") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <X aria-hidden="true" size={14} />}拒绝

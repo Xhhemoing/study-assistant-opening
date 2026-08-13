@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PromotionCandidate } from "@aistudy/contracts";
 import {
   buildCandidateNoteBlocks,
+  candidateCourseDraft,
   candidateKindLabel,
   pendingCandidates,
 } from "./candidate-panel-model";
@@ -45,5 +46,22 @@ describe("candidate panel model", () => {
   it("labels candidate kinds for the review surface", () => {
     expect(candidateKindLabel("note")).toBe("笔记候选");
     expect(candidateKindLabel("question")).toBe("题目候选");
+  });
+
+  it("derives a course draft from a candidate with a fallback slug", () => {
+    const draft = candidateCourseDraft(baseCandidate, 1730000000000);
+    expect(draft.title).toBe("熵的直觉解释");
+    expect(draft.slug).toMatch(/^promoted-/);
+    expect(draft.description).toBe("熵是系统混乱程度的度量。");
+  });
+
+  it("keeps an ascii candidate title as the course slug", () => {
+    const draft = candidateCourseDraft({ ...baseCandidate, title: "Entropy Intuition" }, 1730000000000);
+    expect(draft.slug).toBe("entropy-intuition");
+  });
+
+  it("truncates a long candidate body to the description limit", () => {
+    const draft = candidateCourseDraft({ ...baseCandidate, body: "x".repeat(800) }, 1);
+    expect(draft.description.length).toBe(500);
   });
 });

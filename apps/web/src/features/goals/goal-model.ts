@@ -5,14 +5,14 @@ export type GoalWizardStep = (typeof GOAL_WIZARD_STEPS)[number];
 
 export type GoalDraft = Required<Pick<StudyGoalInput, "title" | "scenario" | "examDate" | "subjects" | "dailyMinutes" | "courseId">>;
 
-export function defaultGoalInput(): GoalDraft {
+export function defaultGoalInput(courseId: string | null = null): GoalDraft {
   return {
     title: "未命名目标",
     scenario: "final",
     examDate: null,
     subjects: [],
     dailyMinutes: 45,
-    courseId: null,
+    courseId,
   };
 }
 
