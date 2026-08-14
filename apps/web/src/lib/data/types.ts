@@ -1,5 +1,6 @@
 import type {
   AIRole,
+  AssessmentMode,
   AttemptEvent,
   ErrorCause,
   Exploration,
@@ -116,6 +117,7 @@ export interface MockProviderOptions {
   now?: Date | (() => Date);
   delayMs?: number;
   syllabus?: SyllabusPoint[];
+  assessmentMode?: AssessmentMode;
 }
 
 export interface StudyDataProvider {

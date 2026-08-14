@@ -1,5 +1,6 @@
 import {
   studyGoalSchema,
+  type AssessmentMode,
   type AttemptEvent,
   type ChatTurn,
   type Exploration,
@@ -37,6 +38,7 @@ export interface MockProviderState {
   fetchDocuments: () => Promise<SearchableDocument[]>;
   now: () => Date;
   syllabus: SyllabusPoint[];
+  assessmentMode: AssessmentMode;
 }
 
 export const MOCK_DOMAINS = [
@@ -63,6 +65,7 @@ export function createProviderState(options: MockProviderOptions): MockProviderS
     fetchDocuments: options.fetchDocuments ?? (async () => []),
     now: () => new Date(options.now instanceof Function ? options.now() : options.now ?? new Date()),
     syllabus: options.syllabus ?? SEED_SYLLABUS,
+    assessmentMode: options.assessmentMode ?? "basic",
   };
 }
 

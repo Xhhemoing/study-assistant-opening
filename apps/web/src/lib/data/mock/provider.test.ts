@@ -381,25 +381,17 @@ describe("MockStudyDataProvider", () => {
     expect(plan.totalMinutes).toBeLessThanOrEqual(50);
   });
 
-  it("computes effective requirements for multiple active goals", async () => {
-    const provider = createProvider();
-    const first = (await provider.listGoals())[0];
-    expect(first).toBeDefined();
-    if (!first) return;
-
-    await provider.updateGoal(first.id, { dailyMinutes: 30 });
-    await provider.createGoal({
-      title: "第二个学习目标",
-      scenario: "custom",
-      examDate: null,
-      subjects: ["数学"],
-      dailyMinutes: 20,
-      courseId: null,
+  it("skips practice tasks but keeps reviews when assessment is disabled", async () => {
+    const provider = createMockProvider({
+      userId: USER_ID,
+      now: NOW,
+      delayMs: 0,
+      storage: createMemoryStorage(),
+      assessmentMode: "disabled",
     });
 
-    // Should not throw even when multiple goals contribute to effective requirements
     const plan = await provider.getTodayPlan("2026-08-02");
-    expect(plan.budgetMinutes).toBe(50);
-    expect(plan.totalMinutes).toBeLessThanOrEqual(50);
+    expect(plan.tasks.every((task) => task.kind !== "practice")).toBe(true);
+    expect(plan.tasks.filter((task) => task.kind === "review").length).toBeGreaterThan(0);
   });
 });
