@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AttemptEvent, Diagnostics, StatusResult } from "@aistudy/contracts";
 import {
+  buildInterventionSummary,
   findPracticeResult,
   getAttemptEvidenceLabel,
   reasonCodeLabel,
@@ -61,5 +62,41 @@ describe("practice result summary model", () => {
   it("explains whether an attempt is independent evidence", () => {
     expect(getAttemptEvidenceLabel(event)).toContain("有效证据");
     expect(getAttemptEvidenceLabel({ ...event, assisted: true })).toContain("不计入");
+  });
+});
+
+describe("buildInterventionSummary", () => {
+  const wrongEvent: AttemptEvent = {
+    ...event,
+    correct: false,
+    confidence: 2,
+    errorCause: "concept",
+    createdAt: "2026-08-14T08:00:00.000Z",
+  };
+
+  it("returns null for a correct attempt", () => {
+    expect(buildInterventionSummary({ ...wrongEvent, correct: true }, [])).toBeNull();
+  });
+
+  it("returns null when no error cause is reported", () => {
+    expect(buildInterventionSummary({ ...wrongEvent, errorCause: null }, [])).toBeNull();
+  });
+
+  it("maps a low-confidence concept error to a review action with normal priority", () => {
+    const summary = buildInterventionSummary(wrongEvent, []);
+    expect(summary?.actionLabel).toBe("复习巩固");
+    expect(summary?.priorityLabel).toBe("常规");
+    expect(summary?.checkAtLabel).toBe("2026-08-21");
+  });
+
+  it("raises priority when the same cause repeated in history", () => {
+    const history: AttemptEvent[] = [
+      { ...wrongEvent, id: "77777777-7777-4777-8777-777777777702", errorCause: "concept" },
+    ];
+    expect(buildInterventionSummary(wrongEvent, history)?.priorityLabel).toBe("优先处理");
+  });
+
+  it("raises to focus priority for a high-confidence error", () => {
+    expect(buildInterventionSummary({ ...wrongEvent, confidence: 5 }, [])?.priorityLabel).toBe("重点关注");
   });
 });

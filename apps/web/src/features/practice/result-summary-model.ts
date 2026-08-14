@@ -1,9 +1,11 @@
 import type {
   AttemptEvent,
   Diagnostics,
+  ErrorCause,
   StatusResult,
   StatusWord,
 } from "@aistudy/contracts";
+import { planIntervention } from "@aistudy/domain";
 
 const statusLabels: Record<StatusWord, string> = {
   stable: "稳固",
@@ -50,5 +52,53 @@ export function findPracticeResult(
   return {
     event,
     status: diagnostics.statuses.find((item) => item.syllabusPointId === event.syllabusPointId) ?? null,
+  };
+}
+
+export interface InterventionSummary {
+  actionLabel: string;
+  priorityLabel: string;
+  checkAtLabel: string;
+}
+
+const ACTION_LABELS: Record<"review" | "variant" | "schedule", string> = {
+  review: "复习巩固",
+  variant: "做一道变式",
+  schedule: "安排限时复习",
+};
+
+const PRIORITY_LABELS: Record<"low" | "medium" | "high", string> = {
+  low: "常规",
+  medium: "重点关注",
+  high: "优先处理",
+};
+
+/**
+ * 根据本次错误与该考点历史错误生成干预摘要；答对或无错因时返回 null。
+ */
+export function buildInterventionSummary(
+  event: AttemptEvent,
+  history: AttemptEvent[],
+): InterventionSummary | null {
+  if (event.correct || !event.errorCause) return null;
+  const historyCauses: ErrorCause[] = history
+    .filter(
+      (item) =>
+        item.id !== event.id &&
+        item.syllabusPointId === event.syllabusPointId &&
+        !item.correct &&
+        item.errorCause !== null,
+    )
+    .map((item) => item.errorCause as ErrorCause);
+  const plan = planIntervention({
+    cause: event.errorCause,
+    confidence: event.confidence,
+    occurredAt: event.createdAt,
+    historyCauses,
+  });
+  return {
+    actionLabel: ACTION_LABELS[plan.action],
+    priorityLabel: PRIORITY_LABELS[plan.priority],
+    checkAtLabel: plan.checkAt.slice(0, 10),
   };
 }

@@ -53,4 +53,27 @@ describe("result summary", () => {
     expect(html).toContain("为什么");
     expect(html).toContain("继续今日计划");
   });
+
+  it("shows the intervention suggestion when provided", () => {
+    const html = renderToStaticMarkup(createElement(ResultSummary, {
+      data: { event, status },
+      nextHref: "/learn",
+      onOpenReason: vi.fn(),
+      intervention: { actionLabel: "复习巩固", priorityLabel: "常规", checkAtLabel: "2026-08-21" },
+    }));
+
+    expect(html).toContain("干预建议");
+    expect(html).toContain("复习巩固");
+    expect(html).toContain("2026-08-21");
+  });
+
+  it("omits the intervention block when none is provided", () => {
+    const html = renderToStaticMarkup(createElement(ResultSummary, {
+      data: { event, status },
+      nextHref: "/learn",
+      onOpenReason: vi.fn(),
+    }));
+
+    expect(html).not.toContain("干预建议");
+  });
 });
