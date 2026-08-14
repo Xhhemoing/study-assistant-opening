@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PracticeItem } from "@aistudy/contracts";
-import { classifyError } from "./intervention";
+import type { ErrorCause, PracticeItem } from "@aistudy/contracts";
+import { classifyError, type InterventionAction } from "./intervention";
 
 const item = (overrides: Partial<PracticeItem> = {}): PracticeItem => ({
   id: "22222222-2222-4222-8222-222222222201",
@@ -16,18 +16,34 @@ const item = (overrides: Partial<PracticeItem> = {}): PracticeItem => ({
   ...overrides,
 });
 
+const EXPECTED_ACTIONS: Array<[ErrorCause | null, InterventionAction]> = [
+  ["concept", "review"],
+  ["misread", "review"],
+  ["calculation", "variant"],
+  ["steps", "review"],
+  ["time", "schedule"],
+  ["other", "review"],
+  [null, "review"],
+];
+
 describe("classifyError", () => {
-  it("returns a non-empty message for every known cause", () => {
-    const causes = ["concept", "misread", "calculation", "steps", "time", "other", null] as const;
-    for (const cause of causes) {
-      const hint = classifyError(cause as never, item());
-      expect(hint.message.length).toBeGreaterThan(5);
-      expect(["review", "variant", "schedule"]).toContain(hint.action);
+  it("maps every known cause to its expected action", () => {
+    for (const [cause, action] of EXPECTED_ACTIONS) {
+      const hint = classifyError(cause, item());
+      expect(hint.action).toBe(action);
     }
   });
 
-  it("suggests variant for calculation errors", () => {
-    const hint = classifyError("calculation", item());
-    expect(hint.action).toBe("variant");
+  it("returns a non-empty message for every known cause", () => {
+    for (const [cause] of EXPECTED_ACTIONS) {
+      const hint = classifyError(cause, item());
+      expect(hint.message.length).toBeGreaterThan(5);
+    }
+  });
+
+  it("does not append ellipsis to short stems", () => {
+    const hint = classifyError("concept", item({ stem: "极限" }));
+    expect(hint.message).toContain("「极限」");
+    expect(hint.message).not.toContain("极限…");
   });
 });

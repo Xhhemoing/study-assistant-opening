@@ -1,8 +1,14 @@
 import type { ErrorCause, PracticeItem } from "@aistudy/contracts";
 
+export type InterventionAction = "review" | "variant" | "schedule";
+
 export interface InterventionHint {
   message: string;
-  action: "review" | "variant" | "schedule";
+  action: InterventionAction;
+}
+
+function shortStem(stem: string, max = 12): string {
+  return stem.length > max ? `${stem.slice(0, max)}…` : stem;
 }
 
 /**
@@ -15,7 +21,7 @@ export function classifyError(cause: ErrorCause | null, item: PracticeItem): Int
   }
   switch (cause) {
     case "concept":
-      return { message: `「${item.stem.slice(0, 12)}…」涉及的概念定义需要再巩固。`, action: "review" };
+      return { message: `「${shortStem(item.stem)}」涉及的概念定义需要再巩固。`, action: "review" };
     case "misread":
       return { message: "请仔细阅读题干，避免遗漏限定条件。", action: "review" };
     case "calculation":
