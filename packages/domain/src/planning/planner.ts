@@ -1,4 +1,5 @@
 import type {
+  AssessmentMode,
   PlannedTask,
   ScenarioPreset,
   StatusWord,
@@ -24,6 +25,8 @@ export interface PlannerInput {
   points: PlannerPointInput[];
   dueReviews: Array<{ cardId: string; front: string; estimatedMinutes: number }>;
   lockedTasks: PlannedTask[];
+  /** 评估开关；disabled 表示不评估，跳过 practice 任务（review 仍会排）。 */
+  assessmentMode?: AssessmentMode;
 }
 
 const TITLE_MAX = 24;
@@ -66,19 +69,22 @@ export function buildTodayPlan(input: PlannerInput): TodayPlan {
     });
   }
   const def = getScenarioPresetDefinition(input.scenario);
-  for (const status of def.tierOrder) {
-    const tier = (pointsByStatus.get(status) ?? []).slice().sort(byTitle);
-    for (const p of tier) {
-      queue.push({
-        id: `plan-${input.date}-practice-${p.practiceItemId}`,
-        kind: "practice",
-        refId: p.practiceItemId,
-        title: clipTitle(p.title),
-        estimatedMinutes: p.estimatedMinutes,
-        reason: def.reasonByStatus[status],
-        locked: false,
-        status: "pending",
-      });
+  const assessmentEnabled = (input.assessmentMode ?? "basic") !== "disabled";
+  if (assessmentEnabled) {
+    for (const status of def.tierOrder) {
+      const tier = (pointsByStatus.get(status) ?? []).slice().sort(byTitle);
+      for (const p of tier) {
+        queue.push({
+          id: `plan-${input.date}-practice-${p.practiceItemId}`,
+          kind: "practice",
+          refId: p.practiceItemId,
+          title: clipTitle(p.title),
+          estimatedMinutes: p.estimatedMinutes,
+          reason: def.reasonByStatus[status],
+          locked: false,
+          status: "pending",
+        });
+      }
     }
   }
 

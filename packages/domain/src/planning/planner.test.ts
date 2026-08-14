@@ -133,6 +133,21 @@ describe("buildTodayPlan plan-1", () => {
     expect(p.tasks[3].reason).toBe("做一道变式保持手感");
   });
 
+  it("skips practice tasks when assessment is disabled but keeps reviews", () => {
+    const p = plan({
+      assessmentMode: "disabled",
+      dueReviews: [{ cardId: "card-1", front: "导数定义卡片", estimatedMinutes: 5 }],
+      points: [point("a", "weak", 10), point("b", "untested", 10)],
+    });
+    expect(p.tasks.map((t) => t.kind)).toEqual(["review"]);
+    expect(p.tasks.every((t) => t.kind !== "practice")).toBe(true);
+  });
+
+  it("defaults to basic assessment mode and includes practice tasks", () => {
+    const p = plan({ points: [point("a", "weak", 10)] });
+    expect(p.tasks.map((t) => t.kind)).toEqual(["practice"]);
+  });
+
   it("is deterministic and carries plan metadata", () => {
     const input: PlannerInput = { ...BASE, points: [point("a", "weak", 10)] };
     const p1 = buildTodayPlan(input);
