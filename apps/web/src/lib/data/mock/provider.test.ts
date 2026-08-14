@@ -313,4 +313,71 @@ describe("MockStudyDataProvider", () => {
     const hits = await provider.searchAll(" ＴＯＰＩＣ ");
     expect(hits.find((hit) => hit.id === "remote-1")?.type).toBe("document");
   });
+
+  it("feeds review grades on syllabus-bound cards into that point's status", async () => {
+    const provider = createProvider();
+    const untested = (await provider.listStatuses()).find((s) => s.status === "untested");
+    expect(untested).toBeDefined();
+    if (!untested) return;
+
+    const card = await provider.createReviewCard({
+      front: "测试卡正面",
+      back: "测试卡背面",
+      syllabusPointId: untested.syllabusPointId,
+    });
+    await provider.gradeCard(card.id, "good");
+    await provider.gradeCard(card.id, "good");
+
+    const after = (await provider.listStatuses()).find((s) => s.syllabusPointId === untested.syllabusPointId);
+    expect(after?.status).toBe("usable");
+  });
+
+  it("applies a status correction override to the affected point", async () => {
+    const provider = createProvider();
+    const target = (await provider.listStatuses())[0];
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    await provider.recordStatusCorrection(target.syllabusPointId, "我觉得应该是稳固", "stable");
+
+    const after = (await provider.listStatuses()).find((s) => s.syllabusPointId === target.syllabusPointId);
+    expect(after?.status).toBe("stable");
+    expect(after?.reasonCodes).toContain("user-correction");
+  });
+
+  it("uses an injected syllabus instead of the seed list", async () => {
+    const provider = createMockProvider({
+      userId: USER_ID,
+      now: NOW,
+      delayMs: 0,
+      storage: createMemoryStorage(),
+      syllabus: [{ id: "99999999-9999-4999-8999-999999999999", title: "自定义考点" }],
+    });
+
+    const statuses = await provider.listStatuses();
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.syllabusPointId).toBe("99999999-9999-4999-8999-999999999999");
+    expect(statuses[0]?.status).toBe("untested");
+  });
+
+  it("combines daily budgets of multiple active goals", async () => {
+    const provider = createProvider();
+    const first = (await provider.listGoals())[0];
+    expect(first).toBeDefined();
+    if (!first) return;
+
+    await provider.updateGoal(first.id, { dailyMinutes: 30 });
+    await provider.createGoal({
+      title: "第二个学习目标",
+      scenario: "custom",
+      examDate: null,
+      subjects: ["数学"],
+      dailyMinutes: 20,
+      courseId: null,
+    });
+
+    const plan = await provider.getTodayPlan("2026-08-02");
+    expect(plan.budgetMinutes).toBe(50);
+    expect(plan.totalMinutes).toBeLessThanOrEqual(50);
+  });
 });

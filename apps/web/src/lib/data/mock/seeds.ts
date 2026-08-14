@@ -158,17 +158,21 @@ const CARD_CONTENT: Array<[string, string]> = [
   ["泰勒公式直觉", "用多项式逼近光滑函数"],
 ];
 
+const CARD_POINT_INDEX: Array<number | null> = [1, 4, 3, 8, 7, 5, 0, null];
+
 function buildCards(ownerUserId: string, now: Date): { cards: ReviewCard[]; states: ReviewState[] } {
   const cards: ReviewCard[] = [];
   const states: ReviewState[] = [];
   CARD_CONTENT.forEach(([front, back], i) => {
     const id = cid((i + 1).toString(16).padStart(2, "0"));
+    const pointIndex = CARD_POINT_INDEX[i];
     cards.push({
       id,
       ownerUserId,
       front,
       back,
       sourceDocumentId: null,
+      syllabusPointId: pointIndex === null || pointIndex === undefined ? null : (SEED_SYLLABUS[pointIndex]?.id ?? null),
       tags: ["高数"],
       archived: i === 7,
       createdAt: new Date(now.getTime() - 5 * DAY).toISOString(),

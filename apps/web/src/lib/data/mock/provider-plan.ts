@@ -12,10 +12,10 @@ import {
   type ReviewGrade,
   type ReviewState,
   type StatusResult,
+  type StatusWord,
   type TodayPlan,
 } from "@aistudy/contracts";
-import { buildTodayPlan, deriveStatus, scheduleReview, type EvidenceEvent } from "@aistudy/domain";
-import { SEED_SYLLABUS } from "./seeds";
+import { buildTodayPlan, deriveStatus, isPracticeAnswerCorrect, reviewGradeToEvidence, scheduleReview, type EvidenceEvent } from "@aistudy/domain";
 import { listGoals } from "./provider-goals";
 import {
   newId,
@@ -32,28 +32,36 @@ import type {
   AttemptInput,
   PracticeItemInput,
   ReviewCardInput,
+  ReviewEvidenceRecord,
   ReviewQueueItem,
   SubmissionResult,
   StatusCorrection,
 } from "../types";
-import { isPracticeAnswerCorrect } from "../practice-answers";
 
 function statusForPoint(state: MockProviderState, pointId: string, now: Date): StatusResult {
   const events = readDomain<AttemptEvent[]>(state, "attemptEvents", []);
-  const evidence: EvidenceEvent[] = events.filter((event) => event.syllabusPointId === pointId).map((event) => ({
-    correct: event.correct,
-    assisted: event.assisted,
-    hintCount: event.hintCount,
-    confidence: event.confidence,
-    slice: event.abilitySlice,
-    occurredAt: event.createdAt,
-  }));
-  return deriveStatus(pointId, evidence, now);
+  const attemptEvidence: EvidenceEvent[] = events
+    .filter((event) => event.syllabusPointId === pointId)
+    .map((event) => ({
+      correct: event.correct,
+      assisted: event.assisted,
+      hintCount: event.hintCount,
+      confidence: event.confidence,
+      slice: event.abilitySlice,
+      occurredAt: event.createdAt,
+      source: "attempt" as const,
+    }));
+  const reviewEvents = readDomain<ReviewEvidenceRecord[]>(state, "reviewEvents", []);
+  const reviewEvidence: EvidenceEvent[] = reviewEvents
+    .filter((record) => record.syllabusPointId === pointId)
+    .map((record) => reviewGradeToEvidence(record.grade, record.occurredAt));
+  const corrections = readDomain<StatusCorrection[]>(state, "corrections", []);
+  return deriveStatus(pointId, [...attemptEvidence, ...reviewEvidence], now, corrections);
 }
 
 export function listStatuses(state: MockProviderState): StatusResult[] {
   const now = state.now();
-  return SEED_SYLLABUS.map((point) => statusForPoint(state, point.id, now));
+  return state.syllabus.map((point) => statusForPoint(state, point.id, now));
 }
 
 function applyOverlay(plan: TodayPlan, overlays: Record<string, PlanOverlay>): TodayPlan {
@@ -67,22 +75,28 @@ function applyOverlay(plan: TodayPlan, overlays: Record<string, PlanOverlay>): T
   };
 }
 
-function activeGoal(state: MockProviderState) {
-  return listGoals(state).find((goal) => goal.archivedAt === null);
+function activeGoals(state: MockProviderState) {
+  return listGoals(state).filter((goal) => goal.archivedAt === null);
+}
+
+function goalSetKey(goals: ReturnType<typeof activeGoals>): string {
+  return goals.map((goal) => goal.id).sort().join("|");
 }
 
 function planForDate(state: MockProviderState, date: string): TodayPlan {
-  const goal = activeGoal(state);
-  if (!goal) throw new Error("请先创建一个学习目标");
+  const goals = activeGoals(state);
+  const primaryGoal = goals[0];
+  if (!primaryGoal) throw new Error("请先创建一个学习目标");
+  const key = goalSetKey(goals);
   const snapshots = readPlanSnapshots(state);
   const storedSnapshot = snapshots[date];
-  const snapshot: PlanSnapshot = storedSnapshot && storedSnapshot.goalId === goal.id
+  const snapshot: PlanSnapshot = storedSnapshot && storedSnapshot.goalId === key
     ? storedSnapshot
-    : { goalId: goal.id, overlays: {}, lastPlan: null };
+    : { goalId: key, overlays: {}, lastPlan: null };
   const previousLockedTasks = (snapshot.lastPlan?.tasks ?? []).filter((task) => snapshot.overlays[task.id]?.locked);
   const items = readDomain<import("@aistudy/contracts").PracticeItem[]>(state, "practiceItems", []);
   const statuses = listStatuses(state);
-  const points = SEED_SYLLABUS.flatMap((point) => {
+  const points = state.syllabus.flatMap((point) => {
     const item = items.find((candidate) => candidate.syllabusPointId === point.id);
     const status = statuses.find((candidate) => candidate.syllabusPointId === point.id);
     if (!item || !status) return [];
@@ -98,8 +112,8 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
   const plannerInput = {
     ownerUserId: state.userId,
     date,
-    budgetMinutes: goal.dailyMinutes,
-    scenario: goal.scenario,
+    budgetMinutes: goals.reduce((sum, goal) => sum + goal.dailyMinutes, 0),
+    scenario: primaryGoal.scenario,
     points,
     dueReviews,
   };
@@ -117,7 +131,7 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     Object.entries(snapshot.overlays).filter(([taskId]) => plan.tasks.some((task) => task.id === taskId)),
   );
   const applied = applyOverlay(plan, overlays);
-  snapshots[date] = { goalId: goal.id, overlays, lastPlan: applied };
+  snapshots[date] = { goalId: key, overlays, lastPlan: applied };
   writePlanSnapshots(state, snapshots);
   return applied;
 }
@@ -129,9 +143,9 @@ export function getTodayPlan(state: MockProviderState, date?: string): TodayPlan
 function setOverlay(state: MockProviderState, date: string, taskId: string, patch: PlanOverlay): TodayPlan {
   const current = planForDate(state, date);
   const snapshots = readPlanSnapshots(state);
-  const goal = activeGoal(state);
-  if (!goal) throw new Error("请先创建一个学习目标");
-  const snapshot = snapshots[date] ?? { goalId: goal.id, overlays: {}, lastPlan: current };
+  const goals = activeGoals(state);
+  if (goals.length === 0) throw new Error("请先创建一个学习目标");
+  const snapshot = snapshots[date] ?? { goalId: goalSetKey(goals), overlays: {}, lastPlan: current };
   snapshots[date] = {
     ...snapshot,
     overlays: { ...snapshot.overlays, [taskId]: { ...snapshot.overlays[taskId], ...patch } },
@@ -172,8 +186,19 @@ export function submitAttempt(state: MockProviderState, input: AttemptInput): Su
   return { event, status: statusForPoint(state, item.syllabusPointId, state.now()) };
 }
 
-export function recordStatusCorrection(state: MockProviderState, syllabusPointId: string, note: string): StatusCorrection {
-  const correction = { id: newId(), syllabusPointId, note, createdAt: state.now().toISOString() };
+export function recordStatusCorrection(
+  state: MockProviderState,
+  syllabusPointId: string,
+  note: string,
+  overrideStatus: StatusWord | null = null,
+): StatusCorrection {
+  const correction: StatusCorrection = {
+    id: newId(),
+    syllabusPointId,
+    note,
+    overrideStatus,
+    createdAt: state.now().toISOString(),
+  };
   writeDomain(state, "corrections", [...readDomain<StatusCorrection[]>(state, "corrections", []), correction]);
   return correction;
 }
@@ -195,6 +220,7 @@ export function createReviewCard(state: MockProviderState, input: ReviewCardInpu
     front: input.front.trim(),
     back: input.back.trim(),
     sourceDocumentId: input.sourceDocumentId ?? null,
+    syllabusPointId: input.syllabusPointId ?? null,
     tags: [...new Set((input.tags ?? ["探索"]).map((tag) => tag.trim()).filter(Boolean))],
     archived: false,
     createdAt: now,
@@ -215,7 +241,7 @@ export function createReviewCard(state: MockProviderState, input: ReviewCardInpu
 }
 
 export function createPracticeItem(state: MockProviderState, input: PracticeItemInput): PracticeItem {
-  const point = input.syllabusPointId ?? SEED_SYLLABUS[0]?.id;
+  const point = input.syllabusPointId ?? state.syllabus[0]?.id;
   if (!point) throw new Error("没有可用的课程知识点");
   const item = practiceItemSchema.parse({
     id: newId(),
@@ -240,5 +266,14 @@ export function gradeCard(state: MockProviderState, cardId: string, grade: Revie
   if (!current) throw new Error("复习卡不存在");
   const next = scheduleReview(current, grade, state.now());
   writeDomain(state, "reviewStates", states.map((item) => (item.cardId === cardId ? next : item)));
+  const card = readDomain<ReviewCard[]>(state, "reviewCards", []).find((item) => item.id === cardId);
+  if (card?.syllabusPointId) {
+    const record: ReviewEvidenceRecord = {
+      syllabusPointId: card.syllabusPointId,
+      grade,
+      occurredAt: state.now().toISOString(),
+    };
+    writeDomain(state, "reviewEvents", [...readDomain<ReviewEvidenceRecord[]>(state, "reviewEvents", []), record]);
+  }
   return next;
 }
