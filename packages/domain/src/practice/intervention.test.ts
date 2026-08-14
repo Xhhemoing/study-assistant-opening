@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCause, PracticeItem } from "@aistudy/contracts";
-import { classifyError, type InterventionAction } from "./intervention";
+import {
+  actionForCause,
+  classifyError,
+  planIntervention,
+  type InterventionAction,
+} from "./intervention";
 
 const item = (overrides: Partial<PracticeItem> = {}): PracticeItem => ({
   id: "22222222-2222-4222-8222-222222222201",
@@ -45,5 +50,54 @@ describe("classifyError", () => {
     const hint = classifyError("concept", item({ stem: "极限" }));
     expect(hint.message).toContain("「极限」");
     expect(hint.message).not.toContain("极限…");
+  });
+});
+
+describe("actionForCause", () => {
+  it("maps calculation to variant and time to schedule", () => {
+    expect(actionForCause("calculation")).toBe("variant");
+    expect(actionForCause("time")).toBe("schedule");
+    expect(actionForCause("concept")).toBe("review");
+    expect(actionForCause("misread")).toBe("review");
+    expect(actionForCause("steps")).toBe("review");
+    expect(actionForCause("other")).toBe("review");
+    expect(actionForCause(null)).toBe("review");
+  });
+});
+
+describe("planIntervention", () => {
+  const BASE = {
+    cause: "concept" as ErrorCause,
+    confidence: 3,
+    occurredAt: "2026-08-14T08:00:00.000Z",
+  };
+
+  it("schedules a 7-day check window from occurredAt", () => {
+    const plan = planIntervention(BASE);
+    expect(plan.checkAt).toBe("2026-08-21T08:00:00.000Z");
+  });
+
+  it("defaults to low priority for a low-confidence first error", () => {
+    expect(planIntervention(BASE).priority).toBe("low");
+  });
+
+  it("raises to medium on a high-confidence error", () => {
+    expect(planIntervention({ ...BASE, confidence: 4 }).priority).toBe("medium");
+    expect(planIntervention({ ...BASE, confidence: 5 }).priority).toBe("medium");
+  });
+
+  it("raises to high when the same cause repeats in history", () => {
+    expect(planIntervention({ ...BASE, historyCauses: ["concept"] }).priority).toBe("high");
+  });
+
+  it("stays high when both repeat and high confidence apply", () => {
+    expect(
+      planIntervention({ ...BASE, confidence: 5, historyCauses: ["concept", "calculation"] }).priority,
+    ).toBe("high");
+  });
+
+  it("derives the action from the cause", () => {
+    expect(planIntervention({ ...BASE, cause: "calculation" }).action).toBe("variant");
+    expect(planIntervention({ ...BASE, cause: "time" }).action).toBe("schedule");
   });
 });

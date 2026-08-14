@@ -25,7 +25,16 @@ export {
 } from "./planning/planner";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
 export { isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
-export { classifyError, type InterventionAction, type InterventionHint } from "./practice/intervention";
+export {
+  INTERVENTION_VERSION,
+  actionForCause,
+  classifyError,
+  planIntervention,
+  type InterventionAction,
+  type InterventionHint,
+  type InterventionPlan,
+  type InterventionPriority,
+} from "./practice/intervention";
 export {
   assertNonEmptyRevisionBlocks,
   diffRevisionBlocks,
