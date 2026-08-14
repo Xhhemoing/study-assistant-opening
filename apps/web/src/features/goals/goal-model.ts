@@ -47,6 +47,7 @@ const SCENARIO_LABELS: Record<ScenarioPreset, string> = Object.fromEntries(
   GOAL_SCENARIOS.map((item) => [item.value, item.label]),
 ) as Record<ScenarioPreset, string>;
 
+// 未来可从 @aistudy/domain 的 ScenarioPresetDefinition.displayName 统一来源（ADR-014）
 export function scenarioLabel(scenario: ScenarioPreset): string {
   return SCENARIO_LABELS[scenario];
 }
