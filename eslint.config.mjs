@@ -12,6 +12,13 @@ export default tseslint.config(
       "package-lock.json",
       "spikes/**",
       "apps/web/next-env.d.ts",
+      // Agent/CI/tooling metadata directories are not project source.
+      ".agents/**",
+      ".claude/**",
+      ".github/**",
+      ".pi/**",
+      ".hermes/**",
+      "project/**",
     ],
   },
   js.configs.recommended,
