@@ -60,7 +60,7 @@ export function createMockProvider(options: MockProviderOptions): StudyDataProvi
     getPracticeItem: (id) => run((current) => getPracticeItem(current, id)),
     submitAttempt: (input: AttemptInput) => run((current) => submitAttempt(current, input)),
     listStatuses: () => run(listStatuses),
-    recordStatusCorrection: (pointId, note) => run((current) => recordStatusCorrection(current, pointId, note)),
+    recordStatusCorrection: (pointId, note, overrideStatus) => run((current) => recordStatusCorrection(current, pointId, note, overrideStatus ?? null)),
     listDueCards: (at) => run((current) => listDueCards(current, at)),
     createReviewCard: (input) => run((current) => createReviewCard(current, input)),
     gradeCard: (cardId, grade: ReviewGrade) => run((current) => gradeCard(current, cardId, grade)),

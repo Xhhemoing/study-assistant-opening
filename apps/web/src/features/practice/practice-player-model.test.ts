@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PracticeItem } from "@aistudy/contracts";
-import { isPracticeAnswerCorrect, normalizeAnswer } from "../../lib/data/practice-answers";
+import { isPracticeAnswerCorrect, normalizeAnswer } from "@aistudy/domain";
 import {
   createPracticePlayerState,
   getSubmissionIssue,

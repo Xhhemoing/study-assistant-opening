@@ -8,6 +8,7 @@ export const reviewCardSchema = z.object({
   front: z.string().min(1),
   back: z.string().min(1),
   sourceDocumentId: z.string().uuid().nullable(),
+  syllabusPointId: z.string().uuid().nullable(),
   tags: z.array(z.string().min(1)),
   archived: z.boolean(),
   createdAt: z.string().datetime(),

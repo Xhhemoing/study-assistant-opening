@@ -19,6 +19,8 @@ const reasonLabels: Record<string, string> = {
   "insufficient-evidence": "有效证据还不够",
   "consistent-success": "近期连续答对且包含迁移题",
   "partial-mastery": "部分能力已经稳定，仍有边界需要巩固",
+  "user-correction": "你已手动修正这个状态",
+  "user-disputed": "你标记过这个判断不准确",
 };
 
 export function statusWordLabel(status: StatusWord): string {

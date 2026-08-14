@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ASSESSMENT_VERSION, deriveStatus, type EvidenceEvent } from "./status";
+import {
+  ASSESSMENT_VERSION,
+  deriveStatus,
+  reviewGradeToEvidence,
+  type EvidenceEvent,
+  type StatusCorrection,
+} from "./status";
 
 const NOW = new Date("2026-08-02T08:00:00.000Z");
 const POINT = "11111111-1111-4111-8111-111111111101";
@@ -11,6 +17,7 @@ function ev(partial: Partial<EvidenceEvent> & { occurredAt: string }): EvidenceE
     hintCount: 0,
     confidence: 4,
     slice: "recognition",
+    source: "attempt",
     ...partial,
   };
 }
@@ -124,5 +131,99 @@ describe("deriveStatus assess-1", () => {
   it("deterministic output for identical input", () => {
     const events = [ev({ occurredAt: "2026-08-01T08:00:00.000Z" })];
     expect(deriveStatus(POINT, events, NOW)).toEqual(deriveStatus(POINT, events, NOW));
+  });
+
+  it("orders out-of-order events by occurrence time, not insertion order", () => {
+    const r = deriveStatus(
+      POINT,
+      [
+        ev({ occurredAt: "2026-08-01T09:00:00.000Z", correct: false }),
+        ev({ occurredAt: "2026-08-01T08:00:00.000Z" }),
+      ],
+      NOW,
+    );
+    expect(r.status).toBe("weak");
+  });
+});
+
+describe("reviewGradeToEvidence", () => {
+  it("maps grades to recall-slice evidence", () => {
+    const t = "2026-08-01T08:00:00.000Z";
+    expect(reviewGradeToEvidence("again", t)).toEqual({
+      correct: false,
+      assisted: false,
+      hintCount: 0,
+      confidence: 1,
+      slice: "recall",
+      occurredAt: t,
+      source: "review",
+    });
+    expect(reviewGradeToEvidence("hard", t).correct).toBe(true);
+    expect(reviewGradeToEvidence("hard", t).confidence).toBe(2);
+    expect(reviewGradeToEvidence("good", t).confidence).toBe(3);
+    expect(reviewGradeToEvidence("easy", t).confidence).toBe(5);
+  });
+});
+
+describe("review evidence affects status", () => {
+  it("review-only recall history derives usable instead of untested", () => {
+    const r = deriveStatus(
+      POINT,
+      [
+        reviewGradeToEvidence("good", "2026-08-01T08:00:00.000Z"),
+        reviewGradeToEvidence("good", "2026-08-01T09:00:00.000Z"),
+      ],
+      NOW,
+    );
+    expect(r.status).toBe("usable");
+    expect(r.reasonCodes).toEqual(["partial-mastery"]);
+  });
+
+  it("a recent failed review marks the point weak", () => {
+    const r = deriveStatus(
+      POINT,
+      [
+        reviewGradeToEvidence("good", "2026-08-01T08:00:00.000Z"),
+        reviewGradeToEvidence("again", "2026-08-01T09:00:00.000Z"),
+      ],
+      NOW,
+    );
+    expect(r.status).toBe("weak");
+  });
+});
+
+describe("correction override", () => {
+  const overrideCorrection: StatusCorrection = {
+    syllabusPointId: POINT,
+    note: "我觉得应该是稳固",
+    overrideStatus: "stable",
+    createdAt: "2026-08-02T07:00:00.000Z",
+  };
+
+  it("override replaces the derived status and surfaces the note", () => {
+    const r = deriveStatus(
+      POINT,
+      [ev({ occurredAt: "2026-08-01T09:00:00.000Z", correct: false })],
+      NOW,
+      [overrideCorrection],
+    );
+    expect(r.status).toBe("stable");
+    expect(r.reasonCodes[0]).toBe("user-correction");
+    expect(r.summaryMetrics.some((m) => m.key === "correction" && m.value === "我觉得应该是稳固")).toBe(true);
+  });
+
+  it("a note-only correction disputes but keeps the derived status", () => {
+    const r = deriveStatus(
+      POINT,
+      [
+        ev({ occurredAt: "2026-08-01T08:00:00.000Z" }),
+        ev({ occurredAt: "2026-08-01T09:00:00.000Z", correct: false }),
+      ],
+      NOW,
+      [{ syllabusPointId: POINT, note: "标记不准确", overrideStatus: null, createdAt: "2026-08-02T07:00:00.000Z" }],
+    );
+    expect(r.status).toBe("weak");
+    expect(r.reasonCodes).toContain("user-disputed");
+    expect(r.summaryMetrics.some((m) => m.key === "correction")).toBe(true);
   });
 });

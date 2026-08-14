@@ -11,6 +11,7 @@ import type {
   StatusResult,
   StudyGoal,
   StudyGoalInput,
+  StatusWord,
   TodayPlan,
   PlannedTask,
   ChatTurn,
@@ -52,6 +53,7 @@ export interface ReviewCardInput {
   back: string;
   tags?: string[];
   sourceDocumentId?: string | null;
+  syllabusPointId?: string | null;
 }
 
 export interface PracticeItemInput {
@@ -92,7 +94,19 @@ export interface StatusCorrection {
   id: string;
   syllabusPointId: string;
   note: string;
+  overrideStatus?: StatusWord | null;
   createdAt: string;
+}
+
+export interface ReviewEvidenceRecord {
+  syllabusPointId: string;
+  grade: ReviewGrade;
+  occurredAt: string;
+}
+
+export interface SyllabusPoint {
+  id: string;
+  title: string;
 }
 
 export interface MockProviderOptions {
@@ -101,6 +115,7 @@ export interface MockProviderOptions {
   fetchDocuments?: () => Promise<SearchableDocument[]>;
   now?: Date | (() => Date);
   delayMs?: number;
+  syllabus?: SyllabusPoint[];
 }
 
 export interface StudyDataProvider {
@@ -115,7 +130,11 @@ export interface StudyDataProvider {
   getPracticeItem(id: string): Promise<PracticeItem | null>;
   submitAttempt(input: AttemptInput): Promise<SubmissionResult>;
   listStatuses(): Promise<StatusResult[]>;
-  recordStatusCorrection(syllabusPointId: string, note: string): Promise<StatusCorrection>;
+  recordStatusCorrection(
+    syllabusPointId: string,
+    note: string,
+    overrideStatus?: StatusWord | null,
+  ): Promise<StatusCorrection>;
   listDueCards(at?: Date): Promise<ReviewQueueItem[]>;
   createReviewCard(input: ReviewCardInput): Promise<ReviewCard>;
   gradeCard(cardId: string, grade: ReviewGrade): Promise<ReviewState>;

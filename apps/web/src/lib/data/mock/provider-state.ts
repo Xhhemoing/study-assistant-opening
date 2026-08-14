@@ -10,7 +10,7 @@ import {
   type StudyGoal,
   type TodayPlan,
 } from "@aistudy/contracts";
-import { buildSeedBundle } from "./seeds";
+import { buildSeedBundle, SEED_SYLLABUS } from "./seeds";
 import {
   loadDomain,
   mockKey,
@@ -18,7 +18,7 @@ import {
   saveDomain,
   type StorageLike,
 } from "./storage";
-import type { MockProviderOptions, SearchableDocument } from "../types";
+import type { MockProviderOptions, SearchableDocument, SyllabusPoint } from "../types";
 
 export interface PlanOverlay {
   status?: TodayPlan["tasks"][number]["status"];
@@ -36,6 +36,7 @@ export interface MockProviderState {
   storage: StorageLike;
   fetchDocuments: () => Promise<SearchableDocument[]>;
   now: () => Date;
+  syllabus: SyllabusPoint[];
 }
 
 export const MOCK_DOMAINS = [
@@ -44,6 +45,7 @@ export const MOCK_DOMAINS = [
   "attemptEvents",
   "reviewCards",
   "reviewStates",
+  "reviewEvents",
   "explorations",
   "chatTurns",
   "candidates",
@@ -60,6 +62,7 @@ export function createProviderState(options: MockProviderOptions): MockProviderS
     storage: options.storage,
     fetchDocuments: options.fetchDocuments ?? (async () => []),
     now: () => new Date(options.now instanceof Function ? options.now() : options.now ?? new Date()),
+    syllabus: options.syllabus ?? SEED_SYLLABUS,
   };
 }
 
@@ -74,6 +77,7 @@ export function ensureSeed(state: MockProviderState): void {
   saveDomain(state.storage, state.userId, "attemptEvents", bundle.attemptEvents);
   saveDomain(state.storage, state.userId, "reviewCards", bundle.reviewCards);
   saveDomain(state.storage, state.userId, "reviewStates", bundle.reviewStates);
+  saveDomain(state.storage, state.userId, "reviewEvents", []);
   saveDomain(state.storage, state.userId, "explorations", [bundle.exploration]);
   saveDomain(state.storage, state.userId, "chatTurns", bundle.chatTurns);
   saveDomain(state.storage, state.userId, "candidates", bundle.candidates);

@@ -101,6 +101,7 @@ describe("frontend domain contracts", () => {
         front: "导数的定义",
         back: "极限定义的导数",
         sourceDocumentId: null,
+        syllabusPointId: null,
         tags: ["高数"],
         archived: false,
         createdAt: NOW,

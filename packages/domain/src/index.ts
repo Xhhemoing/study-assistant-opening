@@ -16,7 +16,7 @@ export function isSummaryBand(value: string): value is SummaryBand {
 }
 
 export { SRS_VERSION, createInitialState, scheduleReview } from "./srs/scheduler";
-export { ASSESSMENT_VERSION, deriveStatus, type EvidenceEvent } from "./assessment/status";
+export { ASSESSMENT_VERSION, deriveStatus, reviewGradeToEvidence, type EvidenceEvent, type EvidenceSource, type StatusCorrection } from "./assessment/status";
 export {
   PLANNER_VERSION,
   buildTodayPlan,
@@ -24,6 +24,7 @@ export {
   type PlannerPointInput,
 } from "./planning/planner";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
+export { isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
 export {
   assertNonEmptyRevisionBlocks,
   diffRevisionBlocks,

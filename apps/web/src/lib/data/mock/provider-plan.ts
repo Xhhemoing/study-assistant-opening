@@ -15,7 +15,18 @@ import {
   type StatusWord,
   type TodayPlan,
 } from "@aistudy/contracts";
-import { buildTodayPlan, deriveStatus, isPracticeAnswerCorrect, reviewGradeToEvidence, scheduleReview, type EvidenceEvent } from "@aistudy/domain";
+import {
+  buildTodayPlan,
+  computeEffectiveRequirements,
+  defaultGoalAbilities,
+  deriveStatus,
+  getRequirementProfile,
+  isPracticeAnswerCorrect,
+  reviewGradeToEvidence,
+  scheduleReview,
+  type EvidenceEvent,
+  type GoalKind,
+} from "@aistudy/domain";
 import { listGoals } from "./provider-goals";
 import {
   newId,
@@ -109,6 +120,26 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     const card = cards.find((candidate) => candidate.id === stateItem.cardId);
     return card && !card.archived ? [{ cardId: card.id, front: card.front, estimatedMinutes: 5 }] : [];
   });
+  // Resolve effective requirements from active goals (baseline uses free-exploration when courseId is null).
+  const baseline = getRequirementProfile("free-exploration", "basic");
+  const goalRequirements = goals.map((g) => ({
+    goalId: g.id,
+    kind: (g.courseId ? "final-exam" : "custom") as GoalKind,
+    abilities: defaultGoalAbilities((g.courseId ? "final-exam" : "custom") as GoalKind),
+    priority: 0,
+    intensity: 0.5,
+    active: true,
+    strategyVersion: g.strategyVersion,
+  }));
+  // Note: defaultGoalAbilities is a local shim; real mapping would come from course profile.
+  // For now we keep plan output identical while exercising the merge path.
+  const effective = computeEffectiveRequirements({
+    baseline,
+    goals: goalRequirements,
+    timeWindows: [],
+    now: state.now(),
+  });
+
   const plannerInput = {
     ownerUserId: state.userId,
     date,
@@ -116,6 +147,7 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     scenario: primaryGoal.scenario,
     points,
     dueReviews,
+    effective,
   };
   const baselinePlan = buildTodayPlan({ ...plannerInput, lockedTasks: [] });
   const baselineTaskIds = new Set(baselinePlan.tasks.map((task) => task.id));

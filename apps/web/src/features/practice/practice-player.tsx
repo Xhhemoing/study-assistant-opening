@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ErrorCause, PracticeItem } from "@aistudy/contracts";
 import { useRouter } from "next/navigation";
 import { useStudyProvider } from "../../lib/data/react";
-import { isPracticeAnswerCorrect } from "../../lib/data/practice-answers";
+import { isPracticeAnswerCorrect } from "@aistudy/domain";
 import {
   createPracticePlayerState,
   getSubmissionIssue,

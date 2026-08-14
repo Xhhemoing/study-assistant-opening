@@ -1,6 +1,7 @@
 import type {
   AbilitySlice,
   RecommendedAction,
+  ReviewGrade,
   StatusResult,
   StatusWord,
   SummaryMetric,
@@ -9,6 +10,8 @@ import type {
 export const ASSESSMENT_VERSION = "assess-1";
 const MODEL_VERSION = "rules-1";
 
+export type EvidenceSource = "attempt" | "review";
+
 export interface EvidenceEvent {
   correct: boolean;
   assisted: boolean;
@@ -16,6 +19,34 @@ export interface EvidenceEvent {
   confidence: number;
   slice: AbilitySlice;
   occurredAt: string;
+  source: EvidenceSource;
+}
+
+export interface StatusCorrection {
+  syllabusPointId: string;
+  note: string;
+  overrideStatus?: StatusWord | null;
+  createdAt: string;
+}
+
+const REVIEW_GRADE_EVIDENCE: Record<ReviewGrade, { correct: boolean; confidence: number }> = {
+  again: { correct: false, confidence: 1 },
+  hard: { correct: true, confidence: 2 },
+  good: { correct: true, confidence: 3 },
+  easy: { correct: true, confidence: 5 },
+};
+
+export function reviewGradeToEvidence(grade: ReviewGrade, occurredAt: string): EvidenceEvent {
+  const mapping = REVIEW_GRADE_EVIDENCE[grade];
+  return {
+    correct: mapping.correct,
+    assisted: false,
+    hintCount: 0,
+    confidence: mapping.confidence,
+    slice: "recall",
+    occurredAt,
+    source: "review",
+  };
 }
 
 function mean(values: number[]): number {
@@ -23,16 +54,26 @@ function mean(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
-function snapshotId(pointId: string, effective: EvidenceEvent[], totalEvents: number): string {
+function snapshotId(
+  pointId: string,
+  effective: EvidenceEvent[],
+  totalEvents: number,
+  correction?: StatusCorrection,
+): string {
   const lastEvent = effective.at(-1);
   const last = lastEvent ? lastEvent.occurredAt : "none";
-  const input = `${pointId}|${last}|${totalEvents}`;
+  const correctionPart = correction ? `|${correction.createdAt}|${correction.overrideStatus ?? "disputed"}` : "";
+  const input = `${pointId}|${last}|${totalEvents}${correctionPart}`;
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
     h ^= input.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
   return `snap-${(h >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function clipNote(note: string): string {
+  return note.length > 40 ? `${note.slice(0, 39)}…` : note;
 }
 
 interface Verdict {
@@ -92,12 +133,27 @@ export function deriveStatus(
   syllabusPointId: string,
   events: EvidenceEvent[],
   now: Date,
+  corrections: StatusCorrection[] = [],
 ): StatusResult {
   const effective = events
     .filter((e) => !e.assisted)
     .slice()
     .sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0));
   const verdict = judge(effective);
+  const latestCorrection = corrections
+    .filter((c) => c.syllabusPointId === syllabusPointId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+    .at(-1);
+
+  let status = verdict.status;
+  let reasonCodes = [...verdict.reasonCodes];
+  if (latestCorrection?.overrideStatus) {
+    status = latestCorrection.overrideStatus;
+    reasonCodes = ["user-correction", ...reasonCodes].slice(0, 3);
+  } else if (latestCorrection) {
+    reasonCodes = ["user-disputed", ...reasonCodes].slice(0, 3);
+  }
+
   const coverage: SummaryMetric = {
     key: "coverage",
     label: "证据覆盖",
@@ -112,13 +168,17 @@ export function deriveStatus(
           label: "近期正确率",
           value: `${Math.round((last5.filter((e) => e.correct).length / last5.length) * 100)}%`,
         };
+  const summaryMetrics: SummaryMetric[] = [coverage, accuracy];
+  if (latestCorrection) {
+    summaryMetrics.push({ key: "correction", label: "纠正说明", value: clipNote(latestCorrection.note) });
+  }
   return {
     syllabusPointId,
-    status: verdict.status,
-    summaryMetrics: [coverage, accuracy],
-    reasonCodes: verdict.reasonCodes,
+    status,
+    summaryMetrics: summaryMetrics.slice(0, 3),
+    reasonCodes,
     recommendedActions: verdict.actions,
-    evidenceSnapshotId: snapshotId(syllabusPointId, effective, events.length),
+    evidenceSnapshotId: snapshotId(syllabusPointId, effective, events.length, latestCorrection),
     strategyVersion: ASSESSMENT_VERSION,
     modelVersion: MODEL_VERSION,
     computedAt: now.toISOString(),
