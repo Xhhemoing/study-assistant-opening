@@ -21,4 +21,6 @@
 
 ## P2 — 错误到干预的自动闭环
 
-- [ ] 在 evidence 与状态推导稳定后：错误分类、步骤提示、变式、复习卡生成、7 天干预窗口及干预效果反馈（依赖真实 AI provider 或规则候选）
+- [~] 错误分类与干预计划（规则候选，无 AI）：`classifyError`（错因→动作+提示文案）、`planIntervention`（优先级：重复错误→high、高信心错误→medium；7 天干预窗口 `checkAt`）已接入 domain
+  - 位置：`packages/domain/src/practice/intervention.ts`
+- [ ] 干预落地：步骤提示、变式生成、复习卡生成、7 天干预窗口调度及干预效果反馈（依赖真实 AI provider 或规则候选 + UI 接线）
