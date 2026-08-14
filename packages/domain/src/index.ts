@@ -25,6 +25,7 @@ export {
 } from "./planning/planner";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
 export { isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
+export { classifyError, type InterventionHint } from "./practice/intervention";
 export {
   assertNonEmptyRevisionBlocks,
   diffRevisionBlocks,
