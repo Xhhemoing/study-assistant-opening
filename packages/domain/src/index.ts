@@ -36,6 +36,16 @@ export {
   type InterventionPriority,
 } from "./practice/intervention";
 export {
+  generateInterventionContent,
+  generateReviewCard,
+  generateStepGuide,
+  generateVariant,
+  type GeneratedIntervention,
+  type GeneratedReviewCard,
+  type GeneratedStepGuide,
+  type GeneratedVariant,
+} from "./practice/intervention-content";
+export {
   assertNonEmptyRevisionBlocks,
   diffRevisionBlocks,
   selectProposalBlocks,
