@@ -1,6 +1,7 @@
 import type { ScenarioPreset } from "@aistudy/contracts";
 import { describe, expect, it } from "vitest";
 import { buildTodayPlan, PLANNER_VERSION, type PlannerInput } from "./planner";
+import { getScenarioPresetDefinition } from "./scenario-presets";
 
 const BASE: PlannerInput = {
   ownerUserId: "u1",
@@ -67,6 +68,9 @@ describe("buildTodayPlan plan-1", () => {
         point("s1", "stable", 10, "稳固点"),
       ],
     });
+    // 验证 tierOrder 来自注册表而非硬编码
+    const def = getScenarioPresetDefinition("final" as ScenarioPreset);
+    expect(def.tierOrder).toEqual(["weak", "untested", "usable"]);
     expect(p.tasks.map((t) => t.id)).toEqual([
       "plan-2026-08-02-review-card-1",
       "plan-2026-08-02-practice-item-w1",

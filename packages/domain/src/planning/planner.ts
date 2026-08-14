@@ -4,6 +4,7 @@ import type {
   StatusWord,
   TodayPlan,
 } from "@aistudy/contracts";
+import { getScenarioPresetDefinition } from "./scenario-presets";
 
 export const PLANNER_VERSION = "plan-1";
 
@@ -26,18 +27,6 @@ export interface PlannerInput {
 }
 
 const TITLE_MAX = 24;
-
-const REASON_BY_STATUS: Record<Exclude<StatusWord, "stable">, string> = {
-  weak: "薄弱考点，优先补缺",
-  untested: "尚未测评，先建立基线",
-  usable: "做一道变式保持手感",
-};
-
-function tierOrder(scenario: ScenarioPreset): Array<Exclude<StatusWord, "stable">> {
-  return scenario === "gaokao" || scenario === "kaoyan"
-    ? ["weak", "usable", "untested"]
-    : ["weak", "untested", "usable"];
-}
 
 function clipTitle(title: string): string {
   return Array.from(title).slice(0, TITLE_MAX).join("");
@@ -76,7 +65,8 @@ export function buildTodayPlan(input: PlannerInput): TodayPlan {
       status: "pending",
     });
   }
-  for (const status of tierOrder(input.scenario)) {
+  const def = getScenarioPresetDefinition(input.scenario);
+  for (const status of def.tierOrder) {
     const tier = (pointsByStatus.get(status) ?? []).slice().sort(byTitle);
     for (const p of tier) {
       queue.push({
@@ -85,7 +75,7 @@ export function buildTodayPlan(input: PlannerInput): TodayPlan {
         refId: p.practiceItemId,
         title: clipTitle(p.title),
         estimatedMinutes: p.estimatedMinutes,
-        reason: REASON_BY_STATUS[status],
+        reason: def.reasonByStatus[status],
         locked: false,
         status: "pending",
       });
