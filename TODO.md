@@ -15,8 +15,8 @@
 
 - [x] 判题下沉 domain：新增 `packages/domain/src/practice/grading.ts`（删 web 副本）；short_answer 的 ASCII/数字改为 token-boundary 匹配（修复 "12" 匹配 "2" 的误判），CJK 保留子串语义
 - [x] syllabus 解耦：`MockProviderOptions.syllabus` 可注入，默认 `SEED_SYLLABUS`；`provider-plan.ts` 不再直接 import 常量
-- [~] 多目标接入（部分完成）：`activeGoals` 聚合所有未归档目标的 `dailyMinutes` 预算已接入；课程 requirement profile / `computeEffectiveRequirements`（能力权重、评估开关）未接入——mock 缺课程↔考点映射，需产品规则后再接
-  - 位置：`provider-plan.ts` planForDate、`packages/domain/src/goals/effective-requirements.ts`、`courses/requirements.ts`
+- [~] 多目标接入（部分完成）：`activeGoals` 聚合所有未归档目标的 `dailyMinutes` 预算已接入；评估开关（`assessmentMode`，`disabled` 时跳过 practice 任务）已接入 planner + mock；能力权重（`computeEffectiveRequirements` 的 abilities 合并）未接入——mock 缺课程↔考点映射，需产品规则后再接
+  - 位置：`provider-plan.ts` planForDate、`packages/domain/src/planning/planner.ts`、`packages/domain/src/goals/effective-requirements.ts`、`courses/requirements.ts`
 - [ ] scenario 去考试硬编码：`contracts/goals.ts` 的 `scenarioPresetSchema = z.enum(["final","gaokao","kaoyan","custom"])` 建模为可扩展计划策略/配置（需设计决策：preset = id+version 数据驱动，而非扩枚举）
 
 ## P2 — 错误到干预的自动闭环
