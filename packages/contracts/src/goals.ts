@@ -36,3 +36,9 @@ export const studyGoalInputSchema = z.object({
 export type ScenarioPreset = z.infer<typeof scenarioPresetSchema>;
 export type StudyGoal = z.infer<typeof studyGoalSchema>;
 export type StudyGoalInput = z.input<typeof studyGoalInputSchema>;
+
+/**
+ * ScenarioPreset 行为由 @aistudy/domain 的 ScenarioPresetDefinition 注册表驱动。
+ * contracts 保留枚举以保持向后兼容；新增预设无需扩展枚举。
+ * 参考 ADR-014。
+ */
