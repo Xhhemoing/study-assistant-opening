@@ -21,6 +21,8 @@
 
 ## P2 — 错误到干预的自动闭环
 
-- [~] 错误分类与干预计划（规则候选，无 AI）：`classifyError`（错因→动作+提示文案）、`planIntervention`（优先级：重复错误→high、高信心错误→medium；7 天干预窗口 `checkAt`）已接入 domain
+- [x] 错误分类与干预计划（规则候选，无 AI）：`classifyError`（错因→动作+提示文案）、`planIntervention`（优先级：重复错误→high、高信心错误→medium；7 天干预窗口 `checkAt`）已接入 domain
   - 位置：`packages/domain/src/practice/intervention.ts`
-- [ ] 干预落地：步骤提示、变式生成、复习卡生成、7 天干预窗口调度及干预效果反馈（依赖真实 AI provider 或规则候选 + UI 接线）
+- [x] 干预落地（规则候选 + UI 接线）：`generateInterventionContent`（步骤提示、变式生成、复习卡生成、7 天窗口到期 `dueAt`）；练习结果页展示干预建议（动作+优先级+复查日期）
+  - 位置：`packages/domain/src/practice/intervention-content.ts`、`apps/web/src/features/practice/result-summary*.tsx`、`practice-result.tsx`
+- [ ] 干预效果反馈（Stage B 概率校准：给定干预后减少同类错误），依赖真实数据规模后接入
