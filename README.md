@@ -37,37 +37,52 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前仓库处于 `Phase 1 / Workspace Authorization`：
+当前 HEAD 为 `Phase 1 / Workspace Authorization`，能力声明按证据分为三类。完整基线见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)，当前问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
 
-- Phase 0 完成：栈、monorepo、infra、CI
-- Task 5 完成：Workspace 与统一资产契约
-- Task 6 完成：Document/Block/Revision/Relation/Property 持久化
-- Task 7 完成：跨课程稳定资产身份（Course + AssetMembership）
-- Task 8 完成：认证、可吊销会话、Workspace 级服务端授权
-- Task 9 完成：三入口应用壳、workspace 级服务端默认入口偏好与真实浏览器验收
-- Task 10 核心完成：版本化 block 编辑器、追加式 revision、workspace 隔离、乐观 revision 冲突保护与本地草稿恢复；PostgreSQL 集成门禁待在具备数据库的环境中执行
-- Task 11A 核心完成：真实、workspace 授权的 document/block links API；wiki-link 索引、backlink、block reference 与 soft-delete broken-link 降级均已接入编辑器；PostgreSQL integration/handler/browser 门禁待执行
-- Task 11B1 核心完成：编辑器 tags 已迁移到 workspace 授权的 `library_properties` API，支持 Unicode 归一化、去重、持久化清空和失败恢复；PostgreSQL handler/browser 门禁待执行
-- Task 11B2 核心完成：编辑器可创建、重设类型和删除当前笔记发出的 typed relation，并只读展示 document/block properties；关系 source/workspace 授权、冲突及 Task 11A backlink 兼容已覆盖，PostgreSQL integration/handler/browser 门禁待执行
-- Task 13 核心完成：exploration、root/child branch 与 scratch/hypothesis/open-question block 已接入 `0008_explorations.sql`、workspace-bound repository、authenticated API 和真实 Explore UI；contracts/type/lint 与非数据库测试已验证，PostgreSQL integration/handler/browser 门禁待在具备 `DATABASE_URL`、`flock` 和 live browser server 的环境中执行
-- Task 14 核心完成：八类 AI role policy、provider-neutral exploration-chat job、Zod 输出校验与 candidate-only 结果已接入 worker；无权检索角色不会接收 source IDs，silent role 不调用 provider，provenance 明确区分未调用与缺失 provider 元数据。10 项 focused tests、contracts/AI/worker typecheck、目标 ESLint 和 diff 检查已通过；完整 npm 门禁仍需具备 `flock` 的 Bash/WSL 环境执行。
-- Task 15 核心完成：探索候选可被独立接受或拒绝；接受 note 会原子化生成 confirmed、可编辑的 library document，card/question/task 保持 typed target 与来源信息。文档可加入两门课程而不复制，并可返回来源探索。contracts/database/web TypeScript、编辑器 focused Vitest（6 项）、Playwright 用例发现与 `git diff --check` 已通过；promotion repository/handler 和完整浏览器用例仍待 `DATABASE_URL` 与 PostgreSQL `127.0.0.1:5432` 可用后执行。
-- Task 17 核心完成：六类课程需求画像（memory / mathematical-procedural / language / research-writing / programming-project / free-exploration）以 Zod 契约 + 领域预设落地，每类预设带六维能力权重（识别 / 无提示回忆 / 程序执行 / 迁移应用 / 表达输出 / 限时稳定，总和 100），支持 basic/disabled 评估模式、默认值解析、权重归一化与校验；简化设置 UI（预设卡片选择 + 禁用评估开关 + 开发者设置折叠展示权重）已就绪。domain focused Vitest（17 项）、web model Vitest（5 项）、contracts/domain/web typecheck、目标 ESLint 与 `git diff --check` 已通过；本任务无数据库改动，profile 持久化与页面挂载待后续任务。
-- Task 18 核心完成：一门课程可承载多个 goal（final-exam / entrance-exam / interest / maintenance / custom），`course_goals` 与 `goal_time_windows` 表（migration `0011_goals.sql`）落地，含 workspace guard、kind/phase CHECK、时间窗口排序约束与每课程每 kind 唯一约束；domain 实现确定性合并顺序（course baseline → active goal requirements → current time-window modifier → user override → 归一化到 100）。domain focused Vitest（12 项）、domain/database typecheck、目标 ESLint 与 `git diff --check` 已通过；PostgreSQL integration（`tests/integration/multi-goal-course.test.ts`）待 `DATABASE_URL` 可用后执行。
-- Task 19 核心完成：free / advisory / coach 三种自主性指导模式以领域策略（`guidance-1`）落地：free 无自动计划且不锁定功能，advisory 建议需确认，coach 可在预算内重排未来任务但锁定历史与已确认知识修改；受保护探索时段（重叠检测、调度判断、时序追加）与设置 UI（模式卡片选择 + 预留探索时间管理）已就绪并挂载到设置页。domain focused Vitest（12 项）、web model Vitest（5 项）、domain/web/e2e typecheck、目标 ESLint 与 `git diff --check` 已通过；E2E 用例（`tests/e2e/guidance-modes.spec.ts`）待 live browser server 执行。
-- Task 20 核心完成：可选 onboarding 路径落地且不阻塞探索——`onboarding-paths` 模型定义四条起点（free-exploration / goal-course / knowledge-course / promote-exploration），onboarding 页改为 Tailwind 并渲染这四条路径 + 始终可用的知识库入口；课程详情新增「学习目标」区（列出关联目标 + 「添加目标」带 `courseId` 进入目标向导）；探索候选新增「转为课程」（`candidateCourseDraft` 派生标题/slug/描述，中文标题回退 `promoted-*` slug）；目标向导支持从课程详情预填 `courseId`。onboarding/候选/目标模型 focused Vitest（共 10 项新增）、web/e2e typecheck、目标 ESLint 与 `git diff --check` 已通过；E2E 用例（`tests/e2e/onboarding-paths.spec.ts` 四路径）待 live browser server 执行。
+### 已提交且可追溯
+
+- monorepo、CI 工作流、PostgreSQL/Redis/MinIO 基础设施定义。
+- Workspace、统一资产契约、Document/Block/Revision/Relation/Property、Course/AssetMembership。
+- 认证、可吊销会话和 Workspace 级服务端授权。
+- 版本化 block 编辑、wiki link/backlink、typed relation、properties 和追加式 revision。
+- Exploration、候选审核、接受候选生成资产，以及 provider-neutral 的 candidate-only AI job 契约。
+- 课程需求画像、多个课程目标、指导模式和可选 onboarding 路径。
+- HEAD 中已提交的数据库 migration 为 `0001` 至 `0011`。
+
+### 工作区存在但尚未完整验证
+
+- 当前工作区包含 Learning Event、Cards、Attempt/Review API、Assessment replay、Today Plan、导出和 Native Backup 等未提交切片。
+- 这些切片包含 `0012`、`0013` migration 和对应测试，但尚未在干净 checkout 上通过完整 PostgreSQL、handler、browser、build 和 CI 门禁。
+- Learn 主读路径仍含 Mock/localStorage 真源，服务端仍需完成权威内容和判题、SRS 并发一致性以及跨浏览器持久化修复。
+- “文件存在”“单元测试通过”或“当前工作区可运行”都不等于已发布能力。
+
+### 规划中
+
+- 服务端权威内容、判题、Assessment 和 Today Plan 主链。
+- 单一高数内容包和 7 日未见变式题效果验证。
+- Transactional Outbox、真实 BullMQ Worker、受预算约束的 AI Provider。
+- Marketplace、教师/班级、离线客户端、插件 SDK、pgvector 和高级自适应模型继续暂缓。
+
+### 本地验证
 
 ```bash
 cp .env.example .env
-npm run compose:up    # 需要 Docker
+npm run verify:ci
+npx vitest run --project unit
+
+# 完整门禁需要 Docker 服务与 Playwright Chromium
+npm run compose:up
 npm run db:migrate
+npm run lint
+npm run typecheck
+npm test
 npm run test:integration
 npm run test:handler
 npm run test:browser
-npm run lint && npm run typecheck && npm test && npm run build
+npm run build
 ```
 
-执行状态（2026-08-05，Task 16 review 修复）：revision proposal 接受流程现在在 full/partial/preserve-both 进入 append-only revision 前集中拒绝零 blocks，返回 `RevisionProposalRepositoryError("VALIDATION", "Document requires at least one block")`，因此 validation 失败不会删除 projection 或终结 proposal；partial acceptance 仍保留有其他 blocks 时的 selected removal 行为。领域/contracts/review-panel focused tests 13 项通过，domain/contracts/database typecheck、web/e2e TypeScript、目标 ESLint、`git diff --check` 与 `graphify update .` 已完成。PostgreSQL repository/handler 集成测试因未设置 `DATABASE_URL` 阻塞，未宣称 integration 通过；web wrapper typecheck 仍受 Windows 缺少 `flock` 影响；E2E 实际运行仍需 PostgreSQL/web 服务。下一功能实现项为 Task 21（Phase 5 开工）。
+Unit 通过不代表完整系统通过；GitHub Actions `quality` job 是合并权威证据。详细前置条件和 Windows/Git Bash 降级行为见 [CI 说明](docs/operations/ci.md)。
 
 ## 预定技术方向
 

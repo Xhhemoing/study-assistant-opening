@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflowPath = path.join(root, ".github/workflows/ci.yml");
+const runHeavyPath = path.join(root, "scripts/run-heavy.sh");
 
 function fail(message) {
   console.error(`verify:ci FAILED: ${message}`);
@@ -19,8 +20,21 @@ function fail(message) {
 if (!existsSync(workflowPath)) {
   fail("missing .github/workflows/ci.yml");
 }
+if (!existsSync(runHeavyPath)) {
+  fail("missing scripts/run-heavy.sh");
+}
 
 const yaml = readFileSync(workflowPath, "utf8");
+const runHeavy = readFileSync(runHeavyPath, "utf8");
+for (const [fragment, message] of [
+  [/command -v flock/, "run-heavy.sh must probe flock before using it"],
+  [/command -v taskset/, "run-heavy.sh must probe taskset before using it"],
+  [/exec\s+"\$\{run\[@\]\}"/, "run-heavy.sh must exec the final command array"],
+]) {
+  if (!fragment.test(runHeavy)) {
+    fail(message);
+  }
+}
 const required = [
   "npm ci",
   "npm run lint",
@@ -45,11 +59,19 @@ if (!/minio/i.test(yaml)) {
   fail("workflow missing minio service");
 }
 
-const contract = spawnSync(
-  "npm",
-  ["test", "--", "tests/contract/ci-workflow.test.ts"],
-  { cwd: root, stdio: "inherit", shell: process.platform === "win32" },
-);
+const contractCommand = process.platform === "win32"
+  ? {
+      command: process.env.ComSpec ?? "cmd.exe",
+      args: ["/d", "/s", "/c", "npm test -- tests/contract/ci-workflow.test.ts"],
+    }
+  : {
+      command: "npm",
+      args: ["test", "--", "tests/contract/ci-workflow.test.ts"],
+    };
+const contract = spawnSync(contractCommand.command, contractCommand.args, {
+  cwd: root,
+  stdio: "inherit",
+});
 if (contract.status !== 0) {
   process.exit(contract.status ?? 1);
 }
