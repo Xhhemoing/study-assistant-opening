@@ -85,6 +85,7 @@ const validPlan = {
   options: [],
   strategyVersion: "plan-1",
   generatedAt: NOW,
+  evidenceSnapshotId: "snap-plan-contract",
 };
 
 describe("frontend domain contracts", () => {

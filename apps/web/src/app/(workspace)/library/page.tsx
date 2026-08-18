@@ -20,9 +20,14 @@ export default function LibraryPage() {
             <Search aria-hidden="true" size={17} /> 搜索
           </Link>
         </div>
-        <Link className="button library-new-note" href="/library/new">
-          <FilePlus2 aria-hidden="true" size={17} /> 新建笔记
-        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link className="button library-new-note" href="/library/new">
+            <FilePlus2 aria-hidden="true" size={17} /> 新建笔记
+          </Link>
+          <Link className="inline-flex min-h-10 items-center rounded-md border border-line px-3 text-sm text-text-dim transition-colors hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/settings/export">
+            导出 Markdown
+          </Link>
+        </div>
         <LibraryDocumentList />
       </section>
     </div>

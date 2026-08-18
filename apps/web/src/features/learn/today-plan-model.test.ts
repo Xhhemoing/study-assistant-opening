@@ -33,6 +33,7 @@ const plan: TodayPlan = {
   options: [],
   strategyVersion: "plan-1",
   generatedAt: "2026-08-03T00:00:00.000Z",
+  evidenceSnapshotId: "snap-plan-ui",
 };
 
 describe("today plan model", () => {

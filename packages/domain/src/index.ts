@@ -16,15 +16,37 @@ export function isSummaryBand(value: string): value is SummaryBand {
 }
 
 export { SRS_VERSION, createInitialState, scheduleReview } from "./srs/scheduler";
-export { ASSESSMENT_VERSION, deriveStatus, reviewGradeToEvidence, type EvidenceEvent, type EvidenceSource, type StatusCorrection } from "./assessment/status";
+export {
+  buildReviewQueue,
+  isCardEligibleForMode,
+  reviewEligibilityForMode,
+  type ReviewEligibility,
+  type ReviewQueueItem,
+} from "./srs/eligibility";
+export {
+  ASSESSMENT_VERSION,
+  ASSESSMENT_MODEL_VERSION,
+  deriveStatus,
+  reviewGradeToEvidence,
+  type AssessmentOptions,
+  type AssessmentSlice,
+  type EvidenceEvent,
+  type EvidenceSource,
+  type StatusCorrection,
+} from "./assessment/status";
+export { evidenceFromLearningEvent, correctionFromLearningEvent } from "./assessment/from-events";
+export { disabledSlicesFromWeights } from "./assessment/slices";
 export {
   PLANNER_VERSION,
   buildTodayPlan,
   type PlannerInput,
   type PlannerPointInput,
+  type PlannerGoalInput,
 } from "./planning/planner";
+export { applyPlanOption, needsOptionChoice } from "./planning/choice";
+export { scenarioToGoalKind } from "./planning/kinds";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
-export { isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
+export { gradePracticeAnswer, isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
 export {
   INTERVENTION_VERSION,
   actionForCause,
@@ -74,6 +96,34 @@ export {
   type UserOverride,
   type EffectiveRequirements,
 } from "./goals/effective-requirements";
+export {
+  exportMarkdown,
+  exportMarkdownBundle,
+  importMarkdown,
+  libraryDocumentToPortable,
+  blockMarker,
+  type PortableBlock,
+  type PortableDocument,
+  type PortableSourceFile,
+  type MarkdownDocumentExport,
+  type MarkdownImportResult,
+} from "./portability/markdown";
+export { exportAnkiDeck, type AnkiDeckInput, type AnkiSourceCard } from "./portability/anki";
+export {
+  NATIVE_BACKUP_TABLES,
+  RESTORE_TOPOLOGY,
+  NativeBackupError,
+  buildNativeBackup,
+  emptyBackupCounts,
+  planNativeRestore,
+  sha256Hex,
+  type ExistingBackupIds,
+  type NativeBackupFileInput,
+  type NativeBackupRecord,
+  type NativeBackupSnapshot,
+  type NativeRestorePlan,
+  type RestoreCollection,
+} from "./portability/native";
 export {
   GUIDANCE_POLICY_VERSION,
   getGuidancePolicy,

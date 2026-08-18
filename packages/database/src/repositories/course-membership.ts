@@ -282,6 +282,16 @@ export function createCourseMembershipRepository(
       return rows[0]!.workspace_id as string;
     }
 
+    if (assetType === "card") {
+      const rows = await sql`
+        SELECT workspace_id FROM cards WHERE id = ${assetId} LIMIT 1
+      `;
+      if (!rows.length) {
+        throw new CourseMembershipError("NOT_FOUND", `Card not found: ${assetId}`);
+      }
+      return rows[0]!.workspace_id as string;
+    }
+
     // Other asset types land in later migrations; reject until tables exist.
     throw new CourseMembershipError(
       "VALIDATION",

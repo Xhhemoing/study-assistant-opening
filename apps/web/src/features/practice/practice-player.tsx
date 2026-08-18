@@ -10,10 +10,13 @@ import { isPracticeAnswerCorrect } from "@aistudy/domain";
 import {
   createPracticePlayerState,
   getSubmissionIssue,
+  resolveAttemptIdentity,
+  type AttemptIdentity,
   type PracticePlayerState,
-  type SubmissionIssue,
 } from "./practice-player-model";
 import { AnswerInput } from "./answer-input";
+import { formatDuration, getIssueMessage, PlayerSkeleton } from "./practice-player-chrome";
+import { requestPracticeHint, revealPracticeAnswer, startPracticeSession } from "./practice-session-client";
 import { VerdictPanel } from "./verdict-panel";
 
 interface PracticePlayerProps {
@@ -23,23 +26,6 @@ interface PracticePlayerProps {
 
 function createIdempotencyKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `attempt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function formatDuration(value: number): string {
-  const totalSeconds = Math.floor(value / 1000);
-  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-
-function getIssueMessage(issue: SubmissionIssue | null): string {
-  if (issue === "answer-required") return "请先完成作答。";
-  if (issue === "verdict-required") return "请先检查答案。";
-  return "";
-}
-
-function PlayerSkeleton() {
-  return <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8" aria-busy="true"><div className="h-5 w-28 animate-pulse rounded bg-surface-2" /><div className="space-y-3 border-b border-line pb-6"><div className="h-8 w-3/4 animate-pulse rounded bg-surface-2" /><div className="h-4 w-1/2 animate-pulse rounded bg-surface-2" /></div><div className="h-48 animate-pulse rounded-lg bg-surface-2" /></div>;
 }
 
 export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
@@ -54,19 +40,24 @@ export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
   const [submitError, setSubmitError] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const startedAt = useRef(Date.now());
-  const idempotencyKey = useRef(createIdempotencyKey());
+  const attemptIdentity = useRef<AttemptIdentity | null>(null);
+  const sessionId = useRef<string | null>(null);
 
   useEffect(() => {
     if (!provider) return;
     let active = true;
     setLoading(true);
     setLoadError("");
-    provider.getPracticeItem(itemId).then((nextItem) => {
+    provider.getPracticeItem(itemId).then(async (nextItem) => {
       if (!active) return;
+      const started = await startPracticeSession(itemId).catch(() => null);
+      if (!active) return;
+      sessionId.current = started?.sessionId ?? null;
       setItem(nextItem);
       setState(createPracticePlayerState());
       setShowAnswer(false);
       startedAt.current = Date.now();
+      attemptIdentity.current = null;
       if (!nextItem) setLoadError("找不到这道练习题，可能已经被移除。");
     }).catch(() => {
       if (active) setLoadError("练习题加载失败，请重试。");
@@ -88,11 +79,26 @@ export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
 
   function revealHint() {
     if (!item || state.phase !== "answering" || state.hintCount >= Math.min(3, item.hints.length)) return;
+    const currentSessionId = sessionId.current;
+    if (currentSessionId) {
+      void requestPracticeHint(item.id, currentSessionId).then((result) => {
+        setState((current) => ({ ...current, hintCount: result.hintIndex + 1 }));
+      }).catch(() => setSubmitError("提示请求失败，请重试。"));
+      return;
+    }
     setState((current) => ({ ...current, hintCount: current.hintCount + 1 }));
   }
 
   function revealAnswer() {
     if (state.phase === "submitting" || state.phase === "submitted") return;
+    const currentSessionId = sessionId.current;
+    if (currentSessionId) {
+      void revealPracticeAnswer(itemId, currentSessionId).then(() => {
+        setShowAnswer(true);
+        setState((current) => ({ ...current, assisted: true }));
+      }).catch(() => setSubmitError("答案揭示失败，请重试。"));
+      return;
+    }
     setShowAnswer(true);
     setState((current) => ({ ...current, assisted: true }));
   }
@@ -126,17 +132,20 @@ export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
       return;
     }
     setSubmitError("");
+    const identity = resolveAttemptIdentity(attemptIdentity.current, state, createIdempotencyKey);
+    attemptIdentity.current = identity;
     setState((current) => ({ ...current, phase: "submitting" }));
     try {
       const result = await provider.submitAttempt({
         practiceItemId: item.id,
+        practiceSessionId: sessionId.current ?? undefined,
         answer: state.answer,
         durationMs: Math.max(0, Date.now() - startedAt.current),
         hintCount: state.hintCount,
         confidence: state.confidence as number,
         errorCause: state.errorCause,
         assisted: state.assisted,
-        idempotencyKey: idempotencyKey.current,
+        idempotencyKey: identity.key,
       });
       const params = new URLSearchParams({ event: result.event.id });
       if (context?.taskId) params.set("taskId", context.taskId);

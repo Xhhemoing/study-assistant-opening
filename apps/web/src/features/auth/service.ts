@@ -8,6 +8,9 @@ import {
   createLibraryRepository,
   createSqlClient,
   createWorkspacePreferencesRepository,
+  createLearningEventRepository,
+  createCardRepository,
+  createBackupRestoreRepository,
   CourseMembershipError,
   ExplorationRepositoryError,
   IdentityError,
@@ -15,6 +18,10 @@ import {
   WorkspacePreferencesError,
   PromotionRepositoryError,
   RevisionProposalRepositoryError,
+  LearningEventRepositoryError,
+  CardRepositoryError,
+  PracticeContentRepositoryError,
+  BackupRestoreError,
   type RevisionProposalRepository,
   type CourseMembershipRepository,
   type ExplorationRepository,
@@ -22,6 +29,9 @@ import {
   type IdentityRepository,
   type LibraryRepository,
   type WorkspacePreferencesRepository,
+  type LearningEventRepository,
+  type CardRepository,
+  type BackupRestoreRepository,
 } from "@aistudy/database";
 import {
   createDocumentRelationRequestSchema,
@@ -43,7 +53,7 @@ import {
   type ManagedRelation,
   type SearchHit,
 } from "@aistudy/contracts";
-import { rankResults, type SearchDoc } from "@aistudy/domain";
+import { NativeBackupError, rankResults, type SearchDoc } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import {
   AuthorizationError,
@@ -63,6 +73,9 @@ export type AuthRuntime = {
   explorations: ExplorationRepository;
   promotions: PromotionRepository;
   revisionProposals: RevisionProposalRepository;
+  learningEvents: LearningEventRepository;
+  cards: CardRepository;
+  backups: BackupRestoreRepository;
   sessions: SessionService;
   authCookieName: string;
   sessionCookieSecure: boolean;
@@ -85,6 +98,9 @@ export function createAuthRuntime(input: {
   const explorations = createExplorationRepository(sql);
   const promotions = createPromotionRepository(sql);
   const revisionProposals = createRevisionProposalRepository(sql);
+  const learningEvents = createLearningEventRepository(sql);
+  const cards = createCardRepository(sql);
+  const backups = createBackupRestoreRepository(sql);
   const sessions = createSessionService({
     sql,
     authSecret: input.authSecret,
@@ -100,6 +116,9 @@ export function createAuthRuntime(input: {
     explorations,
     promotions,
     revisionProposals,
+    learningEvents,
+    cards,
+    backups,
     sessions,
     authCookieName: input.authCookieName,
     sessionCookieSecure: input.sessionCookieSecure,
@@ -231,6 +250,18 @@ export function mapDomainError(error: unknown): ApiError {
       error.code === "UNAUTHENTICATED" ? 401 : 403,
     );
   }
+  if (error instanceof BackupRestoreError || error instanceof NativeBackupError) {
+    if (error.code === "WORKSPACE_MISMATCH") {
+      return new ApiError("WORKSPACE_FORBIDDEN", error.message, 403);
+    }
+    if (error.code === "NOT_FOUND") {
+      return new ApiError("NOT_FOUND", error.message, 404);
+    }
+    if (error.code === "VALIDATION") {
+      return new ApiError("VALIDATION", error.message, 400);
+    }
+    return new ApiError("CONFLICT", error.message, 409);
+  }
   if (error instanceof IdentityError) {
     if (error.code === "CONFLICT") {
       return new ApiError("CONFLICT", error.message, 409);
@@ -249,6 +280,9 @@ export function mapDomainError(error: unknown): ApiError {
     || error instanceof ExplorationRepositoryError
     || error instanceof PromotionRepositoryError
     || error instanceof RevisionProposalRepositoryError
+    || error instanceof LearningEventRepositoryError
+    || error instanceof CardRepositoryError
+    || error instanceof PracticeContentRepositoryError
   ) {
     if (error.code === "WORKSPACE_MISMATCH" || error.code === "CROSS_WORKSPACE_REFERENCE") {
       return new ApiError("WORKSPACE_FORBIDDEN", error.message, 403);
@@ -259,7 +293,7 @@ export function mapDomainError(error: unknown): ApiError {
     if (error.code === "VALIDATION") {
       return new ApiError("VALIDATION", error.message, 400);
     }
-    if (error.code === "CONFLICT" || error.code === "DUPLICATE_MEMBERSHIP") {
+    if (error.code === "CONFLICT" || error.code === "DUPLICATE_MEMBERSHIP" || error.code === "ARCHIVED") {
       return new ApiError("CONFLICT", error.message, 409);
     }
     if (error.code === "INVALID_TRANSITION") {

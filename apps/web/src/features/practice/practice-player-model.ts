@@ -32,6 +32,33 @@ export function createPracticePlayerState(): PracticePlayerState {
   };
 }
 
+export interface AttemptIdentity {
+  fingerprint: string;
+  key: string;
+}
+
+/** Evidence that defines one attempt: a retry of identical evidence must reuse the same key. */
+function getEvidenceFingerprint(state: PracticePlayerState): string {
+  return JSON.stringify([
+    state.answer.trim(),
+    state.verdict,
+    state.confidence,
+    state.errorCause,
+    state.hintCount,
+    state.assisted,
+  ]);
+}
+
+export function resolveAttemptIdentity(
+  current: AttemptIdentity | null,
+  state: PracticePlayerState,
+  createKey: () => string,
+): AttemptIdentity {
+  const fingerprint = getEvidenceFingerprint(state);
+  if (current && current.fingerprint === fingerprint) return current;
+  return { fingerprint, key: createKey() };
+}
+
 export function getSubmissionIssue(state: PracticePlayerState): SubmissionIssue | null {
   if (state.phase === "submitting") return "submitting";
   if (state.phase === "submitted") return "submitted";

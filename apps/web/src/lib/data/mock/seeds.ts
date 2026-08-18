@@ -175,6 +175,10 @@ function buildCards(ownerUserId: string, now: Date): { cards: ReviewCard[]; stat
       syllabusPointId: pointIndex === null || pointIndex === undefined ? null : (SEED_SYLLABUS[pointIndex]?.id ?? null),
       tags: ["高数"],
       archived: i === 7,
+      contentVersion: 1,
+      pausedUntil: null,
+      maintainUntil: null,
+      excludeFromAssessment: false,
       createdAt: new Date(now.getTime() - 5 * DAY).toISOString(),
     });
     states.push({

@@ -78,3 +78,19 @@ export function reviewGradeForKey(key: string): ReviewGrade | null {
   };
   return grades[key] ?? null;
 }
+
+export interface ReviewGradeIdentity {
+  fingerprint: string;
+  key: string;
+}
+
+export function resolveReviewGradeIdentity(
+  current: ReviewGradeIdentity | null,
+  cardId: string,
+  grade: ReviewGrade,
+  createKey: () => string,
+): ReviewGradeIdentity {
+  const fingerprint = `${cardId}:${grade}`;
+  if (current && current.fingerprint === fingerprint) return current;
+  return { fingerprint, key: createKey() };
+}

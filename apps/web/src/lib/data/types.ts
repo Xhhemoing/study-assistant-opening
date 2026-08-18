@@ -8,6 +8,7 @@ import type {
   PromotionCandidate,
   ReviewCard,
   ReviewGrade,
+  ReviewQueueMode,
   ReviewState,
   StatusResult,
   StudyGoal,
@@ -17,7 +18,7 @@ import type {
   PlannedTask,
   ChatTurn,
 } from "@aistudy/contracts";
-import type { SearchHit } from "@aistudy/domain";
+import type { SearchHit, AssessmentSlice } from "@aistudy/domain";
 import type { StorageLike } from "./mock/storage";
 
 export interface SearchableDocument {
@@ -30,6 +31,7 @@ export interface SearchableDocument {
 
 export interface AttemptInput {
   practiceItemId: string;
+  practiceSessionId?: string;
   answer: string;
   durationMs: number;
   hintCount: number;
@@ -37,6 +39,7 @@ export interface AttemptInput {
   errorCause: ErrorCause | null;
   assisted: boolean;
   idempotencyKey: string;
+  eventId?: string;
 }
 
 export interface SubmissionResult {
@@ -118,6 +121,9 @@ export interface MockProviderOptions {
   delayMs?: number;
   syllabus?: SyllabusPoint[];
   assessmentMode?: AssessmentMode;
+  disabledSlices?: AssessmentSlice[];
+  protectedExplorationMinutes?: number;
+  planningEnabled?: boolean;
 }
 
 export interface StudyDataProvider {
@@ -127,6 +133,7 @@ export interface StudyDataProvider {
   updateGoal(id: string, input: Partial<StudyGoalInput>): Promise<StudyGoal>;
   archiveGoal(id: string): Promise<StudyGoal>;
   getTodayPlan(date?: string): Promise<TodayPlan>;
+  selectPlanOption(date: string, optionId: string): Promise<TodayPlan>;
   setTaskStatus(date: string, taskId: string, status: TaskStatus): Promise<TodayPlan>;
   toggleTaskLock(date: string, taskId: string): Promise<TodayPlan>;
   getPracticeItem(id: string): Promise<PracticeItem | null>;
@@ -137,9 +144,9 @@ export interface StudyDataProvider {
     note: string,
     overrideStatus?: StatusWord | null,
   ): Promise<StatusCorrection>;
-  listDueCards(at?: Date): Promise<ReviewQueueItem[]>;
+  listDueCards(at?: Date, options?: { mode?: ReviewQueueMode }): Promise<ReviewQueueItem[]>;
   createReviewCard(input: ReviewCardInput): Promise<ReviewCard>;
-  gradeCard(cardId: string, grade: ReviewGrade): Promise<ReviewState>;
+  gradeCard(cardId: string, grade: ReviewGrade, input?: { idempotencyKey?: string }): Promise<ReviewState>;
   createPracticeItem(input: PracticeItemInput): Promise<PracticeItem>;
   listExplorations(): Promise<Exploration[]>;
   getExploration(id: string): Promise<ExplorationDetail | null>;

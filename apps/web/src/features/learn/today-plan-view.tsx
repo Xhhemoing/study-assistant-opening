@@ -7,6 +7,8 @@ import type { PlannedTask, TodayPlan } from "@aistudy/contracts";
 import { EmptyState } from "@aistudy/ui";
 import { useStudyProvider } from "../../lib/data/react";
 import { getPlanCompletion, taskHref } from "./today-plan-model";
+import { needsOptionChoice } from "../today-plan/plan-options-model";
+import { PlanOptionsPicker } from "../today-plan/plan-options";
 
 const kindLabels: Record<PlannedTask["kind"], string> = {
   practice: "练习",
@@ -22,6 +24,7 @@ export function TodayPlanView() {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
+  const [selectedOptionId, setSelectedOptionId] = useState("");
 
   const loadPlan = useCallback(async () => {
     if (!provider) {
@@ -31,7 +34,9 @@ export function TodayPlanView() {
     setLoading(true);
     setError("");
     try {
-      setPlan(await provider.getTodayPlan());
+      const next = await provider.getTodayPlan();
+      setPlan(next);
+      setSelectedOptionId(next.options[0]?.id ?? "");
     } catch {
       setPlan(null);
       setError("今日计划暂时无法读取，请先创建目标或稍后重试。");
@@ -43,6 +48,20 @@ export function TodayPlanView() {
   useEffect(() => {
     void loadPlan();
   }, [loadPlan, reloadToken]);
+
+  async function chooseOption() {
+    const optionId = selectedOptionId || plan?.options[0]?.id || "";
+    if (!provider || !plan || !optionId || busyTaskId) return;
+    setBusyTaskId(optionId);
+    setError("");
+    try {
+      setPlan(await provider.selectPlanOption(plan.date, optionId));
+    } catch {
+      setError("方案应用失败，请重试。");
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
 
   async function updateTask(task: PlannedTask, status: PlannedTask["status"]) {
     if (!provider || !plan || busyTaskId) return;
@@ -87,6 +106,8 @@ export function TodayPlanView() {
   if (!plan) return null;
 
   const completion = getPlanCompletion(plan);
+  const choosing = needsOptionChoice(plan);
+  const optionId = selectedOptionId || plan.options[0]?.id || "";
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
       <header className="flex flex-col gap-4 border-b border-line pb-6 sm:flex-row sm:items-end sm:justify-between">
@@ -105,7 +126,7 @@ export function TodayPlanView() {
           <span className="text-xs text-text-dim">{completion.done}/{completion.total} 完成 · {plan.totalMinutes}/{plan.budgetMinutes} 分钟</span>
         </div>
         <progress aria-label={`今日计划完成度 ${completion.percent}%`} className="h-2 w-full accent-primary" max={100} value={completion.percent} />
-        {plan.tasks.length === 0 ? <EmptyState title="今天还没有可执行任务" description="先完成一次练习或从自由探索开始，系统会逐步形成计划。" action={<Link className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/explore">开始探索</Link>} /> : (
+        {choosing ? <PlanOptionsPicker confirming={busyTaskId !== null} onConfirm={() => void chooseOption()} onSelect={setSelectedOptionId} plan={plan} selectedId={optionId} /> : plan.tasks.length === 0 ? <EmptyState title="今天还没有可执行任务" description="先完成一次练习或从自由探索开始，系统会逐步形成计划。" action={<Link className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/explore">开始探索</Link>} /> : (
           <ul className="divide-y divide-line border-y border-line">
             {plan.tasks.map((task) => {
               const busy = busyTaskId === task.id;

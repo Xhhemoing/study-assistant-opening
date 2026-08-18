@@ -57,12 +57,66 @@ export {
   practiceItemSchema,
   errorCauseSchema,
   attemptEventSchema,
+  submitAttemptRequestSchema,
+  submitAttemptResponseSchema,
   type AbilitySlice,
   type PracticeItemKind,
   type PracticeItem,
   type ErrorCause,
   type AttemptEvent,
+  type SubmitAttemptRequest,
+  type SubmitAttemptResponse,
 } from "./attempts";
+
+export {
+  answerRuleSchema,
+  publicPracticeItemSchema,
+  startPracticeRequestSchema,
+  startPracticeResponseSchema,
+  requestHintResponseSchema,
+  revealAnswerResponseSchema,
+  practiceSessionRecordSchema,
+  gradablePracticeItemSchema,
+  syllabusPointRecordSchema,
+  practiceCandidateRecordSchema,
+  type AnswerRule,
+  type PublicPracticeItem,
+  type StartPracticeRequest,
+  type StartPracticeResponse,
+  type RequestHintResponse,
+  type RevealAnswerResponse,
+  type PracticeSessionRecord,
+  type GradablePracticeItem,
+  type SyllabusPointRecord,
+  type PracticeCandidateRecord,
+} from "./practice-content";
+
+export {
+  assessmentQuerySchema,
+  assessmentResponseSchema,
+  appendStatusCorrectionRequestSchema,
+  appendStatusCorrectionResponseSchema,
+  type AssessmentQuery,
+  type AssessmentResponse,
+  type AppendStatusCorrectionRequest,
+  type AppendStatusCorrectionResponse,
+} from "./learning-read-models";
+
+export {
+  LEARNING_EVENT_SCHEMA_VERSION,
+  learningEventTypeSchema,
+  attemptLearningPayloadSchema,
+  reviewLearningPayloadSchema,
+  correctionLearningPayloadSchema,
+  learningEventSchema,
+  appendLearningEventInputSchema,
+  type LearningEventType,
+  type AttemptLearningPayload,
+  type ReviewLearningPayload,
+  type CorrectionLearningPayload,
+  type LearningEvent,
+  type AppendLearningEventInput,
+} from "./learning-events";
 
 export {
   statusWordSchema,
@@ -88,12 +142,33 @@ export {
 
 export {
   reviewGradeSchema,
+  reviewQueueModeSchema,
   reviewCardSchema,
   reviewStateSchema,
   type ReviewGrade,
+  type ReviewQueueMode,
   type ReviewCard,
   type ReviewState,
 } from "./srs";
+
+export {
+  gradeReviewRequestSchema,
+  gradeReviewResponseSchema,
+  createCardRequestSchema,
+  createCardResponseSchema,
+  listReviewQueueQuerySchema,
+  reviewQueueItemSchema,
+  listReviewQueueResponseSchema,
+  updateCardControlsRequestSchema,
+  type GradeReviewRequest,
+  type GradeReviewResponse,
+  type CreateCardRequest,
+  type CreateCardResponse,
+  type ListReviewQueueQuery,
+  type ReviewQueueItem,
+  type ListReviewQueueResponse,
+  type UpdateCardControlsRequest,
+} from "./reviews";
 
 export {
   aiRoleSchema,
@@ -201,6 +276,55 @@ export {
   type BlockPropertyGroup,
   type DocumentPropertiesResponse,
 } from "./properties";
+
+export {
+  NATIVE_BACKUP_FORMAT_VERSION,
+  backupConflictPolicySchema,
+  backupSchemaManifestSchema,
+  backupIdentityCountsSchema,
+  backupFileManifestEntrySchema,
+  nativeBackupPackageSchema,
+  backupExportRequestSchema,
+  backupExportResponseSchema,
+  backupRestoreRequestSchema,
+  backupRestoreResponseSchema,
+  type BackupConflictPolicy,
+  type BackupSchemaManifest,
+  type BackupIdentityCounts,
+  type BackupFileManifestEntry,
+  type NativeBackupPackage,
+  type BackupExportRequest,
+  type BackupExportResponse,
+  type BackupRestoreRequest,
+  type BackupRestoreResponse,
+} from "./backup";
+
+export {
+  lossEntrySchema,
+  lossReportSchema,
+  attachmentManifestEntrySchema,
+  blockIdentitySchema,
+  sourceFileManifestEntrySchema,
+  portabilityManifestSchema,
+  markdownExportRequestSchema,
+  markdownExportResponseSchema,
+  ankiExportRequestSchema,
+  ankiNoteSchema,
+  ankiSchedulingSchema,
+  ankiExportResponseSchema,
+  type LossEntry,
+  type LossReport,
+  type AttachmentManifestEntry,
+  type BlockIdentity,
+  type SourceFileManifestEntry,
+  type PortabilityManifest,
+  type MarkdownExportRequest,
+  type MarkdownExportResponse,
+  type AnkiExportRequest,
+  type AnkiNote,
+  type AnkiScheduling,
+  type AnkiExportResponse,
+} from "./portability";
 
 export {
   relationTypeSchema,

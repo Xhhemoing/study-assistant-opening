@@ -1,4 +1,4 @@
-import type { PracticeItem } from "@aistudy/contracts";
+import type { AnswerRule, PracticeItem } from "@aistudy/contracts";
 
 export function normalizeAnswer(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
@@ -14,6 +14,18 @@ function isSubAnswer(actual: string, expected: string): boolean {
   // ASCII/numeric answers require a token-boundary match so "12" does not match "2".
   const tokens = new Set(actual.split(/[^0-9a-z]+/).filter(Boolean));
   return tokens.has(expected);
+}
+
+export function gradePracticeAnswer(rule: AnswerRule, answer: string): boolean {
+  if (rule.type === "exact") {
+    const actual = normalizeAnswer(answer);
+    return rule.accepted.some((value) => normalizeAnswer(value) === actual);
+  }
+  const actual = checkpointValues(answer);
+  return rule.accepted.some((accepted) => {
+    const expected = new Set(accepted.map((value) => normalizeAnswer(value)));
+    return actual.size === expected.size && [...actual].every((value) => expected.has(value));
+  });
 }
 
 export function isPracticeAnswerCorrect(item: PracticeItem, answer: string): boolean {

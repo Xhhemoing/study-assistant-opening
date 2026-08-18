@@ -2,6 +2,7 @@ import type { AIRole, ReviewGrade, StudyGoalInput } from "@aistudy/contracts";
 import {
   getPracticeItem,
   getTodayPlan,
+  selectPlanOption,
   createPracticeItem,
   createReviewCard,
   gradeCard,
@@ -55,6 +56,7 @@ export function createMockProvider(options: MockProviderOptions): StudyDataProvi
     updateGoal: (id, input) => run((current) => updateGoal(current, id, input)),
     archiveGoal: (id) => run((current) => archiveGoal(current, id)),
     getTodayPlan: (date) => run((current) => getTodayPlan(current, date)),
+    selectPlanOption: (date, optionId) => run((current) => selectPlanOption(current, date, optionId)),
     setTaskStatus: (date, taskId, status: TaskStatus) => run((current) => setTaskStatus(current, date, taskId, status)),
     toggleTaskLock: (date, taskId) => run((current) => toggleTaskLock(current, date, taskId)),
     getPracticeItem: (id) => run((current) => getPracticeItem(current, id)),

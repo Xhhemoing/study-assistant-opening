@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PracticeItem } from "@aistudy/contracts";
-import { isPracticeAnswerCorrect, normalizeAnswer } from "./grading";
+import { gradePracticeAnswer, isPracticeAnswerCorrect, normalizeAnswer } from "./grading";
 
 function item(partial: Partial<PracticeItem> & { answer: string }): PracticeItem {
   return {
@@ -42,5 +42,18 @@ describe("isPracticeAnswerCorrect", () => {
 
   it("matches checkpoint values ignoring order and full-width", () => {
     expect(isPracticeAnswerCorrect(item({ kind: "checkpoint", answer: "0,2" }), " ２，０ ")).toBe(true);
+  });
+});
+
+describe("gradePracticeAnswer", () => {
+  it("grades an exact rule against normalized accepted answers", () => {
+    expect(gradePracticeAnswer({ type: "exact", accepted: ["极限", "导数"] }, "　极限　")).toBe(true);
+    expect(gradePracticeAnswer({ type: "exact", accepted: ["极限"] }, "函数的极限定义")).toBe(false);
+  });
+
+  it("grades a token_set rule without substring matching", () => {
+    expect(gradePracticeAnswer({ type: "token_set", accepted: [["0", "2"]] }, " ２，０ ")).toBe(true);
+    expect(gradePracticeAnswer({ type: "token_set", accepted: [["极限"]] }, "函数的极限定义")).toBe(false);
+    expect(gradePracticeAnswer({ type: "token_set", accepted: [["2"]] }, "12")).toBe(false);
   });
 });

@@ -30,6 +30,7 @@ export const todayPlanSchema = z.object({
   options: z.array(planOptionSchema),
   strategyVersion: z.string().min(1),
   generatedAt: z.string().datetime(),
+  evidenceSnapshotId: z.string().min(1),
 });
 
 export type PlannedTaskKind = z.infer<typeof plannedTaskKindSchema>;

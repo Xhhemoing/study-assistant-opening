@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { statusResultSchema } from "./assessment";
 
 export const abilitySliceSchema = z.enum([
   "recognition",
@@ -51,8 +52,25 @@ export const attemptEventSchema = z.object({
   createdAt: z.string().datetime(),
 });
 
+export const submitAttemptRequestSchema = z
+  .object({
+    practiceSessionId: z.string().uuid(),
+    answer: z.string(),
+    confidence: z.number().int().min(1).max(5),
+    errorCause: errorCauseSchema.nullable(),
+    idempotencyKey: z.string().min(8).max(200),
+  })
+  .strict();
+
+export const submitAttemptResponseSchema = z.object({
+  event: attemptEventSchema,
+  status: statusResultSchema,
+});
+
 export type AbilitySlice = z.infer<typeof abilitySliceSchema>;
 export type PracticeItemKind = z.infer<typeof practiceItemKindSchema>;
 export type PracticeItem = z.infer<typeof practiceItemSchema>;
 export type ErrorCause = z.infer<typeof errorCauseSchema>;
 export type AttemptEvent = z.infer<typeof attemptEventSchema>;
+export type SubmitAttemptRequest = z.infer<typeof submitAttemptRequestSchema>;
+export type SubmitAttemptResponse = z.infer<typeof submitAttemptResponseSchema>;

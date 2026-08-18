@@ -10,6 +10,7 @@
 - preflight 返回 `IDENTITY_ORPHAN_WORKSPACES`，但没有经审批的 owner 映射；
 - 已记录 legacy-unverified `0003_identity.sql`、`0004_identity_repair.sql` 尚未执行、且没有 fingerprint 一致的 operator attestation；
 - `library_revisions_no_delete` 或 `library_revisions_no_update` trigger 缺失；
+- `learning_events_no_delete` 或 `learning_events_no_update` trigger 缺失（`0012` 拒绝 UPDATE，`0014_learning_event_delete_guard.sql` 拒绝普通 DELETE；不要给应用角色加 session-variable 旁路）；
 - registry 出现未知 ID、非法/重复/跳号 migration version、未知 verification state，或 verified checksum 漂移。
 
 不要修改已发布的 migration SQL，不要删除 orphan workspace，不要创建伪造 user 接管数据。历史迁移 ID 包含下划线（例如 `0004_identity_repair.sql`），不可重命名；新旧 ID 均须遵循 `^([0-9]{4})_[a-z0-9_-]+\.sql$`、版本从 `0001` 连续递增且唯一。
@@ -122,6 +123,19 @@ WHERE tgrelid = 'library_revisions'::regclass
   AND tgname IN (
     'library_revisions_no_delete',
     'library_revisions_no_update'
+  )
+ORDER BY tgname;
+```
+
+两行的 `tgenabled` 都必须为 `O`。确认 learning event 追加写保护：
+
+```sql
+SELECT tgname, tgenabled
+FROM pg_trigger
+WHERE tgrelid = 'learning_events'::regclass
+  AND tgname IN (
+    'learning_events_no_delete',
+    'learning_events_no_update'
   )
 ORDER BY tgname;
 ```

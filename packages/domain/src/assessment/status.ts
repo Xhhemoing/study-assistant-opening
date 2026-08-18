@@ -1,16 +1,19 @@
 import type {
   AbilitySlice,
-  RecommendedAction,
+  AssessmentMode,
+  ErrorCause,
   ReviewGrade,
   StatusResult,
   StatusWord,
   SummaryMetric,
 } from "@aistudy/contracts";
+import { applyContextualRules, judge } from "./status-rules";
 
 export const ASSESSMENT_VERSION = "assess-1";
-const MODEL_VERSION = "rules-1";
+export const ASSESSMENT_MODEL_VERSION = "rules-2";
 
 export type EvidenceSource = "attempt" | "review";
+export type AssessmentSlice = AbilitySlice | "timed" | "retention";
 
 export interface EvidenceEvent {
   correct: boolean;
@@ -20,7 +23,14 @@ export interface EvidenceEvent {
   slice: AbilitySlice;
   occurredAt: string;
   source: EvidenceSource;
+  excludeFromAssessment?: boolean;
+  errorCause?: ErrorCause | null;
 }
+
+export type AssessmentOptions = {
+  assessmentMode?: AssessmentMode;
+  disabledSlices?: AssessmentSlice[];
+};
 
 export interface StatusCorrection {
   syllabusPointId: string;
@@ -49,21 +59,30 @@ export function reviewGradeToEvidence(grade: ReviewGrade, occurredAt: string): E
   };
 }
 
-function mean(values: number[]): number {
-  if (values.length === 0) return 0;
-  return values.reduce((sum, v) => sum + v, 0) / values.length;
-}
-
 function snapshotId(
   pointId: string,
   effective: EvidenceEvent[],
   totalEvents: number,
-  correction?: StatusCorrection,
+  correction: StatusCorrection | undefined,
+  options: AssessmentOptions,
+  now: Date,
 ): string {
-  const lastEvent = effective.at(-1);
-  const last = lastEvent ? lastEvent.occurredAt : "none";
+  const eventsPart = effective
+    .map((event) =>
+      [
+        event.occurredAt,
+        event.correct ? "1" : "0",
+        event.slice,
+        event.confidence,
+        event.hintCount,
+        event.errorCause ?? "",
+        event.source,
+      ].join(":"),
+    )
+    .join(";");
   const correctionPart = correction ? `|${correction.createdAt}|${correction.overrideStatus ?? "disputed"}` : "";
-  const input = `${pointId}|${last}|${totalEvents}${correctionPart}`;
+  const disabled = [...(options.disabledSlices ?? [])].sort().join(",");
+  const input = `${pointId}|${eventsPart}|${totalEvents}${correctionPart}|${options.assessmentMode ?? "basic"}|${disabled}|${now.toISOString()}`;
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
     h ^= input.charCodeAt(i);
@@ -76,77 +95,33 @@ function clipNote(note: string): string {
   return note.length > 40 ? `${note.slice(0, 39)}…` : note;
 }
 
-interface Verdict {
-  status: StatusWord;
-  reasonCodes: string[];
-  actions: RecommendedAction[];
-}
-
-function judge(effective: EvidenceEvent[]): Verdict {
-  const n = effective.length;
-  if (n < 2) {
-    return {
-      status: "untested",
-      reasonCodes: ["insufficient-evidence"],
-      actions: [{ code: "baseline", label: "做2道基础识别题", estimatedMinutes: 10 }],
-    };
-  }
-  const last3 = effective.slice(-3);
-  const latest = effective.at(-1);
-  if (!latest) {
-    return {
-      status: "untested",
-      reasonCodes: ["insufficient-evidence"],
-      actions: [{ code: "baseline", label: "做2道基础识别题", estimatedMinutes: 10 }],
-    };
-  }
-  if (!latest.correct) {
-    const reasonCodes = ["recent-failure"];
-    if (mean(last3.map((e) => e.confidence)) <= 2) reasonCodes.push("low-confidence");
-    if (mean(last3.map((e) => e.hintCount)) >= 1.5) reasonCodes.push("hint-dependent");
-    return {
-      status: "weak",
-      reasonCodes: reasonCodes.slice(0, 3),
-      actions: [
-        { code: "hint-steps", label: "步骤提示题", estimatedMinutes: 8 },
-        { code: "no-hint-variant", label: "无提示变式", estimatedMinutes: 12 },
-      ],
-    };
-  }
-  const streakConfident = last3.every((e) => e.correct) && mean(last3.map((e) => e.confidence)) >= 3;
-  const hasTransfer = effective.some((e) => e.slice === "transfer" && e.correct);
-  if (n >= 4 && streakConfident && hasTransfer) {
-    return {
-      status: "stable",
-      reasonCodes: ["consistent-success"],
-      actions: [{ code: "maintain-transfer", label: "保持节奏：1道迁移题", estimatedMinutes: 12 }],
-    };
-  }
-  return {
-    status: "usable",
-    reasonCodes: ["partial-mastery"],
-    actions: [{ code: "variant", label: "1道变式题巩固", estimatedMinutes: 10 }],
-  };
-}
-
 export function deriveStatus(
   syllabusPointId: string,
   events: EvidenceEvent[],
   now: Date,
   corrections: StatusCorrection[] = [],
+  options: AssessmentOptions = {},
 ): StatusResult {
+  const disabledSlices = new Set(options.disabledSlices ?? []);
   const effective = events
-    .filter((e) => !e.assisted)
+    .filter((event) => !event.assisted && !event.excludeFromAssessment && !disabledSlices.has(event.slice))
     .slice()
     .sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0));
-  const verdict = judge(effective);
+  const judged =
+    options.assessmentMode === "disabled"
+      ? {
+          status: "untested" as const,
+          reasonCodes: ["assessment-disabled"],
+          actions: [{ code: "assessment-off", label: "评估已关闭，可继续练习但不更新能力状态", estimatedMinutes: 5 }],
+        }
+      : applyContextualRules(judge(effective), effective, now, options);
   const latestCorrection = corrections
-    .filter((c) => c.syllabusPointId === syllabusPointId)
+    .filter((item) => item.syllabusPointId === syllabusPointId)
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
     .at(-1);
 
-  let status = verdict.status;
-  let reasonCodes = [...verdict.reasonCodes];
+  let status = judged.status;
+  let reasonCodes = [...judged.reasonCodes];
   if (latestCorrection?.overrideStatus) {
     status = latestCorrection.overrideStatus;
     reasonCodes = ["user-correction", ...reasonCodes].slice(0, 3);
@@ -161,12 +136,12 @@ export function deriveStatus(
   };
   const last5 = effective.slice(-5);
   const accuracy: SummaryMetric =
-    verdict.status === "untested"
+    judged.status === "untested"
       ? { key: "recentAccuracy", label: "近期正确率", value: "—" }
       : {
           key: "recentAccuracy",
           label: "近期正确率",
-          value: `${Math.round((last5.filter((e) => e.correct).length / last5.length) * 100)}%`,
+          value: `${Math.round((last5.filter((event) => event.correct).length / last5.length) * 100)}%`,
         };
   const summaryMetrics: SummaryMetric[] = [coverage, accuracy];
   if (latestCorrection) {
@@ -177,10 +152,10 @@ export function deriveStatus(
     status,
     summaryMetrics: summaryMetrics.slice(0, 3),
     reasonCodes,
-    recommendedActions: verdict.actions,
-    evidenceSnapshotId: snapshotId(syllabusPointId, effective, events.length, latestCorrection),
+    recommendedActions: judged.actions,
+    evidenceSnapshotId: snapshotId(syllabusPointId, effective, events.length, latestCorrection, options, now),
     strategyVersion: ASSESSMENT_VERSION,
-    modelVersion: MODEL_VERSION,
+    modelVersion: ASSESSMENT_MODEL_VERSION,
     computedAt: now.toISOString(),
   };
 }

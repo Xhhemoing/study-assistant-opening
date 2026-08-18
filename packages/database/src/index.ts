@@ -109,6 +109,27 @@ export * from "./schema/promotions";
 export * from "./repositories/promotions";
 export * from "./schema/revision-proposals";
 export * from "./repositories/revision-proposals";
+export * from "./schema/learning-events";
+export * from "./repositories/learning-events";
+export * from "./schema/cards";
+export * from "./repositories/cards";
+export * from "./schema/practice-content";
+export {
+  createPracticeContentRepository,
+  PracticeContentRepositoryError,
+  type PracticeContentErrorCode,
+  type PracticeContentRepository,
+} from "./repositories/practice-content";
+export {
+  createPracticeSessionRepository,
+  type PracticeSessionRepository,
+} from "./repositories/practice-sessions";
+export {
+  createBackupRestoreRepository,
+  BackupRestoreError,
+  type BackupRestoreErrorCode,
+  type BackupRestoreRepository,
+} from "./repositories/backup-restore";
 
 export {
   applyIdentityOwnerMappings,

@@ -5,6 +5,7 @@ import {
   createReviewSessionState,
   flipReviewCard,
   getReviewProgress,
+  resolveReviewGradeIdentity,
   reviewGradeForKey,
 } from "./review-session-model";
 
@@ -16,8 +17,13 @@ const queue: ReviewQueueItem[] = [
       front: "卡片一正面",
       back: "卡片一背面",
       sourceDocumentId: null,
+      syllabusPointId: null,
       tags: ["复习"],
       archived: false,
+      contentVersion: 1,
+      pausedUntil: null,
+      maintainUntil: null,
+      excludeFromAssessment: false,
       createdAt: "2026-08-03T08:00:00.000Z",
     },
     state: {
@@ -38,8 +44,13 @@ const queue: ReviewQueueItem[] = [
       front: "卡片二正面",
       back: "卡片二背面",
       sourceDocumentId: null,
+      syllabusPointId: null,
       tags: ["复习"],
       archived: false,
+      contentVersion: 1,
+      pausedUntil: null,
+      maintainUntil: null,
+      excludeFromAssessment: false,
       createdAt: "2026-08-03T08:00:00.000Z",
     },
     state: {
@@ -88,5 +99,21 @@ describe("review session model", () => {
     expect(reviewGradeForKey("1")).toBe("again");
     expect(reviewGradeForKey("4")).toBe("easy");
     expect(reviewGradeForKey("0")).toBeNull();
+  });
+
+  it("reuses an idempotency key for the same card and grade", () => {
+    const first = resolveReviewGradeIdentity(null, queue[0]!.card.id, "good", () => "review-key-new");
+    const retried = resolveReviewGradeIdentity(first, queue[0]!.card.id, "good", () => "should-not-run");
+    expect(retried.key).toBe(first.key);
+  });
+
+  it("issues a new idempotency key when the card or grade changes", () => {
+    let n = 0;
+    const createKey = () => `review-key-${++n}`;
+    const first = resolveReviewGradeIdentity(null, queue[0]!.card.id, "good", createKey);
+    const changedGrade = resolveReviewGradeIdentity(first, queue[0]!.card.id, "hard", createKey);
+    const changedCard = resolveReviewGradeIdentity(changedGrade, queue[1]!.card.id, "hard", createKey);
+    expect(changedGrade.key).not.toBe(first.key);
+    expect(changedCard.key).not.toBe(changedGrade.key);
   });
 });

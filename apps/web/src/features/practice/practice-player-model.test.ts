@@ -4,6 +4,7 @@ import { isPracticeAnswerCorrect, normalizeAnswer } from "@aistudy/domain";
 import {
   createPracticePlayerState,
   getSubmissionIssue,
+  resolveAttemptIdentity,
   type PracticePlayerState,
 } from "./practice-player-model";
 
@@ -60,5 +61,76 @@ describe("practice player model", () => {
     };
     expect(getSubmissionIssue(state)).toBe("submitting");
     expect(getSubmissionIssue({ ...state, phase: "submitted" })).toBe("submitted");
+  });
+});
+
+describe("attempt idempotency identity", () => {
+  const submittable: PracticePlayerState = {
+    ...createPracticePlayerState(),
+    phase: "verdict",
+    answer: "A",
+    verdict: true,
+    confidence: 4,
+  };
+
+  function keyFactory() {
+    let issued = 0;
+    return {
+      create: () => `key-${(issued += 1)}`,
+      get issued() {
+        return issued;
+      },
+    };
+  }
+
+  it("issues a key for the first attempt", () => {
+    const keys = keyFactory();
+    expect(resolveAttemptIdentity(null, submittable, keys.create).key).toBe("key-1");
+    expect(keys.issued).toBe(1);
+  });
+
+  it("reuses the key when the same attempt is retried after a network failure", () => {
+    const keys = keyFactory();
+    const first = resolveAttemptIdentity(null, submittable, keys.create);
+    const retry = resolveAttemptIdentity(first, submittable, keys.create);
+    expect(retry.key).toBe(first.key);
+    expect(keys.issued).toBe(1);
+  });
+
+  it("ignores answer whitespace so a cosmetic edit still retries the same attempt", () => {
+    const keys = keyFactory();
+    const first = resolveAttemptIdentity(null, submittable, keys.create);
+    const retry = resolveAttemptIdentity(first, { ...submittable, answer: " A " }, keys.create);
+    expect(retry.key).toBe(first.key);
+  });
+
+  it.each<[string, Partial<PracticePlayerState>]>([
+    ["answer", { answer: "B", verdict: false, errorCause: "concept" }],
+    ["verdict", { verdict: false, errorCause: "concept" }],
+    ["confidence", { confidence: 2 }],
+    ["error cause", { verdict: false, errorCause: "careless" }],
+    ["hint count", { hintCount: 2 }],
+    ["assisted", { assisted: true }],
+  ])("issues a new key when the learner changes the %s", (_label, overrides) => {
+    const keys = keyFactory();
+    const first = resolveAttemptIdentity(null, submittable, keys.create);
+    const revised = resolveAttemptIdentity(first, { ...submittable, ...overrides }, keys.create);
+    expect(revised.key).not.toBe(first.key);
+    expect(keys.issued).toBe(2);
+  });
+
+  it("keeps the revised key stable across retries of the revised attempt", () => {
+    const keys = keyFactory();
+    const first = resolveAttemptIdentity(null, submittable, keys.create);
+    const revisedState: PracticePlayerState = {
+      ...submittable,
+      answer: "B",
+      verdict: false,
+      errorCause: "concept",
+    };
+    const revised = resolveAttemptIdentity(first, revisedState, keys.create);
+    const retry = resolveAttemptIdentity(revised, revisedState, keys.create);
+    expect(retry.key).toBe(revised.key);
+    expect(keys.issued).toBe(2);
   });
 });

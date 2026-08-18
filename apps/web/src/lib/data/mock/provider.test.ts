@@ -181,6 +181,26 @@ describe("MockStudyDataProvider", () => {
     expect(first.status.syllabusPointId).toBe(item.syllabusPointId);
   });
 
+  it("keeps a server-assigned attempt id when one is provided", async () => {
+    const provider = createProvider();
+    const item = await provider.getPracticeItem("22222222-2222-4222-8222-222222222201");
+    expect(item).not.toBeNull();
+    if (!item) return;
+    const eventId = "66666666-6666-4666-8666-666666666666";
+    const result = await provider.submitAttempt({
+      practiceItemId: item.id,
+      answer: item.answer,
+      durationMs: 1,
+      hintCount: 0,
+      confidence: 4,
+      errorCause: null,
+      assisted: false,
+      idempotencyKey: "attempt-server-id-001",
+      eventId,
+    });
+    expect(result.event.id).toBe(eventId);
+  });
+
   it("normalizes full-width answers and checkpoint ordering before recording correctness", async () => {
     const provider = createProvider();
     const choice = await provider.getPracticeItem("22222222-2222-4222-8222-222222222201");
@@ -393,5 +413,20 @@ describe("MockStudyDataProvider", () => {
     const plan = await provider.getTodayPlan("2026-08-02");
     expect(plan.tasks.every((task) => task.kind !== "practice")).toBe(true);
     expect(plan.tasks.filter((task) => task.kind === "review").length).toBeGreaterThan(0);
+  });
+
+  it("marks every syllabus status untested when assessment is disabled", async () => {
+    const provider = createMockProvider({
+      userId: USER_ID,
+      now: NOW,
+      delayMs: 0,
+      storage: createMemoryStorage(),
+      assessmentMode: "disabled",
+    });
+
+    const statuses = await provider.listStatuses();
+    expect(statuses.length).toBeGreaterThan(0);
+    expect(statuses.every((item) => item.status === "untested")).toBe(true);
+    expect(statuses.every((item) => item.reasonCodes.includes("assessment-disabled"))).toBe(true);
   });
 });

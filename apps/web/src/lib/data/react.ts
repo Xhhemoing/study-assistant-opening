@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { searchableDocumentsResponseSchema } from "@aistudy/contracts";
 import { createMockProvider } from "./mock/provider";
 import { browserStorage } from "./mock/storage";
+import { withPersistedAttempts } from "./persist-attempt";
+import { withPersistedReviews } from "./persist-review";
 import type { SearchableDocument, StudyDataProvider } from "./types";
 
 const LOAD_ERROR = "加载失败，请重试。";
@@ -74,6 +76,8 @@ export function useStudyProvider(): StudyDataProvider | null {
   const userId = useCurrentUserId();
   return useMemo(() => {
     if (!userId) return null;
-    return createMockProvider({ userId, storage: browserStorage(), fetchDocuments });
+    return withPersistedReviews(
+      withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
+    );
   }, [userId]);
 }

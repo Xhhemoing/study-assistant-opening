@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ASSESSMENT_VERSION,
+  ASSESSMENT_MODEL_VERSION,
   deriveStatus,
   reviewGradeToEvidence,
   type EvidenceEvent,
@@ -35,7 +36,7 @@ describe("deriveStatus assess-1", () => {
       { code: "baseline", label: "做2道基础识别题", estimatedMinutes: 10 },
     ]);
     expect(r.strategyVersion).toBe(ASSESSMENT_VERSION);
-    expect(r.modelVersion).toBe("rules-1");
+    expect(r.modelVersion).toBe(ASSESSMENT_MODEL_VERSION);
     expect(r.evidenceSnapshotId.startsWith("snap-")).toBe(true);
     expect(r.computedAt).toBe(NOW.toISOString());
   });

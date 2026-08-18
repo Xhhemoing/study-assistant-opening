@@ -11,7 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReviewGrade } from "@aistudy/contracts";
 import type { LucideIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
@@ -21,9 +21,15 @@ import {
   createReviewSessionState,
   flipReviewCard,
   getReviewProgress,
+  resolveReviewGradeIdentity,
   reviewGradeForKey,
+  type ReviewGradeIdentity,
   type ReviewSessionState,
 } from "./review-session-model";
+
+function createIdempotencyKey(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `review-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 const gradeOptions: Array<{ grade: ReviewGrade; label: string; icon: LucideIcon }> = [
   { grade: "again", label: "忘记", icon: RotateCcw },
@@ -62,13 +68,14 @@ export function ReviewSession() {
   const [error, setError] = useState("");
   const [nextDueAt, setNextDueAt] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  const gradeIdentity = useRef<ReviewGradeIdentity | null>(null);
 
   useEffect(() => {
     if (!provider) return;
     let active = true;
     setLoading(true);
     setError("");
-    provider.listDueCards()
+    provider.listDueCards(undefined, { mode: requestedCardId ? "self-selected" : "auto" })
       .then((queue) => {
         if (active) setSession(createReviewSessionState(queue, requestedCardId));
       })
@@ -86,8 +93,18 @@ export function ReviewSession() {
     if (!provider || !current || !session.flipped || grading) return;
     setGrading(true);
     setError("");
+    const identity = resolveReviewGradeIdentity(
+      gradeIdentity.current,
+      current.card.id,
+      grade,
+      createIdempotencyKey,
+    );
+    gradeIdentity.current = identity;
     try {
-      const nextState = await provider.gradeCard(current.card.id, grade);
+      const nextState = await provider.gradeCard(current.card.id, grade, {
+        idempotencyKey: identity.key,
+      });
+      gradeIdentity.current = null;
       setNextDueAt((existing) => !existing || nextState.dueAt < existing ? nextState.dueAt : existing);
       setSession((currentSession) => applyReviewGrade(currentSession, grade));
     } catch {

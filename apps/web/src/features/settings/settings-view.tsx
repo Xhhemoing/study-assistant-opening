@@ -1,6 +1,7 @@
 "use client";
 
 import { Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import type { GuidanceMode } from "../../lib/data/types";
@@ -115,6 +116,7 @@ export function SettingsView() {
         <section className="space-y-4 border-t border-line pt-6" aria-labelledby="guidance-heading"><div><h2 className="text-base font-semibold text-text" id="guidance-heading">指导模式</h2><p className="mt-1 text-sm text-text-dim">影响探索中的模拟回复风格。</p></div><select className="min-h-10 w-full rounded-md border border-line bg-surface px-3 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/30" onChange={(event) => void saveGuidanceMode(event.target.value as GuidanceMode)} value={guidanceMode}>{guidanceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></section>
         <section className="space-y-4 border-t border-line pt-6" aria-labelledby="autonomy-heading"><div><h2 className="text-base font-semibold text-text" id="autonomy-heading">计划自主权</h2><p className="mt-1 text-sm text-text-dim">决定系统能否自动调整计划，以及建议是否需要确认。</p></div><GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} /></section>
         <section className="space-y-3 border-t border-line pt-6" aria-labelledby="demo-heading"><div><h2 className="text-base font-semibold text-text" id="demo-heading">演示数据</h2><p className="mt-1 text-sm text-text-dim">只重置当前账号的本地 mock 学习数据。</p></div><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-danger/40 px-3 text-sm text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:opacity-50" disabled={saving} onClick={() => void resetDemoData()} type="button"><Check aria-hidden="true" size={16} />重置演示数据</button></section>
+        <section className="space-y-3 border-t border-line pt-6" aria-labelledby="export-heading"><div><h2 className="text-base font-semibold text-text" id="export-heading">数据导出</h2><p className="mt-1 text-sm text-text-dim">Markdown/Anki 投影不是完整备份。原生备份可完整恢复。</p></div><Link className="inline-flex min-h-10 items-center rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/settings/export">打开导出与备份</Link></section>
         <DiagnosticsPanel provider={provider} />
       </> : null}
       {notice ? <p className="text-sm text-success" role="status">{notice}</p> : null}

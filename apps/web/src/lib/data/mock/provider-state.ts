@@ -11,6 +11,7 @@ import {
   type StudyGoal,
   type TodayPlan,
 } from "@aistudy/contracts";
+import type { AssessmentSlice } from "@aistudy/domain";
 import { buildSeedBundle, SEED_SYLLABUS } from "./seeds";
 import {
   loadDomain,
@@ -30,6 +31,7 @@ export interface PlanSnapshot {
   goalId: string;
   overlays: Record<string, PlanOverlay>;
   lastPlan: TodayPlan | null;
+  selectedOptionId?: string | null;
 }
 
 export interface MockProviderState {
@@ -39,6 +41,9 @@ export interface MockProviderState {
   now: () => Date;
   syllabus: SyllabusPoint[];
   assessmentMode: AssessmentMode;
+  disabledSlices: AssessmentSlice[];
+  protectedExplorationMinutes: number;
+  planningEnabled: boolean;
 }
 
 export const MOCK_DOMAINS = [
@@ -66,6 +71,9 @@ export function createProviderState(options: MockProviderOptions): MockProviderS
     now: () => new Date(options.now instanceof Function ? options.now() : options.now ?? new Date()),
     syllabus: options.syllabus ?? SEED_SYLLABUS,
     assessmentMode: options.assessmentMode ?? "basic",
+    disabledSlices: options.disabledSlices ?? [],
+    protectedExplorationMinutes: options.protectedExplorationMinutes ?? 0,
+    planningEnabled: options.planningEnabled ?? true,
   };
 }
 

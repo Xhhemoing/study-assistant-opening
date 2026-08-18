@@ -16,10 +16,12 @@ import {
   type TodayPlan,
 } from "@aistudy/contracts";
 import {
+  applyPlanOption,
   buildTodayPlan,
   deriveStatus,
   isPracticeAnswerCorrect,
   reviewGradeToEvidence,
+  scenarioToGoalKind,
   scheduleReview,
   type EvidenceEvent,
 } from "@aistudy/domain";
@@ -54,6 +56,7 @@ function statusForPoint(state: MockProviderState, pointId: string, now: Date): S
       assisted: event.assisted,
       hintCount: event.hintCount,
       confidence: event.confidence,
+      errorCause: event.errorCause,
       slice: event.abilitySlice,
       occurredAt: event.createdAt,
       source: "attempt" as const,
@@ -63,7 +66,10 @@ function statusForPoint(state: MockProviderState, pointId: string, now: Date): S
     .filter((record) => record.syllabusPointId === pointId)
     .map((record) => reviewGradeToEvidence(record.grade, record.occurredAt));
   const corrections = readDomain<StatusCorrection[]>(state, "corrections", []);
-  return deriveStatus(pointId, [...attemptEvidence, ...reviewEvidence], now, corrections);
+  return deriveStatus(pointId, [...attemptEvidence, ...reviewEvidence], now, corrections, {
+    assessmentMode: state.assessmentMode,
+    disabledSlices: state.disabledSlices,
+  });
 }
 
 export function listStatuses(state: MockProviderState): StatusResult[] {
@@ -90,6 +96,12 @@ function goalSetKey(goals: ReturnType<typeof activeGoals>): string {
   return goals.map((goal) => goal.id).sort().join("|");
 }
 
+function isGoalSetExtension(previous: string, next: string): boolean {
+  const previousIds = previous.split("|").filter(Boolean);
+  const nextIds = new Set(next.split("|").filter(Boolean));
+  return previousIds.length > 0 && previousIds.every((id) => nextIds.has(id));
+}
+
 function planForDate(state: MockProviderState, date: string): TodayPlan {
   const goals = activeGoals(state);
   const primaryGoal = goals[0];
@@ -97,9 +109,12 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
   const key = goalSetKey(goals);
   const snapshots = readPlanSnapshots(state);
   const storedSnapshot = snapshots[date];
-  const snapshot: PlanSnapshot = storedSnapshot && storedSnapshot.goalId === key
-    ? storedSnapshot
-    : { goalId: key, overlays: {}, lastPlan: null };
+  const snapshot: PlanSnapshot =
+    storedSnapshot && storedSnapshot.goalId === key
+      ? storedSnapshot
+      : storedSnapshot && isGoalSetExtension(storedSnapshot.goalId, key)
+        ? { ...storedSnapshot, goalId: key, selectedOptionId: null }
+        : { goalId: key, overlays: {}, lastPlan: null, selectedOptionId: null };
   const previousLockedTasks = (snapshot.lastPlan?.tasks ?? []).filter((task) => snapshot.overlays[task.id]?.locked);
   const items = readDomain<import("@aistudy/contracts").PracticeItem[]>(state, "practiceItems", []);
   const statuses = listStatuses(state);
@@ -124,10 +139,16 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     points,
     dueReviews,
     assessmentMode: state.assessmentMode,
+    goals: goals.map((goal) => ({ id: goal.id, kind: scenarioToGoalKind(goal.scenario) })),
+    protectedExplorationMinutes: state.protectedExplorationMinutes,
+    planningEnabled: state.planningEnabled,
   };
   const baselinePlan = buildTodayPlan({ ...plannerInput, lockedTasks: [] });
-  const baselineTaskIds = new Set(baselinePlan.tasks.map((task) => task.id));
-  const lockedTasks = previousLockedTasks.filter((task) => baselineTaskIds.has(task.id));
+  const lockableIds = new Set([
+    ...baselinePlan.tasks.map((task) => task.id),
+    ...baselinePlan.options.flatMap((option) => option.tasks.map((task) => task.id)),
+  ]);
+  const lockedTasks = previousLockedTasks.filter((task) => lockableIds.has(task.id));
   const lockedRefs = new Set(lockedTasks.map((task) => task.refId));
   const plan = buildTodayPlan({
     ...plannerInput,
@@ -135,17 +156,32 @@ function planForDate(state: MockProviderState, date: string): TodayPlan {
     dueReviews: dueReviews.filter((review) => !lockedRefs.has(review.cardId)),
     lockedTasks,
   });
+  const chosen = snapshot.selectedOptionId ? applyPlanOption(plan, snapshot.selectedOptionId) : plan;
+  const retainIds = new Set([
+    ...chosen.tasks.map((task) => task.id),
+    ...plan.options.flatMap((option) => option.tasks.map((task) => task.id)),
+  ]);
   const overlays = Object.fromEntries(
-    Object.entries(snapshot.overlays).filter(([taskId]) => plan.tasks.some((task) => task.id === taskId)),
+    Object.entries(snapshot.overlays).filter(([taskId]) => retainIds.has(taskId)),
   );
-  const applied = applyOverlay(plan, overlays);
-  snapshots[date] = { goalId: key, overlays, lastPlan: applied };
+  const applied = applyOverlay(chosen, overlays);
+  snapshots[date] = { goalId: key, overlays, lastPlan: applied, selectedOptionId: snapshot.selectedOptionId ?? null };
   writePlanSnapshots(state, snapshots);
   return applied;
 }
 
 export function getTodayPlan(state: MockProviderState, date?: string): TodayPlan {
   return todayPlanSchema.parse(planForDate(state, date ?? todayKey(state.now())));
+}
+
+export function selectPlanOption(state: MockProviderState, date: string, optionId: string): TodayPlan {
+  planForDate(state, date);
+  const snapshots = readPlanSnapshots(state);
+  const snapshot = snapshots[date];
+  if (!snapshot) throw new Error("今日计划不存在");
+  snapshots[date] = { ...snapshot, selectedOptionId: optionId };
+  writePlanSnapshots(state, snapshots);
+  return todayPlanSchema.parse(planForDate(state, date));
 }
 
 function setOverlay(state: MockProviderState, date: string, taskId: string, patch: PlanOverlay): TodayPlan {
@@ -184,7 +220,7 @@ export function submitAttempt(state: MockProviderState, input: AttemptInput): Su
   const existing = events.find((event) => event.idempotencyKey === input.idempotencyKey);
   if (existing) return { event: existing, status: statusForPoint(state, item.syllabusPointId, state.now()) };
   const event = attemptEventSchema.parse({
-    id: newId(), ownerUserId: state.userId, practiceItemId: item.id, syllabusPointId: item.syllabusPointId,
+    id: input.eventId ?? newId(), ownerUserId: state.userId, practiceItemId: item.id, syllabusPointId: item.syllabusPointId,
     idempotencyKey: input.idempotencyKey, answer: input.answer, correct: isPracticeAnswerCorrect(item, input.answer),
     assisted: input.assisted, durationMs: input.durationMs, hintCount: input.hintCount, confidence: input.confidence,
     errorCause: input.errorCause, abilitySlice: item.abilitySlice, contentVersion: item.contentVersion,
