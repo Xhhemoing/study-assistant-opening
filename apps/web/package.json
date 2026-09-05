@@ -21,6 +21,7 @@
     "@blocknote/react": "^0.52.1",
     "ioredis": "5.6.1",
     "jose": "^6.2.4",
+    "jszip": "^3.10.1",
     "next": "15.5.21",
     "postgres": "3.4.7",
     "react": "19.1.9",
@@ -30,8 +31,8 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.11",
     "@types/react": "19.1.17",
-    "tailwindcss": "^4.1.11",
     "@types/react-dom": "19.1.11",
+    "tailwindcss": "^4.1.11",
     "typescript": "5.8.3",
     "vitest": "4.1.10"
   }
