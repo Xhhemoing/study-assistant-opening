@@ -2,17 +2,19 @@
 
 **审计日期：**2026-08-15
 
+**2026-09-06 复核：**分支仍为 `feat/complete-phase1-current-work`；当前 HEAD `146d6662a74c0dc957b59f2ab505342b08e214e2`。本轮只做源码/Git 审查与文档对齐，未重跑 unit/integration/handler/browser，也未把未提交的 `0016` Goals 草稿视为已发布。
+
 **审计范围：**当前分支 `feat/complete-phase1-current-work`、当前工作区未提交变更、源码、数据库迁移、测试、README、PRD、架构文档。
 
-**验证来源：**源码静态审查、`npx vitest run --project unit`（Task 0 重跑为 104 个文件、479 个测试通过）、完整 Vitest 环境失败证据、`ai98pro/gpt-5.6-sol` 独立审查、`deepseek/deepseek-v4-pro` 反证审查。
+**验证来源：**2026-08-15 源码静态审查与当时本地 unit 数字保留为历史；2026-09-06 以 HEAD `146d666` 源码、已提交 migration `0001`–`0015`、GitHub Actions run [31008499233](https://github.com/Xhhemoing/AIstudy/actions/runs/31008499233) 为准。
 
-**当前工作区状态：**Task 0 基线捕获 106 个 Git 状态项；不得将未提交文件、测试文件或规划文档直接视为已发布能力。
+**当前工作区状态：**HEAD 已包含当时未提交的 0012–0015 切片。工作区仍脏：未提交 `0016_goal_and_plan_state.sql` 与 `/api/goals`。不得将未提交文件、测试文件或规划文档直接视为已发布能力。
 
 ## 使用规则
 
 - **事实：**可以从源码、迁移、测试或命令输出直接复核。
 - **推断：**根据事实推导的风险；修复前需要增加针对性测试。
-- **状态：**`Open` 表示尚未修复；`Partial` 表示已有局部实现但主链未闭合；`Blocked` 表示修复依赖环境或前置任务；`Accepted gap` 表示已知规划缺口，不应伪装成已实现。
+- **状态：**`Open` 表示尚未修复；`Partial` 表示已有局部实现但主链未闭合；`Reopened / Partial` 表示曾经关闭后又相对当前 HEAD 漂移；`Blocked` 表示修复依赖环境或前置任务；`Accepted gap` 表示已知规划缺口，不应伪装成已实现。
 - 关闭问题必须同时填写：修复提交、测试命令、实际输出、残余风险。
 - 迁移问题必须确认目标数据库是否已经执行旧迁移；已执行迁移不得修改原文件。
 
@@ -29,20 +31,20 @@
 
 | ID | 严重度 | 状态 | 所属域 | 一句话问题 |
 |---|---|---|---|---|
-| AIST-001 | Critical / P0 | Open | 数据可信度 | 作答接口信任客户端的 `correct`、考点和能力切片 |
-| AIST-002 | Critical / P0 | Partial | 数据架构 | 学习 UI 的主读路径仍是 Mock/localStorage，数据库事件只形成薄镜像 |
-| AIST-003 | Critical / P0 | Open | SRS 并发 | 同一卡片并发评分可能发生 lost update |
-| AIST-004 | High / P0 | Open | 事件不可变性 | `learning_events` 有 no-update guard，但没有 no-delete guard |
-| AIST-005 | High / P0 | Open | 内容事实源 | 没有正式题目、考点、答案版本和服务端评分规则表 |
-| AIST-006 | High / P0 | Partial | 验证交付 | 跨平台 wrapper 已修复；PostgreSQL、Redis、浏览器门禁仍未在当前环境闭合 |
-| AIST-007 | High / P0 | Open | 测试完整性 | Backup 路由和测试只存在于未提交工作区，数据库 handler 门禁未验证 |
-| AIST-008 | High / P1 | Partial | Assessment | 状态和计划没有由真实事件在服务端重放并作为 UI 真源 |
+| AIST-001 | Critical / P0 | Partial | 数据可信度 | `/api/attempts` 已服务端判题；Learn 主读仍 Mock |
+| AIST-002 | Critical / P0 | Partial | 数据架构 | Learn/Goals/Practice/Review/Today Plan 仍 Mock；未提交 0016 草稿不算已发布 |
+| AIST-003 | Critical / P0 | Partial | SRS 并发 | `FOR UPDATE` 与并发测试已在 HEAD；本环境未跑 PostgreSQL 集成测试 |
+| AIST-004 | High / P0 | Partial | 事件不可变性 | `0014` 表级 no-delete 已提交；账号级 CASCADE / 合规删除未做 |
+| AIST-005 | High / P0 | Partial | 内容事实源 | `0015` 内容包已提交；练习页主读仍 Mock，未切服务端 |
+| AIST-006 | High / P0 | Partial | 验证交付 | 跨平台 wrapper 已修；CI 被 `bitnami/minio:2025.4.22` 阻断；本地无 Docker/bash |
+| AIST-007 | High / P0 | Partial | 测试完整性 | Backup 路由/测试已在 HEAD；完整恢复演练与 handler/e2e 未证明 |
+| AIST-008 | High / P1 | Partial | Assessment | `/api/assessment` 已从事件重放；UI / Today Plan 仍 Mock |
 | AIST-009 | High / P1 | Partial | Worker / AI | Worker 仍是 smoke processor，没有真实 BullMQ consumer 或 provider |
 | AIST-010 | High / P1 | Accepted gap | 内容供给 | Marketplace、模考和真实资源包尚未形成 |
-| AIST-011 | High / P1 | Partial | 备份恢复 | Markdown/Anki 投影存在，但 Native Backup API/恢复入口未接通 |
+| AIST-011 | High / P1 | Partial | 备份恢复 | export/restore 已在 HEAD；完整 Workspace 恢复演练未作为 CI 证据 |
 | AIST-012 | High / P1 | Open | 隐私安全 | 自由文本、未成年人、Provider 数据边界、删除和训练用途没有闭合策略 |
 | AIST-013 | Medium / P2 | Open | 开源 / 自托管 | 缺少 LICENSE、治理文件和包含 Web/Worker 的完整 Compose |
-| AIST-014 | Medium / P2 | Closed | 文档治理 | README、TODO 和基线已区分 HEAD、未提交工作区与规划能力 |
+| AIST-014 | Medium / P2 | Reopened / Partial | 文档治理 | 相对 HEAD `146d666` 再次漂移；2026-09-06 文档对齐中 |
 | AIST-015 | Medium / P2 | Open | 架构可维护性 | `library.ts`、auth service 等超大模块增加变更风险 |
 | AIST-016 | Medium / P2 | Accepted gap | 检索架构 | 当前是 FTS/trigram，pgvector 仍是规划方向 |
 | AIST-017 | Medium / P1 | Open | 效果评估 | 干预已经生成，但没有稳定的 7 日独立验证结果链路 |
@@ -54,34 +56,33 @@
 
 **严重度：**Critical / P0
 
-**状态：**Open
+**状态：**Partial
 
-**置信度：**已从源码直接确认
+**置信度：**2026-09-06 已从 HEAD `146d666` 源码直接确认
 
 ### 证据
 
-- `packages/contracts/src/attempts.ts` 的 `submitAttemptRequestSchema` 接受 `correct`、`syllabusPointId`、`contentVersion`、`abilitySlice`。
-- `apps/web/src/features/practice/attempt-service.ts` 将上述字段直接写入 `learning_events`。
-- `apps/web/src/lib/data/persist-attempt.ts` 在客户端先判题，再把 `correct` 发送到服务端。
-- 当前 `packages/domain/src/practice/grading.ts` 只提供客户端可调用的有限字符串匹配规则，服务端没有根据正式题目版本独立重算。
+- `packages/contracts/src/attempts.ts` 的 `submitAttemptRequestSchema` 现为 `{ practiceSessionId, answer, confidence, errorCause, idempotencyKey }`，不再接受客户端 `correct/syllabusPointId/abilitySlice/contentVersion`。响应事件仍含服务端生成的 `correct` 等字段。
+- `apps/web/src/features/practice/attempt-service.ts` 在事务内 lock practice session、`content.getGradableVersion(...)`，再用 `gradePracticeAnswer(item.answerRule, parsed.answer)` 服务端判题后 append learning event。
+- `apps/web/src/lib/data/persist-attempt.ts` 只 POST 上述五个请求字段。
+- 仍未闭合：Learn UI 主读仍是 `createMockProvider()` + `withPersistedAttempts`；`practice-player.tsx` 仍 `useStudyProvider()`，题目来自 Mock，本地仍调用 `isPracticeAnswerCorrect`。没有把练习主读切到服务端内容包。
 
 ### 影响
 
-攻击者或错误客户端可以伪造正确率、考点归属和能力维度，污染状态、计划、干预统计和未来训练数据。这个问题会使“可解释能力状态”和“7 日效果指标”失去可信基础。
+服务端 API 不再信任客户端判题字段，但 Mock 主读仍可让 UI 展示与服务器事实不一致的题目和本地 verdict。在练习页切到服务端内容包之前，状态、计划和干预统计仍可能被演示数据污染。
 
 ### 修复要求
 
-- 请求契约只接受 `practiceItemId`、答案和行为上下文；客户端字段 `correct`、考点、能力切片不再是权威输入。
-- 服务端按 `practiceItemId + contentVersion` 加载正式题目和评分规则。
-- 服务端生成 `correct`、`syllabusPointId`、`abilitySlice` 和最终内容版本。
-- 客户端上报的旧字段若为兼容期保留，只能作为非可信诊断字段，不能写入事实事件。
+- 练习主读改为服务端内容包 / practice session，而不是 Mock seeds。
+- 客户端本地 `isPracticeAnswerCorrect` 不得作为事实源。
+- handler 测试覆盖未知字段被拒绝、跨 Workspace 题目访问失败、旧内容版本仍可重现历史判题。
 
 ### 关闭证据
 
-- handler 测试伪造 `correct: true`、错误考点和错误能力切片，断言服务端重算结果。
+- handler 测试提交额外 `correct: true`、错误考点和错误能力切片，断言请求被拒绝或服务端重算结果。
 - 跨 Workspace 题目访问失败。
 - 旧内容版本仍可重现历史判题。
-- `npx vitest run --project unit`、handler 集成和 E2E 均通过。
+- 练习页不再从 Mock 取题；`npx vitest run --project unit`、handler 集成和 E2E 均通过。
 
 **对应修复任务：**计划 Task 2、Task 3。
 
@@ -101,6 +102,7 @@
 - `apps/web/src/lib/data/mock/` 仍负责目标、今日计划、状态、题目、复习队列和探索回复的主要读模型。
 - `apps/web/src/features/auth/service.ts` 已装配真实 learning event 和 card repositories，但没有对应的真实 `StudyDataProvider` 实现。
 - 作答和复习存在“写入 PostgreSQL + 更新本地 Mock”的镜像路径，数据库事件没有完整反向驱动 UI 读模型。
+- 2026-09-06：工作区有未提交 `0016_goal_and_plan_state.sql` 与 `/api/goals` 草稿，属于下一片，不得视为已发布。
 
 ### 影响
 
@@ -128,19 +130,20 @@
 
 **严重度：**Critical / P0
 
-**状态：**Open
+**状态：**Partial
 
-**置信度：**源码确认，需集成测试量化
+**置信度：**HEAD 源码与测试文件已确认；本环境未跑 PostgreSQL 集成测试
 
 ### 证据
 
-- `packages/database/src/repositories/cards-grade.ts` 在事务中读取 `card_review_states`，但 SELECT 没有 `FOR UPDATE`。
-- `packages/database/src/repositories/cards-ops.ts` 的 `writeState()` 使用 `ON CONFLICT DO UPDATE`。
-- `card_review_states` 没有 version/optimistic lock 字段。
+- `packages/database/src/repositories/cards-ops.ts` 已有 `lockCardForUpdate` / `loadReviewStateForUpdate`，SELECT 带 `FOR UPDATE`。
+- `tests/integration/card-concurrency.test.ts` 已在 HEAD：两个不同幂等键 → 2 events / `reps=2`；相同幂等键并发 → 1 event / `reps=1`；append 失败时 event+state 同时回滚。
+- 2026-08-15 当时的缺口（无 `FOR UPDATE`、无并发测试）已被 `911dd37` 切片覆盖。
+- 仍未闭合：本次环境无 Docker / PATH 无 bash，未跑该 PostgreSQL 集成测试；源码+测试文件存在 ≠ CI 已绿。
 
 ### 影响
 
-两个不同幂等键的并发评分可能基于同一个旧状态计算，最后写入覆盖先写入，造成 `reps`、interval、dueAt 与 review events 不一致。
+实现已按行锁串行化同一卡片评分，但缺少本环境/CI 执行证据。若行锁路径未被真实数据库跑过，仍不能宣称并发一致性已交付。
 
 ### 修复要求
 
@@ -150,12 +153,14 @@
 2. 在锁内再次检查幂等键；
 3. 状态更新和 review event append 在同一事务内完成；
 4. 不允许用简单的“重试几次”替代一致性保证。
+5. 在 PostgreSQL 集成环境和 CI 中实际执行 `card-concurrency` 测试。
 
 ### 关闭证据
 
 - 并发集成测试对同一卡片发起两个不同幂等键评分，最终 `reps`、事件数和状态符合两次评分。
 - 相同幂等键并发只创建一个事件。
 - 数据库异常时 event 和 state 同时回滚。
+- 上述测试在 CI 或干净 PostgreSQL 环境中通过，并记录命令输出。
 
 **对应修复任务：**计划 Task 4。
 
@@ -165,28 +170,30 @@
 
 **严重度：**High / P0
 
-**状态：**Open
+**状态：**Partial
 
-**置信度：**迁移源码确认
+**置信度：**HEAD migration 与测试文件已确认
 
 ### 证据
 
-`packages/database/src/migrations/0012_learning_events.sql` 创建了 `learning_events_no_update`，但没有拒绝 DELETE 的 trigger。外键上的 `ON DELETE CASCADE` 还允许删除 User/Workspace 时级联删除事件。
+- HEAD 已有 `0014_learning_event_delete_guard.sql`：`learning_events_no_delete` BEFORE DELETE trigger，无 session-variable 旁路。
+- `tests/integration/learning-event-idempotency.test.ts` 已断言 `DELETE FROM learning_events` 抛 `learning_events are append-only`，correction 仍可 append。
+- `0012_learning_events.sql` 仍有 `ON DELETE CASCADE` 到 workspace/user。
+- 账号级级联删除 / 合规删除流程未做。运维手册 `docs/operations/database-migrations.md` 已记录 `0014`。
 
 ### 影响
 
-普通事件删除可以破坏重放结果。用户级删除可能是合规所需，但必须作为显式、审计过的数据删除流程，而不能与“事件不可变”混为一谈。
+普通 DELETE 已被表级拒绝。用户/Workspace 删除仍可能级联抹掉事件，不能与“事件不可变”混为一谈。
 
 ### 修复要求
 
-- 新增后续 migration 创建 no-delete trigger。
 - 对用户删除建立独立的合规删除流程和审计记录。
 - 明确备份保留、训练数据抽取和派生状态删除边界。
-- 不修改已经执行的 `0012` 文件。
+- 不修改已经执行的 `0012` / `0014` 文件。
 
 ### 关闭证据
 
-- 直接 DELETE learning event 的数据库集成测试失败并返回约束错误。
+- 直接 DELETE learning event 的数据库集成测试失败并返回约束错误（测试已在 HEAD，待 CI/干净环境执行）。
 - correction 仍可追加。
 - 受控用户删除流程有单独测试和文档。
 
@@ -198,24 +205,24 @@
 
 **严重度：**High / P0
 
-**状态：**Open
+**状态：**Partial
 
-**置信度：**schema 和 migration 清单确认
+**置信度：**HEAD schema / migration 已确认；练习主读未切
 
 ### 证据
 
-- `packages/database/src/schema/` 当前没有正式的 practice item、syllabus node、content package schema。
-- `packages/database/src/migrations/0001` 至 `0013` 没有题目和考点内容表。
-- 练习内容主要来自 `apps/web/src/lib/data/mock/seeds.ts`、`seeds-content.ts`。
-- `learn/marketplace` 和 `learn/exams` 是 `PlannedPage`。
+- HEAD 已有 `0015_practice_content.sql`、`packages/database/src/schema/practice-content.ts`、`packages/contracts/src/practice-content.ts` 及对应 repository / integration test。
+- 表：`content_packages` / `syllabus_nodes` / `practice_items` / `practice_item_versions` / `practice_sessions`。
+- `/api/attempts` 已按 session 加载 `getGradableVersion` 做服务端评分。
+- 仍未闭合：练习 UI 主读仍 Mock（`useStudyProvider()` / `createMockProvider()`）；没有宣称“练习页从服务端读题”。`learn/marketplace` 和 `learn/exams` 仍是规划页。
 
 ### 影响
 
-无法在服务端独立判题、固定题目版本、保留历史引用或维护内容责任人。算法和评估只能围绕演示数据运行。
+服务端已能对已创建的内容版本判题，但用户在练习页看到的题目仍来自演示数据。算法和评估仍可能围绕 Mock 运行。
 
 ### 修复要求
 
-为一个垂直场景建立最小内容模型：考点、题目、题目版本、答案/评分规则、来源、审核状态和内容包版本。
+为一个垂直场景打通最小内容模型到 UI：考点、题目、题目版本、答案/评分规则、来源、审核状态和内容包版本；练习页从服务端读取题目。
 
 ### 关闭证据
 
@@ -234,23 +241,25 @@
 
 **状态：**Partial
 
-**置信度：**命令输出确认
+**置信度：**本地环境探测 + GitHub Actions run 确认
 
 ### 证据
 
 - Task 0 已修复 `scripts/run-heavy.sh`：`flock`、`nice`、`ionice`、`taskset` 按能力可选使用，子进程退出码保持不变。
-- `npm run verify:ci` 在当前 Windows/Git Bash 环境中通过：1 个 contract 文件、3 个测试通过。
-- `npx vitest run --project unit` 重跑为 104 个文件、479 个测试通过；domain/contracts TypeScript 检查退出 0。
-- integration/handler 仍需要 `DATABASE_URL` 和 PostgreSQL，Redis/MinIO 需要服务，browser 还需要隔离 E2E 数据库和 live server。
+- 2026-08-15 的 104/479 unit 数字是当时脏工作区本地证据，**不得写成 2026-09-06 验证**。
+- 2026-09-06 本地：PATH 无 `bash`、无 Docker CLI；有 `wsl.exe`；Node v24.18.0 / npm 11.16.0。完整 PostgreSQL / handler / browser / build 未跑。
+- GitHub `main` 最新 run [31008499233](https://github.com/Xhhemoing/AIstudy/actions/runs/31008499233)（SHA `7e0f6b88fafeecd4ca53b7a62798b9ae6f127ffe`）在 **Initialize containers** 失败：`manifest for bitnami/minio:2025.4.22 not found`。Checkout / Node / lint / test / build 全部 skipped。feat/dev 无 CI run。
+- 本地 compose 使用 `minio/minio:RELEASE.2025-04-22T22-12-26Z`；CI workflow 仍用失效的 bitnami tag。本次文档对齐不修 CI。
 - `docs/operations/ci.md` 和 README 已明确 unit-only、完整本地和 GitHub Actions 权威门禁的区别。
 
 ### 影响
 
-不能把 focused tests 或静态 TypeScript 检查等同于真实数据库、handler、browser 和 build 验收。
+不能把 focused tests 或静态 TypeScript 检查等同于真实数据库、handler、browser 和 build 验收。当前甚至不能把 GitHub Actions `quality` 当作已执行证据。
 
 ### 修复要求
 
 - 明确本地 Windows、WSL/Linux 和 CI 的支持路径。
+- 替换或修复 CI MinIO 镜像，使容器能初始化。
 - 提供服务启动前置检查和清晰跳过原因。
 - 在 CI 中执行完整门禁。
 - 发布记录保存 commit SHA、migration version、Node/Playwright version 和残余风险。
@@ -263,32 +272,34 @@
 
 **严重度：**High / P0
 
-**状态：**Open
+**状态：**Partial
 
-**置信度：**HEAD/工作区文件状态直接确认
+**置信度：**HEAD 文件存在已确认；完整演练未证明
 
 ### 证据
 
-- HEAD `ef0334fe1fe77c02f0388068f3e122244e3c40d0` 不包含 Backup 路由或 handler 测试。
-- 当前未提交工作区已包含：
+- 2026-08-15 当时 HEAD `ef0334f` 不含 Backup 路由；该切片已由 `911dd37` 提交进当前 HEAD `146d666`。
+- HEAD 已包含：
   - `apps/web/src/app/api/backups/export/route.ts`
   - `apps/web/src/app/api/backups/restore/route.ts`
   - `tests/integration/handler/backup-routes-authorization.test.ts`
-- 当前环境未设置 `DATABASE_URL` 且没有 Docker，因此没有执行该 PostgreSQL handler 测试。
+  - `tests/integration/native-backup-roundtrip.test.ts`
+  - `tests/e2e/native-backup.spec.ts`
+- 当前环境未设置可用 PostgreSQL/Docker，因此没有执行 handler 或 e2e；完整 Workspace 恢复演练未证明。
 
 ### 影响
 
-源码存在性已经消除原先的模块导入缺口，但未提交、未执行的 handler 测试不能证明 Backup API 的权限、冲突和恢复行为。
+路由和测试已进入版本历史，但未执行的 handler/e2e 不能证明 Backup API 的权限、冲突和恢复行为。
 
 ### 修复要求
 
-在 Native Backup API 实现前，测试应保持失败并明确标记为未接通；执行 Backup 功能时实现路由、服务和权限测试。不得只删除 import 让 suite 变绿。
+在真实 PostgreSQL / Playwright 环境执行授权、冲突和 roundtrip 测试；补完整 Workspace 恢复演练。不得只删除 import 让 suite 变绿。
 
 ### 关闭证据
 
 - 两个路由真实存在并进行 principal-bound authorization。
 - 未登录 401、跨 Workspace 409/403、同 Workspace 导出/恢复通过。
-- 完整 handler 和 integration 测试收集成功。
+- 完整 handler、integration 和恢复演练收集成功。
 
 **对应修复任务：**计划 Task 9。
 
@@ -300,22 +311,23 @@
 
 **状态：**Partial
 
-**置信度：**源码和迁移清单确认
+**置信度：**源码确认
 
 ### 证据
 
 - `packages/domain/src/assessment/` 有纯函数和测试。
 - `packages/domain/src/planning/` 有 planner 和测试。
-- 但当前学习 UI 主要通过 Mock Provider 读取状态和计划。
-- 没有完整的服务端 assessment/plan API 读路径，也没有明确的持久化 assessment snapshot 表。
+- API 已有 `/api/assessment`、`/api/assessment/corrections`；`assessment-service.ts` 从 learning events 重放。
+- 当前学习 UI 仍通过 `useStudyProvider()` → Mock 读取状态和计划；Today Plan 仍 Mock。
+- 没有明确的持久化 assessment snapshot 表。
 
 ### 影响
 
-领域算法“可重算”不等于产品结果“来自真实事件”。原因抽屉和今日计划无法在多设备和服务端环境中稳定重现。
+领域算法“可重算”和 Assessment API“可重放”不等于产品 UI “来自真实事件”。原因抽屉和今日计划无法在多设备和服务端环境中稳定重现。
 
 ### 修复要求
 
-先保证事件重放可用，再决定是否持久化快照。快照必须是派生缓存而不是事实源，带 model、strategy、evidence snapshot 版本。
+先保证事件重放驱动 UI，再决定是否持久化快照。快照必须是派生缓存而不是事实源，带 model、strategy、evidence snapshot 版本。
 
 **对应修复任务：**计划 Task 6、Task 7。
 
@@ -377,18 +389,18 @@
 
 **状态：**Partial
 
-**置信度：**源码确认
+**置信度：**HEAD 源码确认；演练未证明
 
 ### 证据
 
 - `packages/domain/src/portability/markdown/` 和 `anki/` 有实现和测试。
 - `apps/web/src/app/api/exports/` 有 Markdown/Anki 路由。
-- Native backup 领域函数和契约已经出现，但缺少 `/api/backups/export`、`/api/backups/restore` 路由和完整 UI。
-- Backup handler 测试已经提前引用这些不存在的路由。
+- Native backup 领域函数、契约以及 `/api/backups/export`、`/api/backups/restore` 已在 HEAD（同 AIST-007）。
+- 完整 Workspace 恢复演练 / 权限门禁未作为 CI 证据。
 
 ### 修复要求
 
-先完成真实路由和 principal-bound service，再做完整 Workspace/事件/卡片/附件恢复。所有外部投影继续显示 loss report。
+在 CI 或干净环境执行 principal-bound 恢复演练；所有外部投影继续显示 loss report。
 
 **对应修复任务：**计划 Task 9。
 
@@ -443,16 +455,16 @@
 
 **严重度：**Medium / P2
 
-**状态：**Closed
+**状态：**Reopened / Partial
 
 **置信度：**Git 和文档直接确认
 
 ### 证据
 
-- `README.md` 已改为“已提交且可追溯 / 工作区存在但尚未完整验证 / 规划中”三类能力声明。
-- `docs/releases/phase-1-repair-baseline.md` 固定记录分支、HEAD、106 个工作区状态项、migration 边界、环境缺口和验证命令。
-- `TODO.md` 已成为问题总账和服务端权威修复计划的统一入口。
-- `docs/operations/ci.md` 已区分 unit-only、本地完整门禁和 GitHub Actions 权威合并门禁。
+- 2026-08-15 曾把 README/TODO/基线分成 HEAD / 未提交工作区 / 规划中三类，并关闭本问题。
+- 2026-09-06 复核时，这些文档相对 HEAD `146d666` 再次漂移：仍写 migration 止于 `0011`、0012/0013 未提交、Backup 不在 HEAD、AIST-001/003/004/005/007 仍为 Open，并沿用过时的 98/467 或 104/479 作为当前验证。
+- 本次文档对齐覆盖 `README.md`、`TODO.md`、`docs/releases/phase-1-repair-baseline.md`（只在快照顶部增加 Current HEAD 对照，不改写历史段落）和本总账。
+- 关闭证据仍缺本次 docs commit 之后的稳定 SHA 自检，以及完整产品门禁。本文件与对齐提交同批落地，无法在同一提交内自引用 SHA。
 
 ### 修复要求
 
@@ -464,18 +476,12 @@
 ### 关闭证据
 
 ```text
-npm run verify:ci
-1 contract file passed, 3 tests passed
-
-npx vitest run --project unit
-104 test files passed, 479 tests passed
-
-npx tsc -p packages/domain/tsconfig.json --noEmit
-npx tsc -p packages/contracts/tsconfig.json --noEmit
-both exit 0
+源码审查 + Git HEAD 146d666
+未重跑 unit/integration/handler/browser
+完整门禁未跑：本地无 Docker/bash；CI bitnami/minio:2025.4.22 manifest unknown
 ```
 
-修复提交 SHA 和 CI run URL 需在提交/PR 后补充；当前关闭的是文档漂移问题，不代表完整产品门禁已闭合。
+文档漂移可在对齐提交落地且 README/TODO/总账与 HEAD 一致后重新关闭；这不代表完整产品门禁已闭合。
 
 **对应修复任务：**计划 Task 0、Task 13。
 

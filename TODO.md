@@ -1,8 +1,8 @@
 # TODO — AIstudy 统一修复入口
 
-> 更新：2026-08-15
+> 更新：2026-09-06
 >
-> 验证：源码审查 + `ai98pro/gpt-5.6-sol` + `deepseek/deepseek-v4-pro` 交叉复核。
+> 验证：源码审查 + Git HEAD `146d666`（`feat/complete-phase1-current-work`）。本轮未重跑 unit/integration/handler/browser/CI。
 >
 > 规则：本文件只保留执行摘要；问题事实、状态和关闭证据统一记录在问题总账中。
 
@@ -15,25 +15,25 @@
 
 ## 当前判断
 
-当前不是纯 Mock 原型：认证、Workspace、知识库、课程资产、探索、候选审核、Learning Event、Cards 和导出已有真实数据库/API 切片。但 Learn 主读路径仍由 Mock/localStorage 驱动，服务端还信任客户端判题字段，SRS 并发和完整门禁也未闭合。
+当前不是纯 Mock 原型：认证、Workspace、知识库、课程资产、探索、候选审核、Learning Event、Cards、Practice content、Assessment replay、Attempts、Backup 路由和导出已有真实数据库/API 切片，且 `0001`–`0015` 已提交。但 Learn 主读路径仍由 Mock/localStorage 驱动；练习页未切服务端内容包；账号级删除、完整恢复演练和完整门禁未闭合。
 
 任何“学习闭环完成”声明必须同时满足：服务端权威内容与判题、不可变事件、并发一致 SRS、服务端状态/计划重放、跨浏览器持久化、真实 PostgreSQL/handler/browser 验证。
 
 ## P0 — 真实学习事实与一致性
 
-- [ ] `AIST-006/AIST-014`：冻结当前 92 项工作区基线，修复跨平台验证入口，更新 README 的已实现/未接通/规划中边界。
-- [ ] `AIST-004`：新增 migration，数据库级拒绝普通 Learning Event DELETE。
-- [ ] `AIST-005`：建立版本化内容包、考点、题目版本、答案规则和 Practice Session。
-- [ ] `AIST-001`：移除客户端权威 `correct/syllabusPointId/abilitySlice/contentVersion`，改为服务端判题。
-- [ ] `AIST-003`：锁定同一卡片评分事务，补并发和幂等集成测试。
-- [ ] `AIST-007`：实现 Native Backup 路由或保持显式失败；不得删除测试掩盖缺失能力。
+- [ ] `AIST-006/AIST-014`：README/TODO/总账本次对齐 HEAD `146d666`；完整门禁仍未跑（本地无 Docker/bash；CI `bitnami/minio:2025.4.22` manifest unknown）。
+- [ ] `AIST-004`：表级 no-delete 已提交（`0014`）；账号级 CASCADE / 合规删除流程未做。
+- [ ] `AIST-005`：内容包表已提交（`0015`）；练习页主读仍 Mock，未切服务端内容包。
+- [ ] `AIST-001`：请求契约已去掉客户端权威 `correct/...`，`/api/attempts` 已服务端判题；Learn 主读仍 Mock。
+- [ ] `AIST-003`：`FOR UPDATE` 与并发测试已在 HEAD；本环境未跑 PostgreSQL 集成测试，CI 未绿。
+- [ ] `AIST-007`：Backup 路由/测试已在 HEAD；完整恢复演练和 handler/e2e 未证明。
 
 ## P1 — 服务端读模型与试点
 
-- [ ] `AIST-008`：从真实 Learning Event 重放 Assessment 和 Correction。
-- [ ] `AIST-002`：持久化 Goals/Plan State，把 Learn/Practice/Review/Status 主读路径迁出 Mock/localStorage。
+- [ ] `AIST-008`：`/api/assessment` 与 corrections 已从 learning events 重放；UI 仍 `useStudyProvider()` → Mock，Today Plan 仍 Mock。
+- [ ] `AIST-002`：Learn/Goals/Practice/Review/Status 主读仍 Mock/localStorage。工作区有未提交 `0016` + `/api/goals` 草稿，不得视为已发布。
 - [ ] `AIST-010/AIST-018`：只准备一个高数垂直内容包和 4–8 周成人小规模试点。
-- [ ] `AIST-011`：完成 Native Backup/Restore、权限和恢复演练。
+- [ ] `AIST-011`：export/restore 路由已在 HEAD；完整 Workspace 恢复演练 / 权限门禁未作为 CI 证据。
 - [ ] `AIST-012`：完成数据清单、保留/删除、Origin、限流、Provider 数据边界和成人试点年龄门。
 - [ ] `AIST-017`：记录干预分配和 7 日未见变式题结果；先统计，不自动调参。
 - [ ] `AIST-009`：核心规则闭环稳定后再接 Transactional Outbox、BullMQ、真实 Provider 和成本预算。
@@ -48,9 +48,13 @@
 ## 当前可复核验证
 
 ```text
-npx vitest run --project unit
-98 个测试文件通过
-467 个测试通过
+源码审查 + Git HEAD 146d666
+以问题总账为准；完整门禁未跑
+本地：PATH 无 bash、无 Docker CLI；有 wsl.exe；Node v24.18.0 / npm 11.16.0
+CI：GitHub main run 31008499233 在 Initialize containers 失败
+错误：manifest for bitnami/minio:2025.4.22 not found
+Checkout / Node / lint / test / build 全部 skipped
+feat/dev 无 CI run
 ```
 
 完整门禁仍需 PostgreSQL、Redis、MinIO、Playwright Chromium 和可执行的跨平台 heavy-task wrapper；在完整门禁运行前不得宣称全部测试通过。

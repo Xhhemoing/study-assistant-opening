@@ -37,7 +37,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前 HEAD 为 `Phase 1 / Workspace Authorization`，能力声明按证据分为三类。完整基线见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)，当前问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
+当前 HEAD 为 `146d666`（分支 `feat/complete-phase1-current-work`），能力声明按证据分为三类。2026-08-15 冻结快照见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)；当前问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
 
 ### 已提交且可追溯
 
@@ -47,19 +47,25 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - 版本化 block 编辑、wiki link/backlink、typed relation、properties 和追加式 revision。
 - Exploration、候选审核、接受候选生成资产，以及 provider-neutral 的 candidate-only AI job 契约。
 - 课程需求画像、多个课程目标、指导模式和可选 onboarding 路径。
-- HEAD 中已提交的数据库 migration 为 `0001` 至 `0011`。
+- HEAD 中已提交的数据库 migration 为 `0001` 至 `0015`。
+- Learning Event、Cards、Practice content、Assessment replay、Attempts、Reviews。
+- Native Backup export/restore 路由，以及 Markdown/Anki 导出投影。
+- `/api/attempts` 已按 practice session + 内容版本做服务端判题；Learn/练习 UI 主读尚未切到服务端内容包。
+- SRS 评分路径已有 `FOR UPDATE` 行锁，`tests/integration/card-concurrency.test.ts` 已在 HEAD。
+- `0014_learning_event_delete_guard.sql` 已提交表级 no-delete trigger（无 session-variable 旁路）。
+- 开发预览页：`/preview/notebook`、`/preview/notion-import`。
 
 ### 工作区存在但尚未完整验证
 
-- 当前工作区包含 Learning Event、Cards、Attempt/Review API、Assessment replay、Today Plan、导出和 Native Backup 等未提交切片。
-- 这些切片包含 `0012`、`0013` migration 和对应测试，但尚未在干净 checkout 上通过完整 PostgreSQL、handler、browser、build 和 CI 门禁。
-- Learn 主读路径仍含 Mock/localStorage 真源，服务端仍需完成权威内容和判题、SRS 并发一致性以及跨浏览器持久化修复。
-- “文件存在”“单元测试通过”或“当前工作区可运行”都不等于已发布能力。
+- 工作区另有未提交的 `0016_goal_and_plan_state.sql` 与 `/api/goals` 草稿，属于 AIST-002 下一片，不视为已发布。
+- 完整 PostgreSQL、handler、browser、build 和 CI 门禁未在干净环境通过。本地缺少 Docker CLI 与 PATH 中的 `bash`；GitHub Actions `main` 最新 run 在 Initialize containers 因 `bitnami/minio:2025.4.22` 镜像不存在而失败。
+- “文件存在”“源码审查通过”或“当前工作区可运行”都不等于已发布能力。
 
-### 规划中
+### 未接通 / 规划中
 
-- 服务端权威内容、判题、Assessment 和 Today Plan 主链。
-- 单一高数内容包和 7 日未见变式题效果验证。
+- Learn 主读仍是 `createMockProvider()` + localStorage；练习页仍从 Mock 取题。
+- 账号级级联删除 / 合规删除流程未做（`0012` 仍对 workspace/user 使用 `ON DELETE CASCADE`）。
+- Native Backup 完整 Workspace 恢复演练和权限门禁未作为 CI 证据。
 - Transactional Outbox、真实 BullMQ Worker、受预算约束的 AI Provider。
 - Marketplace、教师/班级、离线客户端、插件 SDK、pgvector 和高级自适应模型继续暂缓。
 
@@ -82,7 +88,7 @@ npm run test:browser
 npm run build
 ```
 
-Unit 通过不代表完整系统通过；GitHub Actions `quality` job 是合并权威证据。详细前置条件和 Windows/Git Bash 降级行为见 [CI 说明](docs/operations/ci.md)。
+Unit 通过不代表完整系统通过。当前完整门禁未跑：本地无 Docker/bash；CI 被失效 MinIO 镜像阻断。GitHub Actions `quality` job 仍是合并权威证据，但 `main` 上最新 run 尚未越过容器初始化。详细前置条件和 Windows/Git Bash 降级行为见 [CI 说明](docs/operations/ci.md)。
 
 ## 预定技术方向
 

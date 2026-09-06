@@ -1,5 +1,22 @@
 # Phase 1 Learning-Loop Repair Baseline
 
+## Current HEAD vs this snapshot
+
+This file remains the 2026-08-15 frozen snapshot (`HEAD` then `ef0334f`). Do not rewrite the historical sections below.
+
+```text
+current branch: feat/complete-phase1-current-work
+current HEAD: 146d6662a74c0dc957b59f2ab505342b08e214e2
+current HEAD subject: Merge remote-tracking branch 'origin/dev' into feat/complete-phase1-current-work
+```
+
+Since the snapshot:
+
+- `911dd37` committed the then-untracked 0012–0015 slice: learning events, cards, `0014` no-delete trigger, `0015` practice content, attempts/reviews, assessment replay, backup/export.
+- Current HEAD therefore contains committed migrations `0001`–`0015`, not only `0001`–`0011`.
+- The working tree is still dirty with an uncommitted `0016_goal_and_plan_state.sql` and `/api/goals` draft. Those files are user work, not released capability.
+- Snapshot numbers (106 working-tree entries, 98→104 unit tests) stay historical. This 2026-09-06 docs alignment did not re-run that suite.
+
 ## Snapshot
 
 Recorded on 2026-08-15 before server-authoritative learning-loop repairs.
