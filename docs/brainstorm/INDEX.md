@@ -6,6 +6,7 @@
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
+| 2026-09-06 | [对标 DeepStudent 的产品与架构研究](2026-09-06-deepstudent-benchmark.md) | exploring | 产品定位、Learn、Explore、Library、Practice、Review、AI 治理、分发 | 不要复制 DeepStudent 桌面工作台；闭合服务端权威学习闭环。Learn 主读仍 Mock 是最大缺口；保留 AI 候选+审核，不跟随 Craft/AGPL/FSRS | 仅作研究笔记；不自动改 PRD。后续只服务 P0：Learn 主读、Goals/plan-state、门禁、开源治理 |
 | 2026-08-06 | [Notion 导入兼容、自由笔记编辑与简洁界面调研](2026-08-06-notion-import-and-freeform-editor-research.md) | exploring | Library、Editor、Portability、View | 采用 Notion HTML ZIP 保真导入 + MD/CSV 有损备路径，输出 ImportReport 并保留原始导出为证据；数据库视图首期降级表格；画布投影与数据库引擎暂不采用 | 笔记本产品设计、Portability 契约、Notion 导入器任务、编辑工作台设计 |
 | 2026-08-05 | [学习型笔记本的界面、智能编排、AI、分享与格式兼容](2026-08-05-learning-notebook-interface-and-capability-design.md) | exploring | Library、Editor、AI、Learn、Review、Portability、Publishing | 推荐“安静画布 + 上下文抽屉 + 内容/视图/学习版本分离”；AI 读取版本化块上下文并只提交 proposal；用 LearningEdition 引用原文形成教材闭环；原生备份无损、其他格式显式报告损失 | 笔记本产品设计与实施计划、内容/视图/教材/发布 ADR、Context/Sharing/Portability 契约 |
 | 2026-08-03 | [自主学习学生的成果驱动自动驾驶体验与验证指标](2026-08-03-self-directed-student-artifact-autopilot.md) | proposed | Onboarding、Learn、Explore、Planner、Assessment、Artifact、自动化治理 | 面向带着目标和资料的自主学习学生，以版本化作品为主结果，将资料审计、首个真实任务、低负担反馈、可撤销计划和 1/7/30 天独立验证整合为自动驾驶旅程；高影响变化仍须确认 | PRD 首个价值楔子与指标、UX/AI 权限政策、Learn/Explore/Planner/Assessment 设计、Goal/Artifact/Decision/Outcome 契约 |
