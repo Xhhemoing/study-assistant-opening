@@ -109,21 +109,16 @@ export {
   type MarkdownImportResult,
 } from "./portability/markdown";
 export { exportAnkiDeck, type AnkiDeckInput, type AnkiSourceCard } from "./portability/anki";
-export {
-  NATIVE_BACKUP_TABLES,
-  RESTORE_TOPOLOGY,
-  NativeBackupError,
-  buildNativeBackup,
-  emptyBackupCounts,
-  planNativeRestore,
-  sha256Hex,
-  type ExistingBackupIds,
-  type NativeBackupFileInput,
-  type NativeBackupRecord,
-  type NativeBackupSnapshot,
-  type NativeRestorePlan,
-  type RestoreCollection,
-} from "./portability/native";
+export { NATIVE_BACKUP_TABLES, RESTORE_TOPOLOGY } from "./portability/native/types";
+export { NativeBackupError } from "./portability/native/errors";
+export type {
+  ExistingBackupIds,
+  NativeBackupFileInput,
+  NativeBackupRecord,
+  NativeBackupSnapshot,
+  RestoreCollection,
+} from "./portability/native/types";
+export type { NativeRestorePlan } from "./portability/native/restore";
 export {
   GUIDANCE_POLICY_VERSION,
   getGuidancePolicy,

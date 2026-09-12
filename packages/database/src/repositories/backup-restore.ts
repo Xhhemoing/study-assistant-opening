@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
-import { planNativeRestore } from "@aistudy/domain";
+import { planNativeRestore } from "@aistudy/domain/native";
 import { dumpWorkspaceSnapshot, snapshotToPackage, assertBackupWorkspaceOwner } from "./backup-dump";
 import { applyRestorePlan, loadExistingIds } from "./backup-insert";
 import { wrapBackupError } from "./backup-map";

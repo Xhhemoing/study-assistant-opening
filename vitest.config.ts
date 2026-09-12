@@ -5,6 +5,7 @@ import { defineConfig, defineProject } from "vitest/config";
 const root = path.dirname(fileURLToPath(import.meta.url));
 
 const alias = {
+  "@aistudy/domain/native": path.resolve(root, "packages/domain/src/portability/native/index.ts"),
   "@aistudy/domain": path.resolve(root, "packages/domain/src/index.ts"),
   "@aistudy/contracts": path.resolve(root, "packages/contracts/src/index.ts"),
   "@aistudy/database": path.resolve(root, "packages/database/src/index.ts"),

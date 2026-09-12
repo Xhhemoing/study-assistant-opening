@@ -3,7 +3,7 @@ import {
   buildNativeBackup,
   type NativeBackupRecord,
   type NativeBackupSnapshot,
-} from "@aistudy/domain";
+} from "@aistudy/domain/native";
 import { listMigrationFiles } from "../migrate";
 import { camelRow, filesFromBlocks } from "./backup-map";
 import { BackupRestoreError } from "./backup-types";
