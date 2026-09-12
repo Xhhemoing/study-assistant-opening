@@ -27,7 +27,6 @@ describe("practice content repository", () => {
   let ownerUserId: string;
   let otherWorkspaceId: string;
   let packageId: string;
-  let pointId: string;
   let itemId: string;
 
   beforeAll(async () => {
@@ -55,7 +54,7 @@ describe("practice content repository", () => {
     workspaceId = owner.workspace.id;
     ownerUserId = owner.user.id;
     otherWorkspaceId = other.workspace.id;
-    ({ packageId, pointId, itemId } = await seedItem(sql, workspaceId));
+    ({ packageId, itemId } = await seedItem(sql, workspaceId));
   });
 
   afterAll(async () => {

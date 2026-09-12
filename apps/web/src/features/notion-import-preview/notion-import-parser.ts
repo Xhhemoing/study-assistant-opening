@@ -10,7 +10,6 @@ import {
 import type {
   ImportAttachment,
   ImportedBlock,
-  ImportedLink,
   ImportedPage,
   ImportReport,
   LossKind,

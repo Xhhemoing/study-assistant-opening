@@ -1,7 +1,6 @@
 import {
   Bot,
   Check,
-  ChevronDown,
   Copy,
   FileText,
   Link2,
