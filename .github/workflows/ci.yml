@@ -55,10 +55,10 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
-      # bitnami/minio starts an S3-compatible API without needing a custom command
+      # bitnamilegacy/minio: Bitnami moved free versioned tags off docker.io/bitnami; keeps no-CMD GHA service behavior
       # (GitHub Actions service containers cannot set image CMD easily).
       minio:
-        image: bitnami/minio:2025.4.22
+        image: bitnamilegacy/minio:2025.4.22
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
