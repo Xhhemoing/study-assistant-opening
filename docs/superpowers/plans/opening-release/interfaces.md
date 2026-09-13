@@ -2,6 +2,15 @@
 
 本文件是F02的契约目标，不代表代码已存在。类型放入`packages/contracts/src/opening/`，每文件≤200行；统一从`opening/index.ts`再由现有包index导出。API版本为1；现有类型保持兼容，不修改既有LearningEvent v1以容纳未经判定的作答。
 
+
+## F02 research contract freeze (mandatory)
+
+- Docling pin: `2.126.0` (`DOCLING_PINNED_VERSION`). Formula enrichment default OFF; PPTX SimplePipeline has no CodeFormula; never tutor from garbled `orig`.
+- Multimodal: `imageObjectKey` is storage-only; `ProviderInput` needs real `imageParts` or `mediaCapability: 'refused'` (`text_only | text_plus_page_images | refused`).
+- Physical `page` ≠ PPTX `slideLabel`; do not dedupe chunks by text hash.
+- RU-01..06 encoded in Zod `.strict()` schemas under `packages/contracts/src/opening/`.
+- LearningEvent v1 unchanged.
+
 ## 1. 基础与材料（foundation.ts / sources.ts）
 
 ```ts
@@ -22,8 +31,14 @@ export type SourceRecord = {
 export type UploadTicket = { source: SourceRecord; uploadUrl: string; expiresAt: string };
 export type SourceChunk = {
   id: string; sourceId: string; sourceVersion: number;
-  page: number | null; startMs: number | null; endMs: number | null;
-  text: string; imageObjectKey: string | null;
+  /** Physical page index — not PPTX slide label. */
+  page: number | null;
+  /** Optional PPTX logical label; never equate with page across MIME types. */
+  slideLabel?: string | null;
+  startMs: number | null; endMs: number | null;
+  text: string;
+  /** Storage-only object key — not provider vision input. */
+  imageObjectKey: string | null;
 };
 export type Citation = { chunkId: string; sourceId: string; sourceVersion: number; label: string };
 ```
@@ -45,10 +60,27 @@ export type TurnInput = {
   conversationId: string; text: string; sourceIds: string[];
   mode: TutorMode; clientKey: string; privacy: 'saved' | 'ephemeral';
   learningSessionId?: string | null;
+  /** Optional server-checked current physical page (RU-03). */
+  currentPage?: number | null;
+  /** Optional server-checked chunk membership selection (RU-03). */
+  chunkId?: string | null;
+};
+/** Resume without pre-seeded chat id: create conversation server-side first (RU-02). */
+export type ConversationCreateInput = { title: string; courseId: string | null };
+export type ProviderMediaCapability = 'text_only' | 'text_plus_page_images' | 'refused';
+export type ProviderImagePart = {
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  /** data URL or vendor file id after authorized fetch — never a raw object key */
+  data: string;
+  detail?: 'auto' | 'low' | 'high';
+  sourceId?: string;
+  physicalPage?: number;
 };
 export type ProviderInput = {
   instruction: string; text: string; chunks: SourceChunk[];
   mode: TutorMode; maxOutputTokens: number; signal: AbortSignal;
+  mediaCapability: ProviderMediaCapability;
+  imageParts: ProviderImagePart[];
 };
 export type AssistantCandidate =
   | {kind:'memory';text:string;temporary:boolean}
@@ -71,6 +103,8 @@ export type BudgetReservation = { id: string; requestKey: string; jobId: string 
 export type EphemeralTurnInput = {
   text: string; sourceIds: string[]; mode: TutorMode;
   history: Array<{role:'user'|'assistant';text:string}>;
+  currentPage?: number | null;
+  chunkId?: string | null;
 };
 ```
 
@@ -82,7 +116,10 @@ export type EphemeralTurnInput = {
 
 ```ts
 export type MemoryItem = {
-  id: string; workspaceId: string; kind: 'confirmed' | 'candidate' | 'temporary';
+  id: string; workspaceId: string;
+  /** Per-course scope — null = workspace-level; never silently global-bleed (RU-06). */
+  courseId: string | null;
+  kind: 'confirmed' | 'candidate' | 'temporary';
   text: string; sourceTurnIds: string[]; version: number;
   expiresAt: string | null; status: 'active' | 'rejected' | 'deleted';
 };
@@ -96,15 +133,23 @@ candidate不可直接作为已确认事实；temporary必须有expiresAt。确�
 
 ```ts
 export type ObservationInput = {
-  sessionId: string; courseId: string; skillLabel: string; sourceIds: string[]; answer: string;
+  sessionId: string; courseId: string; skillLabel: string; sourceIds: string[];
+  /** Optional problem linkage within learning session (RU-04). */
+  problemId?: string | null;
+  answer: string;
   outcome: 'correct' | 'incorrect' | 'unverified';
   assistance: 'independent' | 'hinted' | 'revealed' | 'unknown';
   clientKey: string;
 };
+export type LearningEvidenceVerdict =
+  | 'FLOW_VERIFIED'
+  | 'LEARNING_EFFECT_OBSERVED'
+  | 'MASTERY_NOT_ESTABLISHED';
 export type LearningObservation = ObservationInput & {
   id: string; workspaceId: string; occurredAt: string; sourceTurnIds: string[];
   verdictSource: 'self_report' | 'reference_checked' | 'model_suggestion' | 'unknown';
   referenceSourceId: string | null;
+  evidenceVerdict?: LearningEvidenceVerdict;
 };
 export type LearningSummary = {
   skillLabel: string; status: 'unobserved' | 'needs_check' | 'observed_independent' | 'needs_review';
