@@ -46,6 +46,26 @@ describe("CI workflow contract", () => {
     expect(yaml).not.toMatch(/BEGIN (RSA |OPENSSH )?PRIVATE KEY/);
   });
 
+  it("pins isolated opening test DB flags and never relies on an unnamed default DATABASE_URL alone", () => {
+    const yaml = readFileSync(workflowPath, "utf8");
+
+    expect(yaml).toMatch(/OPENING_TEST_DB:\s*"1"/);
+    expect(yaml).toContain(
+      "OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test",
+    );
+    expect(yaml).toContain(
+      "DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test",
+    );
+    expect(yaml).toMatch(/POSTGRES_DB:\s*aistudy_opening_test/);
+    expect(yaml).toMatch(
+      /pg_isready -U aistudy -d aistudy_opening_test/,
+    );
+    // Primary service must not still target the non-isolated app default DB name.
+    expect(yaml).not.toMatch(
+      /POSTGRES_DB:\s*aistudy\s*$/m,
+    );
+  });
+
   it("runs the child and preserves its exit code when host scheduling tools are unavailable", () => {
     const result = spawnSync(
       "bash",

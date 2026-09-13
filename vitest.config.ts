@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, defineProject } from "vitest/config";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const openingDbSetup = path.resolve(root, "scripts/opening-test-db.mjs");
 
 const alias = {
   "@aistudy/domain/native": path.resolve(root, "packages/domain/src/portability/native/index.ts"),
@@ -47,6 +48,7 @@ export default defineConfig({
           exclude: sharedExclude,
           environment: "node",
           fileParallelism: false,
+          globalSetup: [openingDbSetup],
         },
       }),
       defineProject({
@@ -57,6 +59,7 @@ export default defineConfig({
           exclude: [...sharedExclude, "**/tests/integration/handler/**"],
           environment: "node",
           fileParallelism: false,
+          globalSetup: [openingDbSetup],
         },
       }),
       defineProject({

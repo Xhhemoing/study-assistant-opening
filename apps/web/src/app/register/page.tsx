@@ -1,7 +1,13 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { AuthForm } from "../../features/auth/auth-form";
+import { isOpeningRelease } from "../../features/opening/access-policy";
 
 export default function RegisterPage() {
+  if (isOpeningRelease()) {
+    redirect("/login");
+  }
+
   return (
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="register-title">
