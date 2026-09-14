@@ -38,6 +38,50 @@ export function canBecomeObservedIndependent(
   return outcome === "correct";
 }
 
+export function shouldCreateLearningSession(
+  mode: "hint" | "explain" | "listen" | "think_together",
+): boolean {
+  return mode === "hint" || mode === "explain";
+}
+
+/**
+ * Independent credit requires a server problem id plus unaided correct work.
+ * Missing problemId => unknown/needs_check path — never observed_independent.
+ */
+export function observationAllowsIndependent(input: {
+  problemId?: string | null;
+  assistance: z.infer<typeof assistanceLevelSchema>;
+  outcome: z.infer<typeof observationOutcomeSchema>;
+}): boolean {
+  if (!input.problemId) return false;
+  return canBecomeObservedIndependent(input.assistance, input.outcome);
+}
+
+export const problemRefSchema = z
+  .object({
+    problemId: uuidSchema,
+    sourceId: uuidSchema,
+    sourceVersion: z.number().int().nonnegative(),
+    physicalPage: z.number().int().positive().nullable(),
+    chunkId: uuidSchema.nullable(),
+    stemSnapshot: z.string().min(1).max(2000),
+    artifactKind: z.enum(["reference_item", "student_work", "unknown"]),
+  })
+  .strict();
+
+/** Help counts only after server-confirmed delivery (RU-04). */
+export const helpExposureSchema = z
+  .object({
+    id: uuidSchema,
+    sessionId: uuidSchema,
+    problemId: uuidSchema.nullable(),
+    turnId: uuidSchema,
+    level: z.enum(["hinted", "revealed"]),
+    delivered: z.literal(true),
+    createdAt: isoDateTimeSchema,
+  })
+  .strict();
+
 export const observationInputSchema = z
   .object({
     sessionId: uuidSchema,
@@ -46,6 +90,8 @@ export const observationInputSchema = z
     sourceIds: z.array(uuidSchema).max(32),
     /** Optional problem / item linkage within the learning session (RU-04). */
     problemId: uuidSchema.nullable().optional(),
+    /** Optional delayed retest linkage (RU-04). */
+    retestId: uuidSchema.nullable().optional(),
     answer: z.string().max(20_000),
     outcome: observationOutcomeSchema,
     assistance: assistanceLevelSchema,
@@ -117,3 +163,5 @@ export type LearningEvidenceVerdict = z.infer<
 export type LearningSessionCreateInput = z.infer<
   typeof learningSessionCreateInputSchema
 >;
+export type ProblemRef = z.infer<typeof problemRefSchema>;
+export type HelpExposure = z.infer<typeof helpExposureSchema>;

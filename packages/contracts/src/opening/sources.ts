@@ -73,8 +73,6 @@ export const sourceRecordSchema = z
       "unsupported",
     ]),
     error: apiFailureSchema.nullable(),
-    /** Course membership projection only — not ownership; null until linked. */
-    courseId: uuidSchema.nullable(),
     createdAt: isoDateTimeSchema,
   })
   .strict();
@@ -121,3 +119,23 @@ export type SourceRecord = z.infer<typeof sourceRecordSchema>;
 export type UploadTicket = z.infer<typeof uploadTicketSchema>;
 export type SourceChunk = z.infer<typeof sourceChunkSchema>;
 export type Citation = z.infer<typeof citationSchema>;
+
+/** RU-01: attach opening source to a course via membership (not ownership). */
+export const sourceCourseLinkInputSchema = z
+  .object({
+    sourceId: uuidSchema,
+    courseId: uuidSchema,
+    clientKey: z.string().min(8).max(200),
+  })
+  .strict();
+
+export const sourceCourseUnlinkInputSchema = z
+  .object({
+    sourceId: uuidSchema,
+    courseId: uuidSchema,
+    clientKey: z.string().min(8).max(200),
+  })
+  .strict();
+
+export type SourceCourseLinkInput = z.infer<typeof sourceCourseLinkInputSchema>;
+export type SourceCourseUnlinkInput = z.infer<typeof sourceCourseUnlinkInputSchema>;

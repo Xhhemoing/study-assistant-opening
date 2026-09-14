@@ -1,5 +1,7 @@
 # Opening release shared interfaces
 
+2026-09-14范围增量见[capability-interfaces.md](capability-interfaces.md)，由X01负责连接/媒体/知识/主动建议协议；本文件保留F02已冻结基线，不能把F02通过当成新增协议已实现。
+
 本文件是F02的契约目标，不代表代码已存在。类型放入`packages/contracts/src/opening/`，每文件≤200行；统一从`opening/index.ts`再由现有包index导出。API版本为1；现有类型保持兼容，不修改既有LearningEvent v1以容纳未经判定的作答。
 
 
@@ -26,7 +28,7 @@ export type SourceRecord = {
   bytes: number; sha256: string; version: number;
   uploadState: 'pending' | 'uploaded' | 'rejected';
   parseState: 'not_started' | 'queued' | 'running' | 'ready' | 'failed' | 'unsupported';
-  error: ApiFailure | null; courseId: string | null; createdAt: string;
+  error: ApiFailure | null; createdAt: string;
 };
 export type UploadTicket = { source: SourceRecord; uploadUrl: string; expiresAt: string };
 export type SourceChunk = {
@@ -45,7 +47,7 @@ export type Citation = { chunkId: string; sourceId: string; sourceVersion: numbe
 
 Scope只能由登录principal及workspace所有权查询产生，不能信任请求body。UUID/date/sha256/MIME使用Zod校验。
 初始限制：image 20MiB；document 50MiB；audio 200MiB；文件名≤180字符；不允许路径分隔符或NUL。限制是可配置产品默认值，不是服务器能力实测。
-source identity不嵌入课程所有权：course关联使用已有membership模型；courseId是读取投影。原件object key由服务端生成。
+source identity不嵌入课程所有权：course关联只走 membership（`sourceCourseLink`/`unlink`）；SourceRecord 不含 courseId。原件object key由服务端生成。
 
 ## 2. 作业与AI（jobs.ts / tutor.ts）
 
@@ -56,17 +58,41 @@ export type JobRecord = {
   attempt: number; error: ApiFailure | null; privacyEpoch: number;
 };
 export type TutorMode = 'hint' | 'explain' | 'listen' | 'think_together';
+/**
+ * TurnInput (RU-02/03). conversationId is always server-issued (create/discover first).
+ * sourceIds = files; currentPage/chunkId = current physical page (file != page). Never invent a page.
+ */
 export type TurnInput = {
   conversationId: string; text: string; sourceIds: string[];
   mode: TutorMode; clientKey: string; privacy: 'saved' | 'ephemeral';
   learningSessionId?: string | null;
-  /** Optional server-checked current physical page (RU-03). */
+  /** Optional server-checked physical page — never PPTX slideLabel (RU-03 / AC04). */
   currentPage?: number | null;
-  /** Optional server-checked chunk membership selection (RU-03). */
+  /** Optional server-checked SourceChunk.id (RU-03 / AC04). */
   chunkId?: string | null;
 };
-/** Resume without pre-seeded chat id: create conversation server-side first (RU-02). */
+/** Create conversation server-side before first saved turn (RU-02). */
 export type ConversationCreateInput = { title: string; courseId: string | null };
+/** Discovery row — no client-seeded id (RU-02 / AC07). */
+export type ConversationSummary = {
+  id: string; title: string; courseId: string | null;
+  updatedAt: string; lastTurnPreview: string | null;
+};
+/**
+ * Server-assembled provider continuity (RU-02 / AC07).
+ * Matches packages/contracts/src/opening/conversations.ts.
+ * UI listTurns may still return full TurnRecord[]; provider uses boundedHistory only.
+ */
+export type ConversationResume = {
+  conversationId: string;
+  courseId: string | null;
+  currentPage?: number | null;
+  chunkId?: string | null;
+  sourceIds: string[];
+  boundedHistory: Array<{ role: 'user' | 'assistant'; text: string }>; // max 40
+  /** True when older turns exist but were omitted from boundedHistory (AC07 honesty). */
+  historyTruncated: boolean;
+};
 export type ProviderMediaCapability = 'text_only' | 'text_plus_page_images' | 'refused';
 export type ProviderImagePart = {
   mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
@@ -111,6 +137,15 @@ export type EphemeralTurnInput = {
 真实provider实现`complete(input: ProviderInput): Promise<ProviderOutput>`；模型候选建议另外校验，不把ProviderOutput直接当数据库写入命令。
 首版自动重试仅用于确定未发送/可安全重试的传输阶段，最多2次；未知是否计费转outcome_unknown，先对账或人工重试。业务提交使用幂等键；不承诺第三方exactly-once。
 `AI_DAILY_LIMIT_CENTS=0`默认关闭收费调用；高难升级也经过预算预留，不静默使用其他账户。
+
+
+### RU-03 page selection (AC04)
+
+File selection != current page. Server checks: authorize sourceIds; chunk membership; page hits physical page (not slideLabel); both set must agree; if neither set, do not invent a page. 422: page_not_in_sources | chunk_not_in_sources | page_chunk_mismatch.
+
+### RU-02 session discovery/resume (AC07)
+
+listConversations -> resumeConversation -> submitTurn. boundedHistory is server-assembled (max 40); historyTruncated marks truncation. Clients must not invent provider history or pre-seed conversationId.
 
 ## 3. 记忆（memory.ts）
 
@@ -187,6 +222,12 @@ export type Reminder = { id: string; taskId: string; dueAt: string; channel: 'in
 | sources | readSource(scope, id: string): Promise<{url:string; expiresAt:string}> | GET /api/opening/sources/[id]/download |
 | tutor | submitTurn(scope, input: TurnInput): Promise<{jobId:string; turnId:string}> | POST /api/opening/turns |
 | tutor | listTurns(scope, conversationId: string): Promise<TurnRecord[]> | GET /api/opening/conversations/[id]/turns |
+| tutor | listConversations(scope): Promise<ConversationSummary[]> | GET /api/opening/conversations |
+| tutor | resumeConversation(scope, id: string): Promise<ConversationResume> | GET /api/opening/conversations/[id]/resume |
+| sources | linkSourceToCourse(scope, input: SourceCourseLinkInput): Promise<SourceRecord> | POST /api/opening/sources/[id]/link-course |
+| sources | unlinkSourceFromCourse(scope, input: SourceCourseUnlinkInput): Promise<SourceRecord> | POST /api/opening/sources/[id]/unlink-course |
+| planning | getTimeConfig(scope): Promise<TimeConfig> | GET /api/opening/time-config |
+| planning | saveTimeConfig(scope, input: TimeConfigSaveInput): Promise<TimeConfig> | PUT /api/opening/time-config |
 | jobs | getJob(scope, id: string): Promise<JobRecord> | GET /api/opening/jobs/[id] |
 | memory | listMemory(scope): Promise<MemoryItem[]> | GET /api/opening/memory |
 | memory | decideMemory(scope, input: MemoryDecision): Promise<MemoryItem> | POST /api/opening/memory/[id]/decision |
@@ -206,3 +247,12 @@ export type Reminder = { id: string; taskId: string; dueAt: string; channel: 'in
 F03创建`tests/integration/opening-fixture.ts`：`createOpeningFixture(): Promise<OpeningFixture>`。对象包含`scope`、`otherScope`、`sql`、`cookie`、`request(path, init): Promise<Response>`、`requestAnonymous(path, init): Promise<Response>`、`reset(): Promise<void>`、`close(): Promise<void>`。只连接F01保护的测试库；每次生成独立用户/workspace。
 
 纯规则测试自行使用字面量，避免依赖数据库fixtures。UI测试请求mock仅在测试目录内；Q02必须另跑一次真实API流程。提供`tests/fixtures/opening/source.pdf`等合成素材时注明生成方式，不把合成识别质量当课堂实测。
+
+## 8. Real-use connection contracts (RU-01..06 merge into F02)
+
+- **RU-01 source membership:** `source` assets link via `SourceCourseLinkInput` / unlink; repository must resolve opening `source` ownership (workspace of source row), not delete the VALIDATION guard for unknown types. `SourceRecord` has **no** `courseId` — association is membership-only.
+- **RU-02 continuity:** `ConversationSummary` discovery + `ConversationResume.boundedHistory` assembled server-side; clients must not invent provider history or require a pre-seeded conversationId cookie.
+- **RU-03 page selection:** `TurnInput.currentPage` / `chunkId` are optional and server-checked against source chunks; never invent a page from filename.
+- **RU-04 learning linkage:** `ObservationInput.problemId` / optional `retestId`; `ASSISTANCE_BLOCKS_INDEPENDENT` + `canBecomeObservedIndependent`; `observationAllowsIndependent` (no problemId never independent); `shouldCreateLearningSession` (hint|explain only); `problemRefSchema` + `helpExposureSchema` (`delivered: true` only).
+- **RU-05 time config:** `TimeConfig.version` + `TimeConfigSaveInput.expectedVersion` (409); `timeConfigSupportsAbsoluteScheduling` (termStartDate + non-empty periodToClock); else week/period only — never invent dates. `WeekSession.courseId` nullable optional (courseName stays display label).
+- **RU-06 memory scope:** `MemoryItem.courseId` nullable; temporary requires `expiresAt`; helpers `memoryEffectiveScope` / `memoryVisibleInCourseScope` (no wire field; no cross-course load). Temporary must not promote without M01.

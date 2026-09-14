@@ -4,6 +4,8 @@ import { isoDateTimeSchema, uuidSchema } from "./foundation";
 export const weekSessionSchema = z
   .object({
     courseName: z.string().min(1).max(200),
+    /** Optional course binding; courseName remains the timetable display label (RU-05). */
+    courseId: uuidSchema.nullable().optional(),
     weekday: z.number().int().min(0).max(6),
     weeks: z.array(z.number().int().positive()).min(1).max(60),
     startPeriod: z.number().int().positive(),
@@ -94,6 +96,10 @@ export const reminderSchema = z
  */
 export const timeConfigSchema = z
   .object({
+    /** Monotonic config version for cross-device conflict (RU-05). */
+    version: z.number().int().nonnegative(),
+    /** Optional course binding for display name; null = workspace defaults. */
+    courseId: uuidSchema.nullable(),
     timeZone: z.string().min(1).max(80).default("Asia/Shanghai"),
     termStartDate: z
       .string()
@@ -113,6 +119,30 @@ export const timeConfigSchema = z
   })
   .strict();
 
+export const timeConfigSaveInputSchema = z
+  .object({
+    expectedVersion: z.number().int().nonnegative(),
+    courseId: uuidSchema.nullable(),
+    timeZone: z.string().min(1).max(80),
+    termStartDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable(),
+    periodToClock: z
+      .record(
+        z.string().regex(/^\d+$/),
+        z
+          .object({
+            start: z.string().regex(/^\d{2}:\d{2}$/),
+            end: z.string().regex(/^\d{2}:\d{2}$/),
+          })
+          .strict(),
+      )
+      .nullable(),
+    clientKey: z.string().min(8).max(200),
+  })
+  .strict();
+
 export type WeekSession = z.infer<typeof weekSessionSchema>;
 export type TimeBlock = z.infer<typeof timeBlockSchema>;
 export type TaskItem = z.infer<typeof taskItemSchema>;
@@ -122,3 +152,20 @@ export type PlanDraft = z.infer<typeof planDraftSchema>;
 export type AcceptPlanInput = z.infer<typeof acceptPlanInputSchema>;
 export type Reminder = z.infer<typeof reminderSchema>;
 export type TimeConfig = z.infer<typeof timeConfigSchema>;
+export type TimeConfigSaveInput = z.infer<
+  typeof timeConfigSaveInputSchema
+>;
+
+/**
+ * Absolute wall-clock scheduling is allowed only when both termStartDate and a
+ * non-empty periodToClock map are present. Otherwise UI must show week/period
+ * only — never invent calendar dates (RU-05).
+ */
+export function timeConfigSupportsAbsoluteScheduling(
+  config: Pick<TimeConfig, "termStartDate" | "periodToClock">,
+): boolean {
+  if (config.termStartDate == null) return false;
+  const map = config.periodToClock;
+  if (map == null) return false;
+  return Object.keys(map).length > 0;
+}

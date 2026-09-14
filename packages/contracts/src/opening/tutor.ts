@@ -10,10 +10,10 @@ export const tutorModeSchema = z.enum([
 ]);
 
 /**
- * TurnInput: conversationId may be absent for resume-without-preseed flows
- * when creating a server-side conversation first; when present it must be a
- * server-issued id. Optional currentPage/chunkId are server-validated
- * membership selections (RU-03) — never invent a page.
+ * TurnInput: conversationId is always required and must be server-issued
+ * (create or discover first — never pre-seed across devices). Optional
+ * currentPage/chunkId are server-validated membership selections (RU-03) —
+ * never invent a page when both are absent. File selection is not page selection.
  */
 export const turnInputSchema = z
   .object({

@@ -36,3 +36,25 @@ export const memoryDecisionSchema = z
 
 export type MemoryItem = z.infer<typeof memoryItemSchema>;
 export type MemoryDecision = z.infer<typeof memoryDecisionSchema>;
+
+/** Effective scope derived from courseId — not a wire field (RU-06 continuity). */
+export type MemoryEffectiveScope = "course" | "workspace";
+
+/** courseId non-null → course; else workspace. Derive at T02/M01; do not add wire field. */
+export function memoryEffectiveScope(item: {
+  courseId: string | null;
+}): MemoryEffectiveScope {
+  return item.courseId != null ? "course" : "workspace";
+}
+
+/**
+ * Workspace items (null courseId) visible in every course view; course items only
+ * when activeCourseId matches. No cross-course load (RU-06).
+ */
+export function memoryVisibleInCourseScope(
+  itemCourseId: string | null,
+  activeCourseId: string | null,
+): boolean {
+  if (itemCourseId == null) return true;
+  return activeCourseId != null && itemCourseId === activeCourseId;
+}

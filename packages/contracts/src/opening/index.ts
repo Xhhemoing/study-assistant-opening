@@ -16,12 +16,16 @@ export {
   uploadTicketSchema,
   sourceChunkSchema,
   citationSchema,
+  sourceCourseLinkInputSchema,
+  sourceCourseUnlinkInputSchema,
   type SourceMime,
   type UploadInput,
   type SourceRecord,
   type UploadTicket,
   type SourceChunk,
   type Citation,
+  type SourceCourseLinkInput,
+  type SourceCourseUnlinkInput,
 } from "./sources";
 
 export {
@@ -59,10 +63,21 @@ export {
 } from "./tutor";
 
 export {
+  conversationSummarySchema,
+  providerHistoryMessageSchema,
+  conversationResumeSchema,
+  type ConversationSummary,
+  type ConversationResume,
+} from "./conversations";
+
+export {
   memoryItemSchema,
   memoryDecisionSchema,
+  memoryEffectiveScope,
+  memoryVisibleInCourseScope,
   type MemoryItem,
   type MemoryDecision,
+  type MemoryEffectiveScope,
 } from "./memory";
 
 export {
@@ -71,6 +86,10 @@ export {
   learningEvidenceVerdictSchema,
   ASSISTANCE_BLOCKS_INDEPENDENT,
   canBecomeObservedIndependent,
+  shouldCreateLearningSession,
+  observationAllowsIndependent,
+  problemRefSchema,
+  helpExposureSchema,
   observationInputSchema,
   learningObservationSchema,
   learningSummarySchema,
@@ -82,6 +101,8 @@ export {
   type RetestCandidate,
   type LearningEvidenceVerdict,
   type LearningSessionCreateInput,
+  type ProblemRef,
+  type HelpExposure,
 } from "./learning";
 
 export {
@@ -94,6 +115,8 @@ export {
   acceptPlanInputSchema,
   reminderSchema,
   timeConfigSchema,
+  timeConfigSaveInputSchema,
+  timeConfigSupportsAbsoluteScheduling,
   type WeekSession,
   type TimeBlock,
   type TaskItem,
@@ -103,4 +126,5 @@ export {
   type AcceptPlanInput,
   type Reminder,
   type TimeConfig,
+  type TimeConfigSaveInput,
 } from "./planning";
