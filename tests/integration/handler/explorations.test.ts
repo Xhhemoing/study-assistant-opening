@@ -41,7 +41,8 @@ describe("exploration handlers", () => {
   async function registerAs(label: string) {
     const response = await register(jsonRequest("/api/auth/register", "POST", undefined, { email: `${label}-${randomUUID()}@example.com`, password: "password123", displayName: label }));
     expect(response.status).toBe(201);
-    return { cookie: cookieFrom(response), user: await response.json() as { user: { workspaceId: string } } };
+    const body = await response.json() as { user: { workspaceId: string } };
+    return { cookie: cookieFrom(response), user: body.user };
   }
 
   it("requires authentication and validates create input", async () => {
