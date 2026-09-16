@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   assetTypeSchema,
   type AssetType,
+  type SourceRecord,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import {
@@ -63,6 +64,8 @@ export type AssetMembershipRecord = {
 export type CourseAssetListItem = AssetMembershipRecord & {
   /** Present when assetType is document and the document is loadable. */
   document?: DocumentRecord;
+  /** Membership projection only — SourceRecord never carries courseId. */
+  source?: SourceRecord;
 };
 
 export type CourseForAsset = AssetMembershipRecord & {
@@ -288,6 +291,19 @@ export function createCourseMembershipRepository(
       `;
       if (!rows.length) {
         throw new CourseMembershipError("NOT_FOUND", `Card not found: ${assetId}`);
+      }
+      return rows[0]!.workspace_id as string;
+    }
+
+    if (assetType === "source") {
+      const rows = await sql`
+        SELECT workspace_id FROM opening_sources WHERE id = ${assetId} LIMIT 1
+      `;
+      if (!rows.length) {
+        throw new CourseMembershipError(
+          "NOT_FOUND",
+          `Source not found: ${assetId}`,
+        );
       }
       return rows[0]!.workspace_id as string;
     }
@@ -530,6 +546,32 @@ export function createCourseMembershipRepository(
               throw error;
             }
             // Soft-deleted or missing document: membership remains, no content.
+          }
+        }
+
+
+        if (membership.assetType === "source") {
+          const sourceRows = await sql`
+            SELECT * FROM opening_sources
+            WHERE id = ${membership.assetId}
+              AND workspace_id = ${input.workspaceId}
+            LIMIT 1
+          `;
+          if (sourceRows.length) {
+            const row = sourceRows[0] as Record<string, unknown>;
+            item.source = {
+              id: row.id as string,
+              workspaceId: row.workspace_id as string,
+              name: row.name as string,
+              mime: row.mime as SourceRecord["mime"],
+              bytes: Number(row.bytes),
+              sha256: row.sha256 as string,
+              version: Number(row.version),
+              uploadState: row.upload_state as SourceRecord["uploadState"],
+              parseState: row.parse_state as SourceRecord["parseState"],
+              error: (row.error as SourceRecord["error"]) ?? null,
+              createdAt: new Date(row.created_at as string | Date).toISOString(),
+            };
           }
         }
 

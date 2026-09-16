@@ -141,3 +141,38 @@ export {
   IDENTITY_ORPHAN_WORKSPACES,
   type OrphanWorkspaceSummary,
 } from "./migration-preflight";
+
+export {
+  openingSourcesSchema,
+  openingSources,
+} from "./schema/opening-sources";
+
+
+export {
+  createOpeningSourceRepository,
+  OpeningSourceError,
+  type OpeningSourceRepository,
+  type OpeningSourceErrorCode,
+  type OpeningScope,
+} from "./repositories/opening-sources";
+
+export {
+  openingLearningSessions,
+  openingProblemRefs,
+  openingHelpExposures,
+  openingLearningObservations,
+} from "./schema/opening-learning";
+
+export {
+  createOpeningLearningRepository,
+  type OpeningLearningDb,
+  type OpeningLearningRepository,
+} from "./repositories/opening-learning";
+
+export {
+  createOpeningConversationRepository,
+  OpeningConversationError,
+  type OpeningConversationRepository,
+  type OpeningConversationScope,
+  type OpeningConversationErrorCode,
+} from "./repositories/opening-conversations";
