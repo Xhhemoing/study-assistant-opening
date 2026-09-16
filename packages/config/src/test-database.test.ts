@@ -20,6 +20,27 @@ describe("assertOpeningTestDatabase", () => {
     ).toThrow();
   });
 
+  it.each([
+    "database=production",
+    "database=aistudy_opening_test&database=production",
+    "%64atabase=production",
+  ])("rejects startup database overrides (%s)", (query) => {
+    expect(() =>
+      assertOpeningTestDatabase(
+        `postgres://u:p@127.0.0.1/aistudy_opening_test?${query}`,
+        "1",
+      ),
+    ).toThrow(/database.*parameter|parameter.*database/i);
+  });
+
+  it("preserves non-routing connection parameters", () => {
+    const url = assertOpeningTestDatabase(
+      "postgres://u:p@127.0.0.1/aistudy_opening_test?sslmode=disable",
+      "1",
+    );
+    expect(url.searchParams.get("sslmode")).toBe("disable");
+  });
+
   it("accepts loopback URL with exact database name and OPENING_TEST_DB=1", () => {
     const url = assertOpeningTestDatabase(
       "postgres://u:p@127.0.0.1:5432/aistudy_opening_test",

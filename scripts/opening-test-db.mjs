@@ -27,6 +27,10 @@ export function assertOpeningTestDatabase(url, enabled) {
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
     throw new Error("OPENING_TEST_DATABASE_URL must use the postgres scheme");
   }
+  // postgres.js forwards this query key into startup parameters after the path DB.
+  if (parsed.searchParams.has("database")) {
+    throw new Error("Refusing database query parameter in isolated test URL");
+  }
   if (!LOOPBACK.has(parsed.hostname.toLowerCase())) {
     throw new Error(
       `Refusing destructive tests: database host must be loopback, got ${parsed.hostname}`,

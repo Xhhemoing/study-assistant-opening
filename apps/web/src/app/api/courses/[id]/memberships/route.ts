@@ -1,5 +1,6 @@
-import {
+﻿import {
   addMembershipForPrincipal,
+  removeMembershipForPrincipal,
   jsonError,
   mapDomainError,
   requirePrincipal,
@@ -28,3 +29,20 @@ export async function POST(
     return jsonError(mapDomainError(error));
   }
 }
+
+export async function DELETE(
+  request: Request,
+  context: Params,
+): Promise<Response> {
+  const runtime = getAuthRuntime();
+  try {
+    const principal = await requirePrincipal(runtime, request);
+    const { id } = await context.params;
+    const body = await request.json();
+    await removeMembershipForPrincipal(runtime, principal, id, body);
+    return new Response(null, { status: 204 });
+  } catch (error) {
+    return jsonError(mapDomainError(error));
+  }
+}
+

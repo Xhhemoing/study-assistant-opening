@@ -26,13 +26,22 @@ describe("isOpeningRelease", () => {
 describe("cookie-auth origin", () => {
   const publicBase = "http://localhost:3000";
 
-  it("allows same-origin and fixture origin", () => {
+  it("allows same-origin requests, including explicitly configured fixtures", () => {
     expect(
       isAllowedCookieAuthOrigin("http://localhost:3000", publicBase),
     ).toBe(true);
     expect(
-      isAllowedCookieAuthOrigin(OPENING_TEST_FIXTURE_ORIGIN, publicBase),
+      isAllowedCookieAuthOrigin(OPENING_TEST_FIXTURE_ORIGIN, OPENING_TEST_FIXTURE_ORIGIN),
     ).toBe(true);
+  });
+
+  it("does not exempt a fixture origin from the configured same-origin boundary", () => {
+    expect(
+      isAllowedCookieAuthOrigin(OPENING_TEST_FIXTURE_ORIGIN, publicBase),
+    ).toBe(false);
+    expect(() =>
+      assertAllowedCookieAuthOrigin(OPENING_TEST_FIXTURE_ORIGIN, "https://study.example"),
+    ).toThrow(/Foreign Origin/);
   });
 
   it("denies missing and foreign Origin", () => {

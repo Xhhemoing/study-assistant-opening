@@ -26,6 +26,11 @@ export function assertOpeningTestDatabase(
     throw new Error("OPENING_TEST_DATABASE_URL must use the postgres scheme");
   }
 
+  // postgres.js forwards this query key into startup parameters after the path DB.
+  if (parsed.searchParams.has("database")) {
+    throw new Error("Refusing database query parameter in isolated test URL");
+  }
+
   const host = parsed.hostname.toLowerCase();
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new Error(

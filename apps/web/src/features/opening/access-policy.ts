@@ -25,8 +25,8 @@ function normalizeOrigin(value: string): string | null {
 }
 
 /**
- * Unsafe cookie-auth requests must present a same-origin Origin
- * (or the explicit test fixture origin). Missing/foreign Origin denied.
+ * Unsafe cookie-auth requests must present a same-origin Origin.
+ * Fixtures use their configured application origin, never a cross-origin bypass.
  */
 export function assertAllowedCookieAuthOrigin(
   originHeader: string | null | undefined,
@@ -38,9 +38,6 @@ export function assertAllowedCookieAuthOrigin(
   const origin = normalizeOrigin(originHeader);
   if (!origin) {
     throw new Error("Invalid Origin for cookie-auth mutation");
-  }
-  if (origin === OPENING_TEST_FIXTURE_ORIGIN) {
-    return;
   }
   const allowed = normalizeOrigin(publicBaseUrl);
   if (!allowed || origin !== allowed) {

@@ -4,7 +4,7 @@ import { OPENING_TEST_FIXTURE_ORIGIN } from "../../../apps/web/src/features/open
 import { isAllowedCookieAuthOrigin } from "../../../apps/web/src/features/opening/access-policy";
 
 function registrationRequest(body: unknown, origin?: string) {
-  return new Request("http://localhost:3000/api/auth/register", {
+  return new Request(`${OPENING_TEST_FIXTURE_ORIGIN}/api/auth/register`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -55,6 +55,12 @@ describe("opening access handlers", () => {
       isAllowedCookieAuthOrigin(
         OPENING_TEST_FIXTURE_ORIGIN,
         "http://localhost:3000",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedCookieAuthOrigin(
+        OPENING_TEST_FIXTURE_ORIGIN,
+        OPENING_TEST_FIXTURE_ORIGIN,
       ),
     ).toBe(true);
   });

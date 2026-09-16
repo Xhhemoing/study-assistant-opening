@@ -21,6 +21,7 @@ import {
   LearningEventRepositoryError,
   CardRepositoryError,
   PracticeContentRepositoryError,
+  OpeningSourceError,
   BackupRestoreError,
   type RevisionProposalRepository,
   type CourseMembershipRepository,
@@ -33,6 +34,7 @@ import {
   type CardRepository,
   type BackupRestoreRepository,
 } from "@aistudy/database";
+import { UploadPolicyError } from "../opening/sources/upload-policy";
 import {
   createDocumentRelationRequestSchema,
   documentTagsUpdateSchema,
@@ -317,6 +319,18 @@ export function mapDomainError(error: unknown): ApiError {
   }
   const message =
     error instanceof Error ? error.message : "Unexpected error";
+  if (error instanceof OpeningSourceError) {
+    if (error.code === "NOT_FOUND") {
+      return new ApiError("NOT_FOUND", error.message, 404);
+    }
+    if (error.code === "VALIDATION") {
+      return new ApiError("VALIDATION", error.message, 400);
+    }
+    return new ApiError("CONFLICT", error.message, 409);
+  }
+  if (error instanceof UploadPolicyError) {
+    return new ApiError("VALIDATION", error.message, 400);
+  }
   return new ApiError("VALIDATION", message, 500);
 }
 
@@ -1014,7 +1028,7 @@ export async function addMembershipForPrincipal(
   principal: Principal,
   courseId: string,
   body: {
-    assetType: "document";
+    assetType: "source" | "document" | "block" | "card";
     assetId: string;
     role: "core" | "optional" | "reference" | "archive";
     sortOrder?: number;
@@ -1034,6 +1048,28 @@ export async function addMembershipForPrincipal(
     role: body.role,
     sortOrder: body.sortOrder,
     visibility: body.visibility,
+  });
+}
+
+export async function removeMembershipForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  courseId: string,
+  body: {
+    assetType: "source" | "document" | "block" | "card";
+    assetId: string;
+  },
+) {
+  assertAuthorized(principal, "membership.delete", {
+    type: "membership",
+    workspaceId: principal.workspaceId,
+    courseId,
+  });
+  return runtime.courses.removeAssetMembership({
+    workspaceId: principal.workspaceId,
+    courseId,
+    assetType: body.assetType,
+    assetId: body.assetId,
   });
 }
 
