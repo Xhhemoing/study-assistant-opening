@@ -32,3 +32,6 @@ graphify-out/
 
 # Local pi agent configuration and prompts
 .pi/
+
+# Local portable test PostgreSQL (opening handler/integration gates)
+.local/
