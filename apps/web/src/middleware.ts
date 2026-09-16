@@ -1,14 +1,24 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { isAllowedCookieAuthOrigin } from "./features/opening/access-policy";
+import { isAllowedCookieAuthOrigin, isOpeningRelease } from "./features/opening/access-policy";
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+/** Legacy mock-backed experiences must not masquerade as official entries. */
+const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean }[] = [
+  { test: (p) => p === "/learn" || p === "/explore" || p.startsWith("/preview") },
+];
+
 export function middleware(request: NextRequest) {
+  const pathname = request.nextUrl.pathname;
+  if (
+    isOpeningRelease() &&
+    LEGACY_OPENING_REDIRECTS.some((rule) => rule.test(pathname))
+  ) {
+    return NextResponse.redirect(new URL("/opening/today", request.url));
+  }
   if (!UNSAFE_METHODS.has(request.method)) {
     return NextResponse.next();
   }
-
-  const pathname = request.nextUrl.pathname;
   if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
@@ -16,7 +26,6 @@ export function middleware(request: NextRequest) {
   const publicBaseUrl =
     process.env.PUBLIC_BASE_URL?.trim() || request.nextUrl.origin;
   const origin = request.headers.get("origin");
-
   if (isAllowedCookieAuthOrigin(origin, publicBaseUrl)) {
     return NextResponse.next();
   }
@@ -31,7 +40,3 @@ export function middleware(request: NextRequest) {
     { status: 403 },
   );
 }
-
-export const config = {
-  matcher: ["/api/:path*"],
-};
