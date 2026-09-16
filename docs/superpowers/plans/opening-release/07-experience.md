@@ -52,6 +52,8 @@ it('distinguishes stored originals from parsed material', () => {
 
 ### U03: Conversation, memory, course evidence and plan confirmation
 
+**Early slice (RU-07):** Basic saved-conversation `composer` / `message-list` / `assistant-view` (plus materials pick + optional current page) may ship before M03/L03/P03 so M1 can collect real Q&A feedback. Do **not** unlock the privacy-gated memory panel in this slice. Final U03 integration gate (memory/plan/learning evidence) still applies; thin UI does not waive Q03→Q01→Q02.
+
 **Owner:** EXPERIENCE. **Depends:** T03,M03,L03,P03,U02.
 **Create:** `apps/web/src/features/opening/client/api.ts`, `apps/web/src/features/opening/assistant/assistant-view.tsx`, `apps/web/src/features/opening/assistant/message-list.tsx`, `apps/web/src/features/opening/assistant/composer.tsx`, `apps/web/src/features/opening/assistant/memory-panel.tsx`, `apps/web/src/features/opening/learning/course-view.tsx`, `apps/web/src/features/opening/planning/today-view.tsx`, `apps/web/src/features/opening/planning/plan-diff.tsx`, `apps/web/src/features/opening/planning/plan-action.ts`, `apps/web/src/features/opening/planning/plan-action.test.ts`, `tests/e2e/opening-learning-loop.spec.ts`.
 **Interfaces:** typed API wrappers consume interfaces.md routes; `canAcceptPlan({pending:boolean,stale:boolean}):boolean` in new `plan-action.ts`; components receive server DTOs. GET/job polling uses cancellation and refresh after mutation, not permanent client copies.

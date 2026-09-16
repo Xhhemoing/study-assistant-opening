@@ -3,32 +3,427 @@
   "baseCommit": "e7639c9930bf230185551c86ea825e2524c40a39",
   "branch": "feat/opening-release",
   "tasks": [
-    {"id":"B00","owner":"INTEGRATOR","dependsOn":[],"plan":"00-baseline.md","status":"verified","evidence":["../../evidence/2026-09-12-opening-release/baseline.md"]},
-    {"id":"B01","owner":"INTEGRATOR","dependsOn":["B00"],"plan":"00-quality-baseline.md","status":"verified","evidence":["../../evidence/2026-09-12-opening-release/baseline.md"]},
-    {"id":"B02","owner":"INTEGRATOR","dependsOn":["B01"],"plan":"00-browser-boundary.md","status":"verified","evidence":["../../evidence/2026-09-12-opening-release/baseline.md"]},
-    {"id":"F01","owner":"INTEGRATOR","dependsOn":["B02"],"plan":"01-foundation.md","status":"planned","evidence":[]},
-    {"id":"F02","owner":"INTEGRATOR","dependsOn":["B02"],"plan":"01-foundation.md","status":"planned","evidence":[]},
-    {"id":"F03","owner":"DATA","dependsOn":["F01","F02"],"plan":"01-foundation.md","status":"planned","evidence":[]},
-    {"id":"I01","owner":"PIPELINE","dependsOn":["F03"],"plan":"02-ingestion.md","status":"planned","evidence":[]},
-    {"id":"I02","owner":"PIPELINE","dependsOn":["I01"],"plan":"02-ingestion.md","status":"planned","evidence":[]},
-    {"id":"I03","owner":"PIPELINE","dependsOn":["F03"],"plan":"02-ingestion.md","status":"planned","evidence":[]},
-    {"id":"T01","owner":"AI","dependsOn":["F03"],"plan":"03-tutor.md","status":"planned","evidence":[]},
-    {"id":"T02","owner":"AI","dependsOn":["I02","T01"],"plan":"03-tutor.md","status":"planned","evidence":[]},
-    {"id":"T03","owner":"AI+DATA","dependsOn":["T02","I03"],"plan":"03-tutor.md","status":"planned","evidence":[]},
-    {"id":"M01","owner":"AI+DATA","dependsOn":["T03"],"plan":"04-memory.md","status":"planned","evidence":[]},
-    {"id":"M02","owner":"DATA","dependsOn":["M01"],"plan":"04-memory.md","status":"planned","evidence":[]},
-    {"id":"M03","owner":"AI","dependsOn":["T03","M02"],"plan":"04-memory.md","status":"planned","evidence":[]},
-    {"id":"L01","owner":"DATA","dependsOn":["T03","M01"],"plan":"05-learning.md","status":"planned","evidence":[]},
-    {"id":"L02","owner":"EXPERIENCE","dependsOn":["L01"],"plan":"05-learning.md","status":"planned","evidence":[]},
-    {"id":"L03","owner":"EXPERIENCE","dependsOn":["L02"],"plan":"05-learning.md","status":"planned","evidence":[]},
-    {"id":"P01","owner":"EXPERIENCE","dependsOn":["F02"],"plan":"06-planning.md","status":"planned","evidence":[]},
-    {"id":"P02","owner":"DATA+EXPERIENCE","dependsOn":["P01","F03","L01"],"plan":"06-planning.md","status":"planned","evidence":[]},
-    {"id":"P03","owner":"PIPELINE","dependsOn":["P02","I03"],"plan":"06-planning.md","status":"planned","evidence":[]},
-    {"id":"U01","owner":"EXPERIENCE","dependsOn":["F02","F01"],"plan":"07-experience.md","status":"planned","evidence":[]},
-    {"id":"U02","owner":"EXPERIENCE","dependsOn":["I01","I02","U01"],"plan":"07-experience.md","status":"planned","evidence":[]},
-    {"id":"U03","owner":"EXPERIENCE","dependsOn":["T03","M03","L03","P03","U02"],"plan":"07-experience.md","status":"planned","evidence":[]},
-    {"id":"Q01","owner":"QA","dependsOn":["U03","Q03"],"plan":"08-delivery.md","status":"planned","evidence":[]},
-    {"id":"Q02","owner":"QA","dependsOn":["Q01"],"plan":"08-delivery.md","status":"planned","evidence":[]},
-    {"id":"Q03","owner":"INTEGRATOR+QA","dependsOn":["P03","M02"],"plan":"08-delivery.md","status":"planned","evidence":[]}
+    {
+      "id": "B00",
+      "owner": "INTEGRATOR",
+      "dependsOn": [],
+      "plan": "00-baseline.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "B01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B00"
+      ],
+      "plan": "00-quality-baseline.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "B02",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B01"
+      ],
+      "plan": "00-browser-boundary.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "F01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "blocked",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/f01-f03-unit-gates.md"
+      ]
+    },
+    {
+      "id": "F02",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-13-opening-release/f02-contracts.md"
+      ]
+    },
+    {
+      "id": "F03",
+      "owner": "DATA",
+      "dependsOn": [
+        "F01",
+        "F02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "blocked",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/f01-f03-unit-gates.md"
+      ]
+    },
+    {
+      "id": "I01",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "I02",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "I01"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "I03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "T01",
+      "owner": "AI",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "03-tutor.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "T02",
+      "owner": "AI",
+      "dependsOn": [
+        "I02",
+        "T01"
+      ],
+      "plan": "03-tutor.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "T03",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "T02",
+        "I03"
+      ],
+      "plan": "03-tutor.md",
+      "status": "blocked",
+      "evidence": [
+        "../../evidence/2026-09-13-opening-release/t03-tutor-http-slice.md"
+      ]
+    },
+    {
+      "id": "M01",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "04-memory.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "M02",
+      "owner": "DATA",
+      "dependsOn": [
+        "M01"
+      ],
+      "plan": "04-memory.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "M03",
+      "owner": "AI",
+      "dependsOn": [
+        "T03",
+        "M02"
+      ],
+      "plan": "04-memory.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "L01",
+      "owner": "DATA",
+      "dependsOn": [
+        "T03",
+        "M01"
+      ],
+      "plan": "05-learning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "L02",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "L01"
+      ],
+      "plan": "05-learning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "L03",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "L02"
+      ],
+      "plan": "05-learning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "P01",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "F02"
+      ],
+      "plan": "06-planning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "P02",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "P01",
+        "F03",
+        "L01"
+      ],
+      "plan": "06-planning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "P03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "P02",
+        "I03"
+      ],
+      "plan": "06-planning.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "U01",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "F02",
+        "F01"
+      ],
+      "plan": "07-experience.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "U02",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "I01",
+        "I02",
+        "U01"
+      ],
+      "plan": "07-experience.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "U03",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03",
+        "M03",
+        "L03",
+        "P03",
+        "U02"
+      ],
+      "plan": "07-experience.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q01",
+      "owner": "QA",
+      "dependsOn": [
+        "U03",
+        "Q03"
+      ],
+      "plan": "08-delivery.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q02",
+      "owner": "QA",
+      "dependsOn": [
+        "Q01"
+      ],
+      "plan": "08-delivery.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q03",
+      "owner": "INTEGRATOR+QA",
+      "dependsOn": [
+        "P03",
+        "M02"
+      ],
+      "plan": "08-delivery.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "X01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "F02"
+      ],
+      "plan": "09-connections.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "C01",
+      "owner": "DATA+PIPELINE",
+      "dependsOn": [
+        "X01",
+        "F03",
+        "M02",
+        "P02"
+      ],
+      "plan": "09-connections.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "C02",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "C01",
+        "I01",
+        "I03"
+      ],
+      "plan": "09-connections.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "C03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "C01",
+        "I01",
+        "I03"
+      ],
+      "plan": "09-connections.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "V01",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "X01",
+        "I02",
+        "I03"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "K01",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "X01",
+        "C01",
+        "I02",
+        "T02"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "K02",
+      "owner": "EXPERIENCE+AI+DATA",
+      "dependsOn": [
+        "K01",
+        "L02",
+        "T03"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "P04",
+      "owner": "AI+EXPERIENCE",
+      "dependsOn": [
+        "C02",
+        "C03",
+        "K02",
+        "P02",
+        "M01"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "U04",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "C02",
+        "C03",
+        "V01",
+        "K02",
+        "P04"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q04",
+      "owner": "QA+INTEGRATOR",
+      "dependsOn": [
+        "U04",
+        "Q02"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "planned",
+      "evidence": []
+    }
   ]
 }

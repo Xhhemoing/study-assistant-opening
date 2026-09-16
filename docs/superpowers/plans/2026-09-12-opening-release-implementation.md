@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task; independent leaf tasks may use superpowers:subagent-driven-development after their contracts land. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在隔离分支交付手机/电脑可用的个人学习助理：材料、辅导、记忆、学习证据和协商计划形成真实闭环。
+**Goal:** 在隔离分支交付手机/电脑可用的个人学习助理：先贯通材料、辅导、记忆、学习证据和协商计划，再覆盖学校自建邮箱/钉钉接入、音视频理解、课程知识结构与主动辅导安排。
 
 **Architecture:** 复用AIstudy的认证、workspace、契约和数据库基础；保留Next.js + TypeScript模块化单体、独立worker。首版新增明确的opening API/client，正式入口只读服务器数据，不为赶时间完整重写旧StudyDataProvider的所有探索功能；旧Mock页面在opening模式不可成为正式入口。
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 已批准规格：`../specs/2026-09-12-opening-release-design.md`。
+- 已批准规格：`../specs/2026-09-12-opening-release-design.md`；2026-09-14用户要求补齐的能力范围见`../specs/2026-09-14-learning-capability-expansion.md`，与旧范围冲突时以补充为准。
 - 工作区：`E:/Project/study-assistant-opening`；分支`feat/opening-release`；起点`e7639c9930bf230185551c86ea825e2524c40a39`。
 - 原工作区只读；不搬入未提交的0016迁移和goals/plan-state文件，不自动合并或push。
 - 单用户使用，但所有对象仍按workspace/owner验证；无公开注册、无自行扩大采集。
@@ -25,9 +25,9 @@
 
 ---
 
-## 1. 任务分配：27项，6个逻辑职责
+## 1. 任务分配：37项，6个逻辑职责
 
-以下是代码所有权角色，不代表已启动27个agent。主线程负责调度和验收；不会虚构评审员或签字。
+以下是代码所有权角色，不代表已启动37个agent。主线程负责调度和验收；不会虚构评审员或签字。新增10项均是计划，不改写已有验证状态。
 
 | 角色 | 所有权 | 禁止事项 |
 |---|---|---|
@@ -67,13 +67,24 @@
 | Q01 | QA | 鉴权、并发、失败与删除集成 | U03,Q03 | 08-delivery.md |
 | Q02 | QA | 浏览器、手机和最终样本验收 | Q01 | 08-delivery.md |
 | Q03 | INTEGRATOR+QA | 打包、恢复与运行监督能力 | P03,M02 | 08-delivery.md |
+| X01 | INTEGRATOR | 扩展契约与开源库制品核验 | F02 | 09-connections.md |
+| C01 | DATA+PIPELINE | 连接授权、凭据、游标、来源与撤销 | X01,F03,M02,P02 | 09-connections.md |
+| C02 | PIPELINE | 学校自建邮箱IMAP增量同步及附件 | C01,I01,I03 | 09-connections.md |
+| C03 | PIPELINE | 钉钉实际获准通知/文件接入 | C01,I01,I03 | 09-connections.md |
+| V01 | PIPELINE | 录音转写、视频音轨/关键帧与时间引用 | X01,I02,I03 | 10-media-knowledge.md |
+| K01 | AI+DATA | 课程知识结构生成、纠正与增量更新 | X01,C01,I02,T02 | 10-media-knowledge.md |
+| K02 | EXPERIENCE+AI+DATA | 技能证据、针对性辅导与重测反馈 | K01,L02,T03 | 10-media-knowledge.md |
+| P04 | AI+EXPERIENCE | 多源事项归并及低选择负担的主动安排 | C02,C03,K02,P02,M01 | 11-proactive-acceptance.md |
+| U04 | EXPERIENCE | 连接/知识/媒体/今日行动真实交互 | C02,C03,V01,K02,P04 | 11-proactive-acceptance.md |
+| Q04 | QA+INTEGRATOR | CAP01–06真实验收及扩展隐私恢复 | U04,Q02 | 11-proactive-acceptance.md |
 
 ## 2. 可并行的边界与交接
 
 - F02契约定型之前，不并行写消费方接口。变更F02由INTEGRATOR合并，任务作者不能擅改字段。
 - F03后可并行I01/I03/T01；P01与U01只依赖已冻结契约，可并行。
 - T03后可分开做记忆、学习和计划；数据库迁移始终由DATA按顺序合入。
-- 预留迁移：0016 sources/jobs/outbox/budget，0017 conversations，0018 memories/privacy，0019 paper learning，0020 timetable/plans/reminders。若基线迁移变化，先修任务清单，不复用已发布号。
+- 预留迁移：0016 sources/jobs/outbox/budget，0017 conversations，0018 memories/privacy，0019 paper learning，0020 timetable/plans/reminders；扩展0021 connections/imports，0022 knowledge，0023 skill evidence。C01依赖P02保证编号顺序，K01依赖C01，K02依赖K01。若基线迁移变化，先修任务清单，不复用已发布号。
+- X01为F02旁的增量契约门禁，不重开或篡改F02已验证记录；C02/C03与V01可独立推进，钉钉实接权限不阻塞邮箱/媒体离线开发。扩展接口见`opening-release/capability-interfaces.md`。
 - 所有`package.json`、lockfile、包index、vitest配置、全局导航、migration注册由INTEGRATOR单写；子任务提交变更清单而非抢写。
 - 禁止多个agent同时修改同一工作树中的同一文件；并行代码任务使用独立分支/工作树再集成。
 
@@ -95,9 +106,12 @@
 - **M1：能提交材料并求助** = I01-I03 + T01-T03 + U01-U02。必须是真实链路；没有模型配置明确显示不可用。
 - **M2：会记住、能重测** = M01-M03 + L01-L03。隐私删除是长期记忆启用门禁。
 - **M3：每天用得起来** = P01-P03 + U03。协商确认、失败状态与移动端流程完整。
-- **M4：可交付** = 先Q03打包/恢复实现，再Q01集成，再Q02最终验收。真实材料/模型/手机的结果单列，不能用fake测试替代。
+- **M4：基础可交付** = 先Q03打包/恢复实现，再Q01集成，再Q02最终验收。真实材料/模型/手机的结果单列，不能用fake测试替代；这不代表本轮新增需求全部满足。
+- **M5：新增核心需求完整覆盖** = X01/C01–C03/V01/K01–K02/P04/U04后通过Q04。学校邮箱和钉钉按实际授权验证；视频/录音理解、知识架构、动态学习与主动安排逐项验收。
 
-时间不足先暂缓自动转写、外部推送、复杂检索和视觉细节；不得悄悄取消五项核心范围。核心范围仍不能达到时必须明确报告缺口，不把demo称为开学版。
+允许先交付M4收集真实反馈，但不再默认暂缓转写、外部数据接入和课程知识结构；它们已是CAP01–06明确需求。权限/硬件/效果不满足时保留blocked与临时降级说明，缩减完整交付范围需用户确认；手工导入不算自动同步，存储音频不算理解课堂。
+
+复用原则：邮箱优先ImapFlow+MailParser；Docling/FFmpeg/faster-whisper承担解析；参考DeepTutor辅导流程，不复制另一套主后端。EmailEngine当前是商业备选，不默认购买。依据见`../../quality/opening-capability-reuse-research.md`。
 
 ## 5. 监督与审批
 
@@ -110,4 +124,4 @@
 - `../evidence/2026-09-12-opening-release/baseline.md`：安装、lint、类型、构建与测试的实际结果。
 - `opening-release/tasks.json`：任务依赖与状态。
 - 各子计划：准确文件、接口、测试样例和执行步骤。
-- 计划自检脚本：`scripts/validate-opening-plan.mjs`（仅校验任务引用/依赖/覆盖，不证明代码正确）。
+- 计划自检：`node scripts/validate-opening-plan.mjs`、`node --test tests/tooling/opening-plan.test.mjs tests/tooling/opening-capability-plan.test.mjs`；仅校验任务引用/依赖/需求覆盖，不证明代码正确或学校服务已接通。

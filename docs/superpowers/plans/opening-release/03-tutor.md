@@ -35,7 +35,7 @@ it('never blindly retries authentication errors', () => {
 
 **Owner:** AI. **Depends:** I02,T01.
 **Create:** `packages/ai/src/opening/context.ts`, `packages/ai/src/opening/context.test.ts`, `packages/ai/src/opening/citations.ts`, `packages/ai/src/opening/citations.test.ts`, `packages/database/src/repositories/opening-chunks.ts`, `tests/integration/opening-retrieval.test.ts`.
-**Interfaces:** `resolveCitations(ids:string[],chunks:SourceChunk[]):Citation[]`; `selectContext({chunks,query,maxCharacters}):SourceChunk[]`. First retrieve only authorized selected material/current course; use exact/keyword ordering, not GraphRAG. Vector search is a separate future optimization, not a first-release dependency.
+**Interfaces:** `resolveCitations(ids:string[],chunks:SourceChunk[]):Citation[]`; `selectContext({chunks,query,maxCharacters}):SourceChunk[]`. Honor RU-03: when `TurnInput.currentPage`/`chunkId` present, context must prefer server-validated page/chunk membership (file ≠ page); never invent a page. First retrieve only authorized selected material/current course; use exact/keyword ordering, not GraphRAG. Vector search is a separate future optimization, not a first-release dependency.
 
 - [ ] Add failing citation test:
 ```ts
@@ -55,7 +55,7 @@ it('cannot fabricate an attachment citation', () => {
 
 **Owner:** AI with DATA owning migration. **Depends:** T02,I03.
 **Create:** `packages/database/src/schema/opening-conversations.ts`, `packages/database/src/migrations/0017_opening_conversations.sql`, `packages/database/src/repositories/opening-conversations.ts`, `packages/database/src/repositories/opening-candidates.ts`, `apps/web/src/app/api/opening/candidates/route.ts`, `apps/web/src/features/opening/tutor/tutor-service.ts`, `apps/worker/src/jobs/tutor-turn.ts`, `apps/worker/src/jobs/tutor-turn.test.ts`, `apps/web/src/app/api/opening/conversations/route.ts`, `apps/web/src/app/api/opening/conversations/[id]/turns/route.ts`, `apps/web/src/app/api/opening/turns/route.ts`, `apps/web/src/app/api/opening/jobs/[id]/route.ts`, `tests/integration/handler/opening-tutor.test.ts`.
-**Interfaces:** submitTurn/listTurns/getJob from interfaces.md; `makeTutorInstruction(mode:TutorMode):string`; `POST conversations {title,courseId}` returns server ID. Saved endpoint rejects ephemeral until M03's separate endpoint is ready.
+**Interfaces:** listConversations/createConversation/resumeConversation/submitTurn/listTurns/getJob from interfaces.md; `makeTutorInstruction(mode:TutorMode):string`; `POST conversations` returns `ConversationSummary`; `GET conversations/[id]/resume` returns `ConversationResume` with `boundedHistory` (RU-02 / AC07). Saved endpoint rejects ephemeral until M03's separate endpoint is ready.
 
 - [ ] Test mode policy before implementation:
 ```ts

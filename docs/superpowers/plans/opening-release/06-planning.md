@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans; time correctness and confirmation are functional gates.
 
 **Goal:** Turn real course weeks, deadlines and rest constraints into small, reviewable daily plans.
+
+2026-09-14扩展：P01–P03为排程与协商基础；邮箱/钉钉通知归并、知识证据驱动的主动建议和减少确认负担由[11-proactive-acceptance.md](11-proactive-acceptance.md)的P04/U04验收。
 **Architecture:** Pure schedule rules propose; database transactions accept. AI may explain/extract candidates but cannot bypass conflicts or mutate accepted plans.
 **Tech Stack:** TypeScript, PostgreSQL; read-excel-file 9.3.10 (MIT metadata checked), @js-temporal/polyfill 0.5.1 candidate for explicit timezone/DST handling, pinned and tested before use.
 

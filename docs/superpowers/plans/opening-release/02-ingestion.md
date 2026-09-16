@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans; red/green each task before integration.
 
 **Goal:** Accept real mobile files, preserve originals and process them recoverably.
+
+2026-09-14扩展：I01/I02仍是基础存储与文档解析任务；视频/录音理解已由[10-media-knowledge.md](10-media-knowledge.md)的V01列为M5必须项。下文audio unsupported仅表示V01启用前的诚实状态，不是取消转写需求。
 **Architecture:** Direct private object upload plus PostgreSQL metadata; outbox dispatches bounded jobs to an actual BullMQ worker. Parsing is an isolated conversion process, not a second business backend.
 **Tech Stack:** Existing AWS S3 SDK/BullMQ; Docling 2.126.0 candidate parser, Python 3.12 isolated runtime (PyPI MIT metadata checked; conversion behavior still needs tests).
 

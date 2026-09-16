@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans; never replace observable evidence with model confidence.
 
 **Goal:** Observe paper-based learning without forcing every exercise into the app; distinguish assistance and unverified answers.
+
+2026-09-14扩展：L01–L03为证据基础；课程知识节点、技能维度关联与针对性辅导闭环由[10-media-knowledge.md](10-media-knowledge.md)的K01/K02实现，不能用现有记录API替代CAP04/CAP05验收。
 **Architecture:** New observations sit beside existing formal LearningEvent v1. Only appropriately verified, mapped work is projected into the old boolean-correct event system.
 **Tech Stack:** TypeScript pure rules, PostgreSQL, existing practice/review services.
 

@@ -39,6 +39,7 @@ it('refuses destructive tests without explicit isolated database', () => {
 **Create:** `packages/contracts/src/opening/{foundation,sources,jobs,tutor,memory,learning,planning,index}.ts`, `packages/contracts/src/opening/contracts.test.ts`.
 **Modify:** `packages/contracts/src/index.ts` (one grouped export).
 **Interfaces:** all names and fields in `interfaces.md`; schema names `uploadInputSchema`, `sourceRecordSchema`, `turnInputSchema`, `memoryDecisionSchema`, `observationInputSchema`, `acceptPlanInputSchema`, `weekSessionSchema`.
+**Continuity freeze (RU-02/03 before F02 lock):** `interfaces.md` must include `TurnInput.currentPage`/`chunkId` + server membership rules, `ConversationSummary` / `ConversationResume` + list/create/resume ports, and mark RU-05 `TimeConfigRecord` + RU-06 effective-scope field gaps without expanding the 27-task graph.
 
 - [ ] Add complete invalid/valid fixtures and failing test:
 ```ts
