@@ -46,6 +46,11 @@ export {
 export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
 export { planDay, type DayPlanResult } from "./opening/day-planner";
+export {
+  expandWeekSessions,
+  normalizeWeekSessions,
+} from "./opening/timetable";
+export type { TimeBlock, WeekSession } from "@aistudy/contracts";
 export { scenarioToGoalKind } from "./planning/kinds";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
 export { gradePracticeAnswer, isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
