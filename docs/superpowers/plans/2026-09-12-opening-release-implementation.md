@@ -83,7 +83,7 @@
 - F02契约定型之前，不并行写消费方接口。变更F02由INTEGRATOR合并，任务作者不能擅改字段。
 - F03后可并行I01/I03/T01；P01与U01只依赖已冻结契约，可并行。
 - T03后可分开做记忆、学习和计划；数据库迁移始终由DATA按顺序合入。
-- 预留迁移：0016 sources/jobs/outbox/budget，0017 conversations，0018 memories/privacy，0019 paper learning，0020 timetable/plans/reminders；扩展0021 connections/imports，0022 knowledge，0023 skill evidence。C01依赖P02保证编号顺序，K01依赖C01，K02依赖K01。若基线迁移变化，先修任务清单，不复用已发布号。
+- 落盘迁移：0016 sources，0017 conversations，0018 jobs/outbox/budget（F03），0019 paper learning。预留：0020 memories/privacy（M01），0021 timetable/plans/reminders（P02），0022 connections/imports（C01），0023 knowledge（K01），0024 skill evidence（K02）。C01依赖P02保证编号顺序，K01依赖C01，K02依赖K01。若基线迁移变化，先修任务清单，不复用已发布号。
 - X01为F02旁的增量契约门禁，不重开或篡改F02已验证记录；C02/C03与V01可独立推进，钉钉实接权限不阻塞邮箱/媒体离线开发。扩展接口见`opening-release/capability-interfaces.md`。
 - 所有`package.json`、lockfile、包index、vitest配置、全局导航、migration注册由INTEGRATOR单写；子任务提交变更清单而非抢写。
 - 禁止多个agent同时修改同一工作树中的同一文件；并行代码任务使用独立分支/工作树再集成。

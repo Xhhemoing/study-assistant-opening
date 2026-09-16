@@ -44,9 +44,10 @@
         "B02"
       ],
       "plan": "01-foundation.md",
-      "status": "blocked",
+      "status": "verified",
       "evidence": [
-        "../../evidence/2026-09-16-opening-release/f01-f03-unit-gates.md"
+        "../../evidence/2026-09-13-opening-release/f01-access.md",
+        "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
       ]
     },
     {
@@ -69,9 +70,9 @@
         "F02"
       ],
       "plan": "01-foundation.md",
-      "status": "blocked",
+      "status": "verified",
       "evidence": [
-        "../../evidence/2026-09-16-opening-release/f01-f03-unit-gates.md"
+        "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
       ]
     },
     {

@@ -35,7 +35,7 @@ it('rejects segments outside the source duration', () => {
 ### K01: Source-backed, editable course knowledge structure
 
 **Owner:** AI+DATA. **Depends:** X01,C01,I02,T02.
-**Create:** `packages/contracts/src/opening/knowledge.test.ts`；`packages/domain/src/opening/knowledge-graph.ts`、`knowledge-graph.test.ts`；`packages/database/src/schema/opening-knowledge.ts`、`repositories/opening-knowledge.ts`、`migrations/0022_opening_knowledge.sql`；`apps/worker/src/jobs/build-course-knowledge.ts`；`apps/web/src/features/opening/knowledge/service.ts`；`apps/web/src/app/api/opening/courses/[id]/knowledge/route.ts`、`knowledge/rebuild/route.ts`；`tests/integration/opening-knowledge.test.ts`。
+**Create:** `packages/contracts/src/opening/knowledge.test.ts`；`packages/domain/src/opening/knowledge-graph.ts`、`knowledge-graph.test.ts`；`packages/database/src/schema/opening-knowledge.ts`、`repositories/opening-knowledge.ts`、`migrations/0023_opening_knowledge.sql`；`apps/worker/src/jobs/build-course-knowledge.ts`；`apps/web/src/features/opening/knowledge/service.ts`；`apps/web/src/app/api/opening/courses/[id]/knowledge/route.ts`、`knowledge/rebuild/route.ts`；`tests/integration/opening-knowledge.test.ts`。
 **Interfaces:** `validateKnowledgeSnapshot(snapshot:KnowledgeSnapshot):KnowledgeSnapshot`；CRUD/rebuild遵守X01的expectedVersion与授权引用验证。SourceChunk来自文档或V01时间段，题型节点通过SkillEvidence连接练习，不以自由文本技能名作为永久唯一ID。
 
 - [ ] 在完整fixture上增加无依据节点和循环先修的失败测试：
@@ -55,7 +55,7 @@ it('rejects a self prerequisite', () => {
 ### K02: Skill-linked evidence, targeted tutoring and retest feedback
 
 **Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,L02,T03.
-**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`；`packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/0023_opening_skill_evidence.sql`；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`；`tests/integration/opening-adaptive-loop.test.ts`。
+**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`；`packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/0024_opening_skill_evidence.sql`；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`；`tests/integration/opening-adaptive-loop.test.ts`。
 **Modify:** L01 observation service、L02 retest worker、T03 tutor worker（各自小适配模块，不继续扩大超过200行的文件）。
 **Interfaces:** `recommendTutorAction({nodeId,hasCheckedIndependent,hasAssistance,retestDue}):TutorAction['kind']`；服务端从SkillEvidence/Observation加载标志，客户端不可自报已核验独立。
 
