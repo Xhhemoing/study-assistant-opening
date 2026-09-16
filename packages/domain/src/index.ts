@@ -44,6 +44,8 @@ export {
   type PlannerGoalInput,
 } from "./planning/planner";
 export { applyPlanOption, needsOptionChoice } from "./planning/choice";
+export { availableTimeSlots } from "./opening/planning-time";
+export { planDay, type DayPlanResult } from "./opening/day-planner";
 export { scenarioToGoalKind } from "./planning/kinds";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
 export { gradePracticeAnswer, isPracticeAnswerCorrect, normalizeAnswer } from "./practice/grading";
@@ -131,3 +133,11 @@ export {
   type ReorderTarget,
   type TimeSlot,
 } from "./guidance/guidance";
+
+export {
+  resolveAssistance,
+  qualifyObservationAssistance,
+  type AssistanceLevel,
+  type HelpExposureLevel,
+  type ObservationOutcome,
+} from "./opening/assistance";
