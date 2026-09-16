@@ -15,6 +15,9 @@ export const sourceMimeSchema = z.enum([
   "audio/mpeg",
   "audio/mp4",
   "audio/wav",
+  "video/mp4",
+  "video/webm",
+  "message/rfc822",
 ]);
 
 const MAX_NAME = 180;
@@ -25,6 +28,8 @@ const AUDIO_MAX = 200 * 1024 * 1024;
 function maxBytesForMime(mime: z.infer<typeof sourceMimeSchema>): number {
   if (mime.startsWith("image/")) return IMAGE_MAX;
   if (mime.startsWith("audio/")) return AUDIO_MAX;
+  if (mime.startsWith("video/")) return 512 * 1024 * 1024;
+  if (mime === "message/rfc822") return 25 * 1024 * 1024;
   return DOCUMENT_MAX;
 }
 
@@ -35,7 +40,7 @@ export const uploadInputSchema = z
       .min(1)
       .max(MAX_NAME)
       .refine(
-        (name) => !/[\\/\u0000]/.test(name) && !name.includes(".."),
+        (name) => !name.includes("..") && !["\\", "/", "\u0000"].some((bad) => name.includes(bad)),
         "name must not contain path separators, NUL, or ..",
       ),
     mime: sourceMimeSchema,

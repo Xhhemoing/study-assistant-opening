@@ -128,3 +128,9 @@ export {
   type TimeConfig,
   type TimeConfigSaveInput,
 } from "./planning";
+
+export { connectionKindSchema, connectionStateSchema, connectionViewSchema, imapSetupInputSchema, imapCursorSchema, connectionCredentialInputSchema, type ConnectionKind, type ConnectionState, type ConnectionView, type ImapSetupInput, type ImapCursor } from "./connections";
+export { importIdentitySchema, importReceiptSchema, emailImportInputSchema, type ImportIdentity, type ImportReceipt, type EmailImportInput } from "./imports";
+export { mediaMimeSchema, mediaUploadInputSchema, mediaSegmentSchema, type MediaSegment } from "./media";
+export { knowledgeNodeSchema, knowledgeEdgeSchema, knowledgeSnapshotSchema, skillEvidenceSchema, tutorActionSchema, type KnowledgeNode, type KnowledgeEdge, type KnowledgeSnapshot, type SkillEvidence, type TutorAction } from "./knowledge";
+export { actionCandidateSchema, actionDigestSchema, type ActionCandidate, type ActionDigest } from "./proactive";
