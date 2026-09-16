@@ -20,23 +20,16 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1, "S3_ACCESS_KEY_ID is required"),
   S3_SECRET_ACCESS_KEY: z.string().min(1, "S3_SECRET_ACCESS_KEY is required"),
   PUBLIC_BASE_URL: z.string().url("PUBLIC_BASE_URL must be a valid URL"),
-  S3_FORCE_PATH_STYLE: z
-    .enum(["true", "false"])
-    .default("true")
-    .transform((v) => v === "true"),
-  AUTH_SECRET: z
-    .string()
-    .min(32, "AUTH_SECRET must be at least 32 characters"),
+  S3_FORCE_PATH_STYLE: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
+  AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),
   SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
-  SESSION_TTL_SECONDS: z
-    .string()
-    .optional()
-    .default("604800")
-    .transform((v) => Number.parseInt(v, 10))
-    .refine((n) => Number.isFinite(n) && n >= 60, {
-      message: "SESSION_TTL_SECONDS must be an integer >= 60",
-    }),
+  SESSION_TTL_SECONDS: z.string().optional().default("604800").transform((v) => Number.parseInt(v, 10)).refine((n) => Number.isFinite(n) && n >= 60, { message: "SESSION_TTL_SECONDS must be an integer >= 60" }),
   AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
+  OPENING_MODEL_BASE_URL: z.string().url().optional().default("https://api.openai.com/v1"),
+  OPENING_MODEL_API_KEY: z.string().optional().default(""),
+  OPENING_MODEL_NAME: z.string().min(1).optional().default("gpt-4o-mini"),
+  OPENING_MODEL_INPUT_CENTS_PER_MILLION: z.coerce.number().nonnegative().optional().default(0),
+  OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: z.coerce.number().nonnegative().optional().default(0),
 });
 
 export type AppEnv = {
@@ -48,34 +41,16 @@ export type AppEnv = {
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
-  s3: {
-    endpoint: string;
-    region: string;
-    bucket: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-    forcePathStyle: boolean;
-  };
-  toPublicSummary: () => {
-    nodeEnv: "development" | "test" | "production";
-    publicBaseUrl: string;
-    databaseConfigured: boolean;
-    redisConfigured: boolean;
-    storageConfigured: boolean;
-    authConfigured: boolean;
-  };
+  openingModel: { baseUrl: string; apiKey: string; name: string; inputCentsPerMillion: number; outputCentsPerMillion: number };
+  s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean };
+  toPublicSummary: () => { nodeEnv: "development" | "test" | "production"; publicBaseUrl: string; databaseConfigured: boolean; redisConfigured: boolean; storageConfigured: boolean; authConfigured: boolean };
 };
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const result = envSchema.safeParse(source);
   if (!result.success) {
-    const issues = result.error.issues.map((issue) => {
-      const path = issue.path.join(".") || "env";
-      return `${path}: ${issue.message}`;
-    });
-    throw new EnvValidationError(issues);
+    throw new EnvValidationError(result.error.issues.map((issue) => `${issue.path.join(".") || "env"}: ${issue.message}`));
   }
-
   const data = result.data;
   return {
     nodeEnv: data.NODE_ENV,
@@ -83,33 +58,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     redisUrl: data.REDIS_URL,
     publicBaseUrl: data.PUBLIC_BASE_URL,
     authSecret: data.AUTH_SECRET,
-    sessionCookieSecure:
-      data.SESSION_COOKIE_SECURE === undefined
-        ? data.NODE_ENV === "production"
-        : data.SESSION_COOKIE_SECURE === "true",
+    sessionCookieSecure: data.SESSION_COOKIE_SECURE === undefined ? data.NODE_ENV === "production" : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
-    s3: {
-      endpoint: data.S3_ENDPOINT,
-      region: data.S3_REGION,
-      bucket: data.S3_BUCKET,
-      accessKeyId: data.S3_ACCESS_KEY_ID,
-      secretAccessKey: data.S3_SECRET_ACCESS_KEY,
-      forcePathStyle: data.S3_FORCE_PATH_STYLE,
-    },
+    openingModel: { baseUrl: data.OPENING_MODEL_BASE_URL, apiKey: data.OPENING_MODEL_API_KEY, name: data.OPENING_MODEL_NAME, inputCentsPerMillion: data.OPENING_MODEL_INPUT_CENTS_PER_MILLION, outputCentsPerMillion: data.OPENING_MODEL_OUTPUT_CENTS_PER_MILLION },
+    s3: { endpoint: data.S3_ENDPOINT, region: data.S3_REGION, bucket: data.S3_BUCKET, accessKeyId: data.S3_ACCESS_KEY_ID, secretAccessKey: data.S3_SECRET_ACCESS_KEY, forcePathStyle: data.S3_FORCE_PATH_STYLE },
     toPublicSummary() {
-      return {
-        nodeEnv: data.NODE_ENV,
-        publicBaseUrl: data.PUBLIC_BASE_URL,
-        databaseConfigured: data.DATABASE_URL.length > 0,
-        redisConfigured: data.REDIS_URL.length > 0,
-        storageConfigured:
-          data.S3_ENDPOINT.length > 0 &&
-          data.S3_BUCKET.length > 0 &&
-          data.S3_ACCESS_KEY_ID.length > 0 &&
-          data.S3_SECRET_ACCESS_KEY.length > 0,
-        authConfigured: data.AUTH_SECRET.length >= 32,
-      };
+      return { nodeEnv: data.NODE_ENV, publicBaseUrl: data.PUBLIC_BASE_URL, databaseConfigured: true, redisConfigured: true, storageConfigured: true, authConfigured: data.AUTH_SECRET.length >= 32 };
     },
   };
 }

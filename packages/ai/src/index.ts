@@ -1,7 +1,18 @@
-/**
- * AI orchestration package — providers and candidates only; never formal content writes.
- */
 export const AI_CANDIDATE_ONLY = true as const;
+
+export {
+  createOpeningProvider,
+  OpeningProviderError,
+  type OpeningProviderOptions,
+} from "./opening/provider";
+export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
+export {
+  estimateUsage,
+  extractUsage,
+  usageFromOutput,
+  type OpeningPricing,
+  type OpeningUsage,
+} from "./opening/usage";
 
 export { ROLE_POLICIES, getRolePolicy, type RolePolicy } from "./roles";
 export {

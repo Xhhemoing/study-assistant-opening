@@ -6,6 +6,7 @@ export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED
 
 export class OpeningBudgetError extends Error {
   readonly code: OpeningBudgetErrorCode;
+
   constructor(code: OpeningBudgetErrorCode, message: string) {
     super(message);
     this.name = "OpeningBudgetError";
@@ -40,6 +41,13 @@ export type OpeningBudgetRepository = {
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
   release(requestId: string): Promise<BudgetReservationRecord>;
   complete(requestId: string): Promise<BudgetReservationRecord>;
+  /** Ledger flow: reconcile a completed call to its actual cost. */
+  settle(reservationId: string, actualCents: number): Promise<BudgetReservationRecord>;
+  /**
+   * Unknown remote outcome: the reservation RETAINS its cap space (stays
+   * 'reserved'; the 0018 CHECK has no 'unknown' state) until reconciliation.
+   */
+  markUnknown(reservationId: string): Promise<BudgetReservationRecord>;
 };
 
 function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
@@ -54,16 +62,34 @@ function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
 }
 
 export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository {
-  const changeState = async (requestId: string, state: "released" | "completed") => {
+  const changeState = async (
+    where: { by: "requestId" | "id"; value: string },
+    state: "released" | "completed",
+  ) => {
+    const predicate = where.by === "requestId"
+      ? sql`request_id = ${where.value}`
+      : sql`id = ${where.value}`;
     const rows = await sql`
       UPDATE opening_budget_reservations
       SET state = ${state}, updated_at = now()
-      WHERE request_id = ${requestId}
+      WHERE ${predicate}
       RETURNING *
     `;
-    if (!rows.length) throw new OpeningBudgetError("NOT_FOUND", "reservation not found");
+    if (!rows.length) {
+      throw new OpeningBudgetError("NOT_FOUND", "reservation not found");
+    }
     return mapReservation(rows[0] as Record<string, unknown>);
   };
+  const byId = async (reservationId: string): Promise<BudgetReservationRecord> => {
+    const rows = await sql`
+      SELECT * FROM opening_budget_reservations WHERE id = ${reservationId}
+    `;
+    if (!rows.length) {
+      throw new OpeningBudgetError("NOT_FOUND", "reservation not found");
+    }
+    return mapReservation(rows[0] as Record<string, unknown>);
+  };
+
   return {
     async reserve(scope, input) {
       if (input.amountCents <= 0) {
@@ -79,18 +105,42 @@ export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository
         ON CONFLICT (request_id) DO NOTHING
         RETURNING *
       `;
-      if (rows.length) return mapReservation(rows[0] as Record<string, unknown>);
+      if (rows.length) {
+        return mapReservation(rows[0] as Record<string, unknown>);
+      }
       const existing = await sql`
         SELECT * FROM opening_budget_reservations WHERE request_id = ${input.requestId}
       `;
-      if (existing.length) return mapReservation(existing[0] as Record<string, unknown>);
+      if (existing.length) {
+        return mapReservation(existing[0] as Record<string, unknown>);
+      }
       throw new OpeningBudgetError("BUDGET_EXCEEDED", "workspace budget exceeded");
     },
-    async release(requestId) {
-      return changeState(requestId, "released");
+    release(requestId) {
+      return changeState({ by: "requestId", value: requestId }, "released");
     },
-    async complete(requestId) {
-      return changeState(requestId, "completed");
+    complete(requestId) {
+      return changeState({ by: "requestId", value: requestId }, "completed");
+    },
+    async settle(reservationId, actualCents) {
+      if (actualCents < 0) {
+        throw new OpeningBudgetError("CONFLICT", "actual amount must not be negative");
+      }
+      const rows = await sql`
+        UPDATE opening_budget_reservations
+        SET amount_cents = ${actualCents}, state = 'completed', updated_at = now()
+        WHERE id = ${reservationId} AND state = 'reserved'
+        RETURNING *
+      `;
+      if (!rows.length) {
+        throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
+      }
+      return mapReservation(rows[0] as Record<string, unknown>);
+    },
+    async markUnknown(reservationId) {
+      // Outcome unknown: keep the reservation counted against the workspace
+      // cap ('reserved') until reconciliation settles or releases it.
+      return byId(reservationId);
     },
   };
 }
