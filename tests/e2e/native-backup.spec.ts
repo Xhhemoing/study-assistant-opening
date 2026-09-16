@@ -11,9 +11,9 @@ function userInput(label: string) {
 test("exports a native workspace backup and shows a non-overwriting restore policy", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("native-backup") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("native-backup") });
     expect(registered.status()).toBe(201);
-    const created = await context.request.post("/api/documents", {
+    const created = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         title: "导数笔记",
         blocks: [{ id: crypto.randomUUID(), type: "paragraph", content: { text: "极限" } }],

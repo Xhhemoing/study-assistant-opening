@@ -11,7 +11,7 @@ function userInput(label: string) {
 test("keeps Learn, Explore, and Library available across viewport sizes", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: userInput("navigation-user"),
     });
     expect(registered.status()).toBe(201);
@@ -45,7 +45,7 @@ test("keeps Learn, Explore, and Library available across viewport sizes", async 
 test("persists an onboarding choice on the server and redirects the workspace root", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: userInput("persisted-default"),
     });
     expect(registered.status()).toBe(201);
@@ -66,7 +66,7 @@ test("persists an onboarding choice on the server and redirects the workspace ro
 test("falls back to Learn when an authenticated workspace has no preference", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: userInput("default-learn"),
     });
     expect(registered.status()).toBe(201);

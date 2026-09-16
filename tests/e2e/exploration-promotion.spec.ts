@@ -17,23 +17,26 @@ test("selectively promotes one exploration candidate without duplicating its not
     expect(
       (
         await context.request.post("/api/auth/register", {
+          headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
           data: user("promotion"),
         })
       ).status(),
     ).toBe(201);
     const exploration = await context.request.post("/api/explorations", {
+      headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: { title: "Promotion source" },
     });
     const explorationId = (await exploration.json()).exploration.id as string;
     const create = (title: string) =>
       context.request.post(`/api/explorations/${explorationId}/promotions`, {
+        headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: { kind: "note", title, body: `${title} body` },
       });
     const first = (await (await create("Keep")).json()).promotion;
     const second = (await (await create("Reject")).json()).promotion;
     const accepted = (
       await (
-        await context.request.post(`/api/promotions/${first.id}/accept`)
+        await context.request.post(`/api/promotions/${first.id}/accept`, { headers: { origin: baseURL ?? "http://127.0.0.1:3000" } })
       ).json()
     ).promotion;
     expect(accepted.targetType).toBe("document");
@@ -57,6 +60,7 @@ test("selectively promotes one exploration candidate without duplicating its not
     expect(edited.status()).toBe(200);
     const createCourse = async (title: string, slug: string) => {
       const response = await context.request.post("/api/courses", {
+        headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: { title, slug },
       });
       expect(response.status()).toBe(201);
@@ -79,6 +83,7 @@ test("selectively promotes one exploration candidate without duplicating its not
     expect(
       (
         await context.request.post(`/api/courses/${courseA}/memberships`, {
+          headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
           data: membership,
         })
       ).status(),
@@ -86,6 +91,7 @@ test("selectively promotes one exploration candidate without duplicating its not
     expect(
       (
         await context.request.post(`/api/courses/${courseB}/memberships`, {
+          headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
           data: membership,
         })
       ).status(),

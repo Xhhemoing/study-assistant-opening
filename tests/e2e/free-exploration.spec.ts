@@ -7,7 +7,7 @@ function userInput(label: string) {
 test("persists a goal-free exploration, blocks, branch, and close/resume state", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("exploration-owner") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("exploration-owner") });
     expect(registered.status()).toBe(201);
     const page = await context.newPage();
     await page.goto("/explore");
@@ -29,7 +29,7 @@ test("persists a goal-free exploration, blocks, branch, and close/resume state",
     await page.reload();
     await expect(page.getByText("The root branch is durable")).toBeVisible();
     await expect(page.getByText("What should branch next?")).toBeVisible();
-    await expect(page.getByText("Alternative path")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Alternative path" })).toBeVisible();
   } finally {
     await context.close();
   }
@@ -39,11 +39,11 @@ test("does not expose another user's exploration", async ({ browser, baseURL }) 
   const ownerContext = await browser.newContext({ baseURL });
   const otherContext = await browser.newContext({ baseURL });
   try {
-    const owner = await ownerContext.request.post("/api/auth/register", { data: userInput("exploration-owner") });
-    const other = await otherContext.request.post("/api/auth/register", { data: userInput("exploration-other") });
+    const owner = await ownerContext.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("exploration-owner") });
+    const other = await otherContext.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("exploration-other") });
     expect(owner.status()).toBe(201);
     expect(other.status()).toBe(201);
-    const created = await ownerContext.request.post("/api/explorations", { data: { title: "Private exploration" } });
+    const created = await ownerContext.request.post("/api/explorations", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: { title: "Private exploration" } });
     const id = (await created.json()).exploration.id as string;
     const denied = await otherContext.request.get(`/api/explorations/${id}`);
     expect(denied.status()).toBe(403);

@@ -11,9 +11,9 @@ function userInput(label: string) {
 test("exports library notes as Markdown with a visible loss report", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("markdown-export") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("markdown-export") });
     expect(registered.status()).toBe(201);
-    const created = await context.request.post("/api/documents", {
+    const created = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         title: "导数笔记",
         blocks: [{ id: crypto.randomUUID(), type: "heading", content: { text: "导数", level: 1 } }],

@@ -11,7 +11,7 @@ function userInput(label: string) {
 test("switches guidance autonomy mode between free, advisory, and coach", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: userInput("guidance-mode"),
     });
     expect(registered.status()).toBe(201);
@@ -37,7 +37,7 @@ test("switches guidance autonomy mode between free, advisory, and coach", async 
 test("reserves and removes protected exploration time", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", {
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: userInput("guidance-slot"),
     });
     expect(registered.status()).toBe(201);

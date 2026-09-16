@@ -11,10 +11,10 @@ function userInput(label: string) {
 test("creates, retypes, and deletes an outgoing relation across reloads", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("document-relations") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("document-relations") });
     expect(registered.status()).toBe(201);
     const create = async (title: string) => {
-      const response = await context.request.post("/api/documents", {
+      const response = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: {
           title,
           blocks: [{ id: crypto.randomUUID(), type: "paragraph", content: { text: "body" } }],

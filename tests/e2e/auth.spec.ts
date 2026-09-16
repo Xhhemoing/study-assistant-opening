@@ -26,16 +26,16 @@ test.describe("authentication through the live web server", () => {
     const contextA = await browser.newContext({ baseURL });
     const contextB = await browser.newContext({ baseURL });
     try {
-      const registeredA = await contextA.request.post("/api/auth/register", {
+      const registeredA = await contextA.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: userInput("browser-a"),
       });
-      const registeredB = await contextB.request.post("/api/auth/register", {
+      const registeredB = await contextB.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: userInput("browser-b"),
       });
       expect(registeredA.status()).toBe(201);
       expect(registeredB.status()).toBe(201);
 
-      const created = await contextB.request.post("/api/documents", {
+      const created = await contextB.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: {
           title: "Browser B private note",
           blocks: [

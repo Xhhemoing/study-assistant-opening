@@ -11,9 +11,9 @@ function userInput(label: string) {
 test("exports cards as an Anki projection with a visible loss report", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("anki-export") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("anki-export") });
     expect(registered.status()).toBe(201);
-    const created = await context.request.post("/api/cards", {
+    const created = await context.request.post("/api/cards", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: { front: "导数", back: "极限定义", tags: ["高数"] },
     });
     expect(created.status()).toBe(201);

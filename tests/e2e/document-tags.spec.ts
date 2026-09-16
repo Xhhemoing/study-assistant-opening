@@ -11,9 +11,9 @@ function userInput(label: string) {
 test("persists normalized document tags and clears them", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("document-tags") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("document-tags") });
     expect(registered.status()).toBe(201);
-    const created = await context.request.post("/api/documents", {
+    const created = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         title: "Tagged note",
         blocks: [{ id: crypto.randomUUID(), type: "paragraph", content: { text: "body" } }],

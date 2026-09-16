@@ -1,7 +1,7 @@
 import { expect, test, type BrowserContext } from "@playwright/test";
 
 async function register(context: BrowserContext, label: string) {
-  const response = await context.request.post("/api/auth/register", {
+  const response = await context.request.post("/api/auth/register", { headers: { origin: "http://127.0.0.1:3000" },
     data: {
       email: `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`,
       password: "password123",

@@ -7,13 +7,13 @@ function userInput(label: string) {
 test("requires an explicit decision for a concurrent note revision proposal", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("revision-proposal") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("revision-proposal") });
     expect(registered.status()).toBe(201);
     const blockId = "11111111-1111-4111-8111-111111111111";
-    const created = await context.request.post("/api/documents", { data: { title: "Confirmed note", lifecycle: "confirmed", blocks: [{ id: blockId, type: "paragraph", content: { text: "base" } }] } });
+    const created = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: { title: "Confirmed note", lifecycle: "confirmed", blocks: [{ id: blockId, type: "paragraph", content: { text: "base" } }] } });
     expect(created.status()).toBe(201);
     const document = (await created.json()).document;
-    const proposal = await context.request.post(`/api/documents/${document.id}/revision-proposals`, { data: { proposedBlocks: [{ id: blockId, type: "paragraph", position: 0, content: { text: "proposal" } }], proposedTitle: "Proposed note", source: { kind: "ai", provider: "luna", model: null, sourceId: null, metadata: {} }, provenance: { origin: "ai", actorUserId: null, sourceDocumentId: null, sourceRevisionNumber: null }, supportState: "supported" } });
+    const proposal = await context.request.post(`/api/documents/${document.id}/revision-proposals`, { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: { proposedBlocks: [{ id: blockId, type: "paragraph", position: 0, content: { text: "proposal" } }], proposedTitle: "Proposed note", source: { kind: "ai", provider: "luna", model: null, sourceId: null, metadata: {} }, provenance: { origin: "ai", actorUserId: null, sourceDocumentId: null, sourceRevisionNumber: null }, supportState: "supported" } });
     expect(proposal.status()).toBe(201);
     const listed = await context.request.get(`/api/documents/${document.id}/revision-proposals`);
     expect(listed.status()).toBe(200);
@@ -32,6 +32,7 @@ test("requires an explicit decision for a concurrent note revision proposal", as
     expect(current.currentRevisionNumber).toBe(document.currentRevisionNumber + 1);
 
     const accepted = await context.request.post(`/api/revision-proposals/${proposalRecord.id}/review`, {
+      headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: { action: "accept" },
     });
     expect(accepted.status()).toBe(200);
@@ -40,6 +41,7 @@ test("requires an explicit decision for a concurrent note revision proposal", as
     expect(conflictBody.document.blocks[0].content.text).toBe("manual edit");
 
     const preserved = await context.request.post(`/api/revision-proposals/${proposalRecord.id}/resolve`, {
+      headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         action: "preserve_both",
         selectedProposalBlockIds: [blockId],

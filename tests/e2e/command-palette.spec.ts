@@ -11,10 +11,10 @@ function userInput(label: string) {
 test("finds a note through the global command palette and navigates to it", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("command-palette") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("command-palette") });
     expect(registered.status()).toBe(201);
 
-    const created = await context.request.post("/api/documents", {
+    const created = await context.request.post("/api/documents", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         title: "检索目标笔记",
         blocks: [
@@ -53,7 +53,7 @@ test("finds a note through the global command palette and navigates to it", asyn
 test("shows the no-match state for an unknown query", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
-    const registered = await context.request.post("/api/auth/register", { data: userInput("palette-empty") });
+    const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" }, data: userInput("palette-empty") });
     expect(registered.status()).toBe(201);
 
     const page = await context.newPage();

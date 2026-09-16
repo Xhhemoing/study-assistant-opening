@@ -5,7 +5,7 @@ const shortId = "22222222-2222-4222-8222-222222222209";
 const checkpointId = "22222222-2222-4222-8222-22222222220f";
 
 async function register(context: BrowserContext, label: string) {
-  const response = await context.request.post("/api/auth/register", {
+  const response = await context.request.post("/api/auth/register", { headers: { origin: "http://127.0.0.1:3000" },
     data: {
       email: `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`,
       password: "password123",
@@ -115,7 +115,7 @@ test("replays the multiple-choice attempt request without creating a second even
     expect(replayedBody.practiceSessionId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(replayedBody).not.toHaveProperty("correct");
 
-    const replay = await context.request.post("/api/attempts", { data: replayedBody });
+    const replay = await context.request.post("/api/attempts", { headers: { origin: "http://127.0.0.1:3000" }, data: replayedBody });
     expect(replay.status()).toBe(201);
     const replayed = (await replay.json()) as { event: { id: string; idempotencyKey: string } };
     expect(replayed.event.id).toBe(eventId);
