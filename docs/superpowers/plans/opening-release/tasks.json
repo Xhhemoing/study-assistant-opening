@@ -112,8 +112,10 @@
         "F03"
       ],
       "plan": "03-tutor.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
+      ]
     },
     {
       "id": "T02",
@@ -244,8 +246,10 @@
         "F01"
       ],
       "plan": "07-experience.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
+      ]
     },
     {
       "id": "U02",
