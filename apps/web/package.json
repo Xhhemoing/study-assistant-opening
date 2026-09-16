@@ -29,11 +29,14 @@
     "zod": "4.0.17"
   },
   "devDependencies": {
+    "@js-temporal/polyfill": "^0.5.1",
     "@tailwindcss/postcss": "^4.1.11",
     "@types/react": "19.1.17",
     "@types/react-dom": "19.1.11",
+    "read-excel-file": "^9.3.10",
     "tailwindcss": "^4.1.11",
     "typescript": "5.8.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "write-excel-file": "^4.1.1"
   }
 }
