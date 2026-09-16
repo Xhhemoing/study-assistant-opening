@@ -1,4 +1,4 @@
-﻿-- 0016_opening_sources.sql
+-- 0016_opening_sources.sql
 -- Opening source identity for RU-01 membership ownership resolution.
 -- Course association is membership-only (no course_id on this table).
 
