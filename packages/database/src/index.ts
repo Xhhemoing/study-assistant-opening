@@ -176,3 +176,8 @@ export {
   type OpeningConversationScope,
   type OpeningConversationErrorCode,
 } from "./repositories/opening-conversations";
+
+export { openingJobs, openingOutbox } from "./schema/opening-jobs";
+export { openingBudgetReservations } from "./schema/opening-budget";
+export { createOpeningJobRepository, OpeningJobError, type OpeningJobRepository } from "./repositories/opening-jobs";
+export { createOpeningBudgetRepository, OpeningBudgetError } from "./repositories/opening-budget";
