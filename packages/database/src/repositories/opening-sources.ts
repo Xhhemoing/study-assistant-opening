@@ -1,6 +1,7 @@
 ﻿import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { SourceRecord, UploadInput } from "@aistudy/contracts";
+import type { OpeningJobRecord } from "./opening-jobs";
 
 export type OpeningSourceErrorCode =
   | "NOT_FOUND"
@@ -28,6 +29,22 @@ export type OpeningSourceRepository = {
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
+  /**
+   * Commits the source row, its parse job, and the outbox entry in ONE
+   * transaction; any failure (e.g. an invalid job kind violates the CHECK)
+   * rolls back so no orphan source remains.
+   */
+  createWithParseJob(
+    scope: OpeningScope,
+    input: {
+      source: UploadInput;
+      key: string;
+      /** Enforced by the 0018 CHECK constraint: parse|tutor|retest|remind. */
+      kind?: string;
+      payload: unknown;
+      privacyEpoch: number;
+    },
+  ): Promise<{ source: SourceRecord; job: OpeningJobRecord }>;
 };
 
 function mapSource(row: Record<string, unknown>): SourceRecord {
@@ -126,6 +143,53 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         ORDER BY created_at ASC
       `;
       return rows.map((row) => mapSource(row as Record<string, unknown>));
+    },
+
+    async createWithParseJob(scope, input) {
+      const kind = input.kind ?? "parse";
+      return sql.begin(async (tx) => {
+        const sourceId = randomUUID();
+        const sourceRows = await tx`
+          INSERT INTO opening_sources (
+            id, workspace_id, name, mime, bytes, sha256, version,
+            upload_state, parse_state, error
+          ) VALUES (
+            ${sourceId}, ${scope.workspaceId}, ${input.source.name}, ${input.source.mime},
+            ${input.source.bytes}, ${input.source.sha256}, 0, 'pending', 'not_started', NULL
+          )
+          RETURNING *
+        `;
+        const jobId = randomUUID();
+        const jobRows = await tx`
+          INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+          VALUES (
+            ${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, ${kind},
+            ${tx.json(input.payload as never)}, ${input.privacyEpoch}
+          )
+          RETURNING *
+        `;
+        await tx`
+          INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+          VALUES (
+            ${scope.workspaceId}, ${jobId}, 'opening.job.enqueue',
+            ${tx.json({ jobId, kind, sourceId } as never)}
+          )
+        `;
+        return {
+          source: mapSource(sourceRows[0] as Record<string, unknown>),
+          job: {
+            id: (jobRows[0] as Record<string, unknown>).id as string,
+            workspaceId: scope.workspaceId,
+            ownerUserId: scope.ownerUserId,
+            key: input.key,
+            kind,
+            payload: input.payload,
+            result: null,
+            state: (jobRows[0] as Record<string, unknown>).state as string,
+            privacyEpoch: input.privacyEpoch,
+          } satisfies OpeningJobRecord,
+        };
+      });
     },
   };
 }
