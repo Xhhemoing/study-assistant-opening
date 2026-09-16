@@ -207,8 +207,10 @@
         "F02"
       ],
       "plan": "06-planning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md"
+      ]
     },
     {
       "id": "P02",
@@ -309,8 +311,10 @@
         "F02"
       ],
       "plan": "09-connections.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md"
+      ]
     },
     {
       "id": "C01",
