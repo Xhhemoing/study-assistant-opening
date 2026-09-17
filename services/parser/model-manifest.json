@@ -1,0 +1,11 @@
+{
+  "docling": "2.126.0",
+  "python": "3.13.14",
+  "models": [
+    {"model": "docling-project/docling-layout-heron", "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8"},
+    {"model": "docling-project/docling-models", "revision": "v2.3.0"}
+  ],
+  "obtained": "first offline-cache seeding conversion",
+  "runtime": "runtime downloads disabled via HF_HUB_OFFLINE=1",
+  "note": "The verified runtime uses Python 3.13.14; the implementation plan records >=3.12 intent."
+}
