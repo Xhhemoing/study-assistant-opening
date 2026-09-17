@@ -33,6 +33,13 @@ export type CreateOpeningJobInput = {
   privacyEpoch: number;
 };
 
+export type OpeningOutboxRecord = {
+  id: string;
+  workspaceId: string;
+  jobId: string;
+  payload: unknown;
+};
+
 export type OpeningJobRepository = {
   /**
    * Idempotent enqueue keyed by (workspace_id, key): the same payload replays
@@ -40,6 +47,13 @@ export type OpeningJobRepository = {
    */
   createOnce(scope: OpeningScope, input: CreateOpeningJobInput): Promise<OpeningJobRecord>;
   get(scope: OpeningScope, id: string): Promise<OpeningJobRecord>;
+  dispatchPending(
+    enqueue: (outbox: OpeningOutboxRecord) => Promise<void>,
+    limit?: number,
+  ): Promise<number>;
+  claim(id: string): Promise<OpeningJobRecord | null>;
+  sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
+  finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
 };
 
 function mapJob(row: Record<string, unknown>): OpeningJobRecord {
@@ -90,6 +104,58 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       `;
       if (!rows.length) throw new OpeningJobError("NOT_FOUND", "job not found");
       return mapJob(rows[0] as Record<string, unknown>);
+    },
+    async dispatchPending(enqueue, limit = 50) {
+      return sql.begin(async (tx) => {
+        const rows = await tx`
+          SELECT id, workspace_id, job_id, payload FROM opening_outbox
+          WHERE state = 'pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT ${limit}
+        `;
+        let dispatched = 0;
+        for (const row of rows as Array<Record<string, unknown>>) {
+          const item = { id: row.id as string, workspaceId: row.workspace_id as string, jobId: row.job_id as string, payload: row.payload };
+          try {
+            await enqueue(item);
+            await tx`UPDATE opening_outbox SET state = 'published', updated_at = now() WHERE id = ${item.id}`;
+            dispatched += 1;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "enqueue failed";
+            await tx`UPDATE opening_outbox SET state = 'failed', payload = ${tx.json({ ...item.payload as Record<string, unknown>, error: message } as never)}, updated_at = now() WHERE id = ${item.id}`;
+          }
+        }
+        return dispatched;
+      });
+    },
+    async sourcePrivacyEpoch(sourceId, workspaceId) {
+      const rows = await sql`
+        SELECT version AS privacy_epoch FROM opening_sources
+        WHERE id = ${sourceId} AND workspace_id = ${workspaceId}
+        LIMIT 1
+      `;
+      return rows.length ? Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0) : null;
+    },
+    async claim(id) {
+      // updated_at is the heartbeat. Long handlers must periodically touch it;
+      // only jobs stale for five minutes are eligible for takeover.
+      const rows = await sql`
+        UPDATE opening_jobs SET state = 'running', updated_at = now()
+        WHERE id = ${id}
+          AND (state = 'queued' OR (state = 'running' AND updated_at < now() - interval '5 minutes'))
+        RETURNING *
+      `;
+      return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
+    },
+    async finish(id, state, value) {
+      const rows = await sql`
+        UPDATE opening_jobs SET state = ${state},
+          result = ${state === 'succeeded' ? sql.json(value as never) : null},
+          updated_at = now()
+        WHERE id = ${id} AND state = 'running' RETURNING id
+      `;
+      if (!rows.length && state !== 'succeeded') {
+        await sql`UPDATE opening_jobs SET state = ${state}, updated_at = now() WHERE id = ${id} AND state = 'running'`;
+      }
+      return rows.length > 0;
     },
   };
 }
