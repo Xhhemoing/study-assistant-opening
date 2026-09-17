@@ -69,6 +69,32 @@ def test_nonexistent_file_is_conversion_error():
     assert result.returncode == 4 and result.stdout == ""
 
 
+def test_cli_prints_non_ascii_as_utf8_without_env_var(tmp_path):
+    """Regression: math slides extract to non-ASCII (˙, ∞, →). On Windows a
+    redirected stdout defaults to the ANSI codepage and crashed on print
+    (exit 4). The CLI must reconfigure itself to UTF-8 with no env var set."""
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "from opening_parser import __main__ as cli\n"
+        "class _Prov:\n    page_no = 1\n"
+        "class _Text:\n    text = 'f \\u02d9 \\u221e \\u2192 '\n    prov = [_Prov()]\n"
+        "class _Doc:\n    pages = [1]\n    texts = [_Text()]\n"
+        "cli.convert = lambda path, timeout: _Doc()\n"
+        "sys.exit(cli.main(['--input', sys.argv[1], '--mime', 'application/pdf', '--max-pages', '2', '--timeout-seconds', '5']))\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONIOENCODING", None)
+    env["PYTHONPATH"] = str(PARSER_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, str(driver), str(FIXTURE)],
+        cwd=PARSER_DIR.parents[1], env=env, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "˙".encode("utf-8") in result.stdout
+
+
 @pytest.mark.xfail(reason="Hand-built PPTX compatibility depends on Docling's presentation backend")
 def test_minimal_pptx_conversion():
     pytest.fail("PPTX fixture deferred until backend-compatible XML is available")

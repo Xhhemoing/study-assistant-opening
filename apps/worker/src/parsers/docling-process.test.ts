@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDoclingProcess, decodeParserOutput, UnsupportedMimeError, BoundsExceededError, ConversionFailedError } from "./docling-process";
+import { createDoclingProcess, createNodeRunner, decodeParserOutput, UnsupportedMimeError, BoundsExceededError, ConversionFailedError } from "./docling-process";
 
 describe("docling parser bridge", () => {
   it("strictly validates pages", () => {
@@ -20,5 +20,12 @@ describe("docling parser bridge", () => {
     await parser.parseDocument({ path: "a;b", mime: "application/pdf", maxPages: 2 }, new AbortController().signal);
     expect(argv).toEqual(["-m", "opening_parser", "--input", "a;b", "--mime", "application/pdf", "--max-pages", "2"]);
     expect(argv.join(" ")).not.toMatch(/[|&<>$`]/);
+  });
+
+  it("forces UTF-8 child stdout encoding for non-ASCII math text", async () => {
+    const runner = createNodeRunner(process.execPath);
+    const result = await runner(["-e", "console.log(process.env.PYTHONIOENCODING)"], new AbortController().signal);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("utf-8");
   });
 });

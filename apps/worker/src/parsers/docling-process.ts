@@ -34,7 +34,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
 
 export function createNodeRunner(pythonExecutable = process.env.PARSER_PYTHON ?? path.resolve(process.cwd(), ".local/docling-venv/Scripts/python.exe"), cwd = process.env.PARSER_CWD ?? path.resolve(process.cwd(), "services/parser")): ParserRunner {
   return (argv, signal) => new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true });
+    const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
     let stdout = "";
     child.stdout.on("data", (chunk: Buffer) => { if (Buffer.byteLength(stdout) < 2 * 1024 * 1024) stdout += chunk.toString(); });
     child.stderr.on("data", () => { /* capped and intentionally excluded from errors */ });

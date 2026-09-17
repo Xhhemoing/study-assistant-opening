@@ -58,6 +58,10 @@ def texts_by_page(document):
 
 
 def main(argv=None):
+    # Mathematical PDFs extract to non-ASCII text (˙, ∞, →). On Windows a
+    # redirected stdout defaults to the ANSI codepage and would crash on print.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
     if args.max_pages <= 0 or args.timeout_seconds <= 0:
         parser().error("max-pages and timeout-seconds must be positive")
