@@ -131,8 +131,10 @@
         "T01"
       ],
       "plan": "03-tutor.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
+      ]
     },
     {
       "id": "T03",
@@ -142,9 +144,10 @@
         "I03"
       ],
       "plan": "03-tutor.md",
-      "status": "blocked",
+      "status": "verified",
       "evidence": [
-        "../../evidence/2026-09-13-opening-release/t03-tutor-http-slice.md"
+        "../../evidence/2026-09-13-opening-release/t03-tutor-http-slice.md",
+        "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
       ]
     },
     {
