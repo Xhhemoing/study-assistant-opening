@@ -30,6 +30,7 @@ export type OpeningSourceRepository = {
   ): Promise<SourceRecord>;
   completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string } }): Promise<SourceRecord>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
+  markParseState(scope: OpeningScope, id: string, state: SourceRecord["parseState"], error?: unknown): Promise<SourceRecord>;
   /**
    * Commits the source row, its parse job, and the outbox entry in ONE
    * transaction; any failure (e.g. an invalid job kind violates the CHECK)
@@ -159,6 +160,12 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         ORDER BY created_at ASC
       `;
       return rows.map((row) => mapSource(row as Record<string, unknown>));
+    },
+
+    async markParseState(scope, id, state, error = null) {
+      const rows = await sql`UPDATE opening_sources SET parse_state = ${state}, error = ${sql.json(error as never)}, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} RETURNING *`;
+      if (!rows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+      return mapSource(rows[0] as Record<string, unknown>);
     },
 
     async createWithParseJob(scope, input) {

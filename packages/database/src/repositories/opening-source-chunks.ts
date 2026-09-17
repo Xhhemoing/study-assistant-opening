@@ -1,0 +1,32 @@
+import type { SourceChunk } from "@aistudy/contracts";
+import type { Sql } from "postgres";
+import type { OpeningScope } from "./opening-sources";
+
+export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
+export type OpeningSourceChunksRepository = {
+  replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[] }): Promise<void>;
+  listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>;
+};
+
+export function mapChunk(row: Record<string, unknown>): SourceChunk {
+  return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null };
+}
+export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository {
+  return {
+    async replaceChunks(scope, input) {
+      await sql.begin(async (tx) => {
+        const rows = await tx`SELECT version, upload_state FROM opening_sources WHERE id = ${input.sourceId} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
+        const row = rows[0] as Record<string, unknown> | undefined;
+        if (!row) throw new Error("source not found");
+        if (Number(row.version) !== input.sourceVersion || row.upload_state !== "uploaded") throw new Error("CONFLICT: source version changed during parse");
+        await tx`DELETE FROM opening_source_chunks WHERE source_id = ${input.sourceId} AND source_version = ${input.sourceVersion}`;
+        for (const chunk of input.chunks) await tx`INSERT INTO opening_source_chunks (source_id, source_version, page, slide_label, start_ms, end_ms, text, image_object_key) VALUES (${input.sourceId}, ${input.sourceVersion}, ${chunk.page}, ${chunk.slideLabel ?? null}, ${chunk.startMs ?? null}, ${chunk.endMs ?? null}, ${chunk.text}, ${chunk.imageObjectKey ?? null})`;
+        await tx`UPDATE opening_sources SET parse_state = 'ready', updated_at = now() WHERE id = ${input.sourceId} AND workspace_id = ${scope.workspaceId} AND version = ${input.sourceVersion}`;
+      });
+    },
+    async listChunks(scope, sourceId) {
+      const rows = await sql`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id = c.source_id WHERE c.source_id = ${sourceId} AND s.workspace_id = ${scope.workspaceId} AND c.source_version = s.version ORDER BY c.page NULLS LAST, c.created_at`;
+      return rows.map((row) => mapChunk(row as Record<string, unknown>));
+    },
+  };
+}
