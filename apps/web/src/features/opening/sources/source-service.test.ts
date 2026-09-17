@@ -1,130 +1,285 @@
-﻿import { describe, expect, it, beforeEach } from "vitest";
-import {
-  clearOpeningSourceStagingForTests,
-  createOpeningSourceService,
-} from "./source-service";
+import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import type { Sql } from "postgres";
+import { createOpeningSourceService } from "./source-service";
+import { OpeningSourceError, type OpeningStorage } from "@aistudy/database";
 import type { Principal } from "../../../lib/authorization";
 
-const W = "00000000-0000-4000-8000-000000000001";
-const U = "00000000-0000-4000-8000-0000000000aa";
-const S = "00000000-0000-4000-8000-000000000003";
-const SHA = "a".repeat(64);
-const principal: Principal = { userId: U, workspaceId: W, sessionId: "sess" };
+const principal: Principal = {
+  userId: "00000000-0000-4000-8000-0000000000aa",
+  workspaceId: "00000000-0000-4000-8000-000000000001",
+  sessionId: "sess",
+};
 
-function pendingRow(overrides: Record<string, unknown> = {}) {
-  return {
-    id: S,
-    workspace_id: W,
-    name: "a.pdf",
-    mime: "application/pdf",
-    bytes: 12,
-    sha256: SHA,
-    version: 0,
-    upload_state: "pending",
-    parse_state: "not_started",
-    error: null,
-    created_at: new Date("2026-09-13T00:00:00.000Z"),
-    updated_at: new Date("2026-09-13T00:00:00.000Z"),
-    ...overrides,
-  };
+const otherPrincipal: Principal = {
+  userId: "00000000-0000-4000-8000-0000000000bb",
+  workspaceId: "00000000-0000-4000-8000-000000000002",
+  sessionId: "sess",
+};
+
+const pdfBytes = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(200, 0x78)]);
+const pdfSha = createHash("sha256").update(pdfBytes).digest("hex");
+const jpegBytes = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+  Buffer.alloc(204, 0x11),
+]);
+const jpegSha = createHash("sha256").update(jpegBytes).digest("hex");
+
+type FakeRow = Record<string, unknown>;
+
+/** In-memory opening_sources + insert counters backing a tagged-template fake. */
+function makeFakeSql() {
+  const sources = new Map<string, FakeRow>();
+  let jobInserts = 0;
+  let outboxInserts = 0;
+  const tag = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.join("?").replace(/\s+/g, " ").trim();
+    if (query.startsWith("INSERT INTO opening_sources")) {
+      const [id, workspaceId, name, mime, bytes, sha256] = values as [
+        string,
+        string,
+        string,
+        string,
+        number,
+        string,
+      ];
+      const row: FakeRow = {
+        id,
+        workspace_id: workspaceId,
+        name,
+        mime,
+        bytes,
+        sha256,
+        version: 0,
+        upload_state: "pending",
+        parse_state: "not_started",
+        error: null,
+        created_at: new Date(),
+      };
+      sources.set(id, row);
+      return [row];
+    }
+    if (query.startsWith("SELECT * FROM opening_sources")) {
+      const [id, workspaceId] = values as [string, string];
+      const row = sources.get(id);
+      return row && row.workspace_id === workspaceId ? [row] : [];
+    }
+    if (query.startsWith("UPDATE opening_sources")) {
+      const [id, workspaceId] = values as [string, string];
+      const row = sources.get(id);
+      if (row && row.workspace_id === workspaceId && row.upload_state === "pending") {
+        row.upload_state = "uploaded";
+        return [row];
+      }
+      return [];
+    }
+    if (query.startsWith("INSERT INTO opening_jobs")) {
+      jobInserts += 1;
+      return [{ id: values[0], state: "queued" }];
+    }
+    if (query.startsWith("INSERT INTO opening_outbox")) {
+      outboxInserts += 1;
+      return [];
+    }
+    throw new Error(`unexpected sql: ${query}`);
+  }) as unknown as Sql & { counts(): { jobInserts: number; outboxInserts: number } };
+  tag.json = ((value: unknown) => value) as never;
+  tag.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(tag as unknown as Sql)) as never;
+  tag.counts = () => ({ jobInserts, outboxInserts });
+  return tag;
 }
 
-describe("opening source HTTP service (no real S3)", () => {
-  beforeEach(() => clearOpeningSourceStagingForTests());
+function makeFakeStorage() {
+  const objects = new Map<string, { bytes: Uint8Array; etag: string }>();
+  let etagCounter = 0;
+  const storage: OpeningStorage = {
+    stagingKey: (id) => `staging/${id}`,
+    finalKey: (id, version) => `final/${id}/v${version}`,
+    presignPut: async (key) => `fake://put/${key}`,
+    presignGet: async (key, input) => `fake://get/${key}?disposition=${encodeURIComponent(input.responseContentDisposition)}&cache=${encodeURIComponent(input.responseCacheControl)}`,
+    headObject: async (key) => {
+      const object = objects.get(key);
+      return object
+        ? { exists: true, bytes: object.bytes.length, etag: object.etag, mime: "spoofed/lie" }
+        : { exists: false, bytes: 0, etag: "", mime: "" };
+    },
+    streamDigest: async (key, limit) => {
+      const bytes = objects.get(key)?.bytes ?? new Uint8Array();
+      const allowed = bytes.subarray(0, limit);
+      return {
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(allowed).digest("hex"),
+        firstBytes: allowed.slice(0, 16),
+      };
+    },
+    copyStagingToFinal: async (from, to, input) => {
+      const object = objects.get(from);
+      if (!object) throw new Error("missing staging object");
+      if (object.etag !== input.expectedEtag) throw new Error("etag precondition failed");
+      objects.set(to, object);
+    },
+    deleteObject: async (key) => {
+      objects.delete(key);
+    },
+    objectExists: async (key) => objects.has(key),
+  };
+  const put = (key: string, bytes: Uint8Array) => {
+    etagCounter += 1;
+    objects.set(key, { bytes, etag: `etag-${etagCounter}` });
+  };
+  return { storage, put, has: (key: string) => objects.has(key) };
+}
 
-  it("begin → stage → complete yields uploaded SourceRecord without courseId", async () => {
-    let state = "pending";
-    const _sql = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
-      if (q.startsWith("INSERT INTO opening_sources")) return [pendingRow()];
-      if (q.startsWith("SELECT * FROM opening_sources")) {
-        return [pendingRow({ upload_state: state })];
-      }
-      if (q.startsWith("UPDATE opening_sources")) {
-        state = "uploaded";
-        return [pendingRow({ upload_state: "uploaded" })];
-      }
-      if (q.startsWith("SELECT * FROM opening_sources") === false && q.includes("WHERE workspace_id")) {
-        return [];
-      }
-      throw new Error("unexpected sql: " + q);
-    };
-    // list uses ORDER BY query
-    const sql2 = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
-      if (q.startsWith("INSERT INTO opening_sources")) return [pendingRow()];
-      if (q.startsWith("SELECT * FROM opening_sources WHERE id")) {
-        return [pendingRow({ upload_state: state })];
-      }
-      if (q.startsWith("SELECT * FROM opening_sources WHERE workspace_id")) {
-        return state === "uploaded"
-          ? [pendingRow({ upload_state: "uploaded" })]
-          : [pendingRow()];
-      }
-      if (q.startsWith("UPDATE opening_sources")) {
-        state = "uploaded";
-        return [pendingRow({ upload_state: "uploaded" })];
-      }
-      throw new Error("unexpected sql: " + q);
-    };
+function setup() {
+  const sql = makeFakeSql();
+  const { storage, put, has } = makeFakeStorage();
+  const svc = createOpeningSourceService(sql, storage);
+  return { svc, sql, put, has };
+}
 
-    const svc = createOpeningSourceService(sql2 as never);
-    const ticket = await svc.beginUpload(
-      principal,
-      { name: "a.pdf", mime: "application/pdf", bytes: 12, sha256: SHA },
-      "http://127.0.0.1/api/opening/sources/__SOURCE_ID__/staging",
-    );
-    expect(ticket.uploadUrl).toContain(ticket.source.id);
-    expect(ticket.source).not.toHaveProperty("courseId");
-    expect(ticket.source.uploadState).toBe("pending");
-
-    const bytes = new Uint8Array(12);
-    // Force sha256 of empty-ish buffer to match by using exact SHA of these bytes
-    const { createHash } = await import("node:crypto");
-    const realSha = createHash("sha256").update(bytes).digest("hex");
-    // recreate with matching sha in DB row — override via custom sql
-    const rowSha = realSha;
-    let rowState = "pending";
-    const sql3 = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
-      if (q.startsWith("INSERT INTO opening_sources")) {
-        return [pendingRow({ sha256: rowSha })];
-      }
-      if (q.startsWith("SELECT * FROM opening_sources WHERE id")) {
-        return [pendingRow({ sha256: rowSha, upload_state: rowState })];
-      }
-      if (q.startsWith("SELECT * FROM opening_sources WHERE workspace_id")) {
-        return [pendingRow({ sha256: rowSha, upload_state: rowState })];
-      }
-      if (q.startsWith("UPDATE opening_sources")) {
-        rowState = "uploaded";
-        return [pendingRow({ sha256: rowSha, upload_state: "uploaded" })];
-      }
-      throw new Error("unexpected sql: " + q);
-    };
-    clearOpeningSourceStagingForTests();
-    const svc3 = createOpeningSourceService(sql3 as never);
-    const ticket3 = await svc3.beginUpload(
-      principal,
-      { name: "a.pdf", mime: "application/pdf", bytes: 12, sha256: realSha },
-      "http://127.0.0.1/api/opening/sources/__SOURCE_ID__/staging",
-    );
-    await svc3.putStaging(principal, ticket3.source.id, bytes, "application/pdf");
-    const done = await svc3.completeUpload(principal, ticket3.source.id);
-    expect(done.uploadState).toBe("uploaded");
-    expect(done).not.toHaveProperty("courseId");
-
-    const listed = await svc3.listSources(principal);
-    expect(listed[0]?.uploadState).toBe("uploaded");
+describe("opening signed upload service", () => {
+  it("returns a presigned ticket against the staging key", async () => {
+    const { svc } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    expect(ticket.uploadUrl).toMatch(/^fake:\/\/put\/staging\//);
+    expect(new Date(ticket.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 
-  it("complete without staging fails policy", async () => {
-    const sql = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
-      if (q.startsWith("SELECT * FROM opening_sources")) return [pendingRow()];
-      throw new Error("unexpected sql: " + q);
-    };
-    const svc = createOpeningSourceService(sql as never);
-    await expect(svc.completeUpload(principal, S)).rejects.toThrow(/staged object missing/);
+  it("completes a matching upload with one job and one outbox insert", async () => {
+    const { svc, sql, put, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    const record = await svc.completeUpload(principal, ticket.source.id);
+    expect(record.uploadState).toBe("uploaded");
+    expect(sql.counts()).toEqual({ jobInserts: 1, outboxInserts: 1 });
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+    expect(has(`final/${ticket.source.id}/v0`)).toBe(true);
+  });
+
+  it("replays an already-uploaded completion without new inserts", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const replay = await svc.completeUpload(principal, ticket.source.id);
+    expect(replay.uploadState).toBe("uploaded");
+    expect(sql.counts()).toEqual({ jobInserts: 1, outboxInserts: 1 });
+  });
+
+  it("rejects completion when the staging object is missing", async () => {
+    const { svc, sql } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
+      /upload not found/i,
+    );
+    expect(sql.counts()).toEqual({ jobInserts: 0, outboxInserts: 0 });
+  });
+
+  it("rejects a MIME spoof before any database write", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: jpegBytes.length,
+      sha256: jpegSha,
+    });
+    put(`staging/${ticket.source.id}`, jpegBytes);
+    await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
+      /magic bytes/i,
+    );
+    expect(sql.counts()).toEqual({ jobInserts: 0, outboxInserts: 0 });
+  });
+
+  it("rejects a bytes mismatch before any database write", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes.subarray(0, 10));
+    await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
+      /bytes/i,
+    );
+    expect(sql.counts()).toEqual({ jobInserts: 0, outboxInserts: 0 });
+  });
+
+  it("rejects a sha mismatch before any database write", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: "a".repeat(64),
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
+      /sha256/i,
+    );
+    expect(sql.counts()).toEqual({ jobInserts: 0, outboxInserts: 0 });
+  });
+
+  it("refuses downloads for pending sources", async () => {
+    const { svc } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(svc.getDownloadUrl(principal, ticket.source.id)).rejects.toThrow(
+      OpeningSourceError,
+    );
+  });
+
+  it("signs downloads as private attachments", async () => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const download = await svc.getDownloadUrl(principal, ticket.source.id);
+    expect(download.url).toContain(`final/${ticket.source.id}/v0`);
+    expect(download.url).toContain("attachment");
+    expect(download.url).toContain("private%2C%20no-store");
+  });
+
+  it("keeps another workspace's source invisible", async () => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await expect(
+      svc.completeUpload(otherPrincipal, ticket.source.id),
+    ).rejects.toThrow(OpeningSourceError);
   });
 });

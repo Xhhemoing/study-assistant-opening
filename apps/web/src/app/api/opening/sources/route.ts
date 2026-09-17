@@ -28,12 +28,9 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const principal = await requirePrincipal(runtime, request);
     const body = uploadInputSchema.parse(await request.json());
-    const origin = new URL(request.url).origin;
-    const stagingAbsoluteUrl = `${origin}/api/opening/sources/__SOURCE_ID__/staging`;
     const ticket = await createOpeningSourceService(runtime.sql).beginUpload(
       principal,
       body,
-      stagingAbsoluteUrl,
     );
     return Response.json(ticket, { status: 201 });
   } catch (error) {

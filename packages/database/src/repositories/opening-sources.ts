@@ -28,6 +28,7 @@ export type OpeningSourceRepository = {
     id: string,
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
+  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string } }): Promise<SourceRecord>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
   /**
    * Commits the source row, its parse job, and the outbox entry in ONE
@@ -134,6 +135,21 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         return this.get(scope, id);
       }
       return mapSource(rows[0] as Record<string, unknown>);
+    },
+
+    async completeWithParseJob(scope, id, input) {
+      return sql.begin(async (tx) => {
+        const currentRows = await tx`SELECT * FROM opening_sources WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
+        if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+        const current = mapSource(currentRows[0] as Record<string, unknown>);
+        if (current.uploadState === "uploaded") return current;
+        assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
+        const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;
+        const jobId = randomUUID();
+        await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
+        await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
+        return mapSource(sourceRows[0] as Record<string, unknown>);
+      });
     },
 
     async list(scope) {
