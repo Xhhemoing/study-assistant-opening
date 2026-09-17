@@ -82,8 +82,10 @@
         "F03"
       ],
       "plan": "02-ingestion.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/i01-signed-upload-verified.md"
+      ]
     },
     {
       "id": "I02",
@@ -210,9 +212,10 @@
         "F02"
       ],
       "plan": "06-planning.md",
-      "status": "active",
+      "status": "verified",
       "evidence": [
-        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md"
+        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md",
+        "../../evidence/2026-09-16-opening-release/p01-slice2-verified.md"
       ]
     },
     {
