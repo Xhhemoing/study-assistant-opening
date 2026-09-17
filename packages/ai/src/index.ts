@@ -22,3 +22,6 @@ export {
   type AIProvider,
   type AIProviderRequest,
 } from "./providers/provider";
+
+export { renderContext, selectContext } from "./opening/context";
+export { resolveCitations } from "./opening/citations";
