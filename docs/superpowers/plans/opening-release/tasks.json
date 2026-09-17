@@ -94,8 +94,10 @@
         "I01"
       ],
       "plan": "02-ingestion.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-17-opening-release/i02-parser-verified.md"
+      ]
     },
     {
       "id": "I03",
