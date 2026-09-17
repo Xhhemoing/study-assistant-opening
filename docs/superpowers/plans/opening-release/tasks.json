@@ -104,8 +104,10 @@
         "F03"
       ],
       "plan": "02-ingestion.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/i03-worker-runtime-verified.md"
+      ]
     },
     {
       "id": "T01",
