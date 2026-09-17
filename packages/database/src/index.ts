@@ -37,3 +37,7 @@ export * from "./repositories/opening-jobs";
 export * from "./repositories/opening-budget";
 export * from "./storage/opening-s3";
 export { magicMatchesMime } from "./storage/magic";
+
+export * from "./schema/opening-assistant-candidates";
+export * from "./repositories/opening-candidates";
+export * from "./repositories/opening-tutor-jobs";

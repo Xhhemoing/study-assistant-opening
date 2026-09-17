@@ -73,7 +73,7 @@ export async function createOpeningFixture(): Promise<OpeningFixture> {
     request: (path, init = {}) => call(path, init, true),
     requestAnonymous: (path, init = {}) => call(path, init, false),
     reset: async () => {
-      await sql`TRUNCATE opening_outbox, opening_jobs, opening_budget_reservations, opening_sources RESTART IDENTITY CASCADE`;
+      await sql`TRUNCATE opening_outbox, opening_jobs, opening_budget_reservations, opening_assistant_candidates, opening_tutor_jobs, opening_turns, opening_source_chunks, opening_sources RESTART IDENTITY CASCADE`;
     },
     close: async () => {
       await sql.end({ timeout: 5 });

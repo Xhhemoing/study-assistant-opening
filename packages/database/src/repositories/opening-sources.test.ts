@@ -1,8 +1,5 @@
 ﻿import { describe, expect, it } from "vitest";
-import {
-  createOpeningSourceRepository,
-  OpeningSourceError,
-} from "./opening-sources";
+import { createOpeningSourceRepository } from "./opening-sources";
 
 const W = "00000000-0000-4000-8000-000000000001";
 const S = "00000000-0000-4000-8000-000000000003";
