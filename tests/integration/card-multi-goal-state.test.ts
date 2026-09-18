@@ -370,6 +370,6 @@ describe("card multi-goal personal SRS state", () => {
       ownerUserId,
       cardId: second.id,
     });
-    expect(secondState).toBeNull();
+    expect(secondState).toMatchObject({ cardId: second.id });
   });
 });

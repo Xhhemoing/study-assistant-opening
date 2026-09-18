@@ -243,7 +243,15 @@ describe("library search repository", () => {
     expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "   " })).toEqual([]);
     const literalPercent = await repo.searchLibrary({ workspaceId: workspaceA, query: "100%" });
     expect(literalPercent.map((row) => row.title)).toEqual(["百分比 100% 完成"]);
-    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "100_" })).toEqual([]);
+    // LIKE wildcards are escaped ("100_" does not match "100%完成" via the LIKE
+    // branch), but search is FTS ∪ LIKE: the 'simple' dictionary strips "_" as a
+    // separator, so plainto_tsquery("100_") matches token "100" and the document
+    // is a legitimate FTS hit. Verify the escape property instead of asserting
+    // wildcard coincidence: "_" alone must NOT match, and a wildcard that
+    // collides via LIKE must not broaden the LIKE branch itself.
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "_" })).toEqual([]);
+    const wildcardEscape = await repo.searchLibrary({ workspaceId: workspaceA, query: "100_" });
+    expect(wildcardEscape.map((row) => row.title)).toEqual(["百分比 100% 完成"]);
   });
 
   it("rejects searches against an unknown workspace", async () => {

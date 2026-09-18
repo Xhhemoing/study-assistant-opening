@@ -5,6 +5,7 @@ import { applyMigrations, createRevisionProposalRepository, createSqlClient, typ
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for revision proposal repository tests");
 const userId = randomUUID();
+const otherUserId = randomUUID();
 const workspaceId = randomUUID();
 const otherWorkspaceId = randomUUID();
 const documentId = randomUUID();
@@ -18,8 +19,8 @@ describe("revision proposal repository", () => {
   beforeAll(async () => { await applyMigrations(sql); repository = createRevisionProposalRepository(sql); });
   beforeEach(async () => {
     await sql`TRUNCATE revision_proposals, library_revisions, library_blocks, library_documents, sessions, workspaces, users RESTART IDENTITY CASCADE`;
-    await sql`INSERT INTO users (id,email,display_name,password_hash) VALUES (${userId},${`proposal-${randomUUID()}@example.com`},'Proposal user','test')`;
-    await sql`INSERT INTO workspaces (id,owner_user_id) VALUES (${workspaceId},${userId}),(${otherWorkspaceId},${userId})`;
+    await sql`INSERT INTO users (id,email,display_name,password_hash) VALUES (${userId},${`proposal-${randomUUID()}@example.com`},'Proposal user','test'),(${otherUserId},${`proposal-${randomUUID()}@example.com`},'Other user','test')`;
+    await sql`INSERT INTO workspaces (id,owner_user_id) VALUES (${workspaceId},${userId}),(${otherWorkspaceId},${otherUserId})`;
     await sql`INSERT INTO library_documents (id,workspace_id,title,lifecycle,current_revision_number) VALUES (${documentId},${workspaceId},'Base','confirmed',1)`;
     await sql`INSERT INTO library_blocks (id,workspace_id,document_id,type,position,content) VALUES (${blockId},${workspaceId},${documentId},'paragraph',0,${sql.json({ text: "current" })})`;
     await sql`INSERT INTO library_revisions (workspace_id,document_id,revision_number,title,lifecycle,reason,blocks) VALUES (${workspaceId},${documentId},1,'Base','confirmed','create',${sql.json([block(blockId,"current")])})`;

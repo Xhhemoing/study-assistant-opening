@@ -14,6 +14,7 @@ if (!databaseUrl)
   throw new Error("DATABASE_URL is required for promotion repository tests");
 
 const ownerId = randomUUID();
+const otherOwnerId = randomUUID();
 const workspaceId = randomUUID();
 const otherWorkspaceId = randomUUID();
 
@@ -28,8 +29,8 @@ describe("promotion repository", () => {
 
   beforeEach(async () => {
     await sql`TRUNCATE promotion_targets, promotion_records, exploration_blocks, exploration_branches, explorations, course_asset_memberships, courses, library_revisions, library_blocks, library_documents, sessions, workspaces, users RESTART IDENTITY CASCADE`;
-    await sql`INSERT INTO users (id, email, display_name, password_hash) VALUES (${ownerId}, ${`promotion-${randomUUID()}@example.com`}, 'Owner', 'test')`;
-    await sql`INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceId}, ${ownerId}), (${otherWorkspaceId}, ${ownerId})`;
+    await sql`INSERT INTO users (id, email, display_name, password_hash) VALUES (${ownerId}, ${`promotion-${randomUUID()}@example.com`}, 'Owner', 'test'), (${otherOwnerId}, ${`promotion-${randomUUID()}@example.com`}, 'Other owner', 'test')`;
+    await sql`INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceId}, ${ownerId}), (${otherWorkspaceId}, ${otherOwnerId})`;
   });
 
   afterAll(async () => sql.end({ timeout: 5 }));
@@ -184,27 +185,27 @@ describe("promotion repository", () => {
     const memberships = createCourseMembershipRepository(sql);
     const courseA = randomUUID();
     const courseB = randomUUID();
-    await sql`INSERT INTO courses (id, workspace_id, title, goal, status) VALUES (${courseA}, ${workspaceId}, 'A', 'A', 'active'), (${courseB}, ${workspaceId}, 'B', 'B', 'active')`;
+    await sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseA}, ${workspaceId}, 'A', 'course-a'), (${courseB}, ${workspaceId}, 'B', 'course-b')`;
     await memberships.addAssetMembership({
       workspaceId,
       courseId: courseA,
       assetType: "document",
       assetId: promoted.targetId!,
-      role: "required",
-      visibility: "visible",
+      role: "core",
+      visibility: "course",
     });
     await memberships.addAssetMembership({
       workspaceId,
       courseId: courseB,
       assetType: "document",
       assetId: promoted.targetId!,
-      role: "required",
-      visibility: "visible",
+      role: "core",
+      visibility: "course",
     });
     const rows =
-      await sql`SELECT document_id FROM course_asset_memberships WHERE document_id = ${promoted.targetId}`;
+      await sql`SELECT asset_id FROM course_asset_memberships WHERE asset_id = ${promoted.targetId}`;
     expect(rows).toHaveLength(2);
-    expect(new Set(rows.map((row) => row.document_id))).toEqual(
+    expect(new Set(rows.map((row) => row.asset_id))).toEqual(
       new Set([promoted.targetId]),
     );
   });

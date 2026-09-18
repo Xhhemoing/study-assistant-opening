@@ -177,6 +177,19 @@ describe("identity migration compatibility", () => {
       "0006_wiki_link_relation_source.sql",
       "0007_search_indexes.sql",
       "0008_explorations.sql",
+      "0009_promotions.sql",
+      "0010_revision_proposals.sql",
+      "0011_goals.sql",
+      "0012_learning_events.sql",
+      "0013_cards.sql",
+      "0014_learning_event_delete_guard.sql",
+      "0015_practice_content.sql",
+      "0016_opening_sources.sql",
+      "0017_opening_conversations.sql",
+      "0018_opening_jobs_outbox_budget.sql",
+      "0019_opening_learning.sql",
+      "0020_opening_source_chunks.sql",
+      "0021_opening_assistant_candidates.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -223,6 +236,19 @@ describe("identity migration compatibility", () => {
       "0006_wiki_link_relation_source.sql",
       "0007_search_indexes.sql",
       "0008_explorations.sql",
+      "0009_promotions.sql",
+      "0010_revision_proposals.sql",
+      "0011_goals.sql",
+      "0012_learning_events.sql",
+      "0013_cards.sql",
+      "0014_learning_event_delete_guard.sql",
+      "0015_practice_content.sql",
+      "0016_opening_sources.sql",
+      "0017_opening_conversations.sql",
+      "0018_opening_jobs_outbox_budget.sql",
+      "0019_opening_learning.sql",
+      "0020_opening_source_chunks.sql",
+      "0021_opening_assistant_candidates.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -524,6 +550,19 @@ describe("identity migration compatibility", () => {
       "0006_wiki_link_relation_source.sql",
       "0007_search_indexes.sql",
       "0008_explorations.sql",
+      "0009_promotions.sql",
+      "0010_revision_proposals.sql",
+      "0011_goals.sql",
+      "0012_learning_events.sql",
+      "0013_cards.sql",
+      "0014_learning_event_delete_guard.sql",
+      "0015_practice_content.sql",
+      "0016_opening_sources.sql",
+      "0017_opening_conversations.sql",
+      "0018_opening_jobs_outbox_budget.sql",
+      "0019_opening_learning.sql",
+      "0020_opening_source_chunks.sql",
+      "0021_opening_assistant_candidates.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

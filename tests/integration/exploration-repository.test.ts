@@ -11,6 +11,7 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for exploration repository tests");
 
 const ownerA = randomUUID();
+const ownerB = randomUUID();
 const workspaceA = randomUUID();
 const workspaceB = randomUUID();
 
@@ -25,8 +26,8 @@ describe("exploration repository", () => {
 
   beforeEach(async () => {
     await sql`TRUNCATE exploration_blocks, exploration_branches, explorations, course_asset_memberships, courses, sessions, workspaces, users RESTART IDENTITY CASCADE`;
-    await sql`INSERT INTO users (id, email, display_name, password_hash) VALUES (${ownerA}, ${`owner-${randomUUID()}@example.com`}, 'Owner A', 'test')`;
-    await sql`INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceA}, ${ownerA}), (${workspaceB}, ${ownerA})`;
+    await sql`INSERT INTO users (id, email, display_name, password_hash) VALUES (${ownerA}, ${`owner-${randomUUID()}@example.com`}, 'Owner A', 'test'), (${ownerB}, ${`owner-${randomUUID()}@example.com`}, 'Owner B', 'test')`;
+    await sql`INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceA}, ${ownerA}), (${workspaceB}, ${ownerB})`;
   });
 
   afterAll(async () => sql.end({ timeout: 5 }));

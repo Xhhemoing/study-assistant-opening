@@ -126,7 +126,7 @@ describe("multi-goal course with time windows", () => {
       SELECT kind, active, intensity
       FROM course_goals
       WHERE course_id = ${courseId}
-      ORDER BY priority, kind
+      ORDER BY array_position(ARRAY['final-exam', 'entrance-exam', 'interest', 'maintenance']::text[], kind)
     `;
     expect(rows).toHaveLength(4);
     expect(rows.map((row) => row.kind)).toEqual(GOAL_KINDS);
