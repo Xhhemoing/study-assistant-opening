@@ -67,7 +67,7 @@ export async function main(): Promise<void> {
       return;
     }
     await runJob(repository, job.data.jobId ?? job.id, handlerForKind(kind, handlers));
-  }, { connection: redis, concurrency: 2 }));
+  }, { connection: redis, concurrency: kind === "parse" ? 1 : 2 }));
   const tick = setInterval(() => { void dispatchPending({ repository, queues }).then(() => dispatchTutorTurns({ tutorJobs, queues })); }, 1000);
   const shutdown = async () => {
     stopping = true;

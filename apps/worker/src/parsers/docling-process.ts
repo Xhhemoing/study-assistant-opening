@@ -23,7 +23,10 @@ export function decodeParserOutput(text: string): ParsedPage[] {
 
 export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: number }): { parseDocument: ParseDocument } {
   return { async parseDocument(input, signal) {
-    const result = await deps.run(["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages)], signal);
+    // CPU-only docling runs minutes per deck; a short wall-clock cap turns
+    // legitimate large conversions into exit-4 failures (observed: three
+    // concurrent 50–72-page math slides all timed out together).
+    const result = await deps.run(["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(input.timeoutSeconds ?? 900)], signal);
     if (result.exitCode === 0) return decodeParserOutput(result.stdout);
     if (result.exitCode === 3) throw new UnsupportedMimeError("unsupported source MIME");
     if (result.exitCode === 5) throw new BoundsExceededError("parser bounds exceeded");

@@ -14,11 +14,11 @@ describe("docling parser bridge", () => {
     await expect(parser.parseDocument({ path: "x", mime: "application/pdf", maxPages: 2 }, new AbortController().signal)).rejects.toBeInstanceOf(ErrorType);
   });
 
-  it("passes argv only, without shell syntax", async () => {
+  it("passes argv only, without shell syntax, with a generous conversion timeout", async () => {
     let argv: string[] = [];
     const parser = createDoclingProcess({ run: async (value) => { argv = value; return { exitCode: 0, stdout: '{"pages":[]}' }; } });
     await parser.parseDocument({ path: "a;b", mime: "application/pdf", maxPages: 2 }, new AbortController().signal);
-    expect(argv).toEqual(["-m", "opening_parser", "--input", "a;b", "--mime", "application/pdf", "--max-pages", "2"]);
+    expect(argv).toEqual(["-m", "opening_parser", "--input", "a;b", "--mime", "application/pdf", "--max-pages", "2", "--timeout-seconds", "900"]);
     expect(argv.join(" ")).not.toMatch(/[|&<>$`]/);
   });
 
