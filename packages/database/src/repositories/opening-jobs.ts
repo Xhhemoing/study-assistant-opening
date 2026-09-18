@@ -148,12 +148,12 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
     async finish(id, state, value) {
       const rows = await sql`
         UPDATE opening_jobs SET state = ${state},
-          result = ${state === 'succeeded' ? sql.json(value as never) : null},
+          result = ${sql.json(value as never)},
           updated_at = now()
         WHERE id = ${id} AND state = 'running' RETURNING id
       `;
       if (!rows.length && state !== 'succeeded') {
-        await sql`UPDATE opening_jobs SET state = ${state}, updated_at = now() WHERE id = ${id} AND state = 'running'`;
+        await sql`UPDATE opening_jobs SET state = ${state}, result = ${sql.json(value as never)}, updated_at = now() WHERE id = ${id} AND state = 'running'`;
       }
       return rows.length > 0;
     },

@@ -9,9 +9,21 @@ describe("docling parser bridge", () => {
     expect(() => decodeParserOutput('{"pages":[{"page":1,"text":"x"},{"page":1,"text":"y"}]}')).toThrow();
   });
 
+  it("ignores log lines that pollute stdout before the JSON payload", () => {
+    const polluted = '2026-09-18 15:05:36,284 MatchingPostProcessor WARNING  1 of 5 pdf cells matched neither a row nor a column band\n' + JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }] }) + "\r\n";
+    const pages = decodeParserOutput(polluted);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].text).toBe("Alpha");
+  });
+
   it.each([[3, UnsupportedMimeError], [5, BoundsExceededError], [4, ConversionFailedError]])("maps exit %s", async (exitCode, ErrorType) => {
     const parser = createDoclingProcess({ run: async () => ({ exitCode, stdout: "detail" }) });
     await expect(parser.parseDocument({ path: "x", mime: "application/pdf", maxPages: 2 }, new AbortController().signal)).rejects.toBeInstanceOf(ErrorType);
+  });
+
+  it("includes stderr tail in conversion failures", async () => {
+    const parser = createDoclingProcess({ run: async () => ({ exitCode: 4, stdout: "", stderr: "conversion failed: boom" }) });
+    await expect(parser.parseDocument({ path: "x", mime: "application/pdf", maxPages: 2 }, new AbortController().signal)).rejects.toThrow(/boom/);
   });
 
   it("passes argv only, without shell syntax, with a generous conversion timeout", async () => {

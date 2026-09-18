@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
@@ -25,6 +26,11 @@ def convert(path: Path, timeout: float):
     root = Path(__file__).resolve().parents[3]
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_HOME"] = str(root / ".local" / "hf-home")
+    # stdout is a strict JSON contract; docling's postprocessor warnings (e.g.
+    # table cells) must never pollute it.
+    logging.getLogger().setLevel(logging.ERROR)
+    for _name in list(logging.root.manager.loggerDict):
+        logging.getLogger(_name).setLevel(logging.ERROR)
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
