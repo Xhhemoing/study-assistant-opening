@@ -22,17 +22,19 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
   const states: State[] = [];
   let replaceInput: unknown;
   let runs = 0;
+  const argvs: string[][] = [];
   const dirPromise = mkdtemp(path.join(os.tmpdir(), "opening-parse-test-"));
   const all = dirPromise.then((tempDir) => ({
     tempDir,
     runs: () => runs,
+    argvs: () => argvs,
     states,
     replaceInput: () => replaceInput,
     handler: createParseSourceHandler({
       sources: { get: async () => current, markParseState: async (_scope, _id, state) => { states.push(state); return current; } },
       chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
-      runner: async () => { runs += 1; return { exitCode: input.exitCode ?? 0, stdout: input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
+      runner: async (...args: Parameters<Parameters<typeof createParseSourceHandler>["runner"]>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
       tempDir,
     }),
   }));
@@ -41,6 +43,15 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
 }
 
 describe("parse source handler", () => {
+  it("passes an absolute temp path so the parser child (cwd=services/parser) finds the input", async () => {
+    const d = await deps();
+    await d.handler(job, job.payload);
+    expect(d.argvs().length).toBe(1);
+    const inputArg = d.argvs()[0][3]; // -m opening_parser --input <path>
+    expect(path.isAbsolute(inputArg)).toBe(true);
+    expect(await readdir(d.tempDir)).toEqual([]);
+  });
+
   it("replaces PDF chunks, marks ready, and cleans the temporary file", async () => {
     const d = await deps();
     await d.handler(job, { sourceId });

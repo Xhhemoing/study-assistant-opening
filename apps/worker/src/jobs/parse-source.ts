@@ -15,6 +15,9 @@ type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
 
 export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: OpeningSourceChunksRepository; storage: Storage; runner: ParserRunner; tempDir: string }) {
   const parser = createDoclingProcess({ run: deps.runner });
+  // The parser child runs with cwd=services/parser; a relative tempDir would
+  // resolve there and the CLI would reject the input as missing (exit 4).
+  const tempDir = path.resolve(deps.tempDir);
   return async (job: OpeningJobRecord, payload: unknown) => {
     const sourceId = (payload as { sourceId?: unknown }).sourceId;
     if (typeof sourceId !== "string") throw new Error("parse payload missing sourceId");
@@ -26,8 +29,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       return { unsupported: true };
     }
     const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
-    await mkdir(deps.tempDir, { recursive: true });
-    const temp = path.join(deps.tempDir, `${source.id}-${source.version}`);
+    await mkdir(tempDir, { recursive: true });
+    const temp = path.join(tempDir, `${source.id}-${source.version}`);
     try {
       const response = await fetch(url);
       if (!response.ok || !response.body) throw new Error("source download failed");
