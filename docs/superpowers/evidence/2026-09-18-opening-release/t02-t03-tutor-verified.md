@@ -39,3 +39,25 @@ Real math material probe (local CLI, not yet via upload path): Topic_3__Differen
 - One unreproduced integration failure (parse-job, 01:19 local) during concurrent test-file updates; both isolated and combined re-runs pass. If it recurs, capture full stack before touching anything.
 - Non-ASCII PDF regression uses a stubbed converter (hand-building a CMap-bearing PDF was judged disproportionate); the real-convert path is covered end-to-end by the Topic 3 probe and the synthetic-fixture pipeline tests.
 - Real-model answer quality, citations semantics sampling, cost — Q02, needs configured budget/key. Full legacy integration project still has the 7 pre-existing Phase-1 suite failures (recorded in I02 evidence, outside opening scope).
+
+## Math acceptance addendum (2026-09-18 later) — real materials parsed end-to-end
+
+All four user course PDFs uploaded via the REAL API chain (login → upload policy → S3 PUT → complete → outbox → BullMQ → worker → docling → chunks) against the local dev stack (portable PG 17.5 @5433 `aistudy_opening_dev`, MinIO, Redis; owner seeded via `scripts/opening-create-owner.ts`; web+worker run with inline env, tsx does not read `.env`).
+
+| Material | Pages | Result |
+|---|---|---|
+| Basic notions_SLIDES.pdf | 72 | ready, 72 chunks |
+| Linear_Algebra_Lecture_01.pdf | 50 | ready, 50 chunks |
+| Topic_2_Sequences_and_Limits_SLIDES.pdf | 62 | ready, 62 chunks |
+| Topic_3__Differential_Calculus_SLIDES.pdf | 55 | ready, 55 chunks |
+
+Four product-level defects found and fixed through this real-material run (each committed with regression tests):
+
+1. `42b0d93` parse tempDir was relative while the parser child runs with `cwd=services/parser` → CLI rejected input as missing (sub-second exit-4). Absolute resolution + argv-contract test.
+2. `751f27b` CPU-only docling jobs ran with concurrency=2 → concurrent conversions starved the shared 240s wall-clock cap and three decks failed simultaneously; Topic_2 succeeded only because it was scheduled after a slot freed. Now parse concurrency=1 and explicit `--timeout-seconds 900`.
+3. `c7eade3`+`dda7bb9` failure observability: `finish(failed)` dropped the error value (result=NULL) and the runner discarded child stderr. Errors now persist; non-zero exits carry the stderr tail. NOTE: `c7eade3` accidentally committed 7 unrelated legacy-suite test fixes (concurrent subagent work present in the worktree) under a misleading message; content is kept, discrepancy recorded here.
+4. `dda7bb9` Basic notions (the only table-heavy deck) emitted docling `MatchingPostProcessor WARNING` lines onto **stdout**, breaking the strict-JSON contract (`Unexpected non-whitespace character after JSON at position 4`). CLI now forces logger levels to ERROR and the Node decoder skips any log preamble before the JSON payload.
+
+Also recorded: real deck conversions take 106–172s each on this machine; text-layer math survives inline (f ′(x₀)=0, ≤, j!), while display formulas are dropped/flattened (RU-03 keeps original + explicit statement; multimodal path remains a separate future task). Concurrent-worktree hazard: my uncommitted edits were overwritten once by parallel agent work; narrow, immediate commits are now the rule for this shared tree.
+
+Not yet accepted for the math scenario: real-model tutoring answers (needs `OPENING_MODEL_*` key + budget authorization → then T03 worker end-to-end on these chunks), U02 upload UI, audio + Notion capture.
