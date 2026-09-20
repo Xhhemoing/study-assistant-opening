@@ -93,6 +93,27 @@ describe("runBudgetedCall", () => {
     expect(repo.unknowns).toHaveLength(0);
   });
 
+  it.each(["PROVIDER_RESPONSE", "PROVIDER_REFUSAL", "PROVIDER_UNAVAILABLE"])("retains potentially charged failures: %s", async (code) => {
+    const { repo, api } = fakeBudget();
+    await expect(runBudgetedCall({ ...options, budget: api, provider: { complete: async () => { throw new OpeningProviderError(code, "failed"); } } })).rejects.toThrow();
+    expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.released).toEqual([]);
+  });
+
+  it("keeps missing usage reserved and returns the answer", async () => {
+    const { repo, api } = fakeBudget();
+    const answer = await runBudgetedCall({ ...options, budget: api, provider: { complete: async () => ({ ...output, inputTokens: null }) } });
+    expect(answer.text).toBe("ok");
+    expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.settled).toEqual([]);
+  });
+
+  it("never releases a charge when settlement fails", async () => {
+    const { repo, api } = fakeBudget();
+    await expect(runBudgetedCall({ ...options, budget: { ...api, settle: async () => { throw new Error("database failure"); } }, provider: { complete: async () => output } })).rejects.toThrow("database failure");
+    expect(repo.released).toEqual([]);
+  });
+
   it("retains the reservation on an unknown post-send outcome", async () => {
     const { repo, api } = fakeBudget();
     await expect(

@@ -1,6 +1,7 @@
 import {
   providerOutputSchema,
   type ProviderOutput,
+  type ProviderInput,
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
@@ -9,6 +10,8 @@ import type {
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
 } from "@aistudy/database";
+import { randomUUID } from "node:crypto";
+import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import {
   runBudgetedCall,
   type BudgetedProvider,
@@ -40,6 +43,25 @@ export type TutorTurnDeps = {
     inputCentsPerMillion: number;
     outputCentsPerMillion: number;
   };
+  /** M02 privacy: epoch + exclusions. Optional for unit tests without DB privacy tables. */
+  privacy?: {
+    getWorkspaceEpoch(scope: { workspaceId: string; ownerUserId: string }): Promise<number>;
+    listExcludedSourceIds(scope: { workspaceId: string; ownerUserId: string }): Promise<string[]>;
+  };
+  /** L01: record delivered help against an explicit learningSessionId. */
+  learning?: {
+    insertHelpExposure(
+      scope: { workspaceId: string; ownerUserId: string },
+      exposure: {
+        id: string;
+        sessionId: string;
+        problemId: string | null;
+        turnId: string;
+        level: "hinted" | "revealed";
+        delivered: true;
+      },
+    ): Promise<unknown>;
+  };
 };
 
 const MAX_PROVIDER_CHUNKS = 64;
@@ -67,8 +89,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     try {
       const turn = await deps.tutorJobs.getUserTurn(claimed.userTurnId, claimed.workspaceId);
       if (!turn) throw new Error("user turn for tutor job is missing");
-      const chunks = await deps.chunks.listForSources(scope, turn.sourceIds);
-      if (!chunks.length && turn.sourceIds.length > 0) {
+      const jobEpoch = deps.privacy
+        ? await deps.privacy.getWorkspaceEpoch(scope)
+        : null;
+      const excluded = new Set(
+        deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
+      );
+      const allowedSourceIds = turn.sourceIds.filter((id) => !excluded.has(id));
+      if (excluded.size && allowedSourceIds.length === 0 && turn.sourceIds.length > 0) {
+        throw new Error("all requested source material is privacy-excluded");
+      }
+      const chunks = await deps.chunks.listForSources(scope, allowedSourceIds);
+      if (!chunks.length && allowedSourceIds.length > 0) {
         throw new Error("all requested source material is unavailable");
       }
       const context = selectContext({
@@ -78,21 +110,24 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         preferChunkId: turn.chunkId ?? undefined,
         preferPage: turn.currentPage ?? undefined,
       }).slice(0, MAX_PROVIDER_CHUNKS);
+      const history = await deps.tutorJobs.loadHistory(scope, claimed.userTurnId);
       const mode = claimed.mode as TutorMode;
+      const input: ProviderInput = {
+        instruction: makeTutorInstruction(mode), text: turn.text, history,
+        chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
+        mediaCapability: "text_only", imageParts: [],
+      };
+      // UTF-8 bytes conservatively bound ordinary text tokenization; allow protocol overhead.
+      // This is a local estimate, not a guarantee of a vendor's billing rules.
+      const inputTokenBound = Buffer.byteLength(JSON.stringify(input), "utf8") + 4096;
+      const maximumCost = Math.ceil((inputTokenBound * deps.config.inputCentsPerMillion +
+        input.maxOutputTokens * deps.config.outputCentsPerMillion) / 1_000_000);
       const output = await runBudgetedCall({
         provider: deps.provider,
         budget: scopedBudget,
-        input: {
-          instruction: makeTutorInstruction(mode),
-          text: turn.text,
-          chunks: context,
-          mode,
-          maxOutputTokens: deps.config.maxOutputTokens,
-          mediaCapability: "text_only",
-          imageParts: [],
-        },
+        input,
         requestId: `tutor:${claimed.id}`,
-        reservedCents: deps.config.reservedCents,
+        reservedCents: Math.max(deps.config.reservedCents, maximumCost),
         actualCents: (settled) => {
           const usage = usageFromOutput(settled);
           return Math.ceil(
@@ -104,12 +139,30 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       });
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       const citations = resolveCitations(validated.citedChunkIds, context);
-      const citedSourceIds = [...new Set(citations.map((c) => c.sourceId))];
+      const citedSourceIds = [...new Set(citations.map((c) => c.sourceId))].filter(
+        (id) => !excluded.has(id),
+      );
+      if (deps.privacy && jobEpoch !== null) {
+        const currentEpoch = await deps.privacy.getWorkspaceEpoch(scope);
+        assertCurrentEpoch(jobEpoch, currentEpoch);
+      }
+      // L01: only delivered help counts; bind to explicit session on the user turn.
+      if (deps.learning && turn.learningSessionId && (mode === "hint" || mode === "explain")) {
+        await deps.learning.insertHelpExposure(scope, {
+          id: randomUUID(),
+          sessionId: turn.learningSessionId,
+          problemId: null,
+          turnId: claimed.assistantTurnId,
+          level: mode === "explain" ? "revealed" : "hinted",
+          delivered: true,
+        });
+      }
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,
         assistantTurnId: claimed.assistantTurnId,
         text: validated.text,
+        citations,
         candidates: validated.candidates.map((payload) => ({
           payload,
           sourceIds: citedSourceIds,

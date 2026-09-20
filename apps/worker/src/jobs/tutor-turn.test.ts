@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
+import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { createTutorTurnHandler, makeTutorInstruction } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -21,13 +22,14 @@ describe("tutor mode policy", () => {
 describe("tutor turn handler", () => {
   const chunkA: SourceChunk = { id: "00000000-0000-4000-8000-00000000000a", sourceId: "00000000-0000-4000-8000-000000000001", sourceVersion: 0, page: 1, slideLabel: null, startMs: null, endMs: null, text: "Newton wrote the laws of motion", imageObjectKey: null };
   const chunkB: SourceChunk = { ...chunkA, id: "00000000-0000-4000-8000-00000000000b", page: 2, text: "Einstein refined gravity" };
-  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: ["00000000-0000-4000-8000-000000000001"], currentPage: 1, chunkId: chunkA.id };
+  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: ["00000000-0000-4000-8000-000000000001"], currentPage: 1, chunkId: chunkA.id, learningSessionId: null as string | null };
   const claimedJob = { id: "00000000-0000-4000-8000-00000000000j", workspaceId: "00000000-0000-4000-8000-000000000002", ownerUserId: "00000000-0000-4000-8000-000000000003", conversationId: "00000000-0000-4000-8000-000000000004", userTurnId: "00000000-0000-4000-8000-000000000005", assistantTurnId: "00000000-0000-4000-8000-000000000006", status: "running" as const, mode: "explain", error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown } = {}) {
     const tutorJobs = {
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => turn),
+      loadHistory: vi.fn(async () => [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }]),
       completeTurn: vi.fn(async () => undefined),
       fail: vi.fn(async () => undefined),
       markUnknown: vi.fn(async () => undefined),
@@ -51,9 +53,19 @@ describe("tutor turn handler", () => {
     expect(provider.complete).toHaveBeenCalledTimes(1);
     const input = provider.complete.mock.calls[0][0];
     expect(input.chunks[0].id).toBe(chunkA.id);
+    expect(input.history).toEqual([{ role: "user", text: "yesterday" }, { role: "assistant", text: "step two" }]);
     expect(input.instruction).toContain("完整答案");
     expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
+  });
+
+  it("reserves for actual input size and output limit, not only the fixed floor", async () => {
+    const { deps, budget } = setup();
+    deps.config.reservedCents = 1;
+    deps.config.inputCentsPerMillion = 1_000_000;
+    deps.config.outputCentsPerMillion = 1_000_000;
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(budget.reserve.mock.calls[0][1].amountCents).toBeGreaterThan(2048);
   });
 
   it("skips a redelivered job without calling the provider", async () => {
@@ -94,5 +106,42 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow(/BUDGET_EXCEEDED/);
     expect(provider.complete).not.toHaveBeenCalled();
     expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("rejects writeback when workspace privacy epoch changes mid-job", async () => {
+    const { deps, tutorJobs } = setup();
+    let calls = 0;
+    const privacy = {
+      getWorkspaceEpoch: vi.fn(async () => {
+        calls += 1;
+        return calls === 1 ? 1 : 2;
+      }),
+      listExcludedSourceIds: vi.fn(async () => []),
+    };
+    await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toBeInstanceOf(PrivacyEpochError);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("records delivered help exposure bound to learningSessionId for hint mode", async () => {
+    const sessionId = "00000000-0000-4000-8000-0000000000aa";
+    const { deps, tutorJobs } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      mode: "hint",
+      learningSessionId: sessionId,
+    }));
+    const claimed = { ...claimedJob, mode: "hint" };
+    deps.tutorJobs.claim = vi.fn(async () => claimed);
+    const exposures: Array<{ sessionId: string; level: string; delivered: boolean }> = [];
+    const learning = {
+      insertHelpExposure: vi.fn(async (_scope: unknown, exposure: { sessionId: string; level: string; delivered: boolean }) => {
+        exposures.push({ sessionId: exposure.sessionId, level: exposure.level, delivered: exposure.delivered });
+        return exposure;
+      }),
+    };
+    await createTutorTurnHandler({ ...deps, learning })(claimed.id);
+    expect(exposures).toEqual([{ sessionId, level: "hinted", delivered: true }]);
+    expect(tutorJobs.completeTurn).toHaveBeenCalled();
   });
 });

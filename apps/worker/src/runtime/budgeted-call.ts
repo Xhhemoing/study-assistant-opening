@@ -38,9 +38,9 @@ export class BudgetedCallError extends Error {
 /**
  * Deferred-failure codes: the request may have REACHED the provider, so the
  * reservation retains its cap space (markUnknown) until reconciliation.
- * Definitive outcomes (auth, rate limit, refusal, response shape) release.
+ * Only known pre-generation failures release; malformed responses may be billed.
  */
-const UNKNOWN_OUTCOME_CODES = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"]);
+const UNSENT_CODES = new Set(["PROVIDER_AUTH", "PROVIDER_RATE_LIMIT", "PROVIDER_MEDIA_UNSUPPORTED"]);
 
 export async function runBudgetedCall(options: BudgetedCallOptions): Promise<ProviderOutput> {
   if (!options.provider) {
@@ -51,18 +51,23 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     amountCents: options.reservedCents,
     requestId: options.requestId,
   });
+  let output: ProviderOutput;
   try {
-    const output = await options.provider.complete(options.input);
-    await options.budget.settle(reservation.id, options.actualCents(output));
-    return output;
+    output = await options.provider.complete(options.input);
   } catch (error) {
-    const unknownOutcome =
-      error instanceof OpeningProviderError && UNKNOWN_OUTCOME_CODES.has(error.code);
-    if (unknownOutcome) {
-      await options.budget.markUnknown(reservation.id);
-    } else {
+    if (error instanceof OpeningProviderError && UNSENT_CODES.has(error.code)) {
       await options.budget.release(options.requestId);
+    } else {
+      await options.budget.markUnknown(reservation.id);
     }
     throw error;
   }
+  // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
+  if (output.inputTokens === null || output.outputTokens === null) {
+    await options.budget.markUnknown(reservation.id);
+  } else {
+    // Settlement failures must leave the reservation intact, never release it.
+    await options.budget.settle(reservation.id, options.actualCents(output));
+  }
+  return output;
 }

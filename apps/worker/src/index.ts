@@ -1,14 +1,16 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
-import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { createOpeningProvider } from "@aistudy/ai";
+import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
 import { createNodeRunner } from "./parsers/docling-process";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
+import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { runJob } from "./runtime/run-job";
 
 /**
@@ -26,34 +28,52 @@ export function processSmokeJob(input: unknown): {
 }
 
 export async function main(): Promise<void> {
+  const openingModel = loadOpeningModel();
   const redis = createRedisConnection({ url: process.env.REDIS_URL ?? "redis://127.0.0.1:6379" });
   const sql = createSqlClient(process.env.DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/aistudy");
   const repository = createOpeningJobRepository(sql);
+  const privacyRepo = createOpeningPrivacyRepository(sql);
+  const learningDb = {
+    async query<T>(text: string, params: unknown[] = []): Promise<T[]> {
+      const rows = await sql.unsafe(text, params as never[]);
+      return rows as unknown as T[];
+    },
+    async execute(text: string, params: unknown[] = []): Promise<void> {
+      await sql.unsafe(text, params as never[]);
+    },
+  };
+  const learning = createOpeningLearningRepository(learningDb);
+  const retests = createOpeningRetestRepository(sql);
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" });
   const parse = createParseSourceHandler({ sources, chunks, storage, runner: createNodeRunner(), tempDir: process.env.PARSER_TEMP_DIR ?? ".tmp/opening-parser" });
-  const handlers = createHandlers(parse);
+  const retest = createRetestCandidateHandler({
+    listObservations: (scope, courseId) => learning.listObservationsForCourse(scope, courseId),
+    listDueRetestSkills: (scope, courseId) => retests.listAcceptedSkillLabels(scope, courseId),
+    saveCandidates: (scope, candidates) => retests.saveCandidates(scope, candidates),
+  });
+  const handlers = createHandlers(parse, { retest });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
-  const budget = createOpeningBudgetRepository(sql);
-  const openingModel = {
-    baseUrl: process.env.OPENING_MODEL_BASE_URL ?? "https://api.openai.com/v1",
-    apiKey: process.env.OPENING_MODEL_API_KEY ?? "",
-    model: process.env.OPENING_MODEL_NAME ?? "gpt-4o-mini",
-  };
+  const budget = createOpeningBudgetRepository(sql, { dailyCapCents: openingModel.dailyCapCents });
   const tutorTurn = createTutorTurnHandler({
     tutorJobs,
     chunks,
     budget,
-    provider: openingModel.apiKey
-      ? createOpeningProvider({ baseUrl: openingModel.baseUrl, apiKey: openingModel.apiKey, model: openingModel.model })
+    provider: openingModel.apiKey && openingModel.dailyCapCents > 0
+      ? createOpeningProvider({ baseUrl: openingModel.baseUrl, apiKey: openingModel.apiKey, model: openingModel.name })
       : null,
     config: {
-      maxContextCharacters: Number(process.env.OPENING_TUTOR_MAX_CONTEXT_CHARS ?? 12_000),
-      reservedCents: Number(process.env.OPENING_TUTOR_RESERVED_CENTS ?? 100),
-      maxOutputTokens: Number(process.env.OPENING_TUTOR_MAX_OUTPUT_TOKENS ?? 2_048),
-      inputCentsPerMillion: Number(process.env.OPENING_MODEL_INPUT_CENTS_PER_MILLION ?? 0),
-      outputCentsPerMillion: Number(process.env.OPENING_MODEL_OUTPUT_CENTS_PER_MILLION ?? 0),
+      ...loadOpeningTutorConfig(),
+      inputCentsPerMillion: openingModel.inputCentsPerMillion,
+      outputCentsPerMillion: openingModel.outputCentsPerMillion,
+    },
+    privacy: {
+      getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),
+      listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
+    },
+    learning: {
+      insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),
     },
   });
   const queues = createQueues(redis);

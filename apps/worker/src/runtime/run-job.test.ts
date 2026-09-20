@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
-import { canClaimJob, isUnknownOutcome } from "./run-job";
+import { canClaimJob, isUnknownOutcome, runJob } from "./run-job";
+import type { OpeningJobRecord } from "@aistudy/database";
 import { jobQueueId } from "./queue";
 import { handlers, handlerForKind } from "./handlers";
 
@@ -31,5 +32,60 @@ describe("opening worker runtime guards", () => {
     expect(Object.keys(handlers).sort()).toEqual(["parse", "remind", "retest", "tutor"]);
     await expect(handlers.parse({} as never, {})).rejects.toThrow("not implemented until I02/T02");
     expect(() => handlerForKind("unknown")).toThrow("unknown opening job kind");
+  });
+});
+
+
+describe("runJob workspace privacy epoch (M02-wire)", () => {
+  function baseJob(over: Partial<OpeningJobRecord> = {}): OpeningJobRecord {
+    return {
+      id: "job-1",
+      workspaceId: "ws-1",
+      ownerUserId: "user-1",
+      key: "k1",
+      kind: "remind",
+      payload: {},
+      result: null,
+      state: "queued",
+      privacyEpoch: 1,
+      ...over,
+    };
+  }
+
+  it("rejects final writeback when workspace epoch bumped mid-job", async () => {
+    let epoch = 1;
+    const finished: Array<{ state: string; value: unknown }> = [];
+    const repository = {
+      claim: async () => baseJob(),
+      sourcePrivacyEpoch: async () => 1,
+      workspacePrivacyEpoch: async () => epoch,
+      finish: async (_id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown) => {
+        finished.push({ state, value });
+        return true;
+      },
+    };
+    const ok = await runJob(repository, "job-1", async () => {
+      epoch = 2;
+      return { ok: true };
+    });
+    expect(ok).toBe(false);
+    expect(finished).toEqual([
+      { state: "failed", value: { error: "workspace privacy epoch changed before writeback" } },
+    ]);
+  });
+
+  it("succeeds when epoch stays current", async () => {
+    const finished: string[] = [];
+    const repository = {
+      claim: async () => baseJob({ privacyEpoch: 3 }),
+      sourcePrivacyEpoch: async () => 3,
+      workspacePrivacyEpoch: async () => 3,
+      finish: async (_id: string, state: "succeeded" | "failed" | "outcome_unknown") => {
+        finished.push(state);
+        return true;
+      },
+    };
+    expect(await runJob(repository, "job-1", async () => ({ ok: true }))).toBe(true);
+    expect(finished).toEqual(["succeeded"]);
   });
 });

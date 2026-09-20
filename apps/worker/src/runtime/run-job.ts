@@ -1,10 +1,13 @@
 import type { OpeningJobRecord } from "@aistudy/database";
 import { OpeningProviderError } from "@aistudy/ai";
+import { assertCurrentEpoch } from "./privacy-guard";
 
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
 export type JobRepository = {
   claim(id: string): Promise<OpeningJobRecord | null>;
   sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
+  /** Optional M02 workspace epoch — wire in opening-jobs when allowlisted. */
+  workspacePrivacyEpoch?(workspaceId: string): Promise<number>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
 };
 
@@ -26,6 +29,18 @@ async function validateParseSource(repository: JobRepository, job: OpeningJobRec
   return currentEpoch !== null && currentEpoch === job.privacyEpoch;
 }
 
+/** Dispatch + writeback: workspace privacy epoch must still match the job snapshot. */
+async function validateWorkspaceEpoch(repository: JobRepository, job: OpeningJobRecord): Promise<boolean> {
+  if (!repository.workspacePrivacyEpoch) return true;
+  try {
+    const current = await repository.workspacePrivacyEpoch(job.workspaceId);
+    assertCurrentEpoch(job.privacyEpoch, current);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runJob(
   repository: JobRepository,
   jobId: string,
@@ -37,8 +52,16 @@ export async function runJob(
     await repository.finish(job.id, "failed", { error: "source privacy epoch changed; parse result discarded" });
     return false;
   }
+  if (!(await validateWorkspaceEpoch(repository, job))) {
+    await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" });
+    return false;
+  }
   try {
     const result = await handler(job, job.payload);
+    if (!(await validateWorkspaceEpoch(repository, job))) {
+      await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" });
+      return false;
+    }
     return repository.finish(job.id, "succeeded", result);
   } catch (error) {
     const state = isUnknownOutcome(error) ? "outcome_unknown" : "failed";
