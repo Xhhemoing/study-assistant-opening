@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { loadOpeningModel, openingModelFields } from "./opening-model";
 
 export class EnvValidationError extends Error {
   readonly issues: string[];
@@ -25,11 +26,7 @@ const envSchema = z.object({
   SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   SESSION_TTL_SECONDS: z.string().optional().default("604800").transform((v) => Number.parseInt(v, 10)).refine((n) => Number.isFinite(n) && n >= 60, { message: "SESSION_TTL_SECONDS must be an integer >= 60" }),
   AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
-  OPENING_MODEL_BASE_URL: z.string().url().optional().default("https://api.openai.com/v1"),
-  OPENING_MODEL_API_KEY: z.string().optional().default(""),
-  OPENING_MODEL_NAME: z.string().min(1).optional().default("gpt-4o-mini"),
-  OPENING_MODEL_INPUT_CENTS_PER_MILLION: z.coerce.number().nonnegative().optional().default(0),
-  OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: z.coerce.number().nonnegative().optional().default(0),
+  ...openingModelFields,
 });
 
 export type AppEnv = {
@@ -41,7 +38,7 @@ export type AppEnv = {
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
-  openingModel: { baseUrl: string; apiKey: string; name: string; inputCentsPerMillion: number; outputCentsPerMillion: number };
+  openingModel: ReturnType<typeof loadOpeningModel>;
   s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean };
   toPublicSummary: () => { nodeEnv: "development" | "test" | "production"; publicBaseUrl: string; databaseConfigured: boolean; redisConfigured: boolean; storageConfigured: boolean; authConfigured: boolean };
 };
@@ -61,7 +58,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sessionCookieSecure: data.SESSION_COOKIE_SECURE === undefined ? data.NODE_ENV === "production" : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
-    openingModel: { baseUrl: data.OPENING_MODEL_BASE_URL, apiKey: data.OPENING_MODEL_API_KEY, name: data.OPENING_MODEL_NAME, inputCentsPerMillion: data.OPENING_MODEL_INPUT_CENTS_PER_MILLION, outputCentsPerMillion: data.OPENING_MODEL_OUTPUT_CENTS_PER_MILLION },
+    openingModel: loadOpeningModel(source),
     s3: { endpoint: data.S3_ENDPOINT, region: data.S3_REGION, bucket: data.S3_BUCKET, accessKeyId: data.S3_ACCESS_KEY_ID, secretAccessKey: data.S3_SECRET_ACCESS_KEY, forcePathStyle: data.S3_FORCE_PATH_STYLE },
     toPublicSummary() {
       return { nodeEnv: data.NODE_ENV, publicBaseUrl: data.PUBLIC_BASE_URL, databaseConfigured: true, redisConfigured: true, storageConfigured: true, authConfigured: data.AUTH_SECRET.length >= 32 };

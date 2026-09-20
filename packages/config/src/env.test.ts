@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, EnvValidationError } from "./env";
+import { loadOpeningTutorConfig } from "./opening-model";
 
 describe("loadEnv", () => {
   const valid = {
@@ -36,6 +37,15 @@ describe("loadEnv", () => {
     ).toBe(false);
   });
 
+  it("disables paid calls by default and validates a configured daily cap and prices", () => {
+    expect(loadEnv(valid).openingModel.dailyCapCents).toBe(0);
+    const paid = { ...valid, OPENING_MODEL_API_KEY: "test-key", OPENING_MODEL_DAILY_CAP_CENTS: "100", OPENING_MODEL_INPUT_CENTS_PER_MILLION: "10", OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "20" };
+    expect(loadEnv(paid).openingModel.dailyCapCents).toBe(100);
+    for (const invalid of [{ OPENING_MODEL_DAILY_CAP_CENTS: "NaN" }, { OPENING_MODEL_DAILY_CAP_CENTS: "-1" }, { OPENING_MODEL_INPUT_CENTS_PER_MILLION: "0" }, { OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "" }]) {
+      expect(() => loadEnv({ ...paid, ...invalid })).toThrow();
+    }
+  });
+
   it("rejects missing AUTH_SECRET", () => {
     const { AUTH_SECRET: _omit, ...rest } = valid;
     expect(() => loadEnv(rest)).toThrow(EnvValidationError);
@@ -65,6 +75,46 @@ describe("loadEnv", () => {
       databaseConfigured: true,
       redisConfigured: true,
       storageConfigured: true,
+    });
+  });
+});
+
+describe("loadOpeningTutorConfig", () => {
+  it("defaults finite positive OPENING_TUTOR_* knobs", () => {
+    expect(loadOpeningTutorConfig({})).toEqual({
+      maxContextCharacters: 12_000,
+      reservedCents: 100,
+      maxOutputTokens: 2_048,
+    });
+  });
+
+  it("rejects non-finite, non-positive, and non-integer OPENING_TUTOR_* values", () => {
+    for (const invalid of [
+      { OPENING_TUTOR_MAX_CONTEXT_CHARS: "NaN" },
+      { OPENING_TUTOR_MAX_CONTEXT_CHARS: "Infinity" },
+      { OPENING_TUTOR_MAX_CONTEXT_CHARS: "0" },
+      { OPENING_TUTOR_MAX_CONTEXT_CHARS: "-1" },
+      { OPENING_TUTOR_MAX_CONTEXT_CHARS: "12.5" },
+      { OPENING_TUTOR_RESERVED_CENTS: "" },
+      { OPENING_TUTOR_RESERVED_CENTS: "0" },
+      { OPENING_TUTOR_MAX_OUTPUT_TOKENS: "-2" },
+      { OPENING_TUTOR_MAX_OUTPUT_TOKENS: "abc" },
+    ]) {
+      expect(() => loadOpeningTutorConfig(invalid)).toThrow();
+    }
+  });
+
+  it("parses explicit positive integer OPENING_TUTOR_* values", () => {
+    expect(
+      loadOpeningTutorConfig({
+        OPENING_TUTOR_MAX_CONTEXT_CHARS: "8000",
+        OPENING_TUTOR_RESERVED_CENTS: "50",
+        OPENING_TUTOR_MAX_OUTPUT_TOKENS: "1024",
+      }),
+    ).toEqual({
+      maxContextCharacters: 8000,
+      reservedCents: 50,
+      maxOutputTokens: 1024,
     });
   });
 });

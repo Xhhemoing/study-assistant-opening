@@ -9,6 +9,7 @@ export function getNodeEnv(
 }
 
 export { EnvValidationError, loadEnv, type AppEnv } from "./env";
+export { loadOpeningModel, loadOpeningTutorConfig } from "./opening-model";
 export {
   assertOpeningTestDatabase,
   setup as openingTestDatabaseSetup,
