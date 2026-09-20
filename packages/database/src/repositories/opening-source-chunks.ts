@@ -15,6 +15,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       SELECT c.* FROM opening_source_chunks c
       JOIN opening_sources s ON s.id = c.source_id
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
+        AND c.source_version = s.version
         AND c.source_id IN ${sql(sourceIds)}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at
     `;

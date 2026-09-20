@@ -164,7 +164,59 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
       );
     },
 
-    insertObservation: async (
+    listObservationsForCourse: async (
+      scope: Scope,
+      courseId: string,
+    ): Promise<LearningObservation[]> => {
+      const rows = await db.query<{
+        id: string;
+        workspace_id: string;
+        session_id: string;
+        course_id: string;
+        skill_label: string;
+        source_ids: string[];
+        problem_id: string | null;
+        retest_id: string | null;
+        answer: string;
+        outcome: LearningObservation["outcome"];
+        assistance: LearningObservation["assistance"];
+        client_key: string;
+        occurred_at: string;
+        source_turn_ids: string[];
+        verdict_source: LearningObservation["verdictSource"];
+        reference_source_id: string | null;
+        evidence_verdict: LearningObservation["evidenceVerdict"];
+      }>(
+        `SELECT id, workspace_id, session_id, course_id, skill_label, source_ids,
+                problem_id, retest_id, answer, outcome, assistance, client_key,
+                occurred_at, source_turn_ids, verdict_source, reference_source_id, evidence_verdict
+         FROM opening_learning_observations
+         WHERE workspace_id = $1 AND owner_user_id = $2 AND course_id = $3
+         ORDER BY occurred_at ASC`,
+        [scope.workspaceId, scope.ownerUserId, courseId],
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        sessionId: row.session_id,
+        courseId: row.course_id,
+        skillLabel: row.skill_label,
+        sourceIds: row.source_ids ?? [],
+        problemId: row.problem_id,
+        retestId: row.retest_id,
+        answer: row.answer,
+        outcome: row.outcome,
+        assistance: row.assistance,
+        clientKey: row.client_key,
+        occurredAt: new Date(row.occurred_at).toISOString(),
+        sourceTurnIds: row.source_turn_ids ?? [],
+        verdictSource: row.verdict_source,
+        referenceSourceId: row.reference_source_id,
+        evidenceVerdict: row.evidence_verdict,
+      }));
+    },
+
+        insertObservation: async (
       scope: Scope,
       input: ObservationInput,
       opts?: {
@@ -222,9 +274,65 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
           ],
         );
       } catch (err) {
-        throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
-          code: "CONFLICT",
-        });
+        // Unique (workspace_id, client_key) => idempotent replay of prior observation.
+        const existing = await db.query<{
+          id: string;
+          assistance: LearningObservation["assistance"];
+          occurred_at: string;
+          source_turn_ids: string[];
+          verdict_source: LearningObservation["verdictSource"];
+          reference_source_id: string | null;
+          evidence_verdict: LearningObservation["evidenceVerdict"];
+          answer: string;
+          outcome: LearningObservation["outcome"];
+          course_id: string;
+          skill_label: string;
+          source_ids: string[];
+          problem_id: string | null;
+          retest_id: string | null;
+          session_id: string;
+          client_key: string;
+        }>(
+          `SELECT id, assistance, occurred_at, source_turn_ids, verdict_source, reference_source_id,
+                  evidence_verdict, answer, outcome, course_id, skill_label, source_ids,
+                  problem_id, retest_id, session_id, client_key
+           FROM opening_learning_observations
+           WHERE workspace_id = $1 AND client_key = $2 AND owner_user_id = $3
+           LIMIT 1`,
+          [scope.workspaceId, input.clientKey, scope.ownerUserId],
+        );
+        const row = existing[0];
+        if (!row) {
+          throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+            code: "CONFLICT",
+          });
+        }
+        const replayAllows = qualifyObservationAssistance({
+          declared: row.assistance,
+          exposures: [],
+          problemId: row.problem_id,
+          outcome: row.outcome,
+        }).allowsIndependent;
+        return {
+          sessionId: row.session_id,
+          courseId: row.course_id,
+          skillLabel: row.skill_label,
+          sourceIds: row.source_ids,
+          problemId: row.problem_id,
+          retestId: row.retest_id,
+          answer: row.answer,
+          outcome: row.outcome,
+          assistance: row.assistance,
+          clientKey: row.client_key,
+          id: row.id,
+          workspaceId: scope.workspaceId,
+          occurredAt: new Date(row.occurred_at).toISOString(),
+          sourceTurnIds: row.source_turn_ids ?? [],
+          verdictSource: row.verdict_source,
+          referenceSourceId: row.reference_source_id,
+          evidenceVerdict: row.evidence_verdict,
+          allowsIndependent: replayAllows,
+        };
       }
 
       return {

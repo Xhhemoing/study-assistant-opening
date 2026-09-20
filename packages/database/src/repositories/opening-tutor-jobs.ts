@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
+import type { Citation } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
+import { loadTutorHistory } from "./opening-tutor-history";
 
 export type OpeningTutorJobRecord = {
   id: string;
@@ -40,6 +42,7 @@ export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJob
  */
 export function createOpeningTutorJobsRepository(sql: Sql) {
   return {
+    loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
         UPDATE opening_tutor_jobs j SET status = 'running', updated_at = now()
@@ -79,6 +82,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       jobId: string;
       assistantTurnId: string;
       text: string;
+      citations: Citation[];
       candidates: Array<{ payload: unknown; sourceIds: string[] }>;
     }): Promise<void> {
       await sql.begin(async (tx) => {
@@ -91,7 +95,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         `;
         if (!claimed.length) return;
         await tx`
-          UPDATE opening_turns SET text = ${input.text}, status = 'complete'
+          UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)}, status = 'complete'
           WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
         `;
         for (const candidate of input.candidates) {
@@ -115,9 +119,10 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       sourceIds: string[];
       currentPage: number | null;
       chunkId: string | null;
+      learningSessionId: string | null;
     } | null> {
       const rows = await sql`
-        SELECT text, mode, source_ids, current_page, chunk_id FROM opening_turns
+        SELECT text, mode, source_ids, current_page, chunk_id, learning_session_id FROM opening_turns
         WHERE id = ${id} AND workspace_id = ${workspaceId} LIMIT 1
       `;
       if (!rows.length) return null;
@@ -128,6 +133,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         sourceIds: (row.source_ids as string[]) ?? [],
         currentPage: (row.current_page as number | null) ?? null,
         chunkId: (row.chunk_id as string | null) ?? null,
+        learningSessionId: (row.learning_session_id as string | null) ?? null,
       };
     },
 

@@ -14,9 +14,6 @@ export class OpeningBudgetError extends Error {
   }
 }
 
-/** Hard per-workspace spend ceiling (cents) until a configured budget lands. */
-const WORKSPACE_CAP_CENTS = 100_000;
-
 export type BudgetReservationRecord = {
   id: string;
   workspaceId: string;
@@ -61,7 +58,8 @@ function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
   };
 }
 
-export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository {
+export function createOpeningBudgetRepository(sql: Sql, options: { dailyCapCents: number } = { dailyCapCents: 0 }): OpeningBudgetRepository {
+  if (!Number.isSafeInteger(options.dailyCapCents) || options.dailyCapCents < 0) throw new Error("invalid daily budget cap");
   const changeState = async (
     where: { by: "requestId" | "id"; value: string },
     state: "released" | "completed",
@@ -72,7 +70,7 @@ export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository
     const rows = await sql`
       UPDATE opening_budget_reservations
       SET state = ${state}, updated_at = now()
-      WHERE ${predicate}
+      WHERE ${predicate} AND state = 'reserved'
       RETURNING *
     `;
     if (!rows.length) {
@@ -92,29 +90,36 @@ export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository
 
   return {
     async reserve(scope, input) {
-      if (input.amountCents <= 0) {
-        throw new OpeningBudgetError("CONFLICT", "amount must be positive");
+      if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
+        throw new OpeningBudgetError("CONFLICT", "amount must be a positive integer");
       }
-      const rows = await sql`
-        INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, request_id)
-        SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.requestId}
-        WHERE ${input.amountCents} + COALESCE((
-          SELECT sum(amount_cents) FROM opening_budget_reservations
-          WHERE workspace_id = ${scope.workspaceId} AND state = 'reserved'
-        ), 0) <= ${WORKSPACE_CAP_CENTS}
-        ON CONFLICT (request_id) DO NOTHING
-        RETURNING *
-      `;
-      if (rows.length) {
+      return sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
+        const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
+        if (existing.length) {
+          const row = mapReservation(existing[0] as Record<string, unknown>);
+          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || row.amountCents !== input.amountCents || row.state !== 'reserved') {
+            throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
+          }
+          return row;
+        }
+        // Count all unresolved calls, including old ones, plus today's completed spend.
+        // A late settlement is charged on both its reservation day and settlement day.
+        const rows = await tx`
+          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, request_id)
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.requestId}
+          WHERE ${input.amountCents} + COALESCE((
+            SELECT sum(amount_cents) FROM opening_budget_reservations
+            WHERE workspace_id=${scope.workspaceId} AND (state='reserved' OR
+              (state='completed' AND (created_at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+                OR updated_at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'))))
+          ), 0) <= ${options.dailyCapCents}
+          RETURNING *
+        `;
+        if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
         return mapReservation(rows[0] as Record<string, unknown>);
-      }
-      const existing = await sql`
-        SELECT * FROM opening_budget_reservations WHERE request_id = ${input.requestId}
-      `;
-      if (existing.length) {
-        return mapReservation(existing[0] as Record<string, unknown>);
-      }
-      throw new OpeningBudgetError("BUDGET_EXCEEDED", "workspace budget exceeded");
+      });
     },
     release(requestId) {
       return changeState({ by: "requestId", value: requestId }, "released");
@@ -123,8 +128,8 @@ export function createOpeningBudgetRepository(sql: Sql): OpeningBudgetRepository
       return changeState({ by: "requestId", value: requestId }, "completed");
     },
     async settle(reservationId, actualCents) {
-      if (actualCents < 0) {
-        throw new OpeningBudgetError("CONFLICT", "actual amount must not be negative");
+      if (!Number.isSafeInteger(actualCents) || actualCents <= 0) {
+        throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
       }
       const rows = await sql`
         UPDATE opening_budget_reservations

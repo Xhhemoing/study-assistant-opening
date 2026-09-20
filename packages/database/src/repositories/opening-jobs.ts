@@ -53,6 +53,8 @@ export type OpeningJobRepository = {
   ): Promise<number>;
   claim(id: string): Promise<OpeningJobRecord | null>;
   sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
+  /** Workspace privacy epoch (M02); defaults to 0 if column absent / row missing. */
+  workspacePrivacyEpoch(workspaceId: string): Promise<number>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
 };
 
@@ -133,6 +135,13 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         LIMIT 1
       `;
       return rows.length ? Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0) : null;
+    },
+    async workspacePrivacyEpoch(workspaceId) {
+      const rows = await sql`
+        SELECT privacy_epoch FROM workspaces WHERE id = ${workspaceId} LIMIT 1
+      `;
+      if (!rows.length) return 0;
+      return Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0);
     },
     async claim(id) {
       // updated_at is the heartbeat. Long handlers must periodically touch it;

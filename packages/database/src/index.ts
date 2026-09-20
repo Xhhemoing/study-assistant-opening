@@ -41,3 +41,11 @@ export { magicMatchesMime } from "./storage/magic";
 export * from "./schema/opening-assistant-candidates";
 export * from "./repositories/opening-candidates";
 export * from "./repositories/opening-tutor-jobs";
+
+export * from "./schema/opening-memory";
+export * from "./repositories/opening-memory";
+
+export * from "./repositories/opening-privacy";
+export * from "./repositories/opening-retests";
+export * from "./schema/opening-planning";
+export * from "./repositories/opening-plans";
