@@ -8,6 +8,7 @@ import { getAuthRuntime } from "../../server/runtime";
 import { requirePrincipal } from "../auth/service";
 import { createOpeningObservationService } from "./learning/observation-service";
 import { createTutorService, type TutorService } from "./tutor/tutor-service";
+import { createOpeningPlanService } from "./planning/plan-service";
 
 function openingLearningDbFromSql(sql: Sql) {
   return {
@@ -45,4 +46,8 @@ export function getObservationService(sql: Sql) {
   return createOpeningObservationService(
     createOpeningLearningRepository(openingLearningDbFromSql(sql)),
   );
+}
+
+export function getPlanService(sql: import("postgres").Sql) {
+  return createOpeningPlanService(sql);
 }

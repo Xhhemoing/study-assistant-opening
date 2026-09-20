@@ -1,4 +1,4 @@
-/** Opening-release access policy (registration + cookie-auth origin). */
+﻿/** Opening-release access policy (registration + cookie-auth origin). */
 
 export const OPENING_TEST_FIXTURE_ORIGIN = "http://opening-fixture.test";
 
@@ -24,6 +24,20 @@ function normalizeOrigin(value: string): string | null {
   }
 }
 
+/** Local preview: treat localhost and 127.0.0.1 as the same loopback host. */
+function loopbackEquivalent(a: string, b: string): boolean {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    if (left.protocol !== right.protocol) return false;
+    if (left.port !== right.port) return false;
+    const hosts = new Set([left.hostname, right.hostname]);
+    return hosts.size === 2 && hosts.has("localhost") && hosts.has("127.0.0.1");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Unsafe cookie-auth requests must present a same-origin Origin.
  * Fixtures use their configured application origin, never a cross-origin bypass.
@@ -40,7 +54,10 @@ export function assertAllowedCookieAuthOrigin(
     throw new Error("Invalid Origin for cookie-auth mutation");
   }
   const allowed = normalizeOrigin(publicBaseUrl);
-  if (!allowed || origin !== allowed) {
+  if (!allowed) {
+    throw new Error("Foreign Origin denied for cookie-auth mutation");
+  }
+  if (origin !== allowed && !loopbackEquivalent(origin, allowed)) {
     throw new Error("Foreign Origin denied for cookie-auth mutation");
   }
 }
