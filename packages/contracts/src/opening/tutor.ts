@@ -56,6 +56,11 @@ export const providerInputSchema = z
     instruction: z.string().min(1).max(50_000),
     text: z.string().max(50_000),
     chunks: z.array(sourceChunkSchema).max(64),
+    history: z.array(z.object({
+      role: z.enum(["user", "assistant"]),
+      text: z.string().max(12_000),
+    }).strict()).max(40).refine((turns) => turns.reduce((sum, turn) => sum + turn.text.length, 0) <= 12_000,
+      "history exceeds character budget").optional(),
     mode: tutorModeSchema,
     maxOutputTokens: z.number().int().positive().max(16_384),
     mediaCapability: providerMediaCapabilitySchema,

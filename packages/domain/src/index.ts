@@ -146,3 +146,19 @@ export {
   type HelpExposureLevel,
   type ObservationOutcome,
 } from "./opening/assistance";
+
+export {
+  isMemoryEligible,
+  memoriesForContext,
+  memoriesForReview,
+  memoryCardMeta,
+} from "./opening/memory-policy";
+
+export { summarizeObservations, type SummarizeOptions } from "./opening/learning-summary";
+export {
+  suggestRetestAt,
+  buildRetestCandidates,
+  DEFAULT_RETEST_DELAY_DAYS,
+  DEFAULT_RETEST_BATCH_LIMIT,
+  type BuildRetestCandidatesInput,
+} from "./opening/retest-policy";

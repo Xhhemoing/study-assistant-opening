@@ -13,6 +13,9 @@ export const memoryItemSchema = z
     version: z.number().int().nonnegative(),
     expiresAt: isoDateTimeSchema.nullable(),
     status: z.enum(["active", "rejected", "deleted"]),
+    /** When the card was created (why/when surface). */
+    createdAt: isoDateTimeSchema,
+    updatedAt: isoDateTimeSchema,
   })
   .strict()
   .superRefine((value, ctx) => {

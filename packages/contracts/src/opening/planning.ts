@@ -46,10 +46,21 @@ export const taskCreateInputSchema = z
     title: z.string().min(1).max(240),
     minutes: z.number().int().positive().max(24 * 60),
     dueAt: isoDateTimeSchema.nullable(),
+    /** Ambiguous deadline text — never auto-promoted to dueAt. */
+    dueText: z.string().min(1).max(200).nullable().optional(),
     priority: z.number().finite(),
     candidateId: uuidSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.dueText && value.dueAt) {
+      ctx.addIssue({
+        code: "custom",
+        message: "dueText cannot become a formal deadline while dueAt is set",
+        path: ["dueText"],
+      });
+    }
+  });
 
 export const plannedBlockSchema = z
   .object({
