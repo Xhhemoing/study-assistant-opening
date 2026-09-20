@@ -35,8 +35,8 @@ it('deduplicates repeated spreadsheet display without removing week differences'
 
 ### P02: Tasks, plan drafts and atomic acceptance
 
-**Owner:** DATA+EXPERIENCE. **Depends:** P01,F03,L01 (migration0021 after0020; L01 follows M01/0020).
-**Create:** `packages/database/src/schema/opening-planning.ts`, `packages/database/src/migrations/0021_opening_planning.sql`, `packages/database/src/repositories/opening-plans.ts`, `packages/domain/src/opening/day-planner.ts`, `packages/domain/src/opening/day-planner.test.ts`, `apps/web/src/features/opening/planning/plan-service.ts`, `apps/web/src/app/api/opening/tasks/route.ts`, `apps/web/src/app/api/opening/timetable/route.ts`, `apps/web/src/app/api/opening/today/route.ts`, `apps/web/src/app/api/opening/plans/route.ts`, `apps/web/src/app/api/opening/plans/[id]/accept/route.ts`, `tests/integration/handler/opening-plans.test.ts`.
+**Owner:** DATA+EXPERIENCE. **Depends:** P01,F03,L01 (migration0024 after M02/0023; L01 remains a retest integration dependency).
+**Create:** `packages/database/src/schema/opening-planning.ts`, `packages/database/src/migrations/0024_opening_planning.sql`, `packages/database/src/repositories/opening-plans.ts`, `packages/domain/src/opening/day-planner.ts`, `packages/domain/src/opening/day-planner.test.ts`, `apps/web/src/features/opening/planning/plan-service.ts`, `apps/web/src/app/api/opening/tasks/route.ts`, `apps/web/src/app/api/opening/timetable/route.ts`, `apps/web/src/app/api/opening/today/route.ts`, `apps/web/src/app/api/opening/plans/route.ts`, `apps/web/src/app/api/opening/plans/[id]/accept/route.ts`, `tests/integration/handler/opening-plans.test.ts`.
 **Interfaces:** `planDay(tasks:TaskItem[],free:TimeBlock[]):{blocks:PlannedBlock[];unscheduledTaskIds:string[]}`; proposePlan/acceptPlan from interfaces.md; task status changes require user action and version. Existing old goal model is not silently reused as every campus task.
 
 - [ ] Write failing pure test:
@@ -51,7 +51,7 @@ it('leaves tasks unscheduled instead of stealing sleep', () => {
 - [ ] Run planner unit red, then guarded plan tests red.
 - [ ] Normalize free slots after subtracting all hard blocks; sort tasks by confirmed deadline risk, user priority, then stable ID. Fit non-overlapping blocks, list unplaced tasks instead of inventing time. T03 task candidates are visible pending suggestions: POST tasks accepts candidateId plus user-confirmed title/minutes/dueAt and consumes the candidate transactionally. Estimates are shown as estimates; ambiguous dueText stays pending and cannot become a formal deadline without confirmation.
 - [ ] Draft stores baseVersion and input snapshot. Accept transaction locks today's plan, checks expected version and current hard blocks, writes a new accepted version once using clientKey. Concurrent old draft gets409. Reject leaves current plan unchanged. Change of user availability invalidates stale draft.
-- [ ] Test two accepts racing, same-key changed payload, rejected draft, incomplete timetable, task done elsewhere, newly inserted class and protected sleep. Commit migration0021 only after migration ordering passes. Do not use the original working tree's uncommitted plan-state code without separate review.
+- [ ] Test two accepts racing, same-key changed payload, rejected draft, incomplete timetable, task done elsewhere, newly inserted class and protected sleep. Commit migration0024 only after migration ordering passes. Do not use the original working tree's uncommitted plan-state code without separate review.
 
 ### P03: Due items and honest reminder delivery status
 

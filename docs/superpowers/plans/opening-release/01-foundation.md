@@ -60,7 +60,7 @@ it('rejects unsupported formats and traversing names', () => {
 ### F03: Sources/jobs/outbox/budget persistence and test fixture
 
 **Owner:** DATA. **Depends:** F01,F02.
-**Create:** `packages/database/src/schema/opening-sources.ts`, `packages/database/src/schema/opening-jobs.ts`, `packages/database/src/schema/opening-budget.ts`, `packages/database/src/migrations/0016_opening_sources_jobs.sql`, `packages/database/src/repositories/opening-sources.ts`, `packages/database/src/repositories/opening-jobs.ts`, `packages/database/src/repositories/opening-budget.ts`, `tests/integration/opening-fixture.ts`, `tests/integration/opening-foundation.test.ts`, `apps/web/src/features/opening/runtime.ts`.
+**Create:** `packages/database/src/schema/opening-sources.ts`, `packages/database/src/schema/opening-jobs.ts`, `packages/database/src/schema/opening-budget.ts`, `packages/database/src/migrations/0016_opening_sources.sql`, `packages/database/src/repositories/opening-sources.ts`, `packages/database/src/repositories/opening-jobs.ts`, `packages/database/src/repositories/opening-budget.ts`, `tests/integration/opening-fixture.ts`, `tests/integration/opening-foundation.test.ts`, `apps/web/src/features/opening/runtime.ts`.
 **Modify:** `packages/database/src/index.ts`.
 **Interfaces:** `createOpeningSourceRepository(sql)`, `createOpeningJobRepository(sql)`, `createOpeningBudgetRepository(sql)`; source methods `create(scope,input)`, `get(scope,id)`, `list(scope)`; jobs `createOnce(scope,{key,kind,payload,privacyEpoch})`, `get(scope,id)`. Runtime composes auth and opening repositories, not a second identity store.
 

@@ -38,3 +38,6 @@ graphify-out/
 
 services/parser/.venv/
 __pycache__/
+
+# Subagent scratch space
+.agent_workspace/

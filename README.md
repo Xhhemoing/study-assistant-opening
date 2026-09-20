@@ -21,7 +21,10 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [Brainstorm 研究索引](docs/brainstorm/INDEX.md)
 - [项目算法与工程做法地图](docs/brainstorm/ALGORITHM_MAP.md)
 - [已批准：终身学习平台调整设计](docs/plans/2026-07-21-lifelong-learning-design.md)
-- [当前实施计划：终身学习平台](docs/plans/2026-07-21-lifelong-learning-implementation.md)
+- [当前实施计划：开学版及能力扩展](docs/superpowers/plans/2026-09-12-opening-release-implementation.md)
+- [质量修复与双Agent协作计划](docs/plans/2026-09-18-quality-dual-agent.md)
+- [任务状态与证据](docs/superpowers/plans/opening-release/tasks.json)
+- [长期平台路线](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
 - [ADR-001：技术栈锁定](docs/decisions/ADR-001-stack.md)
 - [CI 说明](docs/operations/ci.md)
@@ -37,9 +40,11 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前 HEAD 为 `146d666`（分支 `feat/complete-phase1-current-work`），能力声明按证据分为三类。2026-08-15 冻结快照见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)；当前问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
+当前开发主线为 `feat/opening-release`，以开学版总计划、tasks.json及对应证据为准。已落盘迁移为0001–0021；后续编号由集成者统一分配。近期真实材料上传/解析记录见 [T02/T03证据](docs/superpowers/evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md)。局部verified不等于完整产品验收：历史上下文传输、每日预算、真实模型语义、真机和恢复门禁仍需完成，具体工作顺序见质量修复计划。
 
-### 已提交且可追溯
+以下保留2026-08-15 Phase 1历史快照，不代表当前工作区、工具可用性或远端CI状态。冻结基线见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)；旧问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
+
+### Phase 1历史：已提交且可追溯
 
 - monorepo、CI 工作流、PostgreSQL/Redis/MinIO 基础设施定义。
 - Workspace、统一资产契约、Document/Block/Revision/Relation/Property、Course/AssetMembership。
@@ -55,13 +60,13 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - `0014_learning_event_delete_guard.sql` 已提交表级 no-delete trigger（无 session-variable 旁路）。
 - 开发预览页：`/preview/notebook`、`/preview/notion-import`。
 
-### 工作区存在但尚未完整验证
+### Phase 1历史：工作区存在但尚未完整验证
 
 - 工作区另有未提交的 `0016_goal_and_plan_state.sql` 与 `/api/goals` 草稿，属于 AIST-002 下一片，不视为已发布。
 - 完整 PostgreSQL、handler、browser、build 和 CI 门禁未在干净环境通过。本地缺少 Docker CLI 与 PATH 中的 `bash`；GitHub Actions `main` 最新 run 在 Initialize containers 因 `bitnami/minio:2025.4.22` 镜像不存在而失败。
 - “文件存在”“源码审查通过”或“当前工作区可运行”都不等于已发布能力。
 
-### 未接通 / 规划中
+### Phase 1历史：未接通 / 规划中
 
 - Learn 主读仍是 `createMockProvider()` + localStorage；练习页仍从 Mock 取题。
 - 账号级级联删除 / 合规删除流程未做（`0012` 仍对 workspace/user 使用 `ON DELETE CASCADE`）。
@@ -88,7 +93,7 @@ npm run test:browser
 npm run build
 ```
 
-Unit 通过不代表完整系统通过。当前完整门禁未跑：本地无 Docker/bash；CI 被失效 MinIO 镜像阻断。GitHub Actions `quality` job 仍是合并权威证据，但 `main` 上最新 run 尚未越过容器初始化。详细前置条件和 Windows/Git Bash 降级行为见 [CI 说明](docs/operations/ci.md)。
+Unit通过不代表完整系统通过。集成测试须设置独立测试数据库与`OPENING_TEST_DB=1`，不能对用户数据库执行测试；browser、真实模型、恢复演练和远端CI需各自保留证据。本地结果不能替代当前提交的GitHub Actions `quality`门禁。详细前置条件见 [CI说明](docs/operations/ci.md)。
 
 ## 预定技术方向
 

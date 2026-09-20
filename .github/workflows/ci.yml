@@ -113,8 +113,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Plan and tooling checks
+        run: |
+          node scripts/validate-opening-plan.mjs
+          node --test tests/tooling/*.test.mjs
+
       - name: Unit and contract tests
-        run: npm test
+        run: npm test -- --project unit --project contract
+
+      - name: Technology spike tests
+        run: npm test -- --project '@aistudy/spike-*'
 
       - name: Integration tests
         run: npm run test:integration

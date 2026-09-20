@@ -22,7 +22,9 @@ Triggers:
 | Install | `npm ci` | Uses lockfile; cache via setup-node |
 | Lint | `npm run lint` | ESLint flat config |
 | Typecheck | `npm run typecheck` | packages + web + worker |
-| Unit/contract | `npm test` | Vitest named projects |
+| Plan/tooling | `node scripts/validate-opening-plan.mjs` and `node --test tests/tooling/*.test.mjs` | Includes migration reservation conflicts |
+| Unit/contract | `npm test -- --project unit --project contract` | Only these named projects |
+| Technology spikes | `npm test -- --project '@aistudy/spike-*'` | Spike projects run separately; integration/handler suites are not repeated |
 | Integration | `npm run test:integration` | DB/Redis/storage probes |
 | Route handlers | `npm run test:handler` | HTTP handler behavior against isolated services |
 | Browser E2E | `npm run test:browser` | Real production web server and Playwright Chromium |

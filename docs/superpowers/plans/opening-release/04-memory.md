@@ -13,7 +13,7 @@ Candidate memory is not a fact. Temporary state expires. No clinical/personality
 ### M01: Candidate, confirmed and temporary memory lifecycle
 
 **Owner:** AI+DATA. **Depends:** T03.
-**Create:** `packages/database/src/schema/opening-memory.ts`, `packages/database/src/migrations/0020_opening_memory_privacy.sql`, `packages/database/src/repositories/opening-memory.ts`, `packages/domain/src/opening/memory-policy.ts`, `packages/domain/src/opening/memory-policy.test.ts`, `apps/web/src/features/opening/memory/memory-service.ts`, `apps/web/src/app/api/opening/memory/route.ts`, `apps/web/src/app/api/opening/memory/[id]/decision/route.ts`, `tests/integration/handler/opening-memory.test.ts`.
+**Create:** `packages/database/src/schema/opening-memory.ts`, `packages/database/src/migrations/0022_opening_memory_privacy.sql`, `packages/database/src/repositories/opening-memory.ts`, `packages/domain/src/opening/memory-policy.ts`, `packages/domain/src/opening/memory-policy.test.ts`, `apps/web/src/features/opening/memory/memory-service.ts`, `apps/web/src/app/api/opening/memory/route.ts`, `apps/web/src/app/api/opening/memory/[id]/decision/route.ts`, `tests/integration/handler/opening-memory.test.ts`.
 **Interfaces:** MemoryItem/MemoryDecision and listMemory/decideMemory from interfaces.md; `isMemoryEligible(item:MemoryItem,now:string):boolean` for context selection; `proposeMemory(scope,{text,sourceTurnIds,expiresAt:null|string})` creates candidate/temporary only.
 
 - [ ] Write failing pure test:
