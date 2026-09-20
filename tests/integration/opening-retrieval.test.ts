@@ -30,6 +30,15 @@ run("opening retrieval isolation", () => {
     expect(await chunks.listChunksAtVersion(fixture.scope, own, 1)).toEqual([]);
   });
 
+  it("lists only each source's current version", async () => {
+    const id = await source(fixture.scope, 1);
+    await chunks.replaceChunks(fixture.scope, { sourceId: id, sourceVersion: 1, chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "current", imageObjectKey: null }] });
+    await fixture.sql`INSERT INTO opening_source_chunks (source_id, source_version, page, text) VALUES (${id}, 0, 1, 'stale')`;
+
+    const result = await chunks.listForSources(fixture.scope, [id]);
+    expect(result.map((item) => item.text)).toEqual(["current"]);
+  });
+
   it("handles revoked, empty, oversized, and injected context", async () => {
     const id = await source(fixture.scope); await fixture.sql`UPDATE opening_sources SET upload_state = 'rejected' WHERE id = ${id}`;
     expect(await chunks.listChunks(fixture.scope, id)).toEqual([]);

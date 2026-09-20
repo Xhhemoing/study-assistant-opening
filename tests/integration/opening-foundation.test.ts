@@ -22,7 +22,7 @@ beforeAll(async () => {
   fixture = await createOpeningFixture();
   sources = createOpeningSourceRepository(fixture.sql);
   jobs = createOpeningJobRepository(fixture.sql);
-  budget = createOpeningBudgetRepository(fixture.sql);
+  budget = createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 });
 });
 beforeEach(async () => {
   await fixture.reset();

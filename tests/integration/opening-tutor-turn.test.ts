@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { OpeningProviderError } from "@aistudy/ai";
+import { createOpeningProvider, OpeningProviderError } from "@aistudy/ai";
 import {
   createOpeningBudgetRepository,
   createOpeningCandidateRepository,
@@ -25,6 +25,21 @@ const chunk = { id: chunkId, sourceId, sourceVersion: 0, page: 1, slideLabel: nu
 async function seedConversationAndSource() {
   const conversations = createOpeningConversationRepository(fixture.sql);
   const conversation = await conversations.create(fixture.scope, { title: "tutor gate", courseId: null });
+  // Prior completed exchange must reach the real provider HTTP body as history.
+  const prior = await conversations.appendSavedTurn({
+    scope: fixture.scope,
+    conversationId: conversation.id,
+    text: "what did we cover yesterday",
+    mode: "explain",
+    clientKey: `client-${randomUUID()}`,
+    sourceIds: [],
+    learningSessionId: null,
+    currentPage: null,
+    chunkId: null,
+  });
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${prior.turnId}, ${prior.assistantTurnId})`;
+  await fixture.sql`UPDATE opening_turns SET status='complete', text='we covered inertia' WHERE id=${prior.assistantTurnId}`;
+  await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${prior.jobId}`;
   const saved = await conversations.appendSavedTurn({
     scope: fixture.scope,
     conversationId: conversation.id,
@@ -63,7 +78,7 @@ function buildDeps(citedChunkId: string | null, providerError?: Error) {
   const deps = {
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql),
     chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql),
+    budget: createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 }),
     provider,
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 2_048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
   };
@@ -85,13 +100,38 @@ describe("opening tutor turn durable path (guarded)", () => {
     const seeded = await seedConversationAndSource();
     const actualChunkId = (await fixture.sql`SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId}`)[0].id as string;
     const { deps, provider } = buildDeps(actualChunkId);
-    const result = await createTutorTurnHandler(deps)(seeded.jobId);
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      // Prove server history reached the real adapter HTTP body (fetch-only mock).
+      // messages[0]=system, then prior user/assistant, then current question+chunks.
+      expect(body.messages[0].role).toBe("system");
+      expect(body.messages.slice(1, 3)).toEqual([
+        { role: "user", content: "what did we cover yesterday" },
+        { role: "assistant", content: "we covered inertia" },
+      ]);
+      expect(body.messages[3].content).toContain("explain the laws of motion");
+      expect(body.messages[3].content).toContain("Newton wrote the laws of motion");
+      expect(body.messages[3].content).toContain(actualChunkId);
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          text: "The laws of motion are F = ma.", citedChunkIds: [actualChunkId],
+          candidates: [{ kind: "memory", text: "Learner is studying Newton's laws", temporary: false }],
+        }) } }], usage: { prompt_tokens: 100, completion_tokens: 50 },
+      }));
+    });
+    const adapter = createOpeningProvider({ baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl });
+    // Only the network is replaced: exercise worker, real adapter and real DB together.
+    const result = await createTutorTurnHandler({ ...deps, provider: adapter })(seeded.jobId);
     expect(result).toEqual({ skipped: false });
 
     const job = await deps.tutorJobs.get(fixture.scope, seeded.jobId);
     expect(job?.status).toBe("succeeded");
     const turns = await fixture.sql`SELECT role, text, status FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
     expect(turns[0]).toMatchObject({ role: "assistant", text: "The laws of motion are F = ma.", status: "complete" });
+    const persistedCitations = await fixture.sql`SELECT citations FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
+    expect(persistedCitations[0].citations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chunkId: actualChunkId, sourceId }),
+    ]));
     const candidates = await fixture.sql`SELECT source_turn_id, source_ids, status, payload FROM opening_assistant_candidates WHERE workspace_id = ${fixture.scope.workspaceId}`;
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ source_turn_id: seeded.assistantTurnId, status: "pending" });
@@ -100,7 +140,8 @@ describe("opening tutor turn durable path (guarded)", () => {
 
     const listPending = await createOpeningCandidateRepository(fixture.sql).listPending(fixture.scope);
     expect(listPending).toHaveLength(1);
-    expect(provider.complete).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(provider.complete).not.toHaveBeenCalled();
   });
 
   it("skips redelivery without re-persisting a second candidate", async () => {
@@ -116,7 +157,7 @@ describe("opening tutor turn durable path (guarded)", () => {
 
   it("fails definitively on provider auth errors and releases the reservation", async () => {
     const seeded = await seedConversationAndSource();
-    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_AUTH", "bad key", 401));
+    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_AUTH", "bad key"));
     await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toThrow();
     const job = await deps.tutorJobs.get(fixture.scope, seeded.jobId);
     expect(job?.status).toBe("failed");
@@ -128,7 +169,7 @@ describe("opening tutor turn durable path (guarded)", () => {
 
   it("keeps outcome unknown and retains the reservation on provider timeouts", async () => {
     const seeded = await seedConversationAndSource();
-    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", 0));
+    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true));
     await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toThrow();
     const job = await deps.tutorJobs.get(fixture.scope, seeded.jobId);
     expect(job?.status).toBe("outcome_unknown");

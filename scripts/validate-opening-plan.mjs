@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -40,10 +40,27 @@ export function validateTaskGraph(tasks) {
   return errors;
 }
 
+export function validateMigrationReservations(existing, planned) {
+  const byVersion = new Map();
+  const errors = [];
+  for (const name of [...existing, ...planned]) {
+    const version = name.match(/^(\d{4})_/)?.[1];
+    if (!version) continue;
+    const previous = byVersion.get(version);
+    if (previous && previous !== name) {
+      errors.push(`migration number collision: ${name} conflicts with ${previous}`);
+    } else {
+      byVersion.set(version, name);
+    }
+  }
+  return [...new Set(errors)];
+}
+
 export function validatePlanFiles(root) {
   const dir = path.join(root, "docs/superpowers/plans/opening-release");
   const manifest = JSON.parse(readFileSync(path.join(dir, "tasks.json"), "utf8"));
   const errors = validateTaskGraph(manifest.tasks);
+  const plannedMigrations = new Set();
   const master = readFileSync(path.join(root, "docs/superpowers/plans/2026-09-12-opening-release-implementation.md"), "utf8");
   for (const task of manifest.tasks) {
     const file = path.resolve(dir, task.plan);
@@ -52,6 +69,7 @@ export function validatePlanFiles(root) {
       continue;
     }
     const text = readFileSync(file, "utf8");
+    for (const match of text.matchAll(/migrations\/(\d{4}_[\w]+\.sql)/g)) plannedMigrations.add(match[1]);
     if (!new RegExp(`^#{2,3} ${task.id}:`, "m").test(text)) errors.push(`missing task section: ${task.id}`);
     if (!master.includes(`| ${task.id} |`)) errors.push(`missing master row: ${task.id}`);
     if (/\b(TODO|TBD|FIXME)\b/.test(text)) errors.push(`unresolved marker: ${task.plan}`);
@@ -63,6 +81,9 @@ export function validatePlanFiles(root) {
       }
     }
   }
+  errors.push(...validateMigrationReservations(
+    readdirSync(path.join(root, "packages/database/src/migrations")), [...plannedMigrations],
+  ));
   const ready = manifest.tasks.filter(t => t.status === "planned" && t.dependsOn.every(
     id => manifest.tasks.find(p => p.id === id)?.status === "verified",
   )).map(t => t.id);

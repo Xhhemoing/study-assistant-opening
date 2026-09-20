@@ -7,7 +7,7 @@ let budget: ReturnType<typeof createOpeningBudgetRepository>;
 
 beforeAll(async () => {
   fixture = await createOpeningFixture();
-  budget = createOpeningBudgetRepository(fixture.sql);
+  budget = createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 });
 });
 beforeEach(async () => {
   await fixture.reset();
@@ -41,6 +41,33 @@ describe("opening budget ledger (guarded)", () => {
       WHERE workspace_id = ${fixture.scope.workspaceId} AND state = 'reserved'
     `;
     expect(rows[0].total).toBe(80_000);
+  });
+
+  it("defaults to disabled and rejects invalid caps", async () => {
+    await expect(createOpeningBudgetRepository(fixture.sql).reserve(fixture.scope, { purpose: "tutor", amountCents: 1, requestId: "disabled" })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    expect(() => createOpeningBudgetRepository(fixture.sql, { dailyCapCents: NaN })).toThrow();
+  });
+
+  it("counts today's completed spend and unresolved reservations from previous days", async () => {
+    const reserve = (requestId: string, amountCents: number) => budget.reserve(fixture.scope, { purpose: "tutor", amountCents, requestId });
+    const old = await reserve("old", 40_000);
+    await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days' WHERE id=${old.id}`;
+    const today = await reserve("today", 50_000);
+    await budget.settle(today.id, 50_000);
+    await expect(reserve("over", 10_001)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days', updated_at=now()-interval '2 days' WHERE id=${today.id}`;
+    await expect(reserve("next-day", 50_000)).resolves.toBeDefined();
+  });
+
+  it("rejects changed or cross-workspace replay and cannot release completed spend", async () => {
+    const input = { purpose: "tutor", amountCents: 10, requestId: "replay" };
+    const first = await budget.reserve(fixture.scope, input);
+    expect((await budget.reserve(fixture.scope, input)).id).toBe(first.id);
+    await expect(budget.reserve(fixture.otherScope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(budget.reserve(fixture.scope, { ...input, amountCents: 11 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await budget.settle(first.id, 8);
+    await expect(budget.release(input.requestId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(budget.reserve(fixture.scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("a failed pre-send call releases the reservation by requestId", async () => {
