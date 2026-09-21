@@ -15,7 +15,7 @@ function fakeSql(handler: (query: string) => unknown[] = () => []) {
   }) as unknown as Sql & { calls: string[] };
   sql.calls = calls;
   sql.json = ((value: unknown) => value) as Sql["json"];
-  sql.begin = async (callback: (tx: Sql) => Promise<unknown>) => callback(sql);
+  sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
   return sql;
 }
 
