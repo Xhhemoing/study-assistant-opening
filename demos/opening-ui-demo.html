@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIstudy · 开学版界面逻辑演示</title>
+<style>
+  /* ============ 设计 token：中性工作台 + 品牌蓝 ============ */
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef0f4;
+    --border: #e3e6ec;
+    --text: #1b2434;
+    --muted: #64708273;
+    --muted-strong: #5d6a7d;
+    --accent: #3565e0;
+    --accent-strong: #2b54c0;
+    --accent-weak: #e9effd;
+    --ok: #157f52;
+    --ok-weak: #e2f4ea;
+    --warn: #9a6200;
+    --warn-weak: #fdf2dc;
+    --danger: #b8402f;
+    --danger-weak: #fbe9e5;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --shadow: 0 1px 2px rgba(20,28,45,.05), 0 8px 24px rgba(20,28,45,.06);
+    --shadow-pop: 0 12px 40px rgba(20,28,45,.18);
+  }
+  [data-theme="dark"] {
+    --bg: #14181f;
+    --surface: #1b212b;
+    --surface-2: #232b37;
+    --border: #2e3846;
+    --text: #e9edf3;
+    --muted-strong: #97a3b4;
+    --accent: #6d95f2;
+    --accent-strong: #86a9f6;
+    --accent-weak: #24324e;
+    --ok: #58c08c;
+    --ok-weak: #1d3329;
+    --warn: #d9a34a;
+    --warn-weak: #332a18;
+    --danger: #e07b6a;
+    --danger-weak: #3a2420;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.3);
+    --shadow-pop: 0 12px 40px rgba(0,0,0,.5);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #10151d;
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 18px 12px 90px;
+    transition: background .2s;
+  }
+  [data-theme="dark"] body { background: #0b0e13; }
+
+  button { font: inherit; cursor: pointer; }
+  a { color: inherit; text-decoration: none; }
+
+  /* ============ 演示说明条（不属于产品界面） ============ */
+  .demo-bar {
+    width: min(1120px, 100%);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    background: #1c2532; color: #c6d2e2;
+    border: 1px solid #2b3849; border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 16px;
+    font-size: 13px;
+  }
+  .demo-bar b { color: #fff; font-size: 14px; }
+  .demo-bar .spacer { flex: 1; }
+  .demo-btn {
+    background: #2b3849; color: #dfe7f2; border: 1px solid #3a4a5f;
+    border-radius: 8px; padding: 6px 12px; font-size: 13px;
+  }
+  .demo-btn:hover { background: #35465c; }
+  .demo-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ============ 应用框 ============ */
+  .app {
+    width: min(1120px, 100%);
+    background: var(--bg);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-pop);
+    display: grid;
+    grid-template-columns: 232px 1fr;
+    overflow: hidden;
+    min-height: 640px;
+    height: 78vh;
+    position: relative;
+    transition: background .2s;
+  }
+  body.is-mobile .app {
+    width: 400px; max-width: 100%;
+    height: min(760px, 82vh);
+    grid-template-columns: 1fr;
+    border-radius: 28px;
+  }
+
+  /* ============ 智能计划、外部接入与来源面板 ============ */
+  .schedule-card { overflow: hidden; }
+  .schedule-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+  .schedule-head .signal { width: 10px; height: 10px; margin-top: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px var(--ok-weak); flex-shrink: 0; }
+  .timeline { display: grid; gap: 0; }
+  .time-row { display: grid; grid-template-columns: 58px 1fr; gap: 12px; min-height: 54px; }
+  .time-label { color: var(--muted-strong); font-size: 12px; padding-top: 10px; text-align: right; }
+  .time-event { border-left: 2px solid var(--border); padding: 7px 0 10px 14px; position: relative; }
+  .time-event::before { content: ""; position: absolute; left: -6px; top: 14px; width: 9px; height: 9px; border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); }
+  .time-event.class-event { border-left-color: var(--accent); }
+  .time-event .event-title { font-weight: 600; font-size: 13.5px; }
+  .time-event .event-meta { color: var(--muted-strong); font-size: 12px; }
+  .plan-change { display: flex; align-items: center; gap: 10px; margin-top: 13px; padding: 10px 12px; border-radius: 8px; background: var(--accent-weak); color: var(--text); font-size: 13px; }
+  .plan-change .grow { min-width: 0; }
+  .integration-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .integration { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; font-size: 12.5px; }
+  .integration .state { margin-left: auto; font-size: 11px; color: var(--ok); }
+  .integration.pending .state { color: var(--warn); }
+  .source-tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .source-tab { border: none; background: none; color: var(--muted-strong); border-radius: 6px; padding: 5px 9px; font-size: 12.5px; }
+  .source-tab.active { color: var(--accent); background: var(--accent-weak); font-weight: 600; }
+  .audio-card { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 15px; }
+  .audio-wave { height: 48px; display: flex; align-items: center; gap: 3px; margin: 14px 0; }
+  .audio-wave i { display: block; width: 4px; border-radius: 4px; background: var(--accent); opacity: .7; }
+  .audio-wave i:nth-child(3n) { height: 36px; }.audio-wave i:nth-child(3n+1) { height: 21px; }.audio-wave i:nth-child(3n+2) { height: 29px; }
+  .transcript { border: 1px solid var(--border); background: var(--accent-weak); border-radius: 8px; padding: 10px 11px; font-size: 13px; }
+  .transcript mark { background: var(--warn-weak); color: inherit; border-radius: 3px; padding: 1px 3px; }
+  .requirement-list { width: 100%; max-width: 420px; display: grid; gap: 8px; }
+  .requirement { display: flex; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+  .requirement b { display: block; font-size: 13px; }.requirement span { color: var(--muted-strong); font-size: 12px; }
+  .plan-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 12px; }
+  .plan-grid .card { margin-top: 0; }
+  .conflict { background: var(--warn-weak); border-radius: 8px; }
+  .source-note { color: var(--muted-strong); font-size: 12px; }
+  .status-line { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  @media (max-width: 760px) { .integration-grid, .plan-grid { grid-template-columns: 1fr; } .integration-grid { gap: 6px; } }
+
+  /* ============ 侧栏（桌面） ============ */
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 20px 14px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  body.is-mobile .sidebar { display: none; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 2px 10px 16px; font-weight: 700; font-size: 17px; letter-spacing: .01em; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 3px; background: var(--accent); }
+  .nav-label { font-size: 12px; color: var(--muted-strong); padding: 10px 10px 4px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    min-height: 40px; padding: 0 10px;
+    border-radius: 8px; color: var(--muted-strong);
+    font-size: 14px; width: 100%; text-align: left;
+    background: none; border: none;
+  }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+  .nav-item .ico { width: 18px; text-align: center; opacity: .9; }
+  .nav-item .badge {
+    margin-left: auto; background: var(--accent); color: #fff;
+    border-radius: 99px; font-size: 11px; padding: 1px 7px; font-weight: 600;
+  }
+  .nav-item .badge.hidden { display: none; }
+  .sidebar .grow { flex: 1; }
+  .side-user { display: flex; align-items: center; gap: 10px; padding: 10px; font-size: 13px; color: var(--muted-strong); border-top: 1px solid var(--border); }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #7ea2f5, #3565e0); color: #fff; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+
+  /* ============ 主区 ============ */
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  body.is-mobile .main { height: 100%; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar .search {
+    flex: 0 1 300px; display: flex; align-items: center; gap: 8px;
+    background: var(--surface-2); border: 1px solid transparent;
+    border-radius: 8px; padding: 7px 12px; color: var(--muted-strong); font-size: 13.5px;
+  }
+  .topbar .search:focus-within { border-color: var(--accent); }
+  .topbar .search input { border: none; background: none; outline: none; color: var(--text); font: inherit; width: 100%; }
+  .topbar .grow { flex: 1; }
+  .btn-new {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 8px; padding: 9px 14px; font-size: 14px; font-weight: 600;
+  }
+  .btn-new:hover { background: var(--accent-strong); }
+  .icon-btn {
+    position: relative; min-width: 40px; min-height: 40px;
+    border-radius: 8px; border: none; background: none;
+    color: var(--muted-strong); font-size: 17px; display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--surface-2); }
+  .icon-btn .badge {
+    position: absolute; top: 4px; right: 2px;
+    background: var(--accent); color: #fff; border-radius: 99px;
+    font-size: 10px; padding: 0 5px; font-weight: 700;
+  }
+  .icon-btn .badge.hidden { display: none; }
+
+  .content { flex: 1; overflow-y: auto; padding: 22px 24px 90px; }
+  body.is-mobile .content { padding: 16px 14px 100px; }
+
+  /* ============ 通用组件 ============ */
+  .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .page-sub { color: var(--muted-strong); font-size: 13.5px; margin: 0 0 18px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .card + .card { margin-top: 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 15px; }
+  .row { display: flex; align-items: center; gap: 12px; }
+  .row .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted-strong); font-size: 13px; }
+  .btn {
+    min-height: 40px; padding: 0 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-size: 14px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-strong); }
+  .btn.sm { min-height: 32px; padding: 0 12px; font-size: 13px; border-radius: 7px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 99px; padding: 5px 12px; font-size: 13px; color: var(--muted-strong);
+  }
+  .chip.active { background: var(--accent-weak); border-color: transparent; color: var(--accent); font-weight: 600; }
+  .tag { font-size: 12px; padding: 2px 9px; border-radius: 99px; font-weight: 600; white-space: nowrap; }
+  .tag.ok { background: var(--ok-weak); color: var(--ok); }
+  .tag.warn { background: var(--warn-weak); color: var(--warn); }
+  .tag.info { background: var(--accent-weak); color: var(--accent); }
+  .tag.err { background: var(--danger-weak); color: var(--danger); }
+
+  /* ============ 今天 ============ */
+  .resume-card { display: flex; align-items: center; gap: 16px; }
+  .resume-card .where { font-size: 13px; color: var(--muted-strong); margin-top: 2px; }
+  .action-row { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--border); }
+  .action-row:first-of-type { border-top: none; }
+  .dur { font-size: 12px; color: var(--accent); font-weight: 600; background: var(--accent-weak); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+  .agenda-line { display: flex; align-items: center; gap: 8px; color: var(--muted-strong); font-size: 13px; margin-top: 12px; }
+
+  /* ============ 助理 ============ */
+  .assistant { display: grid; grid-template-columns: 1fr 1.15fr; gap: 14px; height: 100%; min-height: 460px; }
+  body.is-mobile .assistant { grid-template-columns: 1fr; }
+  .pane { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+  .ctx-chip {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .ctx-chip .crumb { background: var(--surface-2); border-radius: 6px; padding: 3px 9px; }
+  .ctx-chip .crumb.on { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+  .ctx-chip .clear { margin-left: auto; border: none; background: none; color: var(--muted-strong); font-size: 12.5px; }
+  .ctx-chip .clear:hover { color: var(--danger); }
+
+  .material-body { flex: 1; overflow-y: auto; background: var(--surface-2); padding: 18px; display: grid; place-items: start center; }
+  .pdf-page {
+    background: #fff; color: #222; width: 100%; max-width: 380px;
+    border-radius: 6px; box-shadow: 0 2px 10px rgba(20,28,45,.12);
+    padding: 26px 26px 34px; font-size: 13.5px; line-height: 1.8; position: relative;
+  }
+  [data-theme="dark"] .pdf-page { background: #f7f5ef; }
+  .pdf-page h4 { margin: 0 0 10px; font-size: 15px; }
+  .formula {
+    font-family: Georgia, "Times New Roman", serif; font-size: 16px;
+    background: #f2f6ff; border: 1px solid #d9e4fb; border-radius: 6px;
+    padding: 10px 12px; margin: 10px 0; transition: box-shadow .3s, border-color .3s;
+  }
+  .formula.flash { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(53,101,224,.28); }
+  .pdf-page .page-no { position: absolute; bottom: 10px; right: 16px; font-size: 11px; color: #98a0ad; }
+
+  .chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 86%; padding: 9px 13px; border-radius: 12px; font-size: 14px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; background: var(--surface-2); border-bottom-left-radius: 4px; }
+  .msg .cite {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--accent);
+    border-radius: 6px; padding: 3px 9px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .msg .cite:hover { border-color: var(--accent); }
+  .msg .acts { display: flex; gap: 6px; margin-top: 8px; }
+  .msg .acts button { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; font-size: 12px; padding: 3px 9px; color: var(--muted-strong); }
+  .msg .acts button:hover { color: var(--text); border-color: var(--accent); }
+  .typing { align-self: flex-start; color: var(--muted-strong); font-size: 13px; padding: 4px 6px; }
+  .typing .dots::after { content: "…"; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+
+  .composer { border-top: 1px solid var(--border); padding: 10px 12px 12px; }
+  .composer .modes { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .composer .inputrow { display: flex; gap: 8px; }
+  .composer input {
+    flex: 1; min-height: 42px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 0 12px; font: inherit; background: var(--bg); color: var(--text); outline: none;
+  }
+  .composer input:focus { border-color: var(--accent); }
+  .send { min-width: 46px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 15px; }
+  .send:hover { background: var(--accent-strong); }
+  .send:disabled { opacity: .5; cursor: default; }
+
+  .mobile-pane-switch { display: none; gap: 8px; margin-bottom: 10px; }
+  body.is-mobile .mobile-pane-switch { display: flex; }
+  body.is-mobile .assistant.show-chat .pane-material { display: none; }
+  body.is-mobile .assistant:not(.show-chat) .pane-chat { display: none; }
+
+  /* ============ 课程 ============ */
+  .course-item { display: flex; align-items: center; gap: 14px; padding: 14px 2px; border-top: 1px solid var(--border); cursor: pointer; border-radius: 8px; }
+  .course-item:hover { color: var(--accent); }
+  .course-item .ico { width: 38px; height: 38px; border-radius: 9px; background: var(--accent-weak); color: var(--accent); display: grid; place-items: center; font-weight: 700; flex-shrink: 0; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 14px 0 16px; flex-wrap: wrap; }
+  .tab { border: none; background: none; padding: 9px 14px; font-size: 14px; color: var(--muted-strong); border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
+  .lo-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  .lo-row:first-of-type { border-top: none; }
+  .kp-item { padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  .kp-item:first-of-type { border-top: none; }
+  .kp-item .kp-sub { font-size: 12.5px; color: var(--muted-strong); margin-top: 2px; }
+  .kp-item a { color: var(--accent); font-size: 12.5px; }
+
+  /* ============ 资料与笔记 / 收件箱 ============ */
+  .filter { display: flex; gap: 6px; margin-bottom: 14px; }
+  .lib-row { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-top: 1px solid var(--border); }
+  .lib-row:first-of-type { border-top: none; }
+  .lib-row .name { font-weight: 500; }
+  .lib-row .meta { font-size: 12.5px; color: var(--muted-strong); }
+  .lib-ico { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; font-size: 16px; flex-shrink: 0; }
+  .lib-ico.note { background: var(--warn-weak); }
+  .lib-ico.doc { background: var(--accent-weak); }
+  .lib-ico.audio { background: var(--ok-weak); }
+
+  /* ============ 底部导航（手机） ============ */
+  .bottom-nav {
+    display: none; position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--surface); border-top: 1px solid var(--border);
+    grid-template-columns: repeat(3, 1fr); padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+  }
+  body.is-mobile .bottom-nav { display: grid; }
+  .bottom-nav button {
+    border: none; background: none; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 11.5px; color: var(--muted-strong); padding: 6px 0; border-radius: 8px;
+  }
+  .bottom-nav button .ico { font-size: 19px; }
+  .bottom-nav button.active { color: var(--accent); font-weight: 600; }
+
+  /* ============ 浮层反馈 ============ */
+  .toast {
+    position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%) translateY(8px);
+    background: #232c3b; color: #f0f4fa; border-radius: 10px;
+    padding: 11px 18px; font-size: 13.5px; box-shadow: var(--shadow-pop);
+    opacity: 0; pointer-events: none; transition: all .25s; z-index: 60; max-width: 86vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.ok::before { content: "✓ "; color: #6fd5a2; }
+
+  .hl { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 10px; animation: hlp 1.7s forwards; }
+  @keyframes hlp { 0%,70% { outline-color: var(--accent); } 100% { outline-color: transparent; } }
+
+  /* 新建菜单 */
+  .new-menu {
+    position: absolute; top: 58px; right: 20px; z-index: 50;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--shadow-pop); padding: 6px; width: 200px; display: none;
+  }
+  .new-menu.open { display: block; }
+  .new-menu button { display: flex; gap: 10px; align-items: center; width: 100%; border: none; background: none; text-align: left; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+  .new-menu button:hover { background: var(--surface-2); }
+  .new-menu .sub { display: block; font-size: 12px; color: var(--muted-strong); }
+
+  /* ============ 导览条 ============ */
+  .tour {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    width: min(680px, calc(100vw - 24px));
+    background: #1c2532; color: #dbe4f0; border: 1px solid #33445a;
+    border-radius: 14px; padding: 12px 16px; z-index: 70;
+    display: flex; align-items: center; gap: 14px; box-shadow: var(--shadow-pop);
+  }
+  .tour .step-txt { flex: 1; font-size: 13.5px; line-height: 1.55; }
+  .tour .step-txt b { color: #fff; display: block; font-size: 14px; margin-bottom: 2px; }
+  .tour .dots { display: flex; gap: 5px; }
+  .tour .dots i { width: 7px; height: 7px; border-radius: 50%; background: #3d4f68; }
+  .tour .dots i.on { background: var(--accent); }
+  .tour button.tnext { background: var(--accent); border: none; color: #fff; border-radius: 8px; padding: 8px 16px; font-size: 13.5px; font-weight: 600; }
+  .tour button.tskip { background: none; border: none; color: #8fa0b8; font-size: 13px; }
+  .tour.done { display: none; }
+</style>
+</head>
+<body>
+
+<!-- 演示控制条（非产品界面） -->
+<div class="demo-bar">
+  <b>AIstudy · 开学版界面逻辑演示</b>
+  <span>只演示使用逻辑与导航流，非最终视觉稿</span>
+  <span class="spacer"></span>
+  <button class="demo-btn" id="btn-device">📱 手机预览</button>
+  <button class="demo-btn" id="btn-theme">🌙 深色</button>
+  <button class="demo-btn primary" id="btn-restart">↺ 重新演示</button>
+</div>
+
+<div class="app" id="app">
+
+  <!-- 侧栏：今天 / 助理 / 课程 三个主入口 + 固定资源区 -->
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span>AIstudy</div>
+    <button class="nav-item active" data-go="today"><span class="ico">☀️</span>今天</button>
+    <button class="nav-item" data-go="assistant"><span class="ico">💬</span>助理</button>
+    <button class="nav-item" data-go="courses"><span class="ico">📚</span>课程</button>
+    <button class="nav-item" data-go="planner"><span class="ico">🗓️</span>计划与课表</button>
+    <div class="nav-label">资源</div>
+    <button class="nav-item" data-go="library"><span class="ico">🗂️</span>资料与笔记</button>
+    <button class="nav-item" data-go="inbox"><span class="ico">📥</span>收件箱 <span class="badge" id="badge-side">2</span></button>
+    <div class="grow"></div>
+    <div class="side-user"><span class="avatar">学</span>小舟 · 开学版</div>
+  </aside>
+
+  <div class="main">
+    <!-- 顶栏 -->
+    <div class="topbar">
+      <div class="search">🔍<input placeholder="搜索课程、材料、笔记、对话" aria-label="全局搜索"></div>
+      <span class="grow"></span>
+      <button class="icon-btn" data-go="inbox" title="收件箱">📥<span class="badge" id="badge-top">2</span></button>
+      <button class="icon-btn" data-go="library" title="资料与笔记">🗂️</button>
+      <button class="btn-new" id="btn-new">＋ 新建</button>
+    </div>
+
+    <!-- 新建菜单：不要求先建课程 -->
+    <div class="new-menu" id="new-menu">
+      <button data-new="note">📝 <span>记笔记<span class="sub">直接写，稍后归课</span></span></button>
+      <button data-new="upload">📤 <span>上传资料<span class="sub">照片、PDF、课件、录音</span></span></button>
+      <button data-new="thing">🗒️ <span>记一件事<span class="sub">提醒、截止、待确认</span></span></button>
+    </div>
+
+    <div class="content">
+
+      <!-- ① 今天 -->
+      <section data-view="today">
+        <h1 class="page-title">今天</h1>
+        <p class="page-sub">先接着上次做，再给你少量可选的下一步。</p>
+
+        <div class="card resume-card" id="hl-resume">
+          <div class="grow">
+            <div class="row" style="gap:8px"><span class="tag info">继续上次</span><b style="font-size:15px">高数Ⅰ · 反函数第 2 步</b></div>
+            <div class="where">停在「第3周讲义」第 12 页的一个积分 · 草稿已自动保存</div>
+          </div>
+          <button class="btn primary" data-go="assistant">继续 →</button>
+        </div>
+
+        <div class="card">
+          <h3>今日行动 <span class="muted" style="font-weight:400">· 由你的材料和进度生成，可跳过</span></h3>
+          <div class="action-row"><span class="dur">12 分钟</span><div class="grow">检验昨天卡住的那个积分问题</div><button class="btn sm" data-go="assistant">开始</button></div>
+          <div class="action-row"><span class="dur">20 分钟</span><div class="grow">阅读本周讲义第 13–16 页</div><button class="btn sm" data-go="assistant">开始</button></div>
+          <div class="agenda-line">📅 近期：周四下午有机测 · 一项已确认截止</div>
+        </div>
+
+        <div class="card schedule-card" id="hl-smart-plan">
+          <div class="schedule-head">
+            <span class="signal"></span>
+            <div class="grow"><h3 style="margin-bottom:2px">今天的安排已结合你的课表</h3><div class="muted">钉钉课表、课程要求和可用时间已同步；重要调整仍由你确认。</div></div>
+            <button class="btn sm" data-go="planner">查看计划</button>
+          </div>
+          <div class="integration-grid">
+            <div class="integration"><span>🔔</span>钉钉课表<span class="state">已同步</span></div>
+            <div class="integration"><span>🎙️</span>课堂录音<span class="state">已理解</span></div>
+            <div class="integration pending"><span>📋</span>教师要求<span class="state">待确认 1</span></div>
+          </div>
+        </div>
+
+        <div class="card" id="hl-inbox-cta">
+          <div class="row">
+            <div class="grow"><b style="font-size:14.5px">两份材料待归类</b><div class="muted">确认归属后才会进入课程，不会自动改动</div></div>
+            <button class="btn sm" data-go="inbox">查看</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ② 计划与课表：外部信息 → 理解要求 → 生成计划 → 用户确认 -->
+      <section data-view="planner" hidden>
+        <h1 class="page-title">计划与课表</h1>
+        <p class="page-sub">把固定课程、教师要求、考核时间和你的真实精力放到同一张可调整的计划里。</p>
+
+        <div class="card schedule-card" id="hl-integrations">
+          <div class="schedule-head">
+            <span class="signal"></span>
+            <div class="grow"><h3 style="margin-bottom:2px">信息接入中心</h3><div class="muted">只读取你授权的范围；每个来源都能单独暂停或撤销。</div></div>
+            <button class="btn sm" id="btn-sync">立即同步</button>
+          </div>
+          <div class="integration-grid">
+            <div class="integration" id="ding-status"><span>🔔</span><div class="grow"><b>钉钉</b><div class="muted">课表与通知</div></div><span class="state">已连接</span></div>
+            <div class="integration"><span>📅</span><div class="grow"><b>个人日历</b><div class="muted">不可占用时段</div></div><span class="state">已连接</span></div>
+            <div class="integration pending"><span>🎙️</span><div class="grow"><b>课程录音</b><div class="muted">老师重点与要求</div></div><span class="state">3 条新发现</span></div>
+          </div>
+        </div>
+
+        <div class="plan-grid" style="margin-top:12px">
+          <div class="card" id="hl-week-plan">
+            <div class="row" style="margin-bottom:12px"><div class="grow"><h3 style="margin-bottom:2px">本周时间线</h3><div class="muted">已避开上课、通勤和你标记的休息时间</div></div><span class="tag ok">冲突已检查</span></div>
+            <div class="timeline">
+              <div class="time-row"><div class="time-label">周一<br>18:30</div><div class="time-event class-event"><div class="event-title">高数Ⅰ · 讲义第 3 周</div><div class="event-meta">来自钉钉课表 · 课堂录音已归档</div></div></div>
+              <div class="time-row"><div class="time-label">周二<br>19:00</div><div class="time-event"><div class="event-title">高数：凑微分专项练习 · 25 分钟</div><div class="event-meta">依据：课堂卡点 + 周五小测范围</div></div></div>
+              <div class="time-row"><div class="time-label">周三<br>20:00</div><div class="time-event"><div class="event-title">英语口试准备 · 第 2 轮</div><div class="event-meta">依据：老师要求“脱稿表达 3 分钟”</div></div></div>
+              <div class="time-row"><div class="time-label">周四<br>16:00</div><div class="time-event class-event"><div class="event-title">有机化学测验</div><div class="event-meta">固定事项 · 不会被自动挪动</div></div></div>
+              <div class="time-row"><div class="time-label">周五<br>18:30</div><div class="time-event"><div class="event-title">复盘：错题与教师反馈 · 20 分钟</div><div class="event-meta">根据本周作答结果动态调整</div></div></div>
+            </div>
+          </div>
+          <div class="card" id="hl-plan-proposal">
+            <div class="row" style="margin-bottom:10px"><div class="grow"><h3 style="margin-bottom:2px">智能安排建议</h3><div class="muted">这是一份草案，接受后才会改变正式计划。</div></div><span class="tag info">草案 v3</span></div>
+            <div class="lo-row"><span class="tag ok">保留</span><div class="grow">周四测验前保留 40 分钟缓冲</div></div>
+            <div class="lo-row"><span class="tag info">新增</span><div class="grow">周二先做 1 题，再决定是否继续</div></div>
+            <div class="lo-row conflict"><span class="tag warn">冲突</span><div class="grow">周三原计划与英语口试准备重叠 30 分钟</div></div>
+            <div class="plan-change"><span>↻</span><div class="grow">将英语准备移到周三 20:00，保持周二晚不超过 45 分钟。</div></div>
+            <div class="row" style="margin-top:12px"><button class="btn primary" id="btn-accept-plan">接受这份安排</button><button class="btn" id="btn-edit-plan">我来调整</button></div>
+          </div>
+        </div>
+
+        <div class="card" id="hl-requirements" style="margin-top:12px">
+          <div class="row" style="margin-bottom:12px"><div class="grow"><h3 style="margin-bottom:2px">课程要求与考核依据</h3><div class="muted">助理从课件、录音和通知中提取候选信息，并保留原始来源。</div></div><span class="tag warn">1 条待确认</span></div>
+          <div class="requirement-list" style="max-width:none">
+            <div class="requirement"><span>📌</span><div class="grow"><b>高数Ⅰ · 周五小测</b><span>范围：第 3 周讲义 1–16 页 · 来源：课堂录音 03:42、钉钉通知</span></div><button class="btn sm" onclick="toast('已确认范围，计划会在下一次计算时更新')">确认</button></div>
+            <div class="requirement"><span>🎯</span><div class="grow"><b>大学英语 · 口试要求</b><span>脱稿表达 3 分钟，需包含一个个人例子 · 来源：教师录音 08:17</span></div><span class="tag ok">已确认</span></div>
+            <div class="requirement"><span>⚠️</span><div class="grow"><b>不确定的信息</b><span>“下周可能有展示”未发现明确日期，不会自动进入正式计划。</span></div><button class="btn sm" onclick="toast('已保留为待确认事项，不会自动安排')">稍后确认</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ③ 助理 -->
+      <section data-view="assistant" hidden>
+        <div class="assistant" id="assistant">
+          <!-- 材料面 -->
+          <div class="pane pane-material">
+            <div class="ctx-chip">
+              <span class="crumb on">高数Ⅰ</span><span class="crumb">第3周讲义</span><span class="crumb" id="ctx-page">第 12 页</span>
+              <button class="clear" onclick="toast('已清除上下文，进入自由交流（演示）')">清除 ✕</button>
+            </div>
+            <div class="source-tabs" aria-label="材料类型">
+              <button class="source-tab active" data-source-tab="document">📄 讲义</button>
+              <button class="source-tab" data-source-tab="audio">🎙️ 课堂录音</button>
+              <button class="source-tab" data-source-tab="requirements">📋 教师要求</button>
+            </div>
+            <div class="material-body" data-source-pane="document">
+              <div class="pdf-page">
+                <h4>3.4 反函数求导的常用凑微分</h4>
+                <p>当被积函数中出现复合指数与一次因子的乘积时，优先观察因子是否恰好是内层函数的导数：</p>
+                <div class="formula" id="formula">∫ 2x·e<sup>x²</sup> dx ＝ ∫ e<sup>u</sup> du ＝ e<sup>x²</sup> + C　（设 u = x²）</div>
+                <p>注意：凑微分不是技巧性跳跃，而是把「正好出现的导数因子」吸收进 du。</p>
+                <span class="page-no" id="page-no">第 12 页</span>
+              </div>
+            </div>
+            <div class="material-body" data-source-pane="audio" hidden>
+              <div class="audio-card">
+                <div class="row"><div class="grow"><b>课堂录音 0918.m4a</b><div class="muted">周一 · 高数Ⅰ · 47:18</div></div><span class="tag ok">已理解</span></div>
+                <div class="audio-wave" aria-label="录音波形"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <div class="row"><button class="btn sm primary" id="btn-play-audio">▶ 播放 03:42</button><span class="source-note">已定位老师讲解重点</span></div>
+                <p class="transcript" style="margin-bottom:0">“这里考试不会要求你背形式，重点是看到 <mark>内层函数的导数也出现了</mark>，要知道为什么可以换元。”</p>
+              </div>
+            </div>
+            <div class="material-body" data-source-pane="requirements" hidden>
+              <div class="requirement-list">
+                <div class="requirement"><span>🎯</span><div class="grow"><b>本周小测重点</b><span>第 3 周讲义 1–16 页 · 重点理解换元理由，不只写结果</span></div></div>
+                <div class="requirement"><span>🧭</span><div class="grow"><b>老师的解题要求</b><span>先写观察，再写变量替换；答案必须保留积分常数 C</span></div></div>
+                <div class="requirement"><span>🔎</span><div class="grow"><b>证据来源</b><span>课堂录音 03:42 · 钉钉通知 · 第 3 周讲义第 12 页</span></div></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 对话面 -->
+          <div class="pane pane-chat">
+            <div class="ctx-chip" style="justify-content:space-between">
+              <b style="font-size:14px">助理</b>
+              <span class="muted">学习 / 倾听 / 一起想办法 · 无材料也能聊</span>
+            </div>
+            <div class="chat">
+              <div class="msgs" id="msgs">
+                <div class="msg ai">你好。当前上下文：<b>第3周讲义 · 第 12 页</b>。想问这页的内容，也可以随便聊别的。</div>
+              </div>
+              <div class="composer">
+                <div class="modes">
+                  <button class="chip active" data-mode>给点提示</button>
+                  <button class="chip" data-mode>完整解释</button>
+                  <button class="chip" data-mode>倾听</button>
+                  <button class="chip" data-mode>一起想办法</button>
+                </div>
+                <div class="inputrow">
+                  <input id="chat-input" placeholder="试试：这一步为什么先换元？（或点右侧 ➤ 直接发送）">
+                  <button class="send" id="btn-send" title="发送">➤</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- 手机端 材料/对话 切换 -->
+        <div class="mobile-pane-switch">
+          <button class="chip active" id="sw-material" style="flex:1;justify-content:center">📄 材料</button>
+          <button class="chip" id="sw-chat" style="flex:1;justify-content:center">💬 对话</button>
+        </div>
+      </section>
+
+      <!-- ④ 课程 -->
+      <section data-view="courses" hidden>
+        <div id="course-list-view">
+          <h1 class="page-title">课程</h1>
+          <p class="page-sub">课程是可选的长期容器。不用先建课程，也能提问、记笔记、传资料。</p>
+          <div class="card">
+            <div class="course-item" data-open-course="1"><span class="ico">高</span><div class="grow"><b>高等数学Ⅰ</b><div class="muted">12 份材料 · 3 张卡片待复习 · 上周活跃</div></div><span class="muted">›</span></div>
+            <div class="course-item" data-open-course="1"><span class="ico">英</span><div class="grow"><b>大学英语（视听说）</b><div class="muted">4 份材料 · 本周有口试</div></div><span class="muted">›</span></div>
+            <div class="course-item" data-open-course="1"><span class="ico">数</span><div class="grow"><b>数据结构导论</b><div class="muted">2 份材料 · 刚创建</div></div><span class="muted">›</span></div>
+          </div>
+        </div>
+        <div id="course-detail-view" hidden>
+          <button class="btn sm" data-go="courses" style="margin-bottom:12px">‹ 返回课程</button>
+          <h1 class="page-title">高等数学Ⅰ</h1>
+          <p class="page-sub">大一上 · 目标：期末 85+（可在课程设置中调整）</p>
+          <div class="tabs">
+            <button class="tab active" data-tab="overview">概览</button>
+            <button class="tab" data-tab="materials">材料与笔记</button>
+            <button class="tab" data-tab="records">学习记录</button>
+            <button class="tab" data-tab="knowledge">知识结构</button>
+            <button class="tab" data-tab="requirements">要求与考核</button>
+          </div>
+          <div class="card" data-pane="overview">
+            <h3>近期卡点</h3>
+            <div class="lo-row"><span class="tag warn">薄弱</span><div class="grow">反函数求导 · 凑微分的识别</div><button class="btn sm" data-go="assistant">问助理</button></div>
+            <div class="lo-row"><span class="tag ok">可用</span><div class="grow">复合函数求导链式法则</div><span class="muted">三天未练</span></div>
+            <div class="lo-row"><span class="tag info">到期</span><div class="grow">重测：第 11 页的隐函数求导（1 题）</div><button class="btn sm primary">开始重测</button></div>
+          </div>
+          <div class="card" data-pane="materials" hidden>
+            <h3>课程材料</h3>
+            <div class="lib-row"><span class="lib-ico doc">📄</span><div class="grow"><div class="name">第3周讲义.pdf</div><div class="meta">PDF · 32 页 · 来源：课堂下发</div></div><span class="tag ok">可用</span></div>
+            <div class="lib-row"><span class="lib-ico audio">🎙️</span><div class="grow"><div class="name">课堂录音 0918.m4a</div><div class="meta">47 分钟 · 转写待真实样本验证后开放</div></div><span class="tag warn">解析中</span></div>
+          </div>
+          <div class="card" data-pane="records" hidden>
+            <h3>学习记录 <span class="muted" style="font-weight:400">· 只显示基于已观察样本的状态</span></h3>
+            <div class="lo-row"><span class="tag ok">稳固</span><div class="grow">极限的 ε-δ 定义</div><span class="muted">上周重测通过</span></div>
+            <div class="lo-row"><span class="tag warn">薄弱</span><div class="grow">凑微分</div><span class="muted">仅基于已上传题目</span></div>
+            <div class="lo-row"><span class="tag info">未测</span><div class="grow">洛必达法则</div><span class="muted">还没有作答记录</span></div>
+          </div>
+          <div class="card" data-pane="knowledge" hidden>
+            <h3>知识结构 <span class="muted" style="font-weight:400">· AI 生成，点击概念可看来源</span></h3>
+            <div class="kp-item"><b>1. 极限与连续</b><div class="kp-sub">8 个概念 · 依据 3 份材料</div></div>
+            <div class="kp-item"><b>2. 导数与求导法则</b><div class="kp-sub">12 个概念 · 先修：极限与连续</div> <a href="javascript:void(0)" data-cite-jump>查看来源 [讲义 P12]</a></div>
+            <div class="kp-item"><b>3. 微分中值定理</b><div class="kp-sub">尚未开始 · 讲义已上传</div></div>
+            <p class="muted" style="margin-bottom:0">关系图谱是可选视图：列表已够用时不必打开。</p>
+          </div>
+          <div class="card" data-pane="requirements" hidden>
+            <h3>要求与考核 <span class="muted" style="font-weight:400">· 每条要求都保留原始依据</span></h3>
+            <div class="requirement"><span>📌</span><div class="grow"><b>周五小测 · 讲义第 3 周</b><span>理解换元原因；不只提交最终答案 · 来源：课堂录音 03:42</span></div><span class="tag ok">已确认</span></div>
+            <div class="requirement"><span>🧪</span><div class="grow"><b>期末考核 · 计算题</b><span>占课程成绩 60% · 具体范围尚未确认，不自动排计划</span></div><span class="tag warn">待确认</span></div>
+            <div class="requirement"><span>🗓️</span><div class="grow"><b>本周计划依据</b><span>钉钉课表 + 课堂录音 + 个人可用时间 + 最近卡点</span></div><button class="btn sm" data-go="planner">查看计划</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ⑤ 资料与笔记 -->
+      <section data-view="library" hidden>
+        <h1 class="page-title">资料与笔记</h1>
+        <p class="page-sub">全局资产视图，不需要课程。新笔记直接写，稍后归课。</p>
+        <div class="filter">
+          <button class="chip active">全部</button>
+          <button class="chip">笔记</button>
+          <button class="chip">原始资料</button>
+          <button class="chip" onclick="demoUpload()">📤 上传资料</button>
+        </div>
+        <div class="card">
+          <div class="lib-row" id="hl-library-note"><span class="lib-ico note">📝</span><div class="grow"><div class="name">反函数与换元（草稿）</div><div class="meta">笔记 · 昨天 22:41 · 已自动保存</div></div><span class="tag ok">已保存</span></div>
+          <div class="lib-row"><span class="lib-ico doc">📄</span><div class="grow"><div class="name">第3周讲义.pdf</div><div class="meta">PDF · 高数Ⅰ · 32 页</div></div><span class="tag ok">可用</span></div>
+          <div class="lib-row" id="upload-target"><span class="lib-ico audio">🎙️</span><div class="grow"><div class="name">课堂录音 0918.m4a</div><div class="meta">47 分钟 · 刚上传</div></div><span class="tag warn">解析中</span></div>
+          <div class="lib-row"><span class="lib-ico doc">📄</span><div class="grow"><div class="name">数据结构期中卷.pdf</div><div class="meta">解析失败 · 原件仍可读</div></div><span class="tag err">失败</span><button class="btn sm">下载原件</button><button class="btn sm">重试</button></div>
+        </div>
+      </section>
+
+      <!-- ⑥ 收件箱 -->
+      <section data-view="inbox" hidden>
+        <h1 class="page-title">收件箱</h1>
+        <p class="page-sub">新进入的内容先到这里。确认归属后才会进入课程；处理中、失败也在这里看。</p>
+        <div class="card">
+          <div class="lib-row" id="hl-inbox-1">
+            <span class="lib-ico doc">🖼️</span>
+            <div class="grow"><div class="name">微信群图片_0918.png</div><div class="meta">可能是：高等数学Ⅰ（72%）或 数据结构导论（21%）</div></div>
+            <button class="btn sm primary" onclick="confirmInbox(this,'已归入「高等数学Ⅰ」，原件保留')">归入高数Ⅰ</button>
+            <button class="btn sm" onclick="confirmInbox(this,'已保留在收件箱，之后再说')">暂不处理</button>
+          </div>
+          <div class="lib-row" id="hl-inbox-2">
+            <span class="lib-ico doc">📷</span>
+            <div class="grow"><div class="name">教室黑板拍照 0917.jpg</div><div class="meta">无法确定课程 · 只有你能确认归属</div></div>
+            <button class="btn sm primary" onclick="confirmInbox(this,'请选择课程（演示中省略）')">选择课程</button>
+            <button class="btn sm" onclick="confirmInbox(this,'已保留在收件箱，之后再说')">暂不处理</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>处理状态</h3>
+          <div class="lo-row"><span class="tag info">已接收</span><div class="grow">期中时间安排截图.png</div><span class="muted">等待归类</span></div>
+          <div class="lo-row"><span class="tag warn">解析中</span><div class="grow">课堂录音 0918.m4a</div><span class="muted">转写需真实样本验证</span></div>
+          <div class="lo-row"><span class="tag err">失败</span><div class="grow">数据结构期中卷.pdf</div><span class="muted">原件可读 · 可重试</span></div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- 手机底部导航：保持三项 -->
+    <nav class="bottom-nav">
+      <button class="active" data-go="today"><span class="ico">☀️</span>今天</button>
+      <button data-go="assistant"><span class="ico">💬</span>助理</button>
+      <button data-go="courses"><span class="ico">📚</span>课程</button>
+    </nav>
+  </div>
+</div>
+
+<!-- 导览条 -->
+<div class="tour" id="tour">
+  <div class="dots" id="tour-dots"></div>
+  <div class="step-txt"><b id="tour-title"></b><span id="tour-body"></span></div>
+  <button class="tskip" onclick="endTour()">跳过</button>
+  <button class="tnext" id="tour-next">下一步</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  /* ============ 基础状态 ============ */
+  const app = document.getElementById("app");
+  let inboxCount = 2;
+
+  function go(view) {
+    document.querySelectorAll("[data-view]").forEach(s => s.hidden = s.dataset.view !== view);
+    document.querySelectorAll("[data-go]").forEach(b => b.classList.toggle("active", b.dataset.go === view && b.classList.contains("nav-item")));
+    document.querySelectorAll(".bottom-nav button").forEach(b => b.classList.toggle("active", b.dataset.go === view));
+    document.querySelector(".content").scrollTop = 0;
+  }
+
+  document.addEventListener("click", e => {
+    const nav = e.target.closest("[data-go]");
+    if (nav) { go(nav.dataset.go); closeNewMenu(); }
+  });
+
+  /* ============ 温和反馈 toast ============ */
+  let toastTimer;
+  function toast(text, ok = true) {
+    const t = document.getElementById("toast");
+    t.textContent = text; t.className = "toast show" + (ok ? " ok" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+  }
+
+  /* ============ 高亮 ============ */
+  function flashHl(el) {
+    if (!el) return;
+    el.classList.remove("hl"); void el.offsetWidth; el.classList.add("hl");
+  }
+
+  /* ============ 主题 / 设备切换 ============ */
+  document.getElementById("btn-theme").onclick = function () {
+    const dark = document.documentElement.dataset.theme === "dark";
+    document.documentElement.dataset.theme = dark ? "" : "dark";
+    this.textContent = dark ? "🌙 深色" : "☀️ 浅色";
+  };
+  const btnDevice = document.getElementById("btn-device");
+  function setMobile(on) {
+    document.body.classList.toggle("is-mobile", on);
+    btnDevice.textContent = on ? "🖥️ 桌面预览" : "📱 手机预览";
+    if (on) go("today");
+  }
+  btnDevice.onclick = () => setMobile(!document.body.classList.contains("is-mobile"));
+  if (window.innerWidth < 900) setMobile(true);
+
+  /* ============ 新建菜单 ============ */
+  const newMenu = document.getElementById("new-menu");
+  document.getElementById("btn-new").onclick = e => { e.stopPropagation(); newMenu.classList.toggle("open"); };
+  function closeNewMenu() { newMenu.classList.remove("open"); }
+  document.addEventListener("click", e => { if (!e.target.closest("#new-menu") && !e.target.closest("#btn-new")) closeNewMenu(); });
+  newMenu.addEventListener("click", e => {
+    const b = e.target.closest("[data-new]"); if (!b) return;
+    closeNewMenu();
+    if (b.dataset.new === "note") { go("library"); toast("已新建草稿「无标题笔记」，直接写就行（演示）"); }
+    if (b.dataset.new === "upload") { go("assistant"); toast("上传入口在这里，处理中可以离开页面（演示）"); }
+    if (b.dataset.new === "thing") { toast("已记入今天，稍后可确认（演示）"); }
+  });
+
+  /* ============ 外部来源切换：讲义 / 录音 / 教师要求 ============ */
+  document.querySelectorAll("[data-source-tab]").forEach(tab => tab.onclick = () => {
+    const name = tab.dataset.sourceTab;
+    document.querySelectorAll("[data-source-tab]").forEach(x => x.classList.toggle("active", x === tab));
+    document.querySelectorAll("[data-source-pane]").forEach(pane => pane.hidden = pane.dataset.sourcePane !== name);
+    if (name === "audio") toast("已切换到课堂录音，可按时间点回听老师原话");
+    if (name === "requirements") toast("这些要求来自材料、录音和通知，尚未确认的不会自动改计划");
+  });
+
+  /* ============ 智能计划：草案必须由用户确认 ============ */
+  document.getElementById("btn-accept-plan").onclick = () => {
+    const button = document.getElementById("btn-accept-plan");
+    button.textContent = "已接受 ✓"; button.disabled = true;
+    document.querySelector("#hl-plan-proposal .tag.info").textContent = "已生效";
+    document.querySelector("#hl-plan-proposal .tag.info").className = "tag ok";
+    toast("计划已更新：固定课程未移动，新增安排已加入今天");
+  };
+  document.getElementById("btn-edit-plan").onclick = () => toast("进入手动调整：固定课程不可移动，其余安排可拖动（演示）");
+  document.getElementById("btn-sync").onclick = () => {
+    const button = document.getElementById("btn-sync");
+    button.textContent = "同步中…"; button.disabled = true;
+    setTimeout(() => { button.textContent = "已同步 ✓"; button.disabled = false; toast("钉钉课表与个人日历已更新，计划草案重新计算"); }, 1100);
+  };
+  document.getElementById("btn-play-audio").onclick = function () {
+    this.textContent = this.textContent.includes("播放") ? "Ⅱ 暂停 03:42" : "▶ 播放 03:42";
+    toast(this.textContent.includes("暂停") ? "正在回听老师讲解重点" : "已暂停，原文仍保留在 03:42");
+  };
+
+  /* ============ 助理：模式切换 ============ */
+  document.querySelectorAll("[data-mode]").forEach(c => c.onclick = () => {
+    document.querySelectorAll("[data-mode]").forEach(x => x.classList.remove("active"));
+    c.classList.add("active");
+  });
+
+  /* ============ 助理：发送与来源引用 ============ */
+  const msgs = document.getElementById("msgs");
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("btn-send");
+
+  function ask(text) {
+    if (!text.trim()) return;
+    const user = document.createElement("div");
+    user.className = "msg user"; user.textContent = text;
+    msgs.appendChild(user);
+    input.value = "";
+    const typing = document.createElement("div");
+    typing.className = "typing"; typing.innerHTML = '正在结合第 12 页回答<span class="dots"></span>';
+    msgs.appendChild(typing);
+    msgs.scrollTop = msgs.scrollHeight;
+    sendBtn.disabled = true;
+    setTimeout(() => {
+      typing.remove();
+      const ai = document.createElement("div");
+      ai.className = "msg ai";
+      ai.innerHTML = '先换元是因为内层函数 u = x² 的导数 <b>2x</b> 恰好作为因子出现了。把 2x·dx 吸收成 du，积分就变成 ∫e<sup>u</sup>du —— 这叫凑微分，不是凭空变形。' +
+        '<br><button class="cite" data-cite>📎 讲义 · 第12页</button>' +
+        '<div class="acts"><button>保存为笔记</button><button>还有疑问</button></div>';
+      msgs.appendChild(ai);
+      msgs.scrollTop = msgs.scrollHeight;
+      sendBtn.disabled = false;
+      ai.querySelector("[data-cite]").onclick = () => jumpCitation();
+    }, 1300);
+  }
+
+  function jumpCitation() {
+    go("assistant");
+    if (document.body.classList.contains("is-mobile")) switchMobilePane(true); // 回到材料面
+    const f = document.getElementById("formula");
+    document.getElementById("ctx-page").textContent = "第 12 页";
+    f.classList.remove("flash"); void f.offsetWidth; f.classList.add("flash");
+    f.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast("已定位到讲义第 12 页的原始出处");
+  }
+  document.querySelectorAll("[data-cite-jump]").forEach(a => a.onclick = jumpCitation);
+
+  sendBtn.onclick = () => ask(input.value || "这一步为什么先换元？");
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.isComposing) ask(input.value || "这一步为什么先换元？");
+  });
+
+  /* ============ 手机：材料/对话切换 ============ */
+  const assistantEl = document.getElementById("assistant");
+  function switchMobilePane(showChat) {
+    assistantEl.classList.toggle("show-chat", showChat);
+    document.getElementById("sw-material").classList.toggle("active", !showChat);
+    document.getElementById("sw-chat").classList.toggle("active", showChat);
+  }
+  document.getElementById("sw-material").onclick = () => switchMobilePane(false);
+  document.getElementById("sw-chat").onclick = () => switchMobilePane(true);
+
+  /* ============ 收件箱确认 ============ */
+  function confirmInbox(btn, msg) {
+    const row = btn.closest(".lib-row");
+    row.style.opacity = ".45"; btn.disabled = true;
+    if (msg.includes("归入")) {
+      inboxCount = Math.max(0, inboxCount - 1);
+      document.getElementById("badge-side").textContent = inboxCount;
+      document.getElementById("badge-top").textContent = inboxCount;
+      if (inboxCount === 0) { document.getElementById("badge-side").classList.add("hidden"); document.getElementById("badge-top").classList.add("hidden"); }
+    }
+    toast(msg);
+  }
+
+  /* ============ 上传状态演示：已接收 → 解析中 → 可用 ============ */
+  let uploading = false;
+  function demoUpload() {
+    if (uploading) return; uploading = true;
+    go("library");
+    const target = document.getElementById("upload-target");
+    const tag = target.querySelector(".tag");
+    tag.className = "tag info"; tag.textContent = "已接收";
+    toast("已接收。可以离开页面，后台继续处理");
+    setTimeout(() => { tag.className = "tag warn"; tag.textContent = "解析中"; }, 2200);
+    setTimeout(() => { tag.className = "tag ok"; tag.textContent = "可用"; toast("「课堂录音 0918.m4a」已可用，可以引用提问了"); uploading = false; }, 4600);
+  }
+
+  /* ============ 课程内页签 ============ */
+  document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    document.querySelectorAll("[data-pane]").forEach(p => p.hidden = p.dataset.pane !== t.dataset.tab);
+  });
+  document.querySelectorAll("[data-open-course]").forEach(c => c.onclick = () => {
+    document.getElementById("course-list-view").hidden = true;
+    document.getElementById("course-detail-view").hidden = false;
+  });
+  document.addEventListener("click", e => {
+    if (e.target.closest('[data-go="courses"]')) {
+      document.getElementById("course-list-view").hidden = false;
+      document.getElementById("course-detail-view").hidden = true;
+    }
+  });
+
+  /* ============ 导览 ============ */
+  const steps = [
+    { view: "today", hl: "#hl-resume", t: "① 打开就能继续", b: "首屏第一件事是「继续上次」：停在讲义第 12 页的积分和草稿都还在。没有任务时，也能直接提问或记笔记。" },
+    { view: "planner", hl: "#hl-integrations", t: "② 先接入真实时间", b: "钉钉课表、个人日历、课堂录音和教师通知进入同一处。每个来源显示状态，可单独暂停或撤销授权。" },
+    { view: "planner", hl: "#hl-week-plan", t: "③ 安排不是待办清单", b: "系统会避开固定课程、通勤和休息，把小测日期、老师要求、卡点和可用时间组合成一周时间线。" },
+    { view: "planner", hl: "#hl-plan-proposal", t: "④ AI 只提出草案", b: "计划变更先展示保留、新增、冲突和理由。固定课程不自动移动，只有你点击接受后才改变正式计划。" },
+    { view: "planner", hl: "#hl-requirements", t: "⑤ 理解老师真正要求", b: "课堂录音会定位老师的重点；钉钉通知、讲义和录音共同形成考核依据。不确定的内容标记待确认，不冒充事实。" },
+    { view: "assistant", hl: ".pane-material", t: "⑥ 材料、录音和要求一起问", b: "助理不只读 PDF：可以切到录音时间点或教师要求，回答带原始来源，点引用即可回到证据。" },
+    { view: "assistant", hl: null, t: "⑦ 回答带页码来源", b: "现在点输入框发送「这一步为什么先换元？」，回答出现后点蓝色的「📎 讲义·第12页」——材料页会跳回原文高亮。" },
+    { view: "library", hl: "#hl-library-note", t: "⑧ 没有课程也能积累", b: "笔记和资料是全局资产：独立草稿、自动保存、失败保留原件。这是固定入口，不藏在对话或搜索后面。" },
+    { view: "courses", hl: ".course-item", t: "⑨ 课程是可选容器", b: "点开一门课：概览、材料与笔记、学习记录、知识结构、要求与考核。课程是长期上下文，不是开始学习的门槛。" },
+    { view: "today", hl: "#hl-smart-plan", t: "⑩ 明天接着来", b: "下一次打开，系统会结合最新课表、老师要求和完成情况重新给出草案；你始终能看到依据并决定是否接受。" },
+  ];
+  let stepIdx = -1;
+  const dots = document.getElementById("tour-dots");
+  steps.forEach(() => dots.appendChild(document.createElement("i")));
+
+  function showStep(i) {
+    stepIdx = i;
+    const s = steps[i];
+    go(s.view);
+    document.getElementById("tour-title").textContent = s.t;
+    document.getElementById("tour-body").textContent = s.b;
+    dots.querySelectorAll("i").forEach((d, k) => d.classList.toggle("on", k <= i));
+    document.getElementById("tour-next").textContent = i === steps.length - 1 ? "完成 ✓" : "下一步";
+    if (s.hl) flashHl(document.querySelector(s.hl));
+    if (s.view === "assistant" && i === 6) input.focus();
+    if (s.view === "planner" && i === 3) document.getElementById("btn-accept-plan").focus();
+  }
+  document.getElementById("tour-next").onclick = () => {
+    if (stepIdx >= steps.length - 1) return endTour();
+    showStep(stepIdx + 1);
+  };
+  function endTour() { document.getElementById("tour").classList.add("done"); }
+  document.getElementById("btn-restart").onclick = () => {
+    document.getElementById("tour").classList.remove("done");
+    setMobile(document.body.classList.contains("is-mobile"));
+    showStep(0);
+  };
+
+  go("today");
+  showStep(0);
+</script>
+</body>
+</html>

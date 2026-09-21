@@ -49,6 +49,40 @@ describe("openingApi (RU-07 client)", () => {
     expect(resume.sourceIds).toEqual([S]);
   });
 
+  it.each(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"] as const)(
+    "gets strict job status response for %s",
+    async (status) => {
+      const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+        expect(url).toBe(`/api/opening/jobs/${U}`);
+        expect(init?.method).toBe("GET");
+        return jsonResponse({
+          id: U,
+          status,
+          error: status === "failed" ? { message: "provider rejected" } : null,
+          updatedAt: ISO,
+        });
+      });
+      const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+
+      await expect(api.getJob(U)).resolves.toEqual({
+        id: U,
+        status,
+        error: status === "failed" ? { message: "provider rejected" } : null,
+        updatedAt: ISO,
+      });
+    },
+  );
+
+  it("rejects job status responses with unknown fields", async () =>
+    {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse({ id: U, status: "queued", error: null, updatedAt: ISO, extra: true }),
+      );
+      const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+
+      await expect(api.getJob(U)).rejects.toThrow();
+    });
+
   it("submits saved turn to POST /api/opening/turns", async () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("/api/opening/turns");

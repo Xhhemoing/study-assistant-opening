@@ -16,7 +16,14 @@ function tutorError(error: unknown): Response {
   if (error instanceof OpeningConversationError) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
-      { status: error.code === "NOT_FOUND" ? 404 : 400 },
+      {
+        status:
+          error.code === "NOT_FOUND"
+            ? 404
+            : error.code === "CONFLICT"
+              ? 409
+              : 400,
+      },
     );
   }
   return jsonError(mapDomainError(error));
@@ -26,9 +33,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
     const body = await request.json();
-    const result = await getTutorService(sql).submitTurn(scope, body, {
-      authorizedChunks: [],
-    });
+    const result = await getTutorService(sql).submitTurn(scope, body);
     return Response.json(
       { jobId: result.jobId, turnId: result.turnId },
       { status: 201 },

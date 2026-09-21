@@ -1,7 +1,9 @@
 import {
   createOpeningConversationRepository,
   createOpeningLearningRepository,
+  createOpeningSourceChunksRepository,
   type OpeningConversationRepository,
+  type OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { getAuthRuntime } from "../../server/runtime";
@@ -39,7 +41,9 @@ export async function requireOpeningScope(request: Request) {
 export function getTutorService(sql: Sql): TutorService {
   const conversations: OpeningConversationRepository =
     createOpeningConversationRepository(sql);
-  return createTutorService({ conversations });
+  const sourceChunks: OpeningSourceChunksRepository =
+    createOpeningSourceChunksRepository(sql);
+  return createTutorService({ conversations, sourceChunks });
 }
 
 export function getObservationService(sql: Sql) {

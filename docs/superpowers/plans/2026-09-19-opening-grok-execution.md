@@ -20,7 +20,7 @@
 - Every behavior change follows `RED -> root cause -> minimal fix -> same-command GREEN -> type/lint/integration evidence`.
 - Every scope and repository query is principal/workspace bound. Never accept owner, workspace, source ownership, recipient, or provider download URL from an untrusted client field.
 - DB tests must use the guarded isolated URL and `OPENING_TEST_DB=1`; never run destructive fixtures against a development or user database.
-- Preserve existing migration files and numbers. Applied migrations must stay contiguous (migrate.ts enforces `MIGRATION_VERSION_GAP`); no gaps, placeholders, or loader exceptions. Current reservations: M01 `0022` (applied), M02 `0023` (coordinator reallocated 2026-09-20: M02 precedes P02 in execution order), P02 `0024`, C01 `0025`, K01 `0026`, K02 `0027`. Check the actual disk before adding any migration. Existing `0016`-`0022` are not reusable. The coordinator allocates every new migration number; never pick one autonomously.
+- Preserve existing migration files and numbers. Applied migrations must stay contiguous (migrate.ts enforces `MIGRATION_VERSION_GAP`); no gaps, placeholders, or loader exceptions. Current allocations: M01 `0022` and M02 `0023` are applied; P02 `0024` is reserved, this worktree consumes `0025` for Opening Turn Intent Snapshot and `0026` for H6 Opening Turn Outcome Unknown, and future reservations are C01 `0027`, K01 `0028`, K02 `0029`. Check the actual disk before adding any migration. Existing `0016`-`0022` are not reusable. The coordinator allocates every new migration number; never pick one autonomously.
 - UI changes use Tailwind utilities and existing `lucide-react`; provide loading, empty, error, retry, keyboard, mobile and long-text states. Do not display invented progress, fake mastery, fake conversations or fake provider availability.
 - Research findings are not implementation evidence. Real model semantics, real provider billing, real IMAP/DingTalk permission, real audio/video quality and real device behavior remain separately labeled.
 
@@ -105,7 +105,7 @@ OPENING_TEST_DB=1 OPENING_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/a
 
 ### M02: Privacy deletion, epoch and restore exclusion
 
-**Migration allocation (coordinator decision, revised 2026-09-20):** the migration loader enforces contiguous versions, so placeholders are forbidden. M02 takes `0023_opening_memory_privacy_epoch.sql` (already on disk, renamed by the coordinator); P02 shifts to `0024`, C01 to `0025`, K01 to `0026`, K02 to `0027` at their own slices. Do not renumber applied files; downstream tasks use the number stated in their own subplan after the coordinator confirms it.
+**Migration allocation (coordinator decision, revised for the current worktree):** the migration loader enforces contiguous versions, so placeholders are forbidden. M02 takes `0023_opening_memory_privacy_epoch.sql`; P02 takes `0024`; this worktree consumes `0025_opening_turn_intent_snapshot.sql` and H6 adds `0026_opening_turn_outcome_unknown.sql`; C01 shifts to `0027`, K01 to `0028`, and K02 to `0029` at their own slices. Do not renumber applied files; downstream tasks use these allocations.
 
 **Files:** Follow `04-memory.md`: `opening-privacy.ts`, `privacy-guard.ts`, its unit test, `opening-privacy.test.ts`, worker writeback guard and backup adapter boundary. Do not rewrite legacy event guards.
 
@@ -189,7 +189,7 @@ OPENING_TEST_DB=1 OPENING_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/a
 
 The X01 capability contracts are already ledger-verified and the files `connections.ts`, `imports.ts`, `media.ts`, `knowledge.ts`, `proactive.ts` exist under `packages/contracts/src/opening/`. Do not rewrite them; if C01 needs a new field, extend additively and flag it to the coordinator first.
 
-**Files:** Follow `09-connections.md`: connection schema/repository/import repository, migration `0025`, credential vault, import-identity tests, web connection services/routes and guarded handler tests.
+**Files:** Follow `09-connections.md`: connection schema/repository/import repository, migration `0027`, credential vault, import-identity tests, web connection services/routes and guarded handler tests.
 
 **Acceptance:** strict DTOs never expose secrets; import identity includes connection/container/generation/remote ID; AES-GCM nonce/AAD/key rotation boundaries are tested; revoke increments version, deletes credentials, cancels jobs and blocks stale writeback; no arbitrary URL/recipient/scope.
 
@@ -213,7 +213,7 @@ The X01 capability contracts are already ledger-verified and the files `connecti
 
 ### K01 and K02: Knowledge and targeted tutoring
 
-**Files:** K01 contracts/domain graph tests, schema/repository/migration `0026`, build job, service/routes/integration; K02 tutor policy/repository/migration `0027`, action API and adaptive-loop integration. Follow `10-media-knowledge.md`.
+**Files:** K01 contracts/domain graph tests, schema/repository/migration `0028`, build job, service/routes/integration; K02 tutor policy/repository/migration `0029`, action API and adaptive-loop integration. Follow `10-media-knowledge.md`.
 
 **Acceptance:** knowledge nodes/edges are source-backed and editable; supported requires current evidence; self-prerequisite/cycles/foreign references are rejected; corrections and source revocation create needs_check rather than silently deleting history. K02 separates assisted, independent, delayed and transfer evidence; it reuses L02/T03/P02 and does not create a second scoring system.
 
@@ -293,7 +293,7 @@ Migration: `0023_opening_memory_privacy_epoch.sql` (coordinator reallocated from
 GREEN on xhh (Coder, before coordinator renaming): privacy-guard unit 1 passed; opening-privacy integration 4 passed; database/worker/web typecheck exit 0; changed-file eslint exit 0.
 
 Coordinator resolution (2026-09-20 01:19–01:22 CST):
-- Loader enforces contiguous versions (`MIGRATION_VERSION_GAP`); placeholders/exceptions rejected. Renamed `0024_opening_memory_privacy_epoch.sql` → `0023_...` and re-pointed `opening-privacy.test.ts` (sql0023 variable) instead. Reservations shifted: P02→0024, C01→0025, K01→0026, K02→0027 across the execution plan, master plan and subplans (06-planning/09-connections/10-media-knowledge). Validator PASS 37 tasks; tooling 22 pass.
+- Loader enforces contiguous versions (`MIGRATION_VERSION_GAP`); placeholders/exceptions rejected. Renamed `0024_opening_memory_privacy_epoch.sql` → `0023_...` and re-pointed `opening-privacy.test.ts` (sql0023 variable) instead. The current worktree now consumes `0025_opening_turn_intent_snapshot.sql` and H6 adds `0026_opening_turn_outcome_unknown.sql`; future reservations are C01→0027, K01→0028, K02→0029 across the execution plan, master plan and subplans (06-planning/09-connections/10-media-knowledge).
 - Repaired the polluted isolated-test registry: Coder's blocked 0024 attempt had persisted `0023_opening_planning.sql`/`0024_opening_memory_privacy_epoch.sql` rows in `schema_migrations` of `aistudy_opening_test`; deleted both orphan rows via the guarded URL, then `applyMigrations` re-applied `0023_opening_memory_privacy_epoch.sql` cleanly.
 - Re-verified on combined tree: opening-privacy 4/4; guard unit pass; M01 handler regression 6/6; combined integration (privacy+budget+history+tutor-turn+foundation) 25/25 exit 0; worker/database typecheck exit 0.
 - Coordinator wire decision: the production `privacy` wiring in `apps/worker/src/index.ts`/`createOpeningJobRepository` was NOT authorized inside the M02 allowlist and remained outstanding. It was subsequently authorized and delivered inside the L01+M02-wire dispatch (see below).
@@ -331,7 +331,7 @@ GREEN on xhh:
 
 BLOCKED / Coord:
 - M01 handler regression: coordinator resolved by renaming the M02 file to `0023` and re-pointing `opening-privacy.test.ts`; no placeholder, no loader exception.
-- Validator: coordinator shifted reservations (P02→0024, C01→0025, K01→0026, K02→0027) in the execution plan; validator PASS re-verified below.
+- Validator: H6 adds `0026_opening_turn_outcome_unknown.sql`; the current worktree consumes `0025_opening_turn_intent_snapshot.sql`; future reservations are C01→0027, K01→0028, K02→0029. The validator was rerun after updating the active plan references.
 - Production wire incomplete within allowlist: `apps/worker/src/index.ts` does not pass `privacy` into `createTutorTurnHandler`; `createOpeningJobRepository` has no `workspacePrivacyEpoch` — optional hooks no-op until Coord authorizes those paths.
 
 ## Observed evidence — L01+M02-wire (Coder, xhh)
@@ -346,5 +346,5 @@ GREEN on xhh:
 
 Inventory: ObservationInput already required sessionId; resolveAssistance + 0019 schema/repo/routes present — filled gaps only (clientKey replay, tutor learningSessionId exposure, handler/repo integration tests, prod privacy/learning wire).
 
-Residual (not this card PASS): M02 contiguous 0023 + validate-opening-plan C01/0024 collision.
+Residual from the earlier combined-tree record: this worktree now resolves the former migration collision by reserving `0025` for the turn snapshot, `0026` for H6 outcome-unknown turns, and shifting future C01/K01/K02 allocations to `0027`/`0028`/`0029`; no published migration is changed.
 

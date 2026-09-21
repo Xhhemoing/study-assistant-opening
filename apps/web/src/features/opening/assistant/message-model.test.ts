@@ -20,6 +20,23 @@ describe("message-model", () => {
     expect(historyTruncated).toBe(true);
   });
 
+  it("maps outcome_unknown assistant turns without converting their status", () => {
+    const { messages } = resolveChatMessages({
+      resume: null,
+      turns: [{
+        id: "33333333-3333-4333-8333-333333333333",
+        conversationId: U,
+        role: "assistant",
+        text: "结果状态未知，请勿重复提交",
+        citations: [],
+        createdAt: "2026-09-13T12:00:00.000Z",
+        mode: "explain",
+        status: "outcome_unknown",
+      }],
+    });
+    expect(messages[0]?.status).toBe("outcome_unknown");
+  });
+
   it("prefers turn records with citation labels when available", () => {
     const { messages } = resolveChatMessages({
       resume: {

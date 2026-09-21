@@ -35,7 +35,7 @@ it('rejects segments outside the source duration', () => {
 ### K01: Source-backed, editable course knowledge structure
 
 **Owner:** AI+DATA. **Depends:** X01,C01,I02,T02.
-**Create:** `packages/contracts/src/opening/knowledge.test.ts`；`packages/domain/src/opening/knowledge-graph.ts`、`knowledge-graph.test.ts`；`packages/database/src/schema/opening-knowledge.ts`、`repositories/opening-knowledge.ts`、`migrations/0026_opening_knowledge.sql`；`apps/worker/src/jobs/build-course-knowledge.ts`；`apps/web/src/features/opening/knowledge/service.ts`；`apps/web/src/app/api/opening/courses/[id]/knowledge/route.ts`、`knowledge/rebuild/route.ts`；`tests/integration/opening-knowledge.test.ts`。
+**Create:** `packages/contracts/src/opening/knowledge.test.ts`；`packages/domain/src/opening/knowledge-graph.ts`、`knowledge-graph.test.ts`；`packages/database/src/schema/opening-knowledge.ts`、`repositories/opening-knowledge.ts`、`migrations/0028_opening_knowledge.sql`；`apps/worker/src/jobs/build-course-knowledge.ts`；`apps/web/src/features/opening/knowledge/service.ts`；`apps/web/src/app/api/opening/courses/[id]/knowledge/route.ts`、`knowledge/rebuild/route.ts`；`tests/integration/opening-knowledge.test.ts`。
 **Interfaces:** `validateKnowledgeSnapshot(snapshot:KnowledgeSnapshot):KnowledgeSnapshot`；CRUD/rebuild遵守X01的expectedVersion与授权引用验证。SourceChunk来自文档或V01时间段，题型节点通过SkillEvidence连接练习，不以自由文本技能名作为永久唯一ID。
 
 - [ ] 在完整fixture上增加无依据节点和循环先修的失败测试：
@@ -48,14 +48,14 @@ it('rejects a self prerequisite', () => {
 - [ ] 运行`node node_modules/vitest/vitest.mjs run --project unit packages/domain/src/opening/knowledge-graph.test.ts`确认失败。
 - [ ] 用T02已授权chunks提取章节/概念/方法/题型与证据；LLM输出先过结构校验，再按实际source版本、course membership核对引用。无材料的先修推断标suggested，不伪造原文证据；含糊公式不入supported。
 - [ ] 自动形成可用目录与关联；仅歧义合并、冲突和关键修订请求用户确认，不让用户逐节点维护。含义相近不直接合并；保留别名/来源差异、人工纠正和版本记录。先修边拒绝循环，其他关系不误用DAG限制。
-- [ ] 0026在C01的0025后迁移；保存节点/边/快照及来源版本。新材料增量补充，资料撤销或纠错仅使相关推断needs_check；原个人作答历史保留，但不可继续作为已删除来源的可见引用。支持跨课程关联但权限仍逐源校验。
+- [ ] 0028在C01的0027后迁移；保存节点/边/快照及来源版本。新材料增量补充，资料撤销或纠错仅使相关推断needs_check；原个人作答历史保留，但不可继续作为已删除来源的可见引用。支持跨课程关联但权限仍逐源校验。
 - [ ] 重跑单测、`npm run test:integration -- opening-knowledge`：重复提取幂等、非法引用、跨课程越权、循环、人工更正不被覆盖、删除/重建竞态。人工审查一门课的章节覆盖、关键先修和引用支持度，记录分母；不凭图形漂亮认定知识结构正确。
 - [ ] 回滚关闭知识构建任务与读入口，保留新增表和原始资料；不可降级到无引用生成图，数据库恢复走Q03。
 
 ### K02: Skill-linked evidence, targeted tutoring and retest feedback
 
 **Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,L02,T03.
-**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`；`packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/0027_opening_skill_evidence.sql`；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`；`tests/integration/opening-adaptive-loop.test.ts`。
+**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`；`packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/0029_opening_skill_evidence.sql`；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`；`tests/integration/opening-adaptive-loop.test.ts`。
 **Modify:** L01 observation service、L02 retest worker、T03 tutor worker（各自小适配模块，不继续扩大超过200行的文件）。
 **Interfaces:** `recommendTutorAction({nodeId,hasCheckedIndependent,hasAssistance,retestDue}):TutorAction['kind']`；服务端从SkillEvidence/Observation加载标志，客户端不可自报已核验独立。
 
@@ -70,4 +70,4 @@ it('asks for independent transfer after assisted success', () => {
 - [ ] 关联回忆/解释/程序执行/迁移/限时维度、题目身份、提示曝光、用时及参考核验；未知时间和自报正确不升级证据。生成题和答案需校验、标生成；无法可靠核验的证明题保持needs_check，不宣布掌握。
 - [ ] 复用L02重测队列、T03材料辅导和P02候选任务，不另造评分系统。完成重测关闭对应due项、追加新证据并更新下一步建议；同题复述、看答案后答对、新题独立和延迟表现分开。用户可纠正错因；不要把OCR错误算学科错误。
 - [ ] 重跑单测和`npm run test:integration -- opening-adaptive-loop`，验证“提示→新题→延迟→更新计划候选”及跨技能不污染。效果报告比较独立新题、延迟正确率、提示依赖和耗时，保留样本量/难度差异；不作因果疗效或全面提分保证。
-- [ ] 0027追加SkillEvidence关联，保持LearningEvent v1兼容。回滚停用新投影，保留L01原始观察与既有辅导功能，不删除学习历史。
+- [ ] 0029追加SkillEvidence关联，保持LearningEvent v1兼容。回滚停用新投影，保留L01原始观察与既有辅导功能，不删除学习历史。

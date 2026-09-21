@@ -123,7 +123,7 @@ export type ProviderOutput = {
 export type TurnRecord = {
   id: string; conversationId: string; role: 'user' | 'assistant';
   text: string; citations: Citation[]; createdAt: string;
-  mode: TutorMode; status: 'pending' | 'complete' | 'failed';
+  mode: TutorMode; status: 'pending' | 'complete' | 'failed' | 'outcome_unknown';
 };
 export type BudgetReservation = { id: string; requestKey: string; jobId: string | null; reservedCents: number };
 export type EphemeralTurnInput = {

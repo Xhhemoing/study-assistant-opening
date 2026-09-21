@@ -12,6 +12,7 @@ import {
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
+  OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import {
   buildConversationResume,
@@ -57,7 +58,17 @@ export function exposureLevelForMode(
 
 export function createTutorService(deps: {
   conversations: OpeningConversationRepository;
+  sourceChunks: OpeningSourceChunksRepository;
 }) {
+  async function authorizedChunksFor(
+    scope: OpeningConversationScope,
+    sourceIds: readonly string[],
+  ): Promise<AuthorizedChunk[]> {
+    if (sourceIds.length === 0) return [];
+    const chunks = await deps.sourceChunks.listForSources(scope, [...sourceIds]);
+    return chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
+  }
+
   return {
     async listConversations(
       scope: OpeningConversationScope,
@@ -85,7 +96,6 @@ export function createTutorService(deps: {
           currentPage?: number | null;
           chunkId?: string | null;
         };
-        authorizedChunks?: readonly AuthorizedChunk[];
       },
     ): Promise<ConversationResume> {
       const owned = await deps.conversations.getOwned(scope, conversationId);
@@ -93,13 +103,14 @@ export function createTutorService(deps: {
         scope,
         conversationId,
       );
+      const sourceIds = opts?.sticky?.sourceIds ?? [];
       const built = buildConversationResume({
         conversationId,
         courseId: owned.courseId,
-        sourceIds: opts?.sticky?.sourceIds ?? [],
+        sourceIds,
         turns,
         sticky: opts?.sticky,
-        authorizedChunks: opts?.authorizedChunks ?? [],
+        authorizedChunks: await authorizedChunksFor(scope, sourceIds),
       });
       if (!built.ok) {
         throw mapPageSelectionToHttp(built.selection.code);
@@ -117,7 +128,6 @@ export function createTutorService(deps: {
     async submitTurn(
       scope: OpeningConversationScope,
       body: unknown,
-      opts?: { authorizedChunks?: readonly AuthorizedChunk[] },
     ): Promise<{ jobId: string; turnId: string; learningSessionId: string | null }> {
       const input = turnInputSchema.parse(body) as TurnInput;
       if (input.privacy !== "saved") {
@@ -134,7 +144,7 @@ export function createTutorService(deps: {
           currentPage: input.currentPage,
           chunkId: input.chunkId,
         },
-        opts?.authorizedChunks ?? [],
+        await authorizedChunksFor(scope, input.sourceIds),
       );
       if (!selection.ok) {
         throw mapPageSelectionToHttp(selection.code);
@@ -156,6 +166,7 @@ export function createTutorService(deps: {
         text: input.text,
         mode: input.mode,
         clientKey: input.clientKey,
+        privacy: input.privacy,
         sourceIds: input.sourceIds,
         learningSessionId,
         currentPage: input.currentPage ?? null,

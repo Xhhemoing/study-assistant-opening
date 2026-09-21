@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, createSqlClient } from "@aistudy/database";
+import { applyMigrations, createSqlClient, hashSessionToken } from "@aistudy/database";
 import { GET as getCandidates } from "../../../apps/web/src/app/api/opening/candidates/route";
 import { GET as getJob } from "../../../apps/web/src/app/api/opening/jobs/[id]/route";
+import { POST as submitTurn } from "../../../apps/web/src/app/api/opening/turns/route";
+import { POST as createConversation } from "../../../apps/web/src/app/api/opening/conversations/route";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -76,5 +78,76 @@ describe("opening tutor polling handlers", () => {
       params: Promise.resolve({ id: randomUUID() }),
     });
     expect(response.status).toBe(404);
+  });
+
+  it("returns 404 for a job owned by another user in the same workspace", async () => {
+    const sessionToken = cookie.slice(`${cookieName}=`.length);
+    const workspaceId = (await sql`
+      SELECT w.id AS workspace_id
+      FROM sessions s JOIN workspaces w ON w.owner_user_id = s.user_id
+      WHERE s.token_hash = ${hashSessionToken(sessionToken)}
+    `)[0].workspace_id as string;
+    const conversationId = randomUUID();
+    const userTurnId = randomUUID();
+    const assistantTurnId = randomUUID();
+    const jobId = randomUUID();
+    await sql`
+      INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
+      VALUES (${conversationId}, ${workspaceId}, ${randomUUID()}, 'foreign owner')
+    `;
+    await sql`
+      INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status)
+      VALUES
+        (${userTurnId}, ${workspaceId}, ${conversationId}, 'user', 'question', 'explain', 'complete'),
+        (${assistantTurnId}, ${workspaceId}, ${conversationId}, 'assistant', '', 'explain', 'pending')
+    `;
+    await sql`
+      INSERT INTO opening_tutor_jobs (id, workspace_id, conversation_id, user_turn_id, assistant_turn_id, status, mode)
+      VALUES (${jobId}, ${workspaceId}, ${conversationId}, ${userTurnId}, ${assistantTurnId}, 'queued', 'explain')
+    `;
+
+    const insertedJob = await sql`
+      SELECT id FROM opening_tutor_jobs
+      WHERE id = ${jobId} AND workspace_id = ${workspaceId}
+    `;
+    expect(insertedJob).toHaveLength(1);
+
+    const response = await getJob(request(`/api/opening/jobs/${jobId}`), {
+      params: Promise.resolve({ id: jobId }),
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 409 when a saved client key is reused for a different intent", async () => {
+    const conversationResponse = await createConversation(new Request("http://localhost/api/opening/conversations", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ title: "turn conflict", courseId: null }),
+    }));
+    expect(conversationResponse.status).toBe(201);
+    const conversation = await conversationResponse.json() as { id: string };
+    const body = {
+      conversationId: conversation.id,
+      text: "same request",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: `client-${randomUUID()}`,
+      privacy: "saved",
+    };
+    const first = await submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    expect(first.status).toBe(201);
+
+    const conflict = await submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ ...body, text: "changed request" }),
+    }));
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({ error: { code: "CONFLICT" } });
   });
 });

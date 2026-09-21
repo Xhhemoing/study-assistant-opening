@@ -16,7 +16,7 @@ export function MessageList({ messages, historyTruncated }: Props) {
         </p>
       ) : null}
       {messages.length === 0 ? (
-        <p className="text-sm text-zinc-500">还没有消息。上传并指定材料后即可提问。</p>
+        <p className="text-sm text-zinc-500">还没有消息。自由交流，也可基于已选材料提问。</p>
       ) : (
         <ul className="flex flex-col gap-3">
           {messages.map((message) => (
@@ -36,6 +36,9 @@ export function MessageList({ messages, historyTruncated }: Props) {
               ) : null}
               {message.status === "pending" ? (
                 <p className="mt-1 text-xs opacity-70">生成中…</p>
+              ) : null}
+              {message.status === "outcome_unknown" ? (
+                <p className="mt-1 text-xs text-amber-700">结果状态未知，请勿重复提交</p>
               ) : null}
               {message.status === "failed" ? (
                 <p className="mt-1 text-xs text-red-600">本轮失败</p>

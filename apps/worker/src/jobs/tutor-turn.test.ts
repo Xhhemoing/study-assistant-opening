@@ -22,19 +22,26 @@ describe("tutor mode policy", () => {
 describe("tutor turn handler", () => {
   const chunkA: SourceChunk = { id: "00000000-0000-4000-8000-00000000000a", sourceId: "00000000-0000-4000-8000-000000000001", sourceVersion: 0, page: 1, slideLabel: null, startMs: null, endMs: null, text: "Newton wrote the laws of motion", imageObjectKey: null };
   const chunkB: SourceChunk = { ...chunkA, id: "00000000-0000-4000-8000-00000000000b", page: 2, text: "Einstein refined gravity" };
-  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: ["00000000-0000-4000-8000-000000000001"], currentPage: 1, chunkId: chunkA.id, learningSessionId: null as string | null };
+  const secondSourceId = "00000000-0000-4000-8000-000000000007";
+  const chunkC: SourceChunk = { ...chunkA, id: "00000000-0000-4000-8000-00000000000c", sourceId: secondSourceId, text: "Momentum is conserved" };
+  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: [chunkA.sourceId], currentPage: 1, chunkId: chunkA.id, learningSessionId: null as string | null };
   const claimedJob = { id: "00000000-0000-4000-8000-00000000000j", workspaceId: "00000000-0000-4000-8000-000000000002", ownerUserId: "00000000-0000-4000-8000-000000000003", conversationId: "00000000-0000-4000-8000-000000000004", userTurnId: "00000000-0000-4000-8000-000000000005", assistantTurnId: "00000000-0000-4000-8000-000000000006", status: "running" as const, mode: "explain", error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 
-  function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown } = {}) {
+  function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
-      getUserTurn: vi.fn(async () => turn),
+      getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       loadHistory: vi.fn(async () => [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }]),
       completeTurn: vi.fn(async () => undefined),
       fail: vi.fn(async () => undefined),
       markUnknown: vi.fn(async () => undefined),
     };
-    const chunks = { listForSources: vi.fn(async () => overrides.chunks ?? [chunkA, chunkB]) };
+    const chunks = {
+      listForSources: vi.fn(async () => overrides.chunks ?? [chunkA, chunkB]),
+      listChunksAtVersion: vi.fn(async (_scope, sourceId) => overrides.missingSourceIds?.includes(sourceId)
+        ? []
+        : overrides.chunks ?? (sourceId === secondSourceId ? [chunkC] : [chunkA, chunkB])),
+    };
     const budget = {
       reserve: vi.fn(async () => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
@@ -57,6 +64,118 @@ describe("tutor turn handler", () => {
     expect(input.instruction).toContain("完整答案");
     expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
+    expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
+  });
+
+  it("retrieves chunks at each turn's saved source version instead of the current source version", async () => {
+    const snapshotChunk = { ...chunkA, sourceVersion: 4, text: "Newton's laws from the saved source version" };
+    const { deps, chunks, provider } = setup({
+      chunks: [snapshotChunk],
+      sourceVersions: { [chunkA.sourceId]: 4 },
+    });
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }),
+      chunkA.sourceId,
+      4,
+    );
+    expect(chunks.listForSources).not.toHaveBeenCalled();
+    expect(provider.complete.mock.calls[0][0].chunks).toEqual([snapshotChunk]);
+  });
+
+  it("retrieves and merges each selected source at its saved version", async () => {
+    const { deps, chunks, provider } = setup({
+      sourceIds: [chunkA.sourceId, secondSourceId],
+      sourceVersions: { [chunkA.sourceId]: 3, [secondSourceId]: 9 },
+    });
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }),
+      chunkA.sourceId,
+      3,
+    );
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }),
+      secondSourceId,
+      9,
+    );
+    expect(provider.complete.mock.calls[0][0].chunks.map((chunk: SourceChunk) => chunk.id)).toEqual([
+      chunkA.id,
+      chunkC.id,
+      chunkB.id,
+    ]);
+  });
+
+  it("does not fall back to the current source version when a turn has no snapshot", async () => {
+    const { deps, chunks, provider, tutorJobs } = setup({ sourceVersions: {} });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow(/unavailable/);
+
+    expect(chunks.listChunksAtVersion).not.toHaveBeenCalled();
+    expect(chunks.listForSources).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("fails the whole mixed snapshot when one selected source has no saved version", async () => {
+    const { deps, provider, tutorJobs, chunks } = setup({
+      sourceIds: [chunkA.sourceId, secondSourceId],
+      sourceVersions: { [chunkA.sourceId]: 3 },
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow(/missing snapshot/);
+
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledTimes(1);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("does not call the provider when one selected source snapshot is missing", async () => {
+    const { deps, provider, tutorJobs } = setup({
+      sourceIds: [chunkA.sourceId, secondSourceId],
+      sourceVersions: { [chunkA.sourceId]: 3, [secondSourceId]: 9 },
+      missingSourceIds: [secondSourceId],
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow(/unavailable/);
+
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("does not require a snapshot for a privacy-excluded source", async () => {
+    const { deps, chunks, provider } = setup({
+      sourceIds: [chunkA.sourceId, secondSourceId],
+      sourceVersions: { [chunkA.sourceId]: 3 },
+    });
+    deps.privacy = {
+      getWorkspaceEpoch: vi.fn(async () => 1),
+      listExcludedSourceIds: vi.fn(async () => [secondSourceId]),
+    };
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledTimes(1);
+    expect(chunks.listChunksAtVersion).toHaveBeenCalledWith(
+      expect.anything(),
+      chunkA.sourceId,
+      3,
+    );
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps empty sourceIds as a provider-backed free exchange", async () => {
+    const { deps, chunks, provider } = setup({ sourceIds: [], sourceVersions: {}, provider: async () => ({ text: "F = ma", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 }) });
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+
+    expect(chunks.listChunksAtVersion).not.toHaveBeenCalled();
+    expect(chunks.listForSources).not.toHaveBeenCalled();
+    expect(provider.complete).toHaveBeenCalledTimes(1);
   });
 
   it("reserves for actual input size and output limit, not only the fixed floor", async () => {
@@ -123,25 +242,51 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.fail).toHaveBeenCalled();
   });
 
-  it("records delivered help exposure bound to learningSessionId for hint mode", async () => {
+  it("passes delivered help exposure to completeTurn after assistant persistence", async () => {
     const sessionId = "00000000-0000-4000-8000-0000000000aa";
     const { deps, tutorJobs } = setup();
     deps.tutorJobs.getUserTurn = vi.fn(async () => ({
       ...turn,
       mode: "hint",
       learningSessionId: sessionId,
+      sourceVersions: { [chunkA.sourceId]: 0 },
     }));
     const claimed = { ...claimedJob, mode: "hint" };
     deps.tutorJobs.claim = vi.fn(async () => claimed);
-    const exposures: Array<{ sessionId: string; level: string; delivered: boolean }> = [];
-    const learning = {
-      insertHelpExposure: vi.fn(async (_scope: unknown, exposure: { sessionId: string; level: string; delivered: boolean }) => {
-        exposures.push({ sessionId: exposure.sessionId, level: exposure.level, delivered: exposure.delivered });
-        return exposure;
+    await createTutorTurnHandler(deps)(claimed.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      helpExposure: expect.objectContaining({
+        sessionId,
+        turnId: claimed.assistantTurnId,
+        level: "hinted",
+        delivered: true,
       }),
+    }));
+  });
+
+  it("does not expose help when completeTurn rejects before persistence", async () => {
+    const sessionId = "00000000-0000-4000-8000-0000000000aa";
+    const { deps, tutorJobs } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      mode: "hint",
+      learningSessionId: sessionId,
+      sourceVersions: { [chunkA.sourceId]: 0 },
+    }));
+    const claimed = { ...claimedJob, mode: "hint" };
+    deps.tutorJobs.claim = vi.fn(async () => claimed);
+    tutorJobs.completeTurn.mockRejectedValueOnce(new Error("assistant persistence failed"));
+    const learning = {
+      insertHelpExposure: vi.fn(async () => undefined),
     };
-    await createTutorTurnHandler({ ...deps, learning })(claimed.id);
-    expect(exposures).toEqual([{ sessionId, level: "hinted", delivered: true }]);
-    expect(tutorJobs.completeTurn).toHaveBeenCalled();
+
+    await expect(createTutorTurnHandler({ ...deps, learning })(claimed.id)).rejects.toThrow(
+      "assistant persistence failed",
+    );
+
+    expect(learning.insertHelpExposure).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      helpExposure: expect.objectContaining({ sessionId }),
+    }));
   });
 });

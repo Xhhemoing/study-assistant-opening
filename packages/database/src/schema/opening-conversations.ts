@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./library";
 
 export const openingConversations = pgTable("opening_conversations", {
@@ -17,12 +17,14 @@ export const openingTurns = pgTable("opening_turns", {
   role: text("role").notNull(),
   text: text("text").notNull(),
   mode: text("mode").notNull(),
-  status: text("status").notNull(),
+  status: text("status").$type<"pending" | "complete" | "failed" | "outcome_unknown">().notNull(),
   clientKey: text("client_key"),
   learningSessionId: uuid("learning_session_id"),
   currentPage: integer("current_page"),
   chunkId: uuid("chunk_id"),
   sourceIds: uuid("source_ids").array().notNull().default([]),
+  intentHash: text("intent_hash"),
+  sourceVersions: jsonb("source_versions").notNull().default({}),
   citations: text("citations").notNull().default("[]"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

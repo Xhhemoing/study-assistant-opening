@@ -132,7 +132,7 @@ export const turnRecordSchema = z
     citations: z.array(citationSchema).max(64),
     createdAt: isoDateTimeSchema,
     mode: tutorModeSchema,
-    status: z.enum(["pending", "complete", "failed"]),
+    status: z.enum(["pending", "complete", "failed", "outcome_unknown"]),
   })
   .strict();
 

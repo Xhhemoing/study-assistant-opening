@@ -15,6 +15,7 @@ import {
   sourceChunkSchema,
   sourceRecordSchema,
   turnInputSchema,
+  turnRecordSchema,
   uploadInputSchema,
   weekSessionSchema,
   sourceCourseLinkInputSchema,
@@ -62,6 +63,20 @@ describe("F02 opening contracts", () => {
     });
     expect(chunk.page).toBe(3);
     expect(chunk.slideLabel).toBe("Slide 12");
+  });
+
+  it("turn records preserve an unknown provider outcome as a distinct status", () => {
+    const record = turnRecordSchema.parse({
+      id: U,
+      conversationId: U2,
+      role: "assistant",
+      text: "结果状态未知，请勿重复提交",
+      citations: [],
+      createdAt: ISO,
+      mode: "explain",
+      status: "outcome_unknown",
+    });
+    expect(record.status).toBe("outcome_unknown");
   });
 
   it("turnInput requires conversationId; optional page/chunk (RU-02/03)", () => {

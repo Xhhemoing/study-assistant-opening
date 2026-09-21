@@ -70,7 +70,7 @@ export function Composer({
           value={draft}
           disabled={pending || disabled}
           onChange={(e) => onDraftChange(e.target.value)}
-          placeholder="基于已选材料提问…"
+          placeholder="自由交流，或基于已选材料提问…"
           aria-label="消息输入"
         />
         <button

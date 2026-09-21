@@ -43,7 +43,6 @@ export async function GET(
         : undefined;
     const resume = await getTutorService(sql).resumeConversation(scope, id, {
       sticky,
-      authorizedChunks: [],
     });
     return Response.json(resume);
   } catch (error) {

@@ -11,6 +11,12 @@ type Props = {
   disabled?: boolean;
 };
 
+export function isSourceSelectable(
+  source: Pick<SourceRecord, "uploadState" | "parseState">,
+): boolean {
+  return source.uploadState === "uploaded" && source.parseState === "ready";
+}
+
 /** File selection ≠ current-page selection (RU-03). */
 export function SourcePageControls({
   sources,
@@ -20,7 +26,7 @@ export function SourcePageControls({
   onCurrentPageChange,
   disabled,
 }: Props) {
-  const selectable = sources.filter((s) => s.uploadState === "uploaded");
+  const selectable = sources.filter(isSourceSelectable);
 
   function toggle(id: string) {
     if (selectedSourceIds.includes(id)) {
@@ -34,7 +40,7 @@ export function SourcePageControls({
     <section className="space-y-3 border-b border-zinc-200 p-3" aria-label="材料与页码">
       <div>
         <h2 className="text-sm font-medium text-zinc-800">指定材料</h2>
-        <p className="text-xs text-zinc-500">仅已完成上传的材料可选；选文件不等于选当前页。</p>
+        <p className="text-xs text-zinc-500">仅已完成上传且解析就绪的材料可选；解析中的材料不可用于辅导，选文件也不等于选当前页。</p>
         {selectable.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500">暂无可指定材料。</p>
         ) : (

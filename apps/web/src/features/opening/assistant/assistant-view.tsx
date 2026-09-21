@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ConversationResume, SourceRecord, TurnRecord } from "@aistudy/contracts";
-import { OpeningApiError, createOpeningApi, type OpeningApi } from "../client/api";
+import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerSubmit } from "./composer";
 import { MessageList } from "./message-list";
 import { resolveChatMessages } from "./message-model";
@@ -14,6 +14,86 @@ type Props = {
   api?: OpeningApi;
   initialConversationId?: string | null;
 };
+
+const TERMINAL_JOB_STATUSES = new Set<JobStatusResponse["status"]>([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "outcome_unknown",
+]);
+
+type JobPollerOptions = {
+  getJob: () => Promise<JobStatusResponse>;
+  onStatus: (job: JobStatusResponse) => void | Promise<void>;
+  onError?: (error: unknown) => void;
+  intervalMs?: number;
+};
+
+export function createJobPoller({
+  getJob,
+  onStatus,
+  onError,
+  intervalMs = 1_000,
+}: JobPollerOptions) {
+  let active = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight = false;
+
+  const poll = async (): Promise<void> => {
+    if (!active || inFlight) return;
+    inFlight = true;
+    try {
+      const job = await getJob();
+      if (!active) return;
+      await onStatus(job);
+      if (!active || TERMINAL_JOB_STATUSES.has(job.status)) {
+        active = false;
+        return;
+      }
+      timer = setTimeout(() => void poll(), intervalMs);
+    } catch (error) {
+      if (!active) return;
+      onError?.(error);
+      timer = setTimeout(() => void poll(), intervalMs);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  return {
+    start() {
+      if (active) return;
+      active = true;
+      void poll();
+    },
+    cancel() {
+      active = false;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
+export function jobStatusHint(job: JobStatusResponse): string {
+  if (job.status === "queued") return "回答任务已排队。";
+  if (job.status === "running") return "回答任务生成中。";
+  if (job.status === "failed") {
+    return `回答任务失败：${job.error?.message ?? "服务未提供失败原因"}`;
+  }
+  if (job.status === "cancelled") return "回答任务已取消。";
+  if (job.status === "outcome_unknown") {
+    return `回答结果状态未知：${job.error?.message ?? "服务未提供原因"}。请勿重复提交。`;
+  }
+  return "";
+}
+
+export function assistantContextHint(selectedSourceIds: string[]): string {
+  return selectedSourceIds.length === 0
+    ? "自由交流"
+    : `已选材料：${selectedSourceIds.length} 份`;
+}
 
 export function AssistantView({ api: apiProp, initialConversationId = null }: Props) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
@@ -29,6 +109,7 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [pendingHint, setPendingHint] = useState("");
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const refreshSources = useCallback(async () => {
     setSources(await api.listSources());
@@ -48,7 +129,9 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       }
       const hasPending = nextTurns.some((t) => t.status === "pending");
       setPendingHint(
-        hasPending ? "回答任务仍在排队（当前 job 仅 pending，稍后刷新可见）。" : "",
+        hasPending
+          ? "存在尚未完成的回答轮次；当前 DTO 未提供其 job 关联，暂不自动轮询。"
+          : "",
       );
     },
     [api],
@@ -80,7 +163,35 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [api, initialConversationId, refreshConversation, refreshSources]);
+
+  useEffect(() => {
+    if (!activeJobId || !conversationId) return;
+
+    const poller = createJobPoller({
+      getJob: () => api.getJob(activeJobId),
+      onStatus: async (job) => {
+        const terminal = TERMINAL_JOB_STATUSES.has(job.status);
+        if (!terminal) {
+          setPendingHint(jobStatusHint(job));
+          return;
+        }
+        setPending(false);
+        setActiveJobId(null);
+        await refreshConversation(conversationId);
+        setPendingHint(jobStatusHint(job));
+      },
+      onError: (pollError) => {
+        setPendingHint(
+          `回答状态暂时无法读取，正在重试：${
+            pollError instanceof Error ? pollError.message : "未知错误"
+          }`,
+        );
+      },
+    });
+    poller.start();
+    return () => poller.cancel();
+  }, [activeJobId, api, conversationId, refreshConversation]);
 
   const display = useMemo(
     () => resolveChatMessages({ resume, turns }),
@@ -99,11 +210,6 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
 
   async function handleSubmit(input: ComposerSubmit) {
     setError("");
-    if (selectedSourceIds.length === 0) {
-      setError("请先指定至少一份已上传材料");
-      return;
-    }
-
     let page: number | null | undefined;
     try {
       page = pageForSubmit(currentPage);
@@ -113,9 +219,10 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     }
 
     setPending(true);
+    let jobSubmitted = false;
     try {
       const id = await ensureConversation();
-      await api.submitTurn({
+      const submitted = await api.submitTurn({
         conversationId: id,
         text: input.text,
         sourceIds: selectedSourceIds,
@@ -124,9 +231,13 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         privacy: "saved",
         ...(page !== undefined ? { currentPage: page } : {}),
       });
+      setActiveJobId(submitted.jobId);
+      jobSubmitted = true;
+      setPendingHint("回答任务已提交，等待状态更新。");
       setDraft("");
       await refreshConversation(id);
     } catch (err) {
+      if (!jobSubmitted) setPending(false);
       if (
         err instanceof OpeningApiError &&
         err.code === "page_not_in_sources" &&
@@ -135,8 +246,6 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         setCurrentPage("");
       }
       setError(formatTurnError(err));
-    } finally {
-      setPending(false);
     }
   }
 
@@ -144,7 +253,9 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     <div className="flex h-full min-h-[28rem] flex-col rounded-xl border border-zinc-200 bg-white">
       <header className="border-b border-zinc-200 px-3 py-2">
         <h1 className="text-base font-semibold text-zinc-900">助理（M1 薄聊天）</h1>
-        <p className="text-xs text-zinc-500">上传 → 指定材料 → 提问。不开放敏感记忆。</p>
+        <p className="text-xs text-zinc-500">
+          {assistantContextHint(selectedSourceIds)}。不开放敏感记忆。
+        </p>
       </header>
       <UploadStrip api={api} onUploaded={refreshSources} disabled={pending} />
       <SourcePageControls

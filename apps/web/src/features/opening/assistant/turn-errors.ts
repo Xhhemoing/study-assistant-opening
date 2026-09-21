@@ -1,6 +1,6 @@
 import { OpeningApiError } from "../client/api";
 
-/** T03 currently validates currentPage against authorizedChunks (often empty → 422). */
+/** Validate an optional physical page against scope-authorized, parse-ready chunks. */
 export function formatTurnError(err: unknown): string {
   if (err instanceof OpeningApiError) {
     if (err.code === "page_not_in_sources") {

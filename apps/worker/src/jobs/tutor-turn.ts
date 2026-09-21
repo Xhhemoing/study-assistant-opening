@@ -33,7 +33,10 @@ export function makeTutorInstruction(mode: TutorMode): string {
 
 export type TutorTurnDeps = {
   tutorJobs: OpeningTutorJobsRepository;
-  chunks: { listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]> };
+  chunks: {
+    listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
+    listChunksAtVersion(scope: { workspaceId: string; ownerUserId: string }, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
+  };
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
   config: {
@@ -48,7 +51,7 @@ export type TutorTurnDeps = {
     getWorkspaceEpoch(scope: { workspaceId: string; ownerUserId: string }): Promise<number>;
     listExcludedSourceIds(scope: { workspaceId: string; ownerUserId: string }): Promise<string[]>;
   };
-  /** L01: record delivered help against an explicit learningSessionId. */
+  /** L01: record delivered help in the tutor completion transaction. */
   learning?: {
     insertHelpExposure(
       scope: { workspaceId: string; ownerUserId: string },
@@ -99,7 +102,21 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (excluded.size && allowedSourceIds.length === 0 && turn.sourceIds.length > 0) {
         throw new Error("all requested source material is privacy-excluded");
       }
-      const chunks = await deps.chunks.listForSources(scope, allowedSourceIds);
+      const chunks = turn.sourceIds.length
+        ? (await Promise.all(
+            allowedSourceIds.map(async (sourceId) => {
+              const version = turn.sourceVersions[sourceId];
+              if (version === undefined) {
+                throw new Error(`source material is unavailable: missing snapshot for ${sourceId}`);
+              }
+              const sourceChunks = await deps.chunks.listChunksAtVersion(scope, sourceId, version);
+              if (!sourceChunks.length) {
+                throw new Error(`source material is unavailable: missing chunks for ${sourceId}@${version}`);
+              }
+              return sourceChunks;
+            }),
+          )).flat()
+        : [];
       if (!chunks.length && allowedSourceIds.length > 0) {
         throw new Error("all requested source material is unavailable");
       }
@@ -146,17 +163,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         const currentEpoch = await deps.privacy.getWorkspaceEpoch(scope);
         assertCurrentEpoch(jobEpoch, currentEpoch);
       }
-      // L01: only delivered help counts; bind to explicit session on the user turn.
-      if (deps.learning && turn.learningSessionId && (mode === "hint" || mode === "explain")) {
-        await deps.learning.insertHelpExposure(scope, {
-          id: randomUUID(),
-          sessionId: turn.learningSessionId,
-          problemId: null,
-          turnId: claimed.assistantTurnId,
-          level: mode === "explain" ? "revealed" : "hinted",
-          delivered: true,
-        });
-      }
+      // L01: carry delivered help into the same transaction as the assistant turn.
+      const helpExposure = turn.learningSessionId && (mode === "hint" || mode === "explain")
+        ? {
+            id: randomUUID(),
+            sessionId: turn.learningSessionId,
+            problemId: null,
+            turnId: claimed.assistantTurnId,
+            level: mode === "explain" ? "revealed" as const : "hinted" as const,
+            delivered: true as const,
+          }
+        : undefined;
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,
@@ -167,6 +184,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           payload,
           sourceIds: citedSourceIds,
         })),
+        ...(helpExposure ? { helpExposure } : {}),
       });
       return { skipped: false };
     } catch (error) {

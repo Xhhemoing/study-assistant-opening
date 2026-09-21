@@ -894,3 +894,31 @@ Prefer `-like` checks for literal Windows path fragments or use a regex with esc
 - Related Files: none
 
 ---
+
+## [ERR-20260920-001] luna-fast-delegation
+
+**Logged**: 2026-09-20T10:25:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: workflow
+
+### Summary
+The third implementation delegation failed with a connection error before producing a result.
+
+### Error
+```
+Connection error.
+```
+
+### Context
+- Requested migration reservation repair and version-bound tutor retrieval.
+- No file changes were attributed to this failed run.
+
+### Suggested Fix
+Retry the delegated task with the current worktree context, or split migration-doc synchronization from code changes.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: packages/database/src/migrations/0025_opening_turn_intent_snapshot.sql
+
+---

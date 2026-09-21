@@ -59,7 +59,7 @@ After Stage 0, follow tasks.json and the exact subplan. Respect this sequence:
 - C02 authorized school IMAP, C03 authorized DingTalk, V01 media, K01 knowledge, K02 adaptive evidence.
 - P04 action digest, U04 capability UI, Q04 CAP01-CAP06 acceptance.
 Do not bypass dependencies or jump to a later ready task (such as U02/V01) to save time; the single-worker stage order is intentional.
-Do not bypass dependencies. Do not mark task verified. Do not change old migration files; future allocations are 0022 memory, 0023 planning, 0024 connections, 0025 knowledge, 0026 skill evidence only after disk/validator checks.
+Do not bypass dependencies. Do not mark task verified. Do not change old migration files; future allocations are 0023 memory privacy epoch, 0024 planning, 0025 opening turn intent snapshot (already in this worktree), 0026 opening turn outcome unknown (H6), 0027 connections, 0028 knowledge, and 0029 skill evidence; check disk/validator before adding another migration.
 
 DATABASE RULES
 Only run destructive integration fixtures with:

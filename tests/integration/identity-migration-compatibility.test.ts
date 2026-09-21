@@ -193,6 +193,8 @@ describe("identity migration compatibility", () => {
       "0022_opening_memory_privacy.sql",
       "0023_opening_memory_privacy_epoch.sql",
       "0024_opening_planning.sql",
+      "0025_opening_turn_intent_snapshot.sql",
+      "0026_opening_turn_outcome_unknown.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -255,6 +257,8 @@ describe("identity migration compatibility", () => {
       "0022_opening_memory_privacy.sql",
       "0023_opening_memory_privacy_epoch.sql",
       "0024_opening_planning.sql",
+      "0025_opening_turn_intent_snapshot.sql",
+      "0026_opening_turn_outcome_unknown.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -572,6 +576,8 @@ describe("identity migration compatibility", () => {
       "0022_opening_memory_privacy.sql",
       "0023_opening_memory_privacy_epoch.sql",
       "0024_opening_planning.sql",
+      "0025_opening_turn_intent_snapshot.sql",
+      "0026_opening_turn_outcome_unknown.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

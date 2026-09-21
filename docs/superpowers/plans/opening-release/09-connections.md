@@ -32,9 +32,9 @@ it('never exposes credentials in a connection view', () => {
 ### C01: Connection consent, credentials, lineage and revocation
 
 **Owner:** DATA+PIPELINE. **Depends:** X01,F03,M02,P02.
-**Create:** `packages/database/src/schema/opening-connections.ts`、`repositories/opening-connections.ts`、`repositories/opening-imports.ts`、`migrations/0025_opening_connections.sql`；`apps/worker/src/connectors/credential-vault.ts`、`import-identity.ts`、`import-identity.test.ts`；`apps/web/src/features/opening/connections/service.ts`；`tests/integration/handler/opening-connections.test.ts`。
+**Create:** `packages/database/src/schema/opening-connections.ts`、`repositories/opening-connections.ts`、`repositories/opening-imports.ts`、`migrations/0027_opening_connections.sql`；`apps/worker/src/connectors/credential-vault.ts`、`import-identity.ts`、`import-identity.test.ts`；`apps/web/src/features/opening/connections/service.ts`；`tests/integration/handler/opening-connections.test.ts`。
 **Create routes:** `apps/web/src/app/api/opening/connections/route.ts`、`imap/route.ts`、`dingtalk/route.ts`、`[id]/credential/route.ts`、`[id]/check/route.ts`、`[id]/sync/route.ts`、`[id]/revoke/route.ts`（后六条均在connections目录下）。
-**Interfaces:** `importIdentityKey(identity:ImportIdentity):string`；连接版本+privacyEpoch同时约束worker读取与最终写回。迁移0025须在P02的0024后注册，不覆盖历史迁移。
+**Interfaces:** `importIdentityKey(identity:ImportIdentity):string`；连接版本+privacyEpoch同时约束worker读取与最终写回。迁移0027须在当前工作区的0025 opening turn intent snapshot、H6的0026 opening turn outcome unknown、以及P02的0024后注册，不覆盖历史迁移。
 
 - [ ] 先测UIDVALIDITY和连接隔离，禁止Message-ID单独去重：
 ```ts

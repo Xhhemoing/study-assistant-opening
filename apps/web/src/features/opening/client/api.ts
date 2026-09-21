@@ -2,14 +2,18 @@ import {
   conversationCreateInputSchema,
   conversationResumeSchema,
   conversationSummarySchema,
+  isoDateTimeSchema,
+  jobStatusSchema,
   sourceRecordSchema,
   turnInputSchema,
   turnRecordSchema,
   uploadInputSchema,
   uploadTicketSchema,
+  uuidSchema,
   type ConversationCreateInput,
   type ConversationResume,
   type ConversationSummary,
+  type JobStatus,
   type SourceRecord,
   type TurnInput,
   type TurnRecord,
@@ -84,6 +88,22 @@ const summaryListSchema = z.array(conversationSummarySchema);
 const turnListSchema = z.array(turnRecordSchema);
 const sourceListSchema = z.array(sourceRecordSchema);
 
+const jobStatusResponseSchema = z
+  .object({
+    id: uuidSchema,
+    status: jobStatusSchema,
+    error: z.object({ message: z.string().min(1) }).strict().nullable(),
+    updatedAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export type JobStatusResponse = {
+  id: string;
+  status: JobStatus;
+  error: { message: string } | null;
+  updatedAt: string;
+};
+
 /** Local opening staging PUT path (T03 sources HTTP). */
 export function stagingPutUrl(sourceId: string): string {
   return `/api/opening/sources/${sourceId}/staging`;
@@ -141,6 +161,15 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return turnListSchema.parse(body);
+    },
+
+    async getJob(jobId: string): Promise<JobStatusResponse> {
+      const body = await request(
+        `/api/opening/jobs/${jobId}`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return jobStatusResponseSchema.parse(body);
     },
 
     async submitTurn(
