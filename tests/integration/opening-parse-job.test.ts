@@ -3,13 +3,14 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOpeningSourceChunksRepository, createOpeningSourceRepository, OpeningS3 } from "@aistudy/database";
+import { createOpeningSourceChunksRepository, createOpeningSourceRepository } from "@aistudy/database";
 import { createNodeRunner } from "../../apps/worker/src/parsers/docling-process";
 import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningTestStorage } from "./opening-storage-fixture";
 
-const storage = new OpeningS3({ endpoint: "http://127.0.0.1:9000", region: "us-east-1", bucket: "aistudy", accessKeyId: "minioadmin", secretAccessKey: "minioadmin", forcePathStyle: true });
+const storage = createOpeningTestStorage();
 const fixturePath = path.resolve("tests/fixtures/opening/parser-two-page.pdf");
 let fixture: OpeningFixture;
 let service: ReturnType<typeof createOpeningSourceService>;
@@ -44,7 +45,7 @@ describe("opening parse job real stack", () => {
       await parse(source.id, tempDir);
       const rows = await fixture.sql`SELECT page, text, source_version FROM opening_source_chunks WHERE source_id = ${source.id} ORDER BY page`;
       const state = await fixture.sql`SELECT parse_state FROM opening_sources WHERE id = ${source.id}`;
-      expect(state[0].parse_state).toBe("ready");
+      expect(state[0]?.parse_state).toBe("ready");
       expect(rows.map((row) => ({ page: row.page, text: row.text, sourceVersion: row.source_version }))).toEqual([{ page: 1, text: expect.stringContaining("page one"), sourceVersion: source.version }, { page: 2, text: expect.stringContaining("page two"), sourceVersion: source.version }]);
       expect(await readdir(tempDir)).toEqual([]);
     } finally { await rm(tempDir, { recursive: true, force: true }); }
@@ -57,8 +58,8 @@ describe("opening parse job real stack", () => {
       await parse(source.id, tempDir);
       const state = await fixture.sql`SELECT parse_state FROM opening_sources WHERE id = ${source.id}`;
       const chunks = await fixture.sql`SELECT count(*)::int AS count FROM opening_source_chunks WHERE source_id = ${source.id}`;
-      expect(state[0].parse_state).toBe("unsupported");
-      expect(chunks[0].count).toBe(0);
+      expect(state[0]?.parse_state).toBe("unsupported");
+      expect(chunks[0]?.count).toBe(0);
     } finally { await rm(tempDir, { recursive: true, force: true }); }
   }, 120_000);
 });

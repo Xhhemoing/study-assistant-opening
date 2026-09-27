@@ -13,7 +13,8 @@
 - Baseline branch is `feat/opening-release`; baseline commit is `ee455ab`; the worktree is intentionally dirty. Never reset, checkout, clean, or revert another agent's changes.
 - All implementation in this execution is written by `xhh-grok/grok-4.6-fast`; the coordinator reviews diffs and reruns gates. Do not claim independent review by an unavailable agent.
 - No commit, push, deployment, production migration, production/user database access, paid model call, external school mailbox, DingTalk organization, or live-device claim without explicit authorization.
-- Preserve the approved 37-task ledger. Current ledger evidence is historical: `15 verified`, `22 planned`. Do not promote a task merely because code exists or a unit test passes.
+- Preserve the approved task ledger. Current ledger evidence is historical: `15 verified`, `22 planned` (as of 2026-09-19). Do not promote a task merely because code exists or a unit test passes.
+- 2026-09-21 amendment (coordinator): the ledger is now **43 tasks / `15 verified`, `28 planned`** — RP1–RP6 were added from the PI review synthesis (`docs/plans/2026-09-21-review-synthesis.md`, subplan `opening-release/12-review-hardening.md`). RP3/RP4/RP6 depend only on verified tasks and may run in parallel with Stage 1–3 slices; RP1/RP2 slot after M02; RP5 is an integrator lane item. All six remain `planned`; the same evidence rules apply.
 - New code files stay at or below 200 lines. Split focused modules before adding unrelated logic to an existing large file.
 - Domain functions are pure. SQL and migrations belong to `packages/database`; browser code never owns authoritative facts; AI output is validated before persistence.
 - Provider/model calls are disabled by default. Fake adapters may test deterministic failures, but they cannot certify model quality, retention, provider JSON compatibility, or educational effect.

@@ -7,6 +7,13 @@ export const observationOutcomeSchema = z.enum([
   "unverified",
 ]);
 
+export const verdictSourceSchema = z.enum([
+  "self_report",
+  "reference_checked",
+  "model_suggestion",
+  "unknown",
+]);
+
 export const assistanceLevelSchema = z.enum([
   "independent",
   "hinted",
@@ -96,6 +103,11 @@ export const observationInputSchema = z
     outcome: observationOutcomeSchema,
     assistance: assistanceLevelSchema,
     clientKey: z.string().min(8).max(200),
+    /** Server policy input. Omitted requests stay self_report. */
+    verdictSource: verdictSourceSchema.optional(),
+    referenceSourceId: uuidSchema.nullable().optional(),
+    /** Links a correction. Never an in-place rewrite of the parent row. */
+    revisesObservationId: uuidSchema.nullable().optional(),
   })
   .strict();
 
@@ -105,13 +117,9 @@ export const learningObservationSchema = observationInputSchema
     workspaceId: uuidSchema,
     occurredAt: isoDateTimeSchema,
     sourceTurnIds: z.array(uuidSchema).max(32),
-    verdictSource: z.enum([
-      "self_report",
-      "reference_checked",
-      "model_suggestion",
-      "unknown",
-    ]),
+    verdictSource: verdictSourceSchema,
     referenceSourceId: uuidSchema.nullable(),
+    revisesObservationId: uuidSchema.nullable().optional(),
     evidenceVerdict: learningEvidenceVerdictSchema.default(
       "MASTERY_NOT_ESTABLISHED",
     ),
@@ -128,6 +136,8 @@ export const learningSummarySchema = z
       "needs_review",
     ]),
     evidenceIds: z.array(uuidSchema).max(200),
+    /** Distinguishes self-report, model suggestion, and reference-checked evidence. */
+    evidenceSources: z.array(verdictSourceSchema).max(4).optional(),
     sampleCount: z.number().int().nonnegative(),
     lastObservedAt: isoDateTimeSchema.nullable(),
   })
@@ -142,6 +152,8 @@ export const retestCandidateSchema = z
     sourceIds: z.array(uuidSchema).max(32),
     dueAt: isoDateTimeSchema,
     accepted: z.boolean(),
+    /** Only kind=task may be accepted into an opening task. */
+    kind: z.enum(["task", "memory"]).optional(),
   })
   .strict();
 

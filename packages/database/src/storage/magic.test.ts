@@ -12,6 +12,9 @@ const cases: [string, number[]][] = [
   ["audio/wav", [...Buffer.from("RIFFxxxxWAVE")]],
   ["video/webm", [0x1a, 0x45, 0xdf, 0xa3]],
   ["application/vnd.openxmlformats-officedocument.presentationml.presentation", [0x50, 0x4b, 0x03, 0x04]],
+  ["text/markdown", [...Buffer.from("# 标题\n正文")]],
+  ["text/html", [...Buffer.from("<!doctype html>")]],
+  ["application/vnd.ms-powerpoint", [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]],
 ];
 
 describe("magicMatchesMime", () => {
@@ -21,5 +24,6 @@ describe("magicMatchesMime", () => {
   it("rejects spoofed and empty content", () => {
     expect(magicMatchesMime(Uint8Array.from([0xff, 0xd8, 0xff]), "application/pdf")).toBe(false);
     expect(magicMatchesMime(new Uint8Array(), "image/png")).toBe(false);
+    expect(magicMatchesMime(Uint8Array.from([0x23, 0x00]), "text/markdown")).toBe(false);
   });
 });

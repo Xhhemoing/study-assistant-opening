@@ -80,4 +80,40 @@ describe("buildRetestCandidates", () => {
     });
     expect(batch.map((c) => c.skillLabel)).toEqual(["geometry"]);
   });
+
+  it("never emits more than one candidate on the dated two-day heuristic", () => {
+    const batch = buildRetestCandidates({
+      courseId,
+      summaries,
+      now: "2026-09-12T10:00:00.000Z",
+      sourceIdsBySkill: {
+        fractions: ["77777777-7777-4777-8777-777777777777"],
+        geometry: ["99999999-9999-4999-8999-999999999999"],
+      },
+      promptsBySkill: {
+        fractions: "Retest fractions from source stem",
+        geometry: "Retest geometry",
+      },
+    });
+    expect(batch).toHaveLength(1);
+    expect(batch[0]?.dueAt).toBe("2026-09-14T10:00:00.000Z");
+  });
+
+  it("skips a skill when the prompt is missing instead of inventing a stem", () => {
+    const batch = buildRetestCandidates({
+      courseId,
+      summaries,
+      now: "2026-09-12T10:00:00.000Z",
+      limit: 3,
+      sourceIdsBySkill: {
+        fractions: ["77777777-7777-4777-8777-777777777777"],
+        geometry: ["99999999-9999-4999-8999-999999999999"],
+      },
+      promptsBySkill: {
+        geometry: "Retest geometry",
+      },
+    });
+    expect(batch.map((c) => c.skillLabel)).toEqual(["geometry"]);
+    expect(batch.some((c) => c.prompt.includes("fractions"))).toBe(false);
+  });
 });

@@ -1,13 +1,15 @@
 "use client";
 
 import type { ChatMessageView } from "./message-model";
+import { sourceDownloadHref, sourceViewerCopy } from "../inbox/source-viewer";
 
 type Props = {
   messages: ChatMessageView[];
   historyTruncated?: boolean;
+  currentVersions?: Readonly<Record<string, number>>;
 };
 
-export function MessageList({ messages, historyTruncated }: Props) {
+export function MessageList({ messages, historyTruncated, currentVersions = {} }: Props) {
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3" role="log" aria-live="polite">
       {historyTruncated ? (
@@ -29,9 +31,32 @@ export function MessageList({ messages, historyTruncated }: Props) {
               }
             >
               <p className="whitespace-pre-wrap">{message.text}</p>
-              {message.citationLabels.length > 0 ? (
-                <p className="mt-2 text-xs opacity-80">
-                  出处：{message.citationLabels.join(" · ")}
+              {(message.citations ?? []).length > 0 ? (
+                <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs opacity-80">
+                  <span>出处：</span>
+                  {(message.citations ?? []).map((citation) => (
+                    <a
+                      key={`${citation.sourceId}-${citation.chunkId}-${citation.sourceVersion}`}
+                      className="inline-flex max-w-full items-center gap-1 underline-offset-2 hover:underline"
+                      href={sourceDownloadHref(citation.sourceId, citation.sourceVersion)}
+                      title={sourceViewerCopy({
+                        requestedVersion: citation.sourceVersion,
+                        currentVersion: currentVersions[citation.sourceId] ?? citation.sourceVersion,
+                        versionMismatch: (currentVersions[citation.sourceId] ?? citation.sourceVersion) !== citation.sourceVersion,
+                      })}
+                    >
+                      <span className="min-w-0 truncate">{citation.label}</span>
+                      <span
+                        className={
+                          message.role === "user"
+                            ? "shrink-0 rounded bg-white/20 px-1 py-0.5 font-medium tabular-nums leading-none text-[0.65rem] text-white"
+                            : "shrink-0 rounded bg-zinc-200 px-1 py-0.5 font-medium tabular-nums leading-none text-[0.65rem] text-zinc-700"
+                        }
+                      >
+                        {`v${citation.sourceVersion}`}
+                      </span>
+                    </a>
+                  ))}
                 </p>
               ) : null}
               {message.status === "pending" ? (

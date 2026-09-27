@@ -4,7 +4,8 @@ import {
   exposureLevelForMode,
   mapPageSelectionToHttp,
 } from "./tutor-service";
-import { shouldCreateLearningSession } from "@aistudy/contracts";
+import { conversationResumeSchema, shouldCreateLearningSession } from "@aistudy/contracts";
+import { messagesFromResume } from "../assistant/message-model";
 
 const S = "22222222-2222-4222-8222-222222222222";
 const OTHER_SOURCE = "33333333-3333-4333-8333-333333333333";
@@ -17,6 +18,7 @@ function createService() {
     getOwned: vi.fn(async () => ({ id: CONVERSATION, title: "t", courseId: null, updatedAt: "2026-09-20T00:00:00.000Z" })),
     loadContinuityTurns: vi.fn(async () => []),
     appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
+    findTurnByClientKey: vi.fn(async () => null),
   };
   const sourceChunks = {
     listForSources: vi.fn(async () => [
@@ -24,7 +26,8 @@ function createService() {
       { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId: OTHER_SOURCE, sourceVersion: 1, page: 9, slideLabel: null, startMs: null, endMs: null, text: "other", imageObjectKey: null },
     ]),
   };
-  return { service: createTutorService({ conversations, sourceChunks }), conversations, sourceChunks };
+  const readSelection = vi.fn(async () => ({ sourceIds: [S], currentPage: 4, chunkId: C }));
+  return { service: createTutorService({ conversations, sourceChunks, readSelection }), conversations, sourceChunks, readSelection };
 }
 
 describe("tutor-service RU-04 / continuity hooks", () => {
@@ -41,6 +44,35 @@ describe("tutor-service RU-04 / continuity hooks", () => {
     })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
     expect(sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S]);
     expect(conversations.appendSavedTurn).toHaveBeenCalled();
+  });
+
+  it("replays a saved turn after its source version no longer has the selected page", async () => {
+    const { service, conversations, sourceChunks } = createService();
+    sourceChunks.listForSources.mockResolvedValueOnce([]);
+    conversations.findTurnByClientKey.mockResolvedValueOnce({
+      userTurnId: "77777777-7777-4777-8777-777777777777",
+      jobId: "88888888-8888-4888-8888-888888888888",
+      assistantTurnId: "99999999-9999-4999-8999-999999999999",
+      learningSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "explain page four",
+      sourceIds: [S],
+      mode: "explain",
+      clientKey: "client-replay-1",
+      privacy: "saved",
+      currentPage: 4,
+      chunkId: C,
+    })).resolves.toMatchObject({
+      jobId: "88888888-8888-4888-8888-888888888888",
+      learningSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      learningSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }));
+    expect(sourceChunks.listForSources).not.toHaveBeenCalled();
   });
 
   it("rejects a page or chunk outside the requested sources", async () => {
@@ -65,6 +97,42 @@ describe("tutor-service RU-04 / continuity hooks", () => {
     })).rejects.toMatchObject({ code: "chunk_not_in_sources", status: 422 });
   });
 
+  it("keeps citations on resume after schema parse into chat messages", async () => {
+    const citation = {
+      chunkId: C,
+      sourceId: S,
+      sourceVersion: 1,
+      label: "p.4",
+    };
+    const { service, conversations } = createService();
+    conversations.loadContinuityTurns.mockResolvedValueOnce([
+      { role: "user", text: "q", citations: [] },
+      { role: "assistant", text: "a", citations: [citation] },
+    ]);
+    const parsed = conversationResumeSchema.parse(
+      await service.resumeConversation(scope, CONVERSATION),
+    );
+    const { messages } = messagesFromResume(parsed);
+    expect(parsed.boundedHistory[1]?.citations).toEqual([citation]);
+    expect(messages[1]?.citations).toEqual([citation]);
+    expect(messages[1]?.citationLabels).toEqual(["p.4"]);
+    expect(messages[0]?.citations).toEqual([]);
+  });
+
+  it("restores the last saved selection when refresh supplies no client hints", async () => {
+    const { service } = createService();
+    expect(await service.resumeConversation(scope, CONVERSATION)).toMatchObject({
+      sourceIds: [S], currentPage: 4, chunkId: C,
+    });
+  });
+
+  it("clears stale saved page and chunk while preserving readable history", async () => {
+    const { service, sourceChunks } = createService();
+    sourceChunks.listForSources.mockResolvedValueOnce([]);
+    expect(await service.resumeConversation(scope, CONVERSATION)).toMatchObject({
+      sourceIds: [], currentPage: null, chunkId: null, boundedHistory: [],
+    });
+  });
   it("revalidates a sticky resume page against source chunks", async () => {
     const { service, sourceChunks } = createService();
     await expect(service.resumeConversation(scope, CONVERSATION, {
@@ -83,6 +151,21 @@ describe("tutor-service RU-04 / continuity hooks", () => {
       expect(err.status).toBe(422);
       expect(err.code).toBe(code);
     }
+  });
+
+  it("does not invent a learning session when the caller has not created one", async () => {
+    const { service, conversations } = createService();
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "explain without a session",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: "client-no-session",
+      privacy: "saved",
+    })).resolves.toMatchObject({ learningSessionId: null });
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ learningSessionId: null }),
+    );
   });
 
   it("creates learning sessions only for hint/explain", () => {

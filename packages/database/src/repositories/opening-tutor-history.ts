@@ -1,10 +1,12 @@
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
+import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 
-/** Completed exchanges only. A revoked ancestor invalidates all derived history. */
+/** Completed exchanges only. A revoked or excluded ancestor invalidates all derived history. */
 export async function loadTutorHistory(sql: Sql, scope: OpeningScope, currentTurnId: string): Promise<HistoryTurn[]> {
+  const excludedSourceIds = await createOpeningPrivacyRepository(sql).listExcludedSourceIds(scope);
   const rows = await sql`
     WITH prior AS (
       SELECT u.text AS question, a.text AS answer, u.created_at, u.id,
@@ -17,6 +19,12 @@ export async function loadTutorHistory(sql: Sql, scope: OpeningScope, currentTur
           WHERE NOT EXISTS (SELECT 1 FROM opening_sources s
             WHERE s.id::text=citation->>'sourceId' AND s.workspace_id=${scope.workspaceId}
               AND s.upload_state='uploaded' AND s.version::text=citation->>'sourceVersion')
+        ) OR EXISTS (
+          SELECT 1 FROM unnest(u.source_ids || a.source_ids || current.source_ids) AS ref(id)
+          WHERE ref.id = ANY(${excludedSourceIds}::uuid[])
+        ) OR EXISTS (
+          SELECT 1 FROM jsonb_array_elements(a.citations) AS citation
+          WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
         ) AS invalid
       FROM opening_turns current
       JOIN opening_conversations c ON c.id=current.conversation_id

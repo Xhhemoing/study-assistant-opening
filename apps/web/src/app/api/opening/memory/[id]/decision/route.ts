@@ -1,6 +1,7 @@
 import { memoryDecisionSchema } from "@aistudy/contracts";
 import { jsonError, mapDomainError, ApiError } from "../../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../../features/opening/runtime";
+import { readOpeningJsonBody } from "../../../../../../features/opening/request-body";
 import { createOpeningMemoryService } from "../../../../../../features/opening/memory/memory-service";
 
 /**
@@ -18,7 +19,10 @@ export async function POST(
     }
     const { principal, sql } = await requireOpeningScope(request);
     const { id } = await context.params;
-    const body = memoryDecisionSchema.parse({ ...(await request.json()), id });
+    const body = memoryDecisionSchema.parse({
+      ...(await readOpeningJsonBody(request) as Record<string, unknown>),
+      id,
+    });
     const item = await createOpeningMemoryService(sql).decideMemory(principal, body);
     return Response.json(item);
   } catch (error) {

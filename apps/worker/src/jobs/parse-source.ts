@@ -6,6 +6,8 @@ import { Readable, Transform } from "node:stream";
 import type { OpeningJobRecord } from "@aistudy/database";
 import type { OpeningSourceRepository } from "@aistudy/database";
 import { createDoclingProcess, UnsupportedMimeError, ConversionFailedError } from "../parsers/docling-process";
+import { markdownChunks } from "./markdown-chunks";
+import { htmlChunks } from "./html-chunks";
 import type { ParserRunner } from "../parsers/types";
 import type { OpeningSourceChunksRepository } from "@aistudy/database";
 
@@ -24,6 +26,20 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
     const scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
     const source = await deps.sources.get(scope, sourceId);
     if (source.uploadState !== "uploaded") throw new Error("source is not uploaded");
+    if (source.mime === "text/markdown" || source.mime === "text/html") {
+      const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("source download failed");
+      const text = await response.text();
+      if (Buffer.byteLength(text) > source.bytes) throw new Error("source download exceeds declared bytes");
+      const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text);
+      await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
+      return { pages: chunks.length };
+    }
+    if (source.mime === "application/vnd.ms-powerpoint") {
+      await deps.sources.markParseState(scope, source.id, "unsupported");
+      return { unsupported: true, storedOnly: true };
+    }
     if (source.mime !== "application/pdf" && source.mime !== "application/vnd.openxmlformats-officedocument.presentationml.presentation") {
       await deps.sources.markParseState(scope, source.id, "unsupported");
       return { unsupported: true };

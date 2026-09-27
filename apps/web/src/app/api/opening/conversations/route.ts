@@ -3,6 +3,7 @@ import {
   getTutorService,
   requireOpeningScope,
 } from "../../../../features/opening/runtime";
+import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { TutorServiceError } from "../../../../features/opening/tutor/tutor-service";
 import { OpeningConversationError } from "@aistudy/database";
 
@@ -37,7 +38,7 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const body = await request.json();
+    const body = await readOpeningJsonBody(request);
     const created = await getTutorService(sql).createConversation(scope, body);
     return Response.json(created, { status: 201 });
   } catch (error) {

@@ -1,6 +1,6 @@
 # Scope-to-task traceability
 
-此表是计划自审，不是已实现能力声明。2026-09-14新增范围以[能力补充](../../specs/2026-09-14-learning-capability-expansion.md)为准；M4是基础交付，M5/Q04才覆盖本轮完整需求。
+此表是计划自审，不是已实现能力声明。2026-09-14新增范围以[能力补充](../../specs/2026-09-14-learning-capability-expansion.md)为准；M4是基础交付，M5/Q04才覆盖本轮完整需求。2026-09-21新增RP1–RP6审查修复项（[审查综合](../../../plans/2026-09-21-review-synthesis.md)），属既有实现的缺陷修复，不改变CAP01–06映射与Q04依赖闭包。
 
 ## 新增明确需求 → 实现 → 真实验收
 

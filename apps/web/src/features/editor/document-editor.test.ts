@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { DocumentLoadError } from "./document-editor";
 import { documentToDraft, resolveEditorSaveResult } from "./document-editor-model";
 import { readFileSync } from "node:fs";
@@ -12,6 +12,9 @@ import { RelationAuthoringPanel } from "./relation-authoring-panel";
 
 describe("document editor recovery", () => {
   it("keeps local edits made while a save request is in flight", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-04T00:00:00.000Z"));
+    onTestFinished(() => { vi.useRealTimers(); });
     const savedDocument = {
       id: "11111111-1111-4111-8111-111111111111",
       title: "服务器标题",

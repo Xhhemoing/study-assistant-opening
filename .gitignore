@@ -41,3 +41,6 @@ __pycache__/
 
 # Subagent scratch space
 .agent_workspace/
+
+# Dedicated Opening acceptance build
+.next-opening-e2e/

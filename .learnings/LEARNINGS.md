@@ -78,3 +78,57 @@ Verify the browser-visible state after client-side redirects, inspect dependent 
 - Tags: nextjs, client-redirect, loading-state, verification
 
 ---
+
+## [LRN-20260917-NOTION1] task_endpoint_boundary
+
+**Logged**: 2026-09-17T00:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: frontend
+
+### Summary
+Notion Meeting Notes file transcription is queued through `enqueueTask` with event `transcribeAudio`; it is not initiated by the browser-visible `runInferenceTranscript` endpoint.
+
+### Details
+- The client upload path writes `pre_recorded_transcription`, changes state to `recorded_audio_transcribing`, and calls `enqueueTask` with audio URLs and a transcription block pointer.
+- The task layer polls task output through task subscriptions / `getTasks`; a successful task can transition into server-side summarization.
+- Therefore absence of `runInferenceTranscript` alone does not establish that upload transcription was never started.
+
+### Suggested Action
+Capture and classify `enqueueTask`, task status/output, record-map updates, and the eventual `transcription_state` before evaluating inference endpoints.
+
+### Metadata
+- Source: error
+- Related Files: `.tmp/notion-transcription-bundles/a685aba3c3eebee0.js`, `.tmp/notion-transcription-bundles/fde44899f8c0be9e.js`
+- Tags: notion, meeting-notes, transcription, queue
+
+---
+
+## [LRN-20260917-NOTION2] clean_upload_reached_native_transcript
+
+**Logged**: 2026-09-17T00:00:00Z
+**Priority**: critical
+**Status**: pending
+**Area**: frontend
+
+### Summary
+A clean disposable Meeting Notes upload of the spoken WAV successfully produced a native readable Transcript; the prior apparent pre-inference failure was a stale/previous lifecycle observation, not a universal WAV or browser limitation.
+
+### Details
+- Test block was reset only on the disposable page, then uploaded through Meeting Notes → Upload audio or video.
+- Observed lifecycle: `recorded_audio_file_uploading` → `recorded_audio_transcribing` → `summarizing` → `idle`.
+- `enqueueTask` returned HTTP 200 with a task ID; `getTasks` progressed from `in_progress` to `success`.
+- Record-map updates created a transcript child and populated `transcription_transcript_id`; the Transcript tab contained: `0:00 This is a short transcription test. The answer is 42. A. A study audio pipeline.`
+- Summary also completed in this run.
+- The browser did not need `/api/v3/runInferenceTranscript`; uploaded-file transcription is driven by the `transcribeAudio` queued task.
+
+### Suggested Action
+Use the queued task and record-map state as the acceptance instrumentation. Preserve the native Transcript as proof, then move to the complete-source/audio-format and workspace authorization gates; do not infer failure from a missing `runInferenceTranscript` request.
+
+### Metadata
+- Source: error
+- Related Files: `.tmp/notion-fresh-clean-upload-capture.out`, `.tmp/notion-fresh-transcript-panel-stable.out`, `.tmp/notion-transcription-bundles/a685aba3c3eebee0.js`
+- Tags: notion, meeting-notes, transcript, enqueueTask, resolved
+- See Also: LRN-20260917-NOTION1
+
+---

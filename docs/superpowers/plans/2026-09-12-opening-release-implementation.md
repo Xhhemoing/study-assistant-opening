@@ -27,9 +27,9 @@
 
 当前质量修复与双Agent执行方式见 [质量修复与双Agent计划](../../plans/2026-09-18-quality-dual-agent.md)。T01–T03历史verified仅证明原记录中的局部门禁；材料传输/引用持久化修复需新增证据，历史上下文、每日预算与真实模型验收仍是独立待办，不能从旧状态推导发布完成。
 
-## 1. 任务分配：37项，6个逻辑职责
+## 1. 任务分配：43项，6个逻辑职责
 
-以下是代码所有权角色，不代表已启动37个agent。主线程负责调度和验收；不会虚构评审员或签字。新增10项均是计划，不改写已有验证状态。
+以下是代码所有权角色，不代表已启动43个agent。主线程负责调度和验收；不会虚构评审员或签字。新增16项均是计划，不改写已有验证状态。其中RP1–RP6来自2026-09-21 PI审查（[审查综合文档](../../plans/2026-09-21-review-synthesis.md)），是既有实现的修复项，不改变M0–M5范围定义。
 
 | 角色 | 所有权 | 禁止事项 |
 |---|---|---|
@@ -79,6 +79,12 @@
 | P04 | AI+EXPERIENCE | 多源事项归并及低选择负担的主动安排 | C02,C03,K02,P02,M01 | 11-proactive-acceptance.md |
 | U04 | EXPERIENCE | 连接/知识/媒体/今日行动真实交互 | C02,C03,V01,K02,P04 | 11-proactive-acceptance.md |
 | Q04 | QA+INTEGRATOR | CAP01–06真实验收及扩展隐私恢复 | U04,Q02 | 11-proactive-acceptance.md |
+| RP1 | DATA | 模型上下文统一隐私准入（历史+材料） | M02 | 12-review-hardening.md |
+| RP2 | DATA | completeTurn隐私版本原子写回 | M02 | 12-review-hardening.md |
+| RP3 | DATA+EXPERIENCE | 发送幂等收口与刷新恢复 | T03 | 12-review-hardening.md |
+| RP4 | EXPERIENCE | 引用证据展示与按版本查看 | T03 | 12-review-hardening.md |
+| RP5 | INTEGRATOR | 开发分支push CI门禁 | B02 | 12-review-hardening.md |
+| RP6 | EXPERIENCE | 今天页真实恢复入口 | T03,U01 | 12-review-hardening.md |
 
 ## 2. 可并行的边界与交接
 
@@ -112,6 +118,8 @@
 - **M5：新增核心需求完整覆盖** = X01/C01–C03/V01/K01–K02/P04/U04后通过Q04。学校邮箱和钉钉按实际授权验证；视频/录音理解、知识架构、动态学习与主动安排逐项验收。
 
 允许先交付M4收集真实反馈，但不再默认暂缓转写、外部数据接入和课程知识结构；它们已是CAP01–06明确需求。权限/硬件/效果不满足时保留blocked与临时降级说明，缩减完整交付范围需用户确认；手工导入不算自动同步，存储音频不算理解课堂。
+
+2026-09-21审查后新增：RP1–RP6为审查发现的工程修复项（隐私准入、原子写回、发送幂等、引用展示、CI门禁、今天页恢复入口），不扩大产品范围。M2门槛更新为M01–M03＋RP1＋RP2；M1的“跨端恢复”验收增加RP3的三个故障场景；M3今天页以RP6最小恢复入口为先行切片；RP4并入U03体验门禁；RP5为发布证据前置。详见[审查综合文档](../../plans/2026-09-21-review-synthesis.md)。
 
 复用原则：邮箱优先ImapFlow+MailParser；Docling/FFmpeg/faster-whisper承担解析；参考DeepTutor辅导流程，不复制另一套主后端。EmailEngine当前是商业备选，不默认购买。依据见`../../quality/opening-capability-reuse-research.md`。
 

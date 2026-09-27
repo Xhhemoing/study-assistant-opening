@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - feat/opening-release
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -57,8 +59,10 @@ jobs:
 
       # bitnami/minio starts an S3-compatible API without needing a custom command
       # (GitHub Actions service containers cannot set image CMD easily).
+      # Bitnami moved pre-2025-08 images to bitnamilegacy; the bitnami/minio repo
+      # now has no pullable tags and minio/minio left Docker Hub entirely.
       minio:
-        image: bitnami/minio:2025.4.22
+        image: bitnamilegacy/minio:2025.4.22-debian-12-r2
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin

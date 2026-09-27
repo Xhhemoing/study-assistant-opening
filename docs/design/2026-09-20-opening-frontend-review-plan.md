@@ -51,7 +51,7 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
 
 ### 1.4 数据库迁移现状 [V]
 
-已应用 0016–0022；其中 **0018 建有 `opening_jobs` / `opening_outbox` / `opening_budget_reservations` 持久化表**（与第 5 节 F11 直接相关）。当前工作区新增 0025（Opening Turn Intent Snapshot）；未来预留：0023（M02）· 0024（P02）· 0026（C01）· 0027（K01）· 0028（K02）。
+已应用 0016–0024；其中 **0017 建有 Tutor 专用 `opening_conversations` / `opening_turns` / `opening_tutor_jobs`，0018 建有通用 `opening_jobs` / `opening_outbox` / `opening_budget_reservations` 持久化表**。当前工作区新增 0025（Opening Turn Intent Snapshot）与 0026（Opening Turn Outcome Unknown）；未来预留：0027（C01）·0028（K01）·0029（K02）。
 
 ---
 
@@ -66,7 +66,7 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
 | `apps/web` | **BFF + UI**（Next.js 15 模块化单体） | `(opening)` 路由组 · `/api/opening/**` 20 个 API 路由（服务端 BFF）· `features/opening/**` 领域服务（tutor/sources/planning/learning/memory）· React UI |
 | `apps/worker` | **异步执行器**（独立 Node 进程，BullMQ Worker） | `index.ts`（Worker 注册）· `jobs/`（处理器）· `parsers/`（材料解析）· `runtime/queue.ts`（队列） |
 | `packages/contracts` | **共享契约**（Zod 4 `.strict()`） | `opening/{tutor, sources, planning, jobs, memory, learning, conversations, knowledge, capabilities...}` |
-| `packages/database` | **持久化**（PostgreSQL + postgres.js + Drizzle） | `repositories/opening-*.ts`（约 15 个）· `migrations/0001–0024` · `storage/opening-s3.ts` |
+| `packages/database` | **持久化**（PostgreSQL + postgres.js + Drizzle） | `repositories/opening-*.ts`（约 15 个）· `migrations/0001–0026` · `storage/opening-s3.ts` |
 | `packages/ai` | **AI 编排**（与 provider 解耦） | `opening/{context, citations, provider, usage, errors}.ts` · `providers/` · `roles.ts` |
 | `packages/domain` `packages/ui` `packages/config` | 领域逻辑 / UI 原语 / 配置 | domain：legacy Learn/Explore/SRS 状态机；ui：`packages/ui/src/*` |
 
@@ -79,9 +79,9 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
   │  fetch POST /api/opening/conversations/{id}/turns  {conversationId, sourceIds, mode, text}
   ▼
 [WEB 进程] Next.js API 路由 ── requireOpeningScope()（鉴权+workspace 作用域）
-  │  tutor-service.ts  →  ① 写入 opening_turns（status=pending, 持久化）
-  │                     ② 写入 opening_jobs（持久表，执行状态机）
-  │                     ③ 写 opening_outbox → 触发 BullMQ 入队
+  │  tutor-service.ts  →  ① 写入 opening_turns（user=complete，assistant=pending，持久化）
+  │                     ② 写入 opening_tutor_jobs（Tutor 持久表，执行状态机）
+  │                     ③ 由 Tutor dispatcher 扫描 queued job → 触发 BullMQ 入队
   ▼
 [REDIS] BullMQ 队列（瞬态调度；job 可被清理——业务状态不依赖它 [F11]）
   ▼
@@ -89,13 +89,13 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
   │  context.ts 组装上下文（会话历史 + 选中的 chunks + 记忆）
   │  budget 校验（dailyCapCents=0 时拒绝）→ provider.ts 调模型
   │  usage.ts 计费 → citations.ts 抽取引用
-  │  → 回复写入 opening_turns（status=complete）+ opening_jobs 更新
+  │  → 回复写入 opening_turns（status=complete）+ opening_tutor_jobs 更新
   ▼
-浏览器轮询 GET /api/opening/jobs/[id]（读 opening_jobs 持久表）
+浏览器轮询 GET /api/opening/jobs/[id]（读 opening_tutor_jobs 持久表）
   → 完成后 GET turns 取回已持久化回复
 ```
 
-**为什么这个分层对 R5 至关重要**：业务真相（轮次、回复、job 状态）全部落在 **PostgreSQL 持久表**（`opening_turns` / `opening_jobs` / `opening_outbox`），Redis 队列只是调度瞬态——这正是「队列清理后结果仍可恢复」[F11] 的架构基础。
+**为什么这个分层对 R5 至关重要**：Tutor 业务真相（轮次、回复、job 状态）全部落在 **PostgreSQL 持久表**（`opening_turns` / `opening_tutor_jobs`）；Redis 队列只是调度瞬态——这正是「队列清理后结果仍可恢复」[F11] 的架构基础。通用解析等后台任务另使用 `opening_jobs` / `opening_outbox`。
 
 ### 2.3 后端 / 数据 / AI 层事实核查（本轮新增）
 
@@ -104,7 +104,7 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
 **幂等与并发**：
 - `completeUpload` 幂等（重放测试 [V: F4]）；
 - `replaceChunks` 在事务内 `FOR UPDATE` 锁源行 + 校验 `version` 未变，再 DELETE+INSERT chunk [V]——解析期间的并发更新被显式拒绝（`CONFLICT: source version changed during parse`）；
-- `opening_jobs` / `opening_outbox` / `opening_budget_reservations` 持久表支撑「至少一次执行 + 业务幂等键」模式。
+- Tutor 的 `opening_tutor_jobs` 支撑 Tutor「至少一次执行 + 业务幂等键」模式；通用 `opening_jobs` / `opening_outbox` / `opening_budget_reservations` 仅支撑其他后台任务。
 
 **AI 层**：`provider.ts` 统一 provider 接口（`createOpeningProvider({baseUrl, apiKey, model})`）；**预算闸门**：`dailyCapCents > 0` 且 `apiKey` 存在才创建真实 provider，否则 fake/拒绝 [V: apps/worker/src/index.ts:63]——付费调用默认关闭，与 1.2 一致。`citations.ts` 从回复抽取 `Citation`（含 `chunkId/sourceId/sourceVersion` [F6]）。
 
@@ -117,7 +117,8 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
 | `opening_sources` | `version` 递增，`upload_state`/`parse_state` 状态机 | 版本化源头；对象键 `opening/sources/{id}/v{version}` [F12] |
 | `opening_source_chunks` | `UNIQUE(source_id, source_version, page)`；`chunk.id = gen_random_uuid()` | **chunk ID 每次解析全新生成**（见 F14） |
 | `opening_turns` | `status: pending/complete/failed/outcome_unknown` | 恢复权威数据（历史结果）[F9/F11] |
-| `opening_jobs` | 持久执行状态机 | 恢复过程解释依据 [F11] |
+| `opening_tutor_jobs` | `queued/running/succeeded/failed/cancelled/outcome_unknown` | Tutor 恢复过程解释依据 [F11] |
+| `opening_jobs` | `state: queued/running/succeeded/failed/cancelled/outcome_unknown` | 通用解析/重测/提醒后台任务 |
 | `opening_memory` + `opening_privacy` | privacy epoch | 删除写回拦截（但不阻止重新提取，见创新三） |
 
 ---
@@ -215,8 +216,8 @@ AIstudy 当前处于「Opening 开学可用版」阶段：面向单一用户（�
 
 **① 恢复的权威数据**（定稿）：
 ```text
-用户提交的轮次（opening_turns，含 pending 状态 [V: F9]）
-→ 持久化的业务操作记录与执行状态（opening_jobs 持久表 [V: F11]，非 Redis）
+用户提交的轮次（opening_turns，含 pending/complete/failed/outcome_unknown 状态 [V: F9]）
+→ 持久化的 Tutor 业务操作记录与执行状态（opening_tutor_jobs 持久表 [V: F11]，非 Redis）
 → 一次或多次执行尝试
 → 已落库的最终回复（恢复依据；队列状态仅用于解释过程）
 ```
@@ -475,7 +476,7 @@ propose 返回完整 PlanDraft（源码确认 [V]）· 时区方向纠正 · R15
 | 恢复卡位置（创新一高优先却整体放 G5） | **修正**：R2c 基础恢复卡归入 G2；材料定位能力在 G3 补齐 |
 | 隐私验收范围矛盾（验收节 vs D12） | **修正**：验收分「始终适用」与「能力启用后适用」；未发布能力记「不适用」不记「通过」 |
 | 资料列表交付在重构中丢失 | **采纳**：G3 退出条件补「上传→关页→全局入口→找回资料+状态+原件」 |
-| R5 缺恢复权威数据层 | **源码闭合**：jobs/[id] 读 PostgreSQL `opening_jobs` 持久表而非 Redis [V: F11]；权威数据定稿为轮次+持久化回复；clientKey 绑定完整意图；outcome_unknown 退出策略；四个故障注入验收 |
+| R5 缺恢复权威数据层 | **Tutor 链路源码闭合**：jobs/[id] 读 PostgreSQL `opening_tutor_jobs` 持久表而非 Redis [V: F11]；权威数据定稿为轮次+持久化回复；clientKey 绑定完整意图；outcome_unknown 退出策略；四个故障注入验收。通用后台任务另按 `opening_jobs`/`opening_outbox` 验收 |
 | 引用版本可取得性 [T] | **源码闭合一半**：对象键已按版本寻址 [V: F12]；缺口=下载未参数化版本；新增 v1/v2 直接测试；重新解析与 chunk 定位关系仍 [T] |
 | 删除后重新提取 [T] | **采纳**：删除语义三选一（D14）；两个独立验收场景入第 9 节 |
 | 15.5.24 与 15.5.25 性质区分 | **采纳** [E]：1.2/R0/D13 已分开表述 |
@@ -558,7 +559,7 @@ CitationIdentity {
 
 把现有 `POST turn → {jobId, turnId}` + 轮询 `jobs/[id]` 规范成 UI 不感知 BullMQ 的**业务 Operation API**：
 
-- **状态机**（至少）：`pending / running / succeeded / failed / outcome_unknown / cancelled`——在现有 `pending/complete/failed` [F9] 上补 `running`（执行中）与 `cancelled`（用户可取消）。`outcome_unknown` 语义同 R5-③（provider 可能已收请求但 worker 落库前崩溃，不得轻率重复收费调用）。
+- **状态机**：`TurnRecord.status` 为 `pending / complete / failed / outcome_unknown`；Tutor job status 为 `queued / running / succeeded / failed / cancelled / outcome_unknown`。两者不可混用；`outcome_unknown` 语义同 R5-③（provider 可能已收请求但 worker 落库前崩溃，不得轻率重复收费调用）。
 - **幂等契约**：请求头 `Idempotency-Key` + `intent_hash = hash(canonical_request_body)`，落 `UNIQUE(scope_id, idempotency_key)`——**复用既有 `UNIQUE(workspace_id, client_key)` 模式 [V]**。逻辑：`无 key → 创建 operation + side effect`；`同 key + 同 intent_hash → 返回已有结果`；`同 key + 不同 intent_hash → 409 IDEMPOTENCY_CONFLICT`。`intent_hash` 绑定完整意图（会话+材料+版本+模式+文本，同 R5-②）。
 - **版本与兼容**：Monorepo 内部同版本部署的契约可继续 `.strict()`；但**跨设备/独立版本 App/第三方 API** 需显式 `/api/v1/` 版本 + CI 跑 contract diff（breaking-change detector 阻断不兼容 merge）——因为 `.strict()` 客户端面对服务端新增字段可能严格失败。这回应并扩展了 F3/D4。
 
@@ -606,7 +607,7 @@ CitationIdentity {
 API 客户端   apps/web/src/features/opening/client/api.ts
 Opening 路由 apps/web/src/app/(opening)/opening/{today, assistant, courses, courses/[id]}/page.tsx · layout.tsx
 Opening API apps/web/src/app/api/opening/**（20 个 route.ts；plans 返回 201+PlanDraft；jobs/[id] 读持久表）
-作业持久化   packages/database/src/repositories/opening-tutor-jobs.ts · migrations/0018_opening_*.sql（opening_jobs/outbox/budget_reservations）
+作业持久化   packages/database/src/repositories/opening-tutor-jobs.ts · migrations/0017_opening_conversations.sql（Tutor）与 0018_opening_*.sql（通用 opening_jobs/outbox/budget_reservations）
 存储        packages/database/src/storage/opening-s3.ts（对象键 n(sourceId, version) = opening/sources/{id}/v{version}）
 来源服务    apps/web/src/features/opening/sources/source-service.ts（complete 幂等；download 绑定当前版本）
 契约        packages/contracts/src/opening/{tutor, sources, planning, jobs, memory, learning, foundation}.ts

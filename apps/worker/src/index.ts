@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
-import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { createOpeningProvider } from "@aistudy/ai";
 import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
@@ -11,6 +11,9 @@ import { createNodeRunner } from "./parsers/docling-process";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
+import { createRemindHandler } from "./jobs/remind";
+import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
+import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
 
 /**
@@ -53,9 +56,16 @@ export async function main(): Promise<void> {
     listDueRetestSkills: (scope, courseId) => retests.listAcceptedSkillLabels(scope, courseId),
     saveCandidates: (scope, candidates) => retests.saveCandidates(scope, candidates),
   });
-  const handlers = createHandlers(parse, { retest });
+  const reminders = createOpeningReminderRepository(sql);
+  const feishu = createFeishuReminderAdapter({ credential: process.env.FEISHU_REMINDER_CREDENTIAL ?? null });
+  const remind = createRemindHandler({
+    record: (id, input) => reminders.recordAttempt(id, input),
+    send: (input, signal) => feishu.send(input, signal),
+  });
+  const handlers = createHandlers(parse, { retest, remind });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
   const budget = createOpeningBudgetRepository(sql, { dailyCapCents: openingModel.dailyCapCents });
+  const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
     tutorJobs,
     chunks,
@@ -71,6 +81,9 @@ export async function main(): Promise<void> {
     privacy: {
       getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),
       listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
+    },
+    memories: {
+      list: (scope) => memory.listForContext(scope),
     },
     learning: {
       insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),

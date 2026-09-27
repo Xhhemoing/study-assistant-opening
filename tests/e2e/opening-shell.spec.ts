@@ -20,10 +20,10 @@ test.describe("opening shell", () => {
         await expect(
           page.getByRole("navigation", { name: "Opening navigation" }),
         ).toBeVisible();
-        await expect(page.getByRole("link", { name: "今日" })).toBeVisible();
-        await expect(page.getByRole("link", { name: "助理" })).toBeVisible();
-        await expect(page.getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(page.getByRole("link", { name: "今日" })).toHaveAttribute(
+        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "助理" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "课程" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" })).toHaveAttribute(
           "aria-current",
           "page",
         );
@@ -42,7 +42,8 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      await expect(page.getByText("今天还没有学习任务")).toBeVisible();
+      await expect(page.getByRole("heading", { name: "还没有学习记录", exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: "向助理提问", exact: true })).toHaveAttribute("href", "/opening/assistant");
     } finally {
       await context.close();
     }
@@ -54,11 +55,11 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      const today = page.getByRole("link", { name: "今日" });
+      const today = page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" });
       await today.focus();
       await expect(today).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("link", { name: "助理" })).toBeFocused();
+      await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "助理" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(page).toHaveURL(/\/opening\/assistant$/);
     } finally {

@@ -109,4 +109,79 @@ describe("summarizeObservations", () => {
       })[0]?.status,
     ).toBe("needs_review");
   });
+
+  it("requires a current owned source version for observed_independent", () => {
+    const sourceId = "44444444-4444-4444-8444-444444444444";
+    const rows = [
+      obs({
+        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1",
+        skillLabel: "algebra",
+        assistance: "independent",
+        outcome: "correct",
+        verdictSource: "reference_checked",
+        referenceSourceId: sourceId,
+        sourceIds: [sourceId],
+        problemId: "55555555-5555-4555-8555-555555555555",
+      }),
+    ];
+    expect(
+      summarizeObservations(rows, NOW, {
+        currentSourceVersions: { [sourceId]: 3 },
+        observationSourceVersions: {
+          "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1": { [sourceId]: 3 },
+        },
+      })[0]?.status,
+    ).toBe("observed_independent");
+  });
+
+  it("ignores a stale source version and does not treat it as independent", () => {
+    const sourceId = "44444444-4444-4444-8444-444444444444";
+    const rows = [
+      obs({
+        id: "ffffffff-ffff-4fff-8fff-fffffffffff1",
+        skillLabel: "algebra",
+        assistance: "independent",
+        outcome: "correct",
+        verdictSource: "reference_checked",
+        referenceSourceId: sourceId,
+        sourceIds: [sourceId],
+        problemId: "55555555-5555-4555-8555-555555555555",
+      }),
+    ];
+    const summary = summarizeObservations(rows, NOW, {
+      currentSourceVersions: { [sourceId]: 4 },
+      observationSourceVersions: {
+        "ffffffff-ffff-4fff-8fff-fffffffffff1": { [sourceId]: 2 },
+      },
+    });
+    expect(summary).toEqual([]);
+  });
+
+  it("does not promote model_suggestion even when the outcome is correct", () => {
+    const rows = [
+      obs({
+        id: "12121212-1212-4121-8121-121212121212",
+        skillLabel: "ratios",
+        assistance: "independent",
+        outcome: "correct",
+        verdictSource: "model_suggestion",
+        referenceSourceId: "44444444-4444-4444-8444-444444444444",
+      }),
+    ];
+    expect(summarizeObservations(rows, NOW)[0]?.status).toBe("needs_check");
+  });
+
+  it("keeps assisted reference-checked answers at needs_check", () => {
+    const rows = [
+      obs({
+        id: "13131313-1313-4131-8131-131313131313",
+        skillLabel: "ratios",
+        assistance: "assisted",
+        outcome: "correct",
+        verdictSource: "reference_checked",
+        referenceSourceId: "44444444-4444-4444-8444-444444444444",
+      }),
+    ];
+    expect(summarizeObservations(rows, NOW)[0]?.status).toBe("needs_check");
+  });
 });

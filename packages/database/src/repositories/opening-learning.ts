@@ -70,11 +70,38 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
     return rows.map((r) => r.level);
   }
 
+  async function assertUploadedSourceSnapshots(
+    scope: Scope,
+    sourceIds: readonly string[],
+  ): Promise<void> {
+    const unique = [...new Set(sourceIds)];
+    if (unique.length === 0) return;
+    const rows = await db.query<{ id: string }>(
+      `SELECT s.id
+       FROM opening_sources s
+       WHERE s.workspace_id = $1
+         AND s.upload_state = 'uploaded'
+         AND s.id = ANY($2::uuid[])
+         AND EXISTS (
+           SELECT 1 FROM opening_source_chunks c
+           WHERE c.source_id = s.id AND c.source_version = s.version
+         )`,
+      [scope.workspaceId, unique],
+    );
+    if (rows.length !== unique.length) {
+      throw Object.assign(
+        new Error("each source must be an uploaded workspace snapshot"),
+        { code: "VALIDATION" },
+      );
+    }
+  }
+
   return {
     createSession: async (
       scope: Scope,
       input: LearningSessionCreateInput,
     ): Promise<{ id: string }> => {
+      await assertUploadedSourceSnapshots(scope, input.sourceIds);
       const id = randomUUID();
       await db.execute(
         `INSERT INTO opening_learning_sessions
@@ -126,6 +153,24 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
     },
 
     listDeliveredExposures,
+
+    /** Course exists for this workspace and its owner. No migration. */
+    assertOwnedCourse: async (scope: Scope, courseId: string): Promise<void> => {
+      const rows = await db.query<{ id: string }>(
+        `SELECT c.id
+         FROM courses c
+         INNER JOIN workspaces w ON w.id = c.workspace_id
+         WHERE c.id = $1
+           AND c.workspace_id = $2
+           AND w.owner_user_id = $3
+           AND c.archived_at IS NULL
+         LIMIT 1`,
+        [courseId, scope.workspaceId, scope.ownerUserId],
+      );
+      if (!rows[0]) {
+        throw Object.assign(new Error("course not found"), { code: "NOT_FOUND" });
+      }
+    },
 
     upsertProblemRef: async (
       scope: Scope,
@@ -223,11 +268,40 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
         verdictSource?: LearningObservation["verdictSource"];
         referenceSourceId?: string | null;
         sourceTurnIds?: string[];
+        revisesObservationId?: string | null;
       },
     ): Promise<LearningObservation & { allowsIndependent: boolean }> => {
       const session = await getSession(scope, input.sessionId);
       if (!session) {
         throw Object.assign(new Error("session not found"), { code: "NOT_FOUND" });
+      }
+      if (input.sourceIds.some((id) => !session.sourceIds.includes(id))) {
+        throw Object.assign(new Error("observation source is outside the session"), {
+          code: "VALIDATION",
+        });
+      }
+      await assertUploadedSourceSnapshots(scope, input.sourceIds);
+      const verdictSource = opts?.verdictSource ?? input.verdictSource ?? "self_report";
+      if (verdictSource === "unknown" && input.outcome === "correct") {
+        throw Object.assign(new Error("unknown verdict cannot be formally correct"), {
+          code: "VALIDATION",
+        });
+      }
+      const referenceSourceId = opts?.referenceSourceId ?? input.referenceSourceId ?? null;
+      if (verdictSource === "reference_checked") {
+        if (!referenceSourceId || !session.sourceIds.includes(referenceSourceId)) {
+          throw Object.assign(new Error("reference source is not bound to this session"), {
+            code: "VALIDATION",
+          });
+        }
+        await assertUploadedSourceSnapshots(scope, [referenceSourceId]);
+      }
+      const revisesObservationId = opts?.revisesObservationId ?? input.revisesObservationId ?? null;
+      if (revisesObservationId) {
+        throw Object.assign(
+          new Error("observation revision column or table is not in the applied schema"),
+          { code: "CONFLICT" },
+        );
       }
 
       const exposures = await listDeliveredExposures(scope, input.sessionId);
@@ -240,8 +314,6 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
 
       const id = randomUUID();
       const occurredAt = new Date().toISOString();
-      const verdictSource = opts?.verdictSource ?? "self_report";
-      const referenceSourceId = opts?.referenceSourceId ?? null;
       const sourceTurnIds = opts?.sourceTurnIds ?? [];
       const evidenceVerdict = "MASTERY_NOT_ESTABLISHED" as const;
 
@@ -306,6 +378,18 @@ export function createOpeningLearningRepository(db: OpeningLearningDb) {
           throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
             code: "CONFLICT",
           });
+        }
+        const same = row.session_id === input.sessionId
+          && row.course_id === input.courseId
+          && row.skill_label === input.skillLabel
+          && row.answer === input.answer
+          && row.outcome === input.outcome
+          && row.assistance === assistance
+          && row.verdict_source === verdictSource
+          && (row.reference_source_id ?? null) === referenceSourceId
+          && JSON.stringify(row.source_ids ?? []) === JSON.stringify(input.sourceIds);
+        if (!same) {
+          throw Object.assign(new Error("clientKey payload conflict"), { code: "CONFLICT" });
         }
         const replayAllows = qualifyObservationAssistance({
           declared: row.assistance,

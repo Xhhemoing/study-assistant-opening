@@ -2,25 +2,43 @@ import {
   conversationCreateInputSchema,
   conversationResumeSchema,
   conversationSummarySchema,
-  isoDateTimeSchema,
-  jobStatusSchema,
+  jobStatusResponseSchema,
+  sourceDownloadSchema,
   sourceRecordSchema,
   turnInputSchema,
   turnRecordSchema,
   uploadInputSchema,
   uploadTicketSchema,
-  uuidSchema,
   type ConversationCreateInput,
   type ConversationResume,
   type ConversationSummary,
-  type JobStatus,
+  type JobStatusResponse,
+  type SourceDownload,
   type SourceRecord,
   type TurnInput,
   type TurnRecord,
   type UploadInput,
   type UploadTicket,
+  type AssistantCandidateRecord,
+  type EphemeralTurnInput,
+  type MemoryDecision,
+  type MemoryCandidateDecision,
+  type MemoryItem,
+  type PlanDraft,
+  type PlannedBlock,
+  type TaskItem,
+  type ProviderOutput,
+  providerOutputSchema,
+  assistantCandidateRecordSchema,
+  memoryItemSchema,
+  planDraftSchema,
+  reminderListSchema,
+  learningSummarySchema,
+  type ReminderList,
 } from "@aistudy/contracts";
 import { z } from "zod";
+
+export type { JobStatusResponse } from "@aistudy/contracts";
 
 export class OpeningApiError extends Error {
   readonly status: number;
@@ -87,22 +105,16 @@ async function request(
 const summaryListSchema = z.array(conversationSummarySchema);
 const turnListSchema = z.array(turnRecordSchema);
 const sourceListSchema = z.array(sourceRecordSchema);
-
-const jobStatusResponseSchema = z
-  .object({
-    id: uuidSchema,
-    status: jobStatusSchema,
-    error: z.object({ message: z.string().min(1) }).strict().nullable(),
-    updatedAt: isoDateTimeSchema,
-  })
-  .strict();
-
-export type JobStatusResponse = {
-  id: string;
-  status: JobStatus;
-  error: { message: string } | null;
-  updatedAt: string;
-};
+const memoryCardSchema = memoryItemSchema.extend({ why: z.array(z.string()), when: z.string() });
+const todayPlanSchema = z.object({
+  date: z.string(),
+  acceptedVersion: z.number().int().nonnegative(),
+  blocks: z.array(z.object({ taskId: z.string().uuid(), start: z.string(), end: z.string(), reason: z.string() })),
+  hardBlocks: z.array(z.object({ start: z.string(), end: z.string(), kind: z.enum(["class", "sleep", "meal", "locked", "free"]) })),
+});
+const taskListSchema = z.object({ tasks: z.array(z.object({
+  id: z.string().uuid(), title: z.string(), minutes: z.number().int().positive(), dueAt: z.string().nullable(), priority: z.number(), status: z.enum(["pending", "done", "skipped"]),
+})) });
 
 /** Local opening staging PUT path (T03 sources HTTP). */
 export function stagingPutUrl(sourceId: string): string {
@@ -172,6 +184,32 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return jobStatusResponseSchema.parse(body);
     },
 
+    async cancelJob(jobId: string): Promise<JobStatusResponse> {
+      const body = await request(`/api/opening/jobs/${jobId}`, { method: "DELETE" }, fetchImpl);
+      return jobStatusResponseSchema.parse(body);
+    },
+
+    async getPendingJob(conversationId: string): Promise<JobStatusResponse | null> {
+      const body = await request(
+        `/api/opening/conversations/${conversationId}/pending-job`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return jobStatusResponseSchema.nullable().parse(body);
+    },
+
+    async replyEphemeral(
+      input: EphemeralTurnInput,
+      signal?: AbortSignal,
+    ): Promise<ProviderOutput> {
+      const body = await request(
+        "/api/opening/ephemeral",
+        { method: "POST", body: JSON.stringify(input), signal },
+        fetchImpl,
+      );
+      return providerOutputSchema.parse(body);
+    },
+
     async submitTurn(
       input: TurnInput,
     ): Promise<{ jobId: string; turnId: string }> {
@@ -211,6 +249,75 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return sourceRecordSchema.parse(body);
+    },
+
+    async getSourceDownload(sourceId: string, version: number): Promise<SourceDownload> {
+      const body = await request(
+        `/api/opening/sources/${sourceId}/download?version=${version}`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return sourceDownloadSchema.parse(body);
+    },
+
+    async listMemory(courseId: string | null = null): Promise<{ items: MemoryItem[]; context: MemoryItem[]; review: MemoryItem[] }> {
+      const query = courseId ? `?courseId=${encodeURIComponent(courseId)}` : "";
+      const body = await request(`/api/opening/memory${query}`, { method: "GET" }, fetchImpl);
+      return z.object({ items: z.array(memoryCardSchema), context: z.array(memoryCardSchema), review: z.array(memoryCardSchema) }).parse(body);
+    },
+
+    async decideMemory(input: MemoryDecision): Promise<MemoryItem> {
+      const body = await request(`/api/opening/memory/${input.id}/decision`, {
+        method: "POST", body: JSON.stringify(input),
+      }, fetchImpl);
+      return memoryCardSchema.parse(body);
+    },
+
+    async decideMemoryCandidate(input: MemoryCandidateDecision): Promise<MemoryItem> {
+      const body = await request(`/api/opening/candidates/${input.id}/memory-decision`, {
+        method: "POST", body: JSON.stringify(input),
+      }, fetchImpl);
+      return memoryCardSchema.parse(body);
+    },
+
+    async listCandidates(): Promise<AssistantCandidateRecord[]> {
+      const body = await request("/api/opening/candidates", { method: "GET" }, fetchImpl);
+      return z.array(assistantCandidateRecordSchema).parse(body);
+    },
+
+    async getLearning(courseId: string) {
+      const body = await request(`/api/opening/courses/${courseId}/learning`, { method: "GET" }, fetchImpl);
+      return z.array(learningSummarySchema).parse(body);
+    },
+
+    async listReminders(): Promise<ReminderList> {
+      const body = await request("/api/opening/reminders", { method: "GET" }, fetchImpl);
+      return reminderListSchema.parse(body);
+    },
+
+    async getToday(date: string) {
+      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}`, { method: "GET" }, fetchImpl);
+      return todayPlanSchema.parse(body) as { date: string; acceptedVersion: number; blocks: PlannedBlock[]; hardBlocks: Array<{ start: string; end: string; kind: "class" | "sleep" | "meal" | "locked" | "free" }> };
+    },
+
+    async listTasks(): Promise<{ tasks: TaskItem[] }> {
+      const body = await request("/api/opening/tasks", { method: "GET" }, fetchImpl);
+      return taskListSchema.parse(body) as { tasks: TaskItem[] };
+    },
+
+    async proposePlan(input: unknown): Promise<PlanDraft> {
+      const body = await request("/api/opening/plans", { method: "POST", body: JSON.stringify(input) }, fetchImpl);
+      return planDraftSchema.parse(body);
+    },
+
+    async acceptPlan(input: { draftId: string; expectedBaseVersion: number; clientKey: string }): Promise<PlanDraft> {
+      const body = await request(`/api/opening/plans/${input.draftId}/accept`, { method: "POST", body: JSON.stringify(input) }, fetchImpl);
+      return planDraftSchema.parse(body);
+    },
+
+    async rejectPlan(draftId: string): Promise<PlanDraft> {
+      const body = await request(`/api/opening/plans/${draftId}/reject`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
+      return planDraftSchema.parse(body);
     },
   };
 }

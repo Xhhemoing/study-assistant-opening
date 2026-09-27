@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { LearningSummary, RetestCandidate } from "@aistudy/contracts";
 
 /** Default retest delay — heuristic only, not FSRS/BKT. */
@@ -6,6 +5,15 @@ export const DEFAULT_RETEST_DELAY_DAYS = 2;
 
 /** Small candidate batch cap for L02. */
 export const DEFAULT_RETEST_BATCH_LIMIT = 1;
+
+function newCandidateId(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+    const value = Math.floor(Math.random() * 16);
+    const nibble = character === "x" ? value : (value & 3) | 8;
+    return nibble.toString(16);
+  });
+}
 
 /**
  * Add delayDays to an ISO timestamp (UTC). Editable heuristic — not a retention model.
@@ -53,7 +61,7 @@ export function buildRetestCandidates(
     if (!sourceIds.length || !prompt) continue;
     const occurredAt = summary.lastObservedAt ?? input.now;
     out.push({
-      id: randomUUID(),
+      id: newCandidateId(),
       courseId: input.courseId,
       skillLabel: summary.skillLabel,
       prompt,

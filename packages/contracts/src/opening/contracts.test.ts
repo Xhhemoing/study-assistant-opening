@@ -11,6 +11,7 @@ import {
   memoryDecisionSchema,
   memoryItemSchema,
   observationInputSchema,
+  verdictSourceSchema,
   providerInputSchema,
   sourceChunkSchema,
   sourceRecordSchema,
@@ -27,6 +28,8 @@ import {
   timeConfigSupportsAbsoluteScheduling,
   memoryEffectiveScope,
   memoryVisibleInCourseScope,
+  sourceDownloadSchema,
+  jobStatusResponseSchema,
 } from "./index";
 
 const U = "11111111-1111-4111-8111-111111111111";
@@ -35,6 +38,17 @@ const SHA = "a".repeat(64);
 const ISO = "2026-09-13T12:00:00.000Z";
 
 describe("F02 opening contracts", () => {
+  it("keeps pending job discovery on the strict public status shape", () => {
+    const response = jobStatusResponseSchema.parse({
+      id: U,
+      status: "queued",
+      error: null,
+      updatedAt: ISO,
+    });
+    expect(response).toEqual({ id: U, status: "queued", error: null, updatedAt: ISO });
+    expect(jobStatusResponseSchema.safeParse({ ...response, conversationId: U2 }).success).toBe(false);
+  });
+
   it("pins Docling 2.126.0", () => {
     expect(DOCLING_PINNED_VERSION).toBe("2.126.0");
   });
@@ -44,6 +58,18 @@ describe("F02 opening contracts", () => {
     expect(uploadInputSchema.safeParse({ ...base, name: "../evil.pdf", bytes: 100 }).success).toBe(false);
     expect(uploadInputSchema.safeParse({ ...base, name: "ok.pdf", bytes: 51 * 1024 * 1024 }).success).toBe(false);
     expect(uploadInputSchema.safeParse({ ...base, name: "ok.pdf", bytes: 1024 }).success).toBe(true);
+  });
+
+  it("source download reports a cited version mismatch", () => {
+    const download = sourceDownloadSchema.parse({
+      url: "https://minio.local/signed",
+      expiresAt: ISO,
+      version: 0,
+      currentVersion: 2,
+      versionMismatch: true,
+    });
+    expect(download.versionMismatch).toBe(true);
+    expect(sourceDownloadSchema.safeParse({ ...download, version: -1 }).success).toBe(false);
   });
 
   it("sourceRecord has no courseId; link via membership input (RU-01)", () => {
@@ -117,6 +143,26 @@ describe("F02 opening contracts", () => {
     expect(ASSISTANCE_BLOCKS_INDEPENDENT).toEqual(expect.arrayContaining(["hinted", "revealed"]));
     expect(canBecomeObservedIndependent("hinted", "correct")).toBe(false);
     expect(canBecomeObservedIndependent("independent", "correct")).toBe(true);
+  });
+
+  it("keeps the four verdict sources distinct and optional on input", () => {
+    for (const verdictSource of ["self_report", "reference_checked", "model_suggestion", "unknown"] as const) {
+      const parsed = observationInputSchema.parse({
+        sessionId: U, courseId: U2, skillLabel: "chain rule", sourceIds: [],
+        answer: "42", outcome: "unverified", assistance: "unknown",
+        clientKey: "obs-key-1", verdictSource,
+        referenceSourceId: verdictSource === "reference_checked" ? U : null,
+        revisesObservationId: null,
+      });
+      expect(parsed.verdictSource).toBe(verdictSource);
+    }
+    expect(observationInputSchema.parse({
+      sessionId: U, courseId: U2, skillLabel: "chain rule", sourceIds: [],
+      answer: "42", outcome: "unverified", assistance: "unknown", clientKey: "obs-key-1",
+    }).verdictSource).toBeUndefined();
+    expect(verdictSourceSchema.options).toEqual([
+      "self_report", "reference_checked", "model_suggestion", "unknown",
+    ]);
   });
 
   it("weekSession enforces startPeriod <= endPeriod (RU-05)", () => {

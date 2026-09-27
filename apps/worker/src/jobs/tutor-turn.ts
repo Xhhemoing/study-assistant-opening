@@ -1,17 +1,21 @@
 import {
   providerOutputSchema,
+  type MemoryItem,
   type ProviderOutput,
   type ProviderInput,
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
-import { OpeningProviderError, resolveCitations, selectContext, usageFromOutput } from "@aistudy/ai";
+import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
+import { instructionWithMemories } from "@aistudy/domain";
 import type {
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
+import { tutorActualCents, tutorReservationCents } from "./tutor-cost";
+import { chunksAtSnapshots } from "./tutor-chunks";
 import {
   runBudgetedCall,
   type BudgetedProvider,
@@ -31,6 +35,8 @@ export function makeTutorInstruction(mode: TutorMode): string {
   }
 }
 
+type Scope = { workspaceId: string; ownerUserId: string };
+
 export type TutorTurnDeps = {
   tutorJobs: OpeningTutorJobsRepository;
   chunks: {
@@ -48,22 +54,17 @@ export type TutorTurnDeps = {
   };
   /** M02 privacy: epoch + exclusions. Optional for unit tests without DB privacy tables. */
   privacy?: {
-    getWorkspaceEpoch(scope: { workspaceId: string; ownerUserId: string }): Promise<number>;
-    listExcludedSourceIds(scope: { workspaceId: string; ownerUserId: string }): Promise<string[]>;
+    getWorkspaceEpoch(scope: Scope): Promise<number>;
+    listExcludedSourceIds(scope: Scope): Promise<string[]>;
   };
+  /** M01: confirmed/unexpired temporary memories only. Optional. */
+  memories?: { list(scope: Scope): Promise<MemoryItem[]> };
   /** L01: record delivered help in the tutor completion transaction. */
   learning?: {
-    insertHelpExposure(
-      scope: { workspaceId: string; ownerUserId: string },
-      exposure: {
-        id: string;
-        sessionId: string;
-        problemId: string | null;
-        turnId: string;
-        level: "hinted" | "revealed";
-        delivered: true;
-      },
-    ): Promise<unknown>;
+    insertHelpExposure(scope: Scope, exposure: {
+      id: string; sessionId: string; problemId: string | null; turnId: string;
+      level: "hinted" | "revealed"; delivered: true;
+    }): Promise<unknown>;
   };
 };
 
@@ -103,19 +104,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         throw new Error("all requested source material is privacy-excluded");
       }
       const chunks = turn.sourceIds.length
-        ? (await Promise.all(
-            allowedSourceIds.map(async (sourceId) => {
-              const version = turn.sourceVersions[sourceId];
-              if (version === undefined) {
-                throw new Error(`source material is unavailable: missing snapshot for ${sourceId}`);
-              }
-              const sourceChunks = await deps.chunks.listChunksAtVersion(scope, sourceId, version);
-              if (!sourceChunks.length) {
-                throw new Error(`source material is unavailable: missing chunks for ${sourceId}@${version}`);
-              }
-              return sourceChunks;
-            }),
-          )).flat()
+        ? await chunksAtSnapshots(deps.chunks, scope, allowedSourceIds, turn.sourceVersions)
         : [];
       if (!chunks.length && allowedSourceIds.length > 0) {
         throw new Error("all requested source material is unavailable");
@@ -129,30 +118,27 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }).slice(0, MAX_PROVIDER_CHUNKS);
       const history = await deps.tutorJobs.loadHistory(scope, claimed.userTurnId);
       const mode = claimed.mode as TutorMode;
+      const instruction = instructionWithMemories(
+        makeTutorInstruction(mode),
+        deps.memories ? await deps.memories.list(scope) : [],
+        new Date().toISOString(),
+      );
       const input: ProviderInput = {
-        instruction: makeTutorInstruction(mode), text: turn.text, history,
+        instruction, text: turn.text, history,
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
         mediaCapability: "text_only", imageParts: [],
       };
-      // UTF-8 bytes conservatively bound ordinary text tokenization; allow protocol overhead.
-      // This is a local estimate, not a guarantee of a vendor's billing rules.
-      const inputTokenBound = Buffer.byteLength(JSON.stringify(input), "utf8") + 4096;
-      const maximumCost = Math.ceil((inputTokenBound * deps.config.inputCentsPerMillion +
-        input.maxOutputTokens * deps.config.outputCentsPerMillion) / 1_000_000);
+      const rates = {
+        inputCentsPerMillion: deps.config.inputCentsPerMillion,
+        outputCentsPerMillion: deps.config.outputCentsPerMillion,
+      };
       const output = await runBudgetedCall({
         provider: deps.provider,
         budget: scopedBudget,
         input,
         requestId: `tutor:${claimed.id}`,
-        reservedCents: Math.max(deps.config.reservedCents, maximumCost),
-        actualCents: (settled) => {
-          const usage = usageFromOutput(settled);
-          return Math.ceil(
-            (usage.inputTokens * deps.config.inputCentsPerMillion +
-              usage.outputTokens * deps.config.outputCentsPerMillion) /
-              1_000_000,
-          );
-        },
+        reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
+        actualCents: (settled) => tutorActualCents(settled, rates),
       });
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       const citations = resolveCitations(validated.citedChunkIds, context);
@@ -185,6 +171,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           sourceIds: citedSourceIds,
         })),
         ...(helpExposure ? { helpExposure } : {}),
+        expectedPrivacyEpoch: jobEpoch ?? undefined,
       });
       return { skipped: false };
     } catch (error) {

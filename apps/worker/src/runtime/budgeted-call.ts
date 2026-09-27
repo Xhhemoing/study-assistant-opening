@@ -2,7 +2,7 @@ import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { OpeningProviderError } from "@aistudy/ai";
 
 export type BudgetedProvider = {
-  complete(input: ProviderInput): Promise<ProviderOutput>;
+  complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput>;
 };
 
 export type BudgetedRepository = {
@@ -23,6 +23,7 @@ export type BudgetedCallOptions = {
   requestId: string;
   reservedCents: number;
   actualCents: (output: ProviderOutput) => number;
+  signal?: AbortSignal;
 };
 
 export class BudgetedCallError extends Error {
@@ -53,7 +54,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   });
   let output: ProviderOutput;
   try {
-    output = await options.provider.complete(options.input);
+    output = await options.provider.complete(options.input, options.signal);
   } catch (error) {
     if (error instanceof OpeningProviderError && UNSENT_CODES.has(error.code)) {
       await options.budget.release(options.requestId);

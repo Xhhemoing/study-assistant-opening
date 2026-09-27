@@ -922,3 +922,159 @@ Retry the delegated task with the current worktree context, or split migration-d
 - Related Files: packages/database/src/migrations/0025_opening_turn_intent_snapshot.sql
 
 ---
+
+## [ERR-20260923-OPENING-001] release-gate-environment-and-script-failures
+
+**Logged**: 2026-09-23T09:40:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+Initial root build and browser E2E checks failed for distinct causes; the root shell quoting and browser bundle crypto issues were fixed, but service/browser availability remains blocked.
+
+### Error
+- `npm run build` first failed because nested single quotes caused `@aistudy/web'` to be parsed as the workspace name.
+- Next build then failed on `node:crypto` imported by the browser graph through `retest-policy.ts` and `upload-client.ts`.
+- Browser E2E could not start because PostgreSQL was unavailable at `127.0.0.1:5432`.
+
+### Root cause and fix
+The build command embedded a single-quoted `bash -c` string inside npm's shell command; it was changed to an escaped double-quoted command. Browser-facing SHA-256 and retest IDs were changed to Web Crypto/browser-safe implementations. The subsequent build compiled and completed successfully.
+
+### Remaining blocker
+No local PostgreSQL/Redis/MinIO/Docker services were started; browser and full service-backed gates remain unobserved.
+
+### Metadata
+- Source: error
+- Related Files: `package.json`, `packages/domain/src/opening/retest-policy.ts`, `apps/web/src/features/opening/inbox/upload-client.ts`
+- Tags: build, browser, environment, release-gate
+
+---
+
+## [ERR-20260917-NOTION1] diagnostic_json_line_parser
+
+**Logged**: 2026-09-17T00:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+A parser assumed every line of a pretty-printed diagnostic output was a standalone JSON object and failed on nested lines.
+
+### Error
+```
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes
+```
+
+### Context
+- Attempted to summarize `.tmp/notion-fresh-task-inspect.out` line-by-line.
+- The script emits several single-line JSON records followed by one pretty-printed JSON object; only the first records are line-delimited.
+
+### Suggested Fix
+Parse the final capture object by locating the `phase` record or use a streaming/framing format; do not treat arbitrary pretty-printed lines as JSONL.
+
+### Metadata
+- Reproducible: yes
+- Related Files: `.tmp/notion-fresh-task-inspect.mjs`, `.tmp/notion-fresh-task-inspect.out`
+
+---
+## [ERR-20260925-GRF] graphify_query_runtime
+
+**Logged**: 2026-09-25T16:00:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: config
+
+### Summary
+The installed `graphify` launcher points to a removed Microsoft Store Python 3.13 runtime, so codebase queries cannot start through the CLI.
+
+### Error
+```
+did not find executable at 'C:\Users\86080\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe'
+```
+
+### Context
+- Reproduced with `graphify query <question> --budget 2500` on 2026-09-25.
+- `Get-Command graphify` resolves to `C:\Users\86080\.local\bin\graphify.exe`.
+- No current `python`, `python3`, `py`, or `uv` command is available on PATH.
+- Existing `graphify-out/graph.json` remains readable and can be queried with a PowerShell fallback.
+
+### Suggested Fix
+Reinstall the `graphifyy` launcher against an available Python runtime, then regenerate `graphify-out/.graphify_python`.
+
+### Metadata
+- Reproducible: yes
+- Related Files: `graphify-out/graph.json`
+- Tags: graphify, python, environment
+
+### Resolution
+- **Resolved**: 2026-09-25
+- **Notes**: The `graphify` launcher now runs `reflect`, `query`, and `save-result`. `graphify-out/.graphify_python` is still absent, so PowerShell automation must test for it and fall back to the launcher rather than assuming the cache file exists.
+
+---
+
+## [ERR-20260925-PS1] powershell_foreach_pipeline_parse
+
+**Logged**: 2026-09-25
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+A read-only repository statistics command failed because a PowerShell `foreach` statement was piped directly to `Format-Table`.
+
+### Error
+```
+ParserError: An empty pipe element is not allowed.
+```
+
+### Context
+- The command built one object per repository area, then placed `| Format-Table` immediately after the closing `foreach` brace.
+- In this position PowerShell parsed `foreach` as a statement rather than a pipeline-producing expression.
+
+### Suggested Fix
+Collect the loop output with `$rows = foreach (...) { ... }`, then pipe `$rows` to `Format-Table`, or wrap the loop in `@(...)` before piping.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- Tags: powershell, diagnostics, read-only
+
+### Resolution
+- **Resolved**: 2026-09-25
+- **Notes**: Re-ran the statistic using an intermediate `$rows` collection and verified the output.
+
+---
+
+## [ERR-20260925-PS2] powershell_like_question_mark_count
+
+**Logged**: 2026-09-25
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+A read-only Git status summary overcounted untracked files because PowerShell `-like '??*'` treated both question marks as single-character wildcards.
+
+### Error
+```
+The summary reported every status line as untracked and produced an impossible negative remainder.
+```
+
+### Context
+- The intended match was the literal Git porcelain prefix `??`.
+- PowerShell wildcard matching does not treat question marks literally.
+
+### Suggested Fix
+Use `$line.StartsWith('??')` for Git porcelain prefixes instead of wildcard matching.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+- Tags: powershell, git, diagnostics
+
+### Resolution
+- **Resolved**: 2026-09-25
+- **Notes**: Recomputed the worktree as 112 tracked changed paths and 254 untracked paths, 366 total.
+
+---

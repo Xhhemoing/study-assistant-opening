@@ -10,6 +10,14 @@ function storageError(error: unknown): Response | undefined {
   return undefined;
 }
 export async function GET(request: Request, context: Params): Promise<Response> {
-  try { const { principal, sql } = await requireOpeningScope(request); return Response.json(await createOpeningSourceService(sql).getDownloadUrl(principal, (await context.params).id)); }
+  try {
+    const { principal, sql } = await requireOpeningScope(request);
+    const raw = new URL(request.url).searchParams.get("version");
+    const version = raw === null ? undefined : Number(raw);
+    if (version !== undefined && !Number.isInteger(version)) {
+      return Response.json({ error: { code: "VALIDATION", message: "source version is invalid" } }, { status: 422 });
+    }
+    return Response.json(await createOpeningSourceService(sql).getDownloadUrl(principal, (await context.params).id, version));
+  }
   catch (error) { return storageError(error) ?? jsonError(mapDomainError(error)); }
 }

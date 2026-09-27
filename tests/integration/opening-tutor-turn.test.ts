@@ -236,6 +236,38 @@ describe("opening tutor turn durable path (guarded)", () => {
     expect(exposures).toHaveLength(0);
   });
 
+  it("rolls back completeTurn when the locked workspace privacy epoch drifted", async () => {
+    const seeded = await seedConversationAndSource();
+    await fixture.sql`UPDATE opening_tutor_jobs SET status = 'running' WHERE id = ${seeded.jobId}`;
+    await fixture.sql`UPDATE workspaces SET privacy_epoch = 8 WHERE id = ${fixture.scope.workspaceId}`;
+    const repository = createOpeningTutorJobsRepository(fixture.sql);
+
+    try {
+      await expect(repository.completeTurn({
+        scope: fixture.scope,
+        jobId: seeded.jobId,
+        assistantTurnId: seeded.assistantTurnId,
+        text: "answer after deletion",
+        citations: [],
+        candidates: [{ payload: { kind: "memory", text: "should not persist", temporary: false }, sourceIds: [] }],
+        expectedPrivacyEpoch: 7,
+      })).rejects.toThrow(/privacy epoch drift/);
+
+      const job = await repository.get(fixture.scope, seeded.jobId);
+      const turns = await fixture.sql`
+        SELECT status, text FROM opening_turns WHERE id = ${seeded.assistantTurnId}
+      `;
+      const candidates = await fixture.sql`
+        SELECT id FROM opening_assistant_candidates WHERE source_turn_id = ${seeded.assistantTurnId}
+      `;
+      expect(job?.status).toBe("running");
+      expect(turns).toEqual([{ status: "pending", text: "" }]);
+      expect(candidates).toHaveLength(0);
+    } finally {
+      await fixture.sql`UPDATE workspaces SET privacy_epoch = 0 WHERE id = ${fixture.scope.workspaceId}`;
+    }
+  });
+
 
   it("returns the original assistant turn when appending the same client key and canonical intent", async () => {
     const conversations = createOpeningConversationRepository(fixture.sql);
@@ -479,7 +511,7 @@ describe("opening tutor turn durable path (guarded)", () => {
     expect(reservations[0].state).toBe("reserved");
     const turns = await fixture.sql`SELECT status, text FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
     expect(turns[0]).toMatchObject({
-      status: "failed",
+      status: "outcome_unknown",
       text: "provider outcome unknown; usage reconciliation pending",
     });
   });
@@ -502,5 +534,49 @@ describe("opening tutor turn durable path (guarded)", () => {
     await expect(createTutorTurnHandler(deps)(saved.jobId)).rejects.toThrow(/unavailable/);
     const job = await deps.tutorJobs.get(fixture.scope, saved.jobId);
     expect(job?.status).toBe("failed");
+  });
+
+  it("replays the same client key without a second provider call and conflicts on page or chunk drift", async () => {
+    const seeded = await seedConversationAndSource();
+    const conversations = createOpeningConversationRepository(fixture.sql);
+    const actualChunkId = (await fixture.sql`SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId}`)[0].id as string;
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        text: "once", citedChunkIds: [], candidates: [],
+      }) } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    })));
+    const adapter = createOpeningProvider({
+      baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl,
+    });
+    const { deps } = buildDeps(null);
+    const handler = createTutorTurnHandler({ ...deps, provider: adapter });
+    await handler(seeded.jobId);
+
+    const replayInput = {
+      scope: fixture.scope,
+      conversationId: seeded.conversationId,
+      text: "explain the laws of motion",
+      mode: "explain" as const,
+      clientKey: (await fixture.sql`SELECT client_key FROM opening_turns WHERE id = ${seeded.turnId}`)[0].client_key as string,
+      sourceIds: [sourceId],
+      learningSessionId: null,
+      currentPage: 1,
+      chunkId,
+    };
+    const replay = await conversations.appendSavedTurn(replayInput);
+    expect(replay).toEqual({
+      turnId: seeded.turnId, jobId: seeded.jobId, assistantTurnId: seeded.assistantTurnId,
+    });
+    await handler(replay.jobId);
+    const jobs = await fixture.sql`SELECT count(*)::int AS count FROM opening_tutor_jobs WHERE conversation_id = ${seeded.conversationId}`;
+    expect(jobs[0].count).toBe(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    await expect(conversations.appendSavedTurn({ ...replayInput, currentPage: 9 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(conversations.appendSavedTurn({ ...replayInput, chunkId: actualChunkId })).rejects.toMatchObject({ code: "CONFLICT" });
+    const jobsAfterConflict = await fixture.sql`SELECT count(*)::int AS count FROM opening_tutor_jobs WHERE conversation_id = ${seeded.conversationId}`;
+    expect(jobsAfterConflict[0].count).toBe(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

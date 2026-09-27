@@ -4,11 +4,12 @@ import {
   getObservationService,
   requireOpeningScope,
 } from "../../../../features/opening/runtime";
+import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 
 export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const body = learningSessionCreateInputSchema.parse(await request.json());
+    const body = learningSessionCreateInputSchema.parse(await readOpeningJsonBody(request));
     const created = await getObservationService(sql).createLearningSession(
       scope,
       body,

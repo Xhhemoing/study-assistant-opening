@@ -36,6 +36,26 @@ describe("conversation continuity (RU-02)", () => {
     expect(buildBoundedHistory(turns.slice(0, 2)).historyTruncated).toBe(false);
   });
 
+  it("preserves citations on bounded history instead of stripping them", () => {
+    const citation = {
+      chunkId: C1,
+      sourceId: S1,
+      sourceVersion: 2,
+      label: "p.4",
+    };
+    const { boundedHistory, historyTruncated } = buildBoundedHistory([
+      { role: "user", text: "q" },
+      { role: "assistant", text: "a", citations: [citation] },
+    ]);
+    expect(historyTruncated).toBe(false);
+    expect(boundedHistory[0]).toEqual({ role: "user", text: "q", citations: [] });
+    expect(boundedHistory[1]).toEqual({
+      role: "assistant",
+      text: "a",
+      citations: [citation],
+    });
+  });
+
   it("assembles resume with boundedHistory for provider", () => {
     const result = buildConversationResume({
       conversationId: U,

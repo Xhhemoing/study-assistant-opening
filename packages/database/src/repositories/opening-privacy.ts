@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export type PrivacyExclusion = {
@@ -17,7 +17,7 @@ export type DeletionReceipt = {
   deletedAt: string;
 };
 
-export function createOpeningPrivacyRepository(sql: Sql) {
+export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
   return {
     async getWorkspaceEpoch(scope: OpeningScope): Promise<number> {
       const rows = await sql`

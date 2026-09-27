@@ -1,41 +1,20 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
-import { OpeningS3, OpeningSourceError } from "@aistudy/database";
+import { createOpeningTestStorage, pdfBytes, pdfSha, jpegBytes, jpegSha } from "./opening-storage-fixture";
+import { OpeningSourceError } from "@aistudy/database";
 import { UploadPolicyError } from "../../apps/web/src/features/opening/sources/upload-policy";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
-/**
- * Guarded integration gate for I01 (plan 02-ingestion.md): real portable
- * PostgreSQL (OPENING_TEST_DB=1 + OPENING_TEST_DATABASE_URL) and real MinIO
- * (RELEASE.2025-04-22T22-12-26Z at 127.0.0.1:9000, bucket aistudy).
- * Acceptance: original bytes must round-trip before this slice is done.
+/** I01: guarded PostgreSQL and real MinIO from explicit S3_* configuration.
+ * Original uploaded bytes must round-trip unchanged.
  */
-const minio = new OpeningS3({
-  endpoint: "http://127.0.0.1:9000",
-  region: "us-east-1",
-  bucket: "aistudy",
-  accessKeyId: "minioadmin",
-  secretAccessKey: "minioadmin",
-  forcePathStyle: true,
-});
+const minio = createOpeningTestStorage();
 
 let fixture: OpeningFixture;
 let svc: ReturnType<typeof createOpeningSourceService>;
 let principal: { userId: string; workspaceId: string; sessionId: string };
 let otherPrincipal: { userId: string; workspaceId: string; sessionId: string };
 const trackedKeys: string[] = [];
-
-const pdfBytes = Buffer.concat([
-  Buffer.from("%PDF-1.4\n"),
-  Buffer.alloc(200, 0x78),
-]);
-const pdfSha = createHash("sha256").update(pdfBytes).digest("hex");
-const jpegBytes = Buffer.concat([
-  Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
-  Buffer.alloc(204, 0x11),
-]);
-const jpegSha = createHash("sha256").update(jpegBytes).digest("hex");
 
 async function beginPdf() {
   const ticket = await svc.beginUpload(principal, {
@@ -91,7 +70,7 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
       SELECT count(*)::int AS count FROM opening_jobs
       WHERE kind = 'parse' AND payload->>'sourceId' = ${ticket.source.id}
     `;
-    expect(jobs[0].count).toBe(1);
+    expect(jobs[0]?.count).toBe(1);
 
     const download = await svc.getDownloadUrl(principal, ticket.source.id);
     const roundTrip = Buffer.from(await (await fetch(download.url)).arrayBuffer());
@@ -112,7 +91,7 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
       SELECT count(*)::int AS count FROM opening_jobs
       WHERE kind = 'parse' AND payload->>'sourceId' = ${ticket.source.id}
     `;
-    expect(jobs[0].count).toBe(1);
+    expect(jobs[0]?.count).toBe(1);
   });
 
   it("keeps another workspace's source invisible", async () => {
@@ -153,7 +132,7 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
     const states = await fixture.sql`
       SELECT upload_state FROM opening_sources WHERE id = ${ticket.source.id}
     `;
-    expect(states[0].upload_state).toBe("pending");
+    expect(states[0]?.upload_state).toBe("pending");
   });
 
   it("rejects a declared sha mismatch", async () => {

@@ -27,7 +27,26 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       await storage.copyStagingToFinal(key, storage.finalKey(id, source.version), { expectedEtag: head.etag });
       const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id }, privacyEpoch: 0, actual }); await storage.deleteObject(key); return done;
     },
-    async getDownloadUrl(p: Principal, id: string) { auth(p, "source.read"); const source = await sources.get(scopeOf(p), id); if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded"); return { url: await storage.presignGet(storage.finalKey(id, source.version), { expiresInSeconds: 900, responseContentDisposition: `attachment; filename="${source.name}"`, responseCacheControl: "private, no-store" }), expiresAt: new Date(Date.now() + 900000).toISOString() }; },
+    async getDownloadUrl(p: Principal, id: string, version?: number) {
+      auth(p, "source.read");
+      const source = await sources.get(scopeOf(p), id);
+      if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
+      const requested = version ?? source.version;
+      if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
+        throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+      }
+      const key = storage.finalKey(id, requested);
+      if (!(await storage.objectExists(key))) {
+        throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+      }
+      return {
+        url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: `attachment; filename="${source.name}"`, responseCacheControl: "private, no-store" }),
+        expiresAt: new Date(Date.now() + 900000).toISOString(),
+        version: requested,
+        currentVersion: source.version,
+        versionMismatch: requested !== source.version,
+      };
+    },
   };
 }
 export type OpeningSourceService = ReturnType<typeof createOpeningSourceService>;

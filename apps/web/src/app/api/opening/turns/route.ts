@@ -3,8 +3,20 @@ import {
   getTutorService,
   requireOpeningScope,
 } from "../../../../features/opening/runtime";
+import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { TutorServiceError } from "../../../../features/opening/tutor/tutor-service";
 import { OpeningConversationError } from "@aistudy/database";
+import { uuidSchema } from "@aistudy/contracts";
+import { randomUUID } from "node:crypto";
+
+function requestCorrelationId(request: Request): string {
+  const value = request.headers.get("x-request-id");
+  if (value === null) return randomUUID();
+  if (!uuidSchema.safeParse(value).success) {
+    throw new TutorServiceError("VALIDATION", "请求关联 ID 无效", 422);
+  }
+  return value;
+}
 
 function tutorError(error: unknown): Response {
   if (error instanceof TutorServiceError) {
@@ -30,15 +42,19 @@ function tutorError(error: unknown): Response {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  let correlationId: string | null = null;
   try {
+    correlationId = requestCorrelationId(request);
     const { scope, sql } = await requireOpeningScope(request);
-    const body = await request.json();
+    const body = await readOpeningJsonBody(request);
     const result = await getTutorService(sql).submitTurn(scope, body);
     return Response.json(
       { jobId: result.jobId, turnId: result.turnId },
-      { status: 201 },
+      { status: 201, headers: { "x-request-id": correlationId } },
     );
   } catch (error) {
-    return tutorError(error);
+    const response = tutorError(error);
+    if (correlationId) response.headers.set("x-request-id", correlationId);
+    return response;
   }
 }

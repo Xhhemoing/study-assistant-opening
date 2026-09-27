@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   conversationCreateInputSchema,
   shouldCreateLearningSession,
@@ -15,12 +14,12 @@ import type {
   OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import {
-  buildConversationResume,
+  buildConversationResume, revalidateSavedSelection,
   toConversationSummary,
 } from "./conversation-continuity";
 import {
   validatePageSelection,
-  type AuthorizedChunk,
+  type AuthorizedChunk, type PageSelectionInput,
   type PageSelectionCode,
 } from "./page-selection";
 
@@ -59,6 +58,7 @@ export function exposureLevelForMode(
 export function createTutorService(deps: {
   conversations: OpeningConversationRepository;
   sourceChunks: OpeningSourceChunksRepository;
+  readSelection(scope: OpeningConversationScope, conversationId: string): Promise<PageSelectionInput | null>;
 }) {
   async function authorizedChunksFor(
     scope: OpeningConversationScope,
@@ -103,14 +103,17 @@ export function createTutorService(deps: {
         scope,
         conversationId,
       );
-      const sourceIds = opts?.sticky?.sourceIds ?? [];
+      const saved = opts?.sticky ?? await deps.readSelection(scope, conversationId);
+      const authorizedChunks = await authorizedChunksFor(scope, saved?.sourceIds ?? []);
+      const sticky = opts?.sticky ?? revalidateSavedSelection(saved, authorizedChunks);
+      const sourceIds = sticky.sourceIds;
       const built = buildConversationResume({
         conversationId,
         courseId: owned.courseId,
         sourceIds,
         turns,
-        sticky: opts?.sticky,
-        authorizedChunks: await authorizedChunksFor(scope, sourceIds),
+        sticky,
+        authorizedChunks,
       });
       if (!built.ok) {
         throw mapPageSelectionToHttp(built.selection.code);
@@ -138,24 +141,28 @@ export function createTutorService(deps: {
         );
       }
 
-      const selection = validatePageSelection(
-        {
-          sourceIds: input.sourceIds,
-          currentPage: input.currentPage,
-          chunkId: input.chunkId,
-        },
-        await authorizedChunksFor(scope, input.sourceIds),
-      );
-      if (!selection.ok) {
-        throw mapPageSelectionToHttp(selection.code);
-      }
-
       await deps.conversations.getOwned(scope, input.conversationId);
+      const existing = await deps.conversations.findTurnByClientKey(
+        scope,
+        input.clientKey,
+        input.conversationId,
+      );
 
-      let learningSessionId = input.learningSessionId ?? null;
-      if (shouldCreateLearningSession(input.mode) && !learningSessionId) {
-        learningSessionId = randomUUID();
+      if (!existing) {
+        const selection = validatePageSelection(
+          {
+            sourceIds: input.sourceIds,
+            currentPage: input.currentPage,
+            chunkId: input.chunkId,
+          },
+          await authorizedChunksFor(scope, input.sourceIds),
+        );
+        if (!selection.ok) {
+          throw mapPageSelectionToHttp(selection.code);
+        }
       }
+
+      let learningSessionId = existing?.learningSessionId ?? input.learningSessionId ?? null;
       if (!shouldCreateLearningSession(input.mode)) {
         learningSessionId = null;
       }

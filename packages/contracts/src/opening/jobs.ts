@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiFailureSchema, uuidSchema } from "./foundation";
+import { apiFailureSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
 
 export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind"]);
 export const jobStatusSchema = z.enum([
@@ -24,6 +24,16 @@ export const jobRecordSchema = z
   })
   .strict();
 
+export const jobStatusResponseSchema = z
+  .object({
+    id: uuidSchema,
+    status: jobStatusSchema,
+    error: z.object({ message: z.string().min(1) }).strict().nullable(),
+    updatedAt: isoDateTimeSchema,
+  })
+  .strict();
+
 export type JobKind = z.infer<typeof jobKindSchema>;
 export type JobStatus = z.infer<typeof jobStatusSchema>;
 export type JobRecord = z.infer<typeof jobRecordSchema>;
+export type JobStatusResponse = z.infer<typeof jobStatusResponseSchema>;

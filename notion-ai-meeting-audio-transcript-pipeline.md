@@ -2,7 +2,7 @@
 
 > 适用：数学 I（智学北航）完整教师音频 → Notion **AI Meeting Notes** 自动转写/摘要
 > 课次样例：`sub_id=6108854`（2026-09-15，约 99m15s）
-> 更新：2026-09-21
+> 更新：2026-09-23
 
 ---
 
@@ -29,10 +29,12 @@
 
 ### 验收清单
 
-- [ ] 音频时长 ≈ 全课（样例课 ~99 分钟），不是切片
-- [ ] 通过 **Meeting Notes → Upload audio** 上传（不是普通文件块）
-- [ ] Meeting 内出现 **Transcript**（或 API `status` 到就绪态）
-- [ ] 不是「页面能播放附件但 Transcript 为空」
+- [x] 音频时长 ≈ 全课（样例课 ~99 分钟），不是切片
+- [x] 通过 **Meeting Notes → Upload audio** 上传（不是普通文件块）
+- [x] Meeting 内出现可读的原生 **Transcript**
+- [x] 不是「页面能播放附件但 Transcript 为空」
+
+> **硬门槛：** 音频播放、Summary、排队中的任务、`NOTION_UPLOADED`、普通 File Upload 对象或本地 Whisper 文本都不算完成；必须选中 Meeting 的 Transcript tab，并读取到带时间戳的可读原生文本。
 
 ---
 
@@ -86,8 +88,8 @@ Notion-Version: 2026-03-11
 Content-Type: application/json
 ```
 
-- 小文件：单段上传
-- **> 20MB**：multipart 分片
+- 普通 Public API File Upload 的实测边界为 `5 MiB / 5,242,880` bytes；该路径与浏览器 Meeting UI 不是同一个上传契约。
+- 完整课音频的 Public API multipart / 分片 / `external_url` 方案尚未在有效授权下验证；不要把浏览器 UI 的 `26,214,400`-byte 通过结果外推到 API。
 
 ### 3.2 发送文件字节
 
@@ -179,7 +181,7 @@ curl -sS -X POST 'https://api.notion.com/v1/blocks/meeting_notes' \
   }"
 ```
 
-> API 字段名可能随 Notion-Version 微调；以官方文档为准。大文件请改 multipart 分片流程。
+> API 字段名可能随 Notion-Version 微调；以官方文档为准。由于当前 token/plan 未能授权验证完整课的大文件 API 路径，本节 curl 仅是未验证骨架，不是本次验收路线。
 
 ---
 
@@ -245,7 +247,52 @@ ffmpeg -i teacher_full.mp4 -vn -c:a aac -b:a 64k teacher_full_64k.m4a
 
 ---
 
-## 6. 与本仓库的关系
+## 6. 已验证的完整源与可恢复 CLI
+
+### 6.1 完整源与准备产物
+
+本课使用的完整源是 `E:/Mathematics I/recordings/6108854/teacher_full.mp4`，不是试听片段、分段文件或截断文件：
+
+| 项 | 实测值 |
+|----|--------|
+| 完整源字节数 | `1,573,588,400` |
+| 完整源时长 | `5955.01s`（约 99m15s） |
+| 准备命令 | `-map 0:a:0 -vn -ac 1 -ar 16000 -c:a aac -b:a 32k -movflags +faststart` |
+| Meeting 输入 | `24,248,496` bytes，`5954.983s` |
+| 音频 profile | AAC LC，16 kHz，mono，约 32 kbps |
+| 准备产物 SHA-256 | `b2137e72cc4094997dfc271b98042b8af919e6f9c2b62ec90d5f5c53ccf97c4f` |
+
+时长校验容差为 15 秒；准备产物必须保持 16 kHz mono AAC profile，且小于实测浏览器边界 `26,214,400` bytes（达到边界即拒绝）。浏览器 UI 边界与普通 Public API File Upload 的 `5 MiB / 5,242,880` bytes 边界是两个不同契约，不能互相推断。
+
+### 6.2 CLI 边界与恢复语义
+
+独立 CLI 位于 `scripts/notion-meeting-pipeline.mjs`，命令为 `prepare`、`upload`、`verify`、`run`、`status`。它使用版本化的 `manifest.json` 和独占 `pipeline.lock`：
+
+- 先流式 hash、ffprobe 检查完整时长，再原子替换转换产物；复用产物前重新校验 hash、字节数、时长和音频 profile。
+- 在文件选择前写入 upload intent；已记录 task 会轮询 `/api/v3/getTasks`，不会再次上传；任务失败必须显式 `--retry-failed`，且仍要求操作者先检查并干净重置 disposable Meeting。
+- `enqueueTask` 的 HTTP 200 和 `getTasks: in_progress` 只是中间态；只有 task success 后再通过 Transcript tab、文本可读性和尾部时间戳覆盖校验，才进入 `verified`。
+- 默认只允许 `Meeting-<32 hex>` disposable 页面；真实页面和 block 必须以精确 pair 且显式 override 才能操作。真实目标在本次 CLI 验证中未修改。
+- `--dry-run` 只做本地 source/prepared 校验，不创建 manifest、不下载远程源、不打开浏览器、不产生 Notion mutation。
+
+一次完整 CLI disposable 验证使用独立浏览器 profile 完成：
+
+```bash
+node scripts/notion-meeting-pipeline.mjs prepare ...
+node scripts/notion-meeting-pipeline.mjs upload --no-wait ...
+node scripts/notion-meeting-pipeline.mjs upload ...
+node scripts/notion-meeting-pipeline.mjs verify ...
+```
+
+结果为 `stage=verified`、task `success`、原生 Transcript `140` 个时间戳、最后时间戳 `5779s`，相对 `5955.01s` 的尾部差约 `176s`，在 180 秒验收容差内。导出的本地 artifact 为 45,655 bytes，SHA-256 为 `277e28c0967a826c5d3cae78bb4f69430c805f6dd7bac1e23ee60459f8ff260b`；对应的脱敏 timeline 与 hash sidecar 保存在 `.tmp/notion-full-lecture-task-timeline.json`、`.tmp/notion-full-lecture-native-transcript.sha256`。这些文件仅作为本地证据，不回写 Notion 代替原生 Transcript。
+
+### 6.3 当前外部边界与阻塞
+
+- 当前 API Connection 位于另一 Notion workspace；目标 workspace 页面对该 bot 返回 `object_not_found`。
+- 现有 API token 探针返回 HTTP 401 `API token is invalid.`，因此 Public API 的完整音频 multipart / `single_part`、`multi_part` 和 `external_url` 行为仍未被授权验证。
+- 当前 plan 的直接 `POST /v1/blocks/meeting_notes` 返回 AI Meeting Notes 未启用；因此本实现选择已证明的浏览器 Upload audio 路径。
+- ffmpeg/ffprobe 仍是 CLI 外部可配置 executable，不把二进制加入 npm 依赖；Worker/plugin、数据库 migration、通用 parser 和 web request lifecycle 尚未接入。
+
+## 7. 与本仓库的关系
 
 本说明放在 `study-assistant-opening`，供 Opening / 学习助手流水线复用：
 
@@ -255,8 +302,9 @@ ffmpeg -i teacher_full.mp4 -vn -c:a aac -b:a 64k teacher_full_64k.m4a
 
 ---
 
-## 7. 修订记录
+## 8. 修订记录
 
 | 日期 | 说明 |
 |------|------|
 | 2026-09-21 | 初版：根据 6108854 全课音频实践整理；确认 MCP 附件 ≠ Meeting Upload audio |
+| 2026-09-23 | 完成 disposable CLI `prepare → upload → resume/poll → verify` 验证；原生 Transcript 作为唯一硬门槛 |

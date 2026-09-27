@@ -152,6 +152,7 @@ export {
   memoriesForContext,
   memoriesForReview,
   memoryCardMeta,
+  instructionWithMemories,
 } from "./opening/memory-policy";
 
 export { summarizeObservations, type SummarizeOptions } from "./opening/learning-summary";
@@ -162,3 +163,30 @@ export {
   DEFAULT_RETEST_BATCH_LIMIT,
   type BuildRetestCandidatesInput,
 } from "./opening/retest-policy";
+export {
+  reminderDeliveryState,
+  externalChannelConfigured,
+  isWithinQuietHours,
+  reminderIdempotencyKey,
+  isQueueableDueTask,
+  type ReminderChannel,
+  type ReminderStatus,
+  type ReminderDeliveryInput,
+  type QuietHours,
+  type ExternalReminderConfig,
+  type DueTaskRef,
+} from "./opening/reminder-policy";
+export {
+  composeOpeningBackupDraft,
+  type OpeningBackupComposeInput,
+  type OpeningBackupComposeResult,
+  type OpeningBackupComposeRecords,
+  type OpeningBackupComposeStaging,
+} from "./opening/backup-compose";
+export {
+  validateOpeningRestore,
+  type OpeningBackup,
+  type OpeningBackupObject,
+  type OpeningDeletionMark,
+  type RestorePreview,
+} from "./opening/backup-policy";

@@ -82,10 +82,14 @@ function makeFakeSql() {
       return [];
     }
     throw new Error(`unexpected sql: ${query}`);
-  }) as unknown as Sql & { counts(): { jobInserts: number; outboxInserts: number } };
+  }) as unknown as Sql & {
+    counts(): { jobInserts: number; outboxInserts: number };
+    sources: Map<string, FakeRow>;
+  };
   tag.json = ((value: unknown) => value) as never;
   tag.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(tag as unknown as Sql)) as never;
   tag.counts = () => ({ jobInserts, outboxInserts });
+  tag.sources = sources;
   return tag;
 }
 
@@ -265,8 +269,34 @@ describe("opening signed upload service", () => {
     await svc.completeUpload(principal, ticket.source.id);
     const download = await svc.getDownloadUrl(principal, ticket.source.id);
     expect(download.url).toContain(`final/${ticket.source.id}/v0`);
+    expect(download.version).toBe(0);
+    expect(download.versionMismatch).toBe(false);
     expect(download.url).toContain("attachment");
     expect(download.url).toContain("private%2C%20no-store");
+  });
+
+  it("signs a cited older version without silently opening the current object", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const stored = sql.sources.get(ticket.source.id);
+    if (!stored) throw new Error("missing source");
+    stored.version = 1;
+    put(`final/${ticket.source.id}/v0`, pdfBytes);
+    const download = await svc.getDownloadUrl(principal, ticket.source.id, 0);
+    expect(download.url).toContain(`final/${ticket.source.id}/v0`);
+    expect(download.version).toBe(0);
+    expect(download.currentVersion).toBe(1);
+    expect(download.versionMismatch).toBe(true);
+    await expect(svc.getDownloadUrl(principal, ticket.source.id, 2)).rejects.toThrow(
+      /unavailable/i,
+    );
   });
 
   it("keeps another workspace's source invisible", async () => {

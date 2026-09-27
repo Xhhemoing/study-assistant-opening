@@ -18,6 +18,9 @@ export const sourceMimeSchema = z.enum([
   "video/mp4",
   "video/webm",
   "message/rfc822",
+  "text/markdown",
+  "text/html",
+  "application/vnd.ms-powerpoint",
 ]);
 
 const MAX_NAME = 180;
@@ -30,6 +33,8 @@ function maxBytesForMime(mime: z.infer<typeof sourceMimeSchema>): number {
   if (mime.startsWith("audio/")) return AUDIO_MAX;
   if (mime.startsWith("video/")) return 512 * 1024 * 1024;
   if (mime === "message/rfc822") return 25 * 1024 * 1024;
+  if (mime === "text/markdown" || mime === "text/html") return DOCUMENT_MAX;
+  if (mime === "application/vnd.ms-powerpoint") return DOCUMENT_MAX;
   return DOCUMENT_MAX;
 }
 
@@ -90,6 +95,16 @@ export const uploadTicketSchema = z
   })
   .strict();
 
+export const sourceDownloadSchema = z
+  .object({
+    url: z.string().url(),
+    expiresAt: isoDateTimeSchema,
+    version: z.number().int().nonnegative(),
+    currentVersion: z.number().int().nonnegative(),
+    versionMismatch: z.boolean(),
+  })
+  .strict();
+
 /**
  * `page` = physical page index. `slideLabel` = optional PPTX logical label.
  * Never equate them across MIME types. Do not dedupe by text hash.
@@ -122,6 +137,7 @@ export type SourceMime = z.infer<typeof sourceMimeSchema>;
 export type UploadInput = z.infer<typeof uploadInputSchema>;
 export type SourceRecord = z.infer<typeof sourceRecordSchema>;
 export type UploadTicket = z.infer<typeof uploadTicketSchema>;
+export type SourceDownload = z.infer<typeof sourceDownloadSchema>;
 export type SourceChunk = z.infer<typeof sourceChunkSchema>;
 export type Citation = z.infer<typeof citationSchema>;
 

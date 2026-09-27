@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConversationResume, SourceRecord, TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
-import { Composer, type ComposerSubmit } from "./composer";
+import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { MessageList } from "./message-list";
-import { resolveChatMessages } from "./message-model";
+import { resolveChatMessages, type ChatMessageView } from "./message-model";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
-import { UploadStrip } from "./upload-strip";
+import { InboxPanel } from "../inbox/inbox-panel";
+import { MemoryPanel } from "./memory-panel";
 
 type Props = {
   api?: OpeningApi;
@@ -89,10 +90,61 @@ export function jobStatusHint(job: JobStatusResponse): string {
   return "";
 }
 
+export type PendingJobDiscovery =
+  | { kind: "none" }
+  | { kind: "unavailable"; message: string }
+  | { kind: "active"; activeJobId: string; pending: true; hint: string };
+
+/** Null is no pending job. A lookup error must stay unavailable, not empty. */
+export function pendingJobDiscoveryState(
+  result: { ok: true; job: JobStatusResponse | null } | { ok: false; error: unknown },
+): PendingJobDiscovery {
+  if (!result.ok) {
+    const message = result.error instanceof Error ? result.error.message : "服务暂时不可用";
+    return { kind: "unavailable", message };
+  }
+  if (!result.job || (result.job.status !== "queued" && result.job.status !== "running")) {
+    return { kind: "none" };
+  }
+  return {
+    kind: "active",
+    activeJobId: result.job.id,
+    pending: true,
+    hint: jobStatusHint(result.job),
+  };
+}
+
+export function pageIntentValue(currentPage: string): number | null {
+  try {
+    return pageForSubmit(currentPage) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function assistantContextHint(selectedSourceIds: string[]): string {
   return selectedSourceIds.length === 0
     ? "自由交流"
     : `已选材料：${selectedSourceIds.length} 份`;
+}
+
+export function mergeChatMessages(
+  saved: ChatMessageView[],
+  ephemeral: ChatMessageView[],
+): ChatMessageView[] {
+  return [...saved, ...ephemeral];
+}
+
+export function appendEphemeralResponseIfActive(
+  current: ChatMessageView[],
+  input: { clientKey: string; text: string; output: { requestId: string | null; text: string } },
+  signal: AbortSignal,
+): ChatMessageView[] {
+  if (signal.aborted) return current;
+  return [...current,
+    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [] },
+    { id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`, role: "assistant", text: input.output.text, citations: [], citationLabels: [], status: "complete" },
+  ];
 }
 
 export function AssistantView({ api: apiProp, initialConversationId = null }: Props) {
@@ -110,6 +162,9 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
   const [error, setError] = useState("");
   const [pendingHint, setPendingHint] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
+  const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
 
   const refreshSources = useCallback(async () => {
     setSources(await api.listSources());
@@ -127,12 +182,26 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       if (nextResume.currentPage != null) {
         setCurrentPage(String(nextResume.currentPage));
       }
-      const hasPending = nextTurns.some((t) => t.status === "pending");
-      setPendingHint(
-        hasPending
-          ? "存在尚未完成的回答轮次；当前 DTO 未提供其 job 关联，暂不自动轮询。"
-          : "",
-      );
+      let pendingJob: JobStatusResponse | null;
+      try {
+        pendingJob = await api.getPendingJob(id);
+      } catch (lookupError) {
+        const discovered = pendingJobDiscoveryState({ ok: false, error: lookupError });
+        if (discovered.kind === "unavailable") {
+          setPendingHint(`尚未确认是否有进行中的回答：${discovered.message}`);
+        }
+        return;
+      }
+      const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
+      if (discovered.kind === "active") {
+        setActiveJobId(discovered.activeJobId);
+        setPending(discovered.pending);
+        setPendingHint(discovered.hint);
+      } else {
+        setActiveJobId(null);
+        setPending(false);
+        setPendingHint("");
+      }
     },
     [api],
   );
@@ -193,10 +262,13 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     return () => poller.cancel();
   }, [activeJobId, api, conversationId, refreshConversation]);
 
-  const display = useMemo(
+  const savedDisplay = useMemo(
     () => resolveChatMessages({ resume, turns }),
     [resume, turns],
   );
+  const display = privacy === "ephemeral"
+    ? { messages: mergeChatMessages(savedDisplay.messages, ephemeralMessages), historyTruncated: savedDisplay.historyTruncated }
+    : savedDisplay;
 
   async function ensureConversation(): Promise<string> {
     if (conversationId) return conversationId;
@@ -208,19 +280,62 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     return created.id;
   }
 
-  async function handleSubmit(input: ComposerSubmit) {
+  function cancelCurrentTurn(): void {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    const jobId = activeJobId;
+    if (jobId) {
+      void api.cancelJob(jobId).then((job) => {
+        setActiveJobId(null);
+        setPending(false);
+        setPendingHint(jobStatusHint(job) || "回答任务已取消；服务端不会继续写入结果。",);
+        if (conversationId) void refreshConversation(conversationId);
+      }).catch((cancelError) => {
+        setPendingHint(`取消请求未确认：${cancelError instanceof Error ? cancelError.message : "服务暂时不可用"}`);
+      });
+      return;
+    }
+    setPending(false);
+    setPendingHint("本轮已取消；不保存模式的内容不会写入对话。",);
+  }
+
+  async function handleSubmit(input: ComposerSubmit): Promise<{ accepted: boolean }> {
     setError("");
     let page: number | null | undefined;
     try {
       page = pageForSubmit(currentPage);
     } catch (err) {
       setError(err instanceof Error ? err.message : "页码无效");
-      return;
+      return { accepted: false };
     }
 
     setPending(true);
     let jobSubmitted = false;
+    const abortController = new AbortController();
+    abortRef.current = abortController;
     try {
+      if (input.privacy === "ephemeral") {
+        const history = ephemeralMessages.slice(-16).map((message) => ({
+          role: message.role,
+          text: message.text,
+        }));
+        const output = await api.replyEphemeral({
+          text: input.text,
+          sourceIds: selectedSourceIds,
+          mode: input.mode,
+          history,
+          ...(page !== undefined ? { currentPage: page } : {}),
+        }, abortController.signal);
+        setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
+          clientKey: input.clientKey,
+          text: input.text,
+          output,
+        }, abortController.signal));
+        setPendingHint("本轮仅保留在当前标签页；刷新后不会恢复。",);
+        setPending(false);
+        abortRef.current = null;
+        return { accepted: true };
+      }
       const id = await ensureConversation();
       const submitted = await api.submitTurn({
         conversationId: id,
@@ -234,9 +349,17 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       setActiveJobId(submitted.jobId);
       jobSubmitted = true;
       setPendingHint("回答任务已提交，等待状态更新。");
+      abortRef.current = null;
       setDraft("");
       await refreshConversation(id);
+      return { accepted: true };
     } catch (err) {
+      abortRef.current = null;
+      if (abortController.signal.aborted) {
+        setPending(false);
+        setError("");
+        return { accepted: false };
+      }
       if (!jobSubmitted) setPending(false);
       if (
         err instanceof OpeningApiError &&
@@ -246,6 +369,7 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         setCurrentPage("");
       }
       setError(formatTurnError(err));
+      return { accepted: false };
     }
   }
 
@@ -254,10 +378,11 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       <header className="border-b border-zinc-200 px-3 py-2">
         <h1 className="text-base font-semibold text-zinc-900">助理（M1 薄聊天）</h1>
         <p className="text-xs text-zinc-500">
-          {assistantContextHint(selectedSourceIds)}。不开放敏感记忆。
+          {assistantContextHint(selectedSourceIds)}。保存模式写入对话；不保存本轮只保留在当前标签页。
         </p>
       </header>
-      <UploadStrip api={api} onUploaded={refreshSources} disabled={pending} />
+      <InboxPanel api={api} sources={sources} onChanged={refreshSources} />
+      <MemoryPanel api={api} />
       <SourcePageControls
         sources={sources}
         selectedSourceIds={selectedSourceIds}
@@ -269,6 +394,7 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       <MessageList
         messages={display.messages}
         historyTruncated={display.historyTruncated}
+        currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))}
       />
       {pendingHint ? (
         <p className="px-3 text-xs text-amber-800">{pendingHint}</p>
@@ -280,8 +406,15 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
       ) : null}
       <Composer
         draft={draft}
+        intent={{
+          sourceIds: selectedSourceIds,
+          currentPage: pageIntentValue(currentPage),
+        }}
         onDraftChange={setDraft}
         pending={pending}
+        privacy={privacy}
+        onPrivacyChange={setPrivacy}
+        onCancel={cancelCurrentTurn}
         onSubmit={handleSubmit}
       />
     </div>

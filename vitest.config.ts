@@ -71,6 +71,14 @@ export default defineConfig({
           environment: "node",
         },
       }),
+      defineProject({
+        test: {
+          name: "notion-pipeline",
+          include: ["scripts/notion-meeting-pipeline/**/*.test.mjs"],
+          exclude: sharedExclude,
+          environment: "node",
+        },
+      }),
       "spikes/*/vitest.config.ts",
     ],
   },

@@ -16,7 +16,16 @@ export function createOpeningCandidateRepository(sql: Sql) {
       return map(rows[0] as Record<string, unknown>);
     },
     async listPending(scope: OpeningScope) {
-      const rows = await sql`SELECT * FROM opening_assistant_candidates WHERE workspace_id = ${scope.workspaceId} AND status = 'pending' ORDER BY created_at ASC`;
+      const rows = await sql`
+        SELECT c.*
+        FROM opening_assistant_candidates c
+        INNER JOIN opening_conversations conv
+          ON conv.id = c.conversation_id
+         AND conv.workspace_id = c.workspace_id
+         AND conv.owner_user_id = ${scope.ownerUserId}
+        WHERE c.workspace_id = ${scope.workspaceId}
+          AND c.status = 'pending'
+        ORDER BY c.created_at ASC`;
       return rows.map((row) => map(row as Record<string, unknown>));
     },
     async decide(scope: OpeningScope, id: string, decision: CandidateDecision) {

@@ -14,6 +14,7 @@ export {
   uploadInputSchema,
   sourceRecordSchema,
   uploadTicketSchema,
+  sourceDownloadSchema,
   sourceChunkSchema,
   citationSchema,
   sourceCourseLinkInputSchema,
@@ -22,6 +23,7 @@ export {
   type UploadInput,
   type SourceRecord,
   type UploadTicket,
+  type SourceDownload,
   type SourceChunk,
   type Citation,
   type SourceCourseLinkInput,
@@ -32,9 +34,11 @@ export {
   jobKindSchema,
   jobStatusSchema,
   jobRecordSchema,
+  jobStatusResponseSchema,
   type JobKind,
   type JobStatus,
   type JobRecord,
+  type JobStatusResponse,
 } from "./jobs";
 
 export {
@@ -81,6 +85,11 @@ export {
 } from "./memory";
 
 export {
+  memoryCandidateDecisionSchema,
+  type MemoryCandidateDecision,
+} from "./memory-candidate";
+
+export {
   observationOutcomeSchema,
   assistanceLevelSchema,
   learningEvidenceVerdictSchema,
@@ -103,6 +112,7 @@ export {
   type LearningSessionCreateInput,
   type ProblemRef,
   type HelpExposure,
+  verdictSourceSchema,
 } from "./learning";
 
 export {
@@ -114,6 +124,8 @@ export {
   planDraftSchema,
   acceptPlanInputSchema,
   reminderSchema,
+  reminderListSchema,
+  reminderEnqueueInputSchema,
   timeConfigSchema,
   timeConfigSaveInputSchema,
   timeConfigSupportsAbsoluteScheduling,
@@ -125,6 +137,8 @@ export {
   type PlanDraft,
   type AcceptPlanInput,
   type Reminder,
+  type ReminderList,
+  type ReminderEnqueueInput,
   type TimeConfig,
   type TimeConfigSaveInput,
 } from "./planning";

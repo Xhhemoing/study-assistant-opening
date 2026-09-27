@@ -25,3 +25,11 @@ export {
 
 export { renderContext, selectContext } from "./opening/context";
 export { resolveCitations } from "./opening/citations";
+export {
+  assertEphemeralInput,
+  canProposeTask,
+  ConversationPolicyError,
+  EPHEMERAL_HISTORY_MAX_CHARS,
+  EPHEMERAL_HISTORY_MAX_TURNS,
+  stripEphemeralCandidates,
+} from "./opening/conversation-policy";

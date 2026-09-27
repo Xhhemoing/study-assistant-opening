@@ -1,4 +1,6 @@
 # 强制 shell 脚本用 LF 换行，避免 Windows CRLF 破坏 Linux 上执行
 *.sh text eol=lf
+# 强制 .mjs 用 LF 换行：Vitest 4 的 vm.Script 求值会因 shebang+CRLF 组合报 Invalid or unexpected token
+*.mjs text eol=lf
 # 强制 SQL 迁移用 LF 换行，避免 Windows CRLF 造成测试库迁移校验和漂移
 *.sql text eol=lf

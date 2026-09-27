@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 1,
+  "purpose": "personal-use-execution-slices",
+  "baseCommit": "8d616c0622e070799a4d8a3e3e7a172cf2caa189",
+  "snapshotCommit": null,
+  "contractRevision": null,
+  "baselineStatus": "working_tree_not_frozen",
+  "canonicalScope": "../opening-release/tasks.json",
+  "maxAgents": 4,
+  "maxImplementationAgents": 2,
+  "tasks": [
+    {
+      "evidence": [],
+      "dependsOn": [],
+      "id": "PU00",
+      "originalTasks": [
+        "B00",
+        "B01",
+        "B02",
+        "F01"
+      ],
+      "owner": "COORDINATOR",
+      "status": "planned",
+      "plan": "00-execution-protocol.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU00"
+      ],
+      "id": "PU01",
+      "originalTasks": [
+        "F02",
+        "X01"
+      ],
+      "owner": "COORDINATOR",
+      "status": "planned",
+      "plan": "04-contracts.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU01"
+      ],
+      "id": "PU02",
+      "originalTasks": [
+        "RP6",
+        "T03",
+        "RP1"
+      ],
+      "owner": "CONTINUITY_DATA",
+      "status": "planned",
+      "plan": "01-continuity.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU02"
+      ],
+      "id": "PU03",
+      "originalTasks": [
+        "U03",
+        "RP6",
+        "RP4"
+      ],
+      "owner": "CONTINUITY_UI",
+      "status": "planned",
+      "plan": "01-continuity.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU01"
+      ],
+      "id": "PU04",
+      "originalTasks": [
+        "L01",
+        "L02",
+        "L03",
+        "T01",
+        "T02",
+        "Q02"
+      ],
+      "owner": "LEARNING",
+      "status": "planned",
+      "plan": "02-learning-value.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU01"
+      ],
+      "id": "PU05A0",
+      "originalTasks": [
+        "M02",
+        "RP2",
+        "Q03"
+      ],
+      "owner": "RELIABILITY",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU05A0"
+      ],
+      "id": "PU05A1",
+      "originalTasks": [
+        "Q03"
+      ],
+      "owner": "RELIABILITY",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU05A1"
+      ],
+      "id": "PU05B",
+      "originalTasks": [
+        "Q03"
+      ],
+      "owner": "RELIABILITY",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU05B"
+      ],
+      "id": "PU05C",
+      "originalTasks": [
+        "Q03",
+        "T01"
+      ],
+      "owner": "RELIABILITY",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU03",
+        "PU04"
+      ],
+      "id": "PU06",
+      "originalTasks": [
+        "Q01",
+        "Q02",
+        "RP1",
+        "RP2",
+        "RP3"
+      ],
+      "owner": "INTEGRATION",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU06"
+      ],
+      "id": "PU07",
+      "originalTasks": [
+        "Q02",
+        "L02"
+      ],
+      "owner": "PILOT",
+      "status": "planned",
+      "plan": "02-learning-value.md"
+    },
+    {
+      "evidence": [],
+      "dependsOn": [
+        "PU05C",
+        "PU06",
+        "PU07"
+      ],
+      "id": "PU08",
+      "originalTasks": [
+        "Q03",
+        "Q01",
+        "Q02",
+        "RP5"
+      ],
+      "owner": "INTEGRATION",
+      "status": "planned",
+      "plan": "03-reliability.md"
+    }
+  ],
+  "entryGates": {
+    "PU07": [
+      "PU06 controlled admission verified",
+      "selected capability has reviewed real-model quality evidence",
+      "explicit unexpired paid approval covering PU07",
+      "funded credentials, known currency and positive current pricing",
+      "readable persistent actual budget ledger and complete run/pilot manifests",
+      "authorized replaceable material with an external original copy"
+    ],
+    "PU08": [
+      "PU05C restore evidence and PU07 outcome available for review",
+      "real device and isolated clean-machine environment available"
+    ]
+  },
+  "operationGates": {
+    "PU04": {
+      "live": [
+        "explicit unexpired paid approval covering PU04",
+        "funded credentials, known currency and positive current pricing",
+        "readable actual budget ledger and persistent run/pilot manifests"
+      ]
+    },
+    "PU08": {
+      "live": [
+        "valid paid approval, quality scope and actual budget ledger"
+      ],
+      "remotePublication": [
+        "existing authorization for push/PR and remote CI access"
+      ],
+      "deployment": [
+        "deployment authorization if deploying"
+      ]
+    }
+  },
+  "exitEvidence": {
+    "PU07": [
+      "actual user records with missing feedback reported as missing",
+      "pass/observe/stop decision and a separate learning-effect assessment",
+      "settled and still-reserved cost evidence"
+    ],
+    "PU08": [
+      "candidate-version restore, privacy and operations acceptance",
+      "Q03 then Q01 then Q02 evidence applicable to the final SHA",
+      "real-device manual acceptance and actual model/expense evidence",
+      "exact-SHA PR/CI delivery evidence",
+      "separate M4 and M5/Q04 decisions with rollback and blocked items"
+    ]
+  }
+}

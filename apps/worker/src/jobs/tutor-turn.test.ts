@@ -242,6 +242,34 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.fail).toHaveBeenCalled();
   });
 
+  it("passes the job privacy epoch into completeTurn on the success path", async () => {
+    const { deps, tutorJobs } = setup();
+    const privacy = {
+      getWorkspaceEpoch: vi.fn(async () => 7),
+      listExcludedSourceIds: vi.fn(async () => []),
+    };
+
+    await createTutorTurnHandler({ ...deps, privacy })(claimedJob.id);
+
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      expectedPrivacyEpoch: 7,
+    }));
+  });
+
+  it("puts confirmed memory into the provider instruction and omits candidates", async () => {
+    const { deps, provider } = setup();
+    const memories = {
+      list: vi.fn(async () => [
+        { id: "m1", workspaceId: "w", kind: "candidate" as const, text: "待确认偏好", sourceTurnIds: [], version: 1, expiresAt: null, status: "active" as const, createdAt: "2026-09-12T00:00:00Z" },
+        { id: "m2", workspaceId: "w", kind: "confirmed" as const, text: "先看例题再问结论", sourceTurnIds: ["00000000-0000-4000-8000-000000000099"], version: 1, expiresAt: null, status: "active" as const, createdAt: "2026-09-12T00:00:00Z" },
+      ]),
+    };
+    await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
+    const sent = provider.complete.mock.calls[0]?.[0] as { instruction: string };
+    expect(sent.instruction).toContain("先看例题再问结论");
+    expect(sent.instruction).not.toContain("待确认偏好");
+  });
+
   it("passes delivered help exposure to completeTurn after assistant persistence", async () => {
     const sessionId = "00000000-0000-4000-8000-0000000000aa";
     const { deps, tutorJobs } = setup();

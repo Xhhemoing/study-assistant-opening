@@ -9,17 +9,11 @@ import type {
   WeekSession,
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
+import { OpeningPlanError } from "./opening-plan-error";
+import { insertOpeningTask } from "./opening-retest-task";
 
-export type OpeningPlanErrorCode = "NOT_FOUND" | "VALIDATION" | "CONFLICT";
-
-export class OpeningPlanError extends Error {
-  readonly code: OpeningPlanErrorCode;
-  constructor(code: OpeningPlanErrorCode, message: string) {
-    super(message);
-    this.name = "OpeningPlanError";
-    this.code = code;
-  }
-}
+export { OpeningPlanError };
+export type { OpeningPlanErrorCode } from "./opening-plan-error";
 
 export type ProposePlanInput = {
   date: string;
@@ -75,34 +69,7 @@ export function createOpeningPlansRepository(sql: Sql) {
       scope: OpeningScope,
       input: TaskCreateInput & { dueText?: string | null },
     ): Promise<TaskItem> {
-      if (input.dueText && input.dueAt) {
-        throw new OpeningPlanError("VALIDATION", "ambiguous dueText cannot become a formal deadline");
-      }
-      const id = randomUUID();
-      return sql.begin(async (tx) => {
-        if (input.candidateId) {
-          const consumed = await tx`
-            UPDATE opening_assistant_candidates
-            SET status = 'accepted', updated_at = now()
-            WHERE id = ${input.candidateId}
-              AND workspace_id = ${scope.workspaceId}
-              AND status = 'pending'
-            RETURNING id`;
-          if (!consumed.length) {
-            throw new OpeningPlanError("CONFLICT", "candidate missing or already consumed");
-          }
-        }
-        const rows = await tx`
-          INSERT INTO opening_tasks (
-            id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
-            priority, status, version, candidate_id
-          ) VALUES (
-            ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
-            ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
-            ${input.candidateId}
-          ) RETURNING *`;
-        return mapTask(rows[0] as Record<string, unknown>);
-      });
+      return insertOpeningTask(sql, scope, input);
     },
 
     async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {

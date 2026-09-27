@@ -57,6 +57,13 @@ export type JobRecord = {
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'outcome_unknown';
   attempt: number; error: ApiFailure | null; privacyEpoch: number;
 };
+/** Public tutor polling response; do not expose the internal JobRecord shape. */
+export type JobStatusResponse = {
+  id: string;
+  status: JobRecord['status'];
+  error: { message: string } | null;
+  updatedAt: string;
+};
 export type TutorMode = 'hint' | 'explain' | 'listen' | 'think_together';
 /**
  * TurnInput (RU-02/03). conversationId is always server-issued (create/discover first).
@@ -228,7 +235,7 @@ export type Reminder = { id: string; taskId: string; dueAt: string; channel: 'in
 | sources | unlinkSourceFromCourse(scope, input: SourceCourseUnlinkInput): Promise<SourceRecord> | POST /api/opening/sources/[id]/unlink-course |
 | planning | getTimeConfig(scope): Promise<TimeConfig> | GET /api/opening/time-config |
 | planning | saveTimeConfig(scope, input: TimeConfigSaveInput): Promise<TimeConfig> | PUT /api/opening/time-config |
-| jobs | getJob(scope, id: string): Promise<JobRecord> | GET /api/opening/jobs/[id] |
+| jobs | getJob(scope, id: string): Promise<JobStatusResponse> | GET /api/opening/jobs/[id] |
 | memory | listMemory(scope): Promise<MemoryItem[]> | GET /api/opening/memory |
 | memory | decideMemory(scope, input: MemoryDecision): Promise<MemoryItem> | POST /api/opening/memory/[id]/decision |
 | learning | submitObservation(scope, input: ObservationInput): Promise<LearningObservation> | POST /api/opening/observations |
@@ -256,3 +263,12 @@ F03创建`tests/integration/opening-fixture.ts`：`createOpeningFixture(): Promi
 - **RU-04 learning linkage:** `ObservationInput.problemId` / optional `retestId`; `ASSISTANCE_BLOCKS_INDEPENDENT` + `canBecomeObservedIndependent`; `observationAllowsIndependent` (no problemId never independent); `shouldCreateLearningSession` (hint|explain only); `problemRefSchema` + `helpExposureSchema` (`delivered: true` only).
 - **RU-05 time config:** `TimeConfig.version` + `TimeConfigSaveInput.expectedVersion` (409); `timeConfigSupportsAbsoluteScheduling` (termStartDate + non-empty periodToClock); else week/period only — never invent dates. `WeekSession.courseId` nullable optional (courseName stays display label).
 - **RU-06 memory scope:** `MemoryItem.courseId` nullable; temporary requires `expiresAt`; helpers `memoryEffectiveScope` / `memoryVisibleInCourseScope` (no wire field; no cross-course load). Temporary must not promote without M01.
+
+## 9. Review-hardening contracts (RP1–RP6, 2026-09-21)
+
+- **RP1 history admission:** `loadTutorHistory(sql, scope, currentTurnId)` 签名不变；invalid 判定增加对 `opening_privacy_exclusions` 的关联——任一被引用 source 被排除则整组历史置空。排除查询必须复用 `opening-privacy.ts` 的 `listExcludedSourceIds`/`isSourceExcluded`，不在 history SQL 中重写过滤逻辑。
+- **RP2 atomic writeback:** `completeTurn(input & { expectedPrivacyEpoch?: number })`。事务内第一步 `SELECT privacy_epoch FROM workspaces WHERE id=$1 FOR UPDATE`，与删除流程同一锁顺序；epoch 漂移抛错回滚，job 置 failed 并标明 privacy epoch drift。undefined 保持现有单测行为。
+- **RP3 logical send:** `clientKey` 绑定一次待发送意图；`opening_turns.intent_hash`（0025 列）作为同 key 不同内容的冲突检测（409）。同 key 重放返回原 `{jobId, turnId}`。恢复路径由 `ConversationResume`/pending-job 发现补回 job 关联，`outcome_unknown` 终态不得静默改名为失败。
+- **RP4 citation display:** `ChatMessageView` 增加 `citations: Citation[]`（`sourceId/sourceVersion/chunkId/label`）；`getDownloadUrl(principal, id, version?)` 支持按版本取对象键并校验该版本归属同一 source。版本不一致时 UI 明确提示，不静默打开最新版。
+- **RP5 CI gate:** 无代码契约；触发范围与证据要求写入 `docs/operations/ci.md`，发布证据绑定具体 SHA。
+- **RP6 today resume:** `TodayResumeState = { kind: 'continue'|'confirm'|'empty'|'error'|'loggedOut' }`；继续项含课程/材料版本/阅读位置/上一步问题，全部来自服务端真实数据，五态可测。

@@ -118,6 +118,32 @@ describe("opening conversation repository", () => {
 });
 
 describe("opening tutor jobs repository", () => {
+  it("discovers only an active pending job in the owner-scoped conversation", async () => {
+    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running')")
+      ? [{
+          id: "job-1",
+          status: "queued",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    const repository = createOpeningTutorJobsRepository(sql);
+
+    await expect(repository.findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-1",
+      status: "queued",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+    });
+    expect(sql.calls[0]).toContain("owner_user_id");
+    expect(sql.calls[0]).toContain("conversation_id");
+  });
+
+  it("returns no pending job when the owner-scoped conversation is empty", async () => {
+    const repository = createOpeningTutorJobsRepository(fakeSql());
+    await expect(repository.findPendingForConversation(scope, "conversation-1")).resolves.toBeNull();
+  });
+
   it("marks the associated assistant turn failed with the definitive message", async () => {
     const sql = fakeSql((query) =>
       query.includes("RETURNING assistant_turn_id")
@@ -231,6 +257,41 @@ describe("opening tutor jobs repository", () => {
 
     expect(sql.calls).not.toEqual(expect.arrayContaining([
       expect.stringContaining("INSERT INTO opening_help_exposures"),
+    ]));
+  });
+
+  it("rejects completeTurn when the locked workspace privacy epoch drifted", async () => {
+    const sql = fakeSql((query) => {
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) {
+        return [{ privacy_epoch: 8 }];
+      }
+      if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) {
+        return [{ id: "job-1" }];
+      }
+      if (query.includes("UPDATE opening_turns SET text")) {
+        return [{ id: "assistant-turn-1" }];
+      }
+      return [];
+    });
+    const repository = createOpeningTutorJobsRepository(sql);
+
+    await expect(repository.completeTurn({
+      scope,
+      jobId: "job-1",
+      assistantTurnId: "assistant-turn-1",
+      text: "answer",
+      citations: [],
+      candidates: [],
+      expectedPrivacyEpoch: 7,
+    })).rejects.toThrow(/privacy epoch drift/);
+
+    expect(sql.calls[0]).toContain("SELECT privacy_epoch FROM workspaces");
+    expect(sql.calls[0]).toContain("FOR UPDATE");
+    expect(sql.calls).not.toEqual(expect.arrayContaining([
+      expect.stringContaining("UPDATE opening_turns"),
+    ]));
+    expect(sql.calls).not.toEqual(expect.arrayContaining([
+      expect.stringContaining("INSERT"),
     ]));
   });
 });

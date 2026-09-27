@@ -80,20 +80,23 @@ function parseOutput(body: unknown): ProviderOutput {
   return output.data;
 }
 
-export function createOpeningProvider(options: OpeningProviderOptions): { complete(input: ProviderInput): Promise<ProviderOutput> } {
+export function createOpeningProvider(options: OpeningProviderOptions): { complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput> } {
   if (!endpointAllowed(options.baseUrl)) {
     throw new Error("provider baseUrl must use HTTPS");
   }
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? 30_000;
   return {
-    async complete(input) {
+    async complete(input, callerSignal) {
       input = providerInputSchema.parse(input);
       if (input.mediaCapability !== "text_only" || input.imageParts.length > 0) {
         throw new OpeningProviderError("PROVIDER_MEDIA_UNSUPPORTED", "page image input is not configured");
       }
       const timeout = new AbortController();
       const timer = setTimeout(() => timeout.abort(), timeoutMs);
+      const onCallerAbort = () => timeout.abort(callerSignal?.reason);
+      if (callerSignal?.aborted) timeout.abort(callerSignal.reason);
+      else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
       const signal = timeout.signal;
       try {
         const response = await fetchImpl(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -124,10 +127,14 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
         return parseOutput(body);
       } catch (error) {
         if (error instanceof OpeningProviderError) throw error;
+        if (callerSignal?.aborted) {
+          throw new OpeningProviderError("PROVIDER_ABORTED", "provider request aborted", false);
+        }
         if (signal.aborted) throw new OpeningProviderError("PROVIDER_TIMEOUT", "provider request aborted", true);
         throw new OpeningProviderError("PROVIDER_NETWORK", "provider request failed", true);
       } finally {
         clearTimeout(timer);
+        callerSignal?.removeEventListener("abort", onCallerAbort);
       }
     },
   };

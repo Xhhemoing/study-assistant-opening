@@ -3,6 +3,10 @@ import type { LearningObservation, LearningSummary } from "@aistudy/contracts";
 export type SummarizeOptions = {
   /** Skills with an accepted due retest → needs_review (L02). */
   dueRetestSkillLabels?: ReadonlySet<string>;
+  /** Server-known current versions. Client source ids are not trusted alone. */
+  currentSourceVersions?: Readonly<Record<string, number>>;
+  /** Observation id → source id → version recorded with that evidence. */
+  observationSourceVersions?: Readonly<Record<string, Readonly<Record<string, number>>>>;
 };
 
 /**
@@ -28,9 +32,11 @@ export function summarizeObservations(
   const summaries: LearningSummary[] = [];
 
   for (const [skillLabel, rows] of bySkill) {
-    const evidenceIds = rows.map((r) => r.id);
+    const usable = rows.filter((row) => !isStaleSourceEvidence(row, opts));
+    if (usable.length === 0) continue;
+    const evidenceIds = usable.map((r) => r.id);
     const lastObservedAt =
-      rows
+      usable
         .map((r) => r.occurredAt)
         .sort()
         .at(-1) ?? null;
@@ -39,7 +45,7 @@ export function summarizeObservations(
 
     if (due.has(skillLabel)) {
       status = "needs_review";
-    } else if (rows.every(isObservedIndependentEvidence)) {
+    } else if (usable.every((row) => isObservedIndependentEvidence(row, opts))) {
       status = "observed_independent";
     } else {
       status = "needs_check";
@@ -49,7 +55,8 @@ export function summarizeObservations(
       skillLabel,
       status,
       evidenceIds,
-      sampleCount: rows.length,
+      evidenceSources: [...new Set(usable.map((row) => row.verdictSource))],
+      sampleCount: usable.length,
       lastObservedAt,
     });
   }
@@ -57,10 +64,43 @@ export function summarizeObservations(
   return summaries.sort((a, b) => a.skillLabel.localeCompare(b.skillLabel));
 }
 
-function isObservedIndependentEvidence(row: LearningObservation): boolean {
-  return (
-    row.assistance === "independent" &&
-    row.outcome === "correct" &&
-    row.verdictSource === "reference_checked"
-  );
+function isObservedIndependentEvidence(
+  row: LearningObservation,
+  opts: SummarizeOptions,
+): boolean {
+  if (
+    row.assistance !== "independent" ||
+    row.outcome !== "correct" ||
+    row.verdictSource !== "reference_checked" ||
+    !row.referenceSourceId
+  ) {
+    return false;
+  }
+  return sourceVersionMatches(row, row.referenceSourceId, opts);
+}
+
+function isStaleSourceEvidence(
+  row: LearningObservation,
+  opts: SummarizeOptions,
+): boolean {
+  const current = opts.currentSourceVersions;
+  const recorded = opts.observationSourceVersions?.[row.id];
+  if (!current || !recorded) return false;
+  const ids = new Set([...(row.sourceIds ?? []), row.referenceSourceId].filter(Boolean) as string[]);
+  for (const id of ids) {
+    if (current[id] === undefined || recorded[id] === undefined) continue;
+    if (recorded[id] !== current[id]) return true;
+  }
+  return false;
+}
+
+function sourceVersionMatches(
+  row: LearningObservation,
+  sourceId: string,
+  opts: SummarizeOptions,
+): boolean {
+  const current = opts.currentSourceVersions?.[sourceId];
+  const recorded = opts.observationSourceVersions?.[row.id]?.[sourceId];
+  if (current === undefined && recorded === undefined) return true;
+  return current !== undefined && recorded === current;
 }

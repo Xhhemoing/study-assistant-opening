@@ -4,7 +4,7 @@ Status: current repair implemented; local verification recorded below. Baseline:
 
 ## Current repair slice
 
-Existing task-level verification missed transport and persistence boundaries. Keep the approved 37-task product scope; repair these foundations before claiming material-grounded tutoring.
+Existing task-level verification missed transport and persistence boundaries. Keep the approved product scope; repair these foundations before claiming material-grounded tutoring. (2026-09-21 note: the ledger is now 43 tasks — RP1–RP6 review-hardening items added, all `planned`; scope definition unchanged, see `docs/plans/2026-09-21-review-synthesis.md`. Historical "37 tasks" validator records below remain as observed at their time and are not rewritten.)
 
 | Lane | Exclusive files | Behavior and checks |
 |---|---|---|

@@ -1,5 +1,6 @@
 /** RU-02: discovery + server-assembled bounded history for provider continuity. */
 
+import type { Citation } from "@aistudy/contracts";
 import {
   type AuthorizedChunk,
   type PageSelectionInput,
@@ -12,6 +13,13 @@ export const PROVIDER_HISTORY_MAX_TURNS = 40;
 export type ContinuityTurn = {
   role: "user" | "assistant";
   text: string;
+  citations?: readonly Citation[];
+};
+
+export type ResumeHistoryTurn = {
+  role: "user" | "assistant";
+  text: string;
+  citations: Citation[];
 };
 
 export type ConversationSummaryInput = {
@@ -30,24 +38,32 @@ export type ConversationResume = {
   currentPage?: number | null;
   chunkId?: string | null;
   sourceIds: string[];
-  boundedHistory: ContinuityTurn[];
+  boundedHistory: ResumeHistoryTurn[];
   historyTruncated: boolean;
 };
+
+function toResumeHistoryTurn(turn: ContinuityTurn): ResumeHistoryTurn {
+  return {
+    role: turn.role,
+    text: turn.text,
+    citations: turn.citations ? [...turn.citations] : [],
+  };
+}
 
 export function buildBoundedHistory(
   turns: readonly ContinuityTurn[],
   maxTurns: number = PROVIDER_HISTORY_MAX_TURNS,
-): { boundedHistory: ContinuityTurn[]; historyTruncated: boolean } {
+): { boundedHistory: ResumeHistoryTurn[]; historyTruncated: boolean } {
   const limit = Math.max(0, maxTurns);
   if (turns.length <= limit) {
     return {
-      boundedHistory: turns.map((t) => ({ role: t.role, text: t.text })),
+      boundedHistory: turns.map(toResumeHistoryTurn),
       historyTruncated: false,
     };
   }
   const sliced = turns.slice(turns.length - limit);
   return {
-    boundedHistory: sliced.map((t) => ({ role: t.role, text: t.text })),
+    boundedHistory: sliced.map(toResumeHistoryTurn),
     historyTruncated: true,
   };
 }
@@ -124,4 +140,14 @@ export function buildConversationResume(
       historyTruncated,
     },
   };
+}
+
+/** Saved context is a convenience: discard invalid selection, never block history. */
+export function revalidateSavedSelection(saved: PageSelectionInput | null, chunks: readonly AuthorizedChunk[]): PageSelectionInput {
+  const available = new Set(chunks.map((chunk) => chunk.sourceId));
+  const sourceIds = (saved?.sourceIds ?? []).filter((id) => available.has(id));
+  const selection = { sourceIds, currentPage: saved?.currentPage ?? null, chunkId: saved?.chunkId ?? null };
+  return validatePageSelection(selection, chunks).ok
+    ? selection
+    : { sourceIds, currentPage: null, chunkId: null };
 }

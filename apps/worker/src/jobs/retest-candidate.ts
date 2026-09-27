@@ -45,18 +45,21 @@ export function createRetestCandidateHandler(deps: RetestCandidateDeps) {
       dueRetestSkillLabels: new Set(dueSkills),
     });
 
-    const sourceIdsBySkill = body.sourceIdsBySkill ?? {};
-    const promptsBySkill = body.promptsBySkill ?? {};
+    const sourceIdsBySkill: Record<string, string[]> = {};
+    const promptsBySkill = { ...(body.promptsBySkill ?? {}) };
     for (const summary of summaries) {
-      if (!sourceIdsBySkill[summary.skillLabel]) {
-        const fromObs = observations.find((o) => o.skillLabel === summary.skillLabel);
-        if (fromObs?.sourceIds?.length) {
-          sourceIdsBySkill[summary.skillLabel] = fromObs.sourceIds;
+      const owned = observations.find(
+        (o) => o.skillLabel === summary.skillLabel && (o.sourceIds?.length ?? 0) > 0,
+      );
+      const ownedIds = owned?.sourceIds ?? [];
+      const requested = body.sourceIdsBySkill?.[summary.skillLabel];
+      if (requested?.length) {
+        const allowed = new Set(ownedIds);
+        if (requested.every((id) => allowed.has(id))) {
+          sourceIdsBySkill[summary.skillLabel] = requested;
         }
-      }
-      if (!promptsBySkill[summary.skillLabel]) {
-        promptsBySkill[summary.skillLabel] =
-          `Retest ${summary.skillLabel} (heuristic proposal — not a calibrated model)`;
+      } else if (ownedIds.length) {
+        sourceIdsBySkill[summary.skillLabel] = ownedIds;
       }
     }
 

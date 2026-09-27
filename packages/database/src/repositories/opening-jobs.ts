@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
+import { failOpeningJob } from "./opening-job-failure";
 import type { OpeningScope } from "./opening-sources";
 
 export type OpeningJobErrorCode = "NOT_FOUND" | "CONFLICT";
@@ -155,6 +156,7 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
     },
     async finish(id, state, value) {
+      if (state === "failed") return failOpeningJob(sql, id, value);
       const rows = await sql`
         UPDATE opening_jobs SET state = ${state},
           result = ${sql.json(value as never)},

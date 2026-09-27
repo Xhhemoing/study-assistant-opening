@@ -331,6 +331,12 @@ export function mapDomainError(error: unknown): ApiError {
   if (error instanceof UploadPolicyError) {
     return new ApiError("VALIDATION", error.message, 400);
   }
+  if (error instanceof Error && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
+    if (code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
+    if (code === "CONFLICT") return new ApiError("CONFLICT", error.message, 409);
+  }
   return new ApiError("VALIDATION", message, 500);
 }
 

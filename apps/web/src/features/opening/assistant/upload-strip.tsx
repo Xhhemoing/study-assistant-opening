@@ -3,6 +3,7 @@
 import { LoaderCircle, Upload } from "lucide-react";
 import { useState, type ChangeEvent } from "react";
 import { resolveUploadPutUrl, type OpeningApi } from "../client/api";
+import { resolveUploadMime } from "../inbox/upload-state";
 
 type Props = {
   api: OpeningApi;
@@ -17,14 +18,8 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-function mimeOf(file: File): string {
-  if (file.type) return file.type;
-  const name = file.name.toLowerCase();
-  if (name.endsWith(".pdf")) return "application/pdf";
-  if (name.endsWith(".png")) return "image/png";
-  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
-  if (name.endsWith(".webp")) return "image/webp";
-  return "application/pdf";
+function mimeOf(file: File): ReturnType<typeof resolveUploadMime> {
+  return resolveUploadMime({ name: file.name, type: file.type });
 }
 
 export function UploadStrip({ api, onUploaded, disabled }: Props) {
@@ -35,23 +30,19 @@ export function UploadStrip({ api, onUploaded, disabled }: Props) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    const mime = mimeOf(file);
+    if (!mime) {
+      setMessage("不支持这个格式。请使用 PDF、PPT、PPTX、HTML、Markdown、PNG、JPEG 或 WEBP。");
+      return;
+    }
     setBusy(true);
     setMessage("");
     try {
       const buffer = await file.arrayBuffer();
       const sha256 = await sha256Hex(buffer);
-      const mime = mimeOf(file);
       const ticket = await api.beginUpload({
         name: file.name.slice(0, 180),
-        mime: mime as
-          | "application/pdf"
-          | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-          | "image/jpeg"
-          | "image/png"
-          | "image/webp"
-          | "audio/mpeg"
-          | "audio/mp4"
-          | "audio/wav",
+        mime,
         bytes: file.size,
         sha256,
       });
@@ -88,7 +79,7 @@ export function UploadStrip({ api, onUploaded, disabled }: Props) {
           className="sr-only"
           disabled={disabled || busy}
           onChange={onChange}
-          accept=".pdf,.png,.jpg,.jpeg,.webp,.ppt,.pptx,audio/*"
+          accept=".pdf,.ppt,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,audio/*"
         />
       </label>
       {message ? <span className="text-xs text-zinc-600">{message}</span> : null}

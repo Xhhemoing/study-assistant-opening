@@ -23,6 +23,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [已批准：终身学习平台调整设计](docs/plans/2026-07-21-lifelong-learning-design.md)
 - [当前实施计划：开学版及能力扩展](docs/superpowers/plans/2026-09-12-opening-release-implementation.md)
 - [质量修复与双Agent协作计划](docs/plans/2026-09-18-quality-dual-agent.md)
+- [2026-09-21 PI审查综合：工程修复项与产品方向衔接](docs/plans/2026-09-21-review-synthesis.md)
 - [任务状态与证据](docs/superpowers/plans/opening-release/tasks.json)
 - [长期平台路线](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
@@ -40,7 +41,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 当前阶段
 
-当前开发主线为 `feat/opening-release`，以开学版总计划、tasks.json及对应证据为准。已落盘迁移为0001–0021；后续编号由集成者统一分配。近期真实材料上传/解析记录见 [T02/T03证据](docs/superpowers/evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md)。局部verified不等于完整产品验收：历史上下文传输、每日预算、真实模型语义、真机和恢复门禁仍需完成，具体工作顺序见质量修复计划。
+当前开发主线为 `feat/opening-release`，以开学版总计划、tasks.json及对应证据为准。任务账本现为 43 项：原 37 项 + 2026-09-21 审查新增 RP1–RP6 修复项（见[审查综合](docs/plans/2026-09-21-review-synthesis.md)）。已落盘迁移为0001–0021；后续编号由集成者统一分配。近期真实材料上传/解析记录见 [T02/T03证据](docs/superpowers/evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md)。局部verified不等于完整产品验收：历史上下文传输、每日预算、真实模型语义、真机和恢复门禁仍需完成，具体工作顺序见质量修复计划。
 
 以下保留2026-08-15 Phase 1历史快照，不代表当前工作区、工具可用性或远端CI状态。冻结基线见 [Phase 1 修复基线](docs/releases/phase-1-repair-baseline.md)；旧问题见 [学习闭环问题总账](docs/quality/2026-08-15-learning-loop-issue-register.md)。
 

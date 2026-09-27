@@ -1,9 +1,14 @@
 import { AssistantView } from "@/features/opening/assistant/assistant-view";
 
-export default function OpeningAssistantPage() {
+export default async function OpeningAssistantPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ conversation?: string }>;
+}) {
+  const { conversation } = await searchParams;
   return (
     <main className="mx-auto min-h-screen max-w-3xl p-4">
-      <AssistantView />
+      <AssistantView initialConversationId={conversation ?? null} />
     </main>
   );
 }

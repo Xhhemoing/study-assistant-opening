@@ -47,6 +47,49 @@ describe("openingApi (RU-07 client)", () => {
     const resume = await api.resumeConversation(U);
     expect(resume.boundedHistory).toHaveLength(1);
     expect(resume.sourceIds).toEqual([S]);
+    expect(resume.boundedHistory[0]?.citations ?? []).toEqual([]);
+  });
+
+  it("parses resume citations instead of stripping them", async () => {
+    const citation = {
+      chunkId: "33333333-3333-4333-8333-333333333333",
+      sourceId: S,
+      sourceVersion: 1,
+      label: "p.2",
+    };
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        conversationId: U,
+        courseId: null,
+        sourceIds: [S],
+        boundedHistory: [{ role: "assistant", text: "hi", citations: [citation] }],
+        historyTruncated: false,
+      }),
+    );
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const resume = await api.resumeConversation(U);
+    expect(resume.boundedHistory[0]?.citations).toEqual([citation]);
+  });
+
+  it("discovers the owner-scoped pending job for a conversation", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`/api/opening/conversations/${U}/pending-job`);
+      expect(init?.method).toBe("GET");
+      return jsonResponse({ id: U, status: "queued", error: null, updatedAt: ISO });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+
+    await expect(api.getPendingJob(U)).resolves.toEqual({
+      id: U,
+      status: "queued",
+      error: null,
+      updatedAt: ISO,
+    });
+  });
+
+  it("returns no pending job when the conversation has none", async () => {
+    const api = createOpeningApi(vi.fn(async () => jsonResponse(null)) as unknown as typeof fetch);
+    await expect(api.getPendingJob(U)).resolves.toBeNull();
   });
 
   it.each(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"] as const)(
@@ -82,6 +125,36 @@ describe("openingApi (RU-07 client)", () => {
 
       await expect(api.getJob(U)).rejects.toThrow();
     });
+
+  it("posts ephemeral turns with the caller AbortSignal", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("/api/opening/ephemeral");
+      expect(init?.signal).toBe(controller.signal);
+      return jsonResponse({
+        text: "temporary answer",
+        citedChunkIds: [],
+        requestId: "ephemeral-request",
+        candidates: [],
+        inputTokens: null,
+        outputTokens: null,
+      });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.replyEphemeral({
+      text: "q", sourceIds: [], mode: "listen", history: [],
+    }, controller.signal)).resolves.toMatchObject({ text: "temporary answer" });
+  });
+
+  it("cancels a durable job through DELETE without inventing a result", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`/api/opening/jobs/${U}`);
+      expect(init?.method).toBe("DELETE");
+      return jsonResponse({ id: U, status: "cancelled", error: { message: "cancelled by user" }, updatedAt: ISO });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.cancelJob(U)).resolves.toMatchObject({ status: "cancelled" });
+  });
 
   it("submits saved turn to POST /api/opening/turns", async () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
@@ -200,5 +273,24 @@ describe("openingApi integration helpers", () => {
       expiresAt: ISO,
     });
     expect(url).toBe(`http://localhost:3000/api/opening/sources/${S}/staging`);
+  });
+
+  it("requests the cited source version download", async () => {
+    const fetchImpl = vi.fn(async (path: string) => {
+      expect(path).toBe(`/api/opening/sources/${S}/download?version=0`);
+      return jsonResponse({
+        url: "https://minio.local/signed",
+        expiresAt: ISO,
+        version: 0,
+        currentVersion: 2,
+        versionMismatch: true,
+      });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.getSourceDownload(S, 0)).resolves.toMatchObject({
+      version: 0,
+      currentVersion: 2,
+      versionMismatch: true,
+    });
   });
 

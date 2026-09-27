@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { citationSchema } from "./sources";
 
 /** Discoverable conversation row — no client-seeded id required (RU-02). */
 export const conversationSummarySchema = z
@@ -19,6 +20,15 @@ export const providerHistoryMessageSchema = z
   })
   .strict();
 
+/** Resume/UI history: additive citations, never sent as provider history. */
+export const resumeHistoryMessageSchema = z
+  .object({
+    role: z.enum(["user", "assistant"]),
+    text: z.string().max(20_000),
+    citations: z.array(citationSchema).max(64).optional(),
+  })
+  .strict();
+
 /**
  * Server-assembled resume for provider continuity (RU-02).
  * Clients list/discover then request resume; they do not invent history.
@@ -30,7 +40,7 @@ export const conversationResumeSchema = z
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
     sourceIds: z.array(uuidSchema).max(32),
-    boundedHistory: z.array(providerHistoryMessageSchema).max(40),
+    boundedHistory: z.array(resumeHistoryMessageSchema).max(40),
     /** True when older turns exist but were omitted (AC07). */
     historyTruncated: z.boolean(),
   })

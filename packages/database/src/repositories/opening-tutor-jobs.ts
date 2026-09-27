@@ -48,6 +48,12 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     status: "failed" | "outcome_unknown";
   }): Promise<void> {
     await sql.begin(async (tx) => {
+      // Use the same workspace-first lock order as completeTurn/cancel.
+      await tx`
+        SELECT id FROM workspaces
+        WHERE id = ${input.scope.workspaceId}
+        FOR UPDATE
+      `;
       const rows = input.status === "failed"
         ? await tx`
             UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json({ message: input.message } as never)},
@@ -95,6 +101,71 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       return { ...mapJob(row), ownerUserId: row.owner_user_id as string };
     },
 
+    async findPendingForConversation(
+      scope: OpeningScope,
+      conversationId: string,
+    ): Promise<{
+      id: string;
+      status: OpeningTutorJobRecord["status"];
+      error: { message: string } | null;
+      updatedAt: string;
+    } | null> {
+      const rows = await sql`
+        SELECT j.id, j.status, j.error, j.updated_at
+        FROM opening_tutor_jobs j
+        JOIN opening_conversations c ON c.id = j.conversation_id
+        JOIN opening_turns t ON t.id = j.assistant_turn_id
+        WHERE j.conversation_id = ${conversationId}
+          AND j.workspace_id = ${scope.workspaceId}
+          AND c.workspace_id = ${scope.workspaceId}
+          AND c.owner_user_id = ${scope.ownerUserId}
+          AND t.status = 'pending'
+          AND j.status IN ('queued', 'running')
+        ORDER BY j.created_at DESC
+        LIMIT 1
+      `;
+      if (!rows.length) return null;
+      const row = rows[0] as Record<string, unknown>;
+      return {
+        id: row.id as string,
+        status: row.status as OpeningTutorJobRecord["status"],
+        error: (row.error as { message: string } | null) ?? null,
+        updatedAt: new Date(row.updated_at as string | Date).toISOString(),
+      };
+    },
+
+    async cancel(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
+      return sql.begin(async (tx) => {
+        // Keep cancellation in the workspace-first order used by writeback.
+        await tx`
+          SELECT id FROM workspaces
+          WHERE id = ${scope.workspaceId}
+          FOR UPDATE
+        `;
+        const rows = await tx`
+          UPDATE opening_tutor_jobs j
+          SET status = 'cancelled', updated_at = now(), error = ${tx.json({ message: "cancelled by user" } as never)}
+          FROM opening_conversations c
+          WHERE j.id = ${id}
+            AND j.workspace_id = ${scope.workspaceId}
+            AND c.id = j.conversation_id
+            AND c.workspace_id = ${scope.workspaceId}
+            AND c.owner_user_id = ${scope.ownerUserId}
+            AND j.status IN ('queued', 'running')
+          RETURNING j.*
+        `;
+        if (!rows.length) return null;
+        await tx`
+          UPDATE opening_turns
+          SET status = 'failed', text = '回答任务已取消'
+          WHERE id = ${rows[0]!.assistant_turn_id}
+            AND workspace_id = ${scope.workspaceId}
+            AND status = 'pending'
+        `;
+        return mapJob(rows[0] as Record<string, unknown>);
+      });
+    },
+
     async get(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
         SELECT j.* FROM opening_tutor_jobs j
@@ -135,8 +206,20 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         level: "hinted" | "revealed";
         delivered: true;
       };
+      expectedPrivacyEpoch?: number;
     }): Promise<void> {
       await sql.begin(async (tx) => {
+        const workspace = await tx`
+          SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} FOR UPDATE
+        `;
+        if (input.expectedPrivacyEpoch !== undefined) {
+          const currentEpoch = Number((workspace[0] as { privacy_epoch?: number } | undefined)?.privacy_epoch);
+          if (currentEpoch !== input.expectedPrivacyEpoch) {
+            throw new Error(
+              `privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`,
+            );
+          }
+        }
         const claimed = await tx`
           UPDATE opening_tutor_jobs SET status = 'succeeded', error = NULL, updated_at = now()
           WHERE id = ${input.jobId}

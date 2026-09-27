@@ -443,6 +443,67 @@
       "plan": "11-proactive-acceptance.md",
       "status": "planned",
       "evidence": []
+    },
+    {
+      "id": "RP1",
+      "owner": "DATA",
+      "dependsOn": [
+        "M02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP2",
+      "owner": "DATA",
+      "dependsOn": [
+        "M02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP3",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP4",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP5",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP6",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03",
+        "U01"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "planned",
+      "evidence": []
     }
   ]
 }

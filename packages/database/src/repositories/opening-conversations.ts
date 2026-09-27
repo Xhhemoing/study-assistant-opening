@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type {
+  Citation,
   ConversationCreateInput,
   ConversationSummary,
   TurnRecord,
@@ -174,10 +175,10 @@ export function createOpeningConversationRepository(sql: Sql) {
     async loadContinuityTurns(
       scope: OpeningConversationScope,
       conversationId: string,
-    ): Promise<Array<{ role: "user" | "assistant"; text: string }>> {
+    ): Promise<Array<{ role: "user" | "assistant"; text: string; citations: Citation[] }>> {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
-        SELECT role, text
+        SELECT role, text, citations
         FROM opening_turns
         WHERE conversation_id = ${conversationId}
           AND workspace_id = ${scope.workspaceId}
@@ -189,6 +190,7 @@ export function createOpeningConversationRepository(sql: Sql) {
         return {
           role: r.role as "user" | "assistant",
           text: r.text as string,
+          citations: (r.citations as Citation[] | null) ?? [],
         };
       });
     },
@@ -196,17 +198,20 @@ export function createOpeningConversationRepository(sql: Sql) {
     async findTurnByClientKey(
       scope: OpeningConversationScope,
       clientKey: string,
+      conversationId: string,
     ): Promise<{
       userTurnId: string;
       jobId: string;
       assistantTurnId: string;
+      learningSessionId: string | null;
     } | null> {
       const rows = await sql`
-        SELECT t.id AS turn_id, j.id AS job_id, j.assistant_turn_id
+        SELECT t.id AS turn_id, t.learning_session_id, j.id AS job_id, j.assistant_turn_id
         FROM opening_turns t
         LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
         WHERE t.workspace_id = ${scope.workspaceId}
           AND t.client_key = ${clientKey}
+          AND t.conversation_id = ${conversationId}
           AND t.role = 'user'
         LIMIT 1
       `;
@@ -217,6 +222,7 @@ export function createOpeningConversationRepository(sql: Sql) {
         userTurnId: r.turn_id as string,
         jobId: r.job_id as string,
         assistantTurnId: r.assistant_turn_id as string,
+        learningSessionId: (r.learning_session_id as string | null) ?? null,
       };
     },
 

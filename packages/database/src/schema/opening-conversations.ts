@@ -25,7 +25,7 @@ export const openingTurns = pgTable("opening_turns", {
   sourceIds: uuid("source_ids").array().notNull().default([]),
   intentHash: text("intent_hash"),
   sourceVersions: jsonb("source_versions").notNull().default({}),
-  citations: text("citations").notNull().default("[]"),
+  citations: jsonb("citations").$type<unknown[]>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 export const openingConversationsSchema = { openingConversations, openingTurns };

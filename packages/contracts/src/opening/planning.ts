@@ -41,6 +41,20 @@ export const taskItemSchema = z
   })
   .strict();
 
+/** Stored with a retest-origin task. Not a calendar schedule. */
+export const retestTaskSnapshotSchema = z
+  .object({
+    kind: z.literal("retest"),
+    candidateId: uuidSchema,
+    courseId: uuidSchema.optional(),
+    skillLabel: z.string().min(1).max(200).optional(),
+    prompt: z.string().min(1).max(4000).optional(),
+    sourceIds: z.array(uuidSchema).max(32).optional(),
+    dueAt: isoDateTimeSchema.nullable().optional(),
+    heuristic: z.literal(true),
+  })
+  .strict();
+
 export const taskCreateInputSchema = z
   .object({
     title: z.string().min(1).max(240),
@@ -50,6 +64,11 @@ export const taskCreateInputSchema = z
     dueText: z.string().min(1).max(200).nullable().optional(),
     priority: z.number().finite(),
     candidateId: uuidSchema.nullable(),
+    /** Idempotency key when accepting a retest candidate into a task. */
+    clientKey: z.string().min(8).max(200).optional(),
+    /** Plan version the retest snapshot was based on. Not calendar scheduling. */
+    baseVersion: z.number().int().nonnegative().optional(),
+    inputSnapshot: retestTaskSnapshotSchema.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -58,6 +77,13 @@ export const taskCreateInputSchema = z
         code: "custom",
         message: "dueText cannot become a formal deadline while dueAt is set",
         path: ["dueText"],
+      });
+    }
+    if (value.inputSnapshot && value.candidateId && value.inputSnapshot.candidateId !== value.candidateId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "inputSnapshot.candidateId must match candidateId",
+        path: ["inputSnapshot"],
       });
     }
   });
@@ -98,6 +124,26 @@ export const reminderSchema = z
     dueAt: isoDateTimeSchema,
     channel: z.enum(["in_app", "feishu"]),
     status: z.enum(["due", "sending", "sent", "failed", "disabled"]),
+    /** Null until a provider acknowledges. Never implied by listing. */
+    receiptId: z.string().min(1).max(200).nullable(),
+    taskVersion: z.number().int().positive(),
+    /** Visible when the provider outcome is not a receipt. */
+    outcome: z.enum(["acknowledged", "rejected", "unknown", "quiet", "rate_limited"]).nullable(),
+  })
+  .strict();
+
+export const reminderListSchema = z
+  .object({
+    reminders: z.array(reminderSchema).max(200),
+    /** External push is off unless the owner configured a recipient. */
+    externalDelivery: z.enum(["disabled", "configured"]),
+  })
+  .strict();
+
+export const reminderEnqueueInputSchema = z
+  .object({
+    clientKey: z.string().min(8).max(200),
+    channel: z.enum(["in_app", "feishu"]).default("in_app"),
   })
   .strict();
 
@@ -162,6 +208,8 @@ export type PlannedBlock = z.infer<typeof plannedBlockSchema>;
 export type PlanDraft = z.infer<typeof planDraftSchema>;
 export type AcceptPlanInput = z.infer<typeof acceptPlanInputSchema>;
 export type Reminder = z.infer<typeof reminderSchema>;
+export type ReminderList = z.infer<typeof reminderListSchema>;
+export type ReminderEnqueueInput = z.infer<typeof reminderEnqueueInputSchema>;
 export type TimeConfig = z.infer<typeof timeConfigSchema>;
 export type TimeConfigSaveInput = z.infer<
   typeof timeConfigSaveInputSchema

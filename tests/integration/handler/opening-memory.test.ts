@@ -15,6 +15,7 @@ const sql = createSqlClient(databaseUrl);
 let runtime: ReturnType<typeof createAuthRuntime> | undefined;
 let cookie: string;
 let otherCookie: string;
+let owner: { userId: string; workspaceId: string };
 
 function req(
   path: string,
@@ -34,7 +35,7 @@ function req(
   });
 }
 
-async function registerUser(label: string): Promise<string> {
+async function registerUser(label: string): Promise<{ cookie: string; userId: string; workspaceId: string }> {
   const response = await register(new Request("http://localhost/api/auth/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -45,7 +46,12 @@ async function registerUser(label: string): Promise<string> {
     }),
   }));
   expect(response.status).toBe(201);
-  return `${cookieName}=${response.headers.get("set-cookie")!.match(/aistudy_session=([^;]+)/)![1]}`;
+  const body = await response.json() as { user: { id: string; workspaceId: string } };
+  return {
+    cookie: `${cookieName}=${response.headers.get("set-cookie")!.match(/aistudy_session=([^;]+)/)![1]}`,
+    userId: body.user.id,
+    workspaceId: body.user.workspaceId,
+  };
 }
 
 beforeAll(async () => {
@@ -58,8 +64,10 @@ beforeAll(async () => {
     authCookieName: cookieName,
   });
   setAuthRuntimeForTests(runtime);
-  cookie = await registerUser("owner");
-  otherCookie = await registerUser("other");
+  const registered = await registerUser("owner");
+  owner = { userId: registered.userId, workspaceId: registered.workspaceId };
+  cookie = registered.cookie;
+  otherCookie = (await registerUser("other")).cookie;
 });
 
 beforeEach(async () => {
@@ -137,7 +145,8 @@ describe("opening memory handlers", () => {
     const after = await listMemory(req("/api/opening/memory"));
     const afterBody = await after.json() as { context: Array<{ id: string }>; review: unknown[] };
     expect(afterBody.review).toEqual([]);
-    expect(afterBody.context.map((c) => c.id)).toEqual([item.id]);
+    // Explicit manual candidate may be confirmed for display, but source-less rows never enter model context.
+    expect(afterBody.context).toEqual([]);
   });
 
   it("returns 409 on stale expectedVersion", async () => {
@@ -169,7 +178,15 @@ describe("opening memory handlers", () => {
   });
 
   it("suppresses equivalent re-proposal after reject", async () => {
+    const me = owner;
     const turn = randomUUID();
+    const conversationId = randomUUID();
+    await sql`
+      INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
+      VALUES (${conversationId}, ${me.workspaceId}, ${me.userId}, 'memory source')`;
+    await sql`
+      INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status)
+      VALUES (${turn}, ${me!.workspaceId}, ${conversationId}, 'user', 'source', 'explain', 'complete')`;
     const created = await proposeMemory(req("/api/opening/memory", "POST", {
       text: "same text",
       sourceTurnIds: [turn],

@@ -16,7 +16,7 @@ export function createOpeningRetestRepository(sql: Sql) {
       const saved: RetestCandidate[] = [];
       for (const candidate of candidates) {
         const id = candidate.id || randomUUID();
-        const row: RetestCandidate = { ...candidate, id, accepted: false };
+        const row = { ...candidate, id, accepted: false, kind: "task" as const };
         await sql`
           INSERT INTO opening_jobs (
             id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch, state

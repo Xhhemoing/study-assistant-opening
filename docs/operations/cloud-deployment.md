@@ -73,7 +73,7 @@ Take a database backup before a production migration. Do not edit or delete an a
 
 ## Current Scope Limitations
 
-- The Worker is still an in-memory smoke processor. It is not a production BullMQ consumer and is intentionally not part of this Web deployment.
+- The Worker (`apps/worker`) is now a real BullMQ consumer (parse-source, tutor-turn, retest-candidate jobs). A Web deployment without a running Worker accepts requests but never processes them: deployment and health checks must cover job consumption and result writeback, not only the Web health endpoint. Full Web+Worker+parser packaging guidance is pending Q03 (`docs/operations/opening-release.md`).
 - PostgreSQL, Redis, and S3-compatible storage are required by the current environment contract even when a particular page does not use every dependency.
 - A real cloud deployment still requires running integration and browser gates against the selected managed services.
 - The existing uncommitted worktree must be reviewed and committed intentionally before deploying from Git.

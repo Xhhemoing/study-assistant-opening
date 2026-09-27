@@ -150,4 +150,27 @@ describe("opening provider", () => {
       retryable: true,
     });
   });
+
+  it("forwards a caller abort without classifying it as a timeout", async () => {
+    const fetchImpl = vi.fn().mockImplementation((_url, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")),
+        );
+      }),
+    );
+    const controller = new AbortController();
+    const pending = createOpeningProvider({
+      baseUrl: "https://model.example",
+      apiKey: "key",
+      model: "model",
+      fetchImpl,
+      timeoutMs: 30_000,
+    }).complete(input, controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({
+      code: "PROVIDER_ABORTED",
+      retryable: false,
+    });
+  });
 });

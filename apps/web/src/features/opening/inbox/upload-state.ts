@@ -1,0 +1,43 @@
+import type { SourceRecord } from "@aistudy/contracts";
+
+export type UploadMime =
+  | "application/pdf"
+  | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  | "image/jpeg"
+  | "image/png"
+  | "image/webp"
+  | "text/markdown"
+  | "text/html"
+  | "application/vnd.ms-powerpoint";
+
+const BY_EXTENSION: Record<string, UploadMime> = {
+  pdf: "application/pdf",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  html: "text/html",
+  htm: "text/html",
+  ppt: "application/vnd.ms-powerpoint",
+};
+
+/** Declared MIME, else extension. Unknown files are rejected, never renamed to PDF. */
+export function resolveUploadMime(input: { name: string; type: string }): UploadMime | null {
+  const declared = input.type.trim().toLowerCase();
+  if (Object.values(BY_EXTENSION).includes(declared as UploadMime)) return declared as UploadMime;
+  const extension = input.name.toLowerCase().split(".").pop() ?? "";
+  return BY_EXTENSION[extension] ?? null;
+}
+
+export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "parseState">): string {
+  if (record.uploadState !== "uploaded") return "等待上传完成";
+  if (record.parseState === "ready") return "可以用于提问";
+  if (record.parseState === "failed") return "原件已保存，解析失败";
+  if (record.parseState === "unsupported") return "原件已保存，暂不能提取文字";
+  if (record.parseState === "not_started" || record.parseState === "queued" || record.parseState === "running") {
+    return "原件已保存，正在解析";
+  }
+  return "原件已保存，正在解析";
+}

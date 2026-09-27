@@ -6,6 +6,7 @@ import {
   requirePrincipal,
 } from "../../../../features/auth/service";
 import { createOpeningSourceService } from "../../../../features/opening/sources/source-service";
+import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { UploadPolicyError } from "../../../../features/opening/sources/upload-policy";
 import { getAuthRuntime } from "../../../../server/runtime";
 
@@ -27,7 +28,7 @@ export async function POST(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
-    const body = uploadInputSchema.parse(await request.json());
+    const body = uploadInputSchema.parse(await readOpeningJsonBody(request));
     const ticket = await createOpeningSourceService(runtime.sql).beginUpload(
       principal,
       body,

@@ -50,12 +50,13 @@ export function createOpeningMemoryService(sql: Sql) {
       });
       const now = new Date().toISOString();
       const items = await repo.list(scopeOf(principal), courseId);
+      const contextItems = await repo.listForContext(scopeOf(principal), courseId);
       const scoped = items.filter((item) =>
         memoryVisibleInCourseScope(item.courseId, courseId),
       );
       return {
         items: scoped.map(toCard),
-        context: memoriesForContext(scoped, now).map(toCard),
+        context: memoriesForContext(contextItems, now).map(toCard),
         review: memoriesForReview(scoped).map(toCard),
       };
     },
