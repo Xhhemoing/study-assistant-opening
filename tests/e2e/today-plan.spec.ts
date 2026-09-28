@@ -40,7 +40,9 @@ test("asks the learner to choose a plan when goals conflict", async ({ browser, 
     await expect(page.getByRole("heading", { name: "今日任务" })).toBeVisible();
 
     await page.goto("/learn/goals/new");
-    await page.getByRole("radio", { name: /高考/ }).check();
+    // The scenario radio is visually hidden; users click its visible label.
+    await page.locator("label", { has: page.getByRole("radio", { name: /高考/ }) }).click();
+    await expect(page.getByRole("radio", { name: /高考/ })).toBeChecked();
     await page.getByRole("button", { name: "下一步" }).click();
     await page.getByRole("button", { name: "下一步" }).click();
     await page.getByRole("button", { name: "下一步" }).click();

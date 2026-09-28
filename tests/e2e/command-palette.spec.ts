@@ -31,6 +31,8 @@ test("finds a note through the global command palette and navigates to it", asyn
 
     const page = await context.newPage();
     await page.goto("/library");
+    // The shortcut listener attaches on hydration; the list finishing its client fetch proves it.
+    await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 
     const input = page.getByRole("combobox", { name: "搜索笔记和操作" });
@@ -58,6 +60,7 @@ test("shows the no-match state for an unknown query", async ({ browser, baseURL 
 
     const page = await context.newPage();
     await page.goto("/library");
+    await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 
     const input = page.getByRole("combobox", { name: "搜索笔记和操作" });

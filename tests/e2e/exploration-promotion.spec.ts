@@ -47,6 +47,7 @@ test("selectively promotes one exploration candidate without duplicating its not
     const edited = await context.request.patch(
       `/api/documents/${accepted.targetId}`,
       {
+        headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
         data: {
           title: "Edited",
           expectedRevisionNumber: current.currentRevisionNumber,
@@ -124,7 +125,9 @@ test("selectively promotes one exploration candidate without duplicating its not
     await expect(page).toHaveURL(new RegExp(`/explore/${explorationId}$`));
     const rejected = await context.request.post(
       `/api/promotions/${second.id}/reject`,
+      { headers: { origin: baseURL ?? "http://127.0.0.1:3000" } },
     );
+    expect(rejected.status()).toBe(200);
     expect((await rejected.json()).promotion.status).toBe("rejected");
     const outcomes = await context.request.get(
       `/api/explorations/${explorationId}/promotions`,

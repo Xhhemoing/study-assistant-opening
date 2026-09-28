@@ -66,7 +66,7 @@ test("promotes an exploration candidate into a new course (Path C)", async ({ br
     const explorationId = (await exploration.json()).exploration.id as string;
     const promotion = await context.request.post(
       `/api/explorations/${explorationId}/promotions`,
-      { data: { kind: "note", title: "Course Seed", body: "Seed body" } },
+      { headers: { origin: "http://127.0.0.1:3000" }, data: { kind: "note", title: "Course Seed", body: "Seed body" } },
     );
     expect(promotion.status()).toBe(201);
 

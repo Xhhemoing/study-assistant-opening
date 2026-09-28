@@ -18,9 +18,10 @@ test("renders a document-first notebook preview and opens learning mode from pag
 test("keeps document changes as proposals in the preview", async ({ page }) => {
   await page.goto("/preview/notebook");
 
-  await page.getByRole("button", { name: "AI 助手", exact: true }).first().click();
-  await expect(page.getByRole("heading", { name: "理解这个章节" })).toBeVisible();
-  await expect(page.getByText("只生成候选，不会直接修改笔记。")).toBeVisible();
+  await page.getByRole("button", { name: "更多页面操作" }).click();
+  await page.getByRole("button", { name: "AI 助手", exact: true }).click();
+  await expect(page.getByText("理解这个章节", { exact: true })).toBeVisible();
+  await expect(page.getByText(/只生成候选，不会直接修改笔记。/)).toBeVisible();
 
   await page.getByRole("button", { name: "生成学习版候选" }).click();
   await expect(page.getByText("已应用的学习版候选")).toBeVisible();

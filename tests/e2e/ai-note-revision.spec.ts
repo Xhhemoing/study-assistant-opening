@@ -21,6 +21,7 @@ test("requires an explicit decision for a concurrent note revision proposal", as
     const proposalRecord = (await proposal.json()).proposal;
 
     const concurrentEdit = await context.request.patch(`/api/documents/${document.id}`, {
+      headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
       data: {
         title: "Concurrent note",
         expectedRevisionNumber: document.currentRevisionNumber,

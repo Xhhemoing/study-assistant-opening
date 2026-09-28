@@ -23,10 +23,11 @@ test("switches guidance autonomy mode between free, advisory, and coach", async 
     const free = page.locator('input[name="guidance-mode"][value="free"]');
     const advisory = page.locator('input[name="guidance-mode"][value="advisory"]');
 
+    // The radios are visually hidden; users click the visible option label.
     await expect(advisory).toBeChecked();
-    await coach.check();
+    await page.locator("label", { has: coach }).click();
     await expect(coach).toBeChecked();
-    await free.check();
+    await page.locator("label", { has: free }).click();
     await expect(free).toBeChecked();
     await expect(advisory).not.toBeChecked();
   } finally {

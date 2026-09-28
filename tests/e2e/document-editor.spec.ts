@@ -8,7 +8,7 @@ function userInput(label: string) {
   };
 }
 
-test("opens the local note editor from Library", async ({ browser, baseURL }) => {
+test("opens the server-backed note editor from Library", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
     const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
@@ -19,15 +19,15 @@ test("opens the local note editor from Library", async ({ browser, baseURL }) =>
     const page = await context.newPage();
     await page.goto("/library");
     await page.getByRole("link", { name: "新建笔记" }).click();
-    await expect(page).toHaveURL(/\/library\/new$/);
-    await expect(page.getByRole("heading", { name: "新建笔记" })).toBeVisible();
+    await expect(page).toHaveURL(/\/library\/[0-9a-f-]{36}$/);
+    await expect(page.getByRole("heading", { name: "编辑笔记" })).toBeVisible();
     await expect(page.locator(".bn-editor")).toBeVisible();
   } finally {
     await context.close();
   }
 });
 
-test("edits, saves, undoes, and restores a local note draft", async ({ browser, baseURL }) => {
+test("edits, undoes, and reloads a note saved to the server", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
     const registered = await context.request.post("/api/auth/register", { headers: { origin: baseURL ?? "http://127.0.0.1:3000" },
@@ -39,11 +39,14 @@ test("edits, saves, undoes, and restores a local note draft", async ({ browser, 
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => {
-      if (message.type() === "error") pageErrors.push(message.text());
+      // A newly created note has no promotion source; that endpoint intentionally returns 404.
+      const missingSource = /\/api\/documents\/[0-9a-f-]{36}\/promotion-source$/.test(message.location().url)
+        && message.text().includes("404 (Not Found)");
+      if (message.type() === "error" && !missingSource) pageErrors.push(message.text());
     });
 
     await page.goto("/library/new");
-    await expect(page.locator(".editor-save-status")).toContainText("有未保存修改");
+    await expect(page.getByRole("status").filter({ hasText: /^已保存$/ })).toBeVisible();
     const title = page.getByRole("textbox", { name: "笔记标题" });
     await title.fill("终身学习笔记");
 
@@ -60,9 +63,16 @@ test("edits, saves, undoes, and restores a local note draft", async ({ browser, 
     await page.getByRole("button", { name: "重做" }).click();
     await expect(editor).toContainText("第二段：保留稳定的块结构。");
 
-    await page.getByRole("button", { name: "保存草稿" }).click();
-    await expect(page.getByRole("status")).toContainText("已保存到本机");
+    await expect(page.getByRole("status").filter({ hasText: "有未同步修改" })).toBeVisible();
+    const saving = page.waitForResponse((response) =>
+      response.request().method() === "PATCH" && new URL(response.url()).pathname === new URL(page.url()).pathname.replace("/library/", "/api/documents/"),
+    );
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    expect((await saving).status()).toBe(200);
+    await expect(page.getByRole("status").filter({ hasText: /^已保存$/ })).toBeVisible();
 
+    // Remove the safety copy so reload proves server persistence, not local recovery.
+    await page.evaluate(() => localStorage.clear());
     await page.reload();
     await expect(title).toHaveValue("终身学习笔记");
     await expect(page.locator(".bn-editor")).toContainText("第一段：把想法写下来。");
@@ -89,7 +99,7 @@ test("keeps the editor inside the viewport at mobile and desktop sizes", async (
     ]) {
       await page.setViewportSize(viewport);
       await page.goto("/library/new");
-      await expect(page.getByRole("heading", { name: "新建笔记" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "编辑笔记" })).toBeVisible();
       await expect(page.locator(".bn-editor")).toBeVisible();
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
     }

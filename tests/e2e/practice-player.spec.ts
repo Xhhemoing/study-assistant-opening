@@ -1,10 +1,8 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
-const choiceId = "22222222-2222-4222-8222-222222222201";
-const shortId = "22222222-2222-4222-8222-222222222209";
-const checkpointId = "22222222-2222-4222-8222-22222222220f";
+import { seedPracticeContent } from "./practice-content-fixture";
 
-async function register(context: BrowserContext, label: string) {
+async function register(context: BrowserContext, label: string, kind: "choice" | "short" | "checkpoint") {
   const response = await context.request.post("/api/auth/register", { headers: { origin: "http://127.0.0.1:3000" },
     data: {
       email: `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`,
@@ -13,6 +11,8 @@ async function register(context: BrowserContext, label: string) {
     },
   });
   expect(response.status()).toBe(201);
+  const { user } = await response.json() as { user: { workspaceId: string } };
+  return seedPracticeContent(user.workspaceId, kind);
 }
 
 interface RecordedSubmission {
@@ -66,13 +66,25 @@ function recordAttemptSubmissions(page: Page): Array<Promise<RecordedSubmission>
   return recorded;
 }
 
+async function closePracticeContext(context: BrowserContext, cleanup: () => Promise<void>) {
+  try { await context.close(); } finally { await cleanup(); }
+}
+
 async function finishAttempt(page: Page, options?: { revealAnswer?: boolean }) {
   if (options?.revealAnswer) {
+    const revealing = page.waitForResponse((response) =>
+      response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/reveal"),
+    );
     await page.getByRole("button", { name: "看答案" }).click();
-    await expect(page.getByText("看过答案，本次不计入有效独立证据。")).toBeVisible();
+    expect((await revealing).status()).toBe(200);
   }
   await page.getByRole("button", { name: "检查答案" }).click();
-  await page.getByRole("radio", { name: "4" }).click();
+  if (options?.revealAnswer) {
+    await expect(page.getByText("看过答案，本次不计入有效独立证据。")).toBeVisible();
+  }
+  const confidence = page.getByRole("radio", { name: "4", exact: true });
+  await page.locator("label", { has: confidence }).click();
+  await expect(confidence).toBeChecked();
   await page.getByRole("button", { name: "提交这次作答" }).click();
   await expect(page).toHaveURL(/\/learn\/practice\/.+\/result/);
   await expect(page.getByRole("heading", { name: "作答结果" })).toBeVisible();
@@ -81,12 +93,12 @@ async function finishAttempt(page: Page, options?: { revealAnswer?: boolean }) {
 
 test("replays the multiple-choice attempt request without creating a second event", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
+  const fixture = await register(context, "practice-choice", "choice");
   try {
-    await register(context, "practice-choice");
     const page = await context.newPage();
     const starts = recordPracticeStarts(page);
     const submissions = recordAttemptSubmissions(page);
-    await page.goto(`/learn/practice/${choiceId}`);
+    await page.goto(`/learn/practice/${fixture.itemId}`);
     await expect(page.getByRole("heading", { name: "检验你的理解" })).toBeVisible();
     await page.getByRole("radio", { name: /教材定义表述/ }).check();
     await finishAttempt(page);
@@ -94,8 +106,9 @@ test("replays the multiple-choice attempt request without creating a second even
     const eventId = new URL(page.url()).searchParams.get("event");
     expect(eventId).toMatch(/^[0-9a-f-]{36}$/i);
 
-    const started = await Promise.all(starts);
-    for (const start of started.filter((item) => item.status === 201)) {
+    const started = (await Promise.all(starts)).filter((item) => item.status === 201);
+    expect(started.length).toBeGreaterThan(0);
+    for (const start of started) {
       expect(start.body?.item?.answerRule).toBeUndefined();
       expect(start.body?.item).not.toHaveProperty("answerRule");
     }
@@ -121,33 +134,33 @@ test("replays the multiple-choice attempt request without creating a second even
     expect(replayed.event.id).toBe(eventId);
     expect(replayed.event.idempotencyKey).toBe(replayedBody.idempotencyKey);
   } finally {
-    await context.close();
+    await closePracticeContext(context, fixture.cleanup);
   }
 });
 
 test("captures a short-answer attempt and marks revealed answers as assisted", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
+  const fixture = await register(context, "practice-short", "short");
   try {
-    await register(context, "practice-short");
     const page = await context.newPage();
-    await page.goto(`/learn/practice/${shortId}`);
+    await page.goto(`/learn/practice/${fixture.itemId}`);
     await page.getByLabel("你的答案").fill("定义");
     await finishAttempt(page, { revealAnswer: true });
   } finally {
-    await context.close();
+    await closePracticeContext(context, fixture.cleanup);
   }
 });
 
 test("captures a checkpoint attempt with multiple selected steps", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
+  const fixture = await register(context, "practice-checkpoint", "checkpoint");
   try {
-    await register(context, "practice-checkpoint");
     const page = await context.newPage();
-    await page.goto(`/learn/practice/${checkpointId}`);
+    await page.goto(`/learn/practice/${fixture.itemId}`);
     await page.getByRole("checkbox", { name: /第一步：列式/ }).check();
     await page.getByRole("checkbox", { name: /第三步：规范求解/ }).check();
     await finishAttempt(page);
   } finally {
-    await context.close();
+    await closePracticeContext(context, fixture.cleanup);
   }
 });
