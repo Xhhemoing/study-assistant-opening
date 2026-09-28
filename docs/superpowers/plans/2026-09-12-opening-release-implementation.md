@@ -1,5 +1,7 @@
 # 开学版代码任务总计划 Implementation Plan
 
+> **2026-09-27 新版实施入口：**[学习连续性与证据可信度项目计划](2026-09-27-learning-continuity-implementation.md)及[验收附件](2026-09-27-learning-continuity-acceptance.md)整合两版优化报告与两轮审阅；本轮修复顺序及业务语义以新版为准。原 43 项任务账本、依赖和 CAP 扩展承诺保留，不因新增计划变更状态。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task; independent leaf tasks may use superpowers:subagent-driven-development after their contracts land. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在隔离分支交付手机/电脑可用的个人学习助理：先贯通材料、辅导、记忆、学习证据和协商计划，再覆盖学校自建邮箱/钉钉接入、音视频理解、课程知识结构与主动辅导安排。
