@@ -2,8 +2,11 @@
 name = "opening-parser"
 version = "0.1.0"
 description = "Offline Docling parser for opening materials"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.13,<3.14"
+dependencies = ["docling==2.126.0"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest==9.1.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

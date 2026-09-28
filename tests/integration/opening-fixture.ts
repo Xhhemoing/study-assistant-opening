@@ -29,54 +29,59 @@ export async function createOpeningFixture(): Promise<OpeningFixture> {
   );
   const sql = createSqlClient(url.toString());
 
-  const userId = randomUUID();
-  const otherUserId = randomUUID();
-  const workspaceId = randomUUID();
-  const otherWorkspaceId = randomUUID();
-  await sql`
-    INSERT INTO users (id, email, display_name, password_hash) VALUES
-      (${userId}, ${`${userId}@example.com`}, 'Opening fixture', 'test'),
-      (${otherUserId}, ${`${otherUserId}@example.com`}, 'Other fixture', 'test')
-  `;
-  await sql`
-    INSERT INTO workspaces (id, owner_user_id) VALUES
-      (${workspaceId}, ${userId}),
-      (${otherWorkspaceId}, ${otherUserId})
-  `;
+  try {
+    const userId = randomUUID();
+    const otherUserId = randomUUID();
+    const workspaceId = randomUUID();
+    const otherWorkspaceId = randomUUID();
+    await sql`
+      INSERT INTO users (id, email, display_name, password_hash) VALUES
+        (${userId}, ${`${userId}@example.com`}, 'Opening fixture', 'test'),
+        (${otherUserId}, ${`${otherUserId}@example.com`}, 'Other fixture', 'test')
+    `;
+    await sql`
+      INSERT INTO workspaces (id, owner_user_id) VALUES
+        (${workspaceId}, ${userId}),
+        (${otherWorkspaceId}, ${otherUserId})
+    `;
 
-  const secret = process.env.AUTH_SECRET ?? "opening-fixture-secret-opening-fixture-secret";
-  const sessionId = randomUUID();
-  const token = await createSessionJwt({ sub: userId, workspaceId, sid: sessionId }, secret, 3600);
-  await sql`
-    INSERT INTO sessions (id, user_id, token_hash, expires_at)
-    VALUES (${sessionId}, ${userId}, ${hashSessionToken(token)}, now() + interval '1 hour')
-  `;
+    const secret = process.env.AUTH_SECRET ?? "opening-fixture-secret-opening-fixture-secret";
+    const sessionId = randomUUID();
+    const token = await createSessionJwt({ sub: userId, workspaceId, sid: sessionId }, secret, 3600);
+    await sql`
+      INSERT INTO sessions (id, user_id, token_hash, expires_at)
+      VALUES (${sessionId}, ${userId}, ${hashSessionToken(token)}, now() + interval '1 hour')
+    `;
 
-  const base = process.env.OPENING_WEB_BASE_URL ?? "http://127.0.0.1:3000";
-  const call = async (path: string, init: RequestInit, auth: boolean): Promise<Response> => {
-    const headers = new Headers(init.headers);
-    if (auth) headers.set("cookie", `aistudy_session=${token}`);
-    try {
-      return await fetch(new URL(path, base), { ...init, headers });
-    } catch (error) {
-      throw new Error(
-        `Opening API is unreachable at ${base}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  };
+    const base = process.env.OPENING_WEB_BASE_URL ?? "http://127.0.0.1:3000";
+    const call = async (path: string, init: RequestInit, auth: boolean): Promise<Response> => {
+      const headers = new Headers(init.headers);
+      if (auth) headers.set("cookie", `aistudy_session=${token}`);
+      try {
+        return await fetch(new URL(path, base), { ...init, headers });
+      } catch (error) {
+        throw new Error(
+          `Opening API is unreachable at ${base}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
 
-  return {
-    scope: { workspaceId, ownerUserId: userId },
-    otherScope: { workspaceId: otherWorkspaceId, ownerUserId: otherUserId },
-    sql,
-    cookie: `aistudy_session=${token}`,
-    request: (path, init = {}) => call(path, init, true),
-    requestAnonymous: (path, init = {}) => call(path, init, false),
-    reset: async () => {
-      await sql`TRUNCATE opening_outbox, opening_jobs, opening_budget_reservations, opening_assistant_candidates, opening_tutor_jobs, opening_turns, opening_source_chunks, opening_sources RESTART IDENTITY CASCADE`;
-    },
-    close: async () => {
-      await sql.end({ timeout: 5 });
-    },
-  };
+    return {
+      scope: { workspaceId, ownerUserId: userId },
+      otherScope: { workspaceId: otherWorkspaceId, ownerUserId: otherUserId },
+      sql,
+      cookie: `aistudy_session=${token}`,
+      request: (path, init = {}) => call(path, init, true),
+      requestAnonymous: (path, init = {}) => call(path, init, false),
+      reset: async () => {
+        await sql`TRUNCATE opening_outbox, opening_jobs, opening_budget_reservations, opening_assistant_candidates, opening_tutor_jobs, opening_turns, opening_source_chunks, opening_sources RESTART IDENTITY CASCADE`;
+      },
+      close: async () => {
+        await sql.end({ timeout: 5 });
+      },
+    };
+  } catch (error) {
+    await sql.end({ timeout: 5 });
+    throw error;
+  }
 }

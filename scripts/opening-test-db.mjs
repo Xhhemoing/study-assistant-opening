@@ -54,6 +54,8 @@ export default async function setup() {
   }
   const validated = assertOpeningTestDatabase(raw, process.env.OPENING_TEST_DB);
   process.env.DATABASE_URL = validated.toString();
+  const { migrateFromUrl } = await import("../packages/database/src/migrate.ts");
+  await migrateFromUrl(validated.toString());
 }
 
 function main() {

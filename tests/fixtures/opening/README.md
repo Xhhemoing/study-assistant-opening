@@ -5,3 +5,17 @@
 Generation command: run the `write_pdf` helper in `services/parser/tests/test_conversion.py` with the output path `tests/fixtures/opening/parser-two-page.pdf`.
 
 SHA-256: `d8e4184cb0a01af4df2cdf8e0f36bdd13415b4fd9d85ee7b88b70aaeba5338bb`
+
+`parser-two-slide.pptx` is a committed, synthetic two-slide PowerPoint file. Its only slide text is `Opening slide one` and `Opening slide two`; it contains no real user data. The Node integration test uploads it to S3, invokes the real Python parser, and checks database page numbers, text, source versions, and temporary-file cleanup alongside the PDF fixture.
+
+Generate it with the parser environment's installed `python-pptx` package from the repository root:
+
+```python
+from pptx import Presentation
+
+presentation = Presentation()
+for text in ("Opening slide one", "Opening slide two"):
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = text
+presentation.save("tests/fixtures/opening/parser-two-slide.pptx")
+```

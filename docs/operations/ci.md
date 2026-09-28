@@ -73,42 +73,58 @@ They are not production credentials.
 
 ## Local verification
 
-### Unit-only path
+### Daily development
 
-No service containers are required:
+Run the closest relevant test and the owning package's typecheck. For example,
+for web editor draft changes (replace these targets for other modules):
 
-```bash
-npm run verify:ci
-npx vitest run --project unit
+```pwsh
+$ErrorActionPreference = 'Stop'
+npx vitest run --project unit apps/web/src/features/editor/local-draft.test.ts
+npm run typecheck -w @aistudy/web
 ```
 
-`verify:ci` checks the workflow and heavy-task wrapper contracts. Unit success
-is not evidence that PostgreSQL repositories, route handlers, Redis/MinIO
-probes, browser flows, or the production build pass.
+Run lint on changed files when relevant. Documentation-only edits need content
+and diff review, not the full suite or build. Do not repeat passing checks
+without a new change, failure, or unresolved concern. Unit checks require no
+service containers. Select the integration or handler project and relevant
+file only when the changed behavior needs those services.
 
-### Full local path
+Use `npm run verify:ci` only for CI workflow/heavy-runner changes or CI debugging;
+it checks structure contracts and does not replace execution. Ordinary
+implementation, commits, and PR preparation do not require a duplicate full
+local run. Merge and release still depend on the existing remote CI gates.
+Browser acceptance belongs to the user; agents do not run or delegate browser
+checks without explicit authorization. Unperformed browser acceptance does not
+block further development and must not be reported as passed.
+
+### Full local checks, only when explicitly requested
 
 Prerequisites:
 
-- Node.js 20 or newer and `npm ci` completed.
-- Docker with PostgreSQL, isolated PostgreSQL E2E, Redis, and MinIO running via
-  `npm run compose:up`.
-- `.env` copied from `.env.example`; the E2E database name must end in `_e2e`.
-- Playwright Chromium installed with `npx playwright install chromium`.
+- Node.js 20 or newer and dependencies installed from the lockfile.
+- Docker with isolated test PostgreSQL, Redis, and MinIO running via
+  `npm run compose:up`; integration/handler tests require `OPENING_TEST_DB=1` and
+  the explicit loopback `aistudy_opening_test` URL described below.
+- Preserve an existing `.env`; copy `.env.example` only when it is absent.
 
-Run the gates serially:
+Run the non-browser checks serially, selecting each test project once:
 
-```bash
-npm run compose:up
-npm run db:migrate
+```pwsh
+$ErrorActionPreference = 'Stop'
 npm run lint
 npm run typecheck
-npm test
+npm test -- --project unit --project contract --project notion-pipeline
+npm test -- --project '@aistudy/spike-*'
 npm run test:integration
 npm run test:handler
-npm run test:browser
 npm run build
 ```
+
+Local browser E2E is performed by the user with `npm run test:browser` and needs
+Playwright Chromium plus an isolated E2E database whose name ends in `_e2e`.
+The existing CI browser step remains required. Neither a scoped check nor a
+full local run replaces the remote CI result for the current commit.
 
 `run-heavy.sh` uses `flock`, `nice`, `ionice`, and `taskset` only when each tool
 is available. On Windows Git Bash or minimal containers, unavailable host
@@ -133,3 +149,21 @@ SHA, the remote CI gate is not done.
 - Failing logs must not print secrets (env contract + health responses already
   strip credentials).
 - Cache must not hide missing dependencies: always `npm ci` from lockfile.
+
+## Opening parser and isolated test bootstrap
+
+Handler and integration projects validate `OPENING_TEST_DB=1` and the explicit
+loopback `aistudy_opening_test` URL, then await the existing migration runner in
+`globalSetup`. A single test file receives the same schema initialization as the
+full suite. Keep these projects serial while fixtures truncate shared tables.
+
+Parser environment setup and supported text extraction are documented in
+[`services/parser/README.md`](../../services/parser/README.md). CI must prepare the
+pinned Python dependencies and required model resources before running real
+parser tests. Runtime document conversion remains offline; preparing the model
+cache is a separate setup operation.
+
+The [2026-09-27 execution record](../superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)
+contains the observed failure, minimal changes, local verification and outstanding
+checks for OP-01–OP-03 (B02/F03/Q01/RP5/Q03). It is not a replacement for the
+merged-commit GitHub Actions result or the original task ledger.

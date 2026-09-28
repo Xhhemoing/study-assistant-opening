@@ -15,17 +15,18 @@ TEXT_CAP = 200_000
 
 def parser():
     result = argparse.ArgumentParser(description="Offline Docling parser; OCR and image extraction are deferred.")
-    result.add_argument("--input", required=True)
-    result.add_argument("--mime", required=True)
-    result.add_argument("--max-pages", required=True, type=int)
+    result.add_argument("--check", action="store_true", help="Check parser imports without converting a document")
+    result.add_argument("--input")
+    result.add_argument("--mime")
+    result.add_argument("--max-pages", type=int)
     result.add_argument("--timeout-seconds", type=float, default=240)
     return result
 
 
-def convert(path: Path, timeout: float):
+def create_converter():
     root = Path(__file__).resolve().parents[3]
     os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["HF_HOME"] = str(root / ".local" / "hf-home")
+    os.environ.setdefault("HF_HOME", str(root / ".local" / "hf-home"))
     # stdout is a strict JSON contract; docling's postprocessor warnings (e.g.
     # table cells) must never pollute it.
     logging.getLogger().setLevel(logging.ERROR)
@@ -35,7 +36,14 @@ def convert(path: Path, timeout: float):
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
     options = PdfPipelineOptions(do_ocr=False)
-    converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+    manifest = json.loads((Path(__file__).parents[1] / "model-manifest.json").read_text(encoding="utf-8"))
+    layout = next(model for model in manifest["models"] if model["model"] == options.layout_options.model_spec.repo_id)
+    options.layout_options.model_spec.revision = layout["revision"]
+    return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+
+
+def convert(path: Path, timeout: float):
+    converter = create_converter()
     box = {}
 
     def work():
@@ -69,6 +77,16 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    if args.check:
+        try:
+            create_converter()
+            print("parser ready")
+            return 0
+        except Exception as error:
+            print(f"parser check failed: {error}; install services/parser/requirements-lock.txt", file=sys.stderr)
+            return 4
+    if args.input is None or args.mime is None or args.max_pages is None:
+        parser().error("--input, --mime and --max-pages are required for conversion")
     if args.max_pages <= 0 or args.timeout_seconds <= 0:
         parser().error("max-pages and timeout-seconds must be positive")
     if args.mime not in (PDF, PPTX):

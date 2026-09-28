@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import path from "node:path";
+import { loadParserConfig, type ParserConfig } from "./parser-config";
 import type { ParseDocument, ParsedPage, ParserRunner } from "./types";
 
 export class UnsupportedMimeError extends Error { readonly code = "UNSUPPORTED_MIME"; }
@@ -39,7 +39,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
   } };
 }
 
-export function createNodeRunner(pythonExecutable = process.env.PARSER_PYTHON ?? path.resolve(process.cwd(), ".local/docling-venv/Scripts/python.exe"), cwd = process.env.PARSER_CWD ?? path.resolve(process.cwd(), "services/parser")): ParserRunner {
+export function createNodeRunner({ pythonExecutable, cwd }: ParserConfig = loadParserConfig()): ParserRunner {
   return (argv, signal) => new Promise((resolve, reject) => {
     const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
     let stdout = "";

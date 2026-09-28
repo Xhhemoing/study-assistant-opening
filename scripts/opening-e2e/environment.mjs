@@ -12,7 +12,7 @@ export function assertOpeningE2eDatabase(raw, enabled) {
   }
   return url;
 }
-export function buildOpeningE2eEnvironment(inherited = process.env) {
+export function buildOpeningE2eEnvironment(inherited = process.env, platform = process.platform) {
   const database = "postgres://opening:opening-local-test@127.0.0.1:15432/aistudy_opening_e2e";
   return {
     ...inherited,
@@ -29,8 +29,8 @@ export function buildOpeningE2eEnvironment(inherited = process.env) {
     OPENING_MODEL_DAILY_CAP_CENTS: "10000", OPENING_MODEL_INPUT_CENTS_PER_MILLION: "1",
     OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "1", OPENING_TUTOR_RESERVED_CENTS: "100",
     OPENING_TUTOR_MAX_OUTPUT_TOKENS: "256", OPENING_TUTOR_MAX_CONTEXT_CHARS: "12000", FEISHU_REMINDER_CREDENTIAL: "",
-    PARSER_PYTHON: path.join(projectRoot, ".local/docling-venv/Scripts/python.exe"),
-    PARSER_CWD: path.join(projectRoot, "services/parser"),
+    PARSER_PYTHON: path.resolve(projectRoot, inherited.PARSER_PYTHON || `.local/docling-venv/${platform === "win32" ? "Scripts/python.exe" : "bin/python"}`),
+    PARSER_CWD: path.resolve(projectRoot, inherited.PARSER_CWD || "services/parser"),
     PARSER_TEMP_DIR: path.join(projectRoot, ".local/opening-e2e/parser-temp"),
     HF_HOME: path.join(projectRoot, ".local/hf-home"), HF_HUB_OFFLINE: "1",
     NEXT_TELEMETRY_DISABLED: "1",

@@ -94,6 +94,10 @@ jobs:
       SESSION_COOKIE_SECURE: "false"
       SESSION_TTL_SECONDS: "3600"
       AUTH_COOKIE_NAME: aistudy_session
+      PARSER_PYTHON: ${{ github.workspace }}/.local/docling-venv/bin/python
+      PARSER_CWD: ${{ github.workspace }}/services/parser
+      HF_HOME: ${{ github.workspace }}/.local/hf-home
+      HF_HUB_OFFLINE: "1"
 
     steps:
       - name: Checkout
@@ -104,6 +108,41 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: services/parser/requirements-lock.txt
+
+      - name: Install parser dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m venv .local/docling-venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PARSER_PYTHON -m pip install -r services/parser/requirements-lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PARSER_PYTHON -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare parser model cache
+        shell: pwsh
+        working-directory: services/parser
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & $env:PARSER_PYTHON -m opening_parser.prepare_models
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PARSER_PYTHON -m opening_parser --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Python parser tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & $env:PARSER_PYTHON -m pytest services/parser/tests -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install dependencies
         run: npm ci

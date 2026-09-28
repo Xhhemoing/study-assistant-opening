@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 PARSER_DIR = Path(__file__).parents[1]
 FIXTURE = Path(__file__).parents[3] / "tests" / "fixtures" / "opening" / "parser-two-page.pdf"
@@ -95,6 +94,24 @@ def test_cli_prints_non_ascii_as_utf8_without_env_var(tmp_path):
     assert "˙".encode("utf-8") in result.stdout
 
 
-@pytest.mark.xfail(reason="Hand-built PPTX compatibility depends on Docling's presentation backend")
-def test_minimal_pptx_conversion():
-    pytest.fail("PPTX fixture deferred until backend-compatible XML is available")
+def test_check_requires_no_document_and_checks_imports():
+    result = run_cli("--check")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "parser ready"
+
+
+def test_real_pptx_preserves_two_slide_text(tmp_path):
+    from pptx import Presentation
+    presentation = Presentation()
+    for text in ("Opening slide one", "Opening slide two"):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        slide.shapes.title.text = text
+    file = tmp_path / "two-slide.pptx"
+    presentation.save(file)
+    result = run_cli("--input", file, "--mime", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "--max-pages", 2)
+    assert result.returncode == 0, result.stderr
+    pages = json.loads(result.stdout)["pages"]
+    assert [page["page"] for page in pages] == [1, 2]
+    assert "slide one" in pages[0]["text"]
+    assert "slide two" in pages[1]["text"]
+    assert all(page["imagePath"] is None for page in pages)

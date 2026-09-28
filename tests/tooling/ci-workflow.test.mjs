@@ -54,3 +54,17 @@ test("operations doc binds release evidence to the exact SHA and says GitHub run
   assert.match(docs, /cannot be forged locally|cannot be reproduced locally|not locally forged/i);
   assert.match(docs, /GitHub Actions `quality` job is authoritative/);
 });
+
+test("parser is installed and seeded before integration runs with explicit Linux paths", () => {
+  assert.match(workflow, /uses: actions\/setup-python@v5[\s\S]*?python-version: "3\.13"/);
+  assert.match(workflow, /PARSER_PYTHON:.*\.local\/docling-venv\/bin\/python/);
+  assert.match(workflow, /PARSER_CWD:.*services\/parser/);
+  assert.match(workflow, /HF_HOME:.*\.local\/hf-home/);
+  assert.match(workflow, /HF_HUB_OFFLINE: "1"/);
+  const install = workflow.indexOf("services/parser/requirements-lock.txt");
+  const seed = workflow.indexOf("opening_parser.prepare_models");
+  const check = workflow.indexOf("opening_parser --check");
+  const parserTests = workflow.indexOf("-m pytest services/parser/tests");
+  const integration = workflow.indexOf("npm run test:integration");
+  assert.ok(install > 0 && install < seed && seed < check && check < parserTests && parserTests < integration);
+});

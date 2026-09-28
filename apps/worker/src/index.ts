@@ -7,7 +7,7 @@ import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
-import { createNodeRunner } from "./parsers/docling-process";
+import { preflightParser } from "./parsers/parser-preflight";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
@@ -31,6 +31,7 @@ export function processSmokeJob(input: unknown): {
 }
 
 export async function main(): Promise<void> {
+  const runner = await preflightParser();
   const openingModel = loadOpeningModel();
   const redis = createRedisConnection({ url: process.env.REDIS_URL ?? "redis://127.0.0.1:6379" });
   const sql = createSqlClient(process.env.DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/aistudy");
@@ -50,7 +51,7 @@ export async function main(): Promise<void> {
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" });
-  const parse = createParseSourceHandler({ sources, chunks, storage, runner: createNodeRunner(), tempDir: process.env.PARSER_TEMP_DIR ?? ".tmp/opening-parser" });
+  const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: process.env.PARSER_TEMP_DIR ?? ".tmp/opening-parser" });
   const retest = createRetestCandidateHandler({
     listObservations: (scope, courseId) => learning.listObservationsForCourse(scope, courseId),
     listDueRetestSkills: (scope, courseId) => retests.listAcceptedSkillLabels(scope, courseId),
