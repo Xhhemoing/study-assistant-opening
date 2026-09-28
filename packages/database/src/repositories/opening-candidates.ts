@@ -29,7 +29,17 @@ export function createOpeningCandidateRepository(sql: Sql) {
       return rows.map((row) => map(row as Record<string, unknown>));
     },
     async decide(scope: OpeningScope, id: string, decision: CandidateDecision) {
-      const rows = await sql`UPDATE opening_assistant_candidates SET status = ${decision}, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND status = 'pending' RETURNING *`;
+      const rows = await sql`
+        UPDATE opening_assistant_candidates c
+        SET status = ${decision}, updated_at = now()
+        WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId} AND c.status = 'pending'
+          AND EXISTS (
+            SELECT 1 FROM opening_conversations conv
+            WHERE conv.id = c.conversation_id
+              AND conv.workspace_id = c.workspace_id
+              AND conv.owner_user_id = ${scope.ownerUserId}
+          )
+        RETURNING c.*`;
       if (!rows.length) return null;
       return map(rows[0] as Record<string, unknown>);
     },

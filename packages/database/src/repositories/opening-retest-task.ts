@@ -33,6 +33,37 @@ function mapTask(row: Record<string, unknown>): TaskItem {
   };
 }
 
+async function findRetestReplay(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  input: TaskCreateInput,
+): Promise<TaskItem | null> {
+  if (!input.clientKey) return null;
+  const sameKey = await tx`
+    SELECT id, payload FROM opening_jobs
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND kind = ${"retest"}
+      AND payload->>'acceptClientKey' = ${input.clientKey}
+    FOR UPDATE`;
+  if (!sameKey.length) return null;
+  const payload = (sameKey[0] as Record<string, unknown>).payload as {
+    acceptPayloadHash?: string;
+    taskId?: string;
+  };
+  if (payload.acceptPayloadHash !== retestPayloadHash(input)) {
+    throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
+  }
+  if (!payload.taskId) throw new OpeningPlanError("NOT_FOUND", "replayed retest task missing");
+  const tasks = await tx`
+    SELECT * FROM opening_tasks
+    WHERE id = ${payload.taskId}
+      AND workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}`;
+  if (!tasks.length) throw new OpeningPlanError("NOT_FOUND", "replayed retest task missing");
+  return mapTask(tasks[0] as Record<string, unknown>);
+}
+
 /** Lock and validate a retest job. Returns the existing task on same-key replay. */
 export async function prepareRetestTask(
   tx: TransactionSql,
@@ -40,31 +71,8 @@ export async function prepareRetestTask(
   input: TaskCreateInput,
 ): Promise<TaskItem | null> {
   if (input.inputSnapshot?.kind !== "retest" || !input.candidateId) return null;
-  if (input.clientKey) {
-    const sameKey = await tx`
-      SELECT id, payload FROM opening_jobs
-      WHERE workspace_id = ${scope.workspaceId}
-        AND owner_user_id = ${scope.ownerUserId}
-        AND kind = ${"retest"}
-        AND payload->>'acceptClientKey' = ${input.clientKey}
-      FOR UPDATE`;
-    if (sameKey.length) {
-      const payload = (sameKey[0] as Record<string, unknown>).payload as {
-        acceptPayloadHash?: string;
-        taskId?: string;
-      };
-      if (payload.acceptPayloadHash !== retestPayloadHash(input)) {
-        throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
-      }
-      const tasks = await tx`
-        SELECT * FROM opening_tasks
-        WHERE id = ${payload.taskId ?? ""}
-          AND workspace_id = ${scope.workspaceId}
-          AND owner_user_id = ${scope.ownerUserId}`;
-      if (!tasks.length) throw new OpeningPlanError("NOT_FOUND", "replayed retest task missing");
-      return mapTask(tasks[0] as Record<string, unknown>);
-    }
-  }
+  const replay = await findRetestReplay(tx, scope, input);
+  if (replay) return replay;
   const jobs = await tx`
     SELECT id, payload FROM opening_jobs
     WHERE id = ${input.candidateId}
@@ -77,6 +85,10 @@ export async function prepareRetestTask(
   if (payload?.kind !== "task") {
     throw new OpeningPlanError("VALIDATION", "retest candidate payload.kind must be task");
   }
+  // The first lookup may predate a concurrent accept committed while we waited for this lock.
+  // Recheck intent/result before rejecting the now-consumed candidate.
+  const lockedReplay = await findRetestReplay(tx, scope, input);
+  if (lockedReplay) return lockedReplay;
   if (payload.accepted) throw new OpeningPlanError("CONFLICT", "retest candidate already consumed");
   return null;
 }
@@ -132,14 +144,21 @@ export async function insertOpeningTask(
     if (replay) return replay;
     if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
       const consumed = await tx`
-        UPDATE opening_assistant_candidates
+        UPDATE opening_assistant_candidates c
         SET status = 'accepted', updated_at = now()
-        WHERE id = ${input.candidateId}
-          AND workspace_id = ${scope.workspaceId}
-          AND status = 'pending'
-        RETURNING id`;
+        WHERE c.id = ${input.candidateId}
+          AND c.workspace_id = ${scope.workspaceId}
+          AND c.status = 'pending'
+          AND c.payload->>'kind' = 'task'
+          AND EXISTS (
+            SELECT 1 FROM opening_conversations conv
+            WHERE conv.id = c.conversation_id
+              AND conv.workspace_id = c.workspace_id
+              AND conv.owner_user_id = ${scope.ownerUserId}
+          )
+        RETURNING c.id`;
       if (!consumed.length) {
-        throw new OpeningPlanError("CONFLICT", "candidate missing or already consumed");
+        throw new OpeningPlanError("CONFLICT", "task candidate unavailable or already consumed");
       }
     }
     const rows = await tx`

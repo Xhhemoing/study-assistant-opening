@@ -30,63 +30,13 @@ export const timeBlockSchema = z
   })
   .strict();
 
-export const taskItemSchema = z
-  .object({
-    id: uuidSchema,
-    title: z.string().min(1).max(240),
-    minutes: z.number().int().positive().max(24 * 60),
-    dueAt: isoDateTimeSchema.nullable(),
-    priority: z.number().finite(),
-    status: z.enum(["pending", "done", "skipped"]),
-  })
-  .strict();
-
-/** Stored with a retest-origin task. Not a calendar schedule. */
-export const retestTaskSnapshotSchema = z
-  .object({
-    kind: z.literal("retest"),
-    candidateId: uuidSchema,
-    courseId: uuidSchema.optional(),
-    skillLabel: z.string().min(1).max(200).optional(),
-    prompt: z.string().min(1).max(4000).optional(),
-    sourceIds: z.array(uuidSchema).max(32).optional(),
-    dueAt: isoDateTimeSchema.nullable().optional(),
-    heuristic: z.literal(true),
-  })
-  .strict();
-
-export const taskCreateInputSchema = z
-  .object({
-    title: z.string().min(1).max(240),
-    minutes: z.number().int().positive().max(24 * 60),
-    dueAt: isoDateTimeSchema.nullable(),
-    /** Ambiguous deadline text — never auto-promoted to dueAt. */
-    dueText: z.string().min(1).max(200).nullable().optional(),
-    priority: z.number().finite(),
-    candidateId: uuidSchema.nullable(),
-    /** Idempotency key when accepting a retest candidate into a task. */
-    clientKey: z.string().min(8).max(200).optional(),
-    /** Plan version the retest snapshot was based on. Not calendar scheduling. */
-    baseVersion: z.number().int().nonnegative().optional(),
-    inputSnapshot: retestTaskSnapshotSchema.optional(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (value.dueText && value.dueAt) {
-      ctx.addIssue({
-        code: "custom",
-        message: "dueText cannot become a formal deadline while dueAt is set",
-        path: ["dueText"],
-      });
-    }
-    if (value.inputSnapshot && value.candidateId && value.inputSnapshot.candidateId !== value.candidateId) {
-      ctx.addIssue({
-        code: "custom",
-        message: "inputSnapshot.candidateId must match candidateId",
-        path: ["inputSnapshot"],
-      });
-    }
-  });
+export {
+  taskItemSchema,
+  retestTaskSnapshotSchema,
+  taskCreateInputSchema,
+  type TaskItem,
+  type TaskCreateInput,
+} from "./planning-tasks";
 
 export const plannedBlockSchema = z
   .object({
@@ -202,8 +152,6 @@ export const timeConfigSaveInputSchema = z
 
 export type WeekSession = z.infer<typeof weekSessionSchema>;
 export type TimeBlock = z.infer<typeof timeBlockSchema>;
-export type TaskItem = z.infer<typeof taskItemSchema>;
-export type TaskCreateInput = z.infer<typeof taskCreateInputSchema>;
 export type PlannedBlock = z.infer<typeof plannedBlockSchema>;
 export type PlanDraft = z.infer<typeof planDraftSchema>;
 export type AcceptPlanInput = z.infer<typeof acceptPlanInputSchema>;

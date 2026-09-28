@@ -85,6 +85,13 @@ export {
 } from "./memory";
 
 export {
+  candidateRefSchema,
+  reviewResultSchema,
+  type CandidateRef,
+  type ReviewResult,
+} from "./candidate-review";
+
+export {
   memoryCandidateDecisionSchema,
   type MemoryCandidateDecision,
 } from "./memory-candidate";
