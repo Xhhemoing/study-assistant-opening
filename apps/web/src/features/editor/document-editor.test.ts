@@ -43,6 +43,25 @@ describe("document editor recovery", () => {
     });
   });
 
+  it("opens server blocks stored as plain text, such as promoted notes", () => {
+    const draft = documentToDraft({
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "晋升笔记",
+      lifecycle: "confirmed",
+      currentRevisionNumber: 1,
+      blocks: [{
+        id: "22222222-2222-4222-8222-222222222222",
+        type: "paragraph",
+        position: 0,
+        content: { text: "来自探索的内容" },
+      }],
+    });
+
+    expect(draft.blocks).toEqual([
+      { id: "22222222-2222-4222-8222-222222222222", type: "paragraph", content: "来自探索的内容" },
+    ]);
+  });
+
   it("exposes a retry action when the document cannot load", () => {
     const html = renderToStaticMarkup(createElement(DocumentLoadError, {
       message: "暂时无法读取这篇笔记，请稍后重试。",

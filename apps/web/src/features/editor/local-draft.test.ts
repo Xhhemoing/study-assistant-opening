@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   createEmptyLocalDraft,
   createLocalDraftStorageKey,
@@ -18,6 +18,19 @@ describe("local note draft", () => {
         type: "paragraph",
       }),
     ]);
+  });
+
+  it("uses UUID block ids so a new draft is accepted by the document API", () => {
+    const [block] = createEmptyLocalDraft().blocks;
+
+    expect(block?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it.each([undefined, { randomUUID: undefined }])("keeps UUID block ids without randomUUID (%j)", (cryptoApi) => {
+    vi.stubGlobal("crypto", cryptoApi);
+    onTestFinished(() => vi.unstubAllGlobals());
+    const [block] = createEmptyLocalDraft().blocks;
+    expect(block?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("round-trips title, block content, and block ids", () => {

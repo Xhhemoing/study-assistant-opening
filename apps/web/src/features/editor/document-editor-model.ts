@@ -24,6 +24,10 @@ export function documentToDraft(document: EditorDocument): LocalNoteDraft {
             : undefined,
         };
       }
+      // Server-created blocks (e.g. exploration promotion) store plain { text }.
+      if (isRecord(packed) && typeof packed.text === "string") {
+        return { id: block.id, type: block.type, content: packed.text };
+      }
       return { id: block.id, type: block.type, content: packed };
     }),
     updatedAt: document.updatedAt ?? new Date().toISOString(),
