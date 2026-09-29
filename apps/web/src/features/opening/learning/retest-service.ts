@@ -40,7 +40,7 @@ export function createOpeningRetestService(sql: Sql) {
       }
       try {
         const task = await plans.createTask(scope, {
-          title: payload.prompt,
+          title: payload.prompt.slice(0, 240),
           minutes: DEFAULT_RETEST_MINUTES,
           dueAt: null,
           priority: 1,

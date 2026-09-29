@@ -14,6 +14,7 @@ export type OpeningSourceStaging = {
   directory: string;
   snapshot: OpeningBackupSourceSnapshot;
   objects: OpeningBackupObject[];
+  unavailableSources?: Array<{ sourceId: string; version: number }>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -43,10 +44,10 @@ async function removeOwned(directory: string): Promise<void> {
 }
 
 /**
- * Stages the current source inventory only. Not an OpeningBackup, archive, or restore.
+ * Stages current and captured historical source versions. This is not a composed archive or restore.
  * A later deletion can still race after the recheck. The caller owns a successful directory
  * and must supply a private parent; Windows ACL enforcement is not verified here.
- * There is no automatic expiry. Full-table export, history, publish, and encryption remain later.
+ * Confirmed missing versions are returned for composition; compose rejects a missing current version.
  */
 export async function prepareOpeningSourceBackup(
   sql: Sql,
@@ -56,12 +57,12 @@ export async function prepareOpeningSourceBackup(
 ): Promise<OpeningSourceStaging> {
   const stable = copyScope(scope);
   const snapshot = copySnapshot(await readOpeningBackupSources(sql, stable));
-  const staged = await stageOpeningBackupObjects(snapshot.sources, parentDirectory, reader);
+  const staged = await stageOpeningBackupObjects(snapshot.sources, parentDirectory, reader, { allowUnavailable: true });
   try {
     await assertOpeningBackupSnapshotCurrent(sql, stable, snapshot);
   } catch (error) {
     await removeOwned(staged.directory);
     throw error;
   }
-  return { directory: staged.directory, snapshot, objects: staged.objects };
+  return { directory: staged.directory, snapshot, objects: staged.objects, unavailableSources: staged.unavailableSources };
 }

@@ -41,8 +41,10 @@ export async function POST(request: Request): Promise<Response> {
       body as never,
       request.signal,
     );
-    return Response.json(output, { status: 200 });
+    return Response.json(output, { status: 200, headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    return ephemeralError(error);
+    const response = ephemeralError(error);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   }
 }

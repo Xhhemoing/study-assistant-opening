@@ -131,3 +131,17 @@ describe("runBudgetedCall", () => {
     expect(repo.released).toHaveLength(0);
   });
 });
+
+it("runs beforeSend after reserving and releases a rejected pre-send request", async () => {
+  const { repo, api } = fakeBudget();
+  let sent = false;
+  const failure = new Error("privacy changed before sending");
+  await expect(runBudgetedCall({ ...options, budget: api,
+    beforeSend: async () => { expect(repo.reserved).toHaveLength(1); throw failure; },
+    provider: { complete: async () => { sent = true; return output; } },
+  })).rejects.toBe(failure);
+  expect(sent).toBe(false);
+  expect(repo.released).toEqual(["req-1"]);
+  expect(repo.unknowns).toEqual([]);
+  expect(repo.settled).toEqual([]);
+});

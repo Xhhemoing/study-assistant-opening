@@ -1,4 +1,4 @@
-import type { Citation, ConversationResume, TurnRecord } from "@aistudy/contracts";
+import type { Citation, ConversationResume, EphemeralTurnInput, TurnRecord } from "@aistudy/contracts";
 
 export type ChatMessageView = {
   id: string;
@@ -7,6 +7,8 @@ export type ChatMessageView = {
   citations: Citation[];
   citationLabels: string[];
   status?: TurnRecord["status"];
+  origin?: "saved" | "ephemeral";
+  provenanceId?: string | null;
 };
 
 export function messagesFromResume(
@@ -51,4 +53,13 @@ export function resolveChatMessages(input: {
     return messagesFromResume(input.resume);
   }
   return { messages: [], historyTruncated: false };
+}
+
+/** Only the current tab's temporary messages participate in temporary history. */
+export function ephemeralHistoryFromMessages(messages: readonly ChatMessageView[]): EphemeralTurnInput["history"] {
+  return messages.filter((message) => message.origin === "ephemeral").slice(-16).map((message) => ({
+    role: message.role,
+    text: message.text,
+    ...(message.provenanceId ? { provenanceId: message.provenanceId } : {}),
+  }));
 }

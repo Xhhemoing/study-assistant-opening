@@ -7,9 +7,10 @@ import {
   assertSourceTurnsOwned,
   lockOwnedWorkspace,
 } from "./opening-memory-admission";
-import { listMemoriesForContext } from "./opening-memory-context";
+import { listMemoriesForContext, loadMemoryContext } from "./opening-memory-context";
 import { confirmOwnedMemory, rejectOwnedMemory } from "./opening-memory-decision";
 import { deleteOwnedMemory } from "./opening-memory-delete";
+import { memoryUsesDeletedSource } from "./opening-source-actions-privacy";
 import { decideOwnedMemoryCandidate, type MemoryCandidateDecisionInput } from "./opening-memory-candidate";
 import {
   OpeningMemoryError,
@@ -36,8 +37,9 @@ export function createOpeningMemoryRepository(
     async list(scope: OpeningScope, activeCourseId: string | null = null): Promise<MemoryItem[]> {
       await lockOwnedWorkspace(sql, scope);
       const rows = await sql`
-        SELECT * FROM opening_memories
+        SELECT m.* FROM opening_memories m
         WHERE workspace_id = ${scope.workspaceId} AND status <> 'deleted'
+          AND NOT (${memoryUsesDeletedSource(sql)})
         ORDER BY created_at ASC`;
       return rows
         .map((row) => mapMemoryRow(row as Record<string, unknown>))
@@ -55,11 +57,15 @@ export function createOpeningMemoryRepository(
       return listMemoriesForContext(sql, scope, activeCourseId);
     },
 
+    async listContext(scope: OpeningScope, now: string, activeCourseId: string | null = null) {
+      return loadMemoryContext(sql, scope, activeCourseId, now);
+    },
+
     async get(scope: OpeningScope, id: string): Promise<MemoryItem | null> {
       await lockOwnedWorkspace(sql, scope);
       const rows = await sql`
-        SELECT * FROM opening_memories
-        WHERE id = ${id} AND workspace_id = ${scope.workspaceId} LIMIT 1`;
+        SELECT m.* FROM opening_memories m
+        WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND NOT (${memoryUsesDeletedSource(sql)}) LIMIT 1`;
       return rows.length ? mapMemoryRow(rows[0] as Record<string, unknown>) : null;
     },
 

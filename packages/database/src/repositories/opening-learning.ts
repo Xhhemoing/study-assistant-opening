@@ -1,440 +1,70 @@
 import { randomUUID } from "node:crypto";
-import type {
-  HelpExposure,
-  LearningObservation,
-  LearningSessionCreateInput,
-  ObservationInput,
-  ProblemRef,
-  Scope,
-} from "@aistudy/contracts";
-import {
-  qualifyObservationAssistance,
-  type HelpExposureLevel,
-} from "@aistudy/domain";
+import type { Sql } from "postgres";
+import type { HelpExposure, LearningObservation, LearningSessionCreateInput, ObservationInput, ObservationRevisionInput, ProblemRef, Scope } from "@aistudy/contracts";
+import { admitLearningSources, learningError, lockLearningOwner, lockLearningSession, mapLearningObservation } from "./opening-learning-facts";
+import { reviseOpeningLearningObservation, readOpeningObservationHistory } from "./opening-observation-revisions";
+import { insertOpeningLearningObservation } from "./opening-learning-observations";
+import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 
-/**
- * Opening learning repository (L01).
- * Wire `db` to the same SQL/drizzle client used by createOpeningSourceRepository.
- */
-export type OpeningLearningDb = {
-  query: <T>(sql: string, params?: unknown[]) => Promise<T[]>;
-  execute: (sql: string, params?: unknown[]) => Promise<void>;
-};
-
-type SessionRow = {
-  id: string;
-  courseId: string;
-  skillLabel: string;
-  sourceIds: string[];
-};
-
-export function createOpeningLearningRepository(db: OpeningLearningDb) {
-  async function getSession(
-    scope: Scope,
-    sessionId: string,
-  ): Promise<SessionRow | null> {
-    const rows = await db.query<{
-      id: string;
-      course_id: string;
-      skill_label: string;
-      source_ids: string[];
-    }>(
-      `SELECT id, course_id, skill_label, source_ids
-       FROM opening_learning_sessions
-       WHERE id = $1 AND workspace_id = $2 AND owner_user_id = $3`,
-      [sessionId, scope.workspaceId, scope.ownerUserId],
-    );
+/** All learning fact mutations use the native SQL transaction boundary. */
+export function createOpeningLearningRepository(sql: Sql) {
+  async function getSession(scope: Scope, id: string) {
+    const rows = await sql`SELECT l.id,l.course_id,l.skill_label,l.source_ids FROM opening_learning_sessions l
+      JOIN workspaces w ON w.id=l.workspace_id AND w.owner_user_id=${scope.ownerUserId}
+      WHERE l.id=${id} AND l.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId}`;
     const row = rows[0];
-    if (!row) return null;
-    return {
-      id: row.id,
-      courseId: row.course_id,
-      skillLabel: row.skill_label,
-      sourceIds: row.source_ids,
-    };
+    return row ? { id: String(row.id), courseId: String(row.course_id), skillLabel: String(row.skill_label), sourceIds: row.source_ids as string[] } : null;
   }
-
-  async function listDeliveredExposures(
-    scope: Scope,
-    sessionId: string,
-  ): Promise<HelpExposureLevel[]> {
-    const owned = await getSession(scope, sessionId);
-    if (!owned) {
-      throw Object.assign(new Error("session not found"), { code: "NOT_FOUND" });
-    }
-    const rows = await db.query<{ level: HelpExposureLevel }>(
-      `SELECT level FROM opening_help_exposures
-       WHERE workspace_id = $1 AND session_id = $2 AND delivered = TRUE`,
-      [scope.workspaceId, sessionId],
-    );
-    return rows.map((r) => r.level);
-  }
-
-  async function assertUploadedSourceSnapshots(
-    scope: Scope,
-    sourceIds: readonly string[],
-  ): Promise<void> {
-    const unique = [...new Set(sourceIds)];
-    if (unique.length === 0) return;
-    const rows = await db.query<{ id: string }>(
-      `SELECT s.id
-       FROM opening_sources s
-       WHERE s.workspace_id = $1
-         AND s.upload_state = 'uploaded'
-         AND s.id = ANY($2::uuid[])
-         AND EXISTS (
-           SELECT 1 FROM opening_source_chunks c
-           WHERE c.source_id = s.id AND c.source_version = s.version
-         )`,
-      [scope.workspaceId, unique],
-    );
-    if (rows.length !== unique.length) {
-      throw Object.assign(
-        new Error("each source must be an uploaded workspace snapshot"),
-        { code: "VALIDATION" },
-      );
-    }
-  }
-
   return {
-    createSession: async (
-      scope: Scope,
-      input: LearningSessionCreateInput,
-    ): Promise<{ id: string }> => {
-      await assertUploadedSourceSnapshots(scope, input.sourceIds);
-      const id = randomUUID();
-      await db.execute(
-        `INSERT INTO opening_learning_sessions
-          (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          id,
-          scope.workspaceId,
-          scope.ownerUserId,
-          input.courseId,
-          input.skillLabel,
-          input.sourceIds,
-        ],
-      );
-      return { id };
-    },
-
     getSession,
-
-    insertHelpExposure: async (
-      scope: Scope,
-      exposure: Omit<HelpExposure, "createdAt"> & { createdAt?: string },
-    ): Promise<HelpExposure> => {
-      if (exposure.delivered !== true) {
-        throw Object.assign(new Error("help exposure must be delivered"), {
-          code: "VALIDATION",
-        });
-      }
-      const owned = await getSession(scope, exposure.sessionId);
-      if (!owned) {
-        throw Object.assign(new Error("session not found"), { code: "NOT_FOUND" });
-      }
-      const createdAt = exposure.createdAt ?? new Date().toISOString();
-      await db.execute(
-        `INSERT INTO opening_help_exposures
-          (id, workspace_id, session_id, problem_id, turn_id, level, delivered, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7)`,
-        [
-          exposure.id,
-          scope.workspaceId,
-          exposure.sessionId,
-          exposure.problemId,
-          exposure.turnId,
-          exposure.level,
-          createdAt,
-        ],
-      );
-      return { ...exposure, delivered: true, createdAt };
-    },
-
-    listDeliveredExposures,
-
-    /** Course exists for this workspace and its owner. No migration. */
-    assertOwnedCourse: async (scope: Scope, courseId: string): Promise<void> => {
-      const rows = await db.query<{ id: string }>(
-        `SELECT c.id
-         FROM courses c
-         INNER JOIN workspaces w ON w.id = c.workspace_id
-         WHERE c.id = $1
-           AND c.workspace_id = $2
-           AND w.owner_user_id = $3
-           AND c.archived_at IS NULL
-         LIMIT 1`,
-        [courseId, scope.workspaceId, scope.ownerUserId],
-      );
-      if (!rows[0]) {
-        throw Object.assign(new Error("course not found"), { code: "NOT_FOUND" });
-      }
-    },
-
-    upsertProblemRef: async (
-      scope: Scope,
-      ref: ProblemRef & { sessionId: string },
-    ): Promise<void> => {
-      const owned = await getSession(scope, ref.sessionId);
-      if (!owned) {
-        throw Object.assign(new Error("session not found"), { code: "NOT_FOUND" });
-      }
-      await db.execute(
-        `INSERT INTO opening_problem_refs
-          (problem_id, workspace_id, session_id, source_id, source_version,
-           physical_page, chunk_id, stem_snapshot, artifact_kind, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
-         ON CONFLICT (problem_id) DO UPDATE SET
-           source_id = EXCLUDED.source_id,
-           source_version = EXCLUDED.source_version,
-           physical_page = EXCLUDED.physical_page,
-           chunk_id = EXCLUDED.chunk_id,
-           stem_snapshot = EXCLUDED.stem_snapshot,
-           artifact_kind = EXCLUDED.artifact_kind,
-           session_id = EXCLUDED.session_id,
-           updated_at = now()
-         WHERE opening_problem_refs.workspace_id = $2`,
-        [
-          ref.problemId,
-          scope.workspaceId,
-          ref.sessionId,
-          ref.sourceId,
-          ref.sourceVersion,
-          ref.physicalPage,
-          ref.chunkId,
-          ref.stemSnapshot,
-          ref.artifactKind,
-        ],
-      );
-    },
-
-    listObservationsForCourse: async (
-      scope: Scope,
-      courseId: string,
-    ): Promise<LearningObservation[]> => {
-      const rows = await db.query<{
-        id: string;
-        workspace_id: string;
-        session_id: string;
-        course_id: string;
-        skill_label: string;
-        source_ids: string[];
-        problem_id: string | null;
-        retest_id: string | null;
-        answer: string;
-        outcome: LearningObservation["outcome"];
-        assistance: LearningObservation["assistance"];
-        client_key: string;
-        occurred_at: string;
-        source_turn_ids: string[];
-        verdict_source: LearningObservation["verdictSource"];
-        reference_source_id: string | null;
-        evidence_verdict: LearningObservation["evidenceVerdict"];
-      }>(
-        `SELECT id, workspace_id, session_id, course_id, skill_label, source_ids,
-                problem_id, retest_id, answer, outcome, assistance, client_key,
-                occurred_at, source_turn_ids, verdict_source, reference_source_id, evidence_verdict
-         FROM opening_learning_observations
-         WHERE workspace_id = $1 AND owner_user_id = $2 AND course_id = $3
-         ORDER BY occurred_at ASC`,
-        [scope.workspaceId, scope.ownerUserId, courseId],
-      );
-      return rows.map((row) => ({
-        id: row.id,
-        workspaceId: row.workspace_id,
-        sessionId: row.session_id,
-        courseId: row.course_id,
-        skillLabel: row.skill_label,
-        sourceIds: row.source_ids ?? [],
-        problemId: row.problem_id,
-        retestId: row.retest_id,
-        answer: row.answer,
-        outcome: row.outcome,
-        assistance: row.assistance,
-        clientKey: row.client_key,
-        occurredAt: new Date(row.occurred_at).toISOString(),
-        sourceTurnIds: row.source_turn_ids ?? [],
-        verdictSource: row.verdict_source,
-        referenceSourceId: row.reference_source_id,
-        evidenceVerdict: row.evidence_verdict,
-      }));
-    },
-
-        insertObservation: async (
-      scope: Scope,
-      input: ObservationInput,
-      opts?: {
-        verdictSource?: LearningObservation["verdictSource"];
-        referenceSourceId?: string | null;
-        sourceTurnIds?: string[];
-        revisesObservationId?: string | null;
-      },
-    ): Promise<LearningObservation & { allowsIndependent: boolean }> => {
-      const session = await getSession(scope, input.sessionId);
-      if (!session) {
-        throw Object.assign(new Error("session not found"), { code: "NOT_FOUND" });
-      }
-      if (input.sourceIds.some((id) => !session.sourceIds.includes(id))) {
-        throw Object.assign(new Error("observation source is outside the session"), {
-          code: "VALIDATION",
-        });
-      }
-      await assertUploadedSourceSnapshots(scope, input.sourceIds);
-      const verdictSource = opts?.verdictSource ?? input.verdictSource ?? "self_report";
-      if (verdictSource === "unknown" && input.outcome === "correct") {
-        throw Object.assign(new Error("unknown verdict cannot be formally correct"), {
-          code: "VALIDATION",
-        });
-      }
-      const referenceSourceId = opts?.referenceSourceId ?? input.referenceSourceId ?? null;
-      if (verdictSource === "reference_checked") {
-        if (!referenceSourceId || !session.sourceIds.includes(referenceSourceId)) {
-          throw Object.assign(new Error("reference source is not bound to this session"), {
-            code: "VALIDATION",
-          });
-        }
-        await assertUploadedSourceSnapshots(scope, [referenceSourceId]);
-      }
-      const revisesObservationId = opts?.revisesObservationId ?? input.revisesObservationId ?? null;
-      if (revisesObservationId) {
-        throw Object.assign(
-          new Error("observation revision column or table is not in the applied schema"),
-          { code: "CONFLICT" },
-        );
-      }
-
-      const exposures = await listDeliveredExposures(scope, input.sessionId);
-      const { assistance, allowsIndependent } = qualifyObservationAssistance({
-        declared: input.assistance,
-        exposures,
-        problemId: input.problemId,
-        outcome: input.outcome,
+    reviseObservation: (scope: Scope, input: ObservationRevisionInput) => reviseOpeningLearningObservation(sql, scope, input),
+    observationHistory: (scope: Scope, id: string) => readOpeningObservationHistory(sql, scope, id),
+    async createSession(scope: Scope, input: LearningSessionCreateInput): Promise<{ id: string }> {
+      return sql.begin(async (tx) => {
+        await lockLearningOwner(tx, scope);
+        const course = await tx`SELECT id FROM courses WHERE id=${input.courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
+        if (!course.length) throw learningError("NOT_FOUND", "course not found");
+        await admitLearningSources(tx, scope, input.sourceIds);
+        const id = randomUUID();
+        await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,skill_label,source_ids)
+          VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.courseId},${input.skillLabel},${input.sourceIds})`;
+        return { id };
       });
-
-      const id = randomUUID();
-      const occurredAt = new Date().toISOString();
-      const sourceTurnIds = opts?.sourceTurnIds ?? [];
-      const evidenceVerdict = "MASTERY_NOT_ESTABLISHED" as const;
-
-      try {
-        await db.execute(
-          `INSERT INTO opening_learning_observations
-            (id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids,
-             problem_id, retest_id, answer, outcome, assistance, client_key, occurred_at,
-             source_turn_ids, verdict_source, reference_source_id, evidence_verdict)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-          [
-            id,
-            scope.workspaceId,
-            scope.ownerUserId,
-            input.sessionId,
-            input.courseId,
-            input.skillLabel,
-            input.sourceIds,
-            input.problemId ?? null,
-            input.retestId ?? null,
-            input.answer,
-            input.outcome,
-            assistance,
-            input.clientKey,
-            occurredAt,
-            sourceTurnIds,
-            verdictSource,
-            referenceSourceId,
-            evidenceVerdict,
-          ],
-        );
-      } catch (err) {
-        // Unique (workspace_id, client_key) => idempotent replay of prior observation.
-        const existing = await db.query<{
-          id: string;
-          assistance: LearningObservation["assistance"];
-          occurred_at: string;
-          source_turn_ids: string[];
-          verdict_source: LearningObservation["verdictSource"];
-          reference_source_id: string | null;
-          evidence_verdict: LearningObservation["evidenceVerdict"];
-          answer: string;
-          outcome: LearningObservation["outcome"];
-          course_id: string;
-          skill_label: string;
-          source_ids: string[];
-          problem_id: string | null;
-          retest_id: string | null;
-          session_id: string;
-          client_key: string;
-        }>(
-          `SELECT id, assistance, occurred_at, source_turn_ids, verdict_source, reference_source_id,
-                  evidence_verdict, answer, outcome, course_id, skill_label, source_ids,
-                  problem_id, retest_id, session_id, client_key
-           FROM opening_learning_observations
-           WHERE workspace_id = $1 AND client_key = $2 AND owner_user_id = $3
-           LIMIT 1`,
-          [scope.workspaceId, input.clientKey, scope.ownerUserId],
-        );
-        const row = existing[0];
-        if (!row) {
-          throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
-            code: "CONFLICT",
-          });
-        }
-        const same = row.session_id === input.sessionId
-          && row.course_id === input.courseId
-          && row.skill_label === input.skillLabel
-          && row.answer === input.answer
-          && row.outcome === input.outcome
-          && row.assistance === assistance
-          && row.verdict_source === verdictSource
-          && (row.reference_source_id ?? null) === referenceSourceId
-          && JSON.stringify(row.source_ids ?? []) === JSON.stringify(input.sourceIds);
-        if (!same) {
-          throw Object.assign(new Error("clientKey payload conflict"), { code: "CONFLICT" });
-        }
-        const replayAllows = qualifyObservationAssistance({
-          declared: row.assistance,
-          exposures: [],
-          problemId: row.problem_id,
-          outcome: row.outcome,
-        }).allowsIndependent;
-        return {
-          sessionId: row.session_id,
-          courseId: row.course_id,
-          skillLabel: row.skill_label,
-          sourceIds: row.source_ids,
-          problemId: row.problem_id,
-          retestId: row.retest_id,
-          answer: row.answer,
-          outcome: row.outcome,
-          assistance: row.assistance,
-          clientKey: row.client_key,
-          id: row.id,
-          workspaceId: scope.workspaceId,
-          occurredAt: new Date(row.occurred_at).toISOString(),
-          sourceTurnIds: row.source_turn_ids ?? [],
-          verdictSource: row.verdict_source,
-          referenceSourceId: row.reference_source_id,
-          evidenceVerdict: row.evidence_verdict,
-          allowsIndependent: replayAllows,
-        };
-      }
-
-      return {
-        ...input,
-        assistance,
-        id,
-        workspaceId: scope.workspaceId,
-        occurredAt,
-        sourceTurnIds,
-        verdictSource,
-        referenceSourceId,
-        evidenceVerdict,
-        allowsIndependent,
-      };
+    },
+    async assertOwnedCourse(scope: Scope, courseId: string): Promise<void> {
+      const rows = await sql`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id
+        WHERE c.id=${courseId} AND c.workspace_id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId} AND c.archived_at IS NULL`;
+      if (!rows.length) throw learningError("NOT_FOUND", "course not found");
+    },
+    async upsertProblemRef(scope: Scope, ref: ProblemRef & { sessionId: string }): Promise<void> {
+      await sql.begin(async (tx) => {
+        const session = await lockLearningSession(tx, scope, ref.sessionId);
+        if (!(session.source_ids as string[]).includes(ref.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
+        await admitLearningSources(tx, scope, [ref.sourceId]);
+        await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
+          VALUES (${ref.problemId},${scope.workspaceId},${ref.sessionId},${ref.sourceId},${ref.sourceVersion},${ref.physicalPage},${ref.chunkId},${ref.stemSnapshot},${ref.artifactKind})
+          ON CONFLICT(problem_id) DO UPDATE SET source_id=EXCLUDED.source_id,source_version=EXCLUDED.source_version,physical_page=EXCLUDED.physical_page,
+            chunk_id=EXCLUDED.chunk_id,stem_snapshot=EXCLUDED.stem_snapshot,artifact_kind=EXCLUDED.artifact_kind,session_id=EXCLUDED.session_id,updated_at=now()
+          WHERE opening_problem_refs.workspace_id=${scope.workspaceId}`;
+      });
+    },
+    async insertHelpExposure(scope: Scope, exposure: Omit<HelpExposure, "createdAt"> & { createdAt?: string }): Promise<HelpExposure> {
+      return sql.begin((tx) => insertOpeningDeliveredHelp(tx, scope, exposure));
+    },
+    async listDeliveredExposures(scope: Scope, sessionId: string): Promise<Array<"hinted" | "revealed">> {
+      if (!await getSession(scope, sessionId)) throw learningError("NOT_FOUND", "session not found");
+      const rows = await sql`SELECT level FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND session_id=${sessionId} AND delivered=TRUE`;
+      return rows.map((r) => r.level as "hinted" | "revealed");
+    },
+    async listObservationsForCourse(scope: Scope, courseId: string): Promise<LearningObservation[]> {
+      const rows = await sql`SELECT o.* FROM opening_learning_observations o JOIN workspaces w ON w.id=o.workspace_id
+        WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND w.owner_user_id=${scope.ownerUserId}
+          AND o.course_id=${courseId} ORDER BY o.occurred_at,o.id`;
+      return rows.map(mapLearningObservation);
+    },
+    insertObservation(scope: Scope, input: ObservationInput, opts?: Parameters<typeof insertOpeningLearningObservation>[3]) {
+      return insertOpeningLearningObservation(sql, scope, input, opts);
     },
   };
 }
-
-export type OpeningLearningRepository = ReturnType<
-  typeof createOpeningLearningRepository
->;
+export type OpeningLearningRepository = ReturnType<typeof createOpeningLearningRepository>;

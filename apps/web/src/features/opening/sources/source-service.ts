@@ -1,31 +1,72 @@
 import {
   createOpeningSourceRepository,
+  createOpeningSourceActionsRepository,
   OpeningSourceError,
   OpeningS3,
   magicMatchesMime,
   type OpeningStorage,
   type OpeningSourceRepository,
 } from "@aistudy/database";
-import { uploadInputSchema, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
+import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { validateStoredUpload, UploadPolicyError } from "./upload-policy";
 import type { Principal } from "../../../lib/authorization";
 import { assertAuthorized, boundWorkspaceId } from "../../../lib/authorization";
 
-export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" })) {
+function uploadLeaseEnd(url: string, returnedAt: Date): string {
+  const query = new URL(url).searchParams, signed = query.get("X-Amz-Date"), seconds = query.get("X-Amz-Expires");
+  if (signed && /^\d{8}T\d{6}Z$/.test(signed) && seconds && /^\d+$/.test(seconds)) {
+    const time = Date.UTC(Number(signed.slice(0, 4)), Number(signed.slice(4, 6)) - 1, Number(signed.slice(6, 8)),
+      Number(signed.slice(9, 11)), Number(signed.slice(11, 13)), Number(signed.slice(13, 15)));
+    return new Date(time + Number(seconds) * 1000).toISOString();
+  }
+  // Injected adapters may omit AWS metadata; completion time + requested lifetime is conservative.
+  return new Date(returnedAt.getTime() + 900_000).toISOString();
+}
+
+export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" }), options: { now?: () => Date } = {}) {
   const sources: OpeningSourceRepository = createOpeningSourceRepository(sql);
+  const actions = createOpeningSourceActionsRepository(sql);
+  const now = options.now ?? (() => new Date());
   const scopeOf = (p: Principal) => ({ workspaceId: boundWorkspaceId(p), ownerUserId: p.userId });
   const auth = (p: Principal, action: string) => assertAuthorized(p, action as never, { type: "workspace", workspaceId: boundWorkspaceId(p) });
   return {
     async listSources(p: Principal): Promise<SourceRecord[]> { auth(p, "source.list"); return sources.list(scopeOf(p)); },
-    async beginUpload(p: Principal, input: UploadInput): Promise<UploadTicket> { auth(p, "source.create"); const source = await sources.create(scopeOf(p), uploadInputSchema.parse(input)); const key = storage.stagingKey(source.id); return { source, uploadUrl: await storage.presignPut(key, { mime: source.mime, bytes: source.bytes, expiresInSeconds: 900 }), expiresAt: new Date(Date.now() + 900000).toISOString() }; },
+    async beginUpload(p: Principal, input: UploadInput): Promise<UploadTicket> {
+      auth(p, "source.create");
+      const scope = scopeOf(p), source = await sources.create(scope, uploadInputSchema.parse(input));
+      return sources.issueUploadTicket(scope, source.id, async current => {
+        const uploadUrl = await storage.presignPut(storage.stagingKey(current.id), { mime: current.mime, bytes: current.bytes, expiresInSeconds: 900 });
+        return { uploadUrl, expiresAt: uploadLeaseEnd(uploadUrl, now()) };
+      });
+    },
     async completeUpload(p: Principal, id: string): Promise<SourceRecord> {
       auth(p, "source.complete"); const scope = scopeOf(p); const source = await sources.get(scope, id); if (source.uploadState === "uploaded") return source;
       const key = storage.stagingKey(id); const head = await storage.headObject(key); if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
       const digest = await storage.streamDigest(key, source.bytes + 1); if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
       const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime }; validateStoredUpload(source, actual);
-      await storage.copyStagingToFinal(key, storage.finalKey(id, source.version), { expectedEtag: head.etag });
-      const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id }, privacyEpoch: 0, actual }); await storage.deleteObject(key); return done;
+      const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id }, privacyEpoch: 0, actual,
+        beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(id, current.version), { expectedEtag: head.etag }),
+      }); await storage.deleteObject(key); return done;
+    },
+    async getSourceImpact(p: Principal, id: string) { auth(p, "source.read"); return actions.impact(scopeOf(p), id); },
+    async listSourceDeletions(p: Principal) { auth(p, "source.list"); return actions.listPending(scopeOf(p), now()); },
+    async actOnSource(p: Principal, id: string, raw: SourceActionInput): Promise<SourceActionResult> {
+      auth(p, "source.delete");
+      const input = sourceActionInputSchema.parse(raw), scope = scopeOf(p);
+      const result = input.action === "retry_cleanup"
+        ? { deleted: true, cleanup: await actions.cleanup(scope, id) }
+        : await actions.apply(scope, id, input, storage, now());
+      if (!result.deleted) return { sourceId: id, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
+      for (const key of result.cleanup.keys) {
+        try { await storage.deleteObject(key); }
+        catch { continue; } // The receipt keeps this failed key visible and retryable.
+        if (key === storage.stagingKey(id) && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
+        await actions.cleaned(scope, id, key);
+      }
+      const remaining = await actions.cleanup(scope, id);
+      return { sourceId: id, aiExcluded: true, deleted: true, cleanupPending: remaining.keys.length,
+        retryAfter: remaining.keys.length && remaining.notBefore && new Date(remaining.notBefore) > now() ? remaining.notBefore : null };
     },
     async getDownloadUrl(p: Principal, id: string, version?: number) {
       auth(p, "source.read");

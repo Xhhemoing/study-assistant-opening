@@ -41,9 +41,11 @@ afterAll(async () => {
 async function seedRace() {
   const ids = {
     conversationId: randomUUID(), userTurnId: randomUUID(), assistantTurnId: randomUUID(),
-    jobId: randomUUID(), memoryId: randomUUID(), sessionId: randomUUID(), exposureId: randomUUID(),
+    jobId: randomUUID(), memoryId: randomUUID(), sessionId: randomUUID(), exposureId: randomUUID(), courseId: randomUUID(),
   };
   const scope = fixture.scope;
+  await fixture.sql`INSERT INTO courses (id, workspace_id, title, slug)
+    VALUES (${ids.courseId}, ${scope.workspaceId}, 'race course', ${ids.courseId})`;
   await fixture.sql`
     INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
     VALUES (${ids.conversationId}, ${scope.workspaceId}, ${scope.ownerUserId}, 'race')`;
@@ -64,7 +66,9 @@ async function seedRace() {
   await fixture.sql`
     INSERT INTO opening_learning_sessions
       (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-    VALUES (${ids.sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, 'race', '{}'::uuid[])`;
+    VALUES (${ids.sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${ids.courseId}, 'race', '{}'::uuid[])`;
+  await fixture.sql`UPDATE opening_turns SET learning_session_id=${ids.sessionId}
+    WHERE id IN (${ids.userTurnId},${ids.assistantTurnId})`;
   return ids;
 }
 

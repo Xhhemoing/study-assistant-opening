@@ -196,3 +196,24 @@ describe("stageOpeningBackupObjects", () => {
     expect((await readFile(path.join(result.directory, "objects", ID_A, "v0.bin"))).length).toBe(200);
   });
 });
+
+it("stages two revisions of one source and reports confirmed missing history", async () => {
+  const { OpeningStorageError } = await import("./opening-s3");
+  const root = await parent(), body = [bytesOf("abcd")];
+  const fake = reader({ [`opening/sources/${ID_A}/v1`]: body,
+    [`opening/sources/${ID_A}/v2`]: new OpeningStorageError("NOT_FOUND", "missing") });
+  const result = await stageOpeningBackupObjects([
+    source({ version: 1, sha256: sha256(body) }), source({ version: 2, sha256: sha256(body) }),
+  ], root, fake, { allowUnavailable: true });
+  expect(result.objects.map(object => object.archivePath)).toEqual([`objects/${ID_A}/v1.bin`]);
+  expect(result.unavailableSources).toEqual([{ sourceId: ID_A, version: 2 }]);
+  expect(await readFile(path.join(result.directory, "objects", ID_A, "v1.bin"), "utf8")).toBe("abcd");
+});
+it("still fails a historical backup on network failure", async () => {
+  const { OpeningStorageError } = await import("./opening-s3");
+  const root = await parent();
+  const fake = reader({ [`opening/sources/${ID_A}/v1`]: new OpeningStorageError("UNAVAILABLE", "network") });
+  await expect(stageOpeningBackupObjects([source({ version: 1 })], root, fake, { allowUnavailable: true }))
+    .rejects.toThrow("storage unavailable");
+  await expectOnlySentinel(root);
+});

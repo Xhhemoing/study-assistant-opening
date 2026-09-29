@@ -28,11 +28,11 @@ export function backupRows(sql: Sql, scope: OpeningScope) {
         VALUES (${id}, ${w}, ${u}, 'Backup conversation')`;
       return id;
     },
-    async turn(conversation: string, sources: string[] = []) {
+    async turn(conversation: string, sources: string[] = [], contextSourceRefs: Array<{ sourceId: string; sourceVersion: number }> | null = sources.map(sourceId => ({ sourceId, sourceVersion: 1 }))) {
       const id = randomUUID();
       const versions = Object.fromEntries(sources.map((source) => [source, 1]));
-      await sql`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, source_ids, source_versions)
-        VALUES (${id}, ${w}, ${conversation}, 'assistant', 'saved answer', 'hint', 'complete', ${sources}, ${sql.json(versions)})`;
+      await sql`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, source_ids, source_versions, context_source_refs)
+        VALUES (${id}, ${w}, ${conversation}, 'assistant', 'saved answer', 'hint', 'complete', ${sources}, ${sql.json(versions)}, ${contextSourceRefs === null ? null : sql.json(contextSourceRefs)})`;
       return id;
     },
     async learning(sources: string[] = []) {

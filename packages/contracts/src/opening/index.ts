@@ -19,6 +19,14 @@ export {
   citationSchema,
   sourceCourseLinkInputSchema,
   sourceCourseUnlinkInputSchema,
+  sourceActionInputSchema,
+  sourceImpactSchema,
+  sourceActionResultSchema,
+  sourceDeletionListSchema,
+  type SourceActionInput,
+  type SourceImpact,
+  type SourceActionResult,
+  type SourceDeletion,
   type SourceMime,
   type UploadInput,
   type SourceRecord,
@@ -29,6 +37,8 @@ export {
   type SourceCourseLinkInput,
   type SourceCourseUnlinkInput,
 } from "./sources";
+
+export { snippetCreateInputSchema, snippetCreateResponseSchema, type SnippetCreateInput, type SnippetCreateResponse } from "./snippets";
 
 export {
   jobKindSchema,
@@ -53,6 +63,7 @@ export {
   turnRecordSchema,
   budgetReservationSchema,
   ephemeralTurnInputSchema,
+  ephemeralTurnResponseSchema,
   conversationCreateInputSchema,
   type TutorMode,
   type TurnInput,
@@ -61,6 +72,7 @@ export {
   type TurnRecord,
   type BudgetReservation,
   type EphemeralTurnInput,
+  type EphemeralTurnResponse,
   type AssistantCandidate,
   type AssistantCandidateRecord,
   type ConversationCreateInput,
@@ -127,6 +139,7 @@ export {
   timeBlockSchema,
   taskItemSchema,
   taskCreateInputSchema,
+  taskCreateResultSchema,
   plannedBlockSchema,
   planDraftSchema,
   acceptPlanInputSchema,
@@ -140,6 +153,9 @@ export {
   type TimeBlock,
   type TaskItem,
   type TaskCreateInput,
+  type TaskCreateResult,
+  taskStatusUpdateInputSchema,
+  type TaskStatusUpdateInput,
   type PlannedBlock,
   type PlanDraft,
   type AcceptPlanInput,
@@ -155,3 +171,17 @@ export { importIdentitySchema, importReceiptSchema, emailImportInputSchema, type
 export { mediaMimeSchema, mediaUploadInputSchema, mediaSegmentSchema, type MediaSegment } from "./media";
 export { knowledgeNodeSchema, knowledgeEdgeSchema, knowledgeSnapshotSchema, skillEvidenceSchema, tutorActionSchema, type KnowledgeNode, type KnowledgeEdge, type KnowledgeSnapshot, type SkillEvidence, type TutorAction } from "./knowledge";
 export { actionCandidateSchema, actionDigestSchema, type ActionCandidate, type ActionDigest } from "./proactive";
+
+export * from "./learning-evidence";
+export * from "./learning-attempts";
+export * from "./learning-revisions";
+export {
+  retestActivityResultSchema,
+  retestActivitySchema,
+  retestActivityStatusSchema,
+  retestActivityTimesSchema,
+  type RetestActivity,
+  type RetestActivityResult,
+  type RetestActivityStatus,
+  type RetestActivityTimes,
+} from "./retest-activity";

@@ -58,15 +58,15 @@ export function BackupMenu() {
   }
 
   return (
-    <section className="space-y-4 border-t border-line pt-8" aria-labelledby="backup-heading">
+    <section className="space-y-4 border-t border-zinc-200 pt-8" aria-labelledby="backup-heading">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold text-text" id="backup-heading">{copy.headline}</h2>
-        <p className="text-sm leading-6 text-text-dim">{copy.disclaimer}</p>
-        <p className="text-sm leading-6 text-text-dim">{copy.restoreHint}</p>
+        <h2 className="text-base font-semibold text-zinc-800" id="backup-heading">{copy.headline}</h2>
+        <p className="text-sm leading-6 text-zinc-500">{copy.disclaimer}</p>
+        <p className="text-sm leading-6 text-zinc-500">{copy.restoreHint}</p>
       </div>
       <div className="flex flex-wrap gap-3">
         <button
-          className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex min-h-10 items-center gap-2 rounded-md bg-zinc-900 px-3 text-sm font-semibold text-white hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={pending !== null}
           onClick={() => void runExport()}
           type="button"
@@ -76,17 +76,17 @@ export function BackupMenu() {
         </button>
       </div>
       <fieldset className="space-y-2">
-        <legend className="text-sm font-medium text-text">冲突策略</legend>
-        <label className="flex items-center gap-2 text-sm text-text">
-          <input checked={policy === "reject"} className="accent-primary" name="backup-conflict" onChange={() => setPolicy("reject")} type="radio" />
+        <legend className="text-sm font-medium text-zinc-800">冲突策略</legend>
+        <label className="flex items-center gap-2 text-sm text-zinc-800">
+          <input checked={policy === "reject"} className="accent-emerald-700" name="backup-conflict" onChange={() => setPolicy("reject")} type="radio" />
           拒绝（发现已存在 ID 时整体失败）
         </label>
-        <label className="flex items-center gap-2 text-sm text-text">
-          <input checked={policy === "skip"} className="accent-primary" name="backup-conflict" onChange={() => setPolicy("skip")} type="radio" />
+        <label className="flex items-center gap-2 text-sm text-zinc-800">
+          <input checked={policy === "skip"} className="accent-emerald-700" name="backup-conflict" onChange={() => setPolicy("skip")} type="radio" />
           跳过（保留现有记录，不覆盖）
         </label>
       </fieldset>
-      <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-within:ring-2 focus-within:ring-primary">
+      <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-50 focus-within:ring-2 focus-within:ring-emerald-700">
         {pending === "restore" ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} /> : <FolderInput aria-hidden="true" size={16} />}
         恢复备份
         <input
@@ -103,13 +103,13 @@ export function BackupMenu() {
       </label>
       {error ? (
         <div className="flex flex-wrap items-center gap-3" role="alert">
-          <p className="text-sm text-danger">{error}</p>
-          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => void runExport()} type="button">
+          <p className="text-sm text-red-700">{error}</p>
+          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-zinc-200 px-3 text-xs text-zinc-800 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={() => void runExport()} type="button">
             <RefreshCw aria-hidden="true" size={14} />重试导出
           </button>
         </div>
       ) : null}
-      {result ? <p className="text-sm leading-6 text-text-dim" role="status">{copy.resultSummary}</p> : null}
+      {result ? <p className="text-sm leading-6 text-zinc-500" role="status">{copy.resultSummary}</p> : null}
     </section>
   );
 }

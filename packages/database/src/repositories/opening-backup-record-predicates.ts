@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { includedLearningSession } from "./opening-backup-record-privacy";
+import { contextSourceRefsIncluded } from "./opening-context-provenance";
 
 type Tx = Sql | TransactionSql;
 type Fragment = ReturnType<Tx>;
@@ -23,7 +24,7 @@ function versionsObject(tx: Tx, _turn: "t"): Fragment {
 }
 
 /** Fail closed: missing, non-object, non-numeric, or non-integer versions are not included. */
-function sourceVersionsIncluded(tx: Tx, id: string, _turn: "t") {
+function sourceVersionsIncluded(tx: Tx, id: string, _turn: "t", history = false) {
   return tx`
     jsonb_typeof(${raw(tx, "t.source_versions")}) = 'object'
     AND NOT EXISTS (
@@ -34,7 +35,7 @@ function sourceVersionsIncluded(tx: Tx, id: string, _turn: "t") {
         OR NOT EXISTS (
           SELECT 1 FROM opening_sources s
           WHERE s.id::text = lower(source_key) AND s.workspace_id = ${id} AND s.upload_state = 'uploaded'
-            AND s.version::text = source_value #>> '{}'
+            AND (${history} OR s.version::text = source_value #>> '{}')
             AND NOT EXISTS (
               SELECT 1 FROM opening_privacy_exclusions e
               WHERE e.workspace_id = ${id} AND e.source_id = s.id
@@ -44,7 +45,7 @@ function sourceVersionsIncluded(tx: Tx, id: string, _turn: "t") {
 }
 
 /** Migration 0017 stores citations as jsonb. Scan sourceId/sourceVersion; malformed arrays fail closed. */
-function citationsIncluded(tx: Tx, id: string, _turn: "t") {
+function citationsIncluded(tx: Tx, id: string, _turn: "t", history = false) {
   return tx`
     jsonb_typeof(${raw(tx, "t.citations")}) = 'array'
     AND NOT EXISTS (
@@ -56,7 +57,7 @@ function citationsIncluded(tx: Tx, id: string, _turn: "t") {
         OR NOT EXISTS (
           SELECT 1 FROM opening_sources s
           WHERE s.id::text = lower(citation->>'sourceId') AND s.workspace_id = ${id}
-            AND s.upload_state = 'uploaded' AND s.version::text = citation->>'sourceVersion'
+            AND s.upload_state = 'uploaded' AND (${history} OR s.version::text = citation->>'sourceVersion')
             AND NOT EXISTS (
               SELECT 1 FROM opening_privacy_exclusions e
               WHERE e.workspace_id = ${id} AND e.source_id = s.id
@@ -65,7 +66,7 @@ function citationsIncluded(tx: Tx, id: string, _turn: "t") {
     )`;
 }
 
-function turnSourcesIncluded(tx: Tx, id: string, userId: string, _turn: "t") {
+function turnSourcesIncluded(tx: Tx, id: string, userId: string, _turn: "t", history = false) {
   return tx`
     NOT EXISTS (
       SELECT 1 FROM unnest(${raw(tx, "t.source_ids")}) sid(id)
@@ -78,13 +79,15 @@ function turnSourcesIncluded(tx: Tx, id: string, userId: string, _turn: "t") {
           )
       )
     )
-    AND ${sourceVersionsIncluded(tx, id, _turn)}
-    AND ${citationsIncluded(tx, id, _turn)}
+    AND ${sourceVersionsIncluded(tx, id, _turn, history)}
+    AND ${citationsIncluded(tx, id, _turn, history)}
+    AND ((t.role = 'user' AND t.context_source_refs IS NULL)
+      OR ${contextSourceRefsIncluded(tx, id, tx`t.context_source_refs`, history)})
     AND (t.learning_session_id IS NULL OR ${includedLearningSession(tx, id, userId, tx`t.learning_session_id`)})
     AND (${raw(tx, "t.chunk_id")} IS NULL OR EXISTS (
       SELECT 1 FROM opening_source_chunks k
       JOIN opening_sources s ON s.id = k.source_id AND s.workspace_id = ${id}
-        AND s.version = k.source_version AND s.upload_state = 'uploaded'
+        AND (${history} OR s.version = k.source_version) AND s.upload_state = 'uploaded'
       WHERE k.id = ${raw(tx, "t.chunk_id")}
         AND NOT EXISTS (
           SELECT 1 FROM opening_privacy_exclusions e
@@ -94,7 +97,7 @@ function turnSourcesIncluded(tx: Tx, id: string, userId: string, _turn: "t") {
 }
 
 /** Direct reads use the outer alias. Nested reads correlate through the supplied id fragment. */
-export function includedTurn(tx: Tx, id: string, userId: string, turn: typeof TURN | Fragment) {
+export function includedTurn(tx: Tx, id: string, userId: string, turn: typeof TURN | Fragment, history = false) {
   if (turn !== TURN) {
     return tx`
       EXISTS (
@@ -102,7 +105,7 @@ export function includedTurn(tx: Tx, id: string, userId: string, turn: typeof TU
         JOIN opening_conversations c ON c.id = t.conversation_id
           AND c.workspace_id = ${id} AND c.owner_user_id = ${userId}
         WHERE t.id = ${turn as Fragment} AND t.workspace_id = ${id}
-          AND ${turnSourcesIncluded(tx, id, userId, "t")}
+          AND ${turnSourcesIncluded(tx, id, userId, "t", history)}
       )`;
   }
   return tx`
@@ -112,11 +115,11 @@ export function includedTurn(tx: Tx, id: string, userId: string, turn: typeof TU
         AND c.workspace_id = ${id} AND c.owner_user_id = ${userId}
     )
     AND ${raw(tx, "t.workspace_id")} = ${id}
-    AND ${turnSourcesIncluded(tx, id, userId, "t")}`;
+    AND ${turnSourcesIncluded(tx, id, userId, "t", history)}`;
 }
 
 export function includedProblem(
-  tx: Tx, id: string, userId: string, problem: typeof PROBLEM | Fragment, session?: Fragment,
+  tx: Tx, id: string, userId: string, problem: typeof PROBLEM | Fragment, session?: Fragment, history = false,
 ) {
   const direct = problem === PROBLEM;
   const problemId = direct ? raw(tx, "p.problem_id") : problem as Fragment;
@@ -128,7 +131,7 @@ export function includedProblem(
     AND EXISTS (
       SELECT 1 FROM opening_sources s
       WHERE s.id = ${raw(tx, "p.source_id")} AND s.workspace_id = ${id}
-        AND s.version = ${raw(tx, "p.source_version")} AND s.upload_state = 'uploaded'
+        AND (${history} OR s.version = ${raw(tx, "p.source_version")}) AND s.upload_state = 'uploaded'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id = ${id} AND e.source_id = s.id)
     )
     AND (${raw(tx, "p.chunk_id")} IS NULL OR EXISTS (
@@ -139,13 +142,13 @@ export function includedProblem(
     EXISTS (
       SELECT 1 FROM opening_problem_refs ${row}
       WHERE ${raw(tx, "p2.problem_id")} = ${problemId}
-        AND ${raw(tx, "p2.session_id")} = ${sessionId}
+        AND (${history} OR ${raw(tx, "p2.session_id")} = ${sessionId})
         AND ${raw(tx, "p2.workspace_id")} = ${id}
         AND ${includedLearningSession(tx, id, userId, raw(tx, "p2.session_id"))}
         AND EXISTS (
           SELECT 1 FROM opening_sources s
           WHERE s.id = ${raw(tx, "p2.source_id")} AND s.workspace_id = ${id}
-            AND s.version = ${raw(tx, "p2.source_version")} AND s.upload_state = 'uploaded'
+            AND (${history} OR s.version = ${raw(tx, "p2.source_version")}) AND s.upload_state = 'uploaded'
             AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id = ${id} AND e.source_id = s.id)
         )
         AND (${raw(tx, "p2.chunk_id")} IS NULL OR EXISTS (

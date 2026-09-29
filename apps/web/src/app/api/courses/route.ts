@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   createCourseForPrincipal,
   listCoursesForPrincipal,
@@ -23,7 +24,8 @@ export async function GET(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
-    const courses = await listCoursesForPrincipal(runtime, principal);
+    const includeArchived = z.enum(["true", "false"]).optional().parse(new URL(request.url).searchParams.get("includeArchived") ?? undefined);
+    const courses = await listCoursesForPrincipal(runtime, principal, includeArchived === "true");
     return Response.json({ courses });
   } catch (error) {
     return jsonError(mapDomainError(error));

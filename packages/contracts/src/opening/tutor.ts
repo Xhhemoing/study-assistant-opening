@@ -24,6 +24,7 @@ export const turnInputSchema = z
     clientKey: z.string().min(8).max(200),
     privacy: z.enum(["saved", "ephemeral"]),
     learningSessionId: uuidSchema.nullable().optional(),
+    attemptId: uuidSchema.nullable().optional(),
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
   })
@@ -145,8 +146,15 @@ export const budgetReservationSchema = z
   })
   .strict();
 
+export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
+  provenanceId: uuidSchema.nullable().default(null),
+  privacyEpoch: z.number().int().nonnegative(),
+  historyDiscarded: z.boolean(),
+}).strict();
+
 export const ephemeralTurnInputSchema = z
   .object({
+    historyPrivacyEpoch: z.number().int().nonnegative().optional(),
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
     mode: tutorModeSchema,
@@ -156,6 +164,7 @@ export const ephemeralTurnInputSchema = z
           .object({
             role: z.enum(["user", "assistant"]),
             text: z.string().max(20_000),
+            provenanceId: uuidSchema.optional(),
           })
           .strict(),
       )
@@ -178,6 +187,7 @@ export type ProviderInput = z.infer<typeof providerInputSchema>;
 export type ProviderOutput = z.infer<typeof providerOutputSchema>;
 export type TurnRecord = z.infer<typeof turnRecordSchema>;
 export type BudgetReservation = z.infer<typeof budgetReservationSchema>;
+export type EphemeralTurnResponse = z.infer<typeof ephemeralTurnResponseSchema>;
 export type EphemeralTurnInput = z.infer<typeof ephemeralTurnInputSchema>;
 export type AssistantCandidate = z.infer<typeof assistantCandidateSchema>;
 export type AssistantCandidateRecord = z.infer<

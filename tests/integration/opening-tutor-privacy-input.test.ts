@@ -61,7 +61,7 @@ async function seedPriorExchange() {
   });
   const prior = await seedSourceTurn(SECRET_Q, [sourceId]);
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${prior.turnId}, ${prior.assistantTurnId})`;
-  await fixture.sql`UPDATE opening_turns SET status='complete', text=${SECRET_A} WHERE id=${prior.assistantTurnId}`;
+  await fixture.sql`UPDATE opening_turns SET status='complete', context_source_refs='[]'::jsonb, text=${SECRET_A} WHERE id=${prior.assistantTurnId}`;
   await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${prior.jobId}`;
   return { sourceId, conversationId: prior.conversationId, priorTurnId: prior.turnId };
 }

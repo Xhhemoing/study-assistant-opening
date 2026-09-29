@@ -4,16 +4,18 @@ import { OpeningBackupSourceError } from "./opening-backup-sources";
 import { readOpeningBackupTableRows } from "./opening-backup-record-table-queries";
 
 export const OPENING_BACKUP_TABLES = [
+  "workspace_preferences", "courses", "course_asset_memberships",
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_timetable_sessions", "opening_hard_blocks",
+  "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
+  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
 ] as const;
 export type OpeningBackupTable = (typeof OPENING_BACKUP_TABLES)[number];
 export type OpeningBackupRecordSnapshot = {
   privacyEpoch: number;
-  deletionJournal: Array<{ sourceId: string; deletedAt: string }>;
+  deletionJournal: Array<{ sourceId: string; deletedAt: string; assetDeletedAt?: string | null }>;
   tables: Record<OpeningBackupTable, Record<string, unknown>[]>;
 };
 
@@ -35,6 +37,7 @@ export async function readOpeningBackupRecords(
       .map((row) => ({
         sourceId: row.source_id as string,
         deletedAt: new Date(row.deleted_at as string | Date).toISOString(),
+        ...(row.asset_deleted_at ? { assetDeletedAt: new Date(row.asset_deleted_at as string | Date).toISOString() } : {}),
       }));
     return { privacyEpoch, deletionJournal, tables };
   });

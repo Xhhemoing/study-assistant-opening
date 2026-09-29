@@ -1,3 +1,4 @@
+import { readNoteBackupProvenance } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
 import {
@@ -123,6 +124,13 @@ export async function loadExistingIds(
 export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promise<void> {
   for (const step of plan.steps) {
     await insertRows(tx, COLLECTION_TABLES[step.collection], step.records, COLUMNS[step.collection]);
+    if (step.collection === "documents") {
+      for (const record of step.records) {
+        const provenance = readNoteBackupProvenance(record, false);
+        if (provenance) await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+          VALUES(${record.id},${String(record.workspaceId)},${tx.json(provenance.contextSourceRefs)})`;
+      }
+    }
     if (step.collection === "explorations") {
       for (const record of step.records) {
         await insertRows(tx, "exploration_branches", childRows(record, "branches"), BRANCH_COLS);

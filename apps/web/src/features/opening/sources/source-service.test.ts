@@ -64,6 +64,13 @@ function makeFakeSql() {
       const row = sources.get(id);
       return row && row.workspace_id === workspaceId ? [row] : [];
     }
+    if (query.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (query.startsWith("INSERT INTO opening_source_versions")) return [];
+    if (query.startsWith("UPDATE opening_sources SET upload_url_expires_at")) {
+      const row = sources.get(values[1] as string);
+      if (row) row.upload_url_expires_at = values[0];
+      return [];
+    }
     if (query.startsWith("UPDATE opening_sources")) {
       const [id, workspaceId] = values as [string, string];
       const row = sources.get(id);
@@ -142,6 +149,24 @@ function setup() {
 }
 
 describe("opening signed upload service", () => {
+  it("records the actual signed URL expiry when signing and return times differ", async () => {
+    const sql = makeFakeSql(), { storage } = makeFakeStorage();
+    storage.presignPut = async () => "https://s3.invalid/object?X-Amz-Date=20260930T011000Z&X-Amz-Expires=900";
+    const svc = createOpeningSourceService(sql, storage, { now: () => new Date("2026-09-30T01:12:00Z") });
+    const ticket = await svc.beginUpload(principal, { name: "signed.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    expect(ticket.expiresAt).toBe("2026-09-30T01:25:00.000Z");
+    expect(sql.sources.get(ticket.source.id)?.upload_url_expires_at).toEqual(new Date(ticket.expiresAt));
+  });
+  it("persists the signing lifetime after a delayed signature instead of using source creation", async () => {
+    const sql = makeFakeSql(), { storage } = makeFakeStorage();
+    let time = new Date("2026-09-30T01:00:00Z");
+    const sign = storage.presignPut;
+    storage.presignPut = async (...args) => { time = new Date("2026-09-30T01:10:00Z"); return sign(...args); };
+    const svc = createOpeningSourceService(sql, storage, { now: () => time });
+    const ticket = await svc.beginUpload(principal, { name: "slow.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    expect(ticket.expiresAt).toBe("2026-09-30T01:25:00.000Z");
+    expect(sql.sources.get(ticket.source.id)?.upload_url_expires_at).toEqual(new Date(ticket.expiresAt));
+  });
   it("returns a presigned ticket against the staging key", async () => {
     const { svc } = setup();
     const ticket = await svc.beginUpload(principal, {

@@ -97,6 +97,7 @@ describe("assertOpeningBackupSnapshotCurrent", () => {
     ["epoch", snapshot({ privacyEpoch: 5 })],
     ["journal source", snapshot({ deletionJournal: [{ sourceId: sourceA, deletedAt: "2026-09-21T00:00:00.000Z" }] })],
     ["journal time", snapshot({ deletionJournal: [{ sourceId: sourceB, deletedAt: "2026-09-22T00:00:00.000Z" }] })],
+    ["asset deletion", snapshot({ deletionJournal: [{ sourceId: sourceB, deletedAt: "2026-09-21T00:00:00.000Z", assetDeletedAt: "2026-09-22T00:00:00.000Z" }] })],
     ["source id", snapshot({ sources: [{ sourceId: sourceB, version: 3, bytes: 12, sha256: hashA }] })],
     ["source version", snapshot({ sources: [{ sourceId: sourceA, version: 4, bytes: 12, sha256: hashA }] })],
     ["source bytes", snapshot({ sources: [{ sourceId: sourceA, version: 3, bytes: 13, sha256: hashA }] })],

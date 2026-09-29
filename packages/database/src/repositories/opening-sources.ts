@@ -1,6 +1,6 @@
-﻿import { randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import type { SourceRecord, UploadInput } from "@aistudy/contracts";
+import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "./opening-jobs";
 
 export type OpeningSourceErrorCode =
@@ -22,13 +22,14 @@ export type OpeningScope = { workspaceId: string; ownerUserId: string };
 export type OpeningSourceRepository = {
   create(scope: OpeningScope, input: UploadInput): Promise<SourceRecord>;
   get(scope: OpeningScope, id: string): Promise<SourceRecord>;
+  issueUploadTicket(scope: OpeningScope, id: string, sign: (source: SourceRecord) => Promise<Omit<UploadTicket, "source">>): Promise<UploadTicket>;
   /** Marks pending → uploaded after validateStoredUpload at the boundary. */
   complete(
     scope: OpeningScope,
     id: string,
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
-  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string } }): Promise<SourceRecord>;
+  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void> }): Promise<SourceRecord>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
   markParseState(scope: OpeningScope, id: string, state: SourceRecord["parseState"], error?: unknown): Promise<SourceRecord>;
   /**
@@ -110,6 +111,18 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
       return mapSource(rows[0] as Record<string, unknown>);
     },
 
+    async issueUploadTicket(scope, id, sign) {
+      return sql.begin(async tx => {
+        const rows = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
+        if (!rows.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        const source = mapSource(rows[0] as Record<string, unknown>);
+        if (source.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        const ticket = await sign(source);
+        await tx`UPDATE opening_sources SET upload_url_expires_at=${new Date(ticket.expiresAt)} WHERE id=${id} AND workspace_id=${scope.workspaceId}`;
+        return { source, ...ticket };
+      });
+    },
+
     async complete(scope, id, actual) {
       const current = await this.get(scope, id);
       if (current.uploadState === "uploaded") {
@@ -126,11 +139,15 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         actual,
       );
       const rows = await sql`
-        UPDATE opening_sources
-        SET upload_state = 'uploaded', updated_at = now()
-        WHERE id = ${id} AND workspace_id = ${scope.workspaceId}
-          AND upload_state = 'pending'
-        RETURNING *
+        WITH completed AS (
+          UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now()
+          WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending'
+          RETURNING *
+        ), captured AS (
+          INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          SELECT id,version,workspace_id,bytes,sha256,'available' FROM completed
+          ON CONFLICT(source_id,version) DO NOTHING
+        ) SELECT * FROM completed
       `;
       if (!rows.length) {
         return this.get(scope, id);
@@ -140,12 +157,20 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
 
     async completeWithParseJob(scope, id, input) {
       return sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Workspace not found");
         const currentRows = await tx`SELECT * FROM opening_sources WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         const current = mapSource(currentRows[0] as Record<string, unknown>);
         if (current.uploadState === "uploaded") return current;
+        if (current.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
+        await input.beforeComplete?.(current);
         const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded'
+          ON CONFLICT(source_id,version) DO NOTHING`;
         const jobId = randomUUID();
         await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;

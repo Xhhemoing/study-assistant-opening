@@ -43,7 +43,7 @@ async function seedConversationAndSource() {
     chunkId: null,
   });
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${prior.turnId}, ${prior.assistantTurnId})`;
-  await fixture.sql`UPDATE opening_turns SET status='complete', text='we covered inertia' WHERE id=${prior.assistantTurnId}`;
+  await fixture.sql`UPDATE opening_turns SET status='complete', context_source_refs='[]'::jsonb, text='we covered inertia' WHERE id=${prior.assistantTurnId}`;
   await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${prior.jobId}`;
   const saved = await conversations.appendSavedTurn({
     scope: fixture.scope,
@@ -170,16 +170,17 @@ describe("opening tutor turn durable path (guarded)", () => {
 
   it("persists delivered help exposure with the completed assistant turn", async () => {
     const seeded = await seedConversationAndSource();
-    const sessionId = randomUUID();
+    const sessionId = randomUUID(), courseId = randomUUID();
+    await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Help course',${courseId})`;
     await fixture.sql`
       INSERT INTO opening_learning_sessions
         (id, workspace_id, owner_user_id, course_id, skill_label)
-      VALUES (${sessionId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${randomUUID()}, 'motion')
+      VALUES (${sessionId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${courseId}, 'motion')
     `;
     await fixture.sql`
       UPDATE opening_turns
       SET learning_session_id = ${sessionId}
-      WHERE id = ${seeded.turnId}
+      WHERE id IN (${seeded.turnId},${seeded.assistantTurnId})
     `;
     const actualChunkId = (await fixture.sql`SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId}`)[0].id as string;
     const { deps } = buildDeps(actualChunkId);
@@ -222,7 +223,7 @@ describe("opening tutor turn durable path (guarded)", () => {
         level: "hinted",
         delivered: true,
       },
-    })).rejects.toThrow("session not found");
+    })).rejects.toThrow(/session.*not found/);
 
     const job = await repository.get(fixture.scope, seeded.jobId);
     const turns = await fixture.sql`

@@ -10,6 +10,9 @@ import { SourceViewer, type SourceDownloadView } from "./source-viewer";
 import { createUploadClient, type UploadRejected } from "./upload-client";
 import { sourceStatusLabel } from "./upload-state";
 import { shouldRefreshSources, startSourceRefresh } from "./source-refresh";
+import { EmptyState, ui } from "../design/ui";
+import { SourceActionsPanel, sourceActionNotice } from "./source-actions-panel";
+import { SourceCleanupPanel } from "./source-cleanup-panel";
 
 type Notice = { sourceId?: string; text: string; ticket?: UploadRejected["ticket"] };
 
@@ -18,12 +21,14 @@ function percent(loaded: number, total: number): number {
   return Math.round((loaded / total) * 100);
 }
 
-export function InboxPanel({ api, sources, onChanged }: {
+export function InboxPanel({ api, sources, onChanged, filter = "" }: {
   api: OpeningApi;
   sources: SourceRecord[];
   onChanged: () => Promise<void>;
+  filter?: string;
 }) {
   const [busy, setBusy] = useState(false);
+  const [managedId, setManagedId] = useState<string | null>(null);
   const [bytes, setBytes] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [view, setView] = useState<{ record: SourceRecord; download: SourceDownloadView; requestedVersion: number } | null>(null);
@@ -77,12 +82,12 @@ export function InboxPanel({ api, sources, onChanged }: {
   }
 
   return (
-    <section className="space-y-3 border-b border-zinc-200 px-3 py-3">
+    <section className="space-y-3">
       <CaptureDialog disabled={busy} onFile={(file) => void upload(file)} />
       {refreshError ? <p className="text-sm text-amber-800" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
       {notice?.ticket && fileRef.current ? (
         <button
-          className="min-h-11 rounded-md border border-zinc-300 px-3 text-sm"
+          className={ui.secondary}
           onClick={() => {
             const file = fileRef.current;
             if (file && notice.ticket && notice.sourceId) {
@@ -96,8 +101,9 @@ export function InboxPanel({ api, sources, onChanged }: {
       ) : null}
       {bytes != null ? <p className="text-xs tabular-nums text-zinc-700">已上传 {bytes}%</p> : null}
       {notice ? <p className="text-sm text-amber-800" role="status">{notice.text}</p> : null}
-      <ul className="space-y-2">
-        {sources.map((record) => (
+      <SourceCleanupPanel revision={sources} />
+      <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
+        {sources.filter((record) => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())).map((record) => (
           <li key={record.id}>
             <SourceRow
               notice={notice?.sourceId === record.id ? notice.text : undefined}
@@ -107,11 +113,17 @@ export function InboxPanel({ api, sources, onChanged }: {
                 await onChanged();
               } : undefined}
               record={record}
+              onManage={() => setManagedId(value => value === record.id ? null : record.id)}
             />
+            {managedId === record.id ? <SourceActionsPanel record={record} onClose={() => setManagedId(null)} onChanged={onChanged} onResult={result => {
+              setNotice({ text: sourceActionNotice(result) });
+              if (result.deleted) { setView(value => value?.record.id === record.id ? null : value); fileRef.current = null; }
+            }} /> : null}
             <p className="sr-only">{sourceStatusLabel(record)}</p>
           </li>
         ))}
       </ul>
+      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !sources.some((record) => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) ? <p className="py-4 text-sm text-zinc-500">没有匹配的材料。</p> : null}
       {view ? (
         <SourceViewer
           download={view.download}

@@ -20,9 +20,9 @@ const policies: Record<AIRole, RolePolicy> = {
 };
 
 export const ROLE_POLICIES: Readonly<Record<AIRole, RolePolicy>> = Object.freeze(
-  Object.fromEntries(Object.entries(policies).map(([role, policy]) => [role, Object.freeze(policy)])) as Record<AIRole, RolePolicy>,
+  Object.fromEntries(Object.entries(policies).map(([role, policy]) => [role, Object.freeze(rolePolicySchema.parse(policy))])) as Record<AIRole, RolePolicy>,
 );
 
 export function getRolePolicy(role: AIRole): RolePolicy {
-  return Object.freeze(rolePolicySchema.parse({ ...ROLE_POLICIES[role] }));
+  return ROLE_POLICIES[role];
 }

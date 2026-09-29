@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { conversationResumeSchema } from "@aistudy/contracts";
-import { messagesFromResume, messagesFromTurns, resolveChatMessages } from "./message-model";
+import { ephemeralHistoryFromMessages, messagesFromResume, messagesFromTurns, resolveChatMessages } from "./message-model";
 
 const U = "11111111-1111-4111-8111-111111111111";
 const S = "22222222-2222-4222-8222-222222222222";
@@ -146,4 +146,14 @@ describe("message-model", () => {
     expect(messages[0]?.citations).toEqual([citation]);
     expect(messages[0]?.citationLabels).toEqual(["slide A-1"]);
   });
+});
+
+it("carries only ephemeral text and known provenance into bounded history", () => {
+  const ephemeral = Array.from({ length: 18 }, (_, index) => ({
+    id: `ephemeral-${index}`, origin: "ephemeral" as const, role: "user" as const,
+    text: `message-${index}`, citations: [], citationLabels: [], provenanceId: index === 17 ? null : S,
+  }));
+  expect(ephemeralHistoryFromMessages(ephemeral)).toHaveLength(16);
+  expect(ephemeralHistoryFromMessages(ephemeral)[0]).toEqual({ role: "user", text: "message-2", provenanceId: S });
+  expect(ephemeralHistoryFromMessages(ephemeral)[15]).toEqual({ role: "user", text: "message-17" });
 });

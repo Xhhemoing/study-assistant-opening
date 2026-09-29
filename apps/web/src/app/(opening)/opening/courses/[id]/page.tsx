@@ -4,5 +4,5 @@ type Props = { params: Promise<{ id: string }> };
 
 export default async function OpeningCoursePage({ params }: Props) {
   const { id } = await params;
-  return <CourseDetail id={id} />;
+  return <CourseDetail id={id} opening />;
 }

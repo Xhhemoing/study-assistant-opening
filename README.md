@@ -28,6 +28,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [长期平台路线](docs/plans/2026-07-21-lifelong-learning-implementation.md)
 - [已批准：系统实现架构重审](docs/plans/2026-07-22-system-architecture-rethink-design.md)
 - [ADR-001：技术栈锁定](docs/decisions/ADR-001-stack.md)
+- [Codex 开发协作总负责人提示词](docs/operations/project-lead-prompt.md)
 - [CI 说明](docs/operations/ci.md)
 - [云端部署说明](docs/operations/cloud-deployment.md)
 - [项目章程与产品规格](docs/product/PRD.md)
@@ -77,24 +78,17 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ### 本地验证
 
-```bash
-cp .env.example .env
-npm run verify:ci
-npx vitest run --project unit
+日常开发默认运行最近的相关测试和所属包类型检查，按需检查改动文件的 lint。以下以 web 编辑器草稿为例，其他改动替换对应测试与包：
 
-# 完整门禁需要 Docker 服务与 Playwright Chromium
-npm run compose:up
-npm run db:migrate
-npm run lint
-npm run typecheck
-npm test
-npm run test:integration
-npm run test:handler
-npm run test:browser
-npm run build
+```pwsh
+$ErrorActionPreference = 'Stop'
+npx vitest run --project unit apps/web/src/features/editor/local-draft.test.ts
+npm run typecheck -w @aistudy/web
 ```
 
-Unit通过不代表完整系统通过。集成测试须设置独立测试数据库与`OPENING_TEST_DB=1`，不能对用户数据库执行测试；browser、真实模型、恢复演练和远端CI需各自保留证据。本地结果不能替代当前提交的GitHub Actions `quality`门禁。详细前置条件见 [CI说明](docs/operations/ci.md)。
+纯文档改动检查内容与 diff，不跑全量测试或构建。`npm run verify:ci` 仅在 CI/runner 变更或排查时使用；完整本地检查仅在明确请求时运行，不重复作为开发、提交或 PR 的前置，命令见 [CI说明](docs/operations/ci.md#local-verification)。没有新改动或失败，不重复已通过的检查。
+
+集成测试须使用独立测试数据库与 `OPENING_TEST_DB=1`，不能对用户数据库执行测试。浏览器验收由用户负责，Agent 未获明确授权不自行或委派运行；尚未验收标记“待用户浏览器验收”，不阻塞后续开发。现有 CI 浏览器检查保持不变，合并与发布仍须通过当前提交的 GitHub Actions `quality` 门禁，本地结果不能替代它。
 
 ## 预定技术方向
 

@@ -1,0 +1,34 @@
+import { randomUUID } from "node:crypto";
+import { afterAll,beforeAll,beforeEach,expect,it } from "vitest";
+import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
+import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
+import { POST } from "../../../apps/web/src/app/api/opening/observations/revisions/route";
+import { GET } from "../../../apps/web/src/app/api/opening/observations/[id]/history/route";
+import { createOpeningFixture,type OpeningFixture } from "../opening-fixture";
+import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
+let fixture:OpeningFixture,runtime:ReturnType<typeof createAuthRuntime>;
+beforeAll(async()=>{fixture=await createOpeningFixture();runtime=createAuthRuntime({databaseUrl:process.env.DATABASE_URL!,authSecret:process.env.AUTH_SECRET??"opening-fixture-secret-opening-fixture-secret",authCookieName:"aistudy_session",sessionCookieSecure:false,sessionTtlSeconds:3600});setAuthRuntimeForTests(runtime);});
+beforeEach(async()=>{await fixture.reset();await fixture.sql`TRUNCATE opening_learning_sessions,opening_conversations CASCADE`;});
+afterAll(async()=>{setAuthRuntimeForTests(null);await runtime?.close();await fixture?.close();});
+const request=(body:unknown,cookie=fixture.cookie)=>new Request("http://localhost/api/opening/observations/revisions",{method:"POST",headers:{cookie,"content-type":"application/json"},body:JSON.stringify(body)});
+const history=(id:string,cookie=fixture.cookie)=>GET(new Request("http://localhost/api/opening/observations/history",{headers:{cookie}}),{params:Promise.resolve({id})});
+it("authenticates append/history, rejects forged fields, exposes ordered audit and replays before stale head",async()=>{
+  const f=await learningAttemptFixture(fixture),original=await f.submit(await f.start());
+  const input={rootObservationId:original.id,revisesObservationId:original.id,expectedHead:original.id,revisionKind:"replace",reason:"Fix transcription",clientKey:randomUUID(),replacement:{answer:"2",outcome:"incorrect",assistance:"independent"}};
+  expect((await POST(request(input,""))).status).toBe(401);
+  expect((await POST(request({...input,actorId:randomUUID()}))).status).toBe(400);
+  const response=await POST(request(input));expect(response.status).toBe(201);const first=await response.json();
+  expect(first.observation.actorId).toBe(fixture.scope.ownerUserId);
+  expect((await POST(request(input))).status).toBe(200);
+  expect((await POST(request({...input,clientKey:randomUUID()}))).status).toBe(409);
+  const audit=await history(first.headObservationId);expect(audit.status).toBe(200);
+  expect((await audit.json()).revisions.map((row:{id:string})=>row.id)).toEqual([original.id,first.headObservationId]);
+  expect((await history(original.id,"")).status).toBe(401);expect((await history(randomUUID())).status).toBe(404);expect((await history("invalid")).status).toBe(400);
+});
+it("does not reveal excluded chains on history, rewrite or replay",async()=>{
+  const f=await learningAttemptFixture(fixture),original=await f.submit(await f.start());
+  const input={rootObservationId:original.id,revisesObservationId:original.id,expectedHead:original.id,revisionKind:"retract",reason:"Withdraw",clientKey:randomUUID()};
+  expect((await POST(request(input))).status).toBe(201);
+  await fixture.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES (${fixture.scope.workspaceId},${f.sourceId})`;
+  expect((await history(original.id)).status).toBe(404);expect((await POST(request(input))).status).toBe(404);
+});

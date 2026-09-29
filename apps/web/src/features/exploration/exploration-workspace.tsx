@@ -1,14 +1,14 @@
 "use client";
 
-import { GitBranch, Plus, RefreshCw, Save, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, GitBranch, Plus, RefreshCw, Save, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ExplorationBlockKind, PersistedExploration } from "@aistudy/contracts";
+import { EmptyState, LoadError, LoadingRows, PageHeading, textareaClass, ui } from "../opening/design/ui";
 import { explorationApi, ExplorationApiError, type ExplorationDetailResponse } from "./exploration-api";
 
 const kindLabels: Record<ExplorationBlockKind, string> = { scratch: "草稿", hypothesis: "假设", open_question: "开放问题" };
 const statusLabels = { open: "进行中", closed: "已关闭" } as const;
-
 function errorText(error: unknown): string { return error instanceof ExplorationApiError ? error.message : "探索请求失败，请重试。"; }
 function formatDate(value: string): string { return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 
@@ -21,10 +21,31 @@ export function ExplorationWorkspaceList() {
   const load = useCallback(async () => { setLoading(true); setError(""); try { setItems(await explorationApi.list()); } catch (cause) { setError(errorText(cause)); } finally { setLoading(false); } }, []);
   useEffect(() => { void load(); }, [load]);
   async function submit(event: FormEvent) { event.preventDefault(); if (!title.trim() || busy) return; setBusy(true); setError(""); try { const created = await explorationApi.create({ title }); window.location.assign(`/explore/${created.id}`); } catch (cause) { setError(errorText(cause)); } finally { setBusy(false); } }
-  return <main className="mx-auto flex w-full max-w-5xl flex-col gap-10 px-4 py-8 sm:px-6 lg:px-8">
-    <header className="space-y-2"><p className="text-xs font-medium uppercase tracking-[0.12em] text-primary">Explore</p><h1 className="text-3xl font-semibold text-text">自由探索</h1><p className="max-w-prose text-sm leading-6 text-text-dim">先保存问题、假设和线索，再决定哪些内容值得沉淀。</p></header>
-    <section className="space-y-4" aria-labelledby="new-exploration-heading"><h2 className="text-sm font-semibold text-text" id="new-exploration-heading">开始一个探索</h2><form className="flex flex-col gap-3 sm:flex-row" onSubmit={submit}><label className="sr-only" htmlFor="exploration-title">探索主题</label><input className="min-h-11 min-w-0 flex-1 rounded-md border border-line bg-surface px-3 text-sm text-text outline-none placeholder:text-text-dim focus:border-primary focus:ring-2 focus:ring-primary/30" id="exploration-title" maxLength={120} onChange={(event) => setTitle(event.target.value)} placeholder="你想弄清楚什么？" value={title} /><button className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-medium text-ink hover:bg-primary/90 disabled:opacity-50" disabled={busy || !title.trim()} type="submit"><Plus aria-hidden="true" size={17} />{busy ? "创建中" : "开始探索"}</button></form>{error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}</section>
-    <section className="space-y-3" aria-labelledby="exploration-list-heading"><div className="flex items-baseline justify-between"><h2 className="text-sm font-semibold text-text" id="exploration-list-heading">我的探索</h2><button aria-label="刷新探索列表" className="inline-flex size-9 items-center justify-center rounded-md border border-line text-text-dim hover:bg-surface-2" onClick={() => void load()} type="button"><RefreshCw aria-hidden="true" size={16} /></button></div>{loading ? <p className="border-y border-line py-8 text-sm text-text-dim">正在加载探索...</p> : null}{!loading && !error && items.length === 0 ? <p className="border-y border-line py-8 text-sm text-text-dim">还没有探索。输入一个主题开始。</p> : null}{!loading && !error ? <ul className="divide-y divide-line border-y border-line">{items.map((item) => <li key={item.id}><Link className="flex items-center justify-between gap-4 px-3 py-4 hover:bg-surface-2" href={`/explore/${item.id}`}><span className="min-w-0"><span className="block truncate text-sm font-medium text-text">{item.title}</span><span className="block text-xs text-text-dim">更新于 {formatDate(item.updatedAt)}</span></span><span className="shrink-0 text-xs text-text-dim">{statusLabels[item.status]}</span></Link></li>)}</ul> : null}</section>
+  return <main className="min-w-0 bg-white">
+    <PageHeading title="自由探索" description="保存问题、假设和线索，再决定哪些内容值得沉淀。" />
+    <div className="mx-auto max-w-5xl space-y-6 px-5 py-5">
+      <form className="flex flex-col gap-2 sm:flex-row" onSubmit={submit} aria-label="开始探索">
+        <label className="sr-only" htmlFor="exploration-title">探索主题</label>
+        <input className={`${ui.input} flex-1`} id="exploration-title" maxLength={120} onChange={(event) => setTitle(event.target.value)} placeholder="你想弄清楚什么？" value={title} />
+        <button className={ui.primary} disabled={busy || !title.trim()} type="submit"><Plus aria-hidden="true" size={15} />{busy ? "创建中" : "开始探索"}</button>
+      </form>
+      {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
+      <section aria-labelledby="exploration-list-heading">
+        <div className="flex min-h-10 items-center justify-between border-b border-zinc-200 pb-2">
+          <h2 className="text-xs font-medium text-zinc-600" id="exploration-list-heading">我的探索{!loading && !error ? ` · ${items.length}` : ""}</h2>
+          <button aria-label="刷新探索列表" className={ui.icon} disabled={loading} onClick={() => void load()} type="button"><RefreshCw aria-hidden="true" size={15} /></button>
+        </div>
+        {loading ? <LoadingRows label="正在加载探索" /> : null}
+        {!loading && !error && items.length === 0 ? <EmptyState title="还没有探索" description="输入一个主题开始，不需要先创建课程或目标。" /> : null}
+        {!loading && !error && items.length > 0 ? <ul className="divide-y divide-zinc-100">{items.map((item) => <li key={item.id}>
+          <Link className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 px-3 py-3 transition-colors duration-150 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-700 motion-reduce:transition-none sm:grid-cols-[minmax(0,1fr)_7rem_9rem]" href={`/explore/${item.id}`}>
+            <span className="truncate text-sm font-medium text-zinc-800">{item.title}</span>
+            <span className={`text-xs ${item.status === "open" ? "text-emerald-700" : "text-zinc-500"}`}>{statusLabels[item.status]}</span>
+            <span className="col-span-2 text-xs tabular-nums text-zinc-500 sm:col-span-1 sm:text-right">{formatDate(item.updatedAt)}</span>
+          </Link>
+        </li>)}</ul> : null}
+      </section>
+    </div>
   </main>;
 }
 
@@ -43,10 +64,32 @@ export function ExplorationWorkspaceDetail({ explorationId }: { explorationId: s
   async function addBlock(event: FormEvent) { event.preventDefault(); if (!branchId || !content.trim() || busy) return; setBusy(true); setError(""); try { await explorationApi.createBlock(explorationId, { branchId, kind, content }); setContent(""); await load(); } catch (cause) { setError(errorText(cause)); } finally { setBusy(false); } }
   async function addBranch(event: FormEvent) { event.preventDefault(); if (!branchId || !branchTitle.trim() || busy) return; setBusy(true); setError(""); try { const branch = await explorationApi.createBranch(explorationId, { title: branchTitle, parentBranchId: branchId }); setBranchTitle(""); setBranchId(branch.id); await load(); } catch (cause) { setError(errorText(cause)); } finally { setBusy(false); } }
   async function toggleStatus() { if (!detail || busy) return; setBusy(true); setError(""); try { const exploration = await explorationApi.setStatus(explorationId, detail.exploration.status === "open" ? "closed" : "open"); setDetail((current) => current ? { ...current, exploration } : current); } catch (cause) { setError(errorText(cause)); } finally { setBusy(false); } }
-  if (loading) return <main className="mx-auto max-w-3xl px-4 py-8 text-sm text-text-dim">正在加载探索...</main>;
-  if (error && !detail) return <main className="mx-auto max-w-3xl space-y-4 px-4 py-8" role="alert"><p className="text-sm text-danger">{error}</p><button className="inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-sm" onClick={() => void load()} type="button"><RefreshCw size={16} />重试</button></main>;
+  if (loading && !detail) return <LoadingRows label="正在加载探索" />;
+  if (error && !detail) return <div className="p-5"><LoadError message={error} onRetry={() => void load()} /></div>;
   if (!detail) return null;
   const blocks = detail.blocks.filter((block) => block.branchId === branchId);
   const isClosed = detail.exploration.status === "closed";
-  return <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8"><Link className="text-sm text-text-dim hover:text-text" href="/explore">返回探索</Link><header className="flex flex-col gap-4 border-b border-line pb-6 sm:flex-row sm:items-start sm:justify-between"><div className="space-y-2"><p className="text-xs text-text-dim">{ancestry.join(" / ") || "根分支"}</p><h1 className="break-words text-3xl font-semibold text-text">{detail.exploration.title}</h1><p className="text-sm text-text-dim">{statusLabels[detail.exploration.status]} · {detail.branches.length} 个分支</p></div><button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm hover:bg-surface-2 disabled:opacity-50" disabled={busy} onClick={() => void toggleStatus()} type="button">{detail.exploration.status === "open" ? <XCircle size={16} /> : <Save size={16} />}{detail.exploration.status === "open" ? "关闭探索" : "恢复探索"}</button></header>{error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}<section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem]"><div className="space-y-5"><div className="flex items-center gap-2"><GitBranch aria-hidden="true" size={17} className="text-primary" /><label className="text-sm font-medium text-text" htmlFor="branch-select">当前分支</label><select className="min-h-9 min-w-0 flex-1 rounded-md border border-line bg-surface px-2 text-sm" id="branch-select" onChange={(event) => setBranchId(event.target.value)} value={branchId}>{detail.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}{branch.parentBranchId ? " · 子分支" : " · 根"}</option>)}</select></div><div className="space-y-3" aria-live="polite">{blocks.length ? blocks.map((block) => <article className="border-b border-line pb-4" key={block.id}><p className="mb-1 text-xs font-medium text-primary">{kindLabels[block.kind]}</p><p className="whitespace-pre-wrap text-sm leading-6 text-text">{block.content}</p></article>) : <p className="border-y border-line py-8 text-sm text-text-dim">这个分支还没有内容。</p>}</div><form className="space-y-3 border-t border-line pt-5" onSubmit={addBlock}><div className="flex flex-col gap-3 sm:flex-row"><label className="sr-only" htmlFor="block-kind">内容类型</label><select className="min-h-10 rounded-md border border-line bg-surface px-2 text-sm" id="block-kind" onChange={(event) => setKind(event.target.value as ExplorationBlockKind)} value={kind}><option value="scratch">草稿</option><option value="hypothesis">假设</option><option value="open_question">开放问题</option></select><label className="sr-only" htmlFor="block-content">探索内容</label><textarea className="min-h-24 min-w-0 flex-1 rounded-md border border-line bg-surface px-3 py-2 text-sm leading-6" id="block-content" maxLength={20000} onChange={(event) => setContent(event.target.value)} placeholder="写下一个观察、假设或问题..." value={content} /></div><button className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-ink disabled:opacity-50" disabled={busy || isClosed || !content.trim()} type="submit"><Plus size={16} />添加内容</button></form></div><aside className="space-y-4 border-l-0 border-line lg:border-l lg:pl-5"><h2 className="text-sm font-semibold text-text">创建分支</h2><form className="space-y-3" onSubmit={addBranch}><label className="sr-only" htmlFor="branch-title">分支标题</label><input className="min-h-10 w-full rounded-md border border-line bg-surface px-3 text-sm" id="branch-title" maxLength={120} onChange={(event) => setBranchTitle(event.target.value)} placeholder="分支标题" value={branchTitle} /><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm hover:bg-surface-2 disabled:opacity-50" disabled={busy || isClosed || !branchTitle.trim()} type="submit"><GitBranch size={16} />创建分支</button></form><div className="space-y-2"><h2 className="text-sm font-semibold text-text">分支谱系</h2>{detail.branches.map((branch) => <button className={`block w-full rounded-md px-2 py-2 text-left text-xs ${branch.id === branchId ? "bg-primary/10 text-primary" : "text-text-dim hover:bg-surface-2"}`} key={branch.id} onClick={() => setBranchId(branch.id)} type="button">{branch.parentBranchId ? "↳ " : ""}{branch.title}</button>)}</div></aside></section></main>;
+  return <main className="min-w-0 bg-white">
+    <PageHeading title={detail.exploration.title} description={`${statusLabels[detail.exploration.status]} · ${detail.branches.length} 个分支`} action={<div className="flex flex-wrap gap-1">
+      <Link className={ui.quiet} href="/explore"><ArrowLeft aria-hidden="true" size={14} />返回探索</Link>
+      <Link className={ui.secondary} href={`/explore/${explorationId}/promotions`}><ArrowUpRight aria-hidden="true" size={14} />候选沉淀</Link>
+      <button className={ui.secondary} disabled={busy} onClick={() => void toggleStatus()} type="button">{isClosed ? <Save aria-hidden="true" size={14} /> : <XCircle aria-hidden="true" size={14} />}{isClosed ? "恢复探索" : "关闭探索"}</button>
+    </div>} />
+    <div className="grid min-w-0 lg:grid-cols-[260px_minmax(0,1fr)]">
+      <aside className="space-y-5 border-b border-zinc-200 bg-zinc-50/60 p-4 lg:border-b-0 lg:border-r" aria-label="探索分支">
+        <nav className="space-y-1" aria-label="分支谱系"><h2 className="mb-3 text-xs font-medium text-zinc-500">分支谱系</h2>{detail.branches.map((branch) => <button aria-current={branch.id === branchId ? "true" : undefined} className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 motion-reduce:transition-none md:min-h-8 ${branch.id === branchId ? "bg-emerald-50 text-emerald-800" : "text-zinc-600 hover:bg-zinc-100"}`} key={branch.id} onClick={() => setBranchId(branch.id)} type="button"><GitBranch aria-hidden="true" className="shrink-0" size={14} /><span className="truncate">{branch.title}</span>{!branch.parentBranchId ? <span className="ml-auto shrink-0 text-[10px] text-zinc-500">根</span> : null}</button>)}</nav>
+        <form className="space-y-2 border-t border-zinc-200 pt-4" onSubmit={addBranch}><label className={ui.label} htmlFor="branch-title">从当前分支继续</label><input className={ui.input} disabled={isClosed || busy} id="branch-title" maxLength={120} onChange={(event) => setBranchTitle(event.target.value)} placeholder="新分支标题" value={branchTitle} /><button className={ui.secondary} disabled={busy || isClosed || !branchTitle.trim()} type="submit"><Plus aria-hidden="true" size={14} />创建分支</button></form>
+      </aside>
+      <section className="min-w-0 space-y-5 px-5 py-5" aria-label="当前分支内容">
+        <div className="flex flex-wrap items-center justify-between gap-2"><p className="break-words text-xs text-zinc-500">{ancestry.join(" / ") || "根分支"}</p><span className="text-xs text-zinc-500">{blocks.length} 条内容</span></div>
+        {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
+        <div className="mx-auto max-w-3xl space-y-4" aria-live="polite">{blocks.length ? blocks.map((block) => <article className="border-b border-zinc-100 pb-4" key={block.id}><p className="mb-1 text-xs font-medium text-zinc-500">{kindLabels[block.kind]}</p><p className="whitespace-pre-wrap break-words text-sm leading-7 text-zinc-800">{block.content}</p></article>) : <EmptyState title="这个分支还没有内容" description="写下一个观察、假设或开放问题。" />}</div>
+        <form className="sticky bottom-0 mx-auto max-w-3xl space-y-3 border-t border-zinc-200 bg-white pt-4" onSubmit={addBlock}>
+          {isClosed ? <p className="text-xs text-zinc-500">探索已关闭，恢复后可继续添加内容。</p> : null}
+          <label className="sr-only" htmlFor="block-content">探索内容</label><textarea className={textareaClass} disabled={busy || isClosed} id="block-content" maxLength={20000} onChange={(event) => setContent(event.target.value)} placeholder="写下一个观察、假设或问题…" value={content} />
+          <div className="flex flex-wrap items-center justify-between gap-2"><label className="flex items-center gap-2 text-xs text-zinc-500" htmlFor="block-kind">内容类型<select className={`${ui.input} w-auto`} disabled={busy || isClosed} id="block-kind" onChange={(event) => setKind(event.target.value as ExplorationBlockKind)} value={kind}>{Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><button className={ui.primary} disabled={busy || isClosed || !content.trim()} type="submit"><Plus aria-hidden="true" size={14} />{busy ? "保存中" : "添加内容"}</button></div>
+        </form>
+      </section>
+    </div>
+  </main>;
 }

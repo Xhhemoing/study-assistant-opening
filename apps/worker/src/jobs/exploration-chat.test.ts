@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { AIProvider } from "@aistudy/ai";
-import { processExplorationChatJob } from "../../apps/worker/src/jobs/exploration-chat";
+import type { AIProvider, AIProviderRequest } from "@aistudy/ai";
+import type { AIConversationJobRequest } from "@aistudy/contracts";
+import { processExplorationChatJob } from "./exploration-chat";
 
 const request = {
   jobId: "11111111-1111-4111-8111-111111111111",
@@ -55,5 +56,50 @@ describe("exploration chat job", () => {
     const provider: AIProvider = { complete: async () => ({ text: "Reply", candidates: [] }) };
     const result = await processExplorationChatJob(request, provider);
     expect(result.provenance).toMatchObject({ providerRequestStatus: "completed", requestId: null, costUsd: null });
+  });
+});
+
+const job: AIConversationJobRequest = {
+  jobId: "11111111-1111-4111-8111-111111111111",
+  explorationId: "22222222-2222-4222-8222-222222222222",
+  role: "tutor",
+  input: "  Explain this  ",
+  selectedSourceIds: ["source-1"],
+  provider: "  test-provider  ",
+  model: "  test-model  ",
+  promptPolicyVersion: "  v1  ",
+};
+
+it("normalizes jobs at the worker boundary before building provider requests", async () => {
+  const received: AIProviderRequest[] = [];
+  const provider: AIProvider = {
+    complete: async (request) => {
+      received.push(request);
+      return { text: "Reply", candidates: [] };
+    },
+  };
+  const result = await processExplorationChatJob(job, provider);
+  expect(received).toHaveLength(1);
+  expect(received[0]).toMatchObject({
+    role: "tutor", input: "Explain this", selectedSourceIds: ["source-1"],
+  });
+  expect(result.provenance).toMatchObject({
+    provider: "test-provider", model: "test-model", promptPolicyVersion: "v1",
+  });
+  expect(job.input).toBe("  Explain this  ");
+});
+
+describe.each(["tutor", "silent"] as const)("%s job validation", (role) => {
+  it("rejects invalid input before any provider call", async () => {
+    let calls = 0;
+    const provider: AIProvider = {
+      complete: async () => {
+        calls += 1;
+        return { text: "Reply", candidates: [] };
+      },
+    };
+    await expect(processExplorationChatJob({ ...job, role, input: "   " }, provider))
+      .rejects.toThrow();
+    expect(calls).toBe(0);
   });
 });

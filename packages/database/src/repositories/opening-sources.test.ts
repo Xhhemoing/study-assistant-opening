@@ -44,7 +44,7 @@ describe("opening source upload completion boundary", () => {
       if (q.startsWith("SELECT * FROM opening_sources")) {
         return [pendingRow({ upload_state: state })];
       }
-      if (q.startsWith("UPDATE opening_sources")) {
+      if (q.startsWith("WITH completed AS (")) {
         state = "uploaded";
         return [pendingRow({ upload_state: "uploaded" })];
       }

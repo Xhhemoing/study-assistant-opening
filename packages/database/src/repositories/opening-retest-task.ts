@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import type { Sql } from "postgres";
 import { randomUUID } from "node:crypto";
-import type { TaskCreateInput, TaskItem } from "@aistudy/contracts";
+import type { TaskCreateInput, TaskCreateResult, TaskItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
+import { acceptAssistantTask } from "./opening-task-candidate-accept";
 import { OpeningPlanError } from "./opening-plan-error";
+import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
+import { insertAcceptedRetestActivity } from "./opening-retest-activities";
 
 export function retestPayloadHash(input: TaskCreateInput): string {
   return createHash("sha256")
@@ -71,24 +74,12 @@ export async function prepareRetestTask(
   input: TaskCreateInput,
 ): Promise<TaskItem | null> {
   if (input.inputSnapshot?.kind !== "retest" || !input.candidateId) return null;
+  const payload = await lockOpeningRetestReviewCandidate(tx, scope, input.candidateId);
+  // Admission and the candidate lock precede every replay, including a concurrent accept.
   const replay = await findRetestReplay(tx, scope, input);
   if (replay) return replay;
-  const jobs = await tx`
-    SELECT id, payload FROM opening_jobs
-    WHERE id = ${input.candidateId}
-      AND workspace_id = ${scope.workspaceId}
-      AND owner_user_id = ${scope.ownerUserId}
-      AND kind = ${"retest"}
-    FOR UPDATE`;
-  if (!jobs.length) throw new OpeningPlanError("NOT_FOUND", "retest candidate not found");
-  const payload = (jobs[0] as Record<string, unknown>).payload as { kind?: string; accepted?: boolean };
-  if (payload?.kind !== "task") {
-    throw new OpeningPlanError("VALIDATION", "retest candidate payload.kind must be task");
-  }
-  // The first lookup may predate a concurrent accept committed while we waited for this lock.
-  // Recheck intent/result before rejecting the now-consumed candidate.
-  const lockedReplay = await findRetestReplay(tx, scope, input);
-  if (lockedReplay) return lockedReplay;
+  if (payload.invalidated) throw new OpeningPlanError("CONFLICT", "retest candidate evidence was revised");
+  if (payload.discarded) throw new OpeningPlanError("CONFLICT", "retest candidate was discarded");
   if (payload.accepted) throw new OpeningPlanError("CONFLICT", "retest candidate already consumed");
   return null;
 }
@@ -123,6 +114,7 @@ export async function consumeRetestCandidate(
       AND owner_user_id = ${scope.ownerUserId}
       AND kind = ${"retest"}
       AND COALESCE(payload->>'kind', '') = 'task'
+      AND COALESCE(payload->>'invalidated', 'false') = 'false'
       AND COALESCE((payload->>'accepted')::boolean, false) = false
     RETURNING id`;
   if (!marked.length) {
@@ -134,44 +126,49 @@ export async function insertOpeningTask(
   sql: Sql,
   scope: OpeningScope,
   input: TaskCreateInput & { dueText?: string | null },
-): Promise<TaskItem> {
+): Promise<TaskCreateResult> {
   if (input.dueText && input.dueAt) {
     throw new OpeningPlanError("VALIDATION", "ambiguous dueText cannot become a formal deadline");
   }
-  const id = randomUUID();
-  return sql.begin(async (tx) => {
-    const replay = await prepareRetestTask(tx, scope, input);
-    if (replay) return replay;
-    if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
-      const consumed = await tx`
-        UPDATE opening_assistant_candidates c
-        SET status = 'accepted', updated_at = now()
-        WHERE c.id = ${input.candidateId}
-          AND c.workspace_id = ${scope.workspaceId}
-          AND c.status = 'pending'
-          AND c.payload->>'kind' = 'task'
-          AND EXISTS (
-            SELECT 1 FROM opening_conversations conv
-            WHERE conv.id = c.conversation_id
-              AND conv.workspace_id = c.workspace_id
-              AND conv.owner_user_id = ${scope.ownerUserId}
-          )
-        RETURNING c.id`;
-      if (!consumed.length) {
-        throw new OpeningPlanError("CONFLICT", "task candidate unavailable or already consumed");
-      }
-    }
+  const insert = async (tx: TransactionSql): Promise<TaskItem> => {
     const rows = await tx`
       INSERT INTO opening_tasks (
         id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
         priority, status, version, candidate_id
       ) VALUES (
-        ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
+        ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
         ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
         ${input.candidateId}
       ) RETURNING *`;
-    const task = mapTask(rows[0] as Record<string, unknown>);
+    return mapTask(rows[0] as Record<string, unknown>);
+  };
+  if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
+    return acceptAssistantTask(sql, scope, input, insert);
+  }
+  return sql.begin(async (tx) => {
+    const replay = await prepareRetestTask(tx, scope, input);
+    if (replay) return replay;
+    const task = await insert(tx);
     await consumeRetestCandidate(tx, scope, input, task.id);
+    const candidateRows = await tx`SELECT payload FROM opening_jobs
+      WHERE id=${input.candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      FOR SHARE`;
+    const candidate = (candidateRows[0] as Record<string, unknown> | undefined)?.payload as {
+      courseId?: string; skillLabel?: string; requirementKey?: string | null; dueAt?: string;
+    } | undefined;
+    if (candidate?.courseId && candidate.skillLabel && input.candidateId) {
+      await insertAcceptedRetestActivity(tx, scope, {
+        cycleId: input.candidateId,
+        candidateId: input.candidateId,
+        taskId: task.id,
+        courseId: candidate.courseId,
+        skillLabel: candidate.skillLabel,
+        requirementKey: candidate.requirementKey ?? null,
+        proposedAt: candidate.dueAt ?? null,
+        recommendedAt: candidate.dueAt ?? null,
+        acceptedAt: new Date().toISOString(),
+      });
+    }
     return task;
   });
 }

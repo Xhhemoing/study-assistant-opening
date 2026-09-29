@@ -38,8 +38,8 @@ describe("loadTodayResumeState", () => {
 
   it("counts real pending candidates and keeps the continue item", async () => {
     const state = await loadTodayResumeState({ scope, reader: reader(owned, 2) });
-    expect(state.kind).toBe("confirm");
-    expect(state.confirmCount).toBe(2);
+    expect(state.kind).toBe("ready");
+    expect(state.pendingReviews?.count).toBe(2);
     expect(state.continueItem).toMatchObject({
       conversationId: owned.id,
       sourceVersions: owned.sourceVersions,
@@ -94,23 +94,8 @@ describe("createTodayResumeReader", () => {
     expect(sql.mock.calls[0]?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId]);
   });
 
-  it("counts only this owner's pending candidates and does not query statistics", async () => {
-    const rows = [
-      { payload: { kind: "memory" } },
-      { payload: { kind: "task" } },
-    ];
-    const sql = Object.assign(
-      vi.fn(async () => rows),
-      { json: (value: unknown) => value },
-    );
-    const resume = createTodayResumeReader(sql as never);
-    await expect(resume.pendingCandidateCount(scope)).resolves.toBe(2);
-    const query = String((sql.mock.calls[0]?.[0] as TemplateStringsArray).join(" "));
-    expect(query).toContain("opening_assistant_candidates");
-    expect(query).toContain("opening_conversations");
-    expect(query).toContain("owner_user_id");
-    expect(query).toContain("status = 'pending'");
-    expect(query).not.toMatch(/count\(|avg\(|sum\(/i);
-    expect(sql.mock.calls[0]?.slice(1)).toEqual([scope.ownerUserId, scope.workspaceId]);
+  it("surfaces combined assistant/retest read failures instead of an empty count", async () => {
+    const sql = Object.assign(vi.fn(async () => { throw new Error("database unavailable"); }), { json: (value: unknown) => value });
+    await expect(createTodayResumeReader(sql as never).pendingCandidateCount(scope)).rejects.toThrow("database unavailable");
   });
 });

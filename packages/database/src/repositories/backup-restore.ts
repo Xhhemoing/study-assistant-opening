@@ -1,3 +1,4 @@
+import { assertNativeNoteRestorePrivacy } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
 import { planNativeRestore } from "@aistudy/domain/native";
@@ -15,8 +16,11 @@ export {
 export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository {
   return {
     async exportWorkspace(input) {
-      const snapshot = await dumpWorkspaceSnapshot(sql, input.workspaceId, input.ownerUserId);
-      return snapshotToPackage(snapshot);
+      return sql.begin(async tx => {
+        await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
+        const snapshot = await dumpWorkspaceSnapshot(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
+        return snapshotToPackage(snapshot);
+      });
     },
 
     async restoreWorkspace(input) {
@@ -33,6 +37,9 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
           compatibleMigrationIds,
         });
         await sql.begin(async (tx) => {
+          await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
+          await assertBackupWorkspaceOwner(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
+          await assertNativeNoteRestorePrivacy(tx as unknown as Sql, input.workspaceId, input.packed);
           await applyRestorePlan(tx as Sql, plan);
         });
         return {

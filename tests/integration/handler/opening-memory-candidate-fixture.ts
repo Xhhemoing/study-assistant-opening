@@ -20,10 +20,10 @@ export async function insertCompleteTurn(
   const turnId = randomUUID();
   await sql`
     INSERT INTO opening_turns (
-      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations
+      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations, context_source_refs
     ) VALUES (
       ${turnId}, ${scope.workspaceId}, ${conversationId}, 'assistant', 'reply', 'explain',
-      'complete', ${sql.array([] as string[])}::uuid[], ${sql.json([] as never)}
+      'complete', ${sql.array([] as string[])}::uuid[], ${sql.json([] as never)}, '[]'::jsonb
     )`;
   return turnId;
 }

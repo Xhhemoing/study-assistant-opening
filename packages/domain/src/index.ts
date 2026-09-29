@@ -155,7 +155,7 @@ export {
   instructionWithMemories,
 } from "./opening/memory-policy";
 
-export { summarizeObservations, type SummarizeOptions } from "./opening/learning-summary";
+export { summarizeObservations, type SummarizeOptions, type ObservationEligibilityInput, type CourseEvidence, type QualifiedLearningSummary, type RetestEvidenceIdentity } from "./opening/learning-summary";
 export {
   suggestRetestAt,
   buildRetestCandidates,
@@ -177,6 +177,14 @@ export {
   type DueTaskRef,
 } from "./opening/reminder-policy";
 export {
+  isRetestActivityDue,
+  reopenRetestActivity,
+  transitionRetestActivity,
+  RetestActivityTransitionError,
+  type RetestActivityCommand,
+  type RetestActivityReopenInput,
+} from "./opening/retest-activity";
+export {
   composeOpeningBackupDraft,
   type OpeningBackupComposeInput,
   type OpeningBackupComposeResult,
@@ -190,3 +198,6 @@ export {
   type OpeningDeletionMark,
   type RestorePreview,
 } from "./opening/backup-policy";
+
+export * from "./opening/evidence-eligibility";
+export { resolveLearningPreferences } from "./opening/learning-preferences";

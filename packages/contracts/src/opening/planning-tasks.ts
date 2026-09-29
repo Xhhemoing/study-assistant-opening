@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
-import { candidateRefSchema } from "./candidate-review";
+import { candidateRefSchema, reviewResultSchema } from "./candidate-review";
 
 export const taskItemSchema = z.object({
   id: uuidSchema,
@@ -33,8 +33,10 @@ export const taskCreateInputSchema = z.object({
   candidateId: uuidSchema.nullable(),
   /** Optional for old clients; server-side owner/type validation is always required. */
   candidateRef: candidateRefSchema.optional(),
-  /** Idempotency key when accepting a retest candidate into a task. */
+  /** Idempotency key when accepting an assistant or retest candidate into a task. */
   clientKey: z.string().min(8).max(200).optional(),
+  /** Assistant candidate version: pending is 0; replays compare the original value. */
+  expectedVersion: z.number().int().nonnegative().optional(),
   /** Plan version the retest snapshot was based on. Not calendar scheduling. */
   baseVersion: z.number().int().nonnegative().optional(),
   inputSnapshot: retestTaskSnapshotSchema.optional(),
@@ -57,6 +59,16 @@ export const taskCreateInputSchema = z.object({
     ctx.addIssue({ code: "custom", message: "candidate origin must match the task snapshot", path: ["candidateRef", "origin"] });
   }
 });
+
+/** Explicit candidateRef clients receive review metadata; legacy responses remain flat. */
+export const taskCreateResultSchema = taskItemSchema.extend({ reviewResult: reviewResultSchema.optional() });
+export const taskStatusUpdateInputSchema = z.object({
+  status: z.enum(["done", "skipped"]),
+  expectedVersion: z.number().int().positive(),
+  at: isoDateTimeSchema,
+}).strict();
+export type TaskCreateResult = z.infer<typeof taskCreateResultSchema>;
+export type TaskStatusUpdateInput = z.infer<typeof taskStatusUpdateInputSchema>;
 
 export type TaskItem = z.infer<typeof taskItemSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateInputSchema>;

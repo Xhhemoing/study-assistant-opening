@@ -1,20 +1,19 @@
-// Vitest's workspace glob currently includes only *.test.ts, so this component
-// test intentionally uses that extension while rendering TSX through Vite.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-// Workspace chrome is intentionally tested as static markup: state lives in the import container.
 import { NotionImportWorkspace } from "./notion-import-workspace";
 
 const props = {
   children: createElement("article", null, "导入预览正文"),
   documentTitle: "概率推理笔记",
-  pageCount: 3,
-  selectedPageTitle: "概率推理笔记",
+  pages: [{ id: "page-1", title: "概率推理笔记", path: "概率推理笔记.html" }, { id: "page-2", title: "诊断测试的例子", path: "诊断测试的例子.html" }],
+  selectedPageId: "page-1",
   onClosePanel: () => undefined,
   onOpenPage: () => undefined,
   onReset: () => undefined,
+  onExportReport: () => undefined,
+  onTextStyleChange: () => undefined,
   onToggleFullWidth: () => undefined,
   onTogglePanel: () => undefined,
   onToggleSidebar: () => undefined,
@@ -22,40 +21,31 @@ const props = {
   sidebarOpen: true,
   textStyle: "default" as const,
   fullWidth: false,
-  onTextStyleChange: () => undefined,
 };
 
 describe("notion import workspace", () => {
-  it("renders workspace navigation and keeps the page canvas central", () => {
+  it("renders parsed page navigation and a compact reading canvas", () => {
     const html = renderToStaticMarkup(createElement(NotionImportWorkspace, props));
-
-    expect(html).toContain('aria-label="工作区导航"');
-    expect(html).toContain("sm:flex");
-    expect(html).toContain("Private");
+    expect(html).toContain('aria-label="导入页面导航"');
+    expect(html).toContain("导入页面");
     expect(html).toContain("概率推理笔记");
+    expect(html).toContain("诊断测试的例子");
     expect(html).toContain("导入预览正文");
-    expect(html).toContain('aria-label="切换侧边栏"');
-    expect(html).toContain('aria-label="更多页面操作"');
-    expect(html).toContain('aria-label="分享当前导入预览"');
+    expect(html).toContain('aria-label="切换页面列表"');
+    expect(html).toContain("未上传或保存到知识库");
   });
 
-  it("renders the Notion-style action menu with page appearance controls", () => {
+  it("renders local appearance controls in the context inspector", () => {
     const html = renderToStaticMarkup(createElement(NotionImportWorkspace, { ...props, panel: "actions" as const }));
-
-    expect(html).toContain("Search actions...");
-    expect(html).toContain("Default");
-    expect(html).toContain("Serif");
-    expect(html).toContain("Mono");
-    expect(html).toContain("Small text");
-    expect(html).toContain("Full width");
-    expect(html).toContain("Import another export");
-    expect(html).toContain("Export report");
+    expect(html).toContain("阅读字体");
+    expect(html).toContain("下载格式损失报告");
+    expect(html).toContain("重新选择 ZIP");
+    expect(html).toContain("宽版阅读");
   });
 
-  it("renders a compact share panel on demand", () => {
+  it("states that sharing is unavailable in the local preview", () => {
     const html = renderToStaticMarkup(createElement(NotionImportWorkspace, { ...props, panel: "share" as const }));
-
-    expect(html).toContain("Share import preview");
-    expect(html).toContain("Keep source private");
+    expect(html).toContain("尚未接入发布、分享链接或存入知识库");
+    expect(html).toContain("分享尚不可用");
   });
 });

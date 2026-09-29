@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { OpeningBackupObject } from "@aistudy/domain";
+import { OpeningStorageError } from "./opening-s3";
 import { snapshotOpeningBackupSources, type OpeningBackupSource } from "./opening-backup-manifest";
 
 export type OpeningBackupObjectReader = {
@@ -50,7 +51,8 @@ async function stageOne(
   let body: AsyncIterable<Uint8Array>;
   try {
     body = await storage.readObject(key);
-  } catch {
+  } catch (error) {
+    if (error instanceof OpeningStorageError && error.code === "NOT_FOUND") throw error;
     throw failure("storage unavailable");
   }
   const hash = createHash("sha256");
@@ -80,7 +82,8 @@ export async function stageOpeningBackupObjects(
   sources: readonly OpeningBackupSource[],
   parentDirectory: string,
   storage: OpeningBackupObjectReader,
-): Promise<{ directory: string; objects: OpeningBackupObject[] }> {
+  options: { allowUnavailable?: boolean } = {},
+): Promise<{ directory: string; objects: OpeningBackupObject[]; unavailableSources: Array<{ sourceId: string; version: number }> }> {
   const snapshots = snapshotOpeningBackupSources(sources);
   if (!storage || typeof storage.finalKey !== "function" || typeof storage.readObject !== "function") {
     throw failure("storage unavailable");
@@ -93,8 +96,15 @@ export async function stageOpeningBackupObjects(
     throw failure("staging unavailable");
   }
   const objects: OpeningBackupObject[] = [];
+  const unavailableSources: Array<{ sourceId: string; version: number }> = [];
   try {
-    for (const source of snapshots) objects.push(await stageOne(directory, source, storage));
+    for (const source of snapshots) {
+      try { objects.push(await stageOne(directory, source, storage)); }
+      catch (error) {
+        if (!options.allowUnavailable || !(error instanceof OpeningStorageError) || error.code !== "NOT_FOUND") throw error;
+        unavailableSources.push({ sourceId: source.sourceId, version: source.version });
+      }
+    }
   } catch (error) {
     try {
       await rm(directory, { recursive: true, force: false });
@@ -103,5 +113,5 @@ export async function stageOpeningBackupObjects(
     }
     throw error instanceof Error ? error : failure("storage unavailable");
   }
-  return { directory, objects };
+  return { directory, objects, unavailableSources };
 }

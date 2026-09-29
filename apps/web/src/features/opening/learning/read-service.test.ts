@@ -1,96 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
-import type { LearningObservation, Scope } from "@aistudy/contracts";
+import type { Scope } from "@aistudy/contracts";
 import { createOpeningLearningReadService } from "./read-service";
+import { courseEvidence, courseEvidenceCases, learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+import { summarizeObservations } from "@aistudy/domain";
 
-const scope: Scope = {
-  workspaceId: "11111111-1111-4111-8111-111111111111",
-  ownerUserId: "22222222-2222-4222-8222-222222222222",
-};
-const courseId = "33333333-3333-4333-8333-333333333333";
-const NOW = "2026-09-14T10:00:00.000Z";
-
-function observation(partial: Partial<LearningObservation> = {}): LearningObservation {
-  return {
-    id: "44444444-4444-4444-8444-444444444444",
-    workspaceId: scope.workspaceId,
-    sessionId: "55555555-5555-4555-8555-555555555555",
-    courseId,
-    skillLabel: "fractions",
-    sourceIds: [],
-    problemId: null,
-    retestId: null,
-    answer: "1/2",
-    outcome: "correct",
-    assistance: "independent",
-    clientKey: "client-key-01",
-    occurredAt: NOW,
-    sourceTurnIds: [],
-    verdictSource: "self_report",
-    referenceSourceId: null,
-    evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
-    ...partial,
-  };
-}
+const scope: Scope = { workspaceId: learningObservation.workspaceId, ownerUserId: "22222222-2222-4222-8222-222222222222" };
+const courseId = learningObservation.courseId;
+const now = () => learningObservation.occurredAt;
 
 describe("opening learning read service", () => {
-  it("returns an empty known state when the owned course has no observations", async () => {
-    const listObservationsForCourse = vi.fn(async () => []);
-    const service = createOpeningLearningReadService({
-      assertOwnedCourse: vi.fn(async () => undefined),
-      listObservationsForCourse,
-      now: () => NOW,
-    });
-
+  it("returns a real empty course", async () => {
+    const readCourseEvidence = vi.fn(async () => ({ observations: [], evidenceContexts: {} }));
+    const service = createOpeningLearningReadService({ readCourseObservationHeads: async () => [], assertOwnedCourse: async () => undefined, readCourseEvidence, now });
     await expect(service.summarizeLearning(scope, courseId)).resolves.toEqual([]);
-    expect(listObservationsForCourse).toHaveBeenCalledWith(scope, courseId);
+    expect(readCourseEvidence).toHaveBeenCalledWith(scope, courseId);
   });
 
-  it("404s when the course is unknown to this owner", async () => {
-    const listObservationsForCourse = vi.fn();
+  it("authorizes before reading evidence", async () => {
+    const readCourseEvidence = vi.fn(async () => courseEvidence());
     const service = createOpeningLearningReadService({
-      assertOwnedCourse: vi.fn(async () => {
-        throw Object.assign(new Error("course not found"), { code: "NOT_FOUND" });
-      }),
-      listObservationsForCourse,
-      now: () => NOW,
+      readCourseObservationHeads: async () => [], assertOwnedCourse: async () => { throw Object.assign(new Error("course not found"), { code: "NOT_FOUND" }); },
+      readCourseEvidence, now,
     });
-
-    await expect(service.summarizeLearning(scope, courseId)).rejects.toMatchObject({
-      code: "NOT_FOUND",
-    });
-    expect(listObservationsForCourse).not.toHaveBeenCalled();
+    await expect(service.summarizeLearning(scope, courseId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(readCourseEvidence).not.toHaveBeenCalled();
   });
 
-  it("keeps repository failures as errors instead of a fake summary", async () => {
+  it("propagates unavailable evidence rather than inventing a summary", async () => {
     const service = createOpeningLearningReadService({
-      assertOwnedCourse: vi.fn(async () => undefined),
-      listObservationsForCourse: vi.fn(async () => {
-        throw Object.assign(new Error("database unavailable"), { code: "UNAVAILABLE" });
-      }),
-      now: () => NOW,
+      readCourseObservationHeads: async () => [], assertOwnedCourse: async () => undefined,
+      readCourseEvidence: async () => { throw Object.assign(new Error("database unavailable"), { code: "UNAVAILABLE" }); },
+      now,
     });
-
-    await expect(service.summarizeLearning(scope, courseId)).rejects.toMatchObject({
-      code: "UNAVAILABLE",
-    });
+    await expect(service.summarizeLearning(scope, courseId)).rejects.toMatchObject({ code: "UNAVAILABLE" });
   });
 
-  it("summarizes real observations without inventing mastery", async () => {
-    const service = createOpeningLearningReadService({
-      assertOwnedCourse: vi.fn(async () => undefined),
-      listObservationsForCourse: vi.fn(async () => [observation()]),
-      now: () => NOW,
-    });
-
-    await expect(service.summarizeLearning(scope, courseId)).resolves.toEqual([
-      {
-        skillLabel: "fractions",
-        status: "needs_check",
-        evidenceIds: ["44444444-4444-4444-8444-444444444444"],
-        evidenceSources: ["self_report"],
-        sampleCount: 1,
-        lastObservedAt: NOW,
-      },
-    ]);
+  it.each(courseEvidenceCases)("returns the shared qualifications for $name", async ({ evidence }) => {
+    const service = createOpeningLearningReadService({ readCourseObservationHeads: async () => [], assertOwnedCourse: async () => undefined, readCourseEvidence: async () => evidence, now });
+    await expect(service.summarizeLearning(scope, courseId)).resolves.toEqual(summarizeObservations(evidence.observations, now(), { evidenceContexts: evidence.evidenceContexts }));
   });
+});
+
+
+it("authorizes observation history heads before reading and includes tombstones", async () => {
+  const tombstone = { ...learningObservation, revisionKind: "retract" as const };
+  const readCourseObservationHeads = vi.fn(async () => [tombstone]);
+  const assertOwnedCourse = vi.fn(async () => undefined);
+  const service = createOpeningLearningReadService({ assertOwnedCourse, readCourseObservationHeads, readCourseEvidence: async () => ({ observations: [], evidenceContexts: {} }) });
+  expect(await service.listLearningObservations(scope, courseId)).toEqual([tombstone]);
+  expect(assertOwnedCourse).toHaveBeenCalledWith(scope, courseId);
+  expect(readCourseObservationHeads).toHaveBeenCalledWith(scope, courseId);
+  expect(await service.summarizeLearning(scope, courseId)).toEqual([]);
+  assertOwnedCourse.mockRejectedValueOnce(Object.assign(new Error("not found"), { code: "NOT_FOUND" }));
+  await expect(service.listLearningObservations(scope, courseId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(readCourseObservationHeads).toHaveBeenCalledTimes(1);
 });

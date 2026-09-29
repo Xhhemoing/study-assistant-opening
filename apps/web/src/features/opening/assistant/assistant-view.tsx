@@ -1,19 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ConversationResume, SourceRecord, TurnRecord } from "@aistudy/contracts";
+import type { ConversationResume, ConversationSummary, LearningAttempt, SourceRecord, TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { MessageList } from "./message-list";
-import { resolveChatMessages, type ChatMessageView } from "./message-model";
+import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
-import { InboxPanel } from "../inbox/inbox-panel";
+import Link from "next/link";
+import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
+import { LoadingRows, secondaryButtonClass } from "../design/ui";
+import { ResponsiveInspector } from "../design/inspector";
+import { TaskContext } from "./task-context";
+import { replacePromptDraft, type StudyTask } from "../planning/study-task";
 import { MemoryPanel } from "./memory-panel";
+import { prepareSnippetDraft } from "./save-snippet";
+import { SaveSnippetDialog } from "./save-snippet-dialog";
 
 type Props = {
   api?: OpeningApi;
   initialConversationId?: string | null;
+  learningAttempt?: LearningAttempt;
+  task?: StudyTask | null;
+  initialTitle?: string;
+  startFresh?: boolean;
+  embedded?: boolean;
 };
 
 const TERMINAL_JOB_STATUSES = new Set<JobStatusResponse["status"]>([
@@ -137,33 +149,77 @@ export function mergeChatMessages(
 
 export function appendEphemeralResponseIfActive(
   current: ChatMessageView[],
-  input: { clientKey: string; text: string; output: { requestId: string | null; text: string } },
+  input: { clientKey: string; text: string; output: { requestId: string | null; text: string; historyDiscarded?: boolean; provenanceId?: string | null } },
   signal: AbortSignal,
 ): ChatMessageView[] {
   if (signal.aborted) return current;
-  return [...current,
-    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [] },
-    { id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`, role: "assistant", text: input.output.text, citations: [], citationLabels: [], status: "complete" },
+  return [...(input.output.historyDiscarded ? [] : current),
+    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
+    { id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`, role: "assistant", text: input.output.text, citations: [], citationLabels: [], status: "complete", origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
   ];
 }
 
-export function AssistantView({ api: apiProp, initialConversationId = null }: Props) {
+export function learningAttemptTurnContext(attempt?: LearningAttempt) {
+  return attempt ? { learningSessionId: attempt.sessionId, attemptId: attempt.id } : {};
+}
+
+export function shouldLoadConversationList(learningAttempt?: LearningAttempt): boolean {
+  return !learningAttempt;
+}
+
+export function shouldRefreshCurrentConversation(learningAttempt: LearningAttempt | undefined, conversationId: string | null): boolean {
+  return Boolean(learningAttempt && conversationId);
+}
+
+export function canReuseAssistantConversation(conversationId: string | null, learningAttempt?: LearningAttempt, resume?: ConversationResume | null): boolean {
+  return Boolean(conversationId && (!learningAttempt || resume === null || resume === undefined || resume.courseId === learningAttempt.courseId));
+}
+
+export function conversationForAssistant(
+  listed: readonly ConversationSummary[],
+  initialConversationId: string | null,
+  attemptCourseId?: string,
+): ConversationSummary | null {
+  const eligible = attemptCourseId ? listed.filter((row) => row.courseId === attemptCourseId) : listed;
+  return eligible.find((row) => row.id === initialConversationId) ?? eligible[0] ?? null;
+}
+
+export function selectionForResumedConversation(resume: ConversationResume, attempt?: LearningAttempt) {
+  return attempt
+    ? { sourceIds: attempt.sourceIds, currentPage: null }
+    : { sourceIds: resume.sourceIds, currentPage: resume.currentPage ?? null };
+}
+
+export function AssistantView(props: Props) {
+  const [session, setSession] = useState(0);
+  return <AssistantWorkspace key={session} {...props} initialConversationId={session ? null : props.initialConversationId}
+    initialTitle={session ? undefined : props.initialTitle} startFresh={session ? true : props.startFresh}
+    onNew={() => setSession((value) => value + 1)} />;
+}
+function AssistantWorkspace({ api: apiProp, initialConversationId = null, learningAttempt, task, initialTitle,
+  startFresh = false, embedded = false, onNew }: Props & { onNew: () => void }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [conversationId, setConversationId] = useState<string | null>(
-    initialConversationId,
+    learningAttempt ? null : initialConversationId,
   );
   const [resume, setResume] = useState<ConversationResume | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
-  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? []);
   const [currentPage, setCurrentPage] = useState("");
   const [turns, setTurns] = useState<TurnRecord[]>([]);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [reload, setReload] = useState(0);
+  const [contextOpen, setContextOpen] = useState(false);
   const [error, setError] = useState("");
   const [pendingHint, setPendingHint] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
+  const [ephemeralPrivacyEpoch, setEphemeralPrivacyEpoch] = useState<number>();
+  const [snippetDraft, setSnippetDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const refreshSources = useCallback(async () => {
@@ -173,14 +229,19 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
   const refreshConversation = useCallback(
     async (id: string) => {
       const nextResume = await api.resumeConversation(id);
-      const nextTurns = await api.listTurns(id).catch(() => [] as TurnRecord[]);
+      if (learningAttempt && nextResume.courseId !== learningAttempt.courseId) {
+        setConversationId(null); setResume(null); setTurns([]);
+        return false;
+      }
+      const nextTurns = await api.listTurns(id);
       setResume(nextResume);
       setTurns(nextTurns);
-      if (nextResume.sourceIds.length > 0) {
-        setSelectedSourceIds(nextResume.sourceIds);
+      const restoredSelection = selectionForResumedConversation(nextResume, learningAttempt);
+      if (learningAttempt || restoredSelection.sourceIds.length > 0) {
+        setSelectedSourceIds(restoredSelection.sourceIds);
       }
-      if (nextResume.currentPage != null) {
-        setCurrentPage(String(nextResume.currentPage));
+      if (!learningAttempt && restoredSelection.currentPage != null) {
+        setCurrentPage(String(restoredSelection.currentPage));
       }
       let pendingJob: JobStatusResponse | null;
       try {
@@ -189,9 +250,11 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         const discovered = pendingJobDiscoveryState({ ok: false, error: lookupError });
         if (discovered.kind === "unavailable") {
           setPendingHint(`尚未确认是否有进行中的回答：${discovered.message}`);
+          setRecoveryRequired(true);
         }
-        return;
+        return true;
       }
+      setRecoveryRequired(false);
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
       if (discovered.kind === "active") {
         setActiveJobId(discovered.activeJobId);
@@ -202,37 +265,50 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         setPending(false);
         setPendingHint("");
       }
+      return true;
     },
-    [api],
+    [api, learningAttempt],
   );
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true); setError(""); setRecoveryRequired(false);
     (async () => {
       try {
         await refreshSources();
         if (cancelled) return;
-        if (initialConversationId) {
+        if (initialConversationId && !learningAttempt) {
           setConversationId(initialConversationId);
           await refreshConversation(initialConversationId);
           return;
         }
+        if (startFresh && !learningAttempt) return;
+        if (conversationId && shouldRefreshCurrentConversation(learningAttempt, conversationId)) {
+          await refreshConversation(conversationId);
+          return;
+        }
+        // Practice conversations are associated with turns server-side, but the
+        // summary/resume contract does not expose that association. Starting a
+        // fresh conversation here prevents another practice attempt's tutoring
+        // history from being shown as context for this attempt.
+        if (!shouldLoadConversationList(learningAttempt)) return;
         const listed = await api.listConversations();
         if (cancelled) return;
-        if (listed[0]) {
-          setConversationId(listed[0].id);
-          await refreshConversation(listed[0].id);
+        const selected = conversationForAssistant(listed, initialConversationId, learningAttempt?.courseId);
+        if (selected && await refreshConversation(selected.id) && !cancelled) {
+          setConversationId(selected.id);
         }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "加载失败");
+          setRecoveryRequired(true);
         }
-      }
+      } finally { if (!cancelled) setLoading(false); }
     })();
     return () => {
       cancelled = true;
     };
-  }, [api, initialConversationId, refreshConversation, refreshSources]);
+  }, [api, conversationId, initialConversationId, learningAttempt, refreshConversation, refreshSources, reload, startFresh]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -271,10 +347,10 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     : savedDisplay;
 
   async function ensureConversation(): Promise<string> {
-    if (conversationId) return conversationId;
+    if (conversationId && canReuseAssistantConversation(conversationId, learningAttempt, resume)) return conversationId;
     const created = await api.createConversation({
       title: "学习对话",
-      courseId: null,
+      courseId: learningAttempt?.courseId ?? null,
     });
     setConversationId(created.id);
     return created.id;
@@ -314,24 +390,27 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     const abortController = new AbortController();
     abortRef.current = abortController;
     try {
-      if (input.privacy === "ephemeral") {
-        const history = ephemeralMessages.slice(-16).map((message) => ({
-          role: message.role,
-          text: message.text,
-        }));
+      if (input.privacy === "ephemeral" && !learningAttempt) {
+        const history = ephemeralHistoryFromMessages(ephemeralMessages);
         const output = await api.replyEphemeral({
           text: input.text,
           sourceIds: selectedSourceIds,
           mode: input.mode,
           history,
+          ...(ephemeralPrivacyEpoch === undefined ? {} : { historyPrivacyEpoch: ephemeralPrivacyEpoch }),
           ...(page !== undefined ? { currentPage: page } : {}),
         }, abortController.signal);
+        if (abortController.signal.aborted) return { accepted: false };
+        setEphemeralPrivacyEpoch(output.privacyEpoch);
         setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
           clientKey: input.clientKey,
           text: input.text,
           output,
         }, abortController.signal));
-        setPendingHint("本轮仅保留在当前标签页；刷新后不会恢复。",);
+        setPendingHint(output.historyDiscarded
+          ? "隐私设置已变化或旧临时历史无法验证，已清除旧临时上下文；本次只发送当前输入和允许的材料。"
+          : "本轮仅保留在当前标签页；刷新后不会恢复。");
+        setDraft("");
         setPending(false);
         abortRef.current = null;
         return { accepted: true };
@@ -344,6 +423,7 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         mode: input.mode,
         clientKey: input.clientKey,
         privacy: "saved",
+        ...learningAttemptTurnContext(learningAttempt),
         ...(page !== undefined ? { currentPage: page } : {}),
       });
       setActiveJobId(submitted.jobId);
@@ -361,6 +441,11 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
         return { accepted: false };
       }
       if (!jobSubmitted) setPending(false);
+      if (err instanceof OpeningApiError && err.code === "PRIVACY_CHANGED") {
+        setEphemeralMessages([]);
+        setEphemeralPrivacyEpoch(undefined);
+        setPendingHint("隐私设置已变化，旧临时上下文已清除；本次未发送，请确认材料后重试。");
+      }
       if (
         err instanceof OpeningApiError &&
         err.code === "page_not_in_sources" &&
@@ -373,50 +458,33 @@ export function AssistantView({ api: apiProp, initialConversationId = null }: Pr
     }
   }
 
-  return (
-    <div className="flex h-full min-h-[28rem] flex-col rounded-xl border border-zinc-200 bg-white">
-      <header className="border-b border-zinc-200 px-3 py-2">
-        <h1 className="text-base font-semibold text-zinc-900">助理（M1 薄聊天）</h1>
-        <p className="text-xs text-zinc-500">
-          {assistantContextHint(selectedSourceIds)}。保存模式写入对话；不保存本轮只保留在当前标签页。
-        </p>
+  function setPrompt(value: string) {
+    if (pending || loading || recoveryRequired) return;
+    setDraft(replacePromptDraft(draft, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
+  }
+  const Heading = embedded ? "h2" : "h1";
+  return <section aria-label="自由探索工作台" className="flex h-full min-h-[400px] min-w-0 overflow-hidden bg-white lg:min-h-0">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 sm:px-5">
+        <Heading className="min-w-0 truncate text-sm font-semibold text-zinc-800">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "自由探索")}</Heading>
+        <div className="flex shrink-0 items-center gap-1">
+          <button type="button" className={secondaryButtonClass} aria-expanded={contextOpen} aria-controls="exploration-context" onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
+          {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; onNew(); }}><Plus size={15} aria-hidden /></button> : null}
+        </div>
       </header>
-      <InboxPanel api={api} sources={sources} onChanged={refreshSources} />
-      <MemoryPanel api={api} />
-      <SourcePageControls
-        sources={sources}
-        selectedSourceIds={selectedSourceIds}
-        currentPage={currentPage}
-        onSelectedSourceIdsChange={setSelectedSourceIds}
-        onCurrentPageChange={setCurrentPage}
-        disabled={pending}
-      />
-      <MessageList
-        messages={display.messages}
-        historyTruncated={display.historyTruncated}
-        currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))}
-      />
-      {pendingHint ? (
-        <p className="px-3 text-xs text-amber-800">{pendingHint}</p>
-      ) : null}
-      {error ? (
-        <p className="px-3 text-sm text-red-600" role="alert">
-          {error}
-        </p>
-      ) : null}
-      <Composer
-        draft={draft}
-        intent={{
-          sourceIds: selectedSourceIds,
-          currentPage: pageIntentValue(currentPage),
-        }}
-        onDraftChange={setDraft}
-        pending={pending}
-        privacy={privacy}
-        onPrivacyChange={setPrivacy}
-        onCancel={cancelCurrentTurn}
-        onSubmit={handleSubmit}
-      />
+      {task ? <TaskContext task={task} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} />}
+      {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
+      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-red-200 bg-red-50 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-red-800">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
+      <Composer practiceMode={Boolean(learningAttempt)} draft={draft} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
-  );
+    {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
+    <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
+      <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
+      <SourcePageControls sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources} selectedSourceIds={selectedSourceIds} currentPage={currentPage} onSelectedSourceIdsChange={setSelectedSourceIds} onCurrentPageChange={setCurrentPage} disabled={pending || loading} />
+      <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
+      <details className="mt-5 border-t border-zinc-200 pt-2"><summary className="flex min-h-10 cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700"><ShieldCheck size={14} aria-hidden />AI 记忆与待确认建议</summary><MemoryPanel api={api} /></details>
+      <p className="mt-6 text-[11px] leading-5 text-zinc-500">选择资料不会发送消息。AI 建议需由你确认后才进入后续上下文。</p>
+    </ResponsiveInspector>
+  </section>;
 }

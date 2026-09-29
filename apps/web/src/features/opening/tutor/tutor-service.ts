@@ -58,6 +58,7 @@ export function exposureLevelForMode(
 export function createTutorService(deps: {
   conversations: OpeningConversationRepository;
   sourceChunks: OpeningSourceChunksRepository;
+  attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
   readSelection(scope: OpeningConversationScope, conversationId: string): Promise<PageSelectionInput | null>;
 }) {
   async function authorizedChunksFor(
@@ -162,7 +163,10 @@ export function createTutorService(deps: {
         }
       }
 
-      let learningSessionId = existing?.learningSessionId ?? input.learningSessionId ?? null;
+      const attempt = input.attemptId && deps.attempts ? await deps.attempts.assertAccess(scope, input.attemptId) : null;
+      if (input.attemptId && !attempt) throw new TutorServiceError("NOT_FOUND", "attempt not found", 404);
+      if (attempt && input.learningSessionId && input.learningSessionId !== attempt.sessionId) throw new TutorServiceError("VALIDATION", "attempt/session mismatch", 400);
+      let learningSessionId = attempt?.sessionId ?? existing?.learningSessionId ?? input.learningSessionId ?? null;
       if (!shouldCreateLearningSession(input.mode)) {
         learningSessionId = null;
       }
@@ -176,6 +180,7 @@ export function createTutorService(deps: {
         privacy: input.privacy,
         sourceIds: input.sourceIds,
         learningSessionId,
+        attemptId: input.attemptId ?? null,
         currentPage: input.currentPage ?? null,
         chunkId: input.chunkId ?? null,
       });

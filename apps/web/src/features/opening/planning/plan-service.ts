@@ -4,9 +4,11 @@ import {
   weekSessionSchema,
   type PlanDraft,
   type Scope,
-  type TaskItem,
+  type TaskCreateResult,
   type TimeBlock,
   type WeekSession,
+  taskStatusUpdateInputSchema,
+  uuidSchema,
 } from "@aistudy/contracts";
 import { planDay } from "@aistudy/domain";
 import {
@@ -40,10 +42,19 @@ export function createOpeningPlanService(sql: Sql) {
       return repo.listTasks(scope);
     },
 
-    async createTask(scope: Scope, raw: unknown): Promise<TaskItem> {
+    async createTask(scope: Scope, raw: unknown): Promise<TaskCreateResult> {
       const input = taskCreateInputSchema.parse(raw);
       try {
         return await repo.createTask(scope, input);
+      } catch (error) {
+        throw mapRepoError(error);
+      }
+    },
+
+    async updateTaskStatus(scope: Scope, taskId: string, raw: unknown) {
+      const input = taskStatusUpdateInputSchema.parse(raw);
+      try {
+        return await repo.updateTaskStatus(scope, uuidSchema.parse(taskId), input);
       } catch (error) {
         throw mapRepoError(error);
       }

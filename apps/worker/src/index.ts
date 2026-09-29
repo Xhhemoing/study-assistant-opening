@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
-import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { createOpeningProvider } from "@aistudy/ai";
 import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
@@ -37,30 +37,23 @@ export async function main(): Promise<void> {
   const sql = createSqlClient(process.env.DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/aistudy");
   const repository = createOpeningJobRepository(sql);
   const privacyRepo = createOpeningPrivacyRepository(sql);
-  const learningDb = {
-    async query<T>(text: string, params: unknown[] = []): Promise<T[]> {
-      const rows = await sql.unsafe(text, params as never[]);
-      return rows as unknown as T[];
-    },
-    async execute(text: string, params: unknown[] = []): Promise<void> {
-      await sql.unsafe(text, params as never[]);
-    },
-  };
-  const learning = createOpeningLearningRepository(learningDb);
+  const learning = createOpeningLearningRepository(sql);
   const retests = createOpeningRetestRepository(sql);
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" });
   const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: process.env.PARSER_TEMP_DIR ?? ".tmp/opening-parser" });
   const retest = createRetestCandidateHandler({
-    listObservations: (scope, courseId) => learning.listObservationsForCourse(scope, courseId),
-    listDueRetestSkills: (scope, courseId) => retests.listAcceptedSkillLabels(scope, courseId),
-    saveCandidates: (scope, candidates) => retests.saveCandidates(scope, candidates),
+    readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),
+    readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
+    listDueRetests: (scope, courseId) => retests.listDueEvidence(scope, courseId),
+    saveCandidates: (scope, candidates, epoch, jobId) => retests.saveCandidates(scope, candidates, epoch, jobId),
   });
   const reminders = createOpeningReminderRepository(sql);
   const feishu = createFeishuReminderAdapter({ credential: process.env.FEISHU_REMINDER_CREDENTIAL ?? null });
   const remind = createRemindHandler({
     record: (id, input) => reminders.recordAttempt(id, input),
+    isCurrent: (id, at) => reminders.isCurrent(id, at),
     send: (input, signal) => feishu.send(input, signal),
   });
   const handlers = createHandlers(parse, { retest, remind });
@@ -84,7 +77,7 @@ export async function main(): Promise<void> {
       listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
     },
     memories: {
-      list: (scope) => memory.listForContext(scope),
+      listContext: (scope, now) => memory.listContext(scope, now),
     },
     learning: {
       insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),

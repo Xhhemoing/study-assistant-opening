@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { EphemeralProvenanceError, mergeContextSourceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
 import {
   providerOutputSchema,
   type EphemeralTurnInput,
+  type EphemeralTurnResponse,
   type ProviderInput,
   type ProviderOutput,
   type SourceChunk,
@@ -48,6 +51,11 @@ export type EphemeralProvider = {
 export type EphemeralTutorDeps = {
   sources: { listOwnedIds(scope: EphemeralScope, sourceIds: string[]): Promise<string[]> };
   chunks: { listForSources(scope: EphemeralScope, sourceIds: string[]): Promise<SourceChunk[]> };
+  privacy: {
+    snapshot(scope: EphemeralScope): Promise<{ epoch: number; excludedSourceIds: string[] }>;
+    currentEpoch(scope: EphemeralScope): Promise<number>;
+  };
+  provenance?: EphemeralProvenanceRepository;
   budget: BudgetedRepository;
   provider: EphemeralProvider | null;
   config: {
@@ -73,7 +81,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       scope: EphemeralScope,
       input: EphemeralTurnInput,
       signal?: AbortSignal,
-    ): Promise<ProviderOutput> {
+    ): Promise<EphemeralTurnResponse> {
       try {
         assertEphemeralInput(input);
       } catch (error) {
@@ -92,8 +100,15 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (missing.length) {
         throw new EphemeralServiceError("NOT_FOUND", "source is not in this workspace", 404);
       }
-      const chunks = input.sourceIds.length
-        ? await deps.chunks.listForSources(scope, input.sourceIds)
+      const privacy = await deps.privacy.snapshot(scope);
+      const excluded = new Set(privacy.excludedSourceIds.map(id => id.toLowerCase()));
+      const allowedSourceIds = input.sourceIds.filter(id => !excluded.has(id.toLowerCase()));
+      if (input.sourceIds.length && !allowedSourceIds.length) {
+        throw new EphemeralServiceError("SOURCE_EXCLUDED", "所选材料已停止供 AI 使用，请取消选择后重试。", 409);
+      }
+      const historyDiscarded = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
+      const chunks = allowedSourceIds.length
+        ? await deps.chunks.listForSources(scope, allowedSourceIds)
         : [];
       const authorized: AuthorizedChunk[] = chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
       const selection = validatePageSelection(input, authorized);
@@ -107,10 +122,15 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         preferChunkId: input.chunkId ?? undefined,
         preferPage: input.currentPage ?? undefined,
       });
+      const history = historyDiscarded ? [] : input.history;
+      const historyRefs = history.length ? await deps.provenance?.resolveHistory(scope, history, privacy.epoch) ?? null : [];
+      const contextSourceRefs = historyRefs === null ? null : mergeContextSourceRefs(
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs,
+      );
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode),
         text: input.text,
-        history: input.history,
+        history: history.map(({ role, text }) => ({ role, text })),
         chunks: context,
         mode: input.mode,
         maxOutputTokens: deps.config.maxOutputTokens,
@@ -121,7 +141,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         inputCentsPerMillion: deps.config.inputCentsPerMillion,
         outputCentsPerMillion: deps.config.outputCentsPerMillion,
       };
-      const requestId = deps.requestKey?.() ?? `eph:${deps.now?.() ?? Date.now()}:${scope.workspaceId}`;
+      const requestId = deps.requestKey?.() ?? `eph:${randomUUID()}`;
       let output: ProviderOutput;
       try {
         output = await runBudgetedCall({
@@ -135,17 +155,41 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           ),
           actualCents: (settled) => Math.max(1, tutorActualCents(settled, rates)),
           signal,
+          beforeSend: async () => {
+            const epoch = await deps.privacy.currentEpoch(scope);
+            if (epoch !== privacy.epoch) {
+              throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次未发送。请确认材料后重新提问。", 409);
+            }
+            if (signal?.aborted) {
+              throw new EphemeralServiceError("ABORTED", "ephemeral request aborted before sending", 499);
+            }
+          },
         });
       } catch (error) {
         if (error instanceof OpeningProviderError) throw error;
         throw error;
       }
       const validated = providerOutputSchema.parse(output);
+      if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
+      let provenanceId: string | null = null;
+      try {
+        provenanceId = await deps.provenance?.record(scope, { requestId, privacyEpoch: privacy.epoch, contextSourceRefs }) ?? null;
+      } catch (error) {
+        if (error instanceof EphemeralProvenanceError) {
+          throw new EphemeralServiceError(error.code, error.code === "PRIVACY_CHANGED" ? "隐私设置已变化，本轮内容未保存。请确认材料后重新提问。" : "临时来源凭据不可用。", error.code === "NOT_FOUND" ? 404 : 409);
+        }
+        throw error;
+      }
       const allowed = new Set(context.map((chunk) => chunk.id));
-      return stripEphemeralCandidates({
-        ...validated,
-        citedChunkIds: validated.citedChunkIds.filter((id) => allowed.has(id)),
-      });
+      return {
+        ...stripEphemeralCandidates({
+          ...validated,
+          citedChunkIds: validated.citedChunkIds.filter((id) => allowed.has(id)),
+        }),
+        provenanceId,
+        privacyEpoch: privacy.epoch,
+        historyDiscarded,
+      };
     },
   };
 }

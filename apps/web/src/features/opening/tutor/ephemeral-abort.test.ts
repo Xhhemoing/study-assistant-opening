@@ -33,7 +33,8 @@ describe("ephemeral abort", () => {
     const service = createEphemeralTutorService({
       sources: { listOwnedIds: async () => [] },
       chunks: { listForSources: async () => [] },
-      budget,
+      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    budget,
       provider: {
         complete: async (value, signal) => {
           seen = signal;
@@ -72,7 +73,8 @@ describe("ephemeral abort", () => {
     const service = createEphemeralTutorService({
       sources: { listOwnedIds: async () => [] },
       chunks: { listForSources: async () => [] },
-      budget,
+      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    budget,
       provider: { complete },
       config: {
         maxContextCharacters: 12_000,

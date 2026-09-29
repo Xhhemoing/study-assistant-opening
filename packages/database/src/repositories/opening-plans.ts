@@ -4,13 +4,16 @@ import type {
   PlanDraft,
   PlannedBlock,
   TaskCreateInput,
+  TaskCreateResult,
   TaskItem,
+  TaskStatusUpdateInput,
   TimeBlock,
   WeekSession,
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
 import { insertOpeningTask } from "./opening-retest-task";
+import { transitionRetestActivityForTask } from "./opening-retest-activities";
 
 export { OpeningPlanError };
 export type { OpeningPlanErrorCode } from "./opening-plan-error";
@@ -68,8 +71,54 @@ export function createOpeningPlansRepository(sql: Sql) {
     async createTask(
       scope: OpeningScope,
       input: TaskCreateInput & { dueText?: string | null },
-    ): Promise<TaskItem> {
+    ): Promise<TaskCreateResult> {
       return insertOpeningTask(sql, scope, input);
+    },
+
+    async updateTaskStatus(scope: OpeningScope, taskId: string, input: TaskStatusUpdateInput): Promise<TaskItem> {
+      return sql.begin(async (tx) => {
+        // Lock the linked activity before the task. Observation submission and
+        // task completion use the same order, so concurrent decisions cannot
+        // deadlock while both try to reconcile the pair.
+        const activityRows = await tx`SELECT id, status, candidate_id FROM opening_retest_activities
+          WHERE task_id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        const activity = activityRows[0] as Record<string, unknown> | undefined;
+        const rows = await tx`SELECT * FROM opening_tasks
+          WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!rows.length) throw new OpeningPlanError("NOT_FOUND", "task not found");
+        const current = rows[0] as Record<string, unknown>;
+        const currentVersion = Number(current.version);
+        if (currentVersion !== input.expectedVersion) throw new OpeningPlanError("CONFLICT", "task version is stale");
+        if (current.status === input.status) return mapTask(current);
+
+        if (activity && input.status === "skipped" && String(activity.status) === "completed") {
+          throw new OpeningPlanError("CONFLICT", "completed retest activity cannot be skipped");
+        }
+        if (activity && input.status === "done" && ["cancelled", "declined", "invalidated", "superseded"].includes(String(activity.status))) {
+          throw new OpeningPlanError("CONFLICT", "terminal retest activity cannot be completed by its task");
+        }
+        if (activity && input.status === "done" && ["accepted", "in_progress"].includes(String(activity.status))) {
+          const retestIds = [activity.id, activity.candidate_id].filter((value): value is string => typeof value === "string");
+          const observations = await tx`SELECT outcome FROM opening_learning_observations
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND retest_id IN ${tx(retestIds)}
+            ORDER BY occurred_at DESC, id DESC LIMIT 1`;
+          const outcome = observations[0]?.outcome;
+          await transitionRetestActivityForTask(tx, scope, taskId, {
+            type: "complete",
+            at: input.at,
+            result: outcome === "correct" || outcome === "incorrect" || outcome === "unverified" ? outcome : undefined,
+            hasObservation: observations.length > 0,
+          });
+        } else if (activity && input.status === "skipped" && ["accepted", "in_progress"].includes(String(activity.status))) {
+          await transitionRetestActivityForTask(tx, scope, taskId, { type: "skip", at: input.at });
+        }
+
+        const updated = await tx`UPDATE opening_tasks SET status=${input.status}, version=version + 1, updated_at=now()
+          WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          RETURNING *`;
+        return mapTask(updated[0] as Record<string, unknown>);
+      });
     },
 
     async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {

@@ -1,4 +1,4 @@
-import { workspaceDefaultEntrySchema, type WorkspaceDefaultEntry } from "@aistudy/contracts";
+import { learningPreferencesSchema, workspaceDefaultEntrySchema, type LearningPreferences, type Scope, type WorkspaceDefaultEntry } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 
 export type WorkspacePreferencesErrorCode = "NOT_FOUND" | "VALIDATION";
@@ -12,7 +12,7 @@ export class WorkspacePreferencesError extends Error {
 
 export type WorkspacePreferenceRecord = {
   workspaceId: string;
-  defaultEntry: WorkspaceDefaultEntry;
+  defaultEntry: WorkspaceDefaultEntry | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -23,6 +23,8 @@ export type WorkspacePreferencesRepository = {
     workspaceId: string,
     defaultEntry: WorkspaceDefaultEntry,
   ): Promise<WorkspacePreferenceRecord>;
+  getLearningPreferences(scope: Scope): Promise<LearningPreferences>;
+  setLearningPreferences(scope: Scope, value: LearningPreferences): Promise<LearningPreferences>;
 };
 
 function assertUuid(value: string, field: string): void {
@@ -34,7 +36,7 @@ function assertUuid(value: string, field: string): void {
 function mapPreference(row: Record<string, unknown>): WorkspacePreferenceRecord {
   return {
     workspaceId: row.workspace_id as string,
-    defaultEntry: workspaceDefaultEntrySchema.parse(row.default_entry),
+    defaultEntry: row.default_entry == null ? null : workspaceDefaultEntrySchema.parse(row.default_entry),
     createdAt: new Date(row.created_at as string | Date),
     updatedAt: new Date(row.updated_at as string | Date),
   };
@@ -57,7 +59,7 @@ export function createWorkspacePreferencesRepository(sql: Sql): WorkspacePrefere
         WHERE workspace_id = ${workspaceId}
         LIMIT 1
       `;
-      return rows.length
+      return rows.length && rows[0]!.default_entry != null
         ? workspaceDefaultEntrySchema.parse(rows[0]!.default_entry)
         : null;
     },
@@ -77,6 +79,36 @@ export function createWorkspacePreferencesRepository(sql: Sql): WorkspacePrefere
         RETURNING *
       `;
       return mapPreference(rows[0] as Record<string, unknown>);
+    },
+
+    async getLearningPreferences(scope) {
+      const rows = await sql`SELECT p.assessment_enabled,p.retest_suggestions_enabled,p.automatic_reminders_enabled
+        FROM workspaces w LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
+        WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
+      if (!rows.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
+      return learningPreferencesSchema.parse({
+        assessmentEnabled: rows[0]!.assessment_enabled ?? false,
+        retestSuggestionsEnabled: rows[0]!.retest_suggestions_enabled ?? false,
+        automaticRemindersEnabled: rows[0]!.automatic_reminders_enabled ?? false,
+      });
+    },
+
+    async setLearningPreferences(scope, value) {
+      const parsed = learningPreferencesSchema.parse(value);
+      return sql.begin(async (tx) => {
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
+        await tx`INSERT INTO workspace_preferences
+          (workspace_id,assessment_enabled,retest_suggestions_enabled,automatic_reminders_enabled)
+          VALUES (${scope.workspaceId},${parsed.assessmentEnabled},${parsed.retestSuggestionsEnabled},${parsed.automaticRemindersEnabled})
+          ON CONFLICT(workspace_id) DO UPDATE SET
+            assessment_enabled=EXCLUDED.assessment_enabled,
+            retest_suggestions_enabled=EXCLUDED.retest_suggestions_enabled,
+            automatic_reminders_enabled=EXCLUDED.automatic_reminders_enabled,
+            updated_at=now()`;
+        return parsed;
+      });
     },
   };
 }

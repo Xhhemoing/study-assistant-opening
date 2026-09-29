@@ -1,19 +1,7 @@
-import {
-  AlignLeft,
-  Braces,
-  CheckSquare2,
-  ClipboardCheck,
-  Heading2,
-  Image as ImageIcon,
-  Link2,
-  Quote,
-  Search,
-  Table2,
-  Video,
-  type LucideIcon,
-} from "lucide-react";
+import { AlignLeft, Braces, CheckSquare2, ClipboardCheck, Heading2, Image as ImageIcon, Link2, Quote, Search, Table2, Video } from "lucide-react";
 import { useState } from "react";
 
+import { ui } from "../opening/design/ui";
 import { blockGroups, type BlockOption } from "./notebook-preview-types";
 
 const blockOptions: BlockOption[] = [
@@ -29,72 +17,15 @@ const blockOptions: BlockOption[] = [
   { label: "练习", description: "创建独立作答任务", icon: ClipboardCheck, actionName: "插入练习块", group: "学习闭环" },
 ];
 
-function BlockMenuOption({
-  actionName,
-  description,
-  icon: Icon,
-  label,
-  onSelect,
-}: BlockOption & { onSelect: () => void }) {
-  return (
-    <button
-      aria-label={actionName}
-      className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-300"
-      onClick={onSelect}
-      type="button"
-    >
-      <span className="grid size-8 place-items-center rounded border border-white/10 text-stone-400">
-        <Icon aria-hidden="true" size={16} />
-      </span>
-      <span className="min-w-0">
-        <span className="block text-sm font-medium text-stone-100">{label}</span>
-        <span className="block truncate text-xs text-stone-500">{description}</span>
-      </span>
-    </button>
-  );
-}
-
-export function BlockMenu({ onClose }: { onClose: () => void }) {
+export function BlockMenu() {
   const [query, setQuery] = useState("");
-  const visibleOptions = blockOptions.filter((option) => `${option.label}${option.description}`.includes(query));
-
-  return (
-    <section
-      aria-label="插入内容块"
-      className="absolute left-0 top-10 z-30 w-[min(21rem,calc(100vw-2rem))] rounded-lg border border-white/10 bg-[#242424] p-2 shadow-2xl"
-    >
-      <h2 className="sr-only">插入内容块</h2>
-      <label className="flex items-center gap-2 border-b border-white/10 px-2 pb-2">
-        <Search aria-hidden="true" className="text-stone-500" size={15} />
-        <span className="sr-only">筛选内容块</span>
-        <input
-          autoComplete="off"
-          className="min-w-0 flex-1 bg-transparent text-sm text-stone-100 outline-none placeholder:text-stone-500"
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="输入 / 搜索内容块"
-          value={query}
-        />
-      </label>
-      <div className="max-h-80 overflow-y-auto py-1">
-        {blockGroups.map((group) => {
-          const options = visibleOptions.filter((option) => option.group === group);
-          if (options.length === 0) return null;
-
-          return (
-            <section className="py-2" key={group}>
-              <h3 className="px-2 text-[11px] font-medium text-stone-500">{group}</h3>
-              <div className="mt-1">
-                {options.map((option) => <BlockMenuOption {...option} key={option.label} onSelect={onClose} />)}
-              </div>
-            </section>
-          );
-        })}
-      </div>
-      <footer className="border-t border-white/10 px-2 pt-2 text-[11px] text-stone-500">
-        输入 <kbd className="rounded border border-white/10 px-1">/</kbd> 随时打开
-      </footer>
-    </section>
-  );
+  const visible = blockOptions.filter(option => `${option.label}${option.description}`.includes(query.trim()));
+  return <section aria-label="内容块示例目录">
+    <p className="mb-4 text-xs leading-6 text-zinc-500">浏览内容块类型示例。此预览不提供插入、编辑或拖动内容块。</p>
+    <label className="relative block"><Search aria-hidden="true" className="absolute left-2.5 top-2.5 text-zinc-400" size={14} /><span className="sr-only">筛选内容块</span><input autoComplete="off" className={`${ui.input} pl-8`} onChange={event => setQuery(event.target.value)} placeholder="搜索内容块" value={query} /></label>
+    <div className="mt-3">{blockGroups.map(group => {
+      const options = visible.filter(option => option.group === group);
+      return options.length ? <section className="border-b border-zinc-200 py-3 last:border-0" key={group}><h3 className="mb-2 text-xs font-medium text-zinc-500">{group}</h3><ul className="space-y-3">{options.map(({ label, description, icon: Icon }) => <li className="flex items-center gap-3" key={label}><Icon aria-hidden="true" size={16} className="shrink-0 text-zinc-500" /><div><p className="text-sm text-zinc-800">{label}</p><p className="mt-0.5 text-xs text-zinc-500">{description}</p></div></li>)}</ul></section> : null;
+    })}{!visible.length ? <p className="py-5 text-sm text-zinc-500" role="status">没有匹配的内容块，试试其他名称。</p> : null}</div>
+  </section>;
 }
-
-export type BlockControlIcon = LucideIcon;

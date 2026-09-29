@@ -1,5 +1,6 @@
 "use client";
 
+import { ui } from "../opening/design/ui";
 import { ArrowLeft, Check, Clock3, Eye, Lightbulb, LoaderCircle, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -160,7 +161,7 @@ export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
 
   if (loading || !provider) return <PlayerSkeleton />;
   if (loadError || !item) {
-    return <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8"><Link className="inline-flex w-fit items-center gap-2 text-sm text-text-dim hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/learn"><ArrowLeft aria-hidden="true" size={16} />返回学习空间</Link><section className="space-y-4 border-y border-line py-8" role="alert"><p className="text-sm text-danger">{loadError || "找不到这道练习题。"}</p><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setRetryToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button></section></main>;
+    return <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8"><Link className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" href="/learn"><ArrowLeft aria-hidden="true" size={16} />返回学习空间</Link><section className="space-y-4 border-y border-zinc-200 py-8" role="alert"><p className="text-sm text-red-700">{loadError || "找不到这道练习题。"}</p><button className={ui.secondary} onClick={() => setRetryToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button></section></main>;
   }
 
   const issue = getSubmissionIssue(state);
@@ -168,26 +169,26 @@ export function PracticePlayer({ itemId, context }: PracticePlayerProps) {
   const isAnswering = state.phase === "answering";
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-7 px-4 py-8 sm:px-6 lg:px-8">
-      <header className="space-y-4 border-b border-line pb-6">
-        <Link className="inline-flex items-center gap-2 text-sm text-text-dim transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/learn"><ArrowLeft aria-hidden="true" size={16} />返回学习空间</Link>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div className="space-y-2"><p className="text-xs text-text-dim">练习 · {item.estimatedMinutes} 分钟</p><h1 className="text-2xl font-semibold tracking-[-0.02em] text-text">检验你的理解</h1></div><div className="inline-flex items-center gap-2 text-sm tabular-nums text-text-dim" aria-label={`已用时 ${formatDuration(elapsedMs)}`}><Clock3 aria-hidden="true" size={16} />{formatDuration(elapsedMs)}</div></div>
+    <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
+      <header className="space-y-4 border-b border-zinc-200 pb-4">
+        <Link className="inline-flex items-center gap-2 text-sm text-zinc-500 transition-colors duration-150 motion-reduce:transition-none hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" href="/learn"><ArrowLeft aria-hidden="true" size={16} />返回学习空间</Link>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div className="space-y-2"><p className="text-xs text-zinc-500">练习 · {item.estimatedMinutes} 分钟</p><h1 className="text-xl font-semibold tracking-[-0.02em] text-zinc-900">检验你的理解</h1></div><div className="inline-flex items-center gap-2 text-sm tabular-nums text-zinc-500" aria-label={`已用时 ${formatDuration(elapsedMs)}`}><Clock3 aria-hidden="true" size={16} />{formatDuration(elapsedMs)}</div></div>
       </header>
 
       <section className="space-y-6" aria-labelledby="practice-stem-heading">
-        <div className="flex items-start gap-3"><span className="mt-0.5 inline-grid size-8 shrink-0 place-items-center rounded-full bg-primary/15 text-primary" aria-hidden="true"><Check size={16} /></span><h2 className="text-lg font-semibold leading-7 text-text" id="practice-stem-heading">{item.stem}</h2></div>
+        <div className="flex items-start gap-3"><span className="mt-0.5 inline-grid size-8 shrink-0 place-items-center rounded-full bg-emerald-50 text-emerald-700" aria-hidden="true"><Check size={16} /></span><h2 className="text-lg font-semibold leading-7 text-zinc-900" id="practice-stem-heading">{item.stem}</h2></div>
         <AnswerInput answer={state.answer} disabled={!isAnswering} item={item} onChange={updateAnswer} onSubmit={checkAnswer} />
       </section>
 
-      {state.hintCount > 0 ? <ol className="space-y-2 border-y border-line py-4 text-sm leading-6 text-text-dim" aria-label="已查看的提示">{item.hints.slice(0, state.hintCount).map((hint, index) => <li className="flex gap-3" key={`${index}-${hint}`}><span className="shrink-0 font-semibold text-primary">提示 {index + 1}</span><span>{hint}</span></li>)}</ol> : null}
-      {showAnswer ? <p className="border-y border-line py-4 text-sm leading-6 text-text"><span className="font-semibold">参考答案：</span>{item.answer}</p> : null}
+      {state.hintCount > 0 ? <ol className="space-y-2 border-y border-zinc-200 py-4 text-sm leading-7 text-zinc-500" aria-label="已查看的提示">{item.hints.slice(0, state.hintCount).map((hint, index) => <li className="flex gap-3" key={`${index}-${hint}`}><span className="shrink-0 font-semibold text-emerald-700">提示 {index + 1}</span><span>{hint}</span></li>)}</ol> : null}
+      {showAnswer ? <p className="border-y border-zinc-200 py-4 text-sm leading-7 text-zinc-900"><span className="font-semibold">参考答案：</span>{item.answer}</p> : null}
 
-      {isAnswering ? <div className="flex flex-wrap gap-2 border-t border-line pt-5"><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text-dim transition-colors hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={state.hintCount >= hintLimit} onClick={revealHint} type="button"><Lightbulb aria-hidden="true" size={16} />看提示 <span className="text-xs">{state.hintCount}/{hintLimit}</span></button><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text-dim transition-colors hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={revealAnswer} type="button"><Eye aria-hidden="true" size={16} />看答案</button><button className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-ink transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={checkAnswer} type="button"><Check aria-hidden="true" size={16} />检查答案</button></div> : null}
-      {submitError ? <p className="text-sm text-danger" role="alert">{submitError}</p> : null}
+      {isAnswering ? <div className="flex flex-wrap gap-2 border-t border-zinc-200 pt-5"><button className={ui.secondary} disabled={state.hintCount >= hintLimit} onClick={revealHint} type="button"><Lightbulb aria-hidden="true" size={16} />看提示 <span className="text-xs">{state.hintCount}/{hintLimit}</span></button><button className={ui.secondary} onClick={revealAnswer} type="button"><Eye aria-hidden="true" size={16} />看答案</button><button className={ui.primary} onClick={checkAnswer} type="button"><Check aria-hidden="true" size={16} />检查答案</button></div> : null}
+      {submitError ? <p className="text-sm text-red-700" role="alert">{submitError}</p> : null}
 
       {state.verdict !== null ? <VerdictPanel assisted={state.assisted} confidence={state.confidence} correct={state.verdict} errorCause={state.errorCause} expectedAnswer={item.answer} issue={issue} onConfidenceChange={(confidence) => setState((current) => ({ ...current, confidence }))} onErrorCauseChange={(errorCause: ErrorCause) => setState((current) => ({ ...current, errorCause }))} onRevealAnswer={revealAnswer} onSubmit={() => void submit()} showAnswer={showAnswer} submitting={state.phase === "submitting"} /> : null}
-      {state.phase === "verdict" ? <button className="inline-flex w-fit items-center gap-2 text-sm text-text-dim underline-offset-4 hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={reviseAnswer} type="button">重新作答</button> : null}
-      {state.phase === "submitted" ? <p className="inline-flex items-center gap-2 text-sm text-success" role="status"><LoaderCircle aria-hidden="true" size={16} />正在打开结果...</p> : null}
+      {state.phase === "verdict" ? <button className="inline-flex w-fit items-center gap-2 text-sm text-zinc-500 underline-offset-4 hover:text-zinc-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={reviseAnswer} type="button">重新作答</button> : null}
+      {state.phase === "submitted" ? <p className="inline-flex items-center gap-2 text-sm text-emerald-700" role="status"><LoaderCircle aria-hidden="true" size={16} />正在打开结果...</p> : null}
     </main>
   );
 }

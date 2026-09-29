@@ -1,3 +1,4 @@
+import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import {
   buildNativeBackup,
@@ -71,7 +72,7 @@ export async function dumpWorkspaceSnapshot(
   if (!latestMigrationId) {
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
-  return {
+  return applyNativeNoteExportPrivacy(sql, workspaceId, {
     sourceWorkspaceId: workspaceId,
     workspace,
     latestMigrationId,
@@ -91,7 +92,7 @@ export async function dumpWorkspaceSnapshot(
     cards: nestBy(cards, { reviewStates: cardStates }, "cardId"),
     events,
     files: filesFromBlocks(blocks),
-  };
+  });
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {

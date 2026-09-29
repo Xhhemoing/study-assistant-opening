@@ -1,144 +1,49 @@
-import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { resolveTodayResume, todayConfirmHref } from "./today-read";
+import { TodayResumeBody } from "./today-resume-view";
+import { visibleTodayTasks } from "./today-task-selection";
 
-const lastConversation = {
-  id: "11111111-1111-4111-8111-111111111111",
-  title: "线性代数答疑",
-  lastUserText: "如何判断矩阵可逆？",
-};
-
-describe("resolveTodayResume", () => {
-  it("returns loggedOut when there is no session", () => {
-    expect(resolveTodayResume({ hasSession: false, loadFailed: false })).toEqual({
-      kind: "loggedOut",
-    });
+const conversation = { id: "11111111-1111-4111-8111-111111111111", title: "线性代数答疑", lastUserText: "如何判断矩阵可逆？", currentPage: 7 };
+describe("independent Today resume and review state", () => {
+  it.each([
+    [{ hasSession: false, loadFailed: false }, "loggedOut"],
+    [{ hasSession: true, loadFailed: true }, "error"],
+    [{ hasSession: true, loadFailed: false }, "empty"],
+  ] as const)("classifies %j without inventing data", (input, kind) => {
+    expect(resolveTodayResume(input)).toEqual({ kind });
   });
-
-  it("returns error when loading failed", () => {
-    expect(resolveTodayResume({ hasSession: true, loadFailed: true })).toEqual({
-      kind: "error",
-    });
+  it("keeps continue and pending review navigation visible together", () => {
+    const state = resolveTodayResume({ hasSession: true, loadFailed: false, lastConversation: conversation, pendingConfirmations: 3 });
+    expect(state.kind).toBe("ready");
+    expect(state.continueItem).toMatchObject({ conversationId: conversation.id, currentPage: 7 });
+    expect(state.pendingReviews).toEqual({ count: 3, href: "/opening/review" });
+    const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
+    expect(html).toContain(`/opening/assistant?conversation=${conversation.id}`);
+    expect(html).toContain('href="/opening/review"');
+    expect(html).not.toContain("/api/");
+    expect(html).not.toContain("请先处理");
   });
-
-  it("returns empty when there is no conversation or pending confirmation", () => {
-    expect(resolveTodayResume({ hasSession: true, loadFailed: false })).toEqual({
-      kind: "empty",
-    });
+  it("offers review even without a saved conversation", () => {
+    const state = resolveTodayResume({ hasSession: true, loadFailed: false, pendingConfirmations: 1 });
+    expect(state.continueItem).toBeUndefined();
+    expect(state.pendingReviews?.count).toBe(1);
   });
-
-  it("returns confirm when pending confirmations exist", () => {
-    expect(
-      resolveTodayResume({
-        hasSession: true,
-        loadFailed: false,
-        pendingConfirmations: 2,
-      }),
-    ).toEqual({ kind: "confirm", confirmCount: 2 });
+  it("retains continue when there are no pending suggestions", () => {
+    expect(resolveTodayResume({ hasSession: true, loadFailed: false, lastConversation: conversation }).continueItem?.conversationId).toBe(conversation.id);
   });
-
-  it("returns continue with material versions and reading position", () => {
-    expect(
-      resolveTodayResume({
-        hasSession: true,
-        loadFailed: false,
-        lastConversation: {
-          ...lastConversation,
-          courseId: "22222222-2222-4222-8222-222222222222",
-          sourceVersions: { "33333333-3333-4333-8333-333333333333": 4 },
-          currentPage: 7,
-        },
-      }),
-    ).toEqual({
-      kind: "continue",
-      continueItem: {
-        conversationId: lastConversation.id,
-        title: lastConversation.title,
-        lastUserText: lastConversation.lastUserText,
-        courseId: "22222222-2222-4222-8222-222222222222",
-        sourceVersions: { "33333333-3333-4333-8333-333333333333": 4 },
-        currentPage: 7,
-      },
-    });
+  it.each(["memory", "task", "retest"])("uses the review page for %s, never a mutation API", (kind) => {
+    expect(todayConfirmHref([{ id: "candidate", payload: { kind } }])).toBe("/opening/review");
   });
-
-  it("prefers confirm over continue but keeps the continue item", () => {
-    const state = resolveTodayResume({
-      hasSession: true,
-      loadFailed: false,
-      lastConversation,
-      pendingConfirmations: 1,
-    });
-    expect(state.kind).toBe("confirm");
-    expect(state.confirmCount).toBe(1);
-    expect(state.continueItem?.conversationId).toBe(lastConversation.id);
+  it("renders a read failure without pretending the list is empty", () => {
+    const html = renderToStaticMarkup(createElement(TodayResumeBody, { state: { kind: "error" } }));
+    expect(html).toContain("暂时无法读取");
+    expect(html).not.toContain("还没有学习记录");
   });
-
-  it("prefers error over empty", () => {
-    expect(resolveTodayResume({ hasSession: true, loadFailed: true }).kind).toBe(
-      "error",
-    );
-  });
-
-  it("prefers error over continue", () => {
-    expect(
-      resolveTodayResume({
-        hasSession: true,
-        loadFailed: true,
-        lastConversation,
-      }).kind,
-    ).toBe("error");
-  });
-
-  it("prefers loggedOut over error", () => {
-    expect(
-      resolveTodayResume({ hasSession: false, loadFailed: true }).kind,
-    ).toBe("loggedOut");
-  });
-});
-
-describe("today page wiring", () => {
-  const page = readFileSync(new URL("../../../app/(opening)/opening/today/page.tsx", import.meta.url), "utf8");
-
-  it("loads resume through the owner reader instead of listing conversations", () => {
-    expect(page).toContain("loadTodayResumeState");
-    expect(page).toContain("createTodayResumeReader(sql)");
-    expect(page).not.toContain("getTutorService");
-    expect(page).not.toContain("listConversations");
-  });
-
-  it("shows one primary action and the real continue facts", () => {
-    expect(page).toContain("现在可以做什么");
-    expect(page).toContain("assistant?conversation=");
-    expect(page).toContain("courseId");
-    expect(page).toContain("sourceVersions");
-    expect(page).toContain("currentPage");
-    for (const branch of page.split("if (state.kind").slice(1)) {
-      const body = branch.split("return (")[1]?.split("if (state.kind")[0] ?? "";
-      expect(body.match(/bg-indigo-600/g)?.length ?? 0).toBeLessThanOrEqual(1);
-    }
-  });
-});
-
-describe("todayConfirmHref", () => {
-  it("points a memory payload at the candidate memory decision route", () => {
-    expect(todayConfirmHref([{ id: "m1", payload: { kind: "memory" } }])).toBe(
-      "/api/opening/candidates/m1/memory-decision",
-    );
-  });
-
-  it("points a task payload at the retest accept route", () => {
-    expect(todayConfirmHref([{ id: "t1", payload: { kind: "task" } }])).toBe(
-      "/api/opening/retests/t1/accept",
-    );
-  });
-
-  it("does not pick a dead link when task and memory payloads are mixed", () => {
-    expect(
-      todayConfirmHref([
-        { id: "m1", payload: { kind: "memory" } },
-        { id: "t1", payload: { kind: "task" } },
-      ]),
-    ).toBe("/api/opening/candidates");
+  it("links a returned task even when it is outside the first three or already completed", () => {
+    const tasks = ["a", "b", "c", "d"].map((id) => ({ id, title: id, minutes: 20, priority: 1, dueAt: null, status: "pending" as const }));
+    expect(visibleTodayTasks(tasks, "d").map((task) => task.id)).toEqual(["d", "a", "b"]);
+    expect(visibleTodayTasks([{ ...tasks[0]!, status: "done" }], "a")[0]?.status).toBe("done");
   });
 });

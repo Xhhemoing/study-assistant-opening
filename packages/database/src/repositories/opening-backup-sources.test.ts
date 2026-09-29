@@ -66,7 +66,7 @@ describe("readOpeningBackupSources", () => {
     const sql = fakeSql((call) => {
       if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 4 }];
       if (call.query.includes("FROM opening_sources")) {
-        return [{ id: exportedId, version: "3", bytes: "12", sha256: "ab".repeat(32) }];
+        return [{ source_id: exportedId, version: "3", bytes: "12", sha256: "ab".repeat(32), availability: "available" }];
       }
       if (call.query.includes("opening_privacy_exclusions")) {
         return [{ source_id: excludedId, deleted_at: new Date("2026-09-21T00:00:00.000Z") }];
@@ -79,8 +79,8 @@ describe("readOpeningBackupSources", () => {
     const journal = sql.calls.find((call) => call.query.includes("opening_privacy_exclusions"));
     const sources = sql.calls.find((call) => call.query.includes("FROM opening_sources"));
     expect(journal?.values).toEqual([workspaceId]);
-    expect(sources?.values).toEqual([workspaceId, workspaceId]);
-    expect(sources?.query).toMatch(/upload_state = 'uploaded'/);
+    expect(sources?.values).toEqual(expect.arrayContaining([workspaceId, ownerUserId]));
+    expect(sources?.query).toMatch(/upload_state\s*=\s*'uploaded'/);
     expect(sources?.query).toMatch(/NOT EXISTS/);
     expect(sources?.query).not.toMatch(/SELECT \*/);
     expect(snapshot).toEqual({

@@ -1,5 +1,4 @@
 import {
-  aiConversationJobRequestSchema,
   aiProviderResponseSchema,
   type AIConversationJobRequest,
   type AIProviderResponse,
@@ -17,14 +16,14 @@ export interface AIProvider {
   complete(request: AIProviderRequest): Promise<unknown>;
 }
 
+/** Maps a job already validated and normalized at the worker boundary. */
 export function createProviderRequest(job: AIConversationJobRequest): AIProviderRequest {
-  const parsed = aiConversationJobRequestSchema.parse(job);
-  const policy = getRolePolicy(parsed.role);
+  const policy = getRolePolicy(job.role);
   return {
-    role: parsed.role,
+    role: job.role,
     instruction: policy.instruction,
-    input: parsed.input,
-    selectedSourceIds: policy.allowSourceRetrieval ? [...parsed.selectedSourceIds] : [],
+    input: job.input,
+    selectedSourceIds: policy.allowSourceRetrieval ? [...job.selectedSourceIds] : [],
   };
 }
 

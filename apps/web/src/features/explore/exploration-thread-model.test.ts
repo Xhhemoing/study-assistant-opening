@@ -31,6 +31,7 @@ describe("exploration thread model", () => {
     expect(shouldSendOnEnter("Enter", false)).toBe(true);
     expect(shouldSendOnEnter("Enter", true)).toBe(false);
     expect(shouldSendOnEnter("Tab", false)).toBe(false);
+    expect(shouldSendOnEnter("Enter", false, true)).toBe(false);
   });
 
   it("appends the user turn before an optional AI turn", () => {

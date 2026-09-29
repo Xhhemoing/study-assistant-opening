@@ -15,7 +15,7 @@ async function seed() {
   const append = (text: string) => repo.appendSavedTurn({ scope: f.scope, conversationId: c.id, text, mode: "hint", clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
   const prior = await append("previous question");
   await f.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${prior.turnId}, ${prior.assistantTurnId})`;
-  await f.sql`UPDATE opening_turns SET status='complete', text='step two' WHERE id=${prior.assistantTurnId}`;
+  await f.sql`UPDATE opening_turns SET status='complete', text='step two', context_source_refs='[]'::jsonb WHERE id=${prior.assistantTurnId}`;
   const current = await append("continue");
   return { repo, c, prior, current, jobs: createOpeningTutorJobsRepository(f.sql) };
 }
@@ -30,7 +30,7 @@ it("clears derived history when an earlier source was revoked or its cited versi
   const { current, jobs, prior } = await seed();
   const id = randomUUID();
   await f.sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state) VALUES (${id},${f.scope.workspaceId},'a.pdf','application/pdf',1,${'a'.repeat(64)},0,'uploaded','ready')`;
-  await f.sql`UPDATE opening_turns SET source_ids=ARRAY[${id}]::uuid[] WHERE id=${prior.turnId}`;
+  await f.sql`UPDATE opening_turns SET source_ids=ARRAY[${id}]::uuid[], source_versions=jsonb_build_object(${id}::text,0) WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toHaveLength(2);
   await f.sql`UPDATE opening_sources SET upload_state='rejected' WHERE id=${id}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
@@ -42,7 +42,7 @@ it("clears derived history when a referenced source is privacy-excluded", async 
   const { current, jobs, prior } = await seed();
   const id = randomUUID();
   await f.sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state) VALUES (${id},${f.scope.workspaceId},'a.pdf','application/pdf',1,${'a'.repeat(64)},0,'uploaded','ready')`;
-  await f.sql`UPDATE opening_turns SET source_ids=ARRAY[${id}]::uuid[] WHERE id=${prior.turnId}`;
+  await f.sql`UPDATE opening_turns SET source_ids=ARRAY[${id}]::uuid[], source_versions=jsonb_build_object(${id}::text,0) WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toHaveLength(2);
   await f.sql`INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at) VALUES (${randomUUID()}, ${f.scope.workspaceId}, ${id}, NULL, now())`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);

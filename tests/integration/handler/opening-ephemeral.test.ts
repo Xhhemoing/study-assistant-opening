@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import {
   complete,
+  captureEphemeralLogs,
+  tablesContainingEphemeralMarker,
   ephemeralCounts,
   postEphemeral,
   resetEphemeralRows,
@@ -47,6 +49,7 @@ describe("POST /api/opening/ephemeral", () => {
     expect(after.memories).toBe(before.memories);
     expect(after.learning_sessions).toBe(before.learning_sessions);
     expect(after.learning_observations).toBe(before.learning_observations);
+    expect(after.help_exposures).toBe(before.help_exposures);
     expect(after.reservations).toBe(before.reservations + 1);
   });
 
@@ -131,7 +134,7 @@ describe("POST /api/opening/ephemeral", () => {
     const body = await response.json();
     expect(body.citedChunkIds).toEqual([chunkId]);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-QUOTE");
-    expect(JSON.stringify(complete.mock.calls[0][0])).toContain("PRIVATE-QUOTE-DO-NOT-LOG");
+    expect(JSON.stringify(complete.mock.calls[0]![0])).toContain("PRIVATE-QUOTE-DO-NOT-LOG");
   });
 
   it("aborts through the provider without creating saved conversation rows", async () => {
@@ -168,3 +171,132 @@ describe("POST /api/opening/ephemeral", () => {
     expect(after.learning_sessions).toBe(0);
   });
 });
+
+async function seedEphemeralSource(workspaceId: string, text: string) {
+  const sourceId = randomUUID(), chunkId = randomUUID();
+  await sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES(${sourceId},${workspaceId},'note.pdf','application/pdf',12,${"a".repeat(64)},0,'uploaded','ready')`;
+  await sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES(${chunkId},${sourceId},0,1,${text})`;
+  return sourceId;
+}
+async function excludeThroughMemory(workspaceId: string, sourceId: string) {
+  const { createOpeningMemoryRepository } = await import("@aistudy/database");
+  const ownerUserId = (await sql`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`)[0]!.owner_user_id as string;
+  const conversationId = randomUUID(), turnId = randomUUID();
+  await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title) VALUES(${conversationId},${workspaceId},${ownerUserId},'privacy action')`;
+  await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,source_ids)
+    VALUES(${turnId},${workspaceId},${conversationId},'user','origin','listen','complete',${[sourceId]})`;
+  const memories = createOpeningMemoryRepository(sql);
+  const scope = { workspaceId, ownerUserId };
+  const memory = await memories.proposeMemory(scope, { text: 'private memory', sourceTurnIds: [turnId], expiresAt: null });
+  return memories.deleteMemory(scope, { id: memory.id, expectedVersion: memory.version, deleteSourceText: false, clientKey: randomUUID() });
+}
+
+it("filters real privacy exclusions in mixed ephemeral material without changing ordinary source reads", async () => {
+  const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+  const { createOpeningSourceChunksRepository } = await import("@aistudy/database");
+  const workspaceId = await workspaceForCookie();
+  const privateId = await seedEphemeralSource(workspaceId, "PRIVATE-EXCLUDED-CONTENT");
+  const allowedId = await seedEphemeralSource(workspaceId, "allowed content");
+  const receipt = await excludeThroughMemory(workspaceId, privateId);
+  const before = await ephemeralCounts();
+  complete.mockResolvedValue({ text: 'allowed answer', candidates: [], citedChunkIds: [], requestId: 'mixed', inputTokens: 3, outputTokens: 1 });
+  const response = await POST(postEphemeral({ text: 'explain', sourceIds: [privateId, allowedId], mode: 'explain', history: [] }));
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({ privacyEpoch: receipt.privacyEpoch, historyDiscarded: false });
+  expect(complete.mock.calls[0]![0]!.chunks.map((chunk: { sourceId: string }) => chunk.sourceId)).toEqual([allowedId]);
+  expect(JSON.stringify(complete.mock.calls[0]![0])).not.toContain('PRIVATE-EXCLUDED-CONTENT');
+  const ownerUserId = (await sql`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`)[0]!.owner_user_id as string;
+  const readable = await createOpeningSourceChunksRepository(sql).listForSources({ workspaceId, ownerUserId }, [privateId]);
+  expect(readable.map(chunk => chunk.text)).toEqual(['PRIVATE-EXCLUDED-CONTENT']);
+  const after = await ephemeralCounts();
+  expect(after).toEqual({ ...before, reservations: before.reservations + 1 });
+});
+
+it("isolates the previous temporary reply after real deletion advances the epoch", async () => {
+  const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+  const workspaceId = await workspaceForCookie();
+  const privateId = await seedEphemeralSource(workspaceId, 'PRIVATE-OLD-SOURCE');
+  complete.mockResolvedValueOnce({ text: 'PRIVATE-OLD-REPLY', candidates: [], citedChunkIds: [], requestId: 'first', inputTokens: 3, outputTokens: 1 });
+  const first = await POST(postEphemeral({ text: 'read', sourceIds: [privateId], mode: 'listen', history: [] }));
+  expect(first.status).toBe(200);
+  const previous = await first.json();
+  const receipt = await excludeThroughMemory(workspaceId, privateId);
+  complete.mockResolvedValueOnce({ text: 'new answer', candidates: [], citedChunkIds: [], requestId: 'second', inputTokens: 3, outputTokens: 1 });
+  const second = await POST(postEphemeral({ text: 'next', sourceIds: [], mode: 'listen',
+    history: [{ role: 'assistant', text: previous.text }], historyPrivacyEpoch: previous.privacyEpoch }));
+  expect(second.status).toBe(200);
+  expect(await second.json()).toMatchObject({ privacyEpoch: receipt.privacyEpoch, historyDiscarded: true });
+  expect(complete.mock.calls[1]![0]!.history).toEqual([]);
+  expect(JSON.stringify(complete.mock.calls[1]![0])).not.toContain('PRIVATE-OLD');
+});
+
+it("rejects an all-excluded selection without reserving or sending", async () => {
+  const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+  const workspaceId = await workspaceForCookie();
+  const privateId = await seedEphemeralSource(workspaceId, 'private');
+  await excludeThroughMemory(workspaceId, privateId);
+  const before = await ephemeralCounts();
+  const response = await POST(postEphemeral({ text: 'read', sourceIds: [privateId], mode: 'listen', history: [] }));
+  expect(response.status).toBe(409);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({ error: { code: 'SOURCE_EXCLUDED' } });
+  expect(complete).not.toHaveBeenCalled();
+  expect(await ephemeralCounts()).toEqual(before);
+});
+
+it("refuses a foreign owner even without source material", async () => {
+  const { getEphemeralTutorService } = await import("../../../apps/web/src/features/opening/runtime");
+  const workspaceId = await workspaceForCookie();
+  await expect(getEphemeralTutorService(sql).replyEphemeral({ workspaceId, ownerUserId: randomUUID() }, {
+    text: 'read', sourceIds: [], mode: 'listen', history: [],
+  })).rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 });
+  expect(complete).not.toHaveBeenCalled();
+});
+
+it.each(["success", "provider-error", "invalid-output", "aborted-before", "aborted-after"] as const)(
+  "keeps ephemeral bodies out of notes, drafts, receipts, logs and recovery on %s", async outcome => {
+    const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+    const { createLibraryRepository } = await import("@aistudy/database");
+    const { createTodayResumeReader, loadTodayResumeState } = await import("../../../apps/web/src/features/opening/planning/today-service");
+    const marker = `EPHEMERAL-${randomUUID()}`;
+    const workspaceId = await workspaceForCookie();
+    const owner = (await sql`SELECT owner_user_id, privacy_epoch FROM workspaces WHERE id=${workspaceId}`)[0]!;
+    const library = createLibraryRepository(sql);
+    const stableNote = await library.createDocument({ workspaceId, title: "Existing note", blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "EXISTING-NOTE-UNCHANGED" } }] });
+    const before = await ephemeralCounts();
+    const logs = captureEphemeralLogs();
+    const controller = new AbortController();
+    let started!: () => void;
+    const enteredProvider = new Promise<void>(resolve => { started = resolve; });
+    complete.mockImplementation(async (_input: unknown, signal?: AbortSignal) => {
+      started();
+      if (outcome === "aborted-after") return new Promise((_resolve, reject) => {
+        signal!.addEventListener("abort", () => reject(new OpeningProviderError("PROVIDER_ABORTED", `${marker}-cancelled`)), { once: true });
+      });
+      if (outcome === "provider-error") throw new OpeningProviderError("PROVIDER_NETWORK", `${marker}-provider-error`);
+      return { text: outcome === "invalid-output" ? null : `${marker}-answer`, citedChunkIds: [], requestId: "safe-request-id",
+        candidates: [{ kind: "memory", text: `${marker}-candidate`, temporary: false }], inputTokens: 2, outputTokens: 2 };
+    });
+    try {
+      if (outcome === "aborted-before") controller.abort();
+      const pending = POST(postEphemeral({ text: `${marker}-prompt`, sourceIds: [], mode: "listen",
+        history: [{ role: "user", text: `${marker}-history` }], historyPrivacyEpoch: Number(owner.privacy_epoch) }, controller.signal));
+      if (outcome === "aborted-after") { await enteredProvider; controller.abort(); }
+      const response = await pending;
+      const body = await response.json();
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      if (outcome === "success") { expect(response.status).toBe(200); expect(body.text).toBe(`${marker}-answer`); }
+      else { expect(response.status).toBeGreaterThanOrEqual(400); expect(JSON.stringify(body)).not.toContain(marker); }
+      const after = await ephemeralCounts();
+      expect(after).toEqual({ ...before, reservations: before.reservations + (outcome === "aborted-before" ? 0 : 1) });
+      expect(await tablesContainingEphemeralMarker(marker)).toEqual([]);
+      expect(logs.text()).not.toContain(marker);
+      expect((await library.getDocument({ workspaceId, documentId: stableNote.id })).blocks).toEqual(stableNote.blocks);
+      const resume = await loadTodayResumeState({ scope: { workspaceId, ownerUserId: String(owner.owner_user_id) }, reader: createTodayResumeReader(sql) });
+      expect(resume.kind).toBe("empty");
+      expect(JSON.stringify(resume)).not.toContain(marker);
+    } finally { logs.restore(); }
+  },
+);

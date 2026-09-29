@@ -32,7 +32,7 @@ export function NewDocument() {
   return (
     <main className="flex min-h-[60vh] items-center justify-center px-6 py-12">
       <div className="grid max-w-sm justify-items-center gap-4 text-center">
-        {error ? <><FilePlus2 aria-hidden="true" className="text-danger" size={24} /><p className="text-sm text-danger" role="alert">{error}</p><button className="inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-sm font-semibold text-text hover:bg-surface-2" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button></> : <><FilePlus2 aria-hidden="true" className="text-primary" size={24} /><p className="text-sm text-text-dim" role="status">正在创建笔记...</p></>}
+        {error ? <><FilePlus2 aria-hidden="true" className="text-red-700" size={24} /><p className="text-sm text-red-700" role="alert">{error}</p><button className="inline-flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button></> : <><FilePlus2 aria-hidden="true" className="text-emerald-700" size={24} /><p className="text-sm text-zinc-500" role="status">正在创建笔记...</p></>}
       </div>
     </main>
   );

@@ -2,8 +2,8 @@ import type { AIRole, ChatTurn } from "@aistudy/contracts";
 import type { ExplorationMessageResult } from "../../lib/data/types";
 import { AI_ROLE_OPTIONS } from "../../lib/data/mock/mock-replies";
 
-export function shouldSendOnEnter(key: string, shiftKey: boolean): boolean {
-  return key === "Enter" && !shiftKey;
+export function shouldSendOnEnter(key: string, shiftKey: boolean, isComposing = false): boolean {
+  return key === "Enter" && !shiftKey && !isComposing;
 }
 
 export function appendMessageTurns(

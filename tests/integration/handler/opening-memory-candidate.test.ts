@@ -131,6 +131,24 @@ describe("opening memory candidate decision handler", () => {
     expect(candidate!.status).toBe("accepted");
   });
 
+  it("rejects an unknown-provenance assistant candidate without consuming or erasing it", async () => {
+    const id = await seed("unknown origin fact");
+    await sql`UPDATE opening_turns SET context_source_refs=NULL
+      WHERE id=(SELECT source_turn_id FROM opening_assistant_candidates WHERE id=${id})`;
+    const response = await decideCandidate(
+      req(`/api/opening/candidates/${id}/memory-decision`, {
+        expectedVersion: 0, clientKey: "handler-unknown-1", action: "confirm",
+      }),
+      { params: Promise.resolve({ id }) },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "VALIDATION" } });
+    expect(await sql`SELECT id FROM opening_memories WHERE id=${id}`).toHaveLength(0);
+    const [candidate] = await sql<{ status: string; text: string }[]>`
+      SELECT c.status, t.text FROM opening_assistant_candidates c
+      JOIN opening_turns t ON t.id=c.source_turn_id WHERE c.id=${id}`;
+    expect(candidate).toEqual({ status: "pending", text: "reply" });
+  });
   it("returns 404 for a foreign candidate and 400 for an invalid body", async () => {
     const id = await seed("foreign");
     const foreign = await decideCandidate(

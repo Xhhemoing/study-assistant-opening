@@ -56,8 +56,8 @@ export function ExportMenu({ documentId }: { documentId?: string }) {
   return (
     <section className="space-y-4" aria-labelledby="export-heading">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold text-text" id="export-heading">{copy.headline}</h2>
-        <p className="text-sm leading-6 text-text-dim">{copy.disclaimer}</p>
+        <h2 className="text-base font-semibold text-zinc-800" id="export-heading">{copy.headline}</h2>
+        <p className="text-sm leading-6 text-zinc-500">{copy.disclaimer}</p>
       </div>
       <div className="flex flex-wrap gap-3">
         <ExportButton disabled={pending !== null} label="导出 Markdown" pending={pending === "markdown"} onClick={() => void runExport("markdown")} />
@@ -65,13 +65,13 @@ export function ExportMenu({ documentId }: { documentId?: string }) {
       </div>
       {error ? (
         <div className="flex flex-wrap items-center gap-3" role="alert">
-          <p className="text-sm text-danger">{error}</p>
-          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => void runExport(kind)} type="button">
+          <p className="text-sm text-red-700">{error}</p>
+          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-zinc-200 px-3 text-xs text-zinc-800 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={() => void runExport(kind)} type="button">
             <RefreshCw aria-hidden="true" size={14} />重试
           </button>
         </div>
       ) : null}
-      {hasResult ? <p className="text-sm leading-6 text-text-dim" role="status">损失报告：{copy.lossSummary}</p> : null}
+      {hasResult ? <p className="text-sm leading-6 text-zinc-500" role="status">损失报告：{copy.lossSummary}</p> : null}
     </section>
   );
 }
@@ -89,7 +89,7 @@ function ExportButton({
 }) {
   return (
     <button
-      className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+      className="inline-flex min-h-10 items-center gap-2 rounded-md bg-zinc-900 px-3 text-sm font-semibold text-white hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
       disabled={disabled}
       onClick={onClick}
       type="button"

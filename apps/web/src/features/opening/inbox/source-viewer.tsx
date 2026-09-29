@@ -1,5 +1,6 @@
 import type { SourceRecord } from "@aistudy/contracts";
 import { sourceStatusLabel } from "./upload-state";
+import { ui } from "../design/ui";
 
 export type SourceDownloadView = {
   url: string;
@@ -37,12 +38,12 @@ export function SourceViewer({
     versionMismatch: download.versionMismatch,
   });
   return (
-    <section className="space-y-3 rounded-lg border border-zinc-200 bg-white p-4">
+    <section className="space-y-3 border-t border-zinc-200 bg-white py-4">
       <h2 className="text-base font-semibold text-zinc-950">{record.name}</h2>
       <p className="text-sm text-zinc-700">{sourceStatusLabel(record)}</p>
       <p className="text-sm text-amber-800">{copy}</p>
       <a
-        className="inline-flex min-h-11 items-center rounded-md bg-indigo-600 px-3 text-sm font-semibold text-white"
+        className={ui.primary}
         href={download.url}
         rel="noreferrer"
       >

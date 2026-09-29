@@ -41,7 +41,7 @@ describe("assistant task candidate admission", () => {
     expect(task.title).toBe("练习");
     const [row] = await fixture.sql`SELECT status FROM opening_assistant_candidates WHERE id = ${id}`;
     expect(row?.status).toBe("accepted");
-    await expect(plans.createTask(fixture.scope, taskInput(id))).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await plans.createTask(fixture.scope, taskInput(id))).id).toBe(task.id);
     expect(await fixture.sql`SELECT id FROM opening_tasks`).toHaveLength(1);
   });
 

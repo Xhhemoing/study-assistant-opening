@@ -1,3 +1,4 @@
+import { format } from "node:util";
 import { randomUUID } from "node:crypto";
 import { expect, vi } from "vitest";
 import { applyMigrations, createSqlClient, hashSessionToken } from "@aistudy/database";
@@ -6,7 +7,7 @@ import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import { setEphemeralTutorDepsForTests } from "../../../apps/web/src/features/opening/runtime";
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_URL ?? "";
 if (!databaseUrl) throw new Error("DATABASE_URL is required for ephemeral handler tests");
 
 export const cookieName = "aistudy_session";
@@ -77,12 +78,20 @@ export async function ephemeralCounts() {
       (SELECT count(*)::int FROM opening_assistant_candidates) AS candidates,
       (SELECT count(*)::int FROM opening_memories) AS memories,
       (SELECT count(*)::int FROM opening_learning_sessions) AS learning_sessions,
-      (SELECT count(*)::int FROM opening_help_exposures) AS learning_observations,
+      (SELECT count(*)::int FROM opening_learning_observations) AS learning_observations,
+      (SELECT count(*)::int FROM opening_help_exposures) AS help_exposures,
+      (SELECT count(*)::int FROM library_documents) AS documents,
+      (SELECT count(*)::int FROM library_blocks) AS blocks,
+      (SELECT count(*)::int FROM library_revisions) AS revisions,
+      (SELECT count(*)::int FROM opening_plan_drafts) AS plan_drafts,
+      (SELECT count(*)::int FROM revision_proposals) AS revision_proposals,
+      (SELECT count(*)::int FROM exploration_blocks) AS exploration_blocks,
       (SELECT count(*)::int FROM opening_budget_reservations) AS reservations
   `;
   return row as {
+    documents: number; blocks: number; revisions: number; plan_drafts: number; revision_proposals: number; exploration_blocks: number;
     conversations: number; turns: number; jobs: number; candidates: number;
-    memories: number; learning_sessions: number; learning_observations: number; reservations: number;
+    memories: number; learning_sessions: number; learning_observations: number; help_exposures: number; reservations: number;
   };
 }
 
@@ -92,5 +101,31 @@ export async function workspaceForCookie() {
     SELECT w.id AS workspace_id
     FROM sessions s JOIN workspaces w ON w.owner_user_id = s.user_id
     WHERE s.token_hash = ${hashSessionToken(sessionToken)}
-  `)[0].workspace_id as string;
+  `)[0]!.workspace_id as string;
+}
+
+/** Inspect real persisted rows; return only counts, never body contents. */
+export async function tablesContainingEphemeralMarker(marker: string) {
+  const tables = [
+    "library_documents", "library_blocks", "library_revisions", "revision_proposals",
+    "explorations", "exploration_branches", "exploration_blocks", "opening_plan_drafts",
+    "opening_conversations", "opening_turns", "opening_tutor_jobs", "opening_jobs", "opening_outbox",
+    "opening_assistant_candidates", "opening_memories", "opening_learning_observations",
+    "opening_budget_reservations", "opening_ephemeral_provenance", "opening_note_provenance", "sessions",
+  ];
+  const matching: string[] = [];
+  for (const table of tables) {
+    const rows = await sql`SELECT count(*)::int AS matches FROM ${sql(table)} AS persisted
+      WHERE position(${marker} IN row_to_json(persisted)::text)>0`;
+    if (Number(rows[0]!.matches)>0) matching.push(table);
+  }
+  return matching;
+}
+export function captureEphemeralLogs() {
+  const spies = (["log", "info", "warn", "error", "debug", "trace"] as const)
+    .map(method => vi.spyOn(console, method).mockImplementation(() => undefined));
+  return {
+    text: () => spies.flatMap(spy => spy.mock.calls.map(args => format(...args))).join("\n"),
+    restore: () => spies.forEach(spy => spy.mockRestore()),
+  };
 }

@@ -54,44 +54,44 @@ export function Onboarding() {
 
   if (error) return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-4" role="alert">
-      <span className="text-sm text-danger">{error}</span>
-      <button className="inline-flex min-h-10 items-center rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" type="button" onClick={() => window.location.reload()}>重试</button>
+      <span className="text-sm text-red-700">{error}</span>
+      <button className="inline-flex min-h-10 items-center rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" type="button" onClick={() => window.location.reload()}>重试</button>
     </main>
   );
-  if (!ready) return <main className="flex min-h-screen items-center justify-center px-4"><span className="text-sm text-text-dim">正在准备你的学习空间</span></main>;
+  if (!ready) return <main className="flex min-h-screen items-center justify-center px-4"><span className="text-sm text-zinc-500">正在准备你的学习空间</span></main>;
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center gap-8 px-4 py-10 sm:px-6 lg:px-8">
+    <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <header className="space-y-3">
-        <span className="text-sm font-semibold text-primary">AIstudy</span>
-        <h1 className="text-3xl font-semibold tracking-[-0.02em] text-text">你想从哪里开始？</h1>
-        <p className="max-w-prose text-sm leading-6 text-text-dim">这些只是起点，之后可以随时在 Learn、Explore 和 Library 之间切换，也不需要先创建课程或目标。</p>
+        <span className="text-sm font-semibold text-emerald-700">AIstudy</span>
+        <h1 className="text-xl font-semibold tracking-[-0.02em] text-zinc-800">你想从哪里开始？</h1>
+        <p className="max-w-prose text-sm leading-6 text-zinc-500">这些只是起点，之后可以随时在 学习、探索和知识库 之间切换，也不需要先创建课程或目标。</p>
       </header>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="divide-y divide-zinc-200 border-y border-zinc-200">
         {ONBOARDING_PATHS.map((path) => {
           const Icon = PATH_ICONS[path.id];
           return (
             <button
-              className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-5 text-left transition-colors hover:border-primary hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex min-h-20 w-full items-center gap-4 px-3 py-4 text-left transition-colors duration-150 hover:bg-zinc-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               data-onboarding-path={path.id}
               disabled={choicePending}
               key={path.id}
               onClick={() => void chooseEntry(path.entry, path.href)}
               type="button"
             >
-              <Icon aria-hidden="true" className="text-primary" size={24} strokeWidth={1.7} />
+              <Icon aria-hidden="true" className="text-emerald-700" size={20} strokeWidth={1.7} />
               <span className="flex flex-col gap-1">
-                <strong className="text-sm font-semibold text-text">{path.title}</strong>
-                <span className="text-xs leading-5 text-text-dim">{path.description}</span>
+                <strong className="text-sm font-semibold text-zinc-800">{path.title}</strong>
+                <span className="text-xs leading-5 text-zinc-500">{path.description}</span>
               </span>
             </button>
           );
         })}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4 text-sm">
-        <span className="text-text-dim">或者直接进入</span>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 text-sm">
+        <span className="text-zinc-500">或者直接进入</span>
         <button
-          className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex min-h-10 items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={choicePending}
           onClick={() => void chooseEntry("library", "/library")}
           type="button"

@@ -1,4 +1,4 @@
-import { createOpeningCandidateRepository } from "@aistudy/database";
+import { readOpeningAssistantReviewCandidates } from "@aistudy/database";
 import { assistantCandidateSchema, type AssistantCandidateRecord } from "@aistudy/contracts";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
@@ -7,7 +7,7 @@ import { requireOpeningScope } from "../../../../features/opening/runtime";
 export async function GET(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const candidates = (await createOpeningCandidateRepository(sql).listPending(scope)).filter(
+    const candidates = (await readOpeningAssistantReviewCandidates(sql, scope)).filter(
       (candidate) => candidate.workspaceId === scope.workspaceId,
     );
     const response: AssistantCandidateRecord[] = [];

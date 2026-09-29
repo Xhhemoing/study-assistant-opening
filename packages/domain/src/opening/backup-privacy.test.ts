@@ -12,6 +12,17 @@ function backup(tables: OpeningBackup["tables"] = {}): OpeningBackup {
 const row = (fields: Record<string, unknown>) => ({ workspace_id: workspaceId, ...fields });
 
 describe("opening restore privacy boundary", () => {
+  it("preserves asset deletion separately from exclusion and rejects transport cleanup state", () => {
+    const assetDeletedAt = "2026-09-24T00:00:00.000Z";
+    const value = backup({ opening_privacy_exclusions: [row({ source_id: sourceId, deleted_at: mark.deletedAt, asset_deleted_at: assetDeletedAt })] });
+    value.deletionJournal = [{ ...mark, assetDeletedAt }];
+    expect(validateOpeningRestore(value, value.deletionJournal).allowed).toBe(true);
+    (value.tables.opening_privacy_exclusions![0] as Record<string, unknown>).asset_deleted_at = null;
+    expect(validateOpeningRestore(value, value.deletionJournal).allowed).toBe(false);
+    (value.tables.opening_privacy_exclusions![0] as Record<string, unknown>).asset_deleted_at = assetDeletedAt;
+    (value.tables.opening_privacy_exclusions![0] as Record<string, unknown>).pending_object_keys = ["private/key"];
+    expect(validateOpeningRestore(value, value.deletionJournal).errors).toContain("storage cleanup state cannot be restored");
+  });
   it.each([null, {}, { ...backup(), tables: null }, { ...backup(), objects: null },
     { ...backup(), deletionJournal: undefined }, { ...backup(), privacyEpoch: -1 },
     { ...backup(), tables: { opening_sources: [null] } },
@@ -91,7 +102,7 @@ describe("opening restore privacy boundary", () => {
         .toContain("table opening_turns references a deleted source");
     }
     expect(validateOpeningRestore(backup({
-      opening_turns: [row({ source_ids: JSON.stringify([sourceId.toUpperCase()]) })],
+      opening_turns: [row({ role: "user", source_ids: JSON.stringify([sourceId.toUpperCase()]) })],
     }), []).allowed).toBe(true);
   });
 
@@ -150,7 +161,7 @@ describe("opening restore privacy boundary", () => {
 
   it("accepts clean linked memory without mutating the archive", () => {
     const input = backup({
-      opening_turns: [row({ id: turnId, source_ids: [], citations: [] })],
+      opening_turns: [row({ id: turnId, role: "assistant", context_source_refs: [], source_ids: [], citations: [] })],
       opening_memories: [row({ status: "active", source_turn_ids: [turnId] })],
     });
     const before = structuredClone(input);

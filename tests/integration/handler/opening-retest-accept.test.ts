@@ -5,6 +5,7 @@ import { POST as acceptRetest } from "../../../apps/web/src/app/api/opening/rete
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
+import { backupRows } from "../opening-backup-records-fixture";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for retest accept handler tests");
@@ -30,7 +31,9 @@ function req(path: string, body: unknown, authCookie = cookie) {
 async function insertCandidate(kind: "task" | "memory") {
   const id = randomUUID();
   const courseId = randomUUID();
-  const sourceId = randomUUID();
+  const sourceId = await backupRows(sql, { workspaceId, ownerUserId }).source();
+  await sql`INSERT INTO courses (id, workspace_id, title, slug)
+    VALUES (${courseId}, ${workspaceId}, 'Retest course', ${courseId})`;
   const payload = {
     kind,
     id,

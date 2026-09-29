@@ -10,21 +10,21 @@ interface AnswerInputProps {
   onSubmit: () => void;
 }
 
-const controlClassName = "size-4 border-line bg-surface text-primary focus:ring-2 focus:ring-primary/30";
-const labelClassName = "flex cursor-pointer items-start gap-3 rounded-lg border border-line px-3 py-3 text-sm text-text transition-colors hover:bg-surface-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10";
+const controlClassName = "size-4 border-zinc-200 bg-white text-emerald-700 accent-emerald-700 focus:ring-2 focus:ring-zinc-200";
+const labelClassName = "flex cursor-pointer items-start gap-3 rounded-lg border border-zinc-200 px-3 py-3 text-sm text-zinc-900 transition-colors duration-150 motion-reduce:transition-none hover:bg-zinc-100 has-[:checked]:border-emerald-600 has-[:checked]:bg-emerald-50";
 
 export function AnswerInput({ item, answer, disabled, onChange, onSubmit }: AnswerInputProps) {
   if (item.kind === "short_answer") {
     return (
       <label className="grid gap-2" htmlFor="practice-answer">
-        <span className="text-sm font-semibold text-text">你的答案</span>
+        <span className="text-sm font-semibold text-zinc-900">你的答案</span>
         <input
           autoComplete="off"
-          className="min-h-11 w-full rounded-lg border border-line bg-surface px-3 text-sm text-text outline-none placeholder:text-text-dim focus:border-primary focus:ring-2 focus:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+          className="min-h-10 md:min-h-8 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none placeholder:text-zinc-500 focus:border-emerald-600 focus:ring-2 focus:ring-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={disabled}
           id="practice-answer"
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               event.preventDefault();
               onSubmit();
             }
@@ -50,12 +50,12 @@ export function AnswerInput({ item, answer, disabled, onChange, onSubmit }: Answ
 
   return (
     <fieldset className="grid gap-3" disabled={disabled} onKeyDown={(event) => {
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
         event.preventDefault();
         onSubmit();
       }
     }}>
-      <legend className="text-sm font-semibold text-text">{checkpoint ? "选择所有正确步骤" : "选择一个答案"}</legend>
+      <legend className="text-sm font-semibold text-zinc-900">{checkpoint ? "选择所有正确步骤" : "选择一个答案"}</legend>
       <div className="grid gap-2">
         {options.map((option, index) => {
           const value = checkpoint ? String(index) : String.fromCharCode(65 + index);
@@ -69,7 +69,7 @@ export function AnswerInput({ item, answer, disabled, onChange, onSubmit }: Answ
                 type={checkpoint ? "checkbox" : "radio"}
                 value={value}
               />
-              <span className="leading-6">{option}</span>
+              <span className="leading-7">{option}</span>
             </label>
           );
         })}

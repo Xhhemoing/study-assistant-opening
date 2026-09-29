@@ -52,36 +52,39 @@ afterAll(async () => { setAuthRuntimeForTests(null); await runtime?.close(); awa
 
 describe("opening observation handlers", () => {
   it("rejects another workspace source and a client-only reference", async () => {
+    const courseId = randomUUID();
+    await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${workspaceId},'Observations',${courseId})`;
     const sourceId = randomUUID();
     const foreignId = randomUUID();
     await uploaded(sourceId);
     await sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, upload_state, parse_state)
       VALUES (${foreignId}, ${otherWorkspaceId}, 'foreign.pdf', 'application/pdf', 1, ${"b".repeat(64)}, 'uploaded', 'ready')`;
-    const denied = await createSession(req("/api/opening/learning-sessions", { courseId: randomUUID(), skillLabel: "fractions", sourceIds: [foreignId] }));
+    const denied = await createSession(req("/api/opening/learning-sessions", { courseId, skillLabel: "fractions", sourceIds: [foreignId] }));
     expect(denied.status).toBe(400);
-    const created = await createSession(req("/api/opening/learning-sessions", { courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId] }));
+    const created = await createSession(req("/api/opening/learning-sessions", { courseId, skillLabel: "fractions", sourceIds: [sourceId] }));
     expect(created.status).toBe(201);
     const session = await created.json() as { id: string };
     const cross = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [], answer: "1/2",
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [], answer: "1/2",
       outcome: "correct", assistance: "independent", clientKey: "obs-cross-01", referenceSourceId: foreignId, verdictSource: "reference_checked",
     }, otherCookie));
     expect(cross.status).toBe(404);
     const reference = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId], answer: "1/2",
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId], answer: "1/2",
       outcome: "correct", assistance: "independent", clientKey: "obs-ref-0001", referenceSourceId: foreignId, verdictSource: "reference_checked",
     }));
     expect(reference.status).toBe(400);
 
     const unknown = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId],
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId],
       answer: "1/2", outcome: "correct", assistance: "independent", clientKey: "obs-unknown1",
       verdictSource: "unknown",
     }));
-    expect(unknown.status).toBe(400);
+    expect(unknown.status).toBe(201);
+    expect(await unknown.json()).toMatchObject({ eligibility: { verifiedCorrect: "unknown" } });
 
     const suggestion = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId],
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId],
       answer: "1/2", outcome: "unverified", assistance: "unknown", clientKey: "obs-model001",
       verdictSource: "model_suggestion",
     }));
@@ -89,7 +92,7 @@ describe("opening observation handlers", () => {
     expect((await suggestion.json() as { verdictSource: string }).verdictSource).toBe("model_suggestion");
 
     const selfReport = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId],
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId],
       answer: "1/2", outcome: "correct", assistance: "independent", clientKey: "obs-self0001",
     }));
     const selfBody = await selfReport.json() as { id: string; courseId: string; verdictSource: string };
@@ -105,13 +108,13 @@ describe("opening observation handlers", () => {
     expect((await replay.json() as { id: string }).id).toBe(selfBody.id);
 
     const conflict = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId],
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId],
       answer: "changed", outcome: "incorrect", assistance: "independent", clientKey: "obs-self0001",
     }));
     expect(conflict.status).toBe(409);
 
     const revision = await submitObservation(req("/api/opening/observations", {
-      sessionId: session.id, courseId: randomUUID(), skillLabel: "fractions", sourceIds: [sourceId],
+      sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId],
       answer: "2/4", outcome: "unverified", assistance: "unknown", clientKey: "obs-revise01",
       revisesObservationId: selfBody.id,
     }));
@@ -129,7 +132,7 @@ describe("opening observation handlers", () => {
     }));
     expect(exposed.status).toBe(201);
     const exposedBody = await exposed.json() as { assistance: string; allowsIndependent: boolean };
-    expect(exposedBody.assistance).toBe("revealed");
+    expect(exposedBody.assistance).toBe("independent");
     expect(exposedBody.allowsIndependent).toBe(false);
 
     const fresh = await createSession(req("/api/opening/learning-sessions", {

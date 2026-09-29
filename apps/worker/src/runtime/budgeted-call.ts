@@ -24,6 +24,8 @@ export type BudgetedCallOptions = {
   reservedCents: number;
   actualCents: (output: ProviderOutput) => number;
   signal?: AbortSignal;
+  /** Runs after reservation, before any Provider request is authorized. */
+  beforeSend?: () => Promise<void>;
 };
 
 export class BudgetedCallError extends Error {
@@ -52,6 +54,13 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     amountCents: options.reservedCents,
     requestId: options.requestId,
   });
+  try {
+    await options.beforeSend?.();
+  } catch (error) {
+    // No Provider call has started: this reservation cannot have incurred usage.
+    await options.budget.release(options.requestId);
+    throw error;
+  }
   let output: ProviderOutput;
   try {
     output = await options.provider.complete(options.input, options.signal);

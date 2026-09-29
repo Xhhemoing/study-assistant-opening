@@ -103,7 +103,10 @@ describe("workspace preferences handler", () => {
     const response = await GET(requestWithCookie(user.cookie));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ defaultEntry: null });
+    await expect(response.json()).resolves.toEqual({
+      defaultEntry: null,
+      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+    });
   });
 
   it("persists and reads the authenticated workspace preference", async () => {
@@ -113,7 +116,10 @@ describe("workspace preferences handler", () => {
     expect(updated.status).toBe(200);
     await expect(updated.json()).resolves.toEqual({ defaultEntry: "explore" });
     const current = await GET(requestWithCookie(user.cookie));
-    await expect(current.json()).resolves.toEqual({ defaultEntry: "explore" });
+    await expect(current.json()).resolves.toEqual({
+      defaultEntry: "explore",
+      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+    });
   });
 
   it("ignores a body workspaceId and never updates another workspace", async () => {
@@ -127,9 +133,15 @@ describe("workspace preferences handler", () => {
 
     expect(updated.status).toBe(200);
     const ownerCurrent = await GET(requestWithCookie(owner.cookie));
-    await expect(ownerCurrent.json()).resolves.toEqual({ defaultEntry: "library" });
+    await expect(ownerCurrent.json()).resolves.toEqual({
+      defaultEntry: "library",
+      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+    });
     const otherCurrent = await GET(requestWithCookie(other.cookie));
-    await expect(otherCurrent.json()).resolves.toEqual({ defaultEntry: null });
+    await expect(otherCurrent.json()).resolves.toEqual({
+      defaultEntry: null,
+      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+    });
   });
 
   it("rejects malformed preference updates", async () => {

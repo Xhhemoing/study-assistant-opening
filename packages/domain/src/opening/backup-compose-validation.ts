@@ -1,12 +1,15 @@
+import { LEARNING_STATE_TABLES } from "./backup-learning-state";
 import type { OpeningBackupObject, OpeningDeletionMark } from "./backup-policy";
 import { isJournal, isUuid } from "./backup-validation";
 
 export const BACKUP_TABLES = new Set([
+  ...LEARNING_STATE_TABLES,
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_timetable_sessions", "opening_hard_blocks",
+  "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
+  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/i;
@@ -21,7 +24,7 @@ export function clone<T>(value: T): T {
 }
 
 function journalKey(mark: OpeningDeletionMark): string {
-  return `${mark.sourceId.toLowerCase()}\u0000${new Date(mark.deletedAt).toISOString()}`;
+  return `${mark.sourceId.toLowerCase()}\u0000${new Date(mark.deletedAt).toISOString()}\u0000${mark.assetDeletedAt ? new Date(mark.assetDeletedAt).toISOString() : ""}`;
 }
 
 export function uniqueJournal(value: unknown): value is OpeningDeletionMark[] {
@@ -48,7 +51,10 @@ export function tableJournal(tables: Record<string, Record<string, unknown>[]>):
     if (!isUuid(row.source_id)
       || (!(typeof row.deleted_at === "string" || row.deleted_at instanceof Date))
       || !Number.isFinite(new Date(row.deleted_at).getTime())) return null;
-    marks.push({ sourceId: row.source_id, deletedAt: new Date(row.deleted_at).toISOString() });
+    if (row.asset_deleted_at != null && (!(typeof row.asset_deleted_at === "string" || row.asset_deleted_at instanceof Date)
+      || !Number.isFinite(new Date(row.asset_deleted_at).getTime()))) return null;
+    marks.push({ sourceId: row.source_id, deletedAt: new Date(row.deleted_at).toISOString(),
+      ...(row.asset_deleted_at ? { assetDeletedAt: new Date(row.asset_deleted_at as string | Date).toISOString() } : {}) });
   }
   return uniqueJournal(marks) ? marks : null;
 }
@@ -85,4 +91,38 @@ export function canonicalObject(source: { sourceId: string; version: number }, o
     bytes: object.bytes,
     archivePath: `objects/${source.sourceId.toLowerCase()}/v${source.version}.bin`,
   };
+}
+
+export const sourceVersionKey = (sourceId: string, version: number): string => `${sourceId.toLowerCase()}/${version}`;
+
+/** Legacy archives describe only the current version; new archives retain known historical metadata. */
+export function sourceVersionMap(
+  sources: Map<string, Record<string, unknown>>,
+  versions: readonly Record<string, unknown>[],
+): Map<string, Record<string, unknown>> | null {
+  const result = new Map<string, Record<string, unknown>>();
+  for (const row of versions) {
+    if (!isUuid(row.source_id) || !Number.isSafeInteger(row.version) || (row.version as number) < 0
+      || !sources.has(row.source_id.toLowerCase())
+      || !["available", "unavailable", "unknown"].includes(String(row.availability))) return null;
+    const key = sourceVersionKey(row.source_id, row.version as number);
+    if (result.has(key)) return null;
+    if (row.bytes !== null && (!Number.isSafeInteger(row.bytes) || (row.bytes as number) <= 0)) return null;
+    if (row.sha256 !== null && !validHash(row.sha256)) return null;
+    if (row.availability === "available" && (row.bytes === null || row.sha256 === null)) return null;
+    result.set(key, row);
+  }
+  for (const [id, source] of sources) {
+    const key = sourceVersionKey(id, source.version as number), row = result.get(key);
+    if (row && (row.bytes !== source.bytes || row.sha256 !== source.sha256)) return null;
+    if (!row) result.set(key, { ...source, source_id: id, availability: "available" });
+  }
+  return result;
+}
+
+/** Existing inventories must remain complete; new learning-state tables are additive. */
+export function validBackupTableSet(tables: Record<string, unknown[]>): boolean {
+  const names = Object.keys(tables);
+  return names.every(name => BACKUP_TABLES.has(name))
+    && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name) || name in tables);
 }

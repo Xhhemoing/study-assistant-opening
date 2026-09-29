@@ -152,4 +152,35 @@ describe("remind job", () => {
     await expect(handler(job, payload())).rejects.toThrow(/owner/);
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("re-reads the task state before an external send and suppresses a stale job", async () => {
+    const record = vi.fn(async () => true);
+    const send = vi.fn(async (): Promise<ReminderSendResult> => ({ receiptId: "unexpected" }));
+    const handler = createRemindHandler({
+      record,
+      send,
+      isCurrent: async () => false,
+      now: () => now,
+    });
+
+    const result = await handler(job, payload());
+
+    expect(send).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledWith("job-1", {
+      receiptId: null, outcome: null, state: "succeeded", suppressed: true,
+    });
+    expect(result).toMatchObject({ status: "due", suppressed: true });
+  });
+});
+
+it("preserves an acknowledged provider receipt when a replay is no longer current", async () => {
+  const record = vi.fn(async () => true);
+  const send = vi.fn(async (): Promise<ReminderSendResult> => ({ receiptId: "duplicate" }));
+  const handler = createRemindHandler({ record, send, isCurrent: async () => false, now: () => now });
+
+  const result = await handler(job, payload({ outcome: "acknowledged", receiptId: "original-receipt" }));
+
+  expect(result).toMatchObject({ status: "sent", outcome: "acknowledged", receiptId: "original-receipt" });
+  expect(send).not.toHaveBeenCalled();
+  expect(record).not.toHaveBeenCalled();
 });

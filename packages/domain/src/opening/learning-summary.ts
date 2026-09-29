@@ -1,106 +1,78 @@
 import type { LearningObservation, LearningSummary } from "@aistudy/contracts";
+import { evaluateEvidenceEligibility } from "./evidence-eligibility";
+import type { EvidenceEligibility, EvidenceEligibilityContext, EvidenceObservation, EvidenceVersionApplicability } from "./evidence-eligibility";
 
-export type SummarizeOptions = {
-  /** Skills with an accepted due retest → needs_review (L02). */
-  dueRetestSkillLabels?: ReadonlySet<string>;
-  /** Server-known current versions. Client source ids are not trusted alone. */
-  currentSourceVersions?: Readonly<Record<string, number>>;
-  /** Observation id → source id → version recorded with that evidence. */
-  observationSourceVersions?: Readonly<Record<string, Readonly<Record<string, number>>>>;
+export type ObservationEligibilityInput = {
+  observation: EvidenceObservation;
+  context: EvidenceEligibilityContext;
 };
 
-/**
- * Explainable learning state from L01 observations.
- * Empty evidence → empty summary (never invent mastery).
- * Labels are limited observed evidence — not calibrated mastery.
- */
+export type CourseEvidence = {
+  observations: LearningObservation[];
+  evidenceContexts: Record<string, ObservationEligibilityInput>;
+};
+
+export type RetestEvidenceIdentity = { courseId: string; requirementKey: string | null; skillLabel: string };
+
+export type SummarizeOptions = {
+  /** Due/accepted evidence remains scoped to its course and requirement. */
+  dueRetests?: ReadonlyArray<RetestEvidenceIdentity>;
+  /** Server-owned identity, timing, help, and version facts for each observation. */
+  evidenceContexts?: Readonly<Record<string, ObservationEligibilityInput>>;
+};
+
+export type QualifiedLearningSummary = LearningSummary & {
+  courseId: string;
+  requirementKey: string | null;
+  evidenceEligibility: Array<{ observationId: string; eligibility: EvidenceEligibility; versionApplicability?: EvidenceVersionApplicability }>;
+};
+
+/** Captured facts remain visible even when their current applicability is unknown. */
 export function summarizeObservations(
   observations: ReadonlyArray<LearningObservation>,
   _now: string,
   opts: SummarizeOptions = {},
-): LearningSummary[] {
-  if (observations.length === 0) return [];
-
-  const bySkill = new Map<string, LearningObservation[]>();
+): QualifiedLearningSummary[] {
+  const groups = new Map<string, LearningObservation[]>();
   for (const row of observations) {
-    const list = bySkill.get(row.skillLabel) ?? [];
-    list.push(row);
-    bySkill.set(row.skillLabel, list);
+    const requirementKey = opts.evidenceContexts?.[row.id]?.observation.requirementKey ?? null;
+    const key = JSON.stringify([row.workspaceId, row.courseId, requirementKey, row.skillLabel]);
+    const rows = groups.get(key) ?? [];
+    rows.push(row);
+    groups.set(key, rows);
   }
 
-  const due = opts.dueRetestSkillLabels ?? new Set<string>();
-  const summaries: LearningSummary[] = [];
-
-  for (const [skillLabel, rows] of bySkill) {
-    const usable = rows.filter((row) => !isStaleSourceEvidence(row, opts));
-    if (usable.length === 0) continue;
-    const evidenceIds = usable.map((r) => r.id);
-    const lastObservedAt =
-      usable
-        .map((r) => r.occurredAt)
-        .sort()
-        .at(-1) ?? null;
-
-    let status: LearningSummary["status"] = "needs_check";
-
-    if (due.has(skillLabel)) {
-      status = "needs_review";
-    } else if (usable.every((row) => isObservedIndependentEvidence(row, opts))) {
-      status = "observed_independent";
-    } else {
-      status = "needs_check";
-    }
-
-    summaries.push({
-      skillLabel,
-      status,
-      evidenceIds,
-      evidenceSources: [...new Set(usable.map((row) => row.verdictSource))],
-      sampleCount: usable.length,
-      lastObservedAt,
+  return [...groups.values()].map((rows): QualifiedLearningSummary => {
+    const first = rows[0]!;
+    const requirementKey = opts.evidenceContexts?.[first.id]?.observation.requirementKey ?? null;
+    const due = opts.dueRetests?.some((entry) => entry.courseId === first.courseId && entry.requirementKey === requirementKey && entry.skillLabel === first.skillLabel);
+    const evidenceEligibility = rows.map((row) => {
+      const input = opts.evidenceContexts?.[row.id];
+      // Legacy facts are not upgraded using today's mutable problem or source.
+      const observation: EvidenceObservation = input?.observation ?? {
+        courseId: row.courseId,
+        problemId: row.problemId,
+        assistance: row.assistance,
+        outcome: row.outcome,
+        verdictSource: row.verdictSource,
+      };
+      return { observationId: row.id, eligibility: evaluateEvidenceEligibility(observation, input?.context ?? {}), versionApplicability: input?.context.version?.applicability ?? "version_unknown" };
     });
-  }
-
-  return summaries.sort((a, b) => a.skillLabel.localeCompare(b.skillLabel));
-}
-
-function isObservedIndependentEvidence(
-  row: LearningObservation,
-  opts: SummarizeOptions,
-): boolean {
-  if (
-    row.assistance !== "independent" ||
-    row.outcome !== "correct" ||
-    row.verdictSource !== "reference_checked" ||
-    !row.referenceSourceId
-  ) {
-    return false;
-  }
-  return sourceVersionMatches(row, row.referenceSourceId, opts);
-}
-
-function isStaleSourceEvidence(
-  row: LearningObservation,
-  opts: SummarizeOptions,
-): boolean {
-  const current = opts.currentSourceVersions;
-  const recorded = opts.observationSourceVersions?.[row.id];
-  if (!current || !recorded) return false;
-  const ids = new Set([...(row.sourceIds ?? []), row.referenceSourceId].filter(Boolean) as string[]);
-  for (const id of ids) {
-    if (current[id] === undefined || recorded[id] === undefined) continue;
-    if (recorded[id] !== current[id]) return true;
-  }
-  return false;
-}
-
-function sourceVersionMatches(
-  row: LearningObservation,
-  sourceId: string,
-  opts: SummarizeOptions,
-): boolean {
-  const current = opts.currentSourceVersions?.[sourceId];
-  const recorded = opts.observationSourceVersions?.[row.id]?.[sourceId];
-  if (current === undefined && recorded === undefined) return true;
-  return current !== undefined && recorded === current;
+    const independent = evidenceEligibility.every(({ eligibility }) =>
+      eligibility.independentAttempt === "yes" &&
+      eligibility.verifiedCorrect === "yes" &&
+      eligibility.usableForCurrentVersion === "yes",
+    );
+    return {
+      courseId: first.courseId,
+      requirementKey,
+      skillLabel: first.skillLabel,
+      status: due ? "needs_review" : independent ? "observed_independent" : "needs_check",
+      evidenceIds: rows.map((row) => row.id),
+      evidenceSources: [...new Set(rows.map((row) => row.verdictSource))],
+      evidenceEligibility,
+      sampleCount: rows.length,
+      lastObservedAt: rows.map((row) => row.occurredAt).sort().at(-1) ?? null,
+    };
+  }).sort((a, b) => a.courseId.localeCompare(b.courseId) || a.skillLabel.localeCompare(b.skillLabel) || (a.requirementKey ?? "").localeCompare(b.requirementKey ?? ""));
 }

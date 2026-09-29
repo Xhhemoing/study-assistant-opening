@@ -1,3 +1,5 @@
+import { format } from "node:util";
+import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderInput, ProviderOutput, SourceChunk } from "@aistudy/contracts";
 import { OpeningProviderError } from "@aistudy/ai";
@@ -35,6 +37,7 @@ function deps(overrides?: {
   complete?: (input: ProviderInput, signal?: AbortSignal) => Promise<ProviderOutput>;
   chunks?: SourceChunk[];
   sources?: string[];
+  provenance?: EphemeralProvenanceRepository;
 }) {
   const writes: string[] = [];
   const budget = {
@@ -56,7 +59,9 @@ function deps(overrides?: {
     chunks: {
       listForSources: async () => overrides?.chunks ?? [chunk],
     },
+    privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
     budget,
+    provenance: overrides?.provenance,
     provider: { complete },
     config: {
       maxContextCharacters: 12_000,
@@ -84,7 +89,7 @@ describe("ephemeral tutor service", () => {
     expect(heard.text).toBe("I hear you");
     expect(heard.citedChunkIds).toEqual([chunkId]);
     expect(listen.complete).toHaveBeenCalledOnce();
-    const sent = listen.complete.mock.calls[0][0];
+    const sent = listen.complete.mock.calls[0]![0];
     expect(sent.mode).toBe("listen");
     expect(sent.instruction).toMatch(/不要自动创建任务|do not (auto-)?create tasks/i);
     expect(listen.budget.reserve).toHaveBeenCalledOnce();
@@ -175,5 +180,44 @@ describe("ephemeral tutor service", () => {
       }),
     ).rejects.toBeInstanceOf(OpeningProviderError);
     expect(writes.some((row) => /conversation|turn|job|saved/.test(row))).toBe(false);
+  });
+});
+
+describe("ephemeral content-free provenance", () => {
+  it("uses server history lineage when the current selection has no sources", async () => {
+    const historyRefs = [{ sourceId, sourceVersion: 1 }];
+    const provenance = { resolveHistory: vi.fn(async () => historyRefs), record: vi.fn(async () => chunkId) };
+    const f = deps({ sources: [], chunks: [], provenance });
+    const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
+    const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
+    expect(provenance.resolveHistory).toHaveBeenCalledWith(scope, history, 0);
+    expect(provenance.record).toHaveBeenCalledWith(scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs });
+    expect(reply.provenanceId).toBe(chunkId);
+    expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
+  });
+  it("keeps unknown history lineage unknown instead of replacing it with the current selection", async () => {
+    const provenance = { resolveHistory: vi.fn(async () => null), record: vi.fn(async () => null) };
+    const f = deps({ provenance });
+    const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [sourceId], mode: "listen", history: [{ role: "assistant", text: "unproven history" }], historyPrivacyEpoch: 0 });
+    expect(provenance.record.mock.calls[0]).toEqual([scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: null }]);
+    expect(reply.provenanceId).toBeNull();
+  });
+  it.each([false, true])("never includes private bodies in budget calls, provenance rows, or console logs (provider failure=%s)", async fail => {
+    const marker = "EPHEMERAL-PRIVATE-BODY-MARKER";
+    const spies = (["log", "info", "warn", "error", "debug", "trace"] as const).map(method => vi.spyOn(console, method).mockImplementation(() => undefined));
+    const provenance = { resolveHistory: vi.fn(async () => []), record: vi.fn(async () => chunkId) };
+    try {
+      const f = deps({ provenance, complete: async () => {
+        if (fail) throw new OpeningProviderError("PROVIDER_NETWORK", `${marker}-provider-error`);
+        return { ...output, text: `${marker}-answer`, candidates: [{ kind: "memory", text: `${marker}-candidate`, temporary: false }] };
+      } });
+      const pending = f.service.replyEphemeral(scope, { text: `${marker}-prompt`, sourceIds: [sourceId], mode: "listen", history: [{ role: "user", text: `${marker}-history`, provenanceId: sourceId }], historyPrivacyEpoch: 0 });
+      if (fail) await expect(pending).rejects.toMatchObject({ code: "PROVIDER_NETWORK" });
+      else expect((await pending).text).toBe(`${marker}-answer`);
+      const persisted = [f.budget.reserve, f.budget.release, f.budget.settle, f.budget.markUnknown, provenance.record].flatMap(mock => mock.mock.calls);
+      expect(JSON.stringify(persisted)).not.toContain(marker);
+      expect(spies.flatMap(spy => spy.mock.calls.map(args => format(...args))).join("\n")).not.toContain(marker);
+      if (fail) expect(provenance.record).not.toHaveBeenCalled();
+    } finally { spies.forEach(spy => spy.mockRestore()); }
   });
 });

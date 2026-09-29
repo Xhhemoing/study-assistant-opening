@@ -1,15 +1,13 @@
-import type { LearningObservation, RetestCandidate, Scope } from "@aistudy/contracts";
+import type { LearningPreferences, RetestCandidate, Scope } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
-import {
-  buildRetestCandidates,
-  summarizeObservations,
-} from "@aistudy/domain";
+import { buildRetestCandidates, summarizeObservations, DEFAULT_RETEST_BATCH_LIMIT, type CourseEvidence, type RetestEvidenceIdentity } from "@aistudy/domain";
 
 export type RetestCandidateDeps = {
-  listObservations(scope: Scope, courseId: string): Promise<LearningObservation[]>;
-  listDueRetestSkills(scope: Scope, courseId: string): Promise<string[]>;
+  readLearningPreferences?: (scope: Scope, courseId: string) => Promise<LearningPreferences>;
+  readCourseEvidence(scope: Scope, courseId: string): Promise<CourseEvidence>;
+  listDueRetests(scope: Scope, courseId: string): Promise<RetestEvidenceIdentity[]>;
   /** Persist proposal rows (not calendar tasks). */
-  saveCandidates(scope: Scope, candidates: RetestCandidate[]): Promise<RetestCandidate[]>;
+  saveCandidates(scope: Scope, candidates: RetestCandidate[], expectedPrivacyEpoch?: number, sourceJobId?: string): Promise<RetestCandidate[]>;
   now?: () => string;
 };
 
@@ -21,58 +19,55 @@ export type RetestCandidatePayload = {
   delayDays?: number;
 };
 
-/**
- * L02: small retest proposal batch from explainable summaries.
- * Does not schedule calendar work (P02) — proposals only until accept.
- */
+/** L02 proposals consume the same qualification facts as the course read path. */
 export function createRetestCandidateHandler(deps: RetestCandidateDeps) {
   return async function processRetestCandidate(
     job: OpeningJobRecord,
     payload: unknown,
   ): Promise<{ candidates: RetestCandidate[] }> {
     const body = payload as RetestCandidatePayload;
-    if (!body || typeof body.courseId !== "string") {
-      throw new Error("retest payload missing courseId");
+    if (!body || typeof body.courseId !== "string") throw new Error("retest payload missing courseId");
+    const scope: Scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    if (deps.readLearningPreferences && !(await deps.readLearningPreferences(scope, body.courseId)).retestSuggestionsEnabled) {
+      return { candidates: [] };
     }
-    const scope: Scope = {
-      workspaceId: job.workspaceId,
-      ownerUserId: job.ownerUserId,
-    };
     const now = (deps.now ?? (() => new Date().toISOString()))();
-    const observations = await deps.listObservations(scope, body.courseId);
-    const dueSkills = await deps.listDueRetestSkills(scope, body.courseId);
+    const { observations, evidenceContexts } = await deps.readCourseEvidence(scope, body.courseId);
+    const dueRetests = await deps.listDueRetests(scope, body.courseId);
     const summaries = summarizeObservations(observations, now, {
-      dueRetestSkillLabels: new Set(dueSkills),
+      dueRetests, evidenceContexts,
     });
-
-    const sourceIdsBySkill: Record<string, string[]> = {};
-    const promptsBySkill = { ...(body.promptsBySkill ?? {}) };
+    const candidates: RetestCandidate[] = [];
+    const limit = body.limit ?? DEFAULT_RETEST_BATCH_LIMIT;
     for (const summary of summaries) {
-      const owned = observations.find(
-        (o) => o.skillLabel === summary.skillLabel && (o.sourceIds?.length ?? 0) > 0,
-      );
-      const ownedIds = owned?.sourceIds ?? [];
+      if (candidates.length >= limit) break;
+      // Keep references attached to this course/requirement's evidence; equal labels are not identity.
+      const allowedEvidence = new Set(summary.evidenceEligibility
+        .filter(({ observationId, eligibility }) => {
+          const availability = evidenceContexts[observationId]?.context.version?.applicability;
+          return eligibility.usableForCurrentVersion !== "no" && availability !== "unavailable" && availability !== "privacy_excluded";
+        })
+        .map(({ observationId }) => observationId));
+      const ownedIds = [...new Set(observations
+        .filter((row) => allowedEvidence.has(row.id))
+        .flatMap((row) => row.sourceIds))];
       const requested = body.sourceIdsBySkill?.[summary.skillLabel];
-      if (requested?.length) {
-        const allowed = new Set(ownedIds);
-        if (requested.every((id) => allowed.has(id))) {
-          sourceIdsBySkill[summary.skillLabel] = requested;
-        }
-      } else if (ownedIds.length) {
-        sourceIdsBySkill[summary.skillLabel] = ownedIds;
-      }
+      const allowed = new Set(ownedIds);
+      const sourceIds = requested?.length ? requested.every((id) => allowed.has(id)) ? requested : [] : ownedIds;
+      candidates.push(...buildRetestCandidates({
+        courseId: body.courseId,
+        summaries: [summary],
+        now,
+        sourceIdsBySkill: { [summary.skillLabel]: sourceIds },
+        promptsBySkill: body.promptsBySkill ?? {},
+        limit: limit - candidates.length,
+        delayDays: body.delayDays,
+      }).map((candidate) => ({
+        ...candidate, requirementKey: summary.requirementKey,
+        evidenceObservationIds: summary.evidenceIds,
+        evidenceRootIds: [...new Set(observations.filter((row) => summary.evidenceIds.includes(row.id)).map((row) => row.rootObservationId ?? row.id))],
+      })));
     }
-
-    const candidates = buildRetestCandidates({
-      courseId: body.courseId,
-      summaries,
-      now,
-      sourceIdsBySkill,
-      promptsBySkill,
-      limit: body.limit,
-      delayDays: body.delayDays,
-    });
-    const saved = await deps.saveCandidates(scope, candidates);
-    return { candidates: saved };
+    return { candidates: await deps.saveCandidates(scope, candidates, job.privacyEpoch, job.id) };
   };
 }

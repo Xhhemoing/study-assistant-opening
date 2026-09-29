@@ -1,5 +1,6 @@
 "use client";
 
+import { ui } from "../opening/design/ui";
 import { ListChecks } from "lucide-react";
 import type { TodayPlan } from "@aistudy/contracts";
 
@@ -19,12 +20,12 @@ export function PlanOptionsPicker({
   return (
     <section className="space-y-4" aria-labelledby="plan-options-heading">
       <div className="flex items-center gap-2">
-        <ListChecks aria-hidden="true" className="text-primary" size={19} />
-        <h2 className="text-base font-semibold text-text" id="plan-options-heading">
+        <ListChecks aria-hidden="true" className="text-emerald-700" size={19} />
+        <h2 className="text-base font-semibold text-zinc-900" id="plan-options-heading">
           选择今天的安排
         </h2>
       </div>
-      <p className="text-sm leading-6 text-text-dim">
+      <p className="text-sm leading-7 text-zinc-500">
         多个目标产生了不同的优先级。先选一个方案，系统不会自动替你决定。
       </p>
       <fieldset className="space-y-3">
@@ -33,7 +34,7 @@ export function PlanOptionsPicker({
           const checked = option.id === selectedId;
           return (
             <label
-              className={`block cursor-pointer rounded-lg border p-4 focus-within:ring-2 focus-within:ring-primary ${checked ? "border-primary bg-primary/10" : "border-line bg-surface hover:bg-surface-2"}`}
+              className={`block cursor-pointer border-b px-3 py-3 focus-within:ring-2 focus-within:ring-emerald-600 ${checked ? "border-emerald-600 bg-emerald-50" : "border-zinc-200 bg-white hover:bg-zinc-100"}`}
               key={option.id}
             >
               <input
@@ -44,9 +45,9 @@ export function PlanOptionsPicker({
                 type="radio"
                 value={option.id}
               />
-              <span className="block text-sm font-semibold text-text">{option.label}</span>
-              <span className="mt-1 block text-xs leading-5 text-text-dim">{option.description}</span>
-              <span className="mt-2 block text-xs text-text-dim">
+              <span className="block text-sm font-semibold text-zinc-900">{option.label}</span>
+              <span className="mt-1 block text-xs leading-5 text-zinc-500">{option.description}</span>
+              <span className="mt-2 block text-xs text-zinc-500">
                 {option.tasks.length} 项 · 约 {option.tasks.reduce((sum, task) => sum + task.estimatedMinutes, 0)} 分钟
               </span>
             </label>
@@ -54,7 +55,7 @@ export function PlanOptionsPicker({
         })}
       </fieldset>
       <button
-        className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+        className={ui.primary}
         disabled={confirming || !selectedId}
         onClick={onConfirm}
         type="button"

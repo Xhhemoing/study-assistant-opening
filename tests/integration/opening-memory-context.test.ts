@@ -29,6 +29,18 @@ describe("opening memory context admission", () => {
     expect(loaded.map((item) => item.id)).toEqual([id]);
   });
 
+  it("selects memory text and provenance at the same eligibility instant", async () => {
+    const sourceId = await insertSource(fixture.sql, fixture.scope);
+    const sourceTurn = await insertOwnedTurn(fixture.sql, fixture.scope, { sourceIds: [sourceId] });
+    const temporary = await insertMemory(fixture.sql, fixture.scope, "temporary", [sourceTurn]);
+    await fixture.sql`UPDATE opening_memories SET kind='temporary', expires_at='2026-10-01T00:00:00Z' WHERE id=${temporary}`;
+    const before = await memories.listContext(fixture.scope, "2026-09-30T23:59:59Z");
+    expect(before.memories.map((item) => item.id)).toEqual([temporary]);
+    expect(before.sourceRefs).toEqual([{ sourceId, sourceVersion: 0 }]);
+    expect(await memories.listContext(fixture.scope, "2026-10-01T00:00:00Z")).toEqual({ memories: [], sourceRefs: [] });
+    await fixture.sql`UPDATE opening_memories SET kind='candidate', expires_at=NULL WHERE id=${temporary}`;
+    expect(await memories.listContext(fixture.scope, "2026-09-30T23:59:59Z")).toEqual({ memories: [], sourceRefs: [] });
+  });
   it("hides memories with a missing or foreign turn and a foreign conversation owner", async () => {
     const missing = await insertMemory(fixture.sql, fixture.scope, "missing turn", [randomUUID()]);
     const foreignTurn = await insertOwnedTurn(fixture.sql, fixture.otherScope);

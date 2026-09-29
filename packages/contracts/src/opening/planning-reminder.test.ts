@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reminderEnqueueInputSchema, reminderListSchema, reminderSchema } from "./planning";
+import { reminderEnqueueInputSchema, reminderListSchema, reminderSchema, taskStatusUpdateInputSchema } from "./planning";
 
 const reminder = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -29,5 +29,12 @@ describe("reminder contract", () => {
     const list = reminderListSchema.parse({ reminders: [reminder], externalDelivery: "disabled" });
     expect(list.externalDelivery).toBe("disabled");
     expect(list.reminders[0]?.receiptId).toBeNull();
+  });
+
+  it("requires a version and timestamp when completing or skipping a task", () => {
+    expect(taskStatusUpdateInputSchema.parse({
+      status: "done", expectedVersion: 1, at: "2026-09-29T12:00:00.000Z",
+    }).status).toBe("done");
+    expect(taskStatusUpdateInputSchema.safeParse({ status: "done", expectedVersion: 0 }).success).toBe(false);
   });
 });

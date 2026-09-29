@@ -44,16 +44,22 @@ async function expectCleanFailure() {
   expect(await readFile(path.join(root, "sentinel"), "utf8")).toBe("retain unrelated file");
 }
 
-it("round-trips all 17 real database tables and MinIO bytes through an encrypted archive", async () => {
+it("round-trips the durable database tables and MinIO bytes through an encrypted archive", async () => {
   const graph = await seedBackupGraph(fixture.sql, fixture.scope);
+  const contextRefs = [{ sourceId: graph.source.toUpperCase(), sourceVersion: 0 }, { sourceId: graph.source, sourceVersion: 1 }];
+  await fixture.sql`UPDATE opening_turns SET context_source_refs = ${fixture.sql.json(contextRefs)} WHERE id = ${graph.turn}`;
   await put(graph.source);
   const excluded = await fixture.rows.source();
   await fixture.rows.exclude(excluded); // No corresponding object: it must never be read.
   const draft = await assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader);
   expect(draft).toMatchObject({ ok: true });
   if (!draft.ok) throw new Error(JSON.stringify(draft));
-  expect(Object.keys(draft.backup.tables)).toHaveLength(17);
+  expect(Object.keys(draft.backup.tables)).toHaveLength(25);
   expect(draft.backup.tables.opening_memories).toHaveLength(1);
+  expect(draft.backup.tables.opening_turns).toEqual([expect.objectContaining({ id: graph.turn, context_source_refs: contextRefs })]);
+  expect(draft.backup.tables.opening_source_versions).toContainEqual(expect.objectContaining({
+    source_id: graph.source, version: 0, availability: "unknown", bytes: null, sha256: null,
+  }));
   expect(draft.backup.objects.map((object) => object.sourceId)).toEqual([graph.source]);
   const staged = (await readdir(root)).filter((entry) => entry.startsWith("opening-backup-"));
   expect(staged).toHaveLength(1);
@@ -79,19 +85,21 @@ it("round-trips all 17 real database tables and MinIO bytes through an encrypted
   } finally { await opened.close(); }
 });
 
-it.each(["hash", "missing"])("rejects %s object failure and removes only its staging directory", async (failure) => {
+it("rejects object hash failure and removes only its staging directory", async () => {
   const source = await fixture.rows.source();
-  if (failure === "hash") {
-    const altered = Buffer.from(sourceBytes);
-    altered[0] = altered[0]! ^ 1;
-    await put(source, altered);
-  }
-  await expect(assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader)).rejects.toThrow(
-    failure === "hash" ? "backup object mismatch" : "storage unavailable",
-  );
+  const altered = Buffer.from(sourceBytes);
+  altered[0] = altered[0]! ^ 1;
+  await put(source, altered);
+  await expect(assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader)).rejects.toThrow("backup object mismatch");
   await expectCleanFailure();
 });
-
+it("refuses a current MinIO 404 and cleans staging without producing an archive", async () => {
+  const source = await fixture.rows.source("uploaded",2);
+  expect(source).toBeTruthy();
+  const result = await assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader);
+  expect(result).toMatchObject({ok:false,code:"OBJECT_MISMATCH"});
+  await expectCleanFailure();
+});
 it.each(["exclusion", "version", "journal", "new-source"])("rejects %s drift while real object bytes are staged", async (change) => {
   const source = await fixture.rows.source();
   await put(source);

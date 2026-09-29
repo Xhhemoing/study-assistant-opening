@@ -1,3 +1,4 @@
+import { openingNoteReadable } from "./opening-note-provenance";
 import { randomUUID } from "node:crypto";
 import {
   assetLifecycleSchema,
@@ -496,6 +497,8 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       }
       throw new LibraryError("NOT_FOUND", `Document not found: ${documentId}`);
     }
+    const visible = await sql`SELECT ${openingNoteReadable(sql, workspaceId, sql`${documentId}::uuid`)} AS readable`;
+    if (!visible[0]!.readable) throw new LibraryError("NOT_FOUND", "关联材料已永久删除，此笔记内容不可用。");
     return rows[0]!;
   }
 
@@ -709,6 +712,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         FROM library_documents
         WHERE workspace_id = ${input.workspaceId}
           AND deleted_at IS NULL
+          AND ${openingNoteReadable(sql, input.workspaceId, sql`library_documents.id`)}
         ORDER BY updated_at DESC, id ASC
       `;
       return Promise.all(rows.map(async (row) => {
@@ -747,6 +751,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           FROM library_documents
           WHERE id = ${input.documentId} AND workspace_id = ${input.workspaceId}
             AND deleted_at IS NULL
+            AND ${openingNoteReadable(tx, input.workspaceId, tx`library_documents.id`)}
           FOR UPDATE
         `;
         if (!rows.length) {
@@ -900,6 +905,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async getRevision(input) {
+      await getDocumentRow(input.workspaceId, input.documentId, { includeDeleted: true });
       const rows = await sql`
         SELECT *
         FROM library_revisions
@@ -1308,6 +1314,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         ) properties ON true
         WHERE d.workspace_id = ${input.workspaceId}
           AND d.deleted_at IS NULL
+          AND ${openingNoteReadable(sql, input.workspaceId, sql`d.id`)}
           AND (${documentConditions.reduce((query, condition, index) =>
             index === 0 ? condition : sql`${query} OR ${condition}`,
           )})

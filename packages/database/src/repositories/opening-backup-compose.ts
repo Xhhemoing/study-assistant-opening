@@ -40,6 +40,7 @@ function compose(records: Awaited<ReturnType<typeof readOpeningBackupRecords>>, 
         sources: staging.snapshot.sources,
       },
       objects: staging.objects,
+      unavailableSources: staging.unavailableSources,
     },
   });
 }

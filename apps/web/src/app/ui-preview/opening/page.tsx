@@ -1,7 +1,6 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { OpeningPreviewApp } from "@/features/opening-preview/preview-app";
-
+/** The old isolated demo now leads to the integrated workspace. */
 export default function OpeningPreviewPage() {
-  return <OpeningPreviewApp />;
+  redirect("/opening/today");
 }

@@ -6,11 +6,11 @@ import {
 } from "./backup-policy";
 import { isUuid } from "./backup-validation";
 import {
-  BACKUP_TABLES,
+  validBackupTableSet,
   canonicalObject,
   clone,
   sameJournal,
-  sourceMap,
+  sourceMap, sourceVersionMap, sourceVersionKey,
   tableJournal,
   uniqueJournal,
   validHash,
@@ -31,6 +31,7 @@ export type OpeningBackupComposeStaging = {
     sources: Array<{ sourceId: string; version: number; bytes: number; sha256: string }>;
   };
   objects: OpeningBackupObject[];
+  unavailableSources?: Array<{ sourceId: string; version: number }>;
 };
 
 export type OpeningBackupComposeInput = {
@@ -61,11 +62,7 @@ function validInput(records: OpeningBackupComposeRecords, staging: OpeningBackup
     && Array.isArray(staging.objects);
 }
 
-function validTableSet(tables: Record<string, Record<string, unknown>[]>): boolean {
-  const names = Object.keys(tables);
-  return names.length === BACKUP_TABLES.size
-    && names.every((name) => BACKUP_TABLES.has(name));
-}
+
 
 function validWorkspaceRows(
   tables: Record<string, Record<string, unknown>[]>,
@@ -83,7 +80,7 @@ function validChunks(
     const id = typeof row.source_id === "string" ? row.source_id.toLowerCase() : "";
     const version = row.source_version;
     return isUuid(row.source_id) && Number.isSafeInteger(version) && (version as number) >= 0
-      && sources.get(id)?.version === version;
+      && sources.has(sourceVersionKey(id, version as number));
   });
 }
 
@@ -91,7 +88,7 @@ function matchSources(
   rows: Map<string, Record<string, unknown>>,
   staged: OpeningBackupComposeStaging["snapshot"]["sources"],
 ): boolean {
-  const stagedMap = new Map(staged.map((source) => [source.sourceId.toLowerCase(), source]));
+  const stagedMap = new Map(staged.map((source) => [sourceVersionKey(source.sourceId, source.version), source]));
   if (stagedMap.size !== staged.length || stagedMap.size !== rows.size) return false;
   return [...stagedMap].every(([id, source]) => {
     const row = rows.get(id);
@@ -104,13 +101,15 @@ function buildObjects(
   staged: OpeningBackupComposeStaging["snapshot"]["sources"],
   objects: OpeningBackupObject[],
 ): { ok: true; objects: OpeningBackupObject[] } | { ok: false; code: ComposeFailureCode } {
-  const sources = new Map(staged.map((source) => [source.sourceId.toLowerCase(), source]));
+  const sources = new Map(staged.map((source) => [sourceVersionKey(source.sourceId, source.version), source]));
   const result = new Map<string, OpeningBackupObject>();
   for (const object of objects) {
-    const id = object.sourceId.toLowerCase();
-    const source = sources.get(id);
-    if (!source || !isUuid(object.sourceId) || result.has(id)) return { ok: false, code: "OBJECT_MISMATCH" };
-    const expectedPath = `objects/${id}/v${source.version}.bin`;
+    const id = object.archivePath;
+    const source = [...sources.values()].find(row => `objects/${row.sourceId.toLowerCase()}/v${row.version}.bin` === id);
+    if (!isUuid(object.sourceId) || result.has(id)) return { ok: false, code: "OBJECT_MISMATCH" };
+    if (!source) return { ok: false, code: [...sources.values()].some(row => row.sourceId.toLowerCase() === object.sourceId.toLowerCase()) ? "OBJECT_METADATA_MISMATCH" : "OBJECT_MISMATCH" };
+    if (object.sourceId.toLowerCase() !== source.sourceId.toLowerCase()) return { ok: false, code: "OBJECT_MISMATCH" };
+    const expectedPath = `objects/${source.sourceId.toLowerCase()}/v${source.version}.bin`;
     if (!validHash(object.sha256) || !validHash(object.actualSha256) || object.archivePath !== expectedPath
       || object.bytes !== source.bytes || object.sha256.toLowerCase() !== source.sha256.toLowerCase()
       || object.actualSha256.toLowerCase() !== object.sha256.toLowerCase()) {
@@ -130,7 +129,7 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
   const { records, staging } = input;
   if (records.privacyEpoch !== staging.snapshot.privacyEpoch) return fail("EPOCH_MISMATCH");
   const workspaceId = staging.snapshot.workspaceId.toLowerCase();
-  if (!validTableSet(records.tables)) return fail("INVALID_INPUT");
+  if (!validBackupTableSet(records.tables)) return fail("INVALID_INPUT");
   const sourceRows = records.tables.opening_sources ?? [];
   const chunkRows = records.tables.opening_source_chunks ?? [];
   const sources = sourceMap(sourceRows);
@@ -138,12 +137,22 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
   if ([...sources.values()].some((row) => typeof row.workspace_id !== "string"
       || row.workspace_id.toLowerCase() !== workspaceId)
     || !validWorkspaceRows(records.tables, workspaceId)) return fail("WORKSPACE_MISMATCH");
-  if (!validChunks(chunkRows, sources)) return fail("OBJECT_METADATA_MISMATCH");
+  const versions = sourceVersionMap(sources, records.tables.opening_source_versions ?? []);
+  if (!versions) return fail("OBJECT_METADATA_MISMATCH");
+  if (!validChunks(chunkRows, versions)) return fail("OBJECT_METADATA_MISMATCH");
   const exclusions = tableJournal(records.tables);
   if (!exclusions || !sameJournal(records.deletionJournal, staging.snapshot.deletionJournal)
     || !sameJournal(records.deletionJournal, exclusions)) return fail("JOURNAL_MISMATCH");
-  if (!matchSources(sources, staging.snapshot.sources)) return fail("OBJECT_METADATA_MISMATCH");
-  const objectResult = buildObjects(staging.snapshot.sources, staging.objects);
+  const available = new Map([...versions].filter(([, row]) => row.availability === "available"));
+  if (!matchSources(available, staging.snapshot.sources)) return fail("OBJECT_METADATA_MISMATCH");
+  const currentVersions = new Set([...sources].map(([id,row]) => sourceVersionKey(id,row.version as number)));
+  const unavailable = new Set<string>();
+  for (const missing of staging.unavailableSources ?? []) {
+    const key = sourceVersionKey(missing.sourceId, missing.version);
+    if (currentVersions.has(key) || !available.has(key) || unavailable.has(key)) return fail("OBJECT_MISMATCH");
+    unavailable.add(key);
+  }
+  const objectResult = buildObjects(staging.snapshot.sources.filter(source => !unavailable.has(sourceVersionKey(source.sourceId, source.version))), staging.objects);
   if (!objectResult.ok) return fail(objectResult.code);
   const backup: OpeningBackup = {
     format: "opening-backup", version: 1, workspaceId,
@@ -151,6 +160,10 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
     deletionJournal: clone(records.deletionJournal),
     tables: clone(records.tables), objects: objectResult.objects,
   };
+  if (unavailable.size) backup.tables.opening_source_versions = [...versions].map(([key, row]) => ({
+    source_id: row.source_id, version: row.version, workspace_id: row.workspace_id, bytes: row.bytes,
+    sha256: row.sha256, availability: unavailable.has(key) ? "unavailable" : row.availability,
+  }));
   const preview = validateOpeningRestore(backup, staging.snapshot.deletionJournal);
   return preview.allowed ? { ok: true, backup } : fail("PREVIEW_REJECTED", ...preview.errors);
 }

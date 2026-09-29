@@ -23,6 +23,7 @@ import {
   conversationSummarySchema,
   conversationResumeSchema,
   ephemeralTurnInputSchema,
+  ephemeralTurnResponseSchema,
   timeConfigSchema,
   timeConfigSaveInputSchema,
   timeConfigSupportsAbsoluteScheduling,
@@ -305,4 +306,16 @@ it("timeConfigSupportsAbsoluteScheduling requires termStart + non-empty period m
     expect(memoryVisibleInCourseScope(U, null)).toBe(false);
   });
 
+});
+it("carries a temporary history epoch separately from Provider output", () => {
+  const input = { text: "next", sourceIds: [], mode: "listen", history: [] };
+  expect(ephemeralTurnInputSchema.parse(input).historyPrivacyEpoch).toBeUndefined();
+  expect(ephemeralTurnInputSchema.parse({ ...input, historyPrivacyEpoch: 2 }).historyPrivacyEpoch).toBe(2);
+  for (const historyPrivacyEpoch of [-1, 1.5, "2"]) {
+    expect(ephemeralTurnInputSchema.safeParse({ ...input, historyPrivacyEpoch }).success).toBe(false);
+  }
+  const reply = { text: "reply", citedChunkIds: [], candidates: [], requestId: null, inputTokens: null, outputTokens: null };
+  expect(ephemeralTurnResponseSchema.safeParse(reply).success).toBe(false);
+  expect(ephemeralTurnResponseSchema.parse({ ...reply, privacyEpoch: 2, historyDiscarded: true }))
+    .toMatchObject({ privacyEpoch: 2, historyDiscarded: true });
 });

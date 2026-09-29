@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createOpeningPlansRepository, createOpeningRetestRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
 
 describe("opening retest → P02 task bridge", () => {
   let fixture: OpeningFixture;
@@ -20,11 +21,14 @@ describe("opening retest → P02 task bridge", () => {
 
   async function insertCandidate(kind: "task" | "memory") {
     const id = randomUUID();
-    const sourceId = randomUUID();
+    const sourceId = await backupRows(fixture.sql, fixture.scope).source();
+    const courseId = randomUUID();
+    await fixture.sql`INSERT INTO courses (id, workspace_id, title, slug)
+      VALUES (${courseId}, ${fixture.scope.workspaceId}, 'Retest course', ${courseId})`;
     const payload = {
       kind,
       id,
-      courseId: randomUUID(),
+      courseId,
       skillLabel: "fractions",
       prompt: "Retest fractions from source stem",
       sourceIds: [sourceId],

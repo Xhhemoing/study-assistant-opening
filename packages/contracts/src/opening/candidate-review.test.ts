@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { candidateRefSchema, reviewResultSchema } from "./candidate-review";
-import { taskCreateInputSchema } from "./planning";
+import { taskCreateInputSchema, taskCreateResultSchema, taskItemSchema } from "./planning";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const otherId = "22222222-2222-4222-8222-222222222222";
@@ -54,4 +54,21 @@ describe("source-aware candidate review contracts", () => {
     expect(reviewResultSchema.parse(result)).toEqual(result);
     expect(reviewResultSchema.parse({ disposition: "already_processed", resultRef: null }).resultRef).toBeNull();
   });
+});
+
+it("accepts optional original versions and rejects malformed keys or versions", () => {
+  const input = { ...task, clientKey: "retry-key", expectedVersion: 0 };
+  expect(taskCreateInputSchema.parse(input)).toEqual(input);
+  for (const bad of [{ expectedVersion: -1 }, { expectedVersion: 0.5 }, { clientKey: "short" }]) {
+    expect(taskCreateInputSchema.safeParse({ ...input, ...bad }).success).toBe(false);
+  }
+});
+
+it("retains the legacy task shape while exposing review metadata for explicit clients", () => {
+  const created = { id, title: "复习", minutes: 20, dueAt: null, priority: 1, status: "pending" };
+  expect(taskItemSchema.parse(created)).toEqual(taskCreateResultSchema.parse(created));
+  for (const disposition of ["applied", "replayed", "already_processed"]) {
+    const response = { ...created, reviewResult: { disposition, resultRef: { kind: "task", id } } };
+    expect(taskCreateResultSchema.parse(response)).toEqual(response);
+  }
 });

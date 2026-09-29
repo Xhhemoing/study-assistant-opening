@@ -1,5 +1,6 @@
 "use client";
 
+import { PageHeading, ui } from "../opening/design/ui";
 import { Archive, ArrowLeft, Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -115,47 +116,40 @@ export function GoalDetail({ id }: { id: string }) {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
-      <header className="space-y-3 border-b border-line pb-6">
-        <Link className="inline-flex items-center gap-2 text-sm text-text-dim hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/learn/goals"><ArrowLeft aria-hidden="true" size={16} />返回目标列表</Link>
-        <div className="space-y-1">
-          <p className="text-xs text-text-dim">学习空间 / 目标详情</p>
-          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-text">目标详情</h1>
-        </div>
-      </header>
+    <main className="min-w-0 bg-white"><PageHeading title="目标详情" action={<Link className={ui.quiet} href="/learn/goals"><ArrowLeft aria-hidden="true" size={14} />返回目标列表</Link>} /><div className="mx-auto max-w-3xl space-y-6 px-5 py-5">
 
-      {loading ? <p className="border-y border-line py-8 text-sm text-text-dim" role="status">正在读取目标…</p> : null}
+      {loading ? <p className="border-y border-zinc-200 py-8 text-sm text-zinc-500" role="status">正在读取目标…</p> : null}
       {!loading && error && !draft ? (
-        <section className="space-y-3 border-y border-line py-8" role="alert">
-          <p className="text-sm text-danger">{error}</p>
-          <button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setReloadToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button>
+        <section className="space-y-3 border-y border-zinc-200 py-8" role="alert">
+          <p className="text-sm text-red-700">{error}</p>
+          <button className={ui.secondary} onClick={() => setReloadToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={16} />重试</button>
         </section>
       ) : null}
       {!loading && draft ? (
         <>
-          <form className="space-y-8" onSubmit={saveGoal}>
+          <form className="space-y-6" onSubmit={saveGoal}>
             <div className="space-y-2">
-              <label className="text-sm font-semibold text-text" htmlFor="goal-detail-title">目标名称</label>
-              <input className="min-h-11 w-full rounded-lg border border-line bg-surface px-3 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/30" id="goal-detail-title" maxLength={80} onChange={(event) => updateDraft("title", event.target.value)} value={draft.title} />
+              <label className="text-sm font-semibold text-zinc-900" htmlFor="goal-detail-title">目标名称</label>
+              <input className="min-h-10 md:min-h-8 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-zinc-200" id="goal-detail-title" maxLength={80} onChange={(event) => updateDraft("title", event.target.value)} value={draft.title} />
             </div>
             <ScenarioPicker onChange={(value) => updateDraft("scenario", value)} value={draft.scenario} />
             <ExamDateField onChange={(value) => updateDraft("examDate", value)} value={draft.examDate} />
             <SubjectPicker onChange={(value) => updateDraft("subjects", value)} value={draft.subjects} />
             <DailyMinutesField onChange={(value) => updateDraft("dailyMinutes", clampDailyMinutes(value))} value={draft.dailyMinutes} />
-            {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
-            <div className="flex justify-end border-t border-line pt-5">
-              <button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={saving} type="submit">
-                {saving ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} /> : <Save aria-hidden="true" size={16} />}
+            {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
+            <div className="flex justify-end border-t border-zinc-200 pt-5">
+              <button className={ui.primary} disabled={saving} type="submit">
+                {saving ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={16} /> : <Save aria-hidden="true" size={16} />}
                 {saving ? "保存中" : "保存变更"}
               </button>
             </div>
           </form>
-          <section className="space-y-3 border-t border-line pt-6" aria-labelledby="archive-goal-heading">
-            <div className="space-y-1"><h2 className="text-sm font-semibold text-text" id="archive-goal-heading">归档目标</h2><p className="text-xs text-text-dim">归档后会从当前目标列表中隐藏。</p></div>
-            {confirmArchive ? <div className="flex flex-col gap-3 sm:flex-row sm:items-center"><p className="text-sm text-danger">确认归档这个目标吗？</p><button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-danger px-3 text-sm font-semibold text-white hover:bg-danger/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:opacity-50" disabled={archiving} onClick={() => void archiveGoal()} type="button"><Check aria-hidden="true" size={16} />确认归档</button><button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm text-text-dim hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setConfirmArchive(false)} type="button">取消</button></div> : <button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-danger/40 px-3 text-sm text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger" onClick={() => setConfirmArchive(true)} type="button"><Archive aria-hidden="true" size={16} />归档目标</button>}
+          <section className="space-y-3 border-t border-zinc-200 pt-6" aria-labelledby="archive-goal-heading">
+            <div className="space-y-1"><h2 className="text-sm font-semibold text-zinc-900" id="archive-goal-heading">归档目标</h2><p className="text-xs text-zinc-500">归档后会从当前目标列表中隐藏。</p></div>
+            {confirmArchive ? <div className="flex flex-col gap-3 sm:flex-row sm:items-center"><p className="text-sm text-red-700">确认归档这个目标吗？</p><button className="inline-flex min-h-10 md:min-h-8 items-center justify-center gap-2 rounded-md bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50" disabled={archiving} onClick={() => void archiveGoal()} type="button"><Check aria-hidden="true" size={16} />确认归档</button><button className={ui.secondary} onClick={() => setConfirmArchive(false)} type="button">取消</button></div> : <button className="inline-flex min-h-10 md:min-h-8 items-center justify-center gap-2 rounded-md border border-red-200 px-3 text-sm text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500" onClick={() => setConfirmArchive(true)} type="button"><Archive aria-hidden="true" size={16} />归档目标</button>}
           </section>
         </>
       ) : null}
-    </main>
+    </div></main>
   );
 }

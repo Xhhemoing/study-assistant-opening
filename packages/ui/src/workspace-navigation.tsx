@@ -25,7 +25,7 @@ export function WorkspaceNavigation({
   placement?: WorkspaceNavigationPlacement;
   className?: string;
 }): ReactNode {
-  const classes = ["workspace-navigation", `workspace-navigation--${placement}`, className]
+  const classes = ["flex gap-1", placement === "bottom" ? "justify-around px-2" : "flex-col px-2", className]
     .filter(Boolean)
     .join(" ");
 
@@ -40,10 +40,11 @@ export function WorkspaceNavigation({
           key={item.key}
           href={item.href}
           aria-label={item.label}
+          className={`flex min-h-11 flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-[10px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 motion-reduce:transition-none ${item.key === activeEntry ? "bg-emerald-50 text-emerald-800" : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"}`}
           data-entry={item.key}
           aria-current={item.key === activeEntry ? "page" : undefined}
         >
-          <span className="workspace-navigation__icon" aria-hidden="true">
+          <span className="shrink-0" aria-hidden="true">
             {item.key === "learn" ? (
               <BookOpen size={20} strokeWidth={1.8} />
             ) : item.key === "explore" ? (
@@ -52,7 +53,7 @@ export function WorkspaceNavigation({
               <Library size={20} strokeWidth={1.8} />
             )}
           </span>
-          <span className="workspace-navigation__label">{item.label}</span>
+          <span className="truncate">{item.label}</span>
         </a>
       ))}
     </nav>

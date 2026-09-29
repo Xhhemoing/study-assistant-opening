@@ -1,45 +1,37 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { loadTutorHistory } from "./opening-tutor-history";
+import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
 
 const scope = { workspaceId: "workspace-1", ownerUserId: "owner-1" };
-
-function fakeSql() {
-  const queries: string[] = [];
-  const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const query = strings.join("?");
-    queries.push(query);
-    if (query.includes("opening_privacy_exclusions") && !query.includes("opening_turns")) {
-      return [{ source_id: "excluded-source" }];
-    }
-    expect(query).not.toMatch(/opening_privacy_exclusions/);
-    expect(values).toContainEqual(["excluded-source"]);
-    return [{ question: "kept question", answer: "kept answer" }];
+const sourceId = "00000000-0000-4000-8000-000000000001";
+function fakeSql(rows: Record<string, unknown>[]) {
+  const sql = (async (strings: TemplateStringsArray) => {
+    if (!strings.join("").includes("WITH prior")) return [];
+    return rows;
   }) as unknown as Sql;
-  return { sql, queries };
+  sql.unsafe = (() => "fragment") as unknown as Sql["unsafe"];
+  return sql;
 }
 
-describe("loadTutorHistory privacy admission", () => {
-  it("compares history refs to listExcludedSourceIds instead of a local privacy query", async () => {
-    const privacy = await import("./opening-privacy");
-    const listExcludedSourceIds = vi.fn(async () => ["excluded-source"]);
-    const spy = vi.spyOn(privacy, "createOpeningPrivacyRepository").mockReturnValue({
-      getWorkspaceEpoch: vi.fn(),
-      isSourceExcluded: vi.fn(),
-      listExcludedSourceIds,
-      recordExclusions: vi.fn(),
+describe("loadTutorHistory context selection", () => {
+  it("keeps compatibility history while carrying the selected exchanges' lineage", async () => {
+    const sql = fakeSql([{ question: "question", answer: "answer", user_source_refs: [],
+      assistant_source_refs: [{ sourceId, sourceVersion: 0 }] }]);
+    expect(await loadTutorHistoryContext(sql, scope, "turn-1")).toEqual({
+      history: [{ role: "user", text: "question" }, { role: "assistant", text: "answer" }],
+      sourceRefs: [{ sourceId, sourceVersion: 0 }],
     });
-    const { sql, queries } = fakeSql();
-
-    await expect(loadTutorHistory(sql, scope, "turn-1")).resolves.toEqual([
-      { role: "user", text: "kept question" },
-      { role: "assistant", text: "kept answer" },
+    expect(await loadTutorHistory(sql, scope, "turn-1")).toEqual([
+      { role: "user", text: "question" }, { role: "assistant", text: "answer" },
     ]);
-
-    expect(spy).toHaveBeenCalledWith(sql);
-    expect(listExcludedSourceIds).toHaveBeenCalledWith(scope);
-    expect(queries.some((query) => query.includes("FROM opening_privacy_exclusions"))).toBe(false);
-    expect(queries.some((query) => query.includes("a.citations"))).toBe(true);
-    spy.mockRestore();
+  });
+  it("does not inherit provenance from an exchange omitted by the character limit", async () => {
+    const sql = fakeSql([
+      { question: "recent", answer: "answer", user_source_refs: [], assistant_source_refs: [] },
+      { question: "x".repeat(12001), answer: "old", user_source_refs: [], assistant_source_refs: [{ sourceId, sourceVersion: 0 }] },
+    ]);
+    expect(await loadTutorHistoryContext(sql, scope, "turn-1")).toEqual({
+      history: [{ role: "user", text: "recent" }, { role: "assistant", text: "answer" }], sourceRefs: [],
+    });
   });
 });

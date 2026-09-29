@@ -1,121 +1,99 @@
-import { describe, expect, it, vi } from "vitest";
-import type { LearningObservation } from "@aistudy/contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as domain from "@aistudy/domain";
 import { createRetestCandidateHandler } from "./retest-candidate";
+import { createOpeningLearningReadService } from "../../../web/src/features/opening/learning/read-service";
+import { courseEvidence, courseEvidenceCases, learningObservation } from "../../../../packages/domain/src/opening/learning-summary-fixtures";
 
-const courseId = "11111111-1111-4111-8111-111111111111";
-const job = {
-  id: "job-1",
-  workspaceId: "ws-1",
-  ownerUserId: "user-1",
-  key: "retest-1",
-  kind: "retest",
-  payload: {},
-  result: null,
-  state: "running",
-  privacyEpoch: 0,
-};
+const courseId = learningObservation.courseId;
+const scope = { workspaceId: learningObservation.workspaceId, ownerUserId: "user-1" };
+const job = { id: "job-1", ...scope, key: "retest-1", kind: "retest", payload: {}, result: null, state: "running", privacyEpoch: 0 };
+const now = () => learningObservation.occurredAt;
+const payload = { courseId, promptsBySkill: { fractions: "Retest fractions from source stem" } };
 
-function obs(over: Partial<LearningObservation> & Pick<LearningObservation, "id" | "skillLabel">): LearningObservation {
-  return {
-    sessionId: "22222222-2222-4222-8222-222222222222",
-    courseId,
-    workspaceId: "ws-1",
-    sourceIds: ["77777777-7777-4777-8777-777777777777"],
-    answer: "x",
-    clientKey: `ck-${over.id.slice(0, 8)}xx`,
-    occurredAt: "2026-09-12T10:00:00.000Z",
-    sourceTurnIds: [],
-    referenceSourceId: null,
-    evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
-    problemId: null,
-    retestId: null,
-    assistance: "independent",
-    outcome: "unverified",
-    verdictSource: "self_report",
-    ...over,
-  };
-}
+afterEach(() => vi.restoreAllMocks());
 
-describe("retest-candidate job", () => {
-  it("builds a single heuristic candidate from needs_check evidence", async () => {
-    const saveCandidates = vi.fn(async (_s, c) => c);
-    const handler = createRetestCandidateHandler({
-      listObservations: async () => [
-        obs({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", skillLabel: "fractions" }),
-      ],
-      listDueRetestSkills: async () => [],
-      saveCandidates,
-      now: () => "2026-09-12T10:00:00.000Z",
-    });
-    const result = await handler(job, {
-      courseId,
-      promptsBySkill: { fractions: "Retest fractions from source stem" },
-    });
-    expect(result.candidates).toHaveLength(1);
-    expect(result.candidates[0]?.skillLabel).toBe("fractions");
-    expect(result.candidates[0]?.prompt).toBe("Retest fractions from source stem");
-    expect(result.candidates[0]?.accepted).toBe(false);
-    expect(saveCandidates.mock.calls[0]?.[1][0]).toMatchObject({
-      skillLabel: "fractions",
-      accepted: false,
-    });
+describe("retest-candidate shared evidence", () => {
+  it.each(courseEvidenceCases)("matches read status and all reason codes for $name", async ({ evidence, independent }) => {
+    const summarize = vi.spyOn(domain, "summarizeObservations");
+    const readCourseEvidence = vi.fn(async () => evidence);
+    const read = createOpeningLearningReadService({ readCourseObservationHeads: async () => [], assertOwnedCourse: async () => undefined, readCourseEvidence, now });
+    const expected = await read.summarizeLearning(scope, courseId);
+    const saveCandidates = vi.fn(async (_scope, candidates) => candidates);
+    const worker = createRetestCandidateHandler({ readCourseEvidence, listDueRetests: async () => [], saveCandidates, now });
+    const actual = await worker(job, payload);
+    expect(summarize.mock.results.at(-1)?.value).toEqual(expected);
+    const unavailable = expected.some((summary) => summary.evidenceEligibility?.some(({ eligibility }) => eligibility.usableForCurrentVersion === "no"));
+    expect(actual.candidates).toHaveLength(independent || unavailable ? 0 : 1);
+    expect(readCourseEvidence).toHaveBeenLastCalledWith(scope, courseId);
   });
 
-  it("returns empty when there is no evidence", async () => {
-    const handler = createRetestCandidateHandler({
-      listObservations: async () => [],
-      listDueRetestSkills: async () => [],
-      saveCandidates: async (_s, c) => c,
-    });
-    const result = await handler(job, { courseId });
+  it("keeps a genuinely empty course empty", async () => {
+    const worker = createRetestCandidateHandler({ readCourseEvidence: async () => ({ observations: [], evidenceContexts: {} }), listDueRetests: async () => [], saveCandidates: async (_s, c) => c });
+    expect((await worker(job, payload)).candidates).toEqual([]);
+  });
+
+  it("does not accept a payload source outside captured observations", async () => {
+    const worker = createRetestCandidateHandler({ readCourseEvidence: async () => courseEvidence(null), listDueRetests: async () => [], saveCandidates: async (_s, c) => c });
+    expect((await worker(job, { ...payload, sourceIdsBySkill: { fractions: ["foreign-source"] } })).candidates).toEqual([]);
+  });
+
+  it("does not invent a prompt", async () => {
+    const worker = createRetestCandidateHandler({ readCourseEvidence: async () => courseEvidence(null), listDueRetests: async () => [], saveCandidates: async (_s, c) => c });
+    expect((await worker(job, { courseId })).candidates).toEqual([]);
+  });
+});
+
+
+
+it("proposes only the due requirement and persists its identity for equal labels", async () => {
+  const first = courseEvidence();
+  const input = first.evidenceContexts[learningObservation.id]!;
+  const second = { ...learningObservation, id: "second", sourceIds: ["second-source"] };
+  const evidence = { observations: [...first.observations, second], evidenceContexts: { ...first.evidenceContexts, [second.id]: { ...input, observation: { ...input.observation, requirementKey: "requirement-2" } } } };
+  const worker = createRetestCandidateHandler({
+    readCourseEvidence: async () => evidence,
+    listDueRetests: async () => [{ courseId, skillLabel: learningObservation.skillLabel, requirementKey: input.observation.requirementKey! }],
+    saveCandidates: async (_scope, candidates) => candidates,
+  });
+  const result = await worker(job, { ...payload, limit: 5 });
+  expect(result.candidates).toHaveLength(1);
+  expect(result.candidates[0]).toMatchObject({ requirementKey: input.observation.requirementKey, sourceIds: learningObservation.sourceIds });
+});
+
+it("never proposes unavailable or excluded source references from identity-incomplete observations", async () => {
+  for (const applicability of ["unavailable", "privacy_excluded"] as const) {
+    const evidence = courseEvidence({ observation: {}, context: { version: { applicability } } });
+    const worker = createRetestCandidateHandler({ readCourseEvidence: async () => evidence, listDueRetests: async () => [], saveCandidates: async (_scope, candidates) => candidates });
+    const result = await worker(job, payload);
     expect(result.candidates).toEqual([]);
+  }
+});
+
+it("attaches current observation and stable root identity to generated proposals", async () => {
+  const current = { ...learningObservation, id: "88888888-8888-4888-8888-888888888888", rootObservationId: learningObservation.id, revisionKind: "replace" as const, verdictSource: "self_report" as const };
+  const evidence = { observations: [current], evidenceContexts: {} };
+  const saveCandidates = vi.fn(async (_scope, candidates) => candidates);
+  const worker = createRetestCandidateHandler({ readCourseEvidence: async () => evidence, listDueRetests: async () => [], saveCandidates, now });
+  const result = await worker(job, payload);
+  expect(result.candidates).toHaveLength(1);
+  expect(result.candidates[0]).toMatchObject({ evidenceObservationIds: [current.id], evidenceRootIds: [learningObservation.id] });
+  expect(saveCandidates).toHaveBeenCalledWith(scope, result.candidates, job.privacyEpoch, job.id);
+  expect(domain.summarizeObservations(evidence.observations, now())[0]?.sampleCount).toBe(1);
+});
+
+it("does not read evidence or publish when retest suggestions are disabled", async () => {
+  const readCourseEvidence = vi.fn(async () => courseEvidence(null));
+  const saveCandidates = vi.fn(async (_scope, candidates) => candidates);
+  const worker = createRetestCandidateHandler({
+    readLearningPreferences: async () => ({
+      assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: true,
+    }),
+    readCourseEvidence,
+    listDueRetests: async () => [],
+    saveCandidates,
   });
 
-  it("does not copy a client source id that the observation does not own", async () => {
-    const saveCandidates = vi.fn(async (_s, c) => c);
-    const handler = createRetestCandidateHandler({
-      listObservations: async () => [
-        obs({
-          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-          skillLabel: "fractions",
-          sourceIds: [],
-        }),
-      ],
-      listDueRetestSkills: async () => [],
-      saveCandidates,
-      now: () => "2026-09-12T10:00:00.000Z",
-    });
-    const result = await handler(job, {
-      courseId,
-      sourceIdsBySkill: {
-        fractions: ["99999999-9999-4999-8999-999999999999"],
-      },
-      promptsBySkill: { fractions: "Retest fractions from source stem" },
-    });
-    expect(result.candidates).toEqual([]);
-  });
-
-  it("skips a skill when the prompt is missing instead of inventing a stem", async () => {
-    const saveCandidates = vi.fn(async (_s, c) => c);
-    const handler = createRetestCandidateHandler({
-      listObservations: async () => [
-        obs({
-          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-          skillLabel: "fractions",
-          sourceIds: ["77777777-7777-4777-8777-777777777777"],
-        }),
-      ],
-      listDueRetestSkills: async () => [],
-      saveCandidates,
-      now: () => "2026-09-12T10:00:00.000Z",
-    });
-    const result = await handler(job, {
-      courseId,
-      sourceIdsBySkill: {
-        fractions: ["77777777-7777-4777-8777-777777777777"],
-      },
-    });
-    expect(result.candidates).toEqual([]);
-    expect(saveCandidates).toHaveBeenCalledWith(expect.anything(), []);
-  });
+  expect((await worker(job, payload)).candidates).toEqual([]);
+  expect(readCourseEvidence).not.toHaveBeenCalled();
+  expect(saveCandidates).not.toHaveBeenCalled();
 });

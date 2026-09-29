@@ -3,6 +3,7 @@
 import { Camera, Upload } from "lucide-react";
 import { useId, useState, type ChangeEvent } from "react";
 import { resolveUploadMime } from "./upload-state";
+import { ui } from "../design/ui";
 
 type Props = {
   disabled?: boolean;
@@ -28,7 +29,7 @@ export function CaptureDialog({ disabled, onFile }: Props) {
   return (
     <div className="space-y-2">
       <label
-        className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md bg-indigo-600 px-3 text-sm font-semibold text-white"
+        className={`${ui.primary} cursor-pointer ${disabled ? "pointer-events-none opacity-50" : ""}`}
         htmlFor={inputId}
       >
         <Camera aria-hidden size={16} />

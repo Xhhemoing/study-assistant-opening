@@ -37,7 +37,7 @@ export function assertEphemeralInput(input: unknown): void {
     if ((turn.role !== "user" && turn.role !== "assistant") || turn.text.trim().length === 0) {
       throw new ConversationPolicyError("ephemeral history turn is invalid");
     }
-    if (Object.keys(turn).some((key) => key !== "role" && key !== "text")) {
+    if (Object.keys(turn).some((key) => key !== "role" && key !== "text" && key !== "provenanceId")) {
       throw new ConversationPolicyError("ephemeral history turn has extra fields");
     }
   }

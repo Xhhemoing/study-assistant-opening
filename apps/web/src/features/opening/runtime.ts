@@ -1,6 +1,7 @@
+import { createOpeningAttemptService } from "./learning/attempt-service";
 import {
   createOpeningConversationRepository, readOpeningConversationSelection,
-  createOpeningLearningRepository,
+  createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
   type OpeningConversationRepository,
   type OpeningSourceChunksRepository,
@@ -14,27 +15,19 @@ import { createTutorService, type TutorService } from "./tutor/tutor-service";
 import { createOpeningPlanService } from "./planning/plan-service";
 import {
   createEphemeralTutorService,
+  EphemeralServiceError,
+  type EphemeralScope,
   type EphemeralProvider,
   type EphemeralTutorService,
 } from "./tutor/ephemeral-service";
 import {
   createOpeningBudgetRepository,
+  createOpeningEphemeralProvenanceRepository,
+  createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
 import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
 import { createOpeningProvider } from "@aistudy/ai";
-
-function openingLearningDbFromSql(sql: Sql) {
-  return {
-    async query<T>(text: string, params: unknown[] = []): Promise<T[]> {
-      const rows = await sql.unsafe(text, params as never[]);
-      return rows as unknown as T[];
-    },
-    async execute(text: string, params: unknown[] = []): Promise<void> {
-      await sql.unsafe(text, params as never[]);
-    },
-  };
-}
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -55,22 +48,23 @@ export function getTutorService(sql: Sql): TutorService {
     createOpeningConversationRepository(sql);
   const sourceChunks: OpeningSourceChunksRepository =
     createOpeningSourceChunksRepository(sql);
-  return createTutorService({ conversations, sourceChunks,
+  return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
   });
 }
 
 export function getObservationService(sql: Sql) {
   return createOpeningObservationService(
-    createOpeningLearningRepository(openingLearningDbFromSql(sql)),
+    createOpeningLearningRepository(sql),
   );
 }
 
 export function getLearningReadService(sql: Sql) {
-  const repo = createOpeningLearningRepository(openingLearningDbFromSql(sql));
+  const repo = createOpeningLearningRepository(sql);
   return createOpeningLearningReadService({
     assertOwnedCourse: (scope, courseId) => repo.assertOwnedCourse(scope, courseId),
-    listObservationsForCourse: (scope, courseId) => repo.listObservationsForCourse(scope, courseId),
+    readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
+    readCourseObservationHeads: (scope, courseId) => readOpeningCourseObservationHeads(sql, scope, courseId),
   });
 }
 
@@ -116,6 +110,15 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   });
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
+  const privacySnapshot = (scope: EphemeralScope) => sql.begin("isolation level repeatable read read only", async tx => {
+    const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    if (!owners.length) throw new EphemeralServiceError("NOT_FOUND", "workspace not found", 404);
+    const privacy = createOpeningPrivacyRepository(tx);
+    return {
+      epoch: await privacy.getWorkspaceEpoch(scope),
+      excludedSourceIds: await privacy.listExcludedSourceIds(scope),
+    };
+  });
   return {
     replyEphemeral(scope, input, signal) {
       return createEphemeralTutorService({
@@ -134,6 +137,11 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
           },
         },
         chunks,
+        provenance: createOpeningEphemeralProvenanceRepository(sql),
+        privacy: {
+          snapshot: privacySnapshot,
+          currentEpoch: async ownedScope => (await privacySnapshot(ownedScope)).epoch,
+        },
         budget: {
           reserve: (entry) => budgetRepo.reserve(scope, entry),
           release: (requestId) => budgetRepo.release(requestId),
@@ -146,3 +154,5 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
     },
   };
 }
+
+export function getAttemptService(sql: Sql) { return createOpeningAttemptService(sql); }

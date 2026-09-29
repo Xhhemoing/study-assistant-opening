@@ -198,9 +198,11 @@ describe("opening tutor jobs repository", () => {
       if (query.includes("UPDATE opening_turns SET text")) {
         return [{ id: "assistant-turn-1" }];
       }
-      if (query.includes("SELECT id FROM opening_learning_sessions")) {
-        return [{ id: "session-1" }];
-      }
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("SELECT l.* FROM opening_learning_sessions")) return [{ id: "session-1", course_id: "course-1", source_ids: [] }];
+      if (query.includes("SELECT t.id FROM opening_turns")) return [{ id: "assistant-turn-1" }];
+      if (query.includes("RETURNING revision")) return [{ revision: 1 }];
+      if (query.includes("INSERT INTO opening_help_exposures")) return [{ created_at: "2026-09-28T00:00:00Z", delivered_at: "2026-09-28T00:00:01Z" }];
       return [];
     });
     const repository = createOpeningTutorJobsRepository(sql);

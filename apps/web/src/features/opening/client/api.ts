@@ -1,4 +1,8 @@
 import {
+  snippetCreateInputSchema,
+  snippetCreateResponseSchema,
+  type SnippetCreateInput,
+  type SnippetCreateResponse,
   conversationCreateInputSchema,
   conversationResumeSchema,
   conversationSummarySchema,
@@ -27,8 +31,14 @@ import {
   type PlanDraft,
   type PlannedBlock,
   type TaskItem,
-  type ProviderOutput,
-  providerOutputSchema,
+  type TaskCreateInput,
+  type TaskStatusUpdateInput,
+  type CandidateRef,
+  taskCreateInputSchema,
+  taskStatusUpdateInputSchema,
+  taskCreateResultSchema,
+  type EphemeralTurnResponse,
+  ephemeralTurnResponseSchema,
   assistantCandidateRecordSchema,
   memoryItemSchema,
   planDraftSchema,
@@ -37,6 +47,7 @@ import {
   type ReminderList,
 } from "@aistudy/contracts";
 import { z } from "zod";
+import { retestReviewSchema } from "../planning/review-types";
 
 export type { JobStatusResponse } from "@aistudy/contracts";
 
@@ -201,13 +212,23 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
     async replyEphemeral(
       input: EphemeralTurnInput,
       signal?: AbortSignal,
-    ): Promise<ProviderOutput> {
+    ): Promise<EphemeralTurnResponse> {
       const body = await request(
         "/api/opening/ephemeral",
         { method: "POST", body: JSON.stringify(input), signal },
         fetchImpl,
       );
-      return providerOutputSchema.parse(body);
+      return ephemeralTurnResponseSchema.parse(body);
+    },
+
+    async createSnippet(input: SnippetCreateInput): Promise<SnippetCreateResponse> {
+      const payload = snippetCreateInputSchema.parse(input);
+      const body = await request(
+        "/api/opening/snippets",
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return snippetCreateResponseSchema.parse(body);
     },
 
     async submitTurn(
@@ -285,6 +306,34 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return z.array(assistantCandidateRecordSchema).parse(body);
     },
 
+    async createTask(input: TaskCreateInput) {
+      const body = await request("/api/opening/tasks", { method: "POST", body: JSON.stringify(taskCreateInputSchema.parse(input)) }, fetchImpl);
+      return taskCreateResultSchema.parse(body);
+    },
+
+    async updateTaskStatus(taskId: string, input: TaskStatusUpdateInput) {
+      const body = await request(`/api/opening/tasks/${taskId}`, {
+        method: "PATCH", body: JSON.stringify(taskStatusUpdateInputSchema.parse(input)),
+      }, fetchImpl);
+      return taskListSchema.shape.tasks.element.parse(body);
+    },
+
+    async listRetestCandidates() {
+      const body = await request("/api/opening/retests", { method: "GET" }, fetchImpl);
+      return z.array(retestReviewSchema).parse(body);
+    },
+
+    async acceptRetest(id: string, clientKey: string) {
+      const body = await request(`/api/opening/retests/${id}/accept`, { method: "POST", body: JSON.stringify({ clientKey }) }, fetchImpl);
+      return z.object({ taskId: z.string().uuid(), accepted: z.literal(true), scheduled: z.literal(false) }).parse(body);
+    },
+
+    async discardCandidate(ref: CandidateRef, clientKey: string) {
+      if (ref.kind === "memory") throw new Error("记忆建议请使用记忆决定接口。");
+      const path = ref.origin === "assistant" ? `/api/opening/candidates/${ref.id}/discard` : `/api/opening/retests/${ref.id}/discard`;
+      const body = await request(path, { method: "POST", body: JSON.stringify({ candidateRef: ref, clientKey }) }, fetchImpl);
+      return z.object({ id: z.string().uuid(), status: z.literal("discarded") }).parse(body);
+    },
     async getLearning(courseId: string) {
       const body = await request(`/api/opening/courses/${courseId}/learning`, { method: "GET" }, fetchImpl);
       return z.array(learningSummarySchema).parse(body);

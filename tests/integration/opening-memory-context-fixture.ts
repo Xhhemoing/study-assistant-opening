@@ -5,7 +5,7 @@ import type { OpeningScope } from "@aistudy/database";
 export async function insertOwnedTurn(
   sql: Sql,
   scope: OpeningScope,
-  input: { sourceIds?: string[]; citations?: unknown; role?: "user" | "assistant" } = {},
+  input: { sourceIds?: string[]; citations?: unknown; role?: "user" | "assistant"; contextSourceRefs?: unknown } = {},
 ): Promise<string> {
   const turnId = randomUUID();
   const conversationId = randomUUID();
@@ -14,11 +14,13 @@ export async function insertOwnedTurn(
     VALUES (${conversationId}, ${scope.workspaceId}, ${scope.ownerUserId}, 'context')`;
   await sql`
     INSERT INTO opening_turns (
-      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations
+      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations, source_versions, context_source_refs
     ) VALUES (
       ${turnId}, ${scope.workspaceId}, ${conversationId}, ${input.role ?? "user"},
       'owned turn', 'explain', 'complete', ${sql.array(input.sourceIds ?? [])}::uuid[],
-      ${sql.json((input.citations ?? []) as never)}
+      ${sql.json((input.citations ?? []) as never)},
+      (SELECT COALESCE(jsonb_object_agg(id::text,version), '{}'::jsonb) FROM opening_sources WHERE id=ANY(${sql.array(input.sourceIds ?? [])}::uuid[])),
+      ${input.contextSourceRefs === undefined ? null : sql.json(input.contextSourceRefs as never)}
     )`;
   return turnId;
 }

@@ -1,8 +1,8 @@
 export const designTokens = {
   color: {
-    bg: "#0b1020",
-    fg: "#f5f7ff",
-    accent: "#6ea8fe",
+    bg: "#fafafa",
+    fg: "#27272a",
+    accent: "#047857",
   },
   space: {
     sm: "0.5rem",

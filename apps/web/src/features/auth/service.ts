@@ -44,6 +44,7 @@ import {
   registerRequestSchema,
   searchRequestSchema,
   workspacePreferenceUpdateSchema,
+  learningPreferencesSchema,
   normalizeDocumentTags,
   updateDocumentRelationRequestSchema,
   createPromotionRequestSchema,
@@ -508,6 +509,19 @@ export async function setWorkspacePreferenceForPrincipal(
     parsed.defaultEntry,
   );
   return preference.defaultEntry;
+}
+
+export async function getLearningPreferencesForPrincipal(runtime: AuthRuntime, principal: Principal) {
+  const workspaceId = boundWorkspaceId(principal);
+  assertAuthorized(principal, "workspace.preference.read", { type: "workspace", workspaceId });
+  return runtime.preferences.getLearningPreferences({ workspaceId, ownerUserId: principal.userId });
+}
+
+export async function setLearningPreferencesForPrincipal(runtime: AuthRuntime, principal: Principal, body: unknown) {
+  const parsed = learningPreferencesSchema.parse(body);
+  const workspaceId = boundWorkspaceId(principal);
+  assertAuthorized(principal, "workspace.preference.update", { type: "workspace", workspaceId });
+  return runtime.preferences.setLearningPreferences({ workspaceId, ownerUserId: principal.userId }, parsed);
 }
 
 /** Document helpers — always bind principal workspace. */
@@ -1004,12 +1018,13 @@ export async function createCourseForPrincipal(
 export async function listCoursesForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
+  includeArchived = false,
 ) {
   assertAuthorized(principal, "course.read", {
     type: "course",
     workspaceId: principal.workspaceId,
   });
-  return runtime.courses.listCourses({ workspaceId: principal.workspaceId });
+  return runtime.courses.listCourses({ workspaceId: principal.workspaceId, includeArchived });
 }
 
 export async function getCourseForPrincipal(
@@ -1027,6 +1042,20 @@ export async function getCourseForPrincipal(
     courseId: course.id,
   });
   return course;
+}
+
+export async function setCourseArchivedForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  courseId: string,
+  archived: boolean,
+) {
+  assertAuthorized(principal, "course.update", {
+    type: "course", workspaceId: principal.workspaceId, courseId,
+  });
+  return runtime.courses.setArchived({
+    workspaceId: boundWorkspaceId(principal), ownerUserId: principal.userId, courseId, archived,
+  });
 }
 
 export async function addMembershipForPrincipal(

@@ -55,10 +55,11 @@ function canonicalJournal(journal: readonly OpeningDeletionMark[]): OpeningDelet
   const marks = journal.map((mark) => {
     if (!mark || typeof mark.sourceId !== "string" || !UUID.test(mark.sourceId)) throw new Error("invalid backup journal");
     if (typeof mark.deletedAt !== "string" || !Number.isFinite(new Date(mark.deletedAt).getTime())) throw new Error("invalid backup journal");
+    if (mark.assetDeletedAt != null && (typeof mark.assetDeletedAt !== "string" || !Number.isFinite(Date.parse(mark.assetDeletedAt)))) throw new Error("invalid backup journal");
     const sourceId = mark.sourceId.toLowerCase();
     if (seen.has(sourceId)) throw new Error("duplicate backup journal");
     seen.add(sourceId);
-    return { sourceId, deletedAt: new Date(mark.deletedAt).toISOString() };
+    return { sourceId, deletedAt: new Date(mark.deletedAt).toISOString(), ...(mark.assetDeletedAt ? { assetDeletedAt: new Date(mark.assetDeletedAt).toISOString() } : {}) };
   });
   return marks.sort((left, right) => left.sourceId.localeCompare(right.sourceId) || left.deletedAt.localeCompare(right.deletedAt));
 }
@@ -72,11 +73,11 @@ function canonicalSources(sources: readonly OpeningBackupSource[]): OpeningBacku
     if (!Number.isSafeInteger(source.bytes) || source.bytes < 1 || !Number.isSafeInteger(source.bytes + 1)) throw new Error("invalid backup source");
     if (typeof source.sha256 !== "string" || !SHA256.test(source.sha256)) throw new Error("invalid backup source");
     const sourceId = source.sourceId.toLowerCase();
-    if (seen.has(sourceId)) throw new Error("duplicate backup source");
-    seen.add(sourceId);
+    if (seen.has(`${sourceId}/${source.version}`)) throw new Error("duplicate backup source");
+    seen.add(`${sourceId}/${source.version}`);
     return { sourceId, version: source.version, bytes: source.bytes, sha256: source.sha256.toLowerCase() };
   });
-  return rows.sort((left, right) => left.sourceId.localeCompare(right.sourceId));
+  return rows.sort((left, right) => left.sourceId.localeCompare(right.sourceId) || left.version - right.version);
 }
 
 function sameTuples(expected: Expected, live: Expected): boolean {
@@ -85,7 +86,7 @@ function sameTuples(expected: Expected, live: Expected): boolean {
     && expected.sources.length === live.sources.length
     && expected.deletionJournal.every((mark, index) => {
       const current = live.deletionJournal[index];
-      return current?.sourceId === mark.sourceId && current.deletedAt === mark.deletedAt;
+      return current?.sourceId === mark.sourceId && current.deletedAt === mark.deletedAt && (current.assetDeletedAt ?? null) === (mark.assetDeletedAt ?? null);
     })
     && expected.sources.every((source, index) => {
       const current = live.sources[index];

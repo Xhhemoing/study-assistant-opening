@@ -1,27 +1,8 @@
-import {
-  Archive,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsRight,
-  CircleHelp,
-  Copy,
-  Download,
-  FileText,
-  FolderOpen,
-  Link2,
-  Lock,
-  Menu,
-  MoreHorizontal,
-  PanelLeft,
-  Search,
-  Share2,
-  Star,
-  Trash2,
-  Upload,
-  X,
-} from "lucide-react";
+import { FileText, PanelLeft, Settings2, Share2, Upload } from "lucide-react";
 import type { ReactNode } from "react";
+
+import { Inspector } from "../opening/design/inspector";
+import { ui } from "../opening/design/ui";
 
 export type WorkspacePanel = "actions" | "share" | null;
 export type WorkspaceTextStyle = "default" | "serif" | "mono";
@@ -31,73 +12,45 @@ type WorkspaceProps = {
   documentTitle: string;
   fullWidth: boolean;
   onClosePanel: () => void;
-  onOpenPage: (title: string) => void;
+  onExportReport: () => void;
+  onOpenPage: (id: string) => void;
   onReset: () => void;
   onTextStyleChange: (style: WorkspaceTextStyle) => void;
   onToggleFullWidth: () => void;
   onTogglePanel: (panel: Exclude<WorkspacePanel, null>) => void;
   onToggleSidebar: () => void;
-  pageCount: number;
+  pages: { id: string; title: string; path: string }[];
   panel: WorkspacePanel;
-  selectedPageTitle: string;
+  selectedPageId: string;
   sidebarOpen: boolean;
   textStyle: WorkspaceTextStyle;
 };
 
-const personalPages = ["概率推理笔记", "诊断测试的例子", "统计学习路线"];
-
-function IconAction({ className = "", label, onClick, children }: { className?: string; label: string; onClick: () => void; children: ReactNode }) {
-  return <button aria-label={label} className={`grid size-8 place-items-center rounded-md text-stone-400 hover:bg-white/10 hover:text-stone-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${className}`} onClick={onClick} title={label} type="button">{children}</button>;
+function AppearancePanel({ fullWidth, onExportReport, onReset, onTextStyleChange, onToggleFullWidth, textStyle }: Pick<WorkspaceProps, "fullWidth" | "onExportReport" | "onReset" | "onTextStyleChange" | "onToggleFullWidth" | "textStyle">) {
+  const styles = [{ id: "default", label: "默认", className: "font-sans" }, { id: "serif", label: "衬线", className: "font-serif" }, { id: "mono", label: "等宽", className: "font-mono" }] as const;
+  return <div className="space-y-6">
+    <fieldset><legend className={`${ui.label} mb-2`}>阅读字体</legend><div className="flex flex-wrap gap-1">{styles.map(style => <button key={style.id} type="button" aria-pressed={textStyle === style.id} className={`${ui.secondary} ${style.className} ${textStyle === style.id ? "border-emerald-300 bg-emerald-50 text-emerald-800" : ""}`} onClick={() => onTextStyleChange(style.id)}>{style.label}</button>)}</div></fieldset>
+    <label className="flex items-center justify-between gap-3 text-sm text-zinc-700">宽版阅读<input type="checkbox" checked={fullWidth} onChange={onToggleFullWidth} className="size-4 accent-emerald-700" /></label>
+    <div className="flex flex-col items-start gap-2 border-t border-zinc-200 pt-4"><button type="button" className={ui.secondary} onClick={onExportReport}>下载格式损失报告</button><button type="button" className={ui.quiet} onClick={onReset}><Upload size={14} aria-hidden="true" />重新选择 ZIP</button></div>
+    <p className="text-xs leading-6 text-zinc-500">外观设置仅用于本次预览。文件在本地解析，未写入知识库。</p>
+  </div>;
 }
 
-function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: () => void }) {
-  return <button aria-checked={checked} aria-label={label} className={`relative h-5 w-9 rounded-full transition ${checked ? "bg-sky-500" : "bg-stone-700"}`} onClick={onChange} role="switch" type="button"><span className={`absolute top-0.5 size-4 rounded-full bg-white transition ${checked ? "left-4" : "left-0.5"}`} /></button>;
-}
-
-function Sidebar({ onOpenPage, selectedPageTitle }: { onOpenPage: (title: string) => void; selectedPageTitle: string }) {
-  return (
-    <aside aria-label="工作区导航" className="hidden h-full w-60 shrink-0 flex-col border-r border-white/10 bg-[#202020] px-2 py-3 sm:flex">
-      <div className="mb-4 flex items-center gap-2 px-2 text-sm font-medium text-stone-100"><span className="grid size-5 place-items-center rounded bg-stone-100 text-xs font-bold text-stone-900">A</span><span className="truncate">AIstudy workspace</span><ChevronDown aria-hidden="true" className="ml-auto text-stone-500" size={14} /></div>
-      <nav aria-label="工作区快捷入口" className="mb-5 flex gap-1 px-1"><IconAction label="主页" onClick={() => undefined}><Menu aria-hidden="true" size={16} /></IconAction><IconAction label="搜索工作区" onClick={() => undefined}><Search aria-hidden="true" size={16} /></IconAction><IconAction label="导入归档" onClick={() => undefined}><Archive aria-hidden="true" size={16} /></IconAction></nav>
-      <section>
-        <h2 className="px-2 text-[11px] font-medium text-stone-500">Private</h2>
-        <ul className="mt-1 space-y-0.5">{personalPages.map((title) => <li key={title}><button aria-current={title === selectedPageTitle ? "page" : undefined} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${title === selectedPageTitle ? "bg-white/10 text-stone-100" : "text-stone-400 hover:bg-white/5 hover:text-stone-200"}`} onClick={() => onOpenPage(title)} type="button"><FileText aria-hidden="true" className="shrink-0 text-stone-500" size={14} /><span className="min-w-0 truncate">{title}</span></button></li>)}</ul>
+export function NotionImportWorkspace(props: WorkspaceProps) {
+  const { children, documentTitle, fullWidth, onClosePanel, onOpenPage, onReset, onTogglePanel, onToggleSidebar, pages, panel, selectedPageId, sidebarOpen } = props;
+  return <main className="flex h-dvh min-h-0 flex-col overflow-hidden bg-white text-zinc-900">
+    <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-3">
+      <div className="flex min-w-0 items-center gap-2"><button aria-label="切换页面列表" aria-expanded={sidebarOpen} className={`${ui.icon} hidden md:inline-flex`} onClick={onToggleSidebar} type="button"><PanelLeft size={16} aria-hidden="true" /></button><span className="hidden shrink-0 text-xs text-zinc-500 sm:inline">本地导入预览 /</span><span className="truncate text-sm font-medium">{documentTitle}</span></div>
+      <div className="flex shrink-0 gap-1"><button aria-label="查看分享状态" className={ui.quiet} onClick={() => onTogglePanel("share")} type="button"><Share2 size={14} aria-hidden="true" /><span className="hidden sm:inline">分享状态</span></button><button aria-label="外观与导入操作" aria-expanded={panel === "actions"} className={ui.icon} onClick={() => onTogglePanel("actions")} type="button"><Settings2 size={16} aria-hidden="true" /></button></div>
+    </header>
+    <div className="flex min-h-0 flex-1">
+      {sidebarOpen ? <aside aria-label="导入页面导航" className="hidden w-64 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 md:flex"><div className="flex h-12 items-center justify-between px-4 text-xs font-medium text-zinc-600"><h2>导入页面</h2><span className="tabular-nums">{pages.length}</span></div><nav className="min-h-0 flex-1 overflow-y-auto px-2"><ul className="space-y-0.5">{pages.map(page => <li key={page.path}><button aria-current={page.id === selectedPageId ? "page" : undefined} className={`${ui.quiet} w-full justify-start py-2 text-left ${page.id === selectedPageId ? "bg-emerald-50 text-emerald-800" : ""}`} onClick={() => onOpenPage(page.id)} title={page.path} type="button"><FileText size={14} className="shrink-0" aria-hidden="true" /><span className="truncate">{page.title}</span></button></li>)}</ul></nav><div className="border-t border-zinc-200 p-3"><button type="button" className={`${ui.secondary} w-full`} onClick={onReset}><Upload size={14} aria-hidden="true" />重新选择 ZIP</button></div></aside> : null}
+      <section className="min-w-0 flex-1 overflow-y-auto">
+        <div className="border-b border-zinc-200 p-3 md:hidden"><label className={ui.label}>当前页面<select className={`${ui.input} mt-1`} value={selectedPageId} onChange={event => onOpenPage(event.target.value)}>{pages.map(page => <option key={page.path} value={page.id}>{page.title}</option>)}</select></label></div>
+        <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-2 text-xs leading-5 text-zinc-500">本地解析 · 未上传或保存到知识库 · 刷新后清除</div>
+        <div className={`mx-auto ${fullWidth ? "max-w-[88rem]" : "max-w-[66rem]"}`}>{children}</div>
       </section>
-      <div className="mt-auto space-y-1 border-t border-white/10 pt-3"><button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-stone-400 hover:bg-white/5 hover:text-stone-200" type="button"><FolderOpen aria-hidden="true" size={15} />Library</button><button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-stone-400 hover:bg-white/5 hover:text-stone-200" type="button"><CircleHelp aria-hidden="true" size={15} />帮助</button><button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-stone-400 hover:bg-white/5 hover:text-stone-200" type="button"><Trash2 aria-hidden="true" size={15} />回收站</button></div>
-    </aside>
-  );
-}
-
-function ActionMenu({ fullWidth, onClose, onReset, onTextStyleChange, onToggleFullWidth, textStyle }: { fullWidth: boolean; onClose: () => void; onReset: () => void; onTextStyleChange: (style: WorkspaceTextStyle) => void; onToggleFullWidth: () => void; textStyle: WorkspaceTextStyle }) {
-  const styles: { id: WorkspaceTextStyle; label: string; className: string }[] = [{ id: "default", label: "Default", className: "font-sans" }, { id: "serif", label: "Serif", className: "font-serif" }, { id: "mono", label: "Mono", className: "font-mono" }];
-  return (
-    <aside aria-label="页面操作菜单" className="absolute right-4 top-12 z-30 w-[19rem] overflow-hidden rounded-xl border border-white/10 bg-[#2a2a2a] p-2 shadow-2xl sm:right-6">
-      <div className="flex justify-end"><IconAction label="关闭页面操作菜单" onClick={onClose}><X aria-hidden="true" size={15} /></IconAction></div>
-      <label className="flex h-9 items-center gap-2 rounded-md border border-sky-400 bg-[#222] px-2 text-stone-400 ring-1 ring-sky-400/50"><Search aria-hidden="true" size={14} /><input aria-label="Search actions" className="min-w-0 flex-1 bg-transparent text-sm text-stone-100 outline-none placeholder:text-stone-500" placeholder="Search actions..." /></label>
-      <div className="mt-2 border-b border-white/10 pb-2">{styles.map((style) => <button aria-pressed={textStyle === style.id} className={`flex w-full items-center rounded-md px-2.5 py-2 text-left text-sm hover:bg-white/10 ${textStyle === style.id ? "text-sky-300" : "text-stone-300"} ${style.className}`} key={style.id} onClick={() => onTextStyleChange(style.id)} type="button">{style.label}</button>)}</div>
-      <div className="border-b border-white/10 py-2"><button className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-stone-300 hover:bg-white/10" type="button"><Link2 aria-hidden="true" size={15} />Copy link</button><button className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-stone-300 hover:bg-white/10" type="button"><Copy aria-hidden="true" size={15} />Copy page contents</button><button className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-stone-300 hover:bg-white/10" onClick={onReset} type="button"><Upload aria-hidden="true" size={15} />Import another export</button></div>
-      <div className="space-y-1 border-b border-white/10 py-2"><div className="flex items-center justify-between px-2.5 py-1.5 text-sm text-stone-300"><span>Small text</span><Switch checked={false} label="Small text" onChange={() => undefined} /></div><div className="flex items-center justify-between px-2.5 py-1.5 text-sm text-stone-300"><span>Full width</span><Switch checked={fullWidth} label="Full width" onChange={onToggleFullWidth} /></div></div>
-      <div className="pt-2"><button className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-stone-300 hover:bg-white/10" type="button"><Download aria-hidden="true" size={15} />Export report</button><button className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-stone-300 hover:bg-white/10" type="button"><Lock aria-hidden="true" size={15} />Keep source private</button></div>
-    </aside>
-  );
-}
-
-function SharePanel({ onClose }: { onClose: () => void }) {
-  return <aside aria-label="分享面板" className="absolute right-4 top-12 z-30 w-[19rem] rounded-xl border border-white/10 bg-[#2a2a2a] p-4 shadow-2xl sm:right-6"><header className="flex items-center justify-between"><h2 className="text-sm font-semibold text-stone-100">Share import preview</h2><IconAction label="关闭分享面板" onClick={onClose}><X aria-hidden="true" size={15} /></IconAction></header><p className="mt-3 text-sm leading-6 text-stone-400">发布的是固定版本预览。原始 ZIP、学习记录和私有来源锚点不会公开。</p><div className="mt-4 flex items-center justify-between border-t border-white/10 pt-3 text-sm text-stone-300"><span>Keep source private</span><Lock aria-hidden="true" className="text-stone-500" size={15} /></div></aside>;
-}
-
-export function NotionImportWorkspace({ children, documentTitle, fullWidth, onClosePanel, onOpenPage, onReset, onTextStyleChange, onToggleFullWidth, onTogglePanel, onToggleSidebar, panel, selectedPageTitle, sidebarOpen, textStyle }: WorkspaceProps) {
-  return (
-    <main className="notebook-preview scheme-dark flex min-h-screen overflow-x-hidden bg-[#191919] text-stone-100">
-      {sidebarOpen ? <Sidebar onOpenPage={onOpenPage} selectedPageTitle={selectedPageTitle} /> : null}
-      <section className="min-w-0 flex-1">
-        <header className="sticky top-0 z-20 flex h-12 items-center justify-between gap-2 border-b border-white/10 bg-[#191919]/95 px-3 backdrop-blur sm:px-5"><div className="flex min-w-0 items-center gap-1"><IconAction label="切换侧边栏" onClick={onToggleSidebar}><PanelLeft aria-hidden="true" size={16} /></IconAction><IconAction className="hidden sm:grid" label="后退" onClick={() => undefined}><ChevronLeft aria-hidden="true" size={16} /></IconAction><IconAction className="hidden sm:grid" label="前进" onClick={() => undefined}><ChevronRight aria-hidden="true" size={16} /></IconAction><div className="ml-1 min-w-0 truncate text-sm text-stone-400 sm:ml-2"><span className="hidden sm:inline">Private / </span>{documentTitle}</div></div><div className="flex shrink-0 items-center gap-1"><button aria-label="分享当前导入预览" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/15 px-2.5 text-sm font-medium text-stone-100 hover:bg-white/10" onClick={() => onTogglePanel("share")} type="button"><Share2 aria-hidden="true" size={14} /><span className="hidden sm:inline">Share</span></button><IconAction className="hidden sm:grid" label="复制导入预览链接" onClick={() => undefined}><Link2 aria-hidden="true" size={16} /></IconAction><IconAction className="hidden sm:grid" label="收藏导入预览" onClick={() => undefined}><Star aria-hidden="true" size={16} /></IconAction><IconAction label="更多页面操作" onClick={() => onTogglePanel("actions")}><MoreHorizontal aria-hidden="true" size={18} /></IconAction></div></header>
-        <div className="relative min-h-[calc(100vh-3rem)]"><div className={fullWidth ? "mx-auto max-w-[88rem]" : "mx-auto max-w-[66rem]"}>{children}</div>{panel === "actions" ? <ActionMenu fullWidth={fullWidth} onClose={onClosePanel} onReset={onReset} onTextStyleChange={onTextStyleChange} onToggleFullWidth={onToggleFullWidth} textStyle={textStyle} /> : null}{panel === "share" ? <SharePanel onClose={onClosePanel} /> : null}</div>
-      </section>
-    </main>
-  );
-}
-
-export function WorkspaceCollapseButton({ onClick }: { onClick: () => void }) {
-  return <button aria-label="展开侧边栏" className="fixed bottom-4 left-4 z-50 grid size-9 place-items-center rounded-full border border-white/10 bg-[#292929] text-stone-400 shadow-lg hover:bg-white/10 hover:text-white" onClick={onClick} type="button"><ChevronsRight aria-hidden="true" size={16} /></button>;
+      <Inspector open={panel !== null} onClose={onClosePanel} title={panel === "share" ? "分享状态" : "外观与导入操作"} id="notion-preview-context">{panel === "actions" ? <AppearancePanel {...props} /> : <div className="space-y-4"><p className="text-sm leading-7 text-zinc-700">当前为本地导入预览，尚未接入发布、分享链接或存入知识库。</p><button type="button" disabled className={ui.secondary}>分享尚不可用</button><p className="text-xs leading-6 text-zinc-500">没有生成公开版本或链接。请保留原始 ZIP 文件。</p></div>}</Inspector>
+    </div>
+  </main>;
 }

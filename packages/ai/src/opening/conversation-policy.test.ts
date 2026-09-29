@@ -116,3 +116,9 @@ describe("conversation policy", () => {
     expect(stripped.citedChunkIds).toEqual([uuid]);
   });
 });
+
+it("accepts a syntactically valid receipt while rejecting malformed client provenance", () => {
+  expect(() => assertEphemeralInput(input({ history: [{ role: "assistant", text: "prior", provenanceId: uuid }] }))).not.toThrow();
+  expect(() => assertEphemeralInput(input({ history: [{ role: "assistant", text: "prior", provenanceId: "not-a-receipt" }] }))).toThrow(ConversationPolicyError);
+  expect(() => assertEphemeralInput({ ...input(), history: [{ role: "assistant", text: "prior", provenanceId: uuid, sourceRefs: [] }] })).toThrow(ConversationPolicyError);
+});

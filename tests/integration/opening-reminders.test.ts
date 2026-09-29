@@ -4,6 +4,7 @@ import {
   applyMigrations,
   createOpeningPlansRepository,
   createOpeningReminderRepository,
+  createOpeningRetestActivityRepository,
   createSqlClient,
 } from "@aistudy/database";
 
@@ -74,6 +75,42 @@ describe("opening reminder repository (P03)", () => {
       dueAt: pastDue,
       outcome: null,
     }]);
+  });
+
+  it("does not list or enqueue a linked retest after its task is done", async () => {
+    const plans = createOpeningPlansRepository(sql);
+    const activities = createOpeningRetestActivityRepository(sql);
+    const reminders = createOpeningReminderRepository(sql);
+    const courseId = randomUUID();
+    await sql`INSERT INTO courses (id, workspace_id, title, slug)
+      VALUES (${courseId}, ${owner.workspaceId}, 'Reminder retest', ${`reminder-retest-${courseId}`})`;
+    try {
+      const task = await plans.createTask(owner, {
+        title: "已完成的补测",
+        minutes: 25,
+        dueAt: null,
+        priority: 1,
+        candidateId: null,
+        clientKey: "task-key-retest-01",
+      });
+      const proposed = await activities.createProposed(owner, {
+        cycleId: randomUUID(),
+        candidateId: null,
+        taskId: task.id,
+        courseId,
+        skillLabel: "fractions",
+        requirementKey: null,
+        proposedAt: pastDue,
+        recommendedAt: pastDue,
+      });
+      await activities.accept(owner, proposed.activityId, task.id, pastDue);
+      await sql`UPDATE opening_tasks SET status='done', version=version + 1 WHERE id=${task.id}`;
+
+      expect((await reminders.list(owner, later)).reminders).toEqual([]);
+      expect(await reminders.enqueue(owner, { clientKey: "remind-retest-01", channel: "in_app" }, later)).toEqual([]);
+    } finally {
+      await sql`DELETE FROM courses WHERE id=${courseId}`;
+    }
   });
 
   it("dedupes enqueue and records quiet, unknown, and rate-limited attempts", async () => {

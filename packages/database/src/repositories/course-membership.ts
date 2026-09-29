@@ -3,8 +3,9 @@ import {
   assetTypeSchema,
   type AssetType,
   type SourceRecord,
+  type CourseLearningPreferencesUpdate,
 } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import {
   createLibraryRepository,
   LibraryError,
@@ -46,6 +47,7 @@ export type CourseRecord = {
   createdAt: Date;
   updatedAt: Date;
   archivedAt: Date | null;
+  learningPreferenceOverrides: CourseLearningPreferencesUpdate;
 };
 
 export type AssetMembershipRecord = {
@@ -87,7 +89,14 @@ export type CourseMembershipRepository = {
     courseId: string;
   }): Promise<CourseRecord>;
 
-  listCourses(input: { workspaceId: string }): Promise<CourseRecord[]>;
+  listCourses(input: { workspaceId: string; includeArchived?: boolean }): Promise<CourseRecord[]>;
+
+  setArchived(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    courseId: string;
+    archived: boolean;
+  }): Promise<CourseRecord>;
 
   addAssetMembership(input: {
     workspaceId: string;
@@ -177,6 +186,11 @@ function mapCourse(row: Record<string, unknown>): CourseRecord {
     slug: row.slug as string,
     description: row.description as string,
     schemaVersion: row.schema_version as number,
+    learningPreferenceOverrides: {
+      ...(row.assessment_enabled === false ? { assessmentEnabled: false } : {}),
+      ...(row.retest_suggestions_enabled === false ? { retestSuggestionsEnabled: false } : {}),
+      ...(row.automatic_reminders_enabled === false ? { automaticRemindersEnabled: false } : {}),
+    },
     createdAt: new Date(row.created_at as string | Date),
     updatedAt: new Date(row.updated_at as string | Date),
     archivedAt: row.archived_at
@@ -368,10 +382,30 @@ export function createCourseMembershipRepository(
       const rows = await sql`
         SELECT * FROM courses
         WHERE workspace_id = ${input.workspaceId}
-          AND archived_at IS NULL
+          AND (${input.includeArchived === true} OR archived_at IS NULL)
         ORDER BY title ASC, created_at ASC
       `;
       return rows.map((row) => mapCourse(row as Record<string, unknown>));
+    },
+
+    async setArchived(input) {
+      assertUuid(input.workspaceId, "workspaceId");
+      assertUuid(input.ownerUserId, "ownerUserId");
+      assertUuid(input.courseId, "courseId");
+      if (typeof input.archived !== "boolean") throw new CourseMembershipError("VALIDATION", "archived must be a boolean");
+      return sql.begin(async (tx) => {
+        // Match automatic publication's workspace -> course lock order.
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId}
+          AND owner_user_id=${input.ownerUserId} FOR SHARE`;
+        if (!owner.length) throw new CourseMembershipError("NOT_FOUND", "Workspace not found");
+        const current = await tx`SELECT * FROM courses WHERE id=${input.courseId}
+          AND workspace_id=${input.workspaceId} FOR UPDATE`;
+        if (!current.length) throw new CourseMembershipError("NOT_FOUND", "Course not found");
+        if ((current[0]!.archived_at != null) === input.archived) return mapCourse(current[0] as Record<string, unknown>);
+        const rows = await tx`UPDATE courses SET archived_at=${input.archived ? new Date() : null}, updated_at=now()
+          WHERE id=${input.courseId} AND workspace_id=${input.workspaceId} RETURNING *`;
+        return mapCourse(rows[0] as Record<string, unknown>);
+      });
     },
 
     async addAssetMembership(input) {
@@ -408,8 +442,7 @@ export function createCourseMembershipRepository(
         );
       }
 
-      try {
-        const rows = await sql`
+      const insert = (db: Sql | TransactionSql) => db`
           INSERT INTO course_asset_memberships (
             workspace_id,
             course_id,
@@ -429,6 +462,15 @@ export function createCourseMembershipRepository(
           )
           RETURNING *
         `;
+      try {
+        const rows = input.assetType === "source" ? await sql.begin(async tx => {
+          // Workspace -> source matches deletion; source remains locked until membership insertion commits.
+          await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} FOR SHARE`;
+          const current = await tx`SELECT id FROM opening_sources WHERE id=${input.assetId}
+            AND workspace_id=${input.workspaceId} FOR SHARE`;
+          if (!current.length) throw new CourseMembershipError("NOT_FOUND", "Source not found");
+          return insert(tx);
+        }) : await insert(sql);
         return mapMembership(rows[0] as Record<string, unknown>);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

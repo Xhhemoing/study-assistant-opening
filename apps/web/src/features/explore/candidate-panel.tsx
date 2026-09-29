@@ -1,5 +1,6 @@
 "use client";
 
+import { ui } from "../opening/design/ui";
 import { BookOpen, CreditCard, GraduationCap, HelpCircle, LoaderCircle, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -90,51 +91,51 @@ export function CandidatePanel({
   }
 
   return (
-    <section className="space-y-4 border-y border-line py-5" aria-label="候选沉淀">
+    <section className="space-y-4 border-y border-zinc-200 py-5" aria-label="候选沉淀">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-text">候选沉淀</h2>
-          <p className="mt-1 text-xs text-text-dim">只处理你明确选中的内容。</p>
+          <h2 className="text-base font-semibold text-zinc-900">候选沉淀</h2>
+          <p className="mt-1 text-xs text-zinc-500">只处理你明确选中的内容。</p>
         </div>
-        <span className="shrink-0 rounded-full bg-primary/10 px-2 py-1 text-xs font-semibold text-primary">{pending.length} 条待处理</span>
+        <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">{pending.length} 条待处理</span>
       </div>
       <div className="space-y-3">
         {pending.map((candidate) => {
           const active = busyKey?.startsWith(`${candidate.id}:`) ?? false;
           return (
-            <article className="space-y-3 rounded-lg border border-line bg-surface p-4" key={candidate.id}>
+            <article className="space-y-3 border-b border-zinc-200 py-4" key={candidate.id}>
               <div className="flex items-start gap-3">
-                <BookOpen aria-hidden="true" className="mt-0.5 shrink-0 text-primary" size={17} />
+                <BookOpen aria-hidden="true" className="mt-0.5 shrink-0 text-emerald-700" size={17} />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="break-words text-sm font-semibold text-text">{candidate.title}</h3>
-                    <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-dim">{candidateKindLabel(candidate.kind)}</span>
+                    <h3 className="break-words text-sm font-semibold text-zinc-900">{candidate.title}</h3>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-500">{candidateKindLabel(candidate.kind)}</span>
                   </div>
-                  <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-dim">{candidate.body}</p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-zinc-500">{candidate.body}</p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2 pl-8">
-                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "note")}>
-                  {active && busyKey?.endsWith(":note") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <BookOpen aria-hidden="true" size={14} />}转笔记
+                <button className={ui.primary} disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "note")}>
+                  {active && busyKey?.endsWith(":note") ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <BookOpen aria-hidden="true" size={14} />}转笔记
                 </button>
-                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-xs font-semibold text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "card")}>
-                  {active && busyKey?.endsWith(":card") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <CreditCard aria-hidden="true" size={14} />}转卡片
+                <button className={ui.secondary} disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "card")}>
+                  {active && busyKey?.endsWith(":card") ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <CreditCard aria-hidden="true" size={14} />}转卡片
                 </button>
-                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-xs font-semibold text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "question")}>
-                  {active && busyKey?.endsWith(":question") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <HelpCircle aria-hidden="true" size={14} />}转题目
+                <button className={ui.secondary} disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "question")}>
+                  {active && busyKey?.endsWith(":question") ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <HelpCircle aria-hidden="true" size={14} />}转题目
                 </button>
-                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-line px-3 text-xs font-semibold text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "course")}>
-                  {active && busyKey?.endsWith(":course") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <GraduationCap aria-hidden="true" size={14} />}转为课程
+                <button className={ui.secondary} disabled={!provider || busyKey !== null} type="button" onClick={() => void promote(candidate, "course")}>
+                  {active && busyKey?.endsWith(":course") ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <GraduationCap aria-hidden="true" size={14} />}转为课程
                 </button>
-                <button className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-transparent px-3 text-xs text-text-dim hover:border-line hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void reject(candidate)}>
-                  {active && busyKey?.endsWith(":reject") ? <LoaderCircle aria-hidden="true" className="animate-spin" size={14} /> : <X aria-hidden="true" size={14} />}拒绝
+                <button className="inline-flex min-h-10 md:min-h-8 items-center gap-1.5 rounded-md border border-transparent px-3 text-xs text-zinc-500 hover:border-zinc-200 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 disabled:cursor-not-allowed disabled:opacity-50" disabled={!provider || busyKey !== null} type="button" onClick={() => void reject(candidate)}>
+                  {active && busyKey?.endsWith(":reject") ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <X aria-hidden="true" size={14} />}拒绝
                 </button>
               </div>
             </article>
           );
         })}
       </div>
-      {error ? <p className="text-xs text-danger" role="alert">{error}</p> : null}
+      {error ? <p className="text-xs text-red-700" role="alert">{error}</p> : null}
     </section>
   );
 }

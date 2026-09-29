@@ -31,6 +31,7 @@ export type RemindRecord = {
   receiptId: string | null;
   outcome: RemindPayload["outcome"];
   state: "succeeded" | "failed" | "outcome_unknown" | "queued";
+  suppressed?: boolean;
 };
 
 export type RemindHandlerDeps = {
@@ -41,23 +42,29 @@ export type RemindHandlerDeps = {
   timeZone?: () => string;
   recipientId?: () => string | null;
   externalConfig?: () => ExternalReminderConfig | null;
+  isCurrent?: (jobId: string, now: Date) => Promise<boolean>;
 };
 
 export function createRemindHandler(deps: RemindHandlerDeps) {
   return async function processRemind(job: OpeningJobRecord, payload: unknown) {
     const body = payload as RemindPayload;
-    if (body.outcome === "unknown") {
+    if (body.outcome === "unknown" || body.receiptId) {
       return {
         status: reminderDeliveryState({
           channel: body.channel,
-          configured: body.configured,
+          configured: true,
           receiptId: body.receiptId,
-          outcome: "unknown",
+          outcome: body.outcome,
         }),
         receiptId: body.receiptId,
-        outcome: "unknown" as const,
+        outcome: body.outcome,
         channel: body.channel,
       };
+    }
+    const current = await deps.isCurrent?.(job.id, deps.now?.() ?? new Date());
+    if (current === false) {
+      await deps.record(job.id, { receiptId: null, outcome: null, state: "succeeded", suppressed: true });
+      return { status: "due" as const, receiptId: null, outcome: null, channel: body.channel, suppressed: true };
     }
     const configured = body.channel === "in_app"
       ? true

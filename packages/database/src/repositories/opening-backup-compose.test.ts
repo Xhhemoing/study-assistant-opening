@@ -43,8 +43,9 @@ const tables = [
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_timetable_sessions", "opening_hard_blocks",
+  "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
+  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
 ] as const;
 const roots: string[] = [];
 
@@ -54,7 +55,7 @@ function recordsSnapshot(): OpeningBackupRecordSnapshot {
     deletionJournal: [],
     tables: Object.fromEntries(tables.map((name) => [name, name === "opening_sources"
       ? [{ id: sourceId, workspace_id: workspaceId, version: 1, bytes: 4, sha256: hash }]
-      : []])) as OpeningBackupRecordSnapshot["tables"],
+      : []])) as unknown as OpeningBackupRecordSnapshot["tables"],
   };
 }
 

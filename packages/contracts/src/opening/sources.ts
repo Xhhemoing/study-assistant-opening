@@ -160,3 +160,40 @@ export const sourceCourseUnlinkInputSchema = z
 
 export type SourceCourseLinkInput = z.infer<typeof sourceCourseLinkInputSchema>;
 export type SourceCourseUnlinkInput = z.infer<typeof sourceCourseUnlinkInputSchema>;
+
+const sourceConfirmation = {
+  expectedVersion: z.number().int().nonnegative(),
+  expectedMembershipIds: z.array(uuidSchema).max(1000),
+};
+
+export const sourceActionInputSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("exclude"), ...sourceConfirmation }).strict(),
+  z.object({ action: z.literal("delete"), ...sourceConfirmation }).strict(),
+  z.object({ action: z.literal("retry_cleanup") }).strict(),
+]);
+
+export const sourceImpactSchema = z.object({
+  sourceId: uuidSchema,
+  version: z.number().int().nonnegative(),
+  aiExcluded: z.boolean(),
+  courses: z.array(z.object({
+    membershipId: uuidSchema,
+    courseId: uuidSchema,
+    title: z.string(),
+    archivedAt: isoDateTimeSchema.nullable(),
+  }).strict()),
+}).strict();
+
+export const sourceActionResultSchema = z.object({
+  sourceId: uuidSchema,
+  aiExcluded: z.boolean(),
+  deleted: z.boolean(),
+  cleanupPending: z.number().int().nonnegative(),
+  retryAfter: isoDateTimeSchema.nullable(),
+}).strict();
+
+export const sourceDeletionListSchema = z.array(sourceActionResultSchema.pick({ sourceId: true, cleanupPending: true, retryAfter: true }));
+export type SourceActionInput = z.infer<typeof sourceActionInputSchema>;
+export type SourceImpact = z.infer<typeof sourceImpactSchema>;
+export type SourceActionResult = z.infer<typeof sourceActionResultSchema>;
+export type SourceDeletion = z.infer<typeof sourceDeletionListSchema>[number];

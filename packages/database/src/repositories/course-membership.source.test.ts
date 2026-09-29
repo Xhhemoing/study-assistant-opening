@@ -32,7 +32,7 @@ function makeSql(handlers: {
   courseWs?: string;
 }): SqlFn {
   const courseWs = handlers.courseWs ?? W;
-  return async (parts, ..._values) => {
+  const sql: SqlFn = async (parts, ..._values) => {
     const q = parts.join("?").replace(/\s+/g, " ").trim();
     if (q.startsWith("SELECT id FROM workspaces")) return [{ id: W }];
     if (q.startsWith("SELECT * FROM courses")) {
@@ -41,6 +41,9 @@ function makeSql(handlers: {
     if (q.startsWith("SELECT workspace_id FROM opening_sources")) {
       if (handlers.sourceWs == null) return [];
       return [{ workspace_id: handlers.sourceWs }];
+    }
+    if (q.startsWith("SELECT id FROM opening_sources")) {
+      return handlers.sourceWs === W ? [{ id: S }] : [];
     }
     if (q.startsWith("INSERT INTO course_asset_memberships")) {
       return [
@@ -61,6 +64,9 @@ function makeSql(handlers: {
     if (q.startsWith("DELETE FROM course_asset_memberships")) return [{ id: "00000000-0000-4000-8000-000000000010" }];
     throw new Error("Unexpected SQL in RU-01 probe: " + q);
   };
+  return Object.assign(sql, {
+    begin: <T>(callback: (tx: SqlFn) => Promise<T>) => callback(sql),
+  });
 }
 
 describe("course membership source resolver (RU-01)", () => {

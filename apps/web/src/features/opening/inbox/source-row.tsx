@@ -2,6 +2,8 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { sourceStatusLabel } from "./upload-state";
+import { FileText } from "lucide-react";
+import { ui } from "../design/ui";
 
 export function SourceRow({
   record,
@@ -9,17 +11,19 @@ export function SourceRow({
   notice,
   onOpen,
   onRetry,
+  onManage,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState">;
   bytePercent?: number | null;
   notice?: string;
   onOpen?: (id: string) => void;
   onRetry?: (id: string) => void;
+  onManage?: (id: string) => void;
 }) {
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   return (
-    <article className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2">
-      <div className="min-w-0">
+    <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">
+      <FileText size={15} aria-hidden="true" className="shrink-0 text-zinc-500" /><div className="min-w-0 flex-1">
         <h3 className="truncate text-sm font-medium text-zinc-950">{record.name}</h3>
         <p className="text-xs text-zinc-600">{sourceStatusLabel(record)}</p>
         {percent != null ? (
@@ -28,13 +32,14 @@ export function SourceRow({
         {notice ? <p className="text-xs text-amber-800">{notice}</p> : null}
       </div>
       <div className="flex gap-2">
+        {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button">管理材料</button> : null}
         {onOpen ? (
-          <button className="min-h-11 rounded-md border border-zinc-300 px-3 text-sm" onClick={() => onOpen(record.id)} type="button">
+          <button className={ui.quiet} onClick={() => onOpen(record.id)} type="button">
             查看原件
           </button>
         ) : null}
         {onRetry ? (
-          <button className="min-h-11 rounded-md border border-zinc-300 px-3 text-sm" onClick={() => onRetry(record.id)} type="button">
+          <button className={ui.secondary} onClick={() => onRetry(record.id)} type="button">
             重试完成
           </button>
         ) : null}

@@ -1,4 +1,4 @@
-import type { OpeningConversationScope } from "@aistudy/database";
+import { readOpeningAssistantReviewCandidates, readOpeningRetestReviewCandidates, type OpeningConversationScope } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
 import { resolveTodayResume, type TodayResumeState } from "./today-read";
@@ -22,26 +22,11 @@ export type TodayResumeReader = {
 /** Owner-scoped resume facts. No writes and no invented rows. */
 export function createTodayResumeReader(sql: Sql): TodayResumeReader {
   async function pendingCandidates(scope: OpeningConversationScope) {
-    const rows = await sql`
-      SELECT c.id, c.payload
-      FROM opening_assistant_candidates c
-      INNER JOIN opening_conversations conv
-        ON conv.id = c.conversation_id
-       AND conv.workspace_id = c.workspace_id
-       AND conv.owner_user_id = ${scope.ownerUserId}
-      WHERE c.workspace_id = ${scope.workspaceId}
-        AND c.status = 'pending'
-    `;
-    return rows.map((row) => {
-      const record = row as Record<string, unknown>;
-      const payload = record.payload;
-      return {
-        id: record.id as string,
-        payload: payload && typeof payload === "object" && !Array.isArray(payload)
-          ? payload as { kind?: string }
-          : null,
-      };
-    });
+    const [assistant, retests] = await Promise.all([
+      readOpeningAssistantReviewCandidates(sql, scope), readOpeningRetestReviewCandidates(sql, scope),
+    ]);
+    return [...assistant.map((row) => ({ id: row.id, payload: row.payload as { kind?: string } | null })),
+      ...retests.map((row) => ({ id: row.id, payload: { kind: "retest" } }))];
   }
   return {
     async latestOwned(scope) {

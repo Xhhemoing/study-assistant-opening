@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
+import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
 import type {
   Citation,
   ConversationCreateInput,
@@ -38,6 +39,7 @@ type SavedTurnIntent = {
   currentPage: number | null;
   chunkId: string | null;
   learningSessionId: string | null;
+  attemptId?: string | null;
 };
 
 function hashSavedTurnIntent(intent: SavedTurnIntent): string {
@@ -53,6 +55,7 @@ export type StoredTurn = {
   status: "pending" | "complete" | "failed" | "outcome_unknown";
   clientKey: string | null;
   learningSessionId: string | null;
+  attemptId?: string | null;
   currentPage: number | null;
   chunkId: string | null;
   sourceIds: string[];
@@ -122,7 +125,7 @@ export function createOpeningConversationRepository(sql: Sql) {
           c.course_id,
           c.updated_at,
           (
-            SELECT LEFT(t.text, 280)
+            SELECT CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE LEFT(t.text, 280) END
             FROM opening_turns t
             WHERE t.conversation_id = c.id
             ORDER BY t.created_at DESC
@@ -151,8 +154,10 @@ export function createOpeningConversationRepository(sql: Sql) {
     ): Promise<TurnRecord[]> {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
-        SELECT id, conversation_id, role, text, mode, status, created_at, citations
-        FROM opening_turns
+        SELECT id, conversation_id, role,
+          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
+          mode, status, created_at, CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations
+        FROM opening_turns t
         WHERE conversation_id = ${conversationId}
           AND workspace_id = ${scope.workspaceId}
         ORDER BY created_at ASC
@@ -178,8 +183,9 @@ export function createOpeningConversationRepository(sql: Sql) {
     ): Promise<Array<{ role: "user" | "assistant"; text: string; citations: Citation[] }>> {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
-        SELECT role, text, citations
-        FROM opening_turns
+        SELECT role, CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations
+        FROM opening_turns t
         WHERE conversation_id = ${conversationId}
           AND workspace_id = ${scope.workspaceId}
           AND status IN ('complete', 'pending')
@@ -204,6 +210,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       jobId: string;
       assistantTurnId: string;
       learningSessionId: string | null;
+  attemptId?: string | null;
     } | null> {
       const rows = await sql`
         SELECT t.id AS turn_id, t.learning_session_id, j.id AS job_id, j.assistant_turn_id
@@ -234,6 +241,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       clientKey: string;
       sourceIds: string[];
       learningSessionId: string | null;
+  attemptId?: string | null;
       currentPage: number | null;
       chunkId: string | null;
       privacy?: "saved";
@@ -245,7 +253,7 @@ export function createOpeningConversationRepository(sql: Sql) {
 
       return sql.begin(async (tx) => {
         const conversations = await tx`
-          SELECT id FROM opening_conversations
+          SELECT id, course_id FROM opening_conversations
           WHERE id = ${input.conversationId}
             AND workspace_id = ${input.scope.workspaceId}
             AND owner_user_id = ${input.scope.ownerUserId}
@@ -258,6 +266,24 @@ export function createOpeningConversationRepository(sql: Sql) {
           );
         }
 
+        if (input.learningSessionId) {
+          const sessions = await tx`SELECT course_id FROM opening_learning_sessions
+            WHERE id=${input.learningSessionId} AND workspace_id=${input.scope.workspaceId}
+              AND owner_user_id=${input.scope.ownerUserId} FOR SHARE`;
+          if (!sessions.length) throw new OpeningConversationError("VALIDATION", "learning session not found");
+          if (conversations[0]!.course_id !== null && conversations[0]!.course_id !== sessions[0]!.course_id) {
+            throw new OpeningConversationError("VALIDATION", "learning session and conversation courses differ");
+          }
+        }
+        if (input.attemptId) {
+          const attempts = await tx`SELECT id, course_id FROM opening_learning_attempts WHERE id=${input.attemptId}
+            AND workspace_id=${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId}
+            AND session_id=${input.learningSessionId} FOR SHARE`;
+          if (!attempts.length) throw new OpeningConversationError("VALIDATION", "attempt/session mismatch");
+          if (conversations[0]!.course_id !== attempts[0]!.course_id) {
+            throw new OpeningConversationError("VALIDATION", "attempt requires a conversation assigned to the same course");
+          }
+        }
         const existingRows = await tx`
           SELECT t.id AS turn_id, t.intent_hash, t.source_versions,
                  j.id AS job_id, j.assistant_turn_id
@@ -288,6 +314,7 @@ export function createOpeningConversationRepository(sql: Sql) {
             currentPage: input.currentPage,
             chunkId: input.chunkId,
             learningSessionId: input.learningSessionId,
+            ...(input.attemptId ? { attemptId: input.attemptId } : {}),
           });
           if (String(existing.intent_hash) !== intentHash) {
             throw new OpeningConversationError(
@@ -334,6 +361,7 @@ export function createOpeningConversationRepository(sql: Sql) {
           currentPage: input.currentPage,
           chunkId: input.chunkId,
           learningSessionId: input.learningSessionId,
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
         };
         const intentHash = hashSavedTurnIntent(intent);
         const sourceVersionsJson = tx.json(sourceVersions as never);
@@ -342,12 +370,12 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            intent_hash, source_versions
+            intent_hash, source_versions, attempt_id
           ) VALUES (
             ${turnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'user', ${input.text}, ${input.mode}, 'complete',
             ${input.clientKey}, ${input.learningSessionId}, ${input.currentPage},
-            ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}
+            ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}, ${input.attemptId ?? null}
           )
           ON CONFLICT (workspace_id, client_key) WHERE client_key IS NOT NULL
           DO NOTHING
@@ -375,12 +403,12 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            source_versions
+            source_versions, attempt_id
           ) VALUES (
             ${assistantTurnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'assistant', '', ${input.mode}, 'pending',
             NULL, ${input.learningSessionId}, ${input.currentPage},
-            ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}
+            ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}, ${input.attemptId ?? null}
           )
         `;
         await tx`

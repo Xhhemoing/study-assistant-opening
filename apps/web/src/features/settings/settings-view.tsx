@@ -1,5 +1,7 @@
 "use client";
 
+import type { LearningPreferences } from "@aistudy/contracts";
+import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -21,12 +23,23 @@ const guidanceModes: Array<{ value: GuidanceMode; label: string }> = [
   { value: "balanced", label: "平衡" },
   { value: "socratic", label: "苏格拉底式追问" },
 ];
+const disabledLearningPreferences: LearningPreferences = {
+  assessmentEnabled: false,
+  retestSuggestionsEnabled: false,
+  automaticRemindersEnabled: false,
+};
+const learningSwitches: Array<{ key: keyof LearningPreferences; label: string }> = [
+  { key: "assessmentEnabled", label: "自动评价" },
+  { key: "retestSuggestionsEnabled", label: "补测建议" },
+  { key: "automaticRemindersEnabled", label: "自动学习提醒" },
+];
 
 export function SettingsView() {
   const router = useRouter();
   const provider = useStudyProvider();
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [guidanceMode, setGuidanceMode] = useState<GuidanceMode>("balanced");
+  const [learningPreferences, setLearningPreferences] = useState<LearningPreferences>(disabledLearningPreferences);
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
     mode: defaultGuidanceMode(),
     protectedSlots: [],
@@ -49,8 +62,9 @@ export function SettingsView() {
         provider.getGuidanceMode(),
       ]);
       if (!preferenceResponse.ok) throw new Error();
-      const body = await preferenceResponse.json() as { defaultEntry?: WorkspaceEntry | null };
+      const body = await preferenceResponse.json() as { defaultEntry?: WorkspaceEntry | null; learningPreferences?: LearningPreferences };
       setDefaultEntry(body.defaultEntry ?? null);
+      setLearningPreferences(body.learningPreferences ?? disabledLearningPreferences);
       setGuidanceMode(mode);
     } catch {
       setError("设置暂时无法读取，请重试。");
@@ -74,6 +88,28 @@ export function SettingsView() {
       setNotice("默认入口已保存。");
     } catch {
       setError("默认入口保存失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveLearningPreferences() {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/workspace/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ learningPreferences }),
+      });
+      if (!response.ok) throw new Error();
+      const body = await response.json() as { learningPreferences: LearningPreferences };
+      setLearningPreferences(body.learningPreferences);
+      setNotice("学习偏好已保存。");
+    } catch {
+      setError("学习偏好保存失败，请重试。");
     } finally {
       setSaving(false);
     }
@@ -107,19 +143,44 @@ export function SettingsView() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
-      <header className="space-y-2 border-b border-line pb-6"><p className="text-xs text-text-dim">工作区</p><h1 className="text-2xl font-semibold tracking-[-0.02em] text-text">设置</h1><p className="text-sm leading-6 text-text-dim">调整入口和学习对话的默认方式。</p></header>
-      {loading ? <p className="border-y border-line py-8 text-sm text-text-dim" role="status">正在读取设置...</p> : null}
-      {error ? <div className="flex flex-wrap items-center gap-3 border-y border-line py-4" role="alert"><p className="text-sm text-danger">{error}</p><button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => void loadSettings()} type="button"><RefreshCw aria-hidden="true" size={14} />重试</button></div> : null}
-      {!loading ? <>
-        <section className="space-y-4" aria-labelledby="default-entry-heading"><div><h2 className="text-base font-semibold text-text" id="default-entry-heading">默认入口</h2><p className="mt-1 text-sm text-text-dim">打开工作区首页时进入这里。</p></div><div className="grid gap-2 sm:grid-cols-3">{entries.map((entry) => <label className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-3 text-sm text-text has-[:checked]:border-primary has-[:checked]:bg-primary/10" key={entry.value}><input checked={defaultEntry === entry.value} className="accent-primary" name="default-entry" onChange={() => setDefaultEntry(entry.value)} type="radio" />{entry.label}</label>)}</div><button className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-ink hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50" disabled={!defaultEntry || saving} onClick={() => void saveEntry()} type="button">{saving ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} /> : <Save aria-hidden="true" size={16} />}保存入口</button></section>
-        <section className="space-y-4 border-t border-line pt-6" aria-labelledby="guidance-heading"><div><h2 className="text-base font-semibold text-text" id="guidance-heading">指导模式</h2><p className="mt-1 text-sm text-text-dim">影响探索中的模拟回复风格。</p></div><select className="min-h-10 w-full rounded-md border border-line bg-surface px-3 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/30" onChange={(event) => void saveGuidanceMode(event.target.value as GuidanceMode)} value={guidanceMode}>{guidanceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></section>
-        <section className="space-y-4 border-t border-line pt-6" aria-labelledby="autonomy-heading"><div><h2 className="text-base font-semibold text-text" id="autonomy-heading">计划自主权</h2><p className="mt-1 text-sm text-text-dim">决定系统能否自动调整计划，以及建议是否需要确认。</p></div><GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} /></section>
-        <section className="space-y-3 border-t border-line pt-6" aria-labelledby="demo-heading"><div><h2 className="text-base font-semibold text-text" id="demo-heading">演示数据</h2><p className="mt-1 text-sm text-text-dim">只重置当前账号的本地 mock 学习数据。</p></div><button className="inline-flex min-h-10 items-center gap-2 rounded-md border border-danger/40 px-3 text-sm text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:opacity-50" disabled={saving} onClick={() => void resetDemoData()} type="button"><Check aria-hidden="true" size={16} />重置演示数据</button></section>
-        <section className="space-y-3 border-t border-line pt-6" aria-labelledby="export-heading"><div><h2 className="text-base font-semibold text-text" id="export-heading">数据导出</h2><p className="mt-1 text-sm text-text-dim">Markdown/Anki 投影不是完整备份。原生备份可完整恢复。</p></div><Link className="inline-flex min-h-10 items-center rounded-md border border-line px-3 text-sm text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" href="/settings/export">打开导出与备份</Link></section>
-        <DiagnosticsPanel provider={provider} />
-      </> : null}
-      {notice ? <p className="text-sm text-success" role="status">{notice}</p> : null}
+    <main className="min-w-0 bg-white">
+      <PageHeading title="设置" description="调整工作区入口、学习方式和数据管理。" />
+      <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
+        {loading ? <LoadingRows label="正在读取设置" /> : null}
+        {error ? <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert"><p className="text-sm text-red-700">{error}</p><button className={ui.secondary} onClick={() => void loadSettings()} type="button"><RefreshCw aria-hidden="true" size={14} />重新读取</button></div> : null}
+        {!loading ? <>
+          <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="default-entry-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="default-entry-heading">默认入口</h2><p className="mt-1 text-xs leading-6 text-zinc-500">打开工作区首页时进入这里。</p></div>
+            <div className="space-y-3"><div className="divide-y divide-zinc-100">{entries.map((entry) => <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-zinc-700 focus-within:ring-2 focus-within:ring-emerald-700 has-[:checked]:bg-emerald-50 has-[:checked]:text-emerald-800" key={entry.value}><input checked={defaultEntry === entry.value} className="size-4 accent-emerald-700" name="default-entry" onChange={() => setDefaultEntry(entry.value)} type="radio" />{entry.label}</label>)}</div><button className={ui.primary} disabled={!defaultEntry || saving} onClick={() => void saveEntry()} type="button">{saving ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}保存入口</button></div>
+          </section>
+          <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="guidance-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="guidance-heading">指导模式</h2><p className="mt-1 text-xs leading-6 text-zinc-500">影响探索中的模拟回复风格。</p></div>
+            <label className="block"><span className="sr-only">指导模式</span><select className={ui.input} onChange={(event) => void saveGuidanceMode(event.target.value as GuidanceMode)} value={guidanceMode}>{guidanceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
+          </section>
+          <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="learning-preferences-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="learning-preferences-heading">学习偏好</h2></div>
+            <div className="space-y-3">
+              <div className="divide-y divide-zinc-100">{learningSwitches.map(({ key, label }) => (
+                <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-zinc-700 focus-within:ring-2 focus-within:ring-emerald-700" key={key}>
+                  <span>{label}</span><input checked={learningPreferences[key]} className="size-4 accent-emerald-700" disabled={key !== "assessmentEnabled" && !learningPreferences.assessmentEnabled} onChange={(event) => setLearningPreferences((current) => key === "assessmentEnabled" && !event.target.checked ? disabledLearningPreferences : { ...current, [key]: event.target.checked })} type="checkbox" />
+                </label>
+              ))}</div>
+              <button className={ui.primary} disabled={saving} onClick={() => void saveLearningPreferences()} type="button">{saving ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}保存学习偏好</button>
+            </div>
+          </section>
+          <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="autonomy-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="autonomy-heading">计划自主权</h2><p className="mt-1 text-xs leading-6 text-zinc-500">预览自动调整规则和探索时段；当前选择仅保留在此页面。</p></div><GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} />
+          </section>
+          <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="export-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="export-heading">数据导出</h2><p className="mt-1 text-xs leading-6 text-zinc-500">下载内容或管理完整备份。</p></div><div className="space-y-3"><p className="text-sm leading-7 text-zinc-600">Markdown / Anki 是内容投影，需要完整恢复时请使用原生备份。</p><Link className={ui.secondary} href="/settings/export">打开导出与备份</Link></div>
+          </section>
+          <section className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="demo-heading">
+            <div><h2 className="text-sm font-medium text-zinc-900" id="demo-heading">演示数据</h2><p className="mt-1 text-xs leading-6 text-zinc-500">只重置当前账号的本地 mock 学习数据。</p></div><div><button className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-red-200 px-3 text-xs text-red-700 transition-colors duration-150 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50 motion-reduce:transition-none md:min-h-8" disabled={saving} onClick={() => void resetDemoData()} type="button"><Check aria-hidden="true" size={14} />重置演示数据</button></div>
+          </section>
+          <DiagnosticsPanel provider={provider} />
+        </> : null}
+        {notice ? <p className="text-sm text-emerald-700" role="status">{notice}</p> : null}
+      </div>
     </main>
   );
 }

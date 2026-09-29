@@ -44,19 +44,19 @@ export function BacklinksPanel({ documentId }: BacklinksPanelProps) {
     : [];
 
   return (
-    <section className="rounded-lg border border-line bg-surface p-4" aria-labelledby="document-backlinks-title">
-      <div className="mb-3 flex items-center gap-2"><Link2 aria-hidden="true" className="text-primary" size={16} /><h2 className="text-sm font-semibold text-text" id="document-backlinks-title">反向链接</h2></div>
-      {state.status === "loading" ? <p className="text-xs text-text-dim" role="status">正在读取链接...</p> : null}
-      {state.status === "error" ? <div className="flex items-center gap-2" role="alert"><p className="text-xs text-danger">{state.message}</p><button aria-label="重试读取链接" className="inline-grid size-8 place-items-center rounded-md border border-line text-text-dim hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={reload} title="重试读取链接" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
-      {state.status === "ready" && links.length === 0 ? <p className="text-xs text-text-dim">还没有其他笔记链接到这里</p> : null}
+    <section className="border-b border-zinc-200 pb-4" aria-labelledby="document-backlinks-title">
+      <div className="mb-3 flex items-center gap-2"><Link2 aria-hidden="true" className="text-emerald-700" size={16} /><h2 className="text-sm font-semibold text-zinc-800" id="document-backlinks-title">反向链接</h2></div>
+      {state.status === "loading" ? <p className="text-xs text-zinc-500" role="status">正在读取链接...</p> : null}
+      {state.status === "error" ? <div className="flex items-center gap-2" role="alert"><p className="text-xs text-red-700">{state.message}</p><button aria-label="重试读取链接" className="inline-grid size-8 place-items-center rounded-md border border-zinc-200 text-zinc-500 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={reload} title="重试读取链接" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
+      {state.status === "ready" && links.length === 0 ? <p className="text-xs text-zinc-500">还没有其他笔记链接到这里</p> : null}
       {state.status === "ready" && links.length > 0 ? <ul className="grid gap-2">{links.map((link) => {
         const source = link.from;
         const broken = source.status === "broken";
         const label = endpointLabel(source);
         const sourceView = broken || !source.documentId
           ? label
-          : <Link className="truncate hover:text-primary" href={`/library/${encodeURIComponent(source.documentId)}`}>{label}</Link>;
-        return <li key={link.id} className="rounded-md border border-line px-3 py-2 text-sm text-text"><div className="flex items-center justify-between gap-3"><span className="truncate">{sourceView}</span><span className="shrink-0 text-xs text-text-dim">{link.relationType}</span></div></li>;
+          : <Link className="truncate hover:text-emerald-700" href={`/library/${encodeURIComponent(source.documentId)}`}>{label}</Link>;
+        return <li key={link.id} className="border-b border-zinc-200 px-2 py-2 text-sm text-zinc-800"><div className="flex items-center justify-between gap-3"><span className="truncate">{sourceView}</span><span className="shrink-0 text-xs text-zinc-500">{link.relationType}</span></div></li>;
       })}</ul> : null}
     </section>
   );

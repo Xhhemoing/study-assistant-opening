@@ -34,8 +34,12 @@ export {
   taskItemSchema,
   retestTaskSnapshotSchema,
   taskCreateInputSchema,
+  taskCreateResultSchema,
+  taskStatusUpdateInputSchema,
   type TaskItem,
   type TaskCreateInput,
+  type TaskCreateResult,
+  type TaskStatusUpdateInput,
 } from "./planning-tasks";
 
 export const plannedBlockSchema = z

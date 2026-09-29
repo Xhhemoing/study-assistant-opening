@@ -1,8 +1,10 @@
+import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { Citation } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { loadTutorHistory } from "./opening-tutor-history";
+import type { ContextSourceRef } from "./opening-context-provenance";
+import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
 
 export type OpeningTutorJobRecord = {
   id: string;
@@ -87,6 +89,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
 
   return {
     loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
+    loadHistoryContext: (scope: OpeningScope, currentTurnId: string) => loadTutorHistoryContext(sql, scope, currentTurnId),
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
         UPDATE opening_tutor_jobs j SET status = 'running', updated_at = now()
@@ -198,10 +201,12 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       text: string;
       citations: Citation[];
       candidates: Array<{ payload: unknown; sourceIds: string[] }>;
+      contextSourceRefs?: ContextSourceRef[];
       helpExposure?: {
         id: string;
         sessionId: string;
         problemId: string | null;
+        attemptId?: string | null;
         turnId: string;
         level: "hinted" | "revealed";
         delivered: true;
@@ -229,29 +234,14 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         `;
         if (!claimed.length) return;
         const assistant = await tx`
-          UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)}, status = 'complete'
+          UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
+            context_source_refs = ${input.contextSourceRefs === undefined ? null : tx.json(input.contextSourceRefs as never)}, status = 'complete'
           WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
           RETURNING id
         `;
         if (!assistant.length) throw new Error("assistant turn was not persisted");
         if (input.helpExposure) {
-          const session = await tx`
-            SELECT id FROM opening_learning_sessions
-            WHERE id = ${input.helpExposure.sessionId}
-              AND workspace_id = ${input.scope.workspaceId}
-              AND owner_user_id = ${input.scope.ownerUserId}
-            LIMIT 1
-          `;
-          if (!session.length) throw new Error("session not found");
-          await tx`
-            INSERT INTO opening_help_exposures
-              (id, workspace_id, session_id, problem_id, turn_id, level, delivered)
-            VALUES (
-              ${input.helpExposure.id}, ${input.scope.workspaceId},
-              ${input.helpExposure.sessionId}, ${input.helpExposure.problemId},
-              ${input.helpExposure.turnId}, ${input.helpExposure.level}, TRUE
-            )
-          `;
+          await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure);
         }
         for (const candidate of input.candidates) {
           await tx`
@@ -276,9 +266,10 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       currentPage: number | null;
       chunkId: string | null;
       learningSessionId: string | null;
+      attemptId?: string | null;
     } | null> {
       const rows = await sql`
-        SELECT text, mode, source_ids, source_versions, current_page, chunk_id, learning_session_id FROM opening_turns
+        SELECT text, mode, source_ids, source_versions, current_page, chunk_id, learning_session_id, attempt_id FROM opening_turns
         WHERE id = ${id} AND workspace_id = ${workspaceId} LIMIT 1
       `;
       if (!rows.length) return null;
@@ -291,6 +282,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         currentPage: (row.current_page as number | null) ?? null,
         chunkId: (row.chunk_id as string | null) ?? null,
         learningSessionId: (row.learning_session_id as string | null) ?? null,
+        attemptId: (row.attempt_id as string | null) ?? null,
       };
     },
 

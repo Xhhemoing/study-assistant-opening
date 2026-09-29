@@ -23,11 +23,12 @@ export async function insertTurn(
   const turnId = randomUUID();
   await sql`
     INSERT INTO opening_turns (
-      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations
+      id, workspace_id, conversation_id, role, text, mode, status, source_ids, citations, context_source_refs
     ) VALUES (
       ${turnId}, ${scope.workspaceId}, ${conversationId}, 'assistant', 'reply', 'explain',
       ${input.status ?? "complete"}, ${sql.array(input.sourceIds ?? [])}::uuid[],
-      ${sql.json((input.citations ?? []) as never)}
+      ${sql.json((input.citations ?? []) as never)},
+      (SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId',id,'sourceVersion',version)), '[]'::jsonb) FROM opening_sources WHERE id=ANY(${sql.array(input.sourceIds ?? [])}::uuid[]))
     )`;
   return turnId;
 }

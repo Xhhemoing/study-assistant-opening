@@ -1,4 +1,5 @@
 import {
+  boolean,
   integer,
   pgTable,
   text,
@@ -26,6 +27,11 @@ export const courses = pgTable(
       .notNull()
       .defaultNow(),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    assessmentEnabled: boolean("assessment_enabled"),
+    retestSuggestionsEnabled: boolean("retest_suggestions_enabled"),
+    automaticRemindersEnabled: boolean("automatic_reminders_enabled"),
+    retestSuggestionsEnabledAt: timestamp("retest_suggestions_enabled_at", { withTimezone: true }),
+    automaticRemindersEnabledAt: timestamp("automatic_reminders_enabled_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("courses_workspace_slug_uidx").on(table.workspaceId, table.slug),

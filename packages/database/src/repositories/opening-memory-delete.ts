@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
+import { parseContextSourceRefs } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 export type MemoryDeletionReceipt = {
@@ -50,10 +51,13 @@ export function deleteOwnedMemory(
     const sourceIds: string[] = [];
     for (const turnId of turnIds) {
       const turns = await tx`
-        SELECT source_ids FROM opening_turns
+        SELECT source_ids, context_source_refs FROM opening_turns
         WHERE workspace_id = ${scope.workspaceId} AND id = ${turnId}
         LIMIT 1`;
-      if (turns.length) sourceIds.push(...((turns[0] as { source_ids: string[] | null }).source_ids ?? []));
+      if (turns.length) {
+        sourceIds.push(...((turns[0] as { source_ids: string[] | null }).source_ids ?? []));
+        sourceIds.push(...(parseContextSourceRefs(turns[0]!.context_source_refs) ?? []).map((ref) => ref.sourceId));
+      }
     }
     await tx`
       UPDATE opening_memories

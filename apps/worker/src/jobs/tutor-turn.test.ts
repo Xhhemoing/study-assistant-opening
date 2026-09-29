@@ -31,7 +31,7 @@ describe("tutor turn handler", () => {
     const tutorJobs = {
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
-      loadHistory: vi.fn(async () => [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }]),
+      loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
       fail: vi.fn(async () => undefined),
       markUnknown: vi.fn(async () => undefined),
@@ -233,7 +233,7 @@ describe("tutor turn handler", () => {
     const privacy = {
       getWorkspaceEpoch: vi.fn(async () => {
         calls += 1;
-        return calls === 1 ? 1 : 2;
+        return calls <= 2 ? 1 : 2;
       }),
       listExcludedSourceIds: vi.fn(async () => []),
     };
@@ -242,6 +242,36 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.fail).toHaveBeenCalled();
   });
 
+  it("does not send stale context and releases the reservation when privacy changes before send", async () => {
+    const { deps, budget, provider, tutorJobs } = setup();
+    let epoch = 1;
+    budget.reserve.mockImplementation(async () => { epoch = 2; return { id: "res-1" }; });
+    const privacy = {
+      getWorkspaceEpoch: vi.fn(async () => epoch),
+      listExcludedSourceIds: vi.fn(async () => []),
+    };
+    await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toBeInstanceOf(PrivacyEpochError);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.release).toHaveBeenCalledWith(`tutor:${claimedJob.id}`);
+    expect(budget.settle).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("carries uncited chunks, history and injected memory references with distinct versions", async () => {
+    const { deps, tutorJobs } = setup({ provider: async () => ({ text: "mixed", citedChunkIds: [],
+      requestId: null, candidates: [{ kind: "memory", text: "mixed memory", temporary: false }], inputTokens: 1, outputTokens: 1 }) });
+    tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 1 }] });
+    const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [] })) };
+    await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      contextSourceRefs: [
+        { sourceId: chunkA.sourceId, sourceVersion: 0 },
+        { sourceId: secondSourceId, sourceVersion: 1 },
+        { sourceId: secondSourceId, sourceVersion: 2 },
+      ],
+      candidates: [{ payload: { kind: "memory", text: "mixed memory", temporary: false }, sourceIds: [chunkA.sourceId, secondSourceId] }],
+    }));
+  });
   it("passes the job privacy epoch into completeTurn on the success path", async () => {
     const { deps, tutorJobs } = setup();
     const privacy = {
@@ -259,10 +289,10 @@ describe("tutor turn handler", () => {
   it("puts confirmed memory into the provider instruction and omits candidates", async () => {
     const { deps, provider } = setup();
     const memories = {
-      list: vi.fn(async () => [
+      listContext: vi.fn(async () => ({ sourceRefs: [], memories: [
         { id: "m1", workspaceId: "w", kind: "candidate" as const, text: "待确认偏好", sourceTurnIds: [], version: 1, expiresAt: null, status: "active" as const, createdAt: "2026-09-12T00:00:00Z" },
         { id: "m2", workspaceId: "w", kind: "confirmed" as const, text: "先看例题再问结论", sourceTurnIds: ["00000000-0000-4000-8000-000000000099"], version: 1, expiresAt: null, status: "active" as const, createdAt: "2026-09-12T00:00:00Z" },
-      ]),
+      ] })),
     };
     await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
     const sent = provider.complete.mock.calls[0]?.[0] as { instruction: string };

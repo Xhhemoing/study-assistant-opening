@@ -131,10 +131,13 @@ describe("openingApi (RU-07 client)", () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("/api/opening/ephemeral");
       expect(init?.signal).toBe(controller.signal);
+      expect(JSON.parse(String(init?.body))).toMatchObject({ historyPrivacyEpoch: 2 });
       return jsonResponse({
         text: "temporary answer",
         citedChunkIds: [],
         requestId: "ephemeral-request",
+        privacyEpoch: 2,
+        historyDiscarded: true,
         candidates: [],
         inputTokens: null,
         outputTokens: null,
@@ -142,8 +145,8 @@ describe("openingApi (RU-07 client)", () => {
     });
     const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
     await expect(api.replyEphemeral({
-      text: "q", sourceIds: [], mode: "listen", history: [],
-    }, controller.signal)).resolves.toMatchObject({ text: "temporary answer" });
+      text: "q", sourceIds: [], mode: "listen", history: [], historyPrivacyEpoch: 2,
+    }, controller.signal)).resolves.toMatchObject({ text: "temporary answer", privacyEpoch: 2, historyDiscarded: true });
   });
 
   it("cancels a durable job through DELETE without inventing a result", async () => {
@@ -294,3 +297,53 @@ describe("openingApi integration helpers", () => {
     });
   });
 
+
+it("posts only the explicitly selected snippet and server provenance", async () => {
+  const requests: Array<{ url: string; method: string | undefined; payload: unknown }> = [];
+  const api = createOpeningApi((async (url, init) => {
+    requests.push({ url: String(url), method: init?.method, payload: JSON.parse(String(init?.body)) });
+    return jsonResponse({ documentId: U });
+  }) as typeof fetch);
+  await expect(api.createSnippet({ title: "我的笔记", text: "仅保存这一句", provenanceId: S })).resolves.toEqual({ documentId: U });
+  expect(requests).toEqual([{ url: "/api/opening/snippets", method: "POST", payload: {
+    title: "我的笔记", text: "仅保存这一句", provenanceId: S,
+  } }]);
+});
+
+it("rejects invalid snippet input before making a persistence request", async () => {
+  const fetchImpl = vi.fn();
+  const api = createOpeningApi(fetchImpl);
+  await expect(api.createSnippet({ title: "笔记", text: "x".repeat(20_001), provenanceId: S })).rejects.toThrow();
+  await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: "unknown" })).rejects.toThrow();
+  expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+it("does not turn a malformed saved-note response into a successful save", async () => {
+  const api = createOpeningApi((async () => jsonResponse({ documentId: "bad-id" })) as typeof fetch);
+  await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: S })).rejects.toThrow();
+});
+
+it("preserves the separate provenance of each temporary history message", async () => {
+  let received: unknown;
+  const api = createOpeningApi((async (_url, init) => {
+    received = JSON.parse(String(init?.body));
+    return jsonResponse({ text: "next answer", citedChunkIds: [], requestId: "next-request", privacyEpoch: 2,
+      historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null, provenanceId: U });
+  }) as typeof fetch);
+  const result = await api.replyEphemeral({ text: "current question", sourceIds: [], mode: "listen", historyPrivacyEpoch: 2,
+    history: [{ role: "user", text: "old question", provenanceId: S }, { role: "assistant", text: "old answer", provenanceId: S }],
+  });
+  expect(received).toMatchObject({ history: [
+    { role: "user", text: "old question", provenanceId: S },
+    { role: "assistant", text: "old answer", provenanceId: S },
+  ] });
+  expect(result.provenanceId).toBe(U);
+});
+
+it("leaves legacy temporary responses without provenance unavailable for saving", async () => {
+  const api = createOpeningApi((async () => jsonResponse({ text: "legacy answer", citedChunkIds: [], requestId: "old-request",
+    privacyEpoch: 2, historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null,
+  })) as typeof fetch);
+  const result = await api.replyEphemeral({ text: "question", sourceIds: [], mode: "listen", history: [] });
+  expect(result.provenanceId).toBeNull();
+});

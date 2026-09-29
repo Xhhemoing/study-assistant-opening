@@ -33,6 +33,36 @@ Resolve the default shell as `bash.exe` on Windows and `/bin/bash` elsewhere. Op
 
 ---
 
+## [ERR-20260929-S4PG] opening_retest_table_missing_in_test_db
+
+**Logged**: 2026-09-29
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+An attempted transactional FK probe failed because the shared test database had not applied migration 0030.
+
+### Error
+```
+ERROR: relation "opening_retest_activities" does not exist
+```
+
+### Context
+- PostgreSQL on `127.0.0.1:15432` was reachable and the test database accepted connections.
+- A separate rollback-only probe confirmed uppercase course/task payload joins differ between raw and lower-normalized comparisons.
+- No data was persisted by the failed probe; the transaction was not committed.
+
+### Suggested Fix
+Apply the current migration set to an isolated test database before running activity FK probes; do not treat a missing 0030 relation as a product regression.
+
+### Metadata
+- Reproducible: yes
+- Related Files: packages/database/src/migrations/0030_opening_retest_activities.sql
+- Tags: postgres, migrations, test-environment
+
+---
+
 ## [ERR-20260804-PI1] duplicate-subagent-extension-fix
 
 **Logged**: 2026-08-04T06:00:00Z

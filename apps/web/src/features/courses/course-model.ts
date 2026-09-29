@@ -1,4 +1,8 @@
+import type { CourseLearningPreferencesUpdate } from "@aistudy/contracts";
+
 export interface CourseSummary {
+  archivedAt?: string | null;
+  learningPreferenceOverrides?: CourseLearningPreferencesUpdate;
   id: string;
   title: string;
   slug: string;
@@ -14,6 +18,7 @@ export interface CourseAsset {
   role: string;
   sortOrder: number;
   document?: { id: string; title: string; updatedAt: string };
+  source?: { id: string; name: string };
 }
 
 export function normalizeCourseSlug(value: string): string {

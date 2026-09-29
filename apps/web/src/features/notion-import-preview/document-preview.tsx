@@ -6,25 +6,25 @@ import type { ImportedPage, ImportedProperty } from "./notion-import-parser";
 function PropertyRow({ property }: { property: ImportedProperty }) {
   return (
     <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3">
-      <dt className="text-stone-500">{property.name}</dt>
-      <dd className="text-stone-300">{property.value}</dd>
+      <dt className="text-zinc-500">{property.name}</dt>
+      <dd className="text-zinc-700">{property.value}</dd>
     </div>
   );
 }
 
 export function DocumentPreview({ fullWidth, page }: { fullWidth: boolean; page: ImportedPage }) {
   return (
-    <article className={`mx-auto px-6 pb-16 pt-10 sm:px-10 ${fullWidth ? "max-w-[72rem]" : "max-w-[46rem]"}`}>
+    <article className={`mx-auto px-4 pb-12 pt-6 sm:px-8 ${fullWidth ? "max-w-[72rem]" : "max-w-[46rem]"}`}>
       <header className="flex items-center gap-3">
-        <span className="grid size-9 place-items-center rounded-lg bg-white/5 text-amber-200"><FileText aria-hidden="true" size={18} /></span>
-        <h1 className="text-2xl font-semibold text-stone-50">{page.title}</h1>
+        <span className="grid size-9 place-items-center rounded-lg bg-zinc-50 text-amber-800"><FileText aria-hidden="true" size={18} /></span>
+        <h1 className="text-base font-semibold text-zinc-900">{page.title}</h1>
       </header>
       {page.properties.length > 0 ? (
-        <dl className="mt-5 grid gap-2 rounded-lg border border-white/10 p-4 sm:grid-cols-2">
+        <dl className="mt-4 grid gap-x-6 gap-y-2 border-y border-zinc-200 py-3 text-xs sm:grid-cols-2">
           {page.properties.map((property) => <PropertyRow key={property.name} property={property} />)}
         </dl>
       ) : null}
-      <div className="mt-10 space-y-7">
+      <div className="mt-6 space-y-5 break-words">
         {page.blocks.map((block, index) => (
           <div className="group" key={index}>
             <BlockView block={block} />
@@ -32,11 +32,11 @@ export function DocumentPreview({ fullWidth, page }: { fullWidth: boolean; page:
         ))}
       </div>
       {page.blocks.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-stone-700 p-6 text-center text-sm text-stone-500">
+        <p className="rounded-lg border border-dashed border-zinc-200 p-6 text-center text-sm text-zinc-500">
           此页面没有可解析的内容块
         </p>
       ) : null}
-      <footer className="mt-12 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-white/10 pt-4 text-xs text-stone-500">
+      <footer className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-zinc-200 pt-4 text-xs text-zinc-500">
         <span className="inline-flex items-center gap-1"><List aria-hidden="true" size={12} />{page.blocks.length} 个内容块</span>
         <span className="inline-flex items-center gap-1"><FileImage aria-hidden="true" size={12} />{page.attachments.length} 个附件</span>
         <span className="inline-flex items-center gap-1"><ListOrdered aria-hidden="true" size={12} />{page.links.length} 个内部链接</span>

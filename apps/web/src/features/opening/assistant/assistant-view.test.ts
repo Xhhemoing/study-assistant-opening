@@ -1,3 +1,4 @@
+import type { ConversationResume, LearningAttempt } from "@aistudy/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendEphemeralResponseIfActive,
@@ -6,6 +7,12 @@ import {
   createJobPoller,
   jobStatusHint,
   pendingJobDiscoveryState,
+  learningAttemptTurnContext,
+  canReuseAssistantConversation,
+  shouldRefreshCurrentConversation,
+  shouldLoadConversationList,
+  conversationForAssistant,
+  selectionForResumedConversation,
 } from "./assistant-view";
 
 const JOB_ID = "33333333-3333-4333-8333-333333333333";
@@ -181,4 +188,87 @@ describe("AssistantView job polling", () => {
       }),
     ).toContain("失败");
   });
+});
+
+
+it("binds practice help to the server attempt and session rather than the conversation alone", () => {
+  const attempt = {
+    id: "attempt-1", workspaceId: "workspace-1", sessionId: "session-1", courseId: "course-1", skillLabel: "fractions",
+    requirementKey: null, problemId: "problem-1", itemVersionId: "version-1", sourceIds: [], sourceVersions: {},
+    startedAt: ISO, submittedAt: null, observationId: null, historyRevision: 1,
+  };
+  expect(learningAttemptTurnContext(attempt)).toEqual({ learningSessionId: "session-1", attemptId: "attempt-1" });
+  expect(learningAttemptTurnContext()).toEqual({});
+});
+
+describe("practice conversation recovery", () => {
+  const courseA = { id: "conversation-a", courseId: "course-a", title: "A", updatedAt: ISO, lastTurnPreview: null };
+  const courseB = { id: "conversation-b", courseId: "course-b", title: "B", updatedAt: ISO, lastTurnPreview: null };
+
+  it("skips a newer conversation from another course", () => {
+    expect(conversationForAssistant([courseB, courseA], null, "course-a")).toEqual(courseA);
+  });
+
+  it("ignores a foreign initial conversation and leaves no reusable id without a course match", () => {
+    expect(conversationForAssistant([courseB, courseA], courseB.id, "course-a")).toEqual(courseA);
+    expect(conversationForAssistant([courseB], courseB.id, "course-a")).toBeNull();
+  });
+
+  it("preserves ordinary assistant recovery and explicit conversation selection", () => {
+    expect(conversationForAssistant([courseB, courseA], null)).toEqual(courseB);
+    expect(conversationForAssistant([courseB, courseA], courseA.id)).toEqual(courseA);
+  });
+
+  it("never replaces attempt sources or page selection with a resumed conversation's selection", () => {
+    const resume = { conversationId: courseA.id, courseId: courseA.courseId, sourceIds: ["unrelated-source"], currentPage: 99, boundedHistory: [], historyTruncated: false };
+    const attempt = {
+      id: "attempt-1", workspaceId: "workspace-1", sessionId: "session-1", courseId: courseA.courseId, skillLabel: "fractions",
+      requirementKey: null, problemId: "problem-1", itemVersionId: "version-1", sourceIds: ["attempt-source"], sourceVersions: { "attempt-source": 1 },
+      startedAt: ISO, submittedAt: null, observationId: null, historyRevision: 1,
+    };
+    expect(selectionForResumedConversation(resume, attempt)).toEqual({ sourceIds: ["attempt-source"], currentPage: null });
+    expect(selectionForResumedConversation(resume)).toEqual({ sourceIds: ["unrelated-source"], currentPage: 99 });
+  });
+});
+
+describe("practice conversation isolation", () => {
+  it("does not list course conversations for an attempt without an explicit conversation association", () => {
+    const attempt = { id: "attempt-1" } as LearningAttempt;
+    expect(shouldLoadConversationList(attempt)).toBe(false);
+    expect(shouldLoadConversationList()).toBe(true);
+  });
+
+  it("reuses the conversation created during the same attempt mount before resume arrives", () => {
+    const attempt = { courseId: "course-a" } as LearningAttempt;
+    expect(canReuseAssistantConversation("created", attempt, null)).toBe(true);
+    expect(canReuseAssistantConversation(null, attempt, null)).toBe(false);
+    expect(canReuseAssistantConversation("old", attempt, { courseId: "course-b" } as ConversationResume)).toBe(false);
+  });
+
+  it("refreshes the current attempt conversation without listing older course conversations", () => {
+    expect(shouldRefreshCurrentConversation({ id: "attempt-1" } as LearningAttempt, "created")).toBe(true);
+    expect(shouldRefreshCurrentConversation({ id: "attempt-1" } as LearningAttempt, null)).toBe(false);
+    expect(shouldRefreshCurrentConversation(undefined, "created")).toBe(false);
+  });
+});
+
+it("removes invalidated temporary history when the server isolates it", () => {
+  const previous = [{ id: "old", role: "assistant" as const, text: "private old reply", citations: [], citationLabels: [] }];
+  const updated = appendEphemeralResponseIfActive(previous, {
+    clientKey: "new-question", text: "current question",
+    output: { requestId: "new-reply", text: "current answer", historyDiscarded: true },
+  }, new AbortController().signal);
+  expect(updated.map(message => message.text)).toEqual(["current question", "current answer"]);
+  expect(JSON.stringify(updated)).not.toContain("private old reply");
+});
+
+it("keeps server provenance on both messages from a temporary response", () => {
+  const messages = appendEphemeralResponseIfActive([], {
+    clientKey: "current-question", text: "selected source question",
+    output: { requestId: "reply", text: "source-backed answer", provenanceId: JOB_ID },
+  }, new AbortController().signal);
+  expect(messages.map(({ role, origin, provenanceId }) => ({ role, origin, provenanceId }))).toEqual([
+    { role: "user", origin: "ephemeral", provenanceId: JOB_ID },
+    { role: "assistant", origin: "ephemeral", provenanceId: JOB_ID },
+  ]);
 });

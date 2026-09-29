@@ -25,7 +25,7 @@ function assertSources(sources: readonly OpeningBackupSource[]): void {
     if (!Number.isSafeInteger(source.bytes) || source.bytes < 1) throw invalid("invalid backup source");
     if (!Number.isSafeInteger(source.bytes + 1)) throw invalid("invalid backup source");
     if (typeof source.sha256 !== "string" || !SHA256.test(source.sha256)) throw invalid("invalid backup source");
-    const id = source.sourceId.toLowerCase();
+    const id = `${source.sourceId.toLowerCase()}/${source.version}`;
     if (seen.has(id)) throw invalid("duplicate backup source");
     seen.add(id);
   }

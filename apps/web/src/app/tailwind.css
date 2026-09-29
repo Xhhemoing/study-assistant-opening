@@ -1,18 +1,18 @@
-@import "tailwindcss/theme";
-@import "tailwindcss/utilities";
+/* Keep build output out of PostCSS's watched directories, regardless of the launch cwd. */
+@import "tailwindcss" source(none);
 
-@source "../../../packages/ui/src";
+@source "../../../../packages/ui/src";
 @source "../";
 
 @theme {
-  --color-ink: #0b1020;
-  --color-surface: #121a2b;
-  --color-surface-2: #1a2440;
-  --color-line: #24304f;
-  --color-text: #f5f7ff;
-  --color-text-dim: #94a3b8;
-  --color-primary: #6ea8fe;
-  --color-success: #4ade80;
-  --color-warning: #facc15;
-  --color-danger: #f87171;
+  --color-ink: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f5;
+  --color-line: #e4e4e7;
+  --color-text: #27272a;
+  --color-text-dim: #71717a;
+  --color-primary: #18181b;
+  --color-success: #047857;
+  --color-warning: #a16207;
+  --color-danger: #b91c1c;
 }

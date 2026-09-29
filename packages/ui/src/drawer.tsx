@@ -22,6 +22,8 @@ export function Drawer({
   children: ReactNode;
 }) {
   const titleId = useId();
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -30,7 +32,7 @@ export function Drawer({
     if (!open) return;
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") { event.preventDefault(); onCloseRef.current(); }
       if (event.key !== "Tab" || !dialogRef.current) return;
       const elements = focusableElements(dialogRef.current);
       if (elements.length === 0) return;
@@ -48,7 +50,7 @@ export function Drawer({
       if (previousFocusRef.current && document.contains(previousFocusRef.current)) previousFocusRef.current.focus();
       previousFocusRef.current = null;
     };
-  }, [onClose, open]);
+  }, [open]);
 
   if (!open) return null;
   return (
@@ -58,13 +60,13 @@ export function Drawer({
         aria-label="关闭抽屉"
         data-drawer-backdrop="true"
         tabIndex={-1}
-        className="absolute inset-0 bg-ink/70"
+        className="absolute inset-0 bg-zinc-950/30"
         onClick={onClose}
       />
-      <aside className="relative flex h-full w-full max-w-md flex-col border-l border-line bg-surface shadow-xl">
-        <header className="flex min-h-16 items-center justify-between border-b border-line px-5">
-          <h2 id={titleId} className="text-base font-semibold text-text">{title}</h2>
-          <button ref={closeRef} type="button" aria-label="关闭抽屉" className="inline-grid size-10 place-items-center rounded-md text-text-dim hover:bg-surface-2 hover:text-text" onClick={onClose}>
+      <aside className="relative flex h-full w-full max-w-80 flex-col border-l border-zinc-200 bg-white shadow-xl">
+        <header className="flex min-h-12 items-center justify-between border-b border-zinc-200 px-5">
+          <h2 id={titleId} className="text-sm font-semibold text-zinc-800">{title}</h2>
+          <button ref={closeRef} type="button" aria-label="关闭抽屉" className="inline-grid size-10 place-items-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 md:size-8" onClick={onClose}>
             <X aria-hidden="true" size={18} />
           </button>
         </header>

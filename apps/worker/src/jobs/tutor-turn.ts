@@ -9,9 +9,11 @@ import {
 import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
 import { instructionWithMemories } from "@aistudy/domain";
 import type {
+  ContextSourceRef,
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
 } from "@aistudy/database";
+import { mergeContextSourceRefs } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import { tutorActualCents, tutorReservationCents } from "./tutor-cost";
@@ -58,7 +60,7 @@ export type TutorTurnDeps = {
     listExcludedSourceIds(scope: Scope): Promise<string[]>;
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
-  memories?: { list(scope: Scope): Promise<MemoryItem[]> };
+  memories?: { listContext(scope: Scope, now: string): Promise<{ memories: MemoryItem[]; sourceRefs: ContextSourceRef[] }> };
   /** L01: record delivered help in the tutor completion transaction. */
   learning?: {
     insertHelpExposure(scope: Scope, exposure: {
@@ -116,12 +118,20 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         preferChunkId: turn.chunkId ?? undefined,
         preferPage: turn.currentPage ?? undefined,
       }).slice(0, MAX_PROVIDER_CHUNKS);
-      const history = await deps.tutorJobs.loadHistory(scope, claimed.userTurnId);
+      const { history, sourceRefs: historySourceRefs } = await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const contextNow = new Date().toISOString();
+      const memoryContext = deps.memories
+        ? await deps.memories.listContext(scope, contextNow)
+        : { memories: [], sourceRefs: [] };
+      const contextSourceRefs = mergeContextSourceRefs(
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
+        historySourceRefs, memoryContext.sourceRefs,
+      );
       const mode = claimed.mode as TutorMode;
       const instruction = instructionWithMemories(
         makeTutorInstruction(mode),
-        deps.memories ? await deps.memories.list(scope) : [],
-        new Date().toISOString(),
+        memoryContext.memories,
+        contextNow,
       );
       const input: ProviderInput = {
         instruction, text: turn.text, history,
@@ -139,10 +149,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         requestId: `tutor:${claimed.id}`,
         reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
         actualCents: (settled) => tutorActualCents(settled, rates),
+        beforeSend: deps.privacy && jobEpoch !== null
+          ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
+          : undefined,
       });
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       const citations = resolveCitations(validated.citedChunkIds, context);
-      const citedSourceIds = [...new Set(citations.map((c) => c.sourceId))].filter(
+      const contextSourceIds = [...new Set(contextSourceRefs.map((ref) => ref.sourceId))].filter(
         (id) => !excluded.has(id),
       );
       if (deps.privacy && jobEpoch !== null) {
@@ -155,6 +168,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             id: randomUUID(),
             sessionId: turn.learningSessionId,
             problemId: null,
+            attemptId: turn.attemptId ?? null,
             turnId: claimed.assistantTurnId,
             level: mode === "explain" ? "revealed" as const : "hinted" as const,
             delivered: true as const,
@@ -166,9 +180,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         assistantTurnId: claimed.assistantTurnId,
         text: validated.text,
         citations,
+        contextSourceRefs,
         candidates: validated.candidates.map((payload) => ({
           payload,
-          sourceIds: citedSourceIds,
+          sourceIds: contextSourceIds,
         })),
         ...(helpExposure ? { helpExposure } : {}),
         expectedPrivacyEpoch: jobEpoch ?? undefined,

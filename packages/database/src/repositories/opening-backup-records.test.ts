@@ -5,6 +5,8 @@ import { OpeningBackupSourceError } from "./opening-backup-sources";
 
 const workspaceId = "a1000000-0000-4000-8000-000000000001";
 const ownerUserId = "b2000000-0000-4000-8000-000000000001";
+const candidateId = "c3000000-0000-4000-8000-000000000001";
+const turnId = "d4000000-0000-4000-8000-000000000001";
 type Call = { query: string; values: unknown[] };
 
 function flatten(value: unknown, values: unknown[]): string {
@@ -52,7 +54,7 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(17);
+    expect(Object.keys(snapshot.tables)).toHaveLength(25);
     expect(sql.calls.some((call) => /(?:FROM|JOIN)\s+(?:opening_tutor_jobs|opening_jobs|opening_outbox|opening_budget_reservations|sessions)(?:\s|$)/.test(call.query))).toBe(false);
   });
 
@@ -86,8 +88,27 @@ describe("readOpeningBackupRecords", () => {
       return [];
     });
     const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
-    expect(snapshot.tables.opening_tasks).toEqual([{ id: "task-1", workspace_id: workspaceId }]);
+    expect(snapshot.tables.opening_tasks).toEqual([{ id: "task-1", workspace_id: workspaceId, candidate_id: null }]);
     expect(snapshot).not.toHaveProperty("objects");
     expect(snapshot).not.toHaveProperty("workspace");
+  });
+
+  it("retains an accepted task candidate only when its assistant candidate and source turn are included", async () => {
+    const sql = fakeSql((call) => {
+      if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 4 }];
+      if (call.query.includes("FROM opening_tasks")) {
+        return [{ id: "task-1", workspace_id: workspaceId, owner_user_id: ownerUserId, candidate_id: candidateId }];
+      }
+      if (call.query.includes("FROM opening_assistant_candidates")) {
+        return [{ id: candidateId, workspace_id: workspaceId, conversation_id: "e5000000-0000-4000-8000-000000000001", source_turn_id: turnId }];
+      }
+      if (call.query.includes("FROM opening_turns")) {
+        return [{ id: turnId, workspace_id: workspaceId, attempt_id: null }];
+      }
+      return [];
+    });
+
+    const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+    expect(snapshot.tables.opening_tasks[0]?.candidate_id).toBe(candidateId);
   });
 });

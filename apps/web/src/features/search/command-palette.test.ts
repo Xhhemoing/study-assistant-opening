@@ -7,6 +7,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { CommandPalette } from "./command-palette";
+import { PALETTE_COMMANDS } from "./command-palette-model";
 
 describe("command palette accessibility", () => {
   it("exposes the open palette as a labelled modal combobox with command options", () => {
@@ -16,6 +17,7 @@ describe("command palette accessibility", () => {
       onClose: vi.fn(),
     }));
 
+    expect(html).toContain("<dialog");
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-modal="true"');
     expect(html).toContain('aria-labelledby="command-palette-title"');
@@ -26,7 +28,7 @@ describe("command palette accessibility", () => {
     expect(html).toContain('id="command-option-new-note"');
     expect(html).toContain('id="command-option-new-exploration"');
     expect(html).toContain('id="command-option-new-goal"');
-    expect(html.match(/role="option"/g)).toHaveLength(3);
+    expect(html.match(/role="option"/g)).toHaveLength(PALETTE_COMMANDS.length);
     expect(html).toContain('aria-label="关闭搜索"');
   });
 });

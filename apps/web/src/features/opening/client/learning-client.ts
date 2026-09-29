@@ -1,6 +1,10 @@
 import {
   learningSummarySchema,
+  learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningObservationSchema,
+  type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
+  observationHistorySchema, observationRevisionInputSchema, observationRevisionResultSchema,
+  type ObservationRevisionInput,
   type LearningSummary,
   type ObservationInput,
 } from "@aistudy/contracts";
@@ -9,12 +13,12 @@ import { OpeningApiError } from "./api";
 
 type FetchLike = typeof fetch;
 
-function errorMessage(body: unknown, status: number): string {
+function requestError(body: unknown, status: number): OpeningApiError {
   if (body && typeof body === "object" && "error" in body) {
-    const error = (body as { error?: { message?: unknown } }).error;
-    if (error && typeof error.message === "string") return error.message;
+    const error = (body as { error?: { message?: unknown; code?: unknown } }).error;
+    if (error && typeof error.message === "string") return new OpeningApiError(status, error.message, typeof error.code === "string" ? error.code : null);
   }
-  return `request failed (${status})`;
+  return new OpeningApiError(status, `request failed (${status})`);
 }
 
 async function request(
@@ -38,7 +42,7 @@ async function request(
       body = null;
     }
   }
-  if (!res.ok) throw new OpeningApiError(res.status, errorMessage(body, res.status));
+  if (!res.ok) throw requestError(body, res.status);
   return body;
 }
 
@@ -52,6 +56,40 @@ export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return z.array(learningSummarySchema).parse(body);
+    },
+
+    async listObservations(courseId: string) {
+      return z.array(learningObservationSchema).parse(await request(`/api/opening/courses/${courseId}/observations`, { method: "GET" }, fetchImpl));
+    },
+
+    async getObservationHistory(id: string) {
+      return observationHistorySchema.parse(await request(`/api/opening/observations/${id}/history`, { method: "GET" }, fetchImpl));
+    },
+
+    async reviseObservation(input: ObservationRevisionInput) {
+      const payload = observationRevisionInputSchema.parse(input);
+      return observationRevisionResultSchema.parse(await request("/api/opening/observations/revisions", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+    },
+
+    async listRevisionCourses() {
+      const result = await request("/api/courses", { method: "GET" }, fetchImpl);
+      return z.object({ courses: z.array(z.object({ id: z.string().uuid(), title: z.string() })) }).parse(result).courses;
+    },
+
+    async createSession(input: LearningSessionCreateInput): Promise<{ id: string }> {
+      const payload = learningSessionCreateInputSchema.parse(input);
+      const body = await request("/api/opening/learning-sessions", { method: "POST", body: JSON.stringify(payload) }, fetchImpl);
+      return z.object({ id: z.string().uuid() }).parse(body);
+    },
+
+    async createAttempt(input: LearningAttemptCreateInput) {
+      const payload = learningAttemptCreateInputSchema.parse(input);
+      return learningAttemptSchema.parse(await request("/api/opening/attempts", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+    },
+
+    async submitAttempt(attemptId: string, input: LearningAttemptSubmitInput) {
+      const payload = learningAttemptSubmitInputSchema.parse(input);
+      return learningObservationSchema.extend({ allowsIndependent: z.boolean() }).parse(await request(`/api/opening/attempts/${attemptId}/submit`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
     async submitObservation(input: ObservationInput) {

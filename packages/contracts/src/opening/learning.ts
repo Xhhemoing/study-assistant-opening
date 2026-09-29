@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { evidenceEligibilitySchema, learningObservationFactsShape, referenceCheckInputSchema } from "./learning-evidence";
 
 export const observationOutcomeSchema = z.enum([
   "correct",
@@ -81,10 +82,13 @@ export const helpExposureSchema = z
   .object({
     id: uuidSchema,
     sessionId: uuidSchema,
+    attemptId: uuidSchema.nullable().optional(),
     problemId: uuidSchema.nullable(),
     turnId: uuidSchema,
     level: z.enum(["hinted", "revealed"]),
     delivered: z.literal(true),
+    deliveredAt: isoDateTimeSchema.nullable().optional(),
+    historyRevision: z.number().int().nonnegative().optional(),
     createdAt: isoDateTimeSchema,
   })
   .strict();
@@ -92,6 +96,7 @@ export const helpExposureSchema = z
 export const observationInputSchema = z
   .object({
     sessionId: uuidSchema,
+    attemptId: uuidSchema.nullable().optional(),
     courseId: uuidSchema,
     skillLabel: z.string().min(1).max(200),
     sourceIds: z.array(uuidSchema).max(32),
@@ -105,6 +110,7 @@ export const observationInputSchema = z
     clientKey: z.string().min(8).max(200),
     /** Server policy input. Omitted requests stay self_report. */
     verdictSource: verdictSourceSchema.optional(),
+    referenceCheck: referenceCheckInputSchema.optional(),
     referenceSourceId: uuidSchema.nullable().optional(),
     /** Links a correction. Never an in-place rewrite of the parent row. */
     revisesObservationId: uuidSchema.nullable().optional(),
@@ -113,6 +119,12 @@ export const observationInputSchema = z
 
 export const learningObservationSchema = observationInputSchema
   .extend({
+    ...learningObservationFactsShape,
+    rootObservationId: uuidSchema.optional(),
+    revisionKind: z.enum(["original", "replace", "retract"] ).optional(),
+    revisionReason: z.string().nullable().optional(),
+    actorId: uuidSchema.nullable().optional(),
+    effectiveHeadId: uuidSchema.nullable().optional(),
     id: uuidSchema,
     workspaceId: uuidSchema,
     occurredAt: isoDateTimeSchema,
@@ -140,6 +152,9 @@ export const learningSummarySchema = z
     evidenceSources: z.array(verdictSourceSchema).max(4).optional(),
     sampleCount: z.number().int().nonnegative(),
     lastObservedAt: isoDateTimeSchema.nullable(),
+    courseId: uuidSchema.optional(),
+    requirementKey: z.string().nullable().optional(),
+    evidenceEligibility: z.array(z.object({ observationId: uuidSchema, eligibility: evidenceEligibilitySchema, versionApplicability: z.enum(["exact", "equivalent_confirmed", "changed_needs_check", "version_unknown", "unavailable", "privacy_excluded"]).optional() }).strict()).optional(),
   })
   .strict();
 
@@ -148,10 +163,16 @@ export const retestCandidateSchema = z
     id: uuidSchema,
     courseId: uuidSchema,
     skillLabel: z.string().min(1).max(200),
+    requirementKey: z.string().max(200).nullable().optional(),
     prompt: z.string().min(1).max(4000),
     sourceIds: z.array(uuidSchema).max(32),
     dueAt: isoDateTimeSchema,
     accepted: z.boolean(),
+    evidenceObservationIds: z.array(uuidSchema).max(200).optional(),
+    evidenceRootIds: z.array(uuidSchema).max(200).optional(),
+    invalidated: z.boolean().optional(),
+    invalidationReason: z.literal("observation_revised").optional(),
+    evidenceChanged: z.boolean().optional(),
     /** Only kind=task may be accepted into an opening task. */
     kind: z.enum(["task", "memory"]).optional(),
   })
@@ -161,6 +182,7 @@ export const learningSessionCreateInputSchema = z
   .object({
     courseId: uuidSchema,
     skillLabel: z.string().min(1).max(200),
+    requirementKey: z.string().max(200).nullable().optional(),
     sourceIds: z.array(uuidSchema).max(32),
   })
   .strict();

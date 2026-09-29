@@ -1,4 +1,5 @@
-import { jsonb, pgTable, text, timestamp, uuid, index } from "drizzle-orm/pg-core";
+import { jsonb, pgTable, text, timestamp, uuid, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { workspaces } from "./library";
 import { openingConversations, openingTurns } from "./opening-conversations";
 
@@ -10,8 +11,13 @@ export const openingAssistantCandidates = pgTable("opening_assistant_candidates"
   sourceIds: jsonb("source_ids").notNull().default([]),
   payload: jsonb("payload").notNull(),
   status: text("status").notNull().default("pending"),
+  taskAcceptClientKey: text("task_accept_client_key"),
+  taskAcceptIntent: jsonb("task_accept_intent"),
+  taskResultRef: jsonb("task_result_ref"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [index("opening_assistant_candidates_workspace_status_idx").on(table.workspaceId, table.status)]);
+}, (table) => [index("opening_assistant_candidates_workspace_status_idx").on(table.workspaceId, table.status),
+  uniqueIndex("opening_assistant_task_accept_key_idx").on(table.workspaceId, table.taskAcceptClientKey)
+    .where(sql`${table.taskAcceptClientKey} IS NOT NULL`)]);
 
 export const openingAssistantCandidatesSchema = { openingAssistantCandidates };

@@ -37,9 +37,13 @@ export {
   workspaceDefaultEntrySchema,
   workspacePreferenceUpdateSchema,
   workspacePreferenceResponseSchema,
+  learningPreferencesSchema,
+  courseLearningPreferencesUpdateSchema,
   type WorkspaceDefaultEntry,
   type WorkspacePreferenceUpdate,
   type WorkspacePreferenceResponse,
+  type LearningPreferences,
+  type CourseLearningPreferencesUpdate,
 } from "./workspace-preferences";
 
 export {

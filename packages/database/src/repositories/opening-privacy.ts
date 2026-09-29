@@ -43,6 +43,20 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
       return rows.map((row) => (row as { source_id: string }).source_id);
     },
 
+    /** Asset deletion is separate from AI exclusion, and survives backup restore. */
+    async isSourceAssetDeleted(scope: OpeningScope, sourceId: string): Promise<boolean> {
+      const rows = await sql`SELECT 1 FROM opening_privacy_exclusions e JOIN workspaces w ON w.id=e.workspace_id
+        WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${sourceId}
+          AND w.owner_user_id=${scope.ownerUserId} AND e.asset_deleted_at IS NOT NULL LIMIT 1`;
+      return rows.length > 0;
+    },
+
+    async listAssetDeletedSourceIds(scope: OpeningScope): Promise<string[]> {
+      const rows = await sql`SELECT e.source_id FROM opening_privacy_exclusions e JOIN workspaces w ON w.id=e.workspace_id
+        WHERE e.workspace_id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId} AND e.asset_deleted_at IS NOT NULL`;
+      return rows.map(row => String(row.source_id));
+    },
+
     async recordExclusions(
       tx: Sql,
       scope: OpeningScope,
@@ -50,13 +64,12 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
     ): Promise<string[]> {
       const recorded: string[] = [];
       for (const sourceId of [...new Set(input.sourceIds)]) {
-        const rows = await tx`
+        await tx`
           INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at)
           VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, ${input.memoryId}, ${input.deletedAt})
-          ON CONFLICT (workspace_id, source_id) DO UPDATE
-            SET memory_id = EXCLUDED.memory_id, deleted_at = EXCLUDED.deleted_at
+          ON CONFLICT (workspace_id, source_id) DO NOTHING
           RETURNING source_id`;
-        if (rows.length) recorded.push(sourceId);
+        recorded.push(sourceId);
       }
       return recorded;
     },
