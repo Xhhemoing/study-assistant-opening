@@ -43,6 +43,8 @@ import {
   memoryItemSchema,
   planDraftSchema,
   reminderListSchema,
+  reminderSchema,
+  reminderEnqueueInputSchema,
   learningSummarySchema,
   type ReminderList,
 } from "@aistudy/contracts";
@@ -124,6 +126,7 @@ const todayPlanSchema = z.object({
   hardBlocks: z.array(z.object({ start: z.string(), end: z.string(), kind: z.enum(["class", "sleep", "meal", "locked", "free"]) })),
 });
 const taskListSchema = z.object({ tasks: z.array(z.object({
+  version: z.number().int().positive().optional(),
   id: z.string().uuid(), title: z.string(), minutes: z.number().int().positive(), dueAt: z.string().nullable(), priority: z.number(), status: z.enum(["pending", "done", "skipped"]),
 })) });
 
@@ -339,6 +342,14 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return z.array(learningSummarySchema).parse(body);
     },
 
+    async requestTaskReminder(input: { clientKey: string; channel?: "in_app" | "feishu"; taskId: string; expectedVersion: number }) {
+      const payload = reminderEnqueueInputSchema.parse(input);
+      const body = await request("/api/opening/reminders", { method: "POST", body: JSON.stringify(payload) }, fetchImpl);
+      return z.object({ reminders: z.array(reminderSchema).length(1) }).strict().refine(result => {
+        const reminder = result.reminders[0];
+        return Boolean(reminder && reminder.taskId === input.taskId && reminder.taskVersion === input.expectedVersion && reminder.channel === payload.channel);
+      }, "reminder response does not match the requested task and version").parse(body);
+    },
     async listReminders(): Promise<ReminderList> {
       const body = await request("/api/opening/reminders", { method: "GET" }, fetchImpl);
       return reminderListSchema.parse(body);

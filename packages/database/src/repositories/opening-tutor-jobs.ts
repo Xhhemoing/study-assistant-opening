@@ -1,3 +1,4 @@
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
@@ -214,6 +215,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       expectedPrivacyEpoch?: number;
     }): Promise<void> {
       await sql.begin(async (tx) => {
+        if (input.helpExposure) await lockWorkspaceLearningHistory(tx, input.scope);
         const workspace = await tx`
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} FOR UPDATE
         `;
@@ -240,9 +242,6 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           RETURNING id
         `;
         if (!assistant.length) throw new Error("assistant turn was not persisted");
-        if (input.helpExposure) {
-          await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure);
-        }
         for (const candidate of input.candidates) {
           await tx`
             INSERT INTO opening_assistant_candidates (
@@ -255,6 +254,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
             )
           `;
         }
+        if (input.helpExposure) await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure);
       });
     },
 

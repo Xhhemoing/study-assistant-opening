@@ -16,7 +16,7 @@ const input: TaskCreateInput = {
   clientKey: "retest-lock-replay", baseVersion: 0,
   inputSnapshot: { kind: "retest", candidateId, heuristic: true },
 };
-const taskRow = { id: taskId, title: "复习", minutes: 20, due_at: null, priority: 1, status: "pending" };
+const taskRow = { id: taskId, title: "复习", minutes: 20, due_at: null, priority: 1, status: "pending", version: 4 };
 beforeEach(() => {
   vi.mocked(lockOpeningRetestReviewCandidate).mockReset();
   vi.mocked(lockOpeningRetestReviewCandidate).mockResolvedValue({ kind: "task", accepted: true });
@@ -27,7 +27,7 @@ describe("retest task lock-time replay", () => {
     const payload = { kind: "task", accepted: true, taskId, acceptPayloadHash: retestPayloadHash(input) };
     const query = vi.fn().mockResolvedValueOnce([{ id: candidateId, payload }]).mockResolvedValueOnce([taskRow]);
     const result = await prepareRetestTask(query as unknown as TransactionSql, scope, input);
-    expect(result).toEqual({ id: taskId, title: "复习", minutes: 20, dueAt: null, priority: 1, status: "pending" });
+    expect(result).toEqual({ id: taskId, title: "复习", minutes: 20, dueAt: null, priority: 1, status: "pending", version: 4 });
     expect(lockOpeningRetestReviewCandidate).toHaveBeenCalledWith(query, scope, candidateId);
     expect(vi.mocked(lockOpeningRetestReviewCandidate).mock.invocationCallOrder[0]).toBeLessThan(query.mock.invocationCallOrder[0]!);
   });

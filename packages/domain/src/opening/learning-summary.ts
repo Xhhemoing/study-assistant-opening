@@ -58,16 +58,27 @@ export function summarizeObservations(
       };
       return { observationId: row.id, eligibility: evaluateEvidenceEligibility(observation, input?.context ?? {}), versionApplicability: input?.context.version?.applicability ?? "version_unknown" };
     });
-    const independent = evidenceEligibility.every(({ eligibility }) =>
+    // Revisions retain the original attempt time; recordedAt is not a new performance.
+    const attemptTimes = rows.map((row) => opts.evidenceContexts?.[row.id]?.observation.submittedAt
+      ?? Date.parse(row.submittedAt ?? row.occurredAt));
+    const latestTime = attemptTimes.reduce((latest, time) => Math.max(latest, time), -Infinity);
+    const latest = evidenceEligibility.filter((_, index) => attemptTimes[index] === latestTime);
+    // A display label alone cannot establish compatibility between unknown requirements.
+    const relevant = requirementKey ? latest : evidenceEligibility;
+    const independent = relevant.length > 0 && relevant.every(({ eligibility }) =>
       eligibility.independentAttempt === "yes" &&
       eligibility.verifiedCorrect === "yes" &&
       eligibility.usableForCurrentVersion === "yes",
     );
+    const performanceStatus = independent ? "observed_independent" : "needs_check";
     return {
       courseId: first.courseId,
       requirementKey,
       skillLabel: first.skillLabel,
-      status: due ? "needs_review" : independent ? "observed_independent" : "needs_check",
+      status: due ? "needs_review" : performanceStatus,
+      ...(requirementKey ? { recentPerformance: { status: performanceStatus, evidenceIds: latest.map(({ observationId }) => observationId) } } : {}),
+      historicalIncorrectCount: evidenceEligibility.filter(({ eligibility }, index) => attemptTimes[index]! < latestTime && eligibility.verifiedCorrect === "no").length,
+      unverifiedCount: evidenceEligibility.filter(({ eligibility }) => eligibility.verifiedCorrect === "unknown").length,
       evidenceIds: rows.map((row) => row.id),
       evidenceSources: [...new Set(rows.map((row) => row.verdictSource))],
       evidenceEligibility,

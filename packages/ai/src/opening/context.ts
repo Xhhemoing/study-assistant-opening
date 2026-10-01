@@ -3,7 +3,10 @@ import type { SourceChunk } from "@aistudy/contracts";
 type ContextOptions = { chunks: SourceChunk[]; query: string; maxCharacters: number; preferChunkId?: string; preferPage?: number };
 
 function terms(value: string): Array<{ whole: string; grams: string[] }> {
-  const tokens = value.toLocaleLowerCase().slice(0, 20_000).split(/\s+/).filter(Boolean);
+  // Strip sentence punctuation, but keep formula operators, parentheses and primes intact.
+  const tokens = value.toLocaleLowerCase().slice(0, 20_000).split(/\s+/)
+    .map((token) => token.replace(/^[,.;:!?"“”「」『』、，。；：！？…]+|[,.;:!?"“”「」『』、，。；：！？…]+$/gu, ""))
+    .filter(Boolean);
   return [...new Set(tokens)].map((whole) => {
     const grams = new Set<string>();
     for (const run of whole.match(/\p{Script=Han}+/gu) ?? []) {
@@ -23,6 +26,7 @@ export function renderContext(chunks: SourceChunk[]): string {
 export function selectContext(options: ContextOptions): SourceChunk[] {
   if (options.maxCharacters <= 0 || options.chunks.length === 0) return [];
   const queryTerms = terms(options.query);
+  const blankQuery = options.query.trim().length === 0;
   const ranked = options.chunks.map((chunk) => {
     const text = chunk.text.toLocaleLowerCase();
     return {
@@ -32,7 +36,10 @@ export function selectContext(options: ContextOptions): SourceChunk[] {
       score: queryTerms.reduce((total, term) => total + (text.includes(term.whole) ? 1 :
         term.grams.filter((gram) => text.includes(gram)).length / Math.max(1, term.grams.length)), 0),
     };
-  }).sort((a, b) => b.preferred - a.preferred || b.score - a.score ||
+  }).filter(({ preferred, score }) =>
+    // Blank queries retain the existing budget-only selection behavior.
+    blankQuery || preferred > 0 || score > 0,
+  ).sort((a, b) => b.preferred - a.preferred || b.score - a.score ||
     a.chunk.sourceId.localeCompare(b.chunk.sourceId) ||
     (a.chunk.page ?? Number.MAX_SAFE_INTEGER) - (b.chunk.page ?? Number.MAX_SAFE_INTEGER) ||
     a.chunk.id.localeCompare(b.chunk.id));

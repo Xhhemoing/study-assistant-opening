@@ -54,7 +54,7 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(25);
+    expect(Object.keys(snapshot.tables)).toHaveLength(26);
     expect(sql.calls.some((call) => /(?:FROM|JOIN)\s+(?:opening_tutor_jobs|opening_jobs|opening_outbox|opening_budget_reservations|sessions)(?:\s|$)/.test(call.query))).toBe(false);
   });
 
@@ -111,4 +111,33 @@ describe("readOpeningBackupRecords", () => {
     const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
     expect(snapshot.tables.opening_tasks[0]?.candidate_id).toBe(candidateId);
   });
+});
+
+
+it("exports the owner-scoped workspace counter as an exact safe JSON number", async () => {
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.includes("FROM opening_workspace_history_revisions")) {
+      expect(call.values).toEqual([workspaceId, ownerUserId]);
+      return [{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: "9007199254740991" }];
+    }
+    return [];
+  });
+  const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+  expect(snapshot.tables.opening_workspace_history_revisions).toEqual([
+    { workspace_id: workspaceId, owner_user_id: ownerUserId, revision: Number.MAX_SAFE_INTEGER },
+  ]);
+});
+
+it("retains each observation workspace revision as a portable number", async () => {
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.includes("FROM opening_learning_observations o")) return [{
+      id: candidateId, workspace_id: workspaceId, owner_user_id: ownerUserId,
+      workspace_history_revision: "7", source_versions: null, source_turn_ids: [], attempt_id: null, item_version_id: null,
+    }];
+    return [];
+  });
+  const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+  expect(snapshot.tables.opening_learning_observations).toMatchObject([{ id: candidateId, workspace_history_revision: 7 }]);
 });

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "./opening-jobs";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 export type OpeningSourceErrorCode =
   | "NOT_FOUND"
@@ -124,39 +126,37 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
     },
 
     async complete(scope, id, actual) {
-      const current = await this.get(scope, id);
-      if (current.uploadState === "uploaded") {
-        return current;
-      }
-      if (current.uploadState !== "pending") {
-        throw new OpeningSourceError(
-          "CONFLICT",
-          `cannot complete uploadState=${current.uploadState}`,
-        );
-      }
-      assertMatch(
-        { bytes: current.bytes, sha256: current.sha256, mime: current.mime },
-        actual,
-      );
-      const rows = await sql`
-        WITH completed AS (
-          UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now()
-          WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending'
-          RETURNING *
-        ), captured AS (
-          INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
-          SELECT id,version,workspace_id,bytes,sha256,'available' FROM completed
-          ON CONFLICT(source_id,version) DO NOTHING
-        ) SELECT * FROM completed
-      `;
-      if (!rows.length) {
-        return this.get(scope, id);
-      }
-      return mapSource(rows[0] as Record<string, unknown>);
+      return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const currentRows = await tx`SELECT * FROM opening_sources
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
+        if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+        const current = mapSource(currentRows[0] as Record<string, unknown>);
+        if (current.uploadState === "uploaded") return current;
+        if (current.uploadState !== "pending") {
+          throw new OpeningSourceError("CONFLICT", `cannot complete uploadState=${current.uploadState}`);
+        }
+        assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, actual);
+        const rows = await tx`
+          WITH completed AS (
+            UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now()
+            WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending'
+            RETURNING *
+          ), captured AS (
+            INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+            SELECT id,version,workspace_id,bytes,sha256,'available' FROM completed
+            ON CONFLICT(source_id,version) DO NOTHING
+          ) SELECT * FROM completed
+        `;
+        if (!rows.length) throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
+        await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
+        return mapSource(rows[0] as Record<string, unknown>);
+      });
     },
-
     async completeWithParseJob(scope, id, input) {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Workspace not found");
         const currentRows = await tx`SELECT * FROM opening_sources WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
@@ -174,6 +174,8 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         const jobId = randomUUID();
         await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
+        await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         return mapSource(sourceRows[0] as Record<string, unknown>);
       });
     },

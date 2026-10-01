@@ -53,6 +53,27 @@ describe("tutor turn handler", () => {
     return { deps, tutorJobs, chunks, budget, provider };
   }
 
+  it("uses one resolved model for provider dispatch, prices and ledger attribution", async () => {
+    const { deps, provider, budget } = setup();
+    const selectedProvider = { complete: vi.fn(async () => ({ text: "selected answer", citedChunkIds: [], candidates: [], requestId: "selected-request", inputTokens: 100, outputTokens: 50 })) };
+    const modelSnapshot = { id: "selected", providerId: "other", modelName: "other-model", inputCentsPerMillion: 10_000, outputCentsPerMillion: 20_000 };
+    const resolveModel = vi.fn(async () => ({ provider: selectedProvider, modelSnapshot, ...modelSnapshot }));
+    await createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id);
+    expect(resolveModel).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }, "explain");
+    expect(selectedProvider.complete).toHaveBeenCalledOnce();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requestId: `tutor:${claimedJob.id}`, modelSnapshot }));
+    expect(budget.settle).toHaveBeenCalledWith("res-1", 2);
+  });
+
+  it("does not dispatch or reserve when route resolution fails", async () => {
+    const { deps, provider, budget, tutorJobs } = setup();
+    const resolveModel = vi.fn(async () => { throw new Error("selected model removed"); });
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow("selected model removed");
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "selected model removed");
+  });
   it("completes the turn once with program-assigned candidate provenance", async () => {
     const { deps, tutorJobs, budget, provider } = setup();
     const result = await createTutorTurnHandler(deps)(claimedJob.id);
@@ -106,7 +127,6 @@ describe("tutor turn handler", () => {
     expect(provider.complete.mock.calls[0][0].chunks.map((chunk: SourceChunk) => chunk.id)).toEqual([
       chunkA.id,
       chunkC.id,
-      chunkB.id,
     ]);
   });
 

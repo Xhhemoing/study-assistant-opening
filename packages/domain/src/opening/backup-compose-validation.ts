@@ -9,7 +9,7 @@ export const BACKUP_TABLES = new Set([
   "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
   "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
-  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
+  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_workspace_history_revisions",
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/i;
@@ -120,9 +120,10 @@ export function sourceVersionMap(
   return result;
 }
 
-/** Existing inventories must remain complete; new learning-state tables are additive. */
+/** Existing inventories stay complete; learning state and workspace history are additive. */
 export function validBackupTableSet(tables: Record<string, unknown[]>): boolean {
   const names = Object.keys(tables);
   return names.every(name => BACKUP_TABLES.has(name))
-    && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name) || name in tables);
+    && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name)
+      || name === "opening_workspace_history_revisions" || name in tables);
 }

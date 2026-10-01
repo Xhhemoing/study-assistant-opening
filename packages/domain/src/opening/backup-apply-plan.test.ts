@@ -12,7 +12,7 @@ const tables = [
   "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
   "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
-  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
+  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_workspace_history_revisions",
 ] as const;
 
 function backup(): OpeningBackup {
@@ -111,7 +111,7 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    expect(new Set(names).size).toBe(25);
+    expect(new Set(names).size).toBe(26);
     expect(names.indexOf("opening_sources")).toBeLessThan(names.indexOf("opening_source_chunks"));
     expect(names.indexOf("opening_conversations")).toBeLessThan(names.indexOf("opening_turns"));
     expect(names.indexOf("opening_turns")).toBeLessThan(names.indexOf("opening_assistant_candidates"));
@@ -132,4 +132,19 @@ describe("planOpeningRestoreApply", () => {
     }
     expect(new Set(names)).toEqual(new Set(tables));
   });
+});
+
+
+it("plans the normalized legacy counter before observations without changing its input", () => {
+  const value = backup(), ownerUserId = "55555555-5555-4555-8555-555555555555";
+  delete value.tables.opening_workspace_history_revisions;
+  value.tables.opening_learning_observations = [{ workspace_id: workspaceId, owner_user_id: ownerUserId, history_revision: 17 }];
+  const original = structuredClone(value);
+  const result = planOpeningRestoreApply(value, [], { confirmLocalRestore: true });
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.plan.batches).toContainEqual({ table: "opening_workspace_history_revisions", rows: 1 });
+  const names = result.plan.batches.map(batch => batch.table);
+  expect(names.indexOf("opening_workspace_history_revisions")).toBeLessThan(names.indexOf("opening_learning_observations"));
+  expect(value).toEqual(original);
 });

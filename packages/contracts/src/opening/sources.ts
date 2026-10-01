@@ -163,7 +163,7 @@ export type SourceCourseUnlinkInput = z.infer<typeof sourceCourseUnlinkInputSche
 
 const sourceConfirmation = {
   expectedVersion: z.number().int().nonnegative(),
-  expectedMembershipIds: z.array(uuidSchema).max(1000),
+  expectedMembershipIds: z.array(uuidSchema),
 };
 
 export const sourceActionInputSchema = z.discriminatedUnion("action", [

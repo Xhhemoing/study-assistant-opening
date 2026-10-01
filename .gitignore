@@ -33,6 +33,12 @@ graphify-out/
 # Local pi agent configuration and prompts
 .pi/
 
+# One-off local scratch scripts
+.tmp-*.mjs
+
+# Personal study material extracts (user-owned, not for the repo)
+topic3_taylor_extract.txt
+
 # Local portable test PostgreSQL (opening handler/integration gates)
 .local/
 
@@ -41,6 +47,12 @@ __pycache__/
 
 # Subagent scratch space
 .agent_workspace/
+
+# Local brainstorm / superpowers draft artifacts
+.superpowers/
+
+# Windows reserved-name artifacts
+NUL
 
 # Dedicated Opening acceptance build
 .next-opening-e2e/

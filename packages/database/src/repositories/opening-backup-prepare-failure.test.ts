@@ -50,7 +50,7 @@ const roots: string[] = [];
 function snapshot(bytes = 4): OpeningBackupSourceSnapshot {
   return {
     workspaceId,
-    privacyEpoch: 4,
+    privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
     deletionJournal: [],
     sources: [{ sourceId, version: 1, bytes, sha256: "ab".repeat(32) }],
   };

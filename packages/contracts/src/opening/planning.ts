@@ -94,12 +94,21 @@ export const reminderListSchema = z
   })
   .strict();
 
-export const reminderEnqueueInputSchema = z
+const reminderBatchEnqueueInputSchema = z
   .object({
     clientKey: z.string().min(8).max(200),
     channel: z.enum(["in_app", "feishu"]).default("in_app"),
   })
   .strict();
+
+/** A single current occurrence is an explicit action, independent of automatic reminders. */
+export const reminderEnqueueInputSchema = z.union([
+  reminderBatchEnqueueInputSchema,
+  reminderBatchEnqueueInputSchema.extend({
+    taskId: uuidSchema,
+    expectedVersion: z.number().int().positive(),
+  }).strict(),
+]);
 
 /**
  * Time-config lifecycle: absolute scheduling requires termStartDate +

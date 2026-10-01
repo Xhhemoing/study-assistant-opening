@@ -1,5 +1,6 @@
 import type { LearningObservation, LearningSummary, Scope } from "@aistudy/contracts";
 import { summarizeObservations, type CourseEvidence } from "@aistudy/domain";
+import { projectLearningSummaryResponse } from "./summary-response";
 
 export type OpeningLearningReadDeps = {
   assertOwnedCourse(scope: Scope, courseId: string): Promise<void>;
@@ -19,7 +20,7 @@ export function createOpeningLearningReadService(deps: OpeningLearningReadDeps) 
     async summarizeLearning(scope: Scope, courseId: string): Promise<LearningSummary[]> {
       await deps.assertOwnedCourse(scope, courseId);
       const { observations, evidenceContexts } = await deps.readCourseEvidence(scope, courseId);
-      return summarizeObservations(observations, now(), { evidenceContexts });
+      return summarizeObservations(observations, now(), { evidenceContexts }).map(projectLearningSummaryResponse);
     },
   };
 }

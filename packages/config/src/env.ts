@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { loadOpeningModel, openingModelFields } from "./opening-model";
+import { loadOpeningModelCatalog } from "./opening-model-catalog";
 
 export class EnvValidationError extends Error {
   readonly issues: string[];
@@ -26,7 +27,7 @@ const envSchema = z.object({
   SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   SESSION_TTL_SECONDS: z.string().optional().default("604800").transform((v) => Number.parseInt(v, 10)).refine((n) => Number.isFinite(n) && n >= 60, { message: "SESSION_TTL_SECONDS must be an integer >= 60" }),
   AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
-  ...openingModelFields,
+
 });
 
 export type AppEnv = {
@@ -44,11 +45,14 @@ export type AppEnv = {
 };
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
-  const result = envSchema.safeParse(source);
+  const usesCatalog = Boolean(source.OPENING_MODEL_CATALOG?.trim());
+  const result = (usesCatalog ? envSchema : envSchema.extend(openingModelFields)).safeParse(source);
   if (!result.success) {
     throw new EnvValidationError(result.error.issues.map((issue) => `${issue.path.join(".") || "env"}: ${issue.message}`));
   }
   const data = result.data;
+  const catalog = usesCatalog ? loadOpeningModelCatalog(source) : null;
+  const defaultModel = catalog?.models.find(model => model.id === catalog.defaultModelId);
   return {
     nodeEnv: data.NODE_ENV,
     databaseUrl: data.DATABASE_URL,
@@ -58,7 +62,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sessionCookieSecure: data.SESSION_COOKIE_SECURE === undefined ? data.NODE_ENV === "production" : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
-    openingModel: loadOpeningModel(source),
+    openingModel: catalog ? {
+      baseUrl: defaultModel?.baseUrl ?? "https://api.openai.com/v1", apiKey: defaultModel?.apiKey ?? "",
+      name: defaultModel?.modelName ?? "unconfigured", dailyCapCents: catalog.dailyCapCents,
+      inputCentsPerMillion: defaultModel?.inputCentsPerMillion ?? 0,
+      outputCentsPerMillion: defaultModel?.outputCentsPerMillion ?? 0,
+    } : loadOpeningModel(source),
     s3: { endpoint: data.S3_ENDPOINT, region: data.S3_REGION, bucket: data.S3_BUCKET, accessKeyId: data.S3_ACCESS_KEY_ID, secretAccessKey: data.S3_SECRET_ACCESS_KEY, forcePathStyle: data.S3_FORCE_PATH_STYLE },
     toPublicSummary() {
       return { nodeEnv: data.NODE_ENV, publicBaseUrl: data.PUBLIC_BASE_URL, databaseConfigured: true, redisConfigured: true, storageConfigured: true, authConfigured: data.AUTH_SECRET.length >= 32 };

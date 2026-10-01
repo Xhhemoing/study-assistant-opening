@@ -31,7 +31,7 @@ export function BackupMenu() {
       const body = await response.json() as { package: NativeBackupPackage };
       downloadFile(JSON.stringify(body.package, null, 2), "aistudy-backup.json", "application/json");
     } catch {
-      setError("暂时无法导出完整备份，请稍后重试。");
+      setError("暂时无法导出原生内容备份，请稍后重试。");
     } finally {
       setPending(null);
     }
@@ -72,7 +72,7 @@ export function BackupMenu() {
           type="button"
         >
           {pending === "export" ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} /> : <FileDown aria-hidden="true" size={16} />}
-          导出完整备份
+          导出原生内容备份
         </button>
       </div>
       <fieldset className="space-y-2">

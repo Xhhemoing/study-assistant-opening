@@ -1,3 +1,4 @@
+import { createOpeningAiSettingsRepository } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -52,8 +53,8 @@ it("exports owned preference and course state and only memberships to included O
   expect(snapshot.tables.course_asset_memberships).toHaveLength(1);
   expect(snapshot.deletionJournal).toContainEqual({ sourceId: excluded, deletedAt: "2026-09-25T00:00:00.000Z" });
   const value = archive(snapshot);
-  expect(validateOpeningRestore(value, snapshot.deletionJournal).allowed).toBe(true);
-  expect(planOpeningRestoreApply(value, snapshot.deletionJournal, { confirmLocalRestore: true,
+  expect(validateOpeningRestore(value, snapshot.deletionJournal, snapshot.memoryDeletions).allowed).toBe(true);
+  expect(planOpeningRestoreApply(value, snapshot.deletionJournal, { confirmLocalRestore: true, currentMemoryDeletions: snapshot.memoryDeletions,
     currentLearningState: { workspacePreferences: null, courses: [] } }).ok).toBe(true);
   const directory = await mkdtemp(path.join(tmpdir(), "learning-state-backup-"));
   try {
@@ -67,7 +68,7 @@ it("exports owned preference and course state and only memberships to included O
       expect(reopened.metadata.tables.workspace_preferences).toEqual(value.tables.workspace_preferences);
       expect(reopened.metadata.tables.courses).toEqual(value.tables.courses);
       expect(reopened.metadata.tables.course_asset_memberships).toEqual(value.tables.course_asset_memberships);
-      expect(planOpeningRestoreApply(reopened.metadata, snapshot.deletionJournal, { confirmLocalRestore: true,
+      expect(planOpeningRestoreApply(reopened.metadata, snapshot.deletionJournal, { confirmLocalRestore: true, currentMemoryDeletions: snapshot.memoryDeletions,
         currentLearningState: { workspacePreferences: null, courses: [] } }).ok).toBe(true);
     } finally { await reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -85,7 +86,7 @@ it("rejects an older active backup after current account closure or course archi
   await fixture.sql`UPDATE workspace_preferences SET assessment_enabled=false WHERE workspace_id=${w}`;
   await fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
   const current = await readOpeningBackupRecords(fixture.sql, fixture.scope);
-  const result = planOpeningRestoreApply(old, [], { confirmLocalRestore: true,
+  const result = planOpeningRestoreApply(old, [], { confirmLocalRestore: true, currentMemoryDeletions: current.memoryDeletions,
     currentLearningState: { workspacePreferences: current.tables.workspace_preferences[0]!, courses: current.tables.courses } });
   expect(result).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
   if (!result.ok) {
@@ -104,7 +105,7 @@ it("rejects rewinding the actual activation timestamp after disable then enable"
   await fixture.sql`UPDATE workspace_preferences SET assessment_enabled=false WHERE workspace_id=${w}`;
   await fixture.sql`UPDATE workspace_preferences SET assessment_enabled=true WHERE workspace_id=${w}`;
   const current = await readOpeningBackupRecords(fixture.sql, fixture.scope);
-  const result = planOpeningRestoreApply(old, [], { confirmLocalRestore: true,
+  const result = planOpeningRestoreApply(old, [], { confirmLocalRestore: true, currentMemoryDeletions: current.memoryDeletions,
     currentLearningState: { workspacePreferences: current.tables.workspace_preferences[0]!, courses: current.tables.courses } });
   expect(result).toMatchObject({ ok: false, errors: expect.arrayContaining([expect.stringContaining("activation time")]) });
 });
@@ -143,9 +144,41 @@ it("preserves PostgreSQL activation microseconds in snapshots and archives and r
     try {
       expect(reopened.metadata.tables.workspace_preferences).toEqual(old.tables.workspace_preferences);
       expect(reopened.metadata.tables.courses).toEqual(old.tables.courses);
-      const result = planOpeningRestoreApply(reopened.metadata, [], { confirmLocalRestore: true,
+      const result = planOpeningRestoreApply(reopened.metadata, [], { confirmLocalRestore: true, currentMemoryDeletions: current.memoryDeletions,
         currentLearningState: { workspacePreferences: current.tables.workspace_preferences[0]!, courses: current.tables.courses } });
       expect(result).toMatchObject({ ok: false, errors: expect.arrayContaining([expect.stringContaining("activation time")]) });
     } finally { await reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("round-trips only saved model ids and routing choices in an Opening archive", async () => {
+  const settings = {
+    mode: "manual" as const, manualModelId: "manual-model", defaultModelId: null,
+    routes: { listen: "daily-model", hint: null, explain: "reasoning-model", think_together: null },
+  };
+  await createOpeningAiSettingsRepository(fixture.sql).set(fixture.scope, settings);
+  const snapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
+  expect(snapshot.tables.workspace_preferences).toHaveLength(1);
+  expect(snapshot.tables.workspace_preferences[0]!.ai_settings).toEqual(settings);
+  const directory = await mkdtemp(path.join(tmpdir(), "ai-settings-backup-"));
+  try {
+    const destination = path.join(directory, "settings.opening");
+    await writeOpeningBackupArchive(archive(snapshot), directory, destination);
+    const reopened = await readOpeningBackupArchive(destination);
+    try {
+      const restored = reopened.metadata.tables.workspace_preferences[0] as Record<string, unknown>;
+      expect(restored.ai_settings).toEqual(settings);
+      expect(Object.keys(restored.ai_settings as Record<string, unknown>).sort()).toEqual(["defaultModelId", "manualModelId", "mode", "routes"]);
+      expect(JSON.stringify(reopened.metadata)).not.toContain("apiKey");
+      expect(JSON.stringify(reopened.metadata)).not.toContain("baseUrl");
+    } finally { await reopened.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("rejects a stored credential-bearing AI setting before it enters a backup snapshot", async () => {
+  const contaminated = { mode: "automatic", manualModelId: null, defaultModelId: null,
+    routes: { listen: null, hint: null, explain: null, think_together: null }, apiKey: "must-not-export" };
+  await fixture.sql`INSERT INTO workspace_preferences(workspace_id,ai_settings)
+    VALUES (${fixture.scope.workspaceId},${fixture.sql.json(contaminated)})`;
+  await expect(readOpeningBackupRecords(fixture.sql, fixture.scope)).rejects.toThrow();
 });

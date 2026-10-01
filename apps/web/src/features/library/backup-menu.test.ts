@@ -6,7 +6,7 @@ import { BackupMenu } from "./backup-menu";
 describe("native backup menu", () => {
   it("renders export, restore, and an explicit non-overwrite conflict policy", () => {
     const html = renderToStaticMarkup(createElement(BackupMenu));
-    expect(html).toContain("导出完整备份");
+    expect(html).toContain("导出原生内容备份");
     expect(html).toContain("恢复备份");
     expect(html).toContain("拒绝");
     expect(html).toContain("跳过");

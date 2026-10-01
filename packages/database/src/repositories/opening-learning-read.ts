@@ -2,7 +2,7 @@ import type { LearningObservation, Scope } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility, type CourseEvidence } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { mapLearningObservation } from "./opening-learning-facts";
-import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 
 /** Read the head projection once; original and replaced rows never compete as new evidence. */
 async function readCourseHeads(sql: Sql, scope: Scope, courseId: string, includeRetracted: boolean): Promise<CourseEvidence> {
@@ -17,9 +17,10 @@ async function readCourseHeads(sql: Sql, scope: Scope, courseId: string, include
       ORDER BY o.occurred_at ASC,root.id ASC`;
     const observations: CourseEvidence["observations"] = [];
     const evidenceContexts: CourseEvidence["evidenceContexts"] = {};
-    for (const row of rows) {
-      const observation = mapLearningObservation(row);
-      const evidence = await readOpeningLearningEvidenceContext(tx, scope, observation);
+    const mapped = rows.map(mapLearningObservation);
+    const inputs = await readOpeningLearningEvidenceContexts(tx, scope, mapped);
+    for (const observation of mapped) {
+      const evidence = inputs[observation.id]!;
       // Privacy exclusion overrides legacy unknown qualification before facts reach any consumer.
       if (evidence.context.version?.applicability === "privacy_excluded") continue;
       observations.push(observation);

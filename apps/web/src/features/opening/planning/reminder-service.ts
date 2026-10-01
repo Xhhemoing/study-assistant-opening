@@ -1,10 +1,9 @@
-import { reminderEnqueueInputSchema, reminderListSchema, type Reminder, type Scope } from "@aistudy/contracts";
-import { OpeningPlanError } from "@aistudy/database";
+import { reminderEnqueueInputSchema, reminderListSchema, type Reminder, type ReminderEnqueueInput, type Scope } from "@aistudy/contracts";
 import { ApiError } from "../../auth/service";
 
 type ReminderRepo = {
   list(scope: Scope, now?: Date): Promise<{ reminders: Reminder[]; externalDelivery: "disabled" | "configured" }>;
-  enqueue(scope: Scope, input: { clientKey: string; channel: "in_app" | "feishu" }, now?: Date): Promise<Array<Reminder & { created?: boolean }>>;
+  enqueue(scope: Scope, input: ReminderEnqueueInput, now?: Date): Promise<Array<Reminder & { created?: boolean }>>;
 };
 
 export function createOpeningReminderService(repo: ReminderRepo) {
@@ -17,10 +16,7 @@ export function createOpeningReminderService(repo: ReminderRepo) {
       try {
         return await repo.enqueue(scope, input);
       } catch (error) {
-        if (error instanceof OpeningPlanError && error.code === "VALIDATION" && input.channel !== "in_app") {
-          throw new ApiError("VALIDATION", error.message, 422);
-        }
-        if (error instanceof Error && "code" in error && (error as { code?: string }).code === "VALIDATION" && input.channel !== "in_app") {
+        if (error instanceof Error && "code" in error && error.code === "VALIDATION" && (input.channel !== "in_app" || "taskId" in input)) {
           throw new ApiError("VALIDATION", error.message, 422);
         }
         throw error;

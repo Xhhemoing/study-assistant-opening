@@ -1,7 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSourceActionsClient } from "./source-actions-client";
+import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import { SourceImpactSummary, sourceActionNotice } from "./source-actions-panel";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -33,5 +34,34 @@ describe("material actions", () => {
   it("rejects a response containing private storage keys", async () => {
     const api = createSourceActionsClient(async () => Response.json([{ sourceId: id, cleanupPending: 1, retryAfter: null, keys: ["private/object"] }]));
     await expect(api.deletions()).rejects.toThrow();
+  });
+});
+
+const dispose: Array<() => void> = [];
+afterEach(() => { dispose.splice(0).forEach(cancel => cancel()); });
+describe("material action privacy notifications", () => {
+  it.each(["exclude", "delete"] as const)("notifies only after a valid successful %s response without passing material data", async action => {
+    const listener = vi.fn(); dispose.push(subscribeOpeningPrivacyChange(listener));
+    const result = { sourceId: id, aiExcluded: true, deleted: action === "delete", cleanupPending: 0, retryAfter: null };
+    const api = createSourceActionsClient(async () => {
+      expect(listener).not.toHaveBeenCalled();
+      return Response.json(result);
+    });
+    await expect(api.act(id, { action, expectedVersion: 1, expectedMembershipIds: [] })).resolves.toEqual(result);
+    expect(listener).toHaveBeenCalledExactlyOnceWith();
+  });
+  it("does not clear drafts for a cleanup retry that changes no privacy decision", async () => {
+    const listener = vi.fn(); dispose.push(subscribeOpeningPrivacyChange(listener));
+    const api = createSourceActionsClient(async () => Response.json({ sourceId: id, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null }));
+    await api.act(id, { action: "retry_cleanup" });
+    expect(listener).not.toHaveBeenCalled();
+  });
+  it.each([409, 500, "invalid-success"] as const)("does not notify after %s", async failure => {
+    const listener = vi.fn(); dispose.push(subscribeOpeningPrivacyChange(listener));
+    const api = createSourceActionsClient(async () => failure === "invalid-success"
+      ? Response.json({ sourceId: id, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null, privateKey: "hidden" })
+      : new Response(null, { status: failure }));
+    await expect(api.act(id, { action: "delete", expectedVersion: 1, expectedMembershipIds: [] })).rejects.toThrow();
+    expect(listener).not.toHaveBeenCalled();
   });
 });

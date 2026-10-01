@@ -1,4 +1,5 @@
-﻿import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { Sql } from "postgres";
 import { createOpeningSourceRepository } from "./opening-sources";
 
 const W = "00000000-0000-4000-8000-000000000001";
@@ -24,23 +25,37 @@ function pendingRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function transactionalSql(handler: (query: string) => unknown[]) {
+  let revision = 0;
+  const sql = ((parts: TemplateStringsArray | unknown[]) => {
+    if (!Object.hasOwn(parts, "raw")) return parts;
+    const query = parts.join("?").replace(/\s+/g, " ").trim();
+    if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: W }]);
+    if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return Promise.resolve([]);
+    if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return Promise.resolve([{ revision }]);
+    if (query.startsWith("UPDATE opening_workspace_history_revisions")) return Promise.resolve([{ revision: ++revision }]);
+    if (query.startsWith("DELETE FROM opening_learning_eligibility") || query.startsWith("p.") || query === "FALSE") return Promise.resolve([]);
+    return Promise.resolve(handler(query));
+  }) as unknown as Sql;
+  sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+  return { sql, revision: () => revision };
+}
 describe("opening source upload completion boundary", () => {
   it("rejects complete when stored object mismatches ticket", async () => {
-    const sql = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
+    const { sql, revision } = transactionalSql((q) => {
       if (q.startsWith("SELECT * FROM opening_sources")) return [pendingRow()];
       throw new Error("unexpected: " + q);
-    };
-    const repo = createOpeningSourceRepository(sql as never);
+    });
+    const repo = createOpeningSourceRepository(sql);
     await expect(
       repo.complete(scope, S, { bytes: 11, sha256: SHA, mime: "application/pdf" }),
     ).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(revision()).toBe(0);
   });
 
   it("pending → uploaded on exact match; replay is idempotent", async () => {
     let state = "pending";
-    const sql = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
+    const { sql, revision } = transactionalSql((q) => {
       if (q.startsWith("SELECT * FROM opening_sources")) {
         return [pendingRow({ upload_state: state })];
       }
@@ -49,8 +64,8 @@ describe("opening source upload completion boundary", () => {
         return [pendingRow({ upload_state: "uploaded" })];
       }
       throw new Error("unexpected: " + q);
-    };
-    const repo = createOpeningSourceRepository(sql as never);
+    });
+    const repo = createOpeningSourceRepository(sql);
     const first = await repo.complete(scope, S, {
       bytes: 12,
       sha256: SHA,
@@ -64,15 +79,15 @@ describe("opening source upload completion boundary", () => {
       mime: "application/pdf",
     });
     expect(second.uploadState).toBe("uploaded");
+    expect(revision()).toBe(1);
   });
 
   it("create returns SourceRecord without courseId", async () => {
-    const sql = async (parts: TemplateStringsArray) => {
-      const q = parts.join("?").replace(/\s+/g, " ").trim();
+    const { sql, revision } = transactionalSql((q) => {
       if (q.startsWith("INSERT INTO opening_sources")) return [pendingRow()];
       throw new Error("unexpected: " + q);
-    };
-    const repo = createOpeningSourceRepository(sql as never);
+    });
+    const repo = createOpeningSourceRepository(sql);
     const record = await repo.create(scope, {
       name: "a.pdf",
       mime: "application/pdf",
@@ -81,5 +96,6 @@ describe("opening source upload completion boundary", () => {
     });
     expect(record.uploadState).toBe("pending");
     expect(Object.keys(record)).not.toContain("courseId");
+    expect(revision()).toBe(0);
   });
 });

@@ -79,7 +79,7 @@ describe("loadTodayResumeState", () => {
 
 describe("createTodayResumeReader", () => {
   it("scopes the latest turn to the owner and the last user role", async () => {
-    const sql = Object.assign(vi.fn(async () => []), {
+    const sql = Object.assign(vi.fn<(...args: unknown[]) => Promise<unknown[]>>(async () => []), {
       json: (value: unknown) => value,
     });
     const resume = createTodayResumeReader(sql as never);
@@ -97,5 +97,76 @@ describe("createTodayResumeReader", () => {
   it("surfaces combined assistant/retest read failures instead of an empty count", async () => {
     const sql = Object.assign(vi.fn(async () => { throw new Error("database unavailable"); }), { json: (value: unknown) => value });
     await expect(createTodayResumeReader(sql as never).pendingCandidateCount(scope)).rejects.toThrow("database unavailable");
+  });
+});
+
+const sourceId = "33333333-3333-4333-8333-333333333333";
+const secondSourceId = "44444444-4444-4444-8444-444444444444";
+const chunkId = "55555555-5555-4555-8555-555555555555";
+const storedTurn = { id: owned.id, title: owned.title, course_id: owned.courseId,
+  last_user_text: owned.lastUserText, source_ids: [sourceId], source_versions: { [sourceId]: 4 }, current_page: 7, chunk_id: null };
+const readableSource = { id: sourceId, version: 4, upload_state: "uploaded", parse_state: "ready", availability: "available", asset_deleted_at: null, ai_excluded: false };
+const readableChunk = { id: chunkId, source_id: sourceId, source_version: 4, page: 7 };
+function storedReader(input: { turn?: Record<string, unknown>; sources?: Record<string, unknown>[]; chunks?: Record<string, unknown>[] } = {}) {
+  const sql = Object.assign(vi.fn((parts: TemplateStringsArray | unknown[]) => {
+    if (!("raw" in parts)) return parts;
+    const query = parts.join(" ");
+    if (query.includes("FROM opening_conversations")) return Promise.resolve([{ ...storedTurn, ...input.turn }]);
+    if (query.includes("FROM opening_sources")) return Promise.resolve(input.sources ?? [readableSource]);
+    if (query.includes("FROM opening_source_chunks")) return Promise.resolve(input.chunks ?? [readableChunk]);
+    return Promise.resolve([]);
+  }), { json: (value: unknown) => value });
+  return createTodayResumeReader(sql as never);
+}
+
+describe("Today stored material recovery", () => {
+  it.each([
+    ["missing source", []],
+    ["permanently deleted source", [{ ...readableSource, asset_deleted_at: "2026-09-30T00:00:00Z" }]],
+    ["changed source version", [{ ...readableSource, version: 5 }]],
+    ["unavailable version", [{ ...readableSource, availability: "unavailable" }]],
+    ["unknown version", [{ ...readableSource, availability: "unknown" }]],
+    ["incomplete upload", [{ ...readableSource, upload_state: "pending" }]],
+    ["unfinished parsing", [{ ...readableSource, parse_state: "running" }]],
+  ])("keeps conversation and user text without restoring %s", async (_label, sources) => {
+    const latest = await storedReader({ sources: sources as Record<string, unknown>[] }).latestOwned(scope);
+    expect(latest).toMatchObject({ id: owned.id, lastUserText: owned.lastUserText, currentPage: null });
+    expect(latest?.sourceVersions).toEqual({});
+  });
+
+  it("keeps an exact readable version and validated physical page", async () => {
+    await expect(storedReader().latestOwned(scope)).resolves.toMatchObject({ sourceVersions: owned.sourceVersions, currentPage: 7 });
+  });
+
+  it("keeps current legacy material without inventing a historical version", async () => {
+    await expect(storedReader({ sources: [{ ...readableSource, availability: null }] }).latestOwned(scope)).resolves.toMatchObject({ sourceVersions: owned.sourceVersions, currentPage: 7 });
+  });
+
+  it.each([null, [], { [sourceId]: "4" }, { [sourceId]: -1 }, { [sourceId]: 4.5 }])("does not turn malformed saved versions into current material", async versions => {
+    const latest = await storedReader({ turn: { source_versions: versions } }).latestOwned(scope);
+    expect(latest?.sourceVersions).toEqual({});
+    expect(latest?.currentPage).toBeNull();
+  });
+
+  it("does not assign a removed material's page to a remaining material", async () => {
+    const latest = await storedReader({
+      turn: { source_ids: [sourceId, secondSourceId], source_versions: { [sourceId]: 4, [secondSourceId]: 4 } },
+      sources: [{ ...readableSource, id: secondSourceId }],
+      chunks: [{ ...readableChunk, source_id: secondSourceId }],
+    }).latestOwned(scope);
+    expect(latest?.sourceVersions).toEqual({ [secondSourceId]: 4 });
+    expect(latest?.currentPage).toBeNull();
+  });
+
+  it("requires a real page and rejects a stale chunk even if that page exists elsewhere", async () => {
+    await expect(storedReader({ chunks: [{ ...readableChunk, page: 9 }] }).latestOwned(scope)).resolves.toMatchObject({ sourceVersions: owned.sourceVersions, currentPage: null });
+    await expect(storedReader({ turn: { chunk_id: "66666666-6666-4666-8666-666666666666" } }).latestOwned(scope)).resolves.toMatchObject({ sourceVersions: owned.sourceVersions, currentPage: null });
+    expect((await storedReader({ chunks: [] }).latestOwned(scope))?.sourceVersions).toEqual({});
+  });
+
+  it("retains AI-excluded material for personal reading with an explicit manual count", async () => {
+    const latest = await storedReader({ sources: [{ ...readableSource, ai_excluded: true }] }).latestOwned(scope);
+    expect(latest?.sourceVersions).toEqual({});
+    expect(latest).toMatchObject({ currentPage: null, manualSourceCount: 1, lastUserText: owned.lastUserText });
   });
 });

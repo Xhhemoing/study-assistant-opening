@@ -9,8 +9,9 @@ describe("asset deletion journal composition", () => {
     const mark = { sourceId, deletedAt: "2026-09-20T00:00:00.000Z", assetDeletedAt: "2026-09-22T00:00:00.000Z" };
     const tables = Object.fromEntries([...BACKUP_TABLES].map(name => [name, [] as Record<string, unknown>[]]));
     tables.opening_privacy_exclusions = [{ workspace_id: workspaceId, source_id: sourceId, deleted_at: new Date(mark.deletedAt), asset_deleted_at: new Date(mark.assetDeletedAt) }];
-    const records = { privacyEpoch: 2, deletionJournal: [mark], tables };
-    const staging = { snapshot: { workspaceId, privacyEpoch: 2, deletionJournal: [mark], sources: [] }, objects: [] };
+    const memoryDeletions = { workspaceId, memories: [] };
+    const records = { privacyEpoch: 2, deletionJournal: [mark], memoryDeletions, tables };
+    const staging = { snapshot: { workspaceId, privacyEpoch: 2, deletionJournal: [mark], memoryDeletions, sources: [] }, objects: [] };
     const result = composeOpeningBackupDraft({ records, staging });
     expect(result).toMatchObject({ ok: true, backup: { deletionJournal: [mark] } });
     expect(composeOpeningBackupDraft({ records, staging: { ...staging, snapshot: { ...staging.snapshot, deletionJournal: [{ sourceId, deletedAt: mark.deletedAt }] } } }))

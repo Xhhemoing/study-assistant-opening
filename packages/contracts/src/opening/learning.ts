@@ -147,11 +147,25 @@ export const learningSummarySchema = z
       "observed_independent",
       "needs_review",
     ]),
+    /** HTTP responses may contain representative IDs; sampleCount remains the full count. */
     evidenceIds: z.array(uuidSchema).max(200),
     /** Distinguishes self-report, model suggestion, and reference-checked evidence. */
     evidenceSources: z.array(verdictSourceSchema).max(4).optional(),
     sampleCount: z.number().int().nonnegative(),
     lastObservedAt: isoDateTimeSchema.nullable(),
+    /** Latest original attempts within a known requirement; never a mastery claim. */
+    recentPerformance: z.object({
+      status: z.enum(["needs_check", "observed_independent"]),
+      evidenceIds: z.array(uuidSchema).min(1).max(200),
+      /** Full latest-attempt count when evidenceIds are representative; absent in legacy responses. */
+      evidenceCount: z.number().int().positive().optional(),
+    }).strict().refine(value => value.evidenceCount === undefined || value.evidenceCount >= value.evidenceIds.length, {
+      message: "recent evidence count cannot be smaller than its representative IDs", path: ["evidenceCount"],
+    }).optional(),
+    /** Full verified-error count before the latest attempts, independent of representative IDs. */
+    historicalIncorrectCount: z.number().int().nonnegative().optional(),
+    /** Unknown correctness is separate from a verified incorrect answer. */
+    unverifiedCount: z.number().int().nonnegative().optional(),
     courseId: uuidSchema.optional(),
     requirementKey: z.string().nullable().optional(),
     evidenceEligibility: z.array(z.object({ observationId: uuidSchema, eligibility: evidenceEligibilitySchema, versionApplicability: z.enum(["exact", "equivalent_confirmed", "changed_needs_check", "version_unknown", "unavailable", "privacy_excluded"]).optional() }).strict()).optional(),

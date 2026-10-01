@@ -81,7 +81,7 @@ describe("opening restore privacy boundary", () => {
   it("rejects memory linked through a citation-only excluded turn", () => {
     const input = backup({
       opening_turns: [row({ id: turnId, source_ids: [], citations: [{ sourceId, sourceVersion: 0 }] })],
-      opening_memories: [row({ status: "active", source_turn_ids: [turnId] })],
+      opening_memories: [row({ id: turnId, status: "active", source_turn_ids: [turnId] })],
     });
     expect(validateOpeningRestore(input, [mark]).errors).toContain("table opening_turns references a deleted source");
   });
@@ -162,10 +162,10 @@ describe("opening restore privacy boundary", () => {
   it("accepts clean linked memory without mutating the archive", () => {
     const input = backup({
       opening_turns: [row({ id: turnId, role: "assistant", context_source_refs: [], source_ids: [], citations: [] })],
-      opening_memories: [row({ status: "active", source_turn_ids: [turnId] })],
+      opening_memories: [row({ id: turnId, status: "active", source_turn_ids: [turnId] })],
     });
     const before = structuredClone(input);
-    expect(validateOpeningRestore(input, [])).toEqual({ allowed: true, errors: [],
+    expect(validateOpeningRestore(input, [], { workspaceId, memories: [] })).toEqual({ allowed: true, errors: [],
       recordCounts: { opening_turns: 1, opening_memories: 1 } });
     expect(input).toEqual(before);
   });

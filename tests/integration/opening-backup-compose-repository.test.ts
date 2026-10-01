@@ -54,7 +54,7 @@ it("round-trips the durable database tables and MinIO bytes through an encrypted
   const draft = await assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader);
   expect(draft).toMatchObject({ ok: true });
   if (!draft.ok) throw new Error(JSON.stringify(draft));
-  expect(Object.keys(draft.backup.tables)).toHaveLength(25);
+  expect(Object.keys(draft.backup.tables)).toHaveLength(26);
   expect(draft.backup.tables.opening_memories).toHaveLength(1);
   expect(draft.backup.tables.opening_turns).toEqual([expect.objectContaining({ id: graph.turn, context_source_refs: contextRefs })]);
   expect(draft.backup.tables.opening_source_versions).toContainEqual(expect.objectContaining({
@@ -78,10 +78,11 @@ it("round-trips the durable database tables and MinIO bytes through an encrypted
     const chunks: Buffer[] = [];
     for await (const chunk of opened.objectBytes(draft.backup.objects[0]!.archivePath)) chunks.push(Buffer.from(chunk));
     expect(Buffer.concat(chunks)).toEqual(sourceBytes);
-    expect(validateOpeningRestore(opened.metadata, draft.backup.deletionJournal).allowed).toBe(true);
+    const current = await readOpeningBackupSources(fixture.sql, fixture.scope);
+    expect(validateOpeningRestore(opened.metadata, current.deletionJournal, current.memoryDeletions).allowed).toBe(true);
     await fixture.rows.exclude(graph.source);
     const live = await readOpeningBackupSources(fixture.sql, fixture.scope);
-    expect(validateOpeningRestore(opened.metadata, live.deletionJournal).allowed).toBe(false);
+    expect(validateOpeningRestore(opened.metadata, live.deletionJournal, live.memoryDeletions).allowed).toBe(false);
   } finally { await opened.close(); }
 });
 

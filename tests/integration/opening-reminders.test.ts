@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations,
@@ -42,6 +43,52 @@ afterAll(async () => {
 });
 
 describe("opening reminder repository (P03)", () => {
+  it("selects one current owner task and preserves its idempotent job", async () => {
+    const plans = createOpeningPlansRepository(sql);
+    const reminders = createOpeningReminderRepository(sql);
+    const create = (title: string, scope = owner) => plans.createTask(scope, {
+      title, minutes: 25, dueAt: pastDue, priority: 1, candidateId: null, clientKey: randomUUID(),
+    });
+    const task = await create("Chosen occurrence");
+    const unrelated = await create("Other old due task");
+    const foreign = await create("Another owner's task", other);
+    const [storedTask] = await sql`UPDATE opening_tasks SET version=4 WHERE id=${task.id} RETURNING version`;
+    const listedTask = (await plans.listTasks(owner)).find(item => item.id === task.id)!;
+    expect(listedTask.version).toBe(Number(storedTask!.version));
+    const input = { taskId: task.id, expectedVersion: listedTask.version!, clientKey: randomUUID(), channel: "in_app" as const };
+    const first = await reminders.enqueue(owner, input, later);
+    expect(first).toMatchObject([{ taskId: task.id, taskVersion: 4, created: true }]);
+    expect(await reminders.enqueue(owner, { ...input, clientKey: randomUUID() }, later))
+      .toMatchObject([{ id: first[0]!.id, created: false }]);
+    await expect(reminders.enqueue(owner, { ...input, taskId: foreign.id }, later)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(reminders.enqueue(owner, { ...input, expectedVersion: 1 }, later)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await sql`SELECT id FROM opening_jobs WHERE payload->>'taskId'=${unrelated.id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM opening_jobs WHERE kind='remind' AND owner_user_id=${owner.ownerUserId}`).toHaveLength(1);
+  });
+
+  it("rechecks an explicit task changed after the initial enqueue read", async () => {
+    const plans = createOpeningPlansRepository(sql);
+    const task = await plans.createTask(owner, {
+      title: "Selected occurrence", minutes: 25, dueAt: pastDue, priority: 1, candidateId: null, clientKey: randomUUID(),
+    });
+    let changed = false;
+    const interleaved = new Proxy(sql, { get(target, property) {
+      if (property !== "begin") return Reflect.get(target, property);
+      return async (work: (tx: TransactionSql) => Promise<unknown>) => {
+        if (!changed) {
+          changed = true;
+          await plans.updateTaskStatus(owner, task.id, { status: "done", expectedVersion: 1, at: later.toISOString() });
+        }
+        return target.begin(work);
+      };
+    } });
+    await expect(createOpeningReminderRepository(interleaved).enqueue(owner, {
+      taskId: task.id, expectedVersion: 1, clientKey: randomUUID(), channel: "in_app",
+    }, later)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(changed).toBe(true);
+    expect(await sql`SELECT id FROM opening_jobs WHERE payload->>'taskId'=${task.id}`).toHaveLength(0);
+  });
+
   it("lists an unenqueued due task for its owner only", async () => {
     const plans = createOpeningPlansRepository(sql);
     const reminders = createOpeningReminderRepository(sql);

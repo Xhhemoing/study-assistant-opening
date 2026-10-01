@@ -3,12 +3,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations, createSqlClient, createIdentityRepository, createLibraryRepository, createBackupRestoreRepository,
   createOpeningBudgetRepository, createOpeningEphemeralProvenanceRepository, createOpeningNoteRepository,
+  createRevisionProposalRepository, createOpeningSourceActionsRepository,
 } from "@aistudy/database";
 import type { ContextSourceRef } from "@aistudy/database";
+import { openRaceSession, closeRace, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const sql = createSqlClient(process.env.DATABASE_URL!);
 const library = createLibraryRepository(sql), backups = createBackupRestoreRepository(sql);
 const provenance = createOpeningEphemeralProvenanceRepository(sql), notes = createOpeningNoteRepository(sql);
+const proposals = createRevisionProposalRepository(sql);
 const scopes: Array<{ workspaceId: string; ownerUserId: string }> = [];
 let scope: { workspaceId: string; ownerUserId: string };
 beforeAll(async () => { await applyMigrations(sql); });
@@ -153,4 +156,110 @@ describe("Opening linked note persistence", () => {
     await expect(backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" })).rejects.toMatchObject({ code: "VALIDATION" });
     expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
   });
+});
+
+const proposalSource = { kind: "user" as const, provider: null, model: null, sourceId: null, metadata: {} };
+const sourceKeys = { stagingKey: (id: string) => `opening/sources/${id}/staging`, finalKey: (id: string, version: number) => `opening/sources/${id}/${version}` };
+async function proposalFixture(status: "pending" | "conflicted" | "accepted" | "rejected" = "pending") {
+  const sourceId = await source();
+  const { documentId } = await save([{ sourceId, sourceVersion: 0 }]);
+  const document = await library.getDocument({ workspaceId: scope.workspaceId, documentId });
+  const proposedBlocks = [{ ...document.blocks[0]!, content: { text: "PRIVATE-PROPOSED-SNAPSHOT" } }];
+  const input = { workspaceId: scope.workspaceId, documentId, baseRevisionNumber: 1, proposedBlocks, source: proposalSource, supportState: "supported" as const };
+  const proposal = await proposals.create(input);
+  if (status === "conflicted") {
+    await library.updateDocument({ workspaceId: scope.workspaceId, documentId, expectedRevisionNumber: 1,
+      blocks: [{ ...document.blocks[0]!, content: { text: "PRIVATE-CURRENT-CONFLICT" } }] });
+    await proposals.review({ workspaceId: scope.workspaceId, proposalId: proposal.id, action: "accept", actorUserId: scope.ownerUserId });
+  } else if (status !== "pending") {
+    await proposals.review({ workspaceId: scope.workspaceId, proposalId: proposal.id, action: status === "accepted" ? "accept" : "reject", actorUserId: scope.ownerUserId });
+  }
+  return { sourceId, documentId, proposal, input };
+}
+async function proposalState(documentId: string) {
+  return {
+    proposals: await sql`SELECT * FROM revision_proposals WHERE document_id=${documentId} ORDER BY id`,
+    document: await sql`SELECT * FROM library_documents WHERE id=${documentId}`,
+    blocks: await sql`SELECT * FROM library_blocks WHERE document_id=${documentId} ORDER BY position`,
+    revisions: await sql`SELECT * FROM library_revisions WHERE document_id=${documentId} ORDER BY revision_number`,
+  };
+}
+
+describe("Opening linked note revision proposal privacy", () => {
+  it.each(["pending", "conflicted", "accepted", "rejected"] as const)("hides %s snapshots and denies every mutation after permanent source deletion", async status => {
+    const fixture = await proposalFixture(status);
+    const before = await proposalState(fixture.documentId);
+    await createOpeningSourceActionsRepository(sql).apply(scope, fixture.sourceId,
+      { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, sourceKeys, new Date());
+    const target = { workspaceId: scope.workspaceId, proposalId: fixture.proposal.id };
+    await expect(proposals.get(target)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(proposals.list({ workspaceId: scope.workspaceId, documentId: fixture.documentId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    for (const action of ["accept", "partial_accept", "reject"] as const) {
+      await expect(proposals.review({ ...target, action, selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+    await expect(proposals.resolveConflict({ ...target, action: "preserve_both", selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId, expectedCurrentRevisionNumber: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(proposals.create(fixture.input)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await proposalState(fixture.documentId)).toEqual(before);
+  });
+
+  it.each(["accept", "partial_accept", "reject"] as const)("allows %s and new personal proposals after AI-only exclusion", async action => {
+    const fixture = await proposalFixture();
+    await exclude(fixture.sourceId);
+    const created = await proposals.create(fixture.input);
+    expect((await proposals.get({ workspaceId: scope.workspaceId, proposalId: created.id })).baseBlocks).toEqual(fixture.proposal.baseBlocks);
+    expect(await proposals.list({ workspaceId: scope.workspaceId, documentId: fixture.documentId })).toHaveLength(2);
+    const result = await proposals.review({ workspaceId: scope.workspaceId, proposalId: created.id, action, actorUserId: scope.ownerUserId, selectedProposalBlockIds: created.proposedBlocks.map(block => block.id) });
+    expect(result.proposal.status).toBe(action === "reject" ? "rejected" : "accepted");
+  });
+
+  it("allows personal conflict snapshots and resolution after AI-only exclusion", async () => {
+    const fixture = await proposalFixture("conflicted");
+    await exclude(fixture.sourceId);
+    const target = { workspaceId: scope.workspaceId, proposalId: fixture.proposal.id };
+    expect((await proposals.get(target)).conflict?.currentBlocks[0]!.content).toEqual({ text: "PRIVATE-CURRENT-CONFLICT" });
+    const result = await proposals.resolveConflict({ ...target, action: "preserve_both", selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId, expectedCurrentRevisionNumber: 2 });
+    expect(result.proposal.status).toBe("accepted");
+    expect(result.document?.currentRevisionNumber).toBe(3);
+  });
+
+  it.each(["get", "review", "resolve"] as const)("serializes %s behind in-flight permanent deletion before exposing or changing snapshots", async operation => {
+    const fixture = await proposalFixture(operation === "resolve" ? "conflicted" : "pending");
+    const before = await proposalState(fixture.documentId);
+    const gate = openRaceSession(), deletion = openRaceSession(), reader = openRaceSession();
+    let unlock = () => {};
+    const pending: Promise<unknown>[] = [];
+    try {
+      const [gateSession, deletionSession, readerSession] = await Promise.all([gate.ready, deletion.ready, reader.ready]);
+      let opened = () => {};
+      const locked = new Promise<void>(resolve => { opened = resolve; });
+      const released = new Promise<void>(resolve => { unlock = resolve; });
+      const held = track(gateSession.sql.begin(async tx => {
+        await tx`SELECT id FROM opening_sources WHERE id=${fixture.sourceId} FOR UPDATE`;
+        opened();
+        await released;
+      }));
+      pending.push(held);
+      await Promise.race([locked, held]);
+      const deleted = track(createOpeningSourceActionsRepository(deletionSession.sql).apply(scope, fixture.sourceId,
+        { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, sourceKeys, new Date()));
+      pending.push(deleted);
+      await waitUntilBlocked(sql, deletionSession.pid, gateSession.pid, "source deletion", /FROM opening_sources[\s\S]*FOR UPDATE/i);
+      const repository = createRevisionProposalRepository(readerSession.sql);
+      const target = { workspaceId: scope.workspaceId, proposalId: fixture.proposal.id };
+      const read = track<unknown>(operation === "get" ? repository.get(target)
+        : operation === "review" ? repository.review({ ...target, action: "accept", actorUserId: scope.ownerUserId })
+          : repository.resolveConflict({ ...target, action: "preserve_both", selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId, expectedCurrentRevisionNumber: 2 }));
+      pending.push(read);
+      await waitUntilBlocked(sql, readerSession.pid, deletionSession.pid, `proposal ${operation}`, /FROM workspaces[\s\S]*FOR (UPDATE|SHARE)/i);
+      unlock();
+      await held;
+      await deleted;
+      await expect(read).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(await proposalState(fixture.documentId)).toEqual(before);
+    } finally {
+      unlock();
+      await Promise.allSettled(pending);
+      await Promise.all([closeRace(gate.sql), closeRace(deletion.sql), closeRace(reader.sql)]);
+    }
+  }, 20_000);
 });

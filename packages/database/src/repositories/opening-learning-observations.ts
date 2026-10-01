@@ -3,14 +3,16 @@ import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
-import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, mapLearningObservation, nextLearningHistoryRevision } from "./opening-learning-facts";
+import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
   opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   return sql.begin(async (tx) => {
+    await lockWorkspaceLearningHistory(tx, scope);
     const session = await lockLearningSession(tx, scope, input.sessionId);
     if (session.course_id !== input.courseId || session.skill_label !== input.skillLabel) throw learningError("VALIDATION", "observation does not match its session course and skill");
     if (input.sourceIds.some((id) => !(session.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "observation source is outside the session");
@@ -67,11 +69,12 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
       checkerId: scope.ownerUserId, outcome: input.outcome } : null;
     const sourceVersions = attempt?.source_versions ?? (input.problemId ? null : Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)])));
     const revision = await nextLearningHistoryRevision(tx, scope, input.courseId), id = randomUUID();
+    const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
     const rows = await tx`INSERT INTO opening_learning_observations
       (id,workspace_id,owner_user_id,session_id,course_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
-       source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
+       source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
        VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${input.outcome},${input.assistance},${input.clientKey},${submittedAt},
-       ${opts.sourceTurnIds ?? []},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${id},${id},'original',${scope.ownerUserId})
+       ${opts.sourceTurnIds ?? []},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
       ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
     if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
     if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;
@@ -91,6 +94,7 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
         }
       }
     }
+    await refreshOpeningLearningEligibility(tx, scope, [id]);
     return qualify(mapLearningObservation(rows[0]));
   });
 }

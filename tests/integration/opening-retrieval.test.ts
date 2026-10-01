@@ -39,6 +39,29 @@ run("opening retrieval isolation", () => {
     expect(result.map((item) => item.text)).toEqual(["current"]);
   });
 
+  it("omits unrelated stored chunks while preserving an explicitly selected page or chunk", async () => {
+    const sourceId = await source(fixture.scope);
+    await chunks.replaceChunks(fixture.scope, {
+      sourceId,
+      sourceVersion: 0,
+      chunks: [
+        { page: 1, slideLabel: null, startMs: null, endMs: null, text: "Bayes theorem", imageObjectKey: null },
+        { page: 2, slideLabel: null, startMs: null, endMs: null, text: "Selected material", imageObjectKey: null },
+        { page: 3, slideLabel: null, startMs: null, endMs: null, text: "Unrelated filler", imageObjectKey: null },
+      ],
+    });
+    const stored = await chunks.listForSources(fixture.scope, [sourceId]);
+    const options = { chunks: stored, query: "Bayes", maxCharacters: 1000 };
+    expect(selectContext(options).map((item) => item.text)).toEqual(["Bayes theorem"]);
+    expect(selectContext({ ...options, query: "quantum" })).toEqual([]);
+    const selectedId = stored.find((item) => item.page === 2)!.id;
+    for (const preference of [{ preferPage: 2 }, { preferChunkId: selectedId }]) {
+      expect(selectContext({ ...options, ...preference }).map((item) => item.text)).toEqual([
+        "Selected material", "Bayes theorem",
+      ]);
+    }
+  });
+
   it("handles revoked, empty, oversized, and injected context", async () => {
     const id = await source(fixture.scope); await fixture.sql`UPDATE opening_sources SET upload_state = 'rejected' WHERE id = ${id}`;
     expect(await chunks.listChunks(fixture.scope, id)).toEqual([]);

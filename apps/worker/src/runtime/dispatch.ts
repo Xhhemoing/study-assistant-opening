@@ -14,16 +14,25 @@ export type DispatchDependencies = {
 
 export async function dispatchPending(deps: DispatchDependencies): Promise<number> {
   return deps.repository.dispatchPending(async (outbox: OpeningOutboxRecord) => {
-    const payload = outbox.payload as { kind?: string; jobId?: string };
+    const payload = outbox.payload as { kind?: string; jobId?: string; availableAt?: string };
     const kind = payload.kind ?? "";
     const queue = deps.queues[kind];
     if (!queue) throw new Error(`unknown opening job kind: ${kind}`);
+    let delay = 0;
+    if (kind === "remind" && payload.availableAt !== undefined) {
+      const availableAt = Date.parse(payload.availableAt);
+      if (!Number.isFinite(availableAt)) throw new Error("invalid reminder availability time");
+      delay = Math.max(0, availableAt - Date.now());
+    }
     await queue.add(outbox.jobId, outbox.payload, {
-      jobId: jobQueueId(outbox.workspaceId, outbox.jobId),
+      jobId: payload.kind === "remind"
+        ? `${jobQueueId(outbox.workspaceId, outbox.jobId)}-event-${outbox.id}`
+        : jobQueueId(outbox.workspaceId, outbox.jobId),
       attempts: 2,
       backoff: { type: "exponential", delay: 1000 },
       removeOnComplete: false,
       removeOnFail: false,
+      ...(kind === "remind" ? { delay } : {}),
     });
   }, deps.limit);
 }

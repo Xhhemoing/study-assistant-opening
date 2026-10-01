@@ -3,8 +3,9 @@ import {
   type OpeningBackup,
   type OpeningBackupObject,
   type OpeningDeletionMark,
+  type OpeningMemoryDeletions,
 } from "./backup-policy";
-import { isUuid } from "./backup-validation";
+import { isMemoryDeletions, isUuid, sameMemoryDeletions } from "./backup-validation";
 import {
   validBackupTableSet,
   canonicalObject,
@@ -20,6 +21,7 @@ import {
 export type OpeningBackupComposeRecords = {
   privacyEpoch: number;
   deletionJournal: OpeningDeletionMark[];
+  memoryDeletions: OpeningMemoryDeletions;
   tables: Record<string, Record<string, unknown>[]>;
 };
 
@@ -28,6 +30,7 @@ export type OpeningBackupComposeStaging = {
     workspaceId: string;
     privacyEpoch: number;
     deletionJournal: OpeningDeletionMark[];
+    memoryDeletions: OpeningMemoryDeletions;
     sources: Array<{ sourceId: string; version: number; bytes: number; sha256: string }>;
   };
   objects: OpeningBackupObject[];
@@ -55,6 +58,8 @@ function validInput(records: OpeningBackupComposeRecords, staging: OpeningBackup
   return Number.isSafeInteger(records.privacyEpoch) && records.privacyEpoch >= 0
     && Number.isSafeInteger(staging.snapshot.privacyEpoch) && staging.snapshot.privacyEpoch >= 0
     && isUuid(staging.snapshot.workspaceId)
+    && isMemoryDeletions(records.memoryDeletions, records.memoryDeletions?.workspaceId ?? "")
+    && isMemoryDeletions(staging.snapshot.memoryDeletions, staging.snapshot.memoryDeletions?.workspaceId ?? "")
     && uniqueJournal(records.deletionJournal) && uniqueJournal(staging.snapshot.deletionJournal)
     && Object.values(records.tables).every((rows) => Array.isArray(rows)
       && rows.every((row) => row && typeof row === "object"))
@@ -129,6 +134,9 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
   const { records, staging } = input;
   if (records.privacyEpoch !== staging.snapshot.privacyEpoch) return fail("EPOCH_MISMATCH");
   const workspaceId = staging.snapshot.workspaceId.toLowerCase();
+  if (!isMemoryDeletions(records.memoryDeletions, workspaceId)
+    || !isMemoryDeletions(staging.snapshot.memoryDeletions, workspaceId)) return fail("WORKSPACE_MISMATCH");
+  if (!sameMemoryDeletions(records.memoryDeletions, staging.snapshot.memoryDeletions)) return fail("JOURNAL_MISMATCH");
   if (!validBackupTableSet(records.tables)) return fail("INVALID_INPUT");
   const sourceRows = records.tables.opening_sources ?? [];
   const chunkRows = records.tables.opening_source_chunks ?? [];
@@ -158,12 +166,13 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
     format: "opening-backup", version: 1, workspaceId,
     privacyEpoch: records.privacyEpoch,
     deletionJournal: clone(records.deletionJournal),
+    memoryDeletions: clone(records.memoryDeletions),
     tables: clone(records.tables), objects: objectResult.objects,
   };
   if (unavailable.size) backup.tables.opening_source_versions = [...versions].map(([key, row]) => ({
     source_id: row.source_id, version: row.version, workspace_id: row.workspace_id, bytes: row.bytes,
     sha256: row.sha256, availability: unavailable.has(key) ? "unavailable" : row.availability,
   }));
-  const preview = validateOpeningRestore(backup, staging.snapshot.deletionJournal);
+  const preview = validateOpeningRestore(backup, staging.snapshot.deletionJournal, staging.snapshot.memoryDeletions);
   return preview.allowed ? { ok: true, backup } : fail("PREVIEW_REJECTED", ...preview.errors);
 }

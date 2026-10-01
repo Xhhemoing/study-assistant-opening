@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
 import { composeOpeningBackupDraft } from "./backup-compose";
+import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sourceId = "11111111-1111-4111-8111-111111111111";
@@ -26,6 +27,31 @@ function backup(): OpeningBackup {
 }
 const emptyTarget = { workspacePreferences: null, courses: [] };
 const options = { confirmLocalRestore: true, currentLearningState: emptyTarget };
+
+describe("backup AI settings boundary", () => {
+  it.each([undefined, null, DEFAULT_OPENING_AI_SETTINGS])("accepts optional or valid AI settings %j", aiSettings => {
+    const value = backup();
+    if (aiSettings !== undefined) (value.tables.workspace_preferences![0] as Record<string, unknown>).ai_settings = aiSettings;
+    const original = structuredClone(value);
+    expect(validateOpeningRestore(value, []).allowed).toBe(true);
+    expect(value).toEqual(original);
+  });
+
+  it.each([
+    { ...DEFAULT_OPENING_AI_SETTINGS, mode: "invalid" },
+    { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual", manualModelId: null },
+    { ...DEFAULT_OPENING_AI_SETTINGS, routes: { ...DEFAULT_OPENING_AI_SETTINGS.routes, listen: "invalid model name" } },
+    { ...DEFAULT_OPENING_AI_SETTINGS, apiKey: "never-import-a-secret" },
+    { ...DEFAULT_OPENING_AI_SETTINGS, unexpected: true },
+    { ...DEFAULT_OPENING_AI_SETTINGS, routes: { ...DEFAULT_OPENING_AI_SETTINGS.routes, unexpected: "model" } },
+    "invalid",
+  ])("rejects non-null settings outside the shared AI contract %j", aiSettings => {
+    const value = backup();
+    (value.tables.workspace_preferences![0] as Record<string, unknown>).ai_settings = aiSettings;
+    expect(validateOpeningRestore(value, []).errors).toContain("workspace AI settings are invalid");
+    expect(planOpeningRestoreApply(value, [], options).ok).toBe(false);
+  });
+});
 
 it("plans included courses before their source memberships and linked learning rows", () => {
   const value = backup();
@@ -178,8 +204,8 @@ it("composes the new optional state tables alongside a legacy complete table inv
     "opening_learning_attempts", "opening_learning_history_revisions"];
   value.tables = { ...Object.fromEntries(legacy.map(table => [table, []])), ...value.tables };
   value.tables.opening_sources = [{ id: sourceId, workspace_id: workspaceId, version: 1, bytes: 4, sha256: "ab".repeat(32) }];
-  const result = composeOpeningBackupDraft({ records: { ...value, tables: value.tables as Record<string, Record<string, unknown>[]> }, staging: {
-    snapshot: { workspaceId, privacyEpoch: 0, deletionJournal: [], sources: [{ sourceId, version: 1, bytes: 4, sha256: "ab".repeat(32) }] },
+  const result = composeOpeningBackupDraft({ records: { ...value, memoryDeletions: { workspaceId, memories: [] }, tables: value.tables as Record<string, Record<string, unknown>[]> }, staging: {
+    snapshot: { workspaceId, privacyEpoch: 0, deletionJournal: [], memoryDeletions: { workspaceId, memories: [] }, sources: [{ sourceId, version: 1, bytes: 4, sha256: "ab".repeat(32) }] },
     objects: [{ sourceId, bytes: 4, sha256: "ab".repeat(32), actualSha256: "ab".repeat(32), archivePath: `objects/${sourceId}/v1.bin` }],
   } });
   expect(result.ok).toBe(true);

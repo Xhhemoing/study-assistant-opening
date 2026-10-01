@@ -18,6 +18,7 @@ import {
   type RevisionProposalSupportState,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
+import { openingNoteReadable } from "./opening-note-provenance";
 
 export type RevisionProposalErrorCode =
   | "NOT_FOUND"
@@ -131,18 +132,25 @@ function assertValidRevisionBlocks(blocks: RevisionProposalBlock[]): void {
 }
 
 export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepository {
-  async function ensureWorkspace(workspaceId: string, db: Sql = sql): Promise<void> {
+  async function ensureWorkspace(workspaceId: string, db: Sql): Promise<void> {
     assertUuid(workspaceId, "workspaceId");
-    const rows = await db`SELECT id FROM workspaces WHERE id=${workspaceId} LIMIT 1`;
+    const rows = await db`SELECT id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
     if (!rows.length) throw new RevisionProposalRepositoryError("NOT_FOUND", `Workspace not found: ${workspaceId}`);
   }
-  async function findProposal(workspaceId: string, proposalId: string, db: Sql = sql, lock = false): Promise<Row> {
+  // All entry points hold the workspace lock until snapshots and mutations finish.
+  // Check provenance separately from document soft deletion to preserve terminal replay.
+  async function ensureDocumentReadable(db: Sql, workspaceId: string, documentId: string): Promise<void> {
+    const rows = await db`SELECT ${openingNoteReadable(db, workspaceId, db`${documentId}::uuid`)} AS readable`;
+    if (!rows[0]?.readable) throw new RevisionProposalRepositoryError("NOT_FOUND", `Document not found: ${documentId}`);
+  }
+  async function findProposal(workspaceId: string, proposalId: string, db: Sql, lock = false): Promise<Row> {
     assertUuid(workspaceId, "workspaceId"); assertUuid(proposalId, "proposalId");
     const rows = lock
       ? await db`SELECT * FROM revision_proposals WHERE id=${proposalId} FOR UPDATE`
       : await db`SELECT * FROM revision_proposals WHERE id=${proposalId}`;
     if (!rows.length) throw new RevisionProposalRepositoryError("NOT_FOUND", `Proposal not found: ${proposalId}`);
     if (rows[0]!.workspace_id !== workspaceId) throw new RevisionProposalRepositoryError("WORKSPACE_MISMATCH", `Proposal ${proposalId} is not in this workspace`);
+    await ensureDocumentReadable(db, workspaceId, rows[0]!.document_id as string);
     return rows[0] as Row;
   }
   async function documentBlocks(db: Sql, workspaceId: string, documentId: string): Promise<RevisionProposalBlock[]> {
@@ -150,6 +158,7 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     return rows.map((row) => ({ id: row.id as string, type: row.type as string, position: row.position as number, content: row.content as Record<string, unknown> }));
   }
   async function documentRow(db: Sql, workspaceId: string, documentId: string, lock = false): Promise<Row> {
+    await ensureDocumentReadable(db, workspaceId, documentId);
     const rows = lock
       ? await db`SELECT * FROM library_documents WHERE id=${documentId} AND workspace_id=${workspaceId} AND deleted_at IS NULL FOR UPDATE`
       : await db`SELECT * FROM library_documents WHERE id=${documentId} AND workspace_id=${workspaceId} AND deleted_at IS NULL`;
@@ -191,13 +200,13 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
   }
   return {
     async create(input) {
-      await ensureWorkspace(input.workspaceId);
       assertUuid(input.documentId, "documentId");
       const source = revisionProposalSourceSchema.parse(input.source);
       const supportState = revisionProposalSupportStateSchema.parse(input.supportState);
       const proposedBlocks = input.proposedBlocks.map((block) => revisionProposalBlockSchema.parse(block));
       validateBlocks(proposedBlocks);
       return sql.begin(async (tx) => {
+        await ensureWorkspace(input.workspaceId, tx);
         // Lock the document before reading blocks so the full base snapshot is coherent.
         const document = await documentRow(tx, input.workspaceId, input.documentId, true);
         const baseRevisionNumber = input.baseRevisionNumber;
@@ -212,14 +221,23 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
       }).catch(errorFromSql);
     },
     async list(input) {
-      await ensureWorkspace(input.workspaceId); await documentRow(sql, input.workspaceId, input.documentId);
-      const rows = await sql`SELECT * FROM revision_proposals WHERE workspace_id=${input.workspaceId} AND document_id=${input.documentId} ORDER BY created_at ASC,id ASC`;
-      return rows.map((row) => map(row as Row));
+      return sql.begin(async (tx) => {
+        await ensureWorkspace(input.workspaceId, tx);
+        await documentRow(tx, input.workspaceId, input.documentId);
+        const rows = await tx`SELECT * FROM revision_proposals WHERE workspace_id=${input.workspaceId} AND document_id=${input.documentId} ORDER BY created_at ASC,id ASC`;
+        return rows.map((row) => map(row as Row));
+      });
     },
-    async get(input) { return map(await findProposal(input.workspaceId, input.proposalId)); },
+    async get(input) {
+      return sql.begin(async (tx) => {
+        await ensureWorkspace(input.workspaceId, tx);
+        return map(await findProposal(input.workspaceId, input.proposalId, tx));
+      });
+    },
     async review(input) {
       assertUuid(input.actorUserId, "actorUserId");
       return sql.begin(async (tx) => {
+        await ensureWorkspace(input.workspaceId, tx);
         const current = await findProposal(input.workspaceId, input.proposalId, tx, true);
         if ((current.status as string) !== "pending") return mapResult(current, tx);
         const proposal = map(current);
@@ -249,6 +267,7 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     async resolveConflict(input) {
       assertUuid(input.actorUserId, "actorUserId");
       return sql.begin(async (tx) => {
+        await ensureWorkspace(input.workspaceId, tx);
         const current = await findProposal(input.workspaceId, input.proposalId, tx, true);
         const proposal = map(current);
         if (proposal.status !== "conflicted") {

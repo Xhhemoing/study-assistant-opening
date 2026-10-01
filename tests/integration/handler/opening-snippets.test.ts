@@ -49,8 +49,15 @@ describe("explicit snippet save handler", () => {
     complete.mockResolvedValueOnce(output("unknown history output"));
     const unknownResponse = await reply(postEphemeral({ text: "continue", sourceIds: [], mode: "listen", historyPrivacyEpoch: epoch, history: [{ role: "assistant", text: "old body without a receipt" }] }));
     expect(unknownResponse.status).toBe(200);
-    expect((await unknownResponse.json()).provenanceId).toBeNull();
-    const unknown = (await sql`SELECT id FROM opening_ephemeral_provenance WHERE workspace_id=${workspaceId} AND context_source_refs IS NULL`)[0]!;
+    const freshReply = await unknownResponse.json();
+    expect(freshReply).toMatchObject({ historyDiscarded: true, provenanceId: expect.any(String) });
+    expect(complete.mock.calls.at(-1)?.[0]).toMatchObject({ history: [] });
+    expect(JSON.stringify(complete.mock.calls.at(-1)?.[0])).not.toContain("old body without a receipt");
+    const freshReceipt = (await sql`SELECT context_source_refs FROM opening_ephemeral_provenance WHERE id=${freshReply.provenanceId}`)[0]!;
+    expect(freshReceipt.context_source_refs).toEqual([]);
+    // The discarded history did not participate in this new reply. Simulate a legacy unknown receipt explicitly.
+    const unknown = (await sql`UPDATE opening_ephemeral_provenance SET context_source_refs=NULL
+      WHERE id=${freshReply.provenanceId} AND workspace_id=${workspaceId} RETURNING id`)[0]!;
     const denied = await save(postEphemeral({ title: "unknown", text: "must not save", provenanceId: unknown.id }));
     expect(denied.status).toBe(409);
     const foreignId = randomUUID();

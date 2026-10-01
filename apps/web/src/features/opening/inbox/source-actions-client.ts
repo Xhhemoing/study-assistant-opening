@@ -1,4 +1,5 @@
 import { sourceActionResultSchema, sourceDeletionListSchema, sourceImpactSchema, type SourceActionInput } from "@aistudy/contracts";
+import { notifyOpeningPrivacyChange } from "../client/privacy-change";
 
 export class SourceActionsError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -22,7 +23,11 @@ export function createSourceActionsClient(fetcher: typeof fetch = fetch) {
   }
   return {
     impact: async (id: string) => sourceImpactSchema.parse(await request(`${encodeURIComponent(id)}/impact`)),
-    act: async (id: string, input: SourceActionInput) => sourceActionResultSchema.parse(await request(`${encodeURIComponent(id)}/actions`, input)),
+    act: async (id: string, input: SourceActionInput) => {
+      const result = sourceActionResultSchema.parse(await request(`${encodeURIComponent(id)}/actions`, input));
+      if (input.action === "exclude" || input.action === "delete") notifyOpeningPrivacyChange();
+      return result;
+    },
     deletions: async () => sourceDeletionListSchema.parse(await request("deletions")),
   };
 }

@@ -1,3 +1,4 @@
+import { openingAiSettingsSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 
 type Rows = Record<string, unknown>[];
@@ -5,11 +6,14 @@ type Rows = Record<string, unknown>[];
 /** The caller owns the workspace owner gate and repeatable-read transaction. */
 export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspaceId: string, sourceIds: readonly string[]) {
   const workspace_preferences: Rows = [...await tx`
-    SELECT workspace_id, default_entry, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
+    SELECT workspace_id, default_entry, ai_settings, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
       to_char(retest_suggestions_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS retest_suggestions_enabled_at,
       to_char(automatic_reminders_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS automatic_reminders_enabled_at,
       created_at, updated_at
     FROM workspace_preferences WHERE workspace_id = ${workspaceId}`];
+  for (const row of workspace_preferences) {
+    if (row.ai_settings != null) row.ai_settings = openingAiSettingsSchema.parse(row.ai_settings);
+  }
   const courses: Rows = [...await tx`
     SELECT id, workspace_id, title, slug, description, schema_version, archived_at,
       assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,

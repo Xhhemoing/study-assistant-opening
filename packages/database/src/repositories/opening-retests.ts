@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { retestCandidateSchema, type RetestCandidate } from "@aistudy/contracts";
 import type { RetestEvidenceIdentity } from "@aistudy/domain";
 import type { OpeningScope } from "./opening-sources";
-import { lockLearningHistory, lockLearningOwner, mapLearningObservation } from "./opening-learning-facts";
+import { lockLearningHistory, lockLearningOwner, lockWorkspaceLearningHistory, mapLearningObservation, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
@@ -19,6 +19,7 @@ export function createOpeningRetestRepository(sql: Sql) {
     async saveCandidates(scope: OpeningScope, candidates: RetestCandidate[], expectedPrivacyEpoch?: number, sourceJobId?: string): Promise<RetestCandidate[]> {
       if (candidates.length === 0) return [];
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         if (expectedPrivacyEpoch !== undefined) {
           const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -104,6 +105,7 @@ export function createOpeningRetestRepository(sql: Sql) {
             saved.push(row);
           }
         }
+        if (saved.length) await nextWorkspaceLearningHistoryRevision(tx, scope);
         return saved;
       }) as Promise<RetestCandidate[]>;
     },
@@ -197,7 +199,7 @@ export type RetestEvidenceRevision = {
   historyRevision: number;
 };
 
-/** Called inside the revision transaction, after history/root locks and before commit. */
+/** Nested helper: the observation revision transaction owns semantic revision and history/root locks. */
 export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: OpeningScope, input: RetestEvidenceRevision): Promise<void> {
   const identities = [input.previousIdentity, ...(input.currentIdentity ? [input.currentIdentity] : [])];
   const courseIds = [...new Set(identities.map((identity) => identity.courseId))];

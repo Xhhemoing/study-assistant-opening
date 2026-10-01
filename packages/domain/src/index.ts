@@ -201,3 +201,4 @@ export {
 
 export * from "./opening/evidence-eligibility";
 export { resolveLearningPreferences } from "./opening/learning-preferences";
+export { summarizeLearningAggregate, type AggregateLearningSummary } from "./opening/learning-summary-aggregate";

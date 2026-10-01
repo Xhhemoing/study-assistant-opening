@@ -1,4 +1,4 @@
-import { boolean, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./library";
 
 export const workspacePreferences = pgTable("workspace_preferences", {
@@ -6,6 +6,7 @@ export const workspacePreferences = pgTable("workspace_preferences", {
     .primaryKey()
     .references(() => workspaces.id, { onDelete: "cascade" }),
   defaultEntry: text("default_entry"),
+  aiSettings: jsonb("ai_settings"),
   assessmentEnabled: boolean("assessment_enabled"),
   retestSuggestionsEnabled: boolean("retest_suggestions_enabled"),
   automaticRemindersEnabled: boolean("automatic_reminders_enabled"),

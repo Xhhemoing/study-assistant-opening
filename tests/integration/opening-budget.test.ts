@@ -112,3 +112,23 @@ describe("opening budget ledger (guarded)", () => {
     });
   });
 });
+
+describe("model attribution within the shared workspace ledger", () => {
+  const firstModel = { id: "one", providerId: "first", modelName: "model-one", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
+  const secondModel = { ...firstModel, id: "two", providerId: "second", modelName: "model-two" };
+  it("retains model and price attribution and rejects a replay with another model", async () => {
+    const input = { purpose: "tutor", requestId: "same-model", amountCents: 10, modelSnapshot: firstModel };
+    const reservation = await budget.reserve(fixture.scope, input);
+    expect(reservation.modelSnapshot).toEqual(firstModel);
+    expect((await budget.reserve(fixture.scope, input)).id).toBe(reservation.id);
+    await expect(budget.reserve(fixture.scope, { ...input, modelSnapshot: secondModel })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(budget.reserve(fixture.scope, { ...input, modelSnapshot: { ...firstModel, outputCentsPerMillion: 30 } })).rejects.toMatchObject({ code: "CONFLICT" });
+    const settled = await budget.settle(reservation.id, 7);
+    expect(settled.modelSnapshot).toEqual(firstModel);
+  });
+  it("does not reset workspace usage when the chosen model or supplier changes", async () => {
+    const first = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "first-provider", amountCents: 60_000, modelSnapshot: firstModel });
+    await budget.settle(first.id, 60_000);
+    await expect(budget.reserve(fixture.scope, { purpose: "tutor", requestId: "second-provider", amountCents: 40_001, modelSnapshot: secondModel })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+  });
+});

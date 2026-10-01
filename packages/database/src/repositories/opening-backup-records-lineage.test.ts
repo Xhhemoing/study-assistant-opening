@@ -45,7 +45,9 @@ function fakeSql(handler: (call: Call) => unknown[]) {
 }
 
 function queryFor(calls: Call[], table: string): string {
-  return calls.find((call) => call.query.includes(`FROM ${table}`))?.query ?? "";
+  // Memory tombstones are read separately before the content export query.
+  const from = table === "opening_memories" ? "FROM opening_memories m" : `FROM ${table}`;
+  return calls.find((call) => call.query.includes(from))?.query ?? "";
 }
 
 function existsBlocks(sql: string): string[] {

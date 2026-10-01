@@ -232,6 +232,9 @@ describe("opening tutor jobs repository", () => {
 
   it("does not write help exposure when the assistant turn was not persisted", async () => {
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT id FROM workspaces") && !query.includes("privacy_epoch")) return [{ id: scope.workspaceId }];
+      if (query.includes("INSERT INTO opening_workspace_history_revisions")) return [];
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];
       if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) {
         return [{ id: "job-1" }];
       }

@@ -4,9 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningSourceRepository, readOpeningObservationHistory, reviseOpeningLearningObservation, readOpeningCourseEvidence } from "@aistudy/database";
+import { createOpeningSourceRepository, createOpeningLearningRepository, readOpeningObservationHistory, reviseOpeningLearningObservation, readOpeningCourseEvidence } from "@aistudy/database";
 import { composeOpeningBackupDraft } from "@aistudy/domain";
 import { planOpeningRestoreApply } from "../../packages/domain/src/opening/backup-apply-plan";
+import { normalizeOpeningRestoreHistory } from "../../packages/domain/src/opening/backup-policy";
+import { readOpeningCourseLearningHistory } from "../../packages/database/src/repositories/opening-learning-history-read";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { sourceBytes } from "./opening-backup-records-fixture";
@@ -20,7 +22,7 @@ const storage=createOpeningTestStorage(), reader=createOpeningBackupReader(stora
 const objectKeys=new Set<string>();
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
-beforeEach(async () => { await fixture.reset(); await fixture.sql`TRUNCATE opening_learning_sessions, opening_learning_item_versions, opening_learning_history_revisions, opening_source_versions, opening_conversations CASCADE`; });
+beforeEach(async () => { await fixture.reset(); await fixture.sql`TRUNCATE opening_learning_sessions, opening_learning_item_versions, opening_learning_history_revisions, opening_workspace_history_revisions, opening_source_versions, opening_conversations CASCADE`; });
 afterAll(async () => {
   try { for(const key of objectKeys) await storage.deleteObject(key); }
   finally { if(storage.client instanceof S3Client) storage.client.destroy(); await fixture?.close(); }
@@ -53,6 +55,12 @@ it.each([false,true])("restores attempt facts, revision and historical objects i
     expect(records.tables.opening_learning_attempts).toMatchObject([{ id: attempt.id, item_version_id: attempt.itemVersionId }]);
     expect(records.tables.opening_help_exposures).toMatchObject([{ id: exposure.id, attempt_id: attempt.id }]);
     expect(records.tables.opening_learning_observations).toHaveLength(3);
+    // The delivered help exposure is also a learning-semantic fact, so it occupies workspace revision 1
+    // and the three observation facts continue at 2–4 (valid gaps are expected in fixed-R history).
+    expect(records.tables.opening_learning_observations.map(row => row.workspace_history_revision).sort()).toEqual([2, 3, 4]);
+    expect(records.tables.opening_workspace_history_revisions).toEqual([
+      { workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 4 },
+    ]);
     expect(records.tables.opening_learning_observations).toEqual(expect.arrayContaining([expect.objectContaining({ id: observation.id, effective_head_id: retracted.headObservationId, source_versions: { [f.sourceId]: 1 } })]));
     for (const [version,bytes] of [[1,sourceBytes],[2,currentBytes]] as const) {
       if(version===1 && missing) continue;
@@ -79,15 +87,16 @@ it.each([false,true])("restores attempt facts, revision and historical objects i
       expect(availableCourseIds).toEqual([f.courseId]);
       const targetSnapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
       const currentLearningState = { workspacePreferences: targetSnapshot.tables.workspace_preferences[0] ?? null, courses: targetSnapshot.tables.courses };
-      const includedTarget = planOpeningRestoreApply(archive.metadata, [], { confirmLocalRestore: true, availableCourseIds: [], currentLearningState });
+      const currentMemoryDeletions = targetSnapshot.memoryDeletions;
+      const includedTarget = planOpeningRestoreApply(archive.metadata, [], { confirmLocalRestore: true, availableCourseIds: [], currentLearningState, currentMemoryDeletions });
       expect(includedTarget.ok).toBe(true);
       const foreignCourseId = randomUUID();
       const foreignReferences = structuredClone(archive.metadata);
-      const sessionRow = foreignReferences.tables.opening_learning_sessions[0] as Record<string, unknown>;
+      const sessionRow = foreignReferences.tables.opening_learning_sessions![0] as Record<string, unknown>;
       sessionRow.course_id = foreignCourseId;
-      const foreignTarget = planOpeningRestoreApply(foreignReferences, [], { confirmLocalRestore: true, availableCourseIds, currentLearningState });
+      const foreignTarget = planOpeningRestoreApply(foreignReferences, [], { confirmLocalRestore: true, availableCourseIds, currentLearningState, currentMemoryDeletions });
       expect(foreignTarget).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
-      const plan = planOpeningRestoreApply(archive.metadata, [], { confirmLocalRestore: true, availableCourseIds, currentLearningState });
+      const plan = planOpeningRestoreApply(archive.metadata, [], { confirmLocalRestore: true, availableCourseIds, currentLearningState, currentMemoryDeletions });
       expect(plan.ok).toBe(true); if (!plan.ok) return;
       await fixture.sql.begin(async tx => {
         for (const { table } of [...plan.plan.batches].reverse()) await tx.unsafe(`DELETE FROM ${table}`);
@@ -127,4 +136,63 @@ it("preserves unknown historical metadata and filters excluded attempt facts", a
   expect(filtered.tables.opening_learning_attempts).toEqual([]);
   expect(filtered.tables.opening_learning_item_versions).toEqual([]);
   expect(filtered.tables.opening_learning_observations).toEqual([]);
+  expect(filtered.tables.opening_workspace_history_revisions).toEqual(snapshot.tables.opening_workspace_history_revisions);
+});
+
+
+it.each([false, true])("restores interleaved course facts with explicit workspace revisions (legacy=%s)", async legacy => {
+  const learning = createOpeningLearningRepository(fixture.sql);
+  const courseA = randomUUID(), courseB = randomUUID();
+  await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES
+    (${courseA},${fixture.scope.workspaceId},'First course',${courseA}),
+    (${courseB},${fixture.scope.workspaceId},'Second course',${courseB})`;
+  const sessionA = await learning.createSession(fixture.scope, { courseId: courseA, skillLabel: "fractions", sourceIds: [] });
+  const sessionB = await learning.createSession(fixture.scope, { courseId: courseB, skillLabel: "fractions", sourceIds: [] });
+  const insert = (sessionId: string, courseId: string) => learning.insertObservation(fixture.scope, {
+    sessionId, courseId, skillLabel: "fractions", sourceIds: [], answer: "1", outcome: "correct", assistance: "independent", clientKey: randomUUID(),
+  });
+  const first = await insert(sessionA.id, courseA), second = await insert(sessionB.id, courseB);
+  const revised = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+    rootObservationId: first.id, revisesObservationId: first.id, expectedHead: first.id,
+    revisionKind: "replace", reason: "Correct answer", clientKey: randomUUID(),
+    replacement: { answer: "2", outcome: "incorrect", assistance: "independent" },
+  });
+  const records = await readOpeningBackupRecords(fixture.sql, fixture.scope);
+  const revisionById = Object.fromEntries(records.tables.opening_learning_observations.map(row => [String(row.id), row.workspace_history_revision]));
+  expect(revisionById).toEqual({ [first.id]: 1, [second.id]: 2, [revised.headObservationId]: 3 });
+  const composed = composeOpeningBackupDraft({ records, staging: {
+    snapshot: { workspaceId: fixture.scope.workspaceId, privacyEpoch: records.privacyEpoch,
+      deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions, sources: [] },
+    objects: [],
+  } });
+  expect(composed.ok).toBe(true); if (!composed.ok) return;
+  const archived = structuredClone(composed.backup);
+  if (legacy) {
+    delete archived.tables.opening_workspace_history_revisions;
+    for (const row of archived.tables.opening_learning_observations as Record<string, unknown>[]) delete row.workspace_history_revision;
+  }
+  const restoredBackup = normalizeOpeningRestoreHistory(archived);
+  const plan = planOpeningRestoreApply(restoredBackup, records.deletionJournal, { confirmLocalRestore: true,
+    currentLearningState: { workspacePreferences: records.tables.workspace_preferences[0] ?? null, courses: records.tables.courses },
+    currentMemoryDeletions: records.memoryDeletions,
+  });
+  expect(plan.ok, JSON.stringify(plan)).toBe(true); if (!plan.ok) return;
+  expect(plan.plan.batches.map(batch => batch.table)).not.toContain("opening_jobs");
+  expect(plan.plan.batches.map(batch => batch.table)).not.toContain("opening_outbox");
+  await fixture.sql.begin(async tx => {
+    for (const { table } of [...plan.plan.batches].reverse()) await tx.unsafe(`DELETE FROM ${table}`);
+    for (const { table, rows } of plan.plan.batches) if (rows) {
+      await tx.unsafe(`INSERT INTO ${table} SELECT * FROM json_populate_recordset(NULL::${table}, $1::text::json)`, [JSON.stringify(restoredBackup.tables[table])]);
+    }
+  });
+  const counter = legacy ? 0 : 3;
+  expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions
+    WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`)
+    .toEqual([{ revision: String(counter) }]);
+  const history = await readOpeningCourseLearningHistory(fixture.sql, fixture.scope, { courseId: courseA, limit: 50 });
+  expect(history).toMatchObject({ snapshotRevision: counter, totalCount: 1 });
+  expect(history.observations.map(row => row.id)).toEqual([revised.headObservationId]);
+  const next = await insert(sessionB.id, courseB);
+  expect(await fixture.sql`SELECT workspace_history_revision FROM opening_learning_observations WHERE id=${next.id}`)
+    .toEqual([{ workspace_history_revision: String(counter + 1) }]);
 });

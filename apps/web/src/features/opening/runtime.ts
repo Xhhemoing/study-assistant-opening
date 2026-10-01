@@ -26,8 +26,8 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
-import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
-import { createOpeningProvider } from "@aistudy/ai";
+import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
+import { resolveTutorModel } from "../../../../worker/src/runtime/tutor-model";
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -90,23 +90,11 @@ export function setEphemeralTutorDepsForTests(
 }
 
 export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
-  const model = ephemeralOverride ? null : loadOpeningModel();
-  const tutor = ephemeralOverride?.config ?? {
-    ...loadOpeningTutorConfig(),
-    inputCentsPerMillion: model?.inputCentsPerMillion ?? 0,
-    outputCentsPerMillion: model?.outputCentsPerMillion ?? 0,
-  };
-  const provider = ephemeralOverride
-    ? ephemeralOverride.provider
-    : model && model.apiKey && model.dailyCapCents > 0
-      ? createOpeningProvider({
-        baseUrl: model.baseUrl,
-        apiKey: model.apiKey,
-        model: model.name,
-      })
-      : null;
+  const override = ephemeralOverride;
+  const catalog = override ? null : loadOpeningModelCatalog();
+  const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
-    dailyCapCents: model?.dailyCapCents ?? 100_000,
+    dailyCapCents: catalog?.dailyCapCents ?? 100_000,
   });
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
@@ -121,6 +109,7 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   });
   return {
     replyEphemeral(scope, input, signal) {
+
       return createEphemeralTutorService({
         sources: {
           listOwnedIds: async (ownedScope, sourceIds) => {
@@ -148,7 +137,8 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
           settle: (reservationId, actualCents) => budgetRepo.settle(reservationId, actualCents),
           markUnknown: (reservationId) => budgetRepo.markUnknown(reservationId),
         },
-        provider,
+        provider: override?.provider ?? null,
+        resolveModel: override ? undefined : (ownedScope, mode) => resolveTutorModel(sql, ownedScope, mode),
         config: tutor,
       }).replyEphemeral(scope, input, signal);
     },

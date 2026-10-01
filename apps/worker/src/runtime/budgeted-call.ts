@@ -1,4 +1,4 @@
-import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
+import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { OpeningProviderError } from "@aistudy/ai";
 
 export type BudgetedProvider = {
@@ -8,6 +8,7 @@ export type BudgetedProvider = {
 export type BudgetedRepository = {
   reserve(input: {
     purpose: string;
+    modelSnapshot?: OpeningModelSnapshot;
     amountCents: number;
     requestId: string;
   }): Promise<{ id: string }>;
@@ -17,6 +18,7 @@ export type BudgetedRepository = {
 };
 
 export type BudgetedCallOptions = {
+  modelSnapshot?: OpeningModelSnapshot;
   provider: BudgetedProvider | null;
   budget: BudgetedRepository;
   input: ProviderInput;
@@ -51,6 +53,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   }
   const reservation = await options.budget.reserve({
     purpose: "tutor",
+    ...(options.modelSnapshot ? { modelSnapshot: options.modelSnapshot } : {}),
     amountCents: options.reservedCents,
     requestId: options.requestId,
   });

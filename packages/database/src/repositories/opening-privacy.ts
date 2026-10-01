@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 export type PrivacyExclusion = {
   workspaceId: string;
@@ -57,21 +59,34 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
       return rows.map(row => String(row.source_id));
     },
 
+    /** Owns the transaction so callers cannot acquire the workspace lock before its semantic counter. */
     async recordExclusions(
-      tx: Sql,
+      db: Sql,
       scope: OpeningScope,
       input: { sourceIds: string[]; memoryId: string; deletedAt: Date },
     ): Promise<string[]> {
-      const recorded: string[] = [];
-      for (const sourceId of [...new Set(input.sourceIds)]) {
-        await tx`
-          INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at)
-          VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, ${input.memoryId}, ${input.deletedAt})
-          ON CONFLICT (workspace_id, source_id) DO NOTHING
-          RETURNING source_id`;
-        recorded.push(sourceId);
-      }
-      return recorded;
+      const sourceIds = [...new Set(input.sourceIds)];
+      if (!sourceIds.length) return [];
+      return db.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        const recorded: string[] = [];
+        for (const sourceId of sourceIds) {
+          const inserted = await tx`
+            INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at)
+            VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, ${input.memoryId}, ${input.deletedAt})
+            ON CONFLICT (workspace_id, source_id) DO NOTHING
+            RETURNING source_id`;
+          if (inserted.length) recorded.push(sourceId);
+        }
+        if (recorded.length) {
+          await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now() WHERE id=${scope.workspaceId}`;
+          await nextWorkspaceLearningHistoryRevision(tx, scope);
+          await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: recorded });
+        }
+        return sourceIds;
+      });
     },
   };
 }

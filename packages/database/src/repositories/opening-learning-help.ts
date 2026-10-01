@@ -1,6 +1,7 @@
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import type { TransactionSql } from "postgres";
 import type { HelpExposure, Scope } from "@aistudy/contracts";
-import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, nextLearningHistoryRevision } from "./opening-learning-facts";
+import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 /** Called after the completed assistant turn is persisted, in that same transaction. */
 export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scope, input: Omit<HelpExposure, "createdAt"> & { createdAt?: string }): Promise<HelpExposure> {
@@ -22,5 +23,12 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
   const revision = await nextLearningHistoryRevision(tx, scope, String(session.course_id));
   const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision)
     VALUES (${input.id},${scope.workspaceId},${input.sessionId},${problemId},${input.turnId},${input.level},TRUE,${input.attemptId ?? null},clock_timestamp(),${revision}) RETURNING *`;
+  await nextWorkspaceLearningHistoryRevision(tx, scope);
+  const affected = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
+    JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND origin.course_id=${session.course_id}
+      AND (o.attempt_id=${input.attemptId ?? null} OR o.problem_id=${problemId}
+        OR (${input.attemptId == null && problemId == null} AND o.session_id=${input.sessionId}))`;
+  await invalidateOpeningLearningEligibility(tx, scope, { rootIds: affected.map(row => String(row.root_id)) });
   return { ...input, problemId, createdAt: learningIso(rows[0]!.created_at)!, deliveredAt: learningIso(rows[0]!.delivered_at), historyRevision: revision };
 }

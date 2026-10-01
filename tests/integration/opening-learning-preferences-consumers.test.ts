@@ -118,6 +118,7 @@ describe("learning preference consumers", () => {
     expect(visible.reminders.some((item) => item.taskId === manualTask.id)).toBe(true);
     const sent: string[] = [];
     const handler = createRemindHandler({
+      externalConfig: job => reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
       record: (id, input) => reminders.recordAttempt(id, input),
       isCurrent: (id, at) => reminders.isCurrent(id, at),
       send: async (input) => { sent.push(input.text); return { receiptId: `receipt-${sent.length}` }; },
@@ -185,6 +186,105 @@ function reminderJob(row: Record<string, unknown>) {
     state: String(row.state), privacyEpoch: Number(row.privacy_epoch),
   };
 }
+
+it.each([
+  ["account", "in_app"], ["course", "in_app"], ["archive", "in_app"],
+  ["account", "feishu"], ["course", "feishu"], ["archive", "feishu"],
+] as const)("permits only the explicitly selected %s-closed retest occurrence on %s", async (boundary, channel) => {
+  const f = await acceptedReminder();
+  const plans = createOpeningPlansRepository(fixture.sql);
+  const activities = createOpeningRetestActivityRepository(fixture.sql);
+  const unrelated = await plans.createTask(fixture.scope, {
+    title: "Unrelated old retest", minutes: 20, dueAt, priority: 1, candidateId: null, clientKey: randomUUID(),
+  });
+  const otherActivity = await activities.createProposed(fixture.scope, {
+    cycleId: randomUUID(), taskId: unrelated.id, courseId: f.courseId, skillLabel: "fractions",
+    proposedAt: dueAt, recommendedAt: dueAt,
+  });
+  await activities.accept(fixture.scope, otherActivity.activityId, unrelated.id, new Date().toISOString());
+  const automatic = await f.reminders.enqueue(fixture.scope, { clientKey: randomUUID(), channel: "feishu" });
+  const oldOther = automatic.find(item => item.taskId === unrelated.id)!;
+  expect(oldOther).toBeDefined();
+  await changeAutomation(f.courseId, boundary, false);
+  const preferences = () => fixture.sql`SELECT c.archived_at,c.automatic_reminders_enabled AS course_reminders,
+    p.automatic_reminders_enabled AS account_reminders FROM courses c
+    JOIN workspace_preferences p ON p.workspace_id=c.workspace_id WHERE c.id=${f.courseId}`;
+  const before = await preferences();
+  const claimed = await f.reminders.claimDue(100);
+  const suppressed = claimed.find(row => row.id === f.reminder.id)!;
+  const sends: string[] = [];
+  const worker = createRemindHandler({
+    isCurrent: (id, at) => f.reminders.isCurrent(id, at),
+    externalConfig: job => f.reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
+    record: (id, input) => f.reminders.recordAttempt(id, input),
+    send: async input => { sends.push(input.text); return { receiptId: "explicit-receipt" }; },
+  });
+  expect(await worker(reminderJob(suppressed), suppressed.payload)).toMatchObject({ suppressed: true });
+  const input = { clientKey: randomUUID(), taskId: f.task.id, expectedVersion: f.task.version!, channel };
+  const explicit = await f.reminders.enqueue(fixture.scope, input);
+  expect(explicit).toMatchObject([{ taskId: f.task.id, taskVersion: f.task.version }]);
+  if (channel === "feishu") expect(explicit[0]!.id).toBe(f.reminder.id);
+  const replay = await f.reminders.enqueue(fixture.scope, { ...input, clientKey: randomUUID() });
+  expect(replay[0]!.id).toBe(explicit[0]!.id);
+  const visible = (await f.reminders.list(fixture.scope)).reminders;
+  expect(visible.some(item => item.id === explicit[0]!.id)).toBe(true);
+  expect(visible.some(item => item.taskId === unrelated.id)).toBe(false);
+  const [otherJob] = await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${oldOther.id}`;
+  expect(otherJob!.payload.explicitDue).toBeUndefined();
+  expect(await f.reminders.isCurrent(oldOther.id)).toBe(false);
+  const next = (await f.reminders.claimDue(100)).find(row => row.id === explicit[0]!.id)!;
+  expect(next).toBeDefined();
+  expect(await worker(reminderJob(next), next.payload)).toMatchObject({ status: channel === "in_app" ? "due" : "sent" });
+  expect(sends).toEqual(channel === "in_app" ? [] : [f.task.title]);
+  expect(await preferences()).toEqual(before);
+  expect((await f.reminders.enqueue(fixture.scope, { clientKey: randomUUID(), channel: "feishu" }))
+    .some(item => item.taskId === f.task.id || item.taskId === unrelated.id)).toBe(false);
+});
+
+it.each(["acknowledged", "unknown"] as const)("does not resend a prior %s result after an explicit request", async outcome => {
+  const f = await acceptedReminder();
+  await f.reminders.claimDue(100);
+  await f.reminders.recordAttempt(f.reminder.id, {
+    state: outcome === "unknown" ? "outcome_unknown" : "succeeded",
+    outcome, receiptId: outcome === "acknowledged" ? "prior-receipt" : null,
+  });
+  await changeAutomation(f.courseId, "archive", false);
+  const [before] = await fixture.sql`SELECT state,payload,result FROM opening_jobs WHERE id=${f.reminder.id}`;
+  expect(await f.reminders.enqueue(fixture.scope, {
+    clientKey: randomUUID(), taskId: f.task.id, expectedVersion: f.task.version!, channel: "feishu",
+  })).toMatchObject([{ id: f.reminder.id, outcome }]);
+  const [after] = await fixture.sql`SELECT state,payload,result FROM opening_jobs WHERE id=${f.reminder.id}`;
+  expect(after).toEqual(before);
+  expect((await f.reminders.claimDue(100)).some(row => row.id === f.reminder.id)).toBe(false);
+});
+
+it.each(["done", "cancelled", "snoozed", "version"] as const)(
+  "rechecks an explicit current occurrence after it becomes %s", async change => {
+    const f = await acceptedReminder();
+    await changeAutomation(f.courseId, "archive", false);
+    await f.reminders.enqueue(fixture.scope, {
+      clientKey: randomUUID(), taskId: f.task.id, expectedVersion: f.task.version!, channel: "feishu",
+    });
+    await f.reminders.claimDue(100);
+    expect(await f.reminders.isCurrent(f.reminder.id)).toBe(true);
+    if (change === "done") {
+      await createOpeningPlansRepository(fixture.sql).updateTaskStatus(fixture.scope, f.task.id, {
+        status: "done", expectedVersion: f.task.version!, at: new Date().toISOString(),
+      });
+    } else if (change === "version") {
+      await fixture.sql`UPDATE opening_tasks SET version=version+1 WHERE id=${f.task.id}`;
+    } else {
+      await createOpeningRetestActivityRepository(fixture.sql).transition(fixture.scope, f.proposed.activityId,
+        change === "cancelled" ? { type: "skip", at: new Date().toISOString() }
+          : { type: "snooze", until: new Date(Date.now()+86_400_000).toISOString() });
+    }
+    expect(await f.reminders.isCurrent(f.reminder.id)).toBe(false);
+    expect((await f.reminders.list(fixture.scope)).reminders.some(item => item.id === f.reminder.id)).toBe(false);
+    await expect(f.reminders.enqueue(fixture.scope, {
+      clientKey: randomUUID(), taskId: f.task.id, expectedVersion: f.task.version!, channel: "feishu",
+    })).rejects.toMatchObject({ code: change === "done" || change === "version" ? "CONFLICT" : "VALIDATION" });
+  },
+);
 
 it.each(["default entry", "course title", "same preferences"] as const)(
   "keeps queued candidates and reminders valid after changing %s",
@@ -271,6 +371,7 @@ it.each([
   const worker = createRemindHandler({
     isCurrent: (id, at) => f.reminders.isCurrent(id, at),
     record: (id, input) => f.reminders.recordAttempt(id, input),
+    externalConfig: (job) => f.reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
     send: async () => {
       await changeAutomation(f.courseId, boundary, false);
       return outcome === "acknowledged" ? { receiptId: "delivered-before-shutdown" } : { error: "unknown" };
@@ -399,10 +500,10 @@ it.each(["completion", "enqueue"] as const)("serializes reminder enqueue and tas
     const complete = (sql: Sql) => createOpeningPlansRepository(sql).updateTaskStatus(context.scope, f.task.id, {
       status: "done", expectedVersion: 1, at: new Date().toISOString(),
     });
-    const winner = track(first === "completion" ? complete(gated) : enqueue(gated));
+    const winner = track<unknown>(first === "completion" ? complete(gated) : enqueue(gated));
     pending.push(winner);
     await Promise.race([opened, winner.then(() => { throw new Error("commit barrier bypassed"); })]);
-    const loser = track(first === "completion" ? enqueue(b.sql) : complete(b.sql));
+    const loser = track<unknown>(first === "completion" ? enqueue(b.sql) : complete(b.sql));
     pending.push(loser);
     await waitUntilBlocked(context.sql, b.pid, a.pid, "reminder task mutation", /opening_retest_activities[\s\S]*FOR UPDATE/);
     release();

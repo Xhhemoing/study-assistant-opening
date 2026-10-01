@@ -31,6 +31,19 @@ function fakeSql(handler: (call: Call) => unknown[]) {
 }
 
 describe("readOpeningBackupSources", () => {
+  it("projects independent memory tombstones without their retained bodies", async () => {
+    const memoryId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sql = fakeSql(call => {
+      if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 3 }];
+      if (call.query.includes("FROM opening_memories")) return [{ id: memoryId.toUpperCase(),
+        updated_at: new Date("2026-09-30T00:00:00.000Z"), text: "retained private body" }];
+      return [];
+    });
+    const snapshot = await readOpeningBackupSources(sql, scope);
+    expect(snapshot.memoryDeletions).toEqual({ workspaceId,
+      memories: [{ memoryId, deletedAt: "2026-09-30T00:00:00.000Z" }] });
+    expect(JSON.stringify(snapshot)).not.toContain("retained private body");
+  });
   it("uses exactly one repeatable read, read only transaction", async () => {
     const sql = fakeSql((call) => {
       if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 2 }];
@@ -71,6 +84,7 @@ describe("readOpeningBackupSources", () => {
       if (call.query.includes("opening_privacy_exclusions")) {
         return [{ source_id: excludedId, deleted_at: new Date("2026-09-21T00:00:00.000Z") }];
       }
+      if (call.query.includes("FROM opening_memories")) return [];
       throw new Error(`unexpected query: ${call.query}`);
     });
 
@@ -86,6 +100,7 @@ describe("readOpeningBackupSources", () => {
     expect(snapshot).toEqual({
       workspaceId,
       privacyEpoch: 4,
+      memoryDeletions: { workspaceId, memories: [] },
       deletionJournal: [{ sourceId: excludedId, deletedAt: "2026-09-21T00:00:00.000Z" }],
       sources: [{ sourceId: exportedId, version: 3, bytes: 12, sha256: "ab".repeat(32) }],
     });

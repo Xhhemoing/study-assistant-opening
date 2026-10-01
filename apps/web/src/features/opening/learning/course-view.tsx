@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createOpeningLearningClient } from "../client/learning-client";
+import { summarizeLearningAggregate } from "@aistudy/domain";
 import { LearningAttemptForm } from "./attempt-form";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
-import { ObservationRevisionCard } from "./observation-revision-card";
-import type { LearningObservation, LearningSummary } from "@aistudy/contracts";
+import { CourseHistory } from "./course-history";
+import { createCourseSummaryController, emptyCourseSummary, type CourseSummaryState } from "./course-summary-state";
+import { LoadError, secondaryButtonClass } from "../design/ui";
+import type { LearningSummary } from "@aistudy/contracts";
+import type { LearningSummaryAggregate } from "@aistudy/contracts";
 
 const STATUS_LABEL: Record<LearningSummary["status"], string> = {
   unobserved: "尚无观察",
@@ -20,58 +24,137 @@ const SOURCE_LABEL: Record<string, string> = {
   unknown: "未知",
 };
 
+function resultLabel(item: LearningSummary): string {
+  if (item.recentPerformance && item.status === "observed_independent") return "最近观察到独立完成";
+  if (item.recentPerformance && item.status === "needs_check") return "最近一次需要核验";
+  return STATUS_LABEL[item.status];
+}
+
+function nextStep(item: LearningSummary): string {
+  if (item.status === "needs_review") return item.recentPerformance?.status === "observed_independent"
+    ? "近期已有独立完成观察；仍需完成到期复习，确认间隔后的表现。"
+    : "完成到期复习，确认间隔后的表现。";
+  if (item.status === "observed_independent") return "换一道题独立完成，继续确认；一次成功不代表掌握。";
+  if (item.status === "needs_check") return "先查看来源与资格，确认记录后再继续练习。";
+  return "先完成一次自己的尝试，再记录结果。";
+}
+
 export function CourseLearningView({ courseId }: { courseId: string }) {
-  const [summary, setSummary] = useState<LearningSummary[]>([]);
-  const [observations, setObservations] = useState<LearningObservation[]>([]);
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
 
-  useEffect(() => {
-    let active = true;
-    setState("loading");
-    const client = createOpeningLearningClient();
-    void Promise.all([client.getSummary(courseId), client.listObservations(courseId)]).then(([next, records]) => {
-      if (!active) return;
-      setSummary(next);
-      setObservations(records);
-      setState("ready");
-    }).catch((reason: unknown) => {
-      if (!active) return;
-      setError(reason instanceof Error ? reason.message : "学习证据暂时无法读取");
-      setState("error");
-    });
-    return () => { active = false; };
-  }, [courseId, revision]);
-
   return (
-    <section className="space-y-3 border-t border-zinc-200 pt-6" aria-labelledby="opening-learning-heading">
+    <div className="space-y-6">
+      <section id="course-practice" className="scroll-mt-6 space-y-3" aria-labelledby="course-practice-heading">
+        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-zinc-800">独立练习</h2><p className="mt-1 text-xs leading-6 text-zinc-500">选一个主题，用自己的话回忆或完成一道题；先保留自己的尝试，需要时再使用练习辅导。</p></div>
+        <LearningAttemptForm key={courseId} courseId={courseId} onRecorded={() => setRevision((value) => value + 1)} />
+      </section>
+      <CourseSummaryPanel key={`${courseId}:${revision}`} courseId={courseId} />
+    </div>
+  );
+}
+
+const aggregateStatusLabel: Record<ReturnType<typeof summarizeLearningAggregate>["recentComparableEvidence"]["status"], string> = {
+  unobserved: "尚无可用观察",
+  needs_check: "需要核验当前证据",
+  observed_independent: "近期观察到独立完成",
+};
+
+function aggregateNextStep(summary: ReturnType<typeof summarizeLearningAggregate>): string {
+  if (summary.nextAction === "complete_due_check") return "有到期核验，请先完成核验活动。";
+  if (summary.nextAction === "continue_check") return "已有进行中的核验，完成后再读取新的结论。";
+  if (summary.nextAction === "record_attempt") return "先完成一次自己的尝试，再记录结果。";
+  if (summary.nextAction === "continue_independent") return "换一道题独立完成，继续确认；一次成功不代表掌握。";
+  return "先查看来源与资格，确认记录后再继续练习。";
+}
+
+function SummaryGroup({ group }: { group: LearningSummaryAggregate }) {
+  const conclusion = summarizeLearningAggregate(group);
+  const sourceLabels = group.evidenceSources.join("、") || "无";
+  return <li className="space-y-2 border-b border-zinc-200 py-4 last:border-b-0">
+    <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <h3 className="min-w-0 text-sm font-medium text-zinc-800">{group.identity.skillLabel}</h3>
+      <span className="text-xs text-zinc-500">{aggregateStatusLabel[conclusion.recentComparableEvidence.status]} · {group.sampleCount} 条观察</span>
+    </div>
+    <p className="text-xs leading-6 text-zinc-600">{aggregateNextStep(conclusion)} <a href="#course-practice" className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
+    <details className="text-xs text-zinc-500">
+      <summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">查看来源、资格与核验计数</summary>
+      <dl className="grid gap-1 py-2 leading-5 sm:grid-cols-2">
+        <div><dt className="inline">近期可比较证据：</dt><dd className="inline">{conclusion.recentComparableEvidence.qualifiedCount} / {conclusion.recentComparableEvidence.evidenceCount} 条符合资格</dd></div>
+        <div><dt className="inline">更早的独立核验正确：</dt><dd className="inline">{conclusion.historicalSuccess.count} 条</dd></div>
+        <div><dt className="inline">适用性：</dt><dd className="inline">精确 {group.applicabilityCounts.exact} · 等价 {group.applicabilityCounts.equivalent_confirmed} · 需重新核验 {group.applicabilityCounts.changed_needs_check} · 版本未知 {group.applicabilityCounts.version_unknown} · 不可用 {group.applicabilityCounts.unavailable}</dd></div>
+        <div><dt className="inline">核验活动：</dt><dd className="inline">已接受 {group.openChecks.acceptedCount} · 进行中 {group.openChecks.inProgressCount} · 到期 {group.openChecks.dueCount}</dd></div>
+      </dl>
+      <p className="py-1 leading-5">证据来源：{sourceLabels} · {group.representatives.length ? `${group.representatives.length} 条代表证据` : "无代表证据"}</p>
+      {group.representatives.map((representative, index) => <div key={representative.observationId} className="py-1"><span>代表观察 {index + 1}</span><LearningEvidenceEligibilityDetails eligibility={representative.eligibility} versionApplicability={representative.versionApplicability} /></div>)}
+      {!group.representatives.length ? <p className="py-1">资格信息尚未提供，保留待核验。</p> : null}
+    </details>
+  </li>;
+}
+
+export function CourseSummaryNotice({ state, onRefresh }: { state: CourseSummaryState; onRefresh: () => void }) {
+  if (!state.notice) return null;
+  const stalled = state.status === "updating" && state.notice.includes("手动刷新");
+  return <div className="flex flex-wrap items-center gap-3" role="status">
+    <p className="text-xs leading-6 text-amber-800">{state.notice}</p>
+    {stalled ? <button type="button" className={secondaryButtonClass} onClick={onRefresh}>刷新摘要</button> : null}
+  </div>;
+}
+
+export function CourseSummaryPanel({ courseId }: { courseId: string }) {
+  const [state, setState] = useState<CourseSummaryState>(emptyCourseSummary);
+  const controller = useMemo(() => createCourseSummaryController(createOpeningLearningClient().getSummaryPage,
+    { courseId }, setState), [courseId]);
+  useEffect(() => { void controller.start(); return () => controller.cancel(); }, [controller]);
+  const requirements = [...new Set(state.groups.flatMap(group => group.identity.requirementKey === null ? [] : [group.identity.requirementKey]))];
+  const busy = state.status === "loading" || state.status === "loading_more";
+  return <section id="course-learning-records" className="scroll-mt-6 space-y-3 border-t border-zinc-200 pt-5" aria-labelledby="opening-learning-heading">
+    <div><h2 id="opening-learning-heading" className="text-sm font-semibold text-zinc-800">学习记录与证据</h2><p className="mt-1 text-sm leading-6 text-zinc-500">这里展示固定快照中的完整分组计数与有限代表证据，不把一次回答当作掌握证明。</p></div>
+    {state.status === "loading" || state.status === "idle" ? <p className="text-sm text-zinc-500" role="status">正在读取学习证据…</p> : null}
+    {state.status === "updating" ? <p className="text-sm text-amber-800" role="status">正在更新当前页的证据资格{state.pendingProjectionCount ? `（剩余 ${state.pendingProjectionCount} 条）` : ""}，完成后再显示结论。</p> : null}
+    <CourseSummaryNotice state={state} onRefresh={() => void controller.refresh()} />
+    {state.status === "error" ? <LoadError message={state.error} onRetry={() => void controller.refresh()} /> : null}
+    {state.status === "ready" && state.groups.length === 0 ? <p className="text-sm text-zinc-500">这门课程目前没有生效的学习观察。</p> : null}
+    {state.status === "ready" && state.groups.length > 0 ? <ul className="divide-y divide-zinc-200 border-y border-zinc-200">{state.groups.map(group => <SummaryGroup key={JSON.stringify([group.identity.skillLabel, group.identity.requirementKey])} group={group} />)}</ul> : null}
+    {state.status === "ready" && state.nextCursor ? <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => void controller.loadMore()}>{busy ? "正在读取下一页…" : "继续加载摘要分组"}</button> : null}
+    <CourseHistory key={courseId} courseId={courseId} requirements={requirements} onChanged={() => void controller.refresh()} />
+  </section>;
+}
+
+export function CourseLearningRecords({ courseId, state, error, summary, onReload }: {
+  courseId: string;
+  state: "loading" | "ready" | "error";
+  error: string;
+  summary: LearningSummary[];
+  onReload: () => void;
+}) {
+  return (
+    <section id="course-learning-records" className="scroll-mt-6 space-y-3 border-t border-zinc-200 pt-5" aria-labelledby="opening-learning-heading">
       <div>
-        <h2 id="opening-learning-heading" className="text-base font-semibold text-zinc-800">学习证据</h2>
+        <h2 id="opening-learning-heading" className="text-sm font-semibold text-zinc-800">学习记录与证据</h2>
         <p className="mt-1 text-sm leading-6 text-zinc-500">这里展示服务器记录的观察，不把一次回答当作掌握证明。</p>
       </div>
       {state === "loading" ? <p className="text-sm text-zinc-500" role="status">正在读取学习证据…</p> : null}
-      {state === "error" ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
+      {state === "error" ? <LoadError message={error} onRetry={onReload} /> : null}
       {state === "ready" && summary.length === 0 ? <p className="text-sm text-zinc-500">这门课程目前没有生效的学习观察。</p> : null}
       {state === "ready" && summary.length > 0 ? (
         <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
           {summary.map((item) => (
             <li key={`${item.courseId ?? courseId}:${item.requirementKey ?? ""}:${item.skillLabel}`} className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-3">
               <span className="min-w-0 text-sm font-medium text-zinc-800">{item.skillLabel}</span>
-              <span className="text-xs text-zinc-500">{STATUS_LABEL[item.status]} · {item.sampleCount} 条观察</span>
-              <span className="w-full text-xs text-zinc-500">证据来源：{item.evidenceSources?.map((source) => SOURCE_LABEL[source] ?? source).join("、") || "无"} · {item.evidenceIds.length ? `${item.evidenceIds.length} 条服务器记录` : "无"}</span>
-              {item.evidenceEligibility?.map(({ observationId, eligibility, versionApplicability }, index) => <div key={observationId} className="w-full"><span className="text-xs text-zinc-500">观察 {index + 1}</span><LearningEvidenceEligibilityDetails eligibility={eligibility} versionApplicability={versionApplicability} /></div>)}
-              {!item.evidenceEligibility?.length ? <p className="w-full text-xs text-zinc-500">资格信息尚未提供，保留待核验。</p> : null}
+              <span className="text-xs text-zinc-500">{resultLabel(item)} · {item.sampleCount} 条观察</span>
+              <p className="w-full text-xs leading-6 text-zinc-600">{nextStep(item)} <a href="#course-practice" className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
+              <details className="w-full text-xs text-zinc-500"><summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">查看来源与资格</summary>
+                {item.recentPerformance ? <p className="py-2 leading-5">近期结果依据最近的 {item.recentPerformance.evidenceCount ?? item.recentPerformance.evidenceIds.length} 条原始作答；纠正记录不增加练习次数。</p> : null}
+                {item.historicalIncorrectCount !== undefined && item.unverifiedCount !== undefined ? <p className="py-2 leading-5">更早的记录中有 {item.historicalIncorrectCount} 条核验错误；当前共 {item.unverifiedCount} 条记录尚未核验。历史仍可查看。</p> : null}
+                <p className="py-2 leading-5">证据来源：{item.evidenceSources?.map((source) => SOURCE_LABEL[source] ?? source).join("、") || "无"} · {item.evidenceIds.length ? `${item.evidenceIds.length} 条代表证据` : "无"}</p>
+                {item.evidenceEligibility?.map(({ observationId, eligibility, versionApplicability }, index) => <div key={observationId} className="py-1"><span className="text-xs text-zinc-500">{item.recentPerformance?.evidenceIds.includes(observationId) ? "最近代表观察" : "代表观察"} {index + 1}</span><LearningEvidenceEligibilityDetails eligibility={eligibility} versionApplicability={versionApplicability} /></div>)}
+                {!item.evidenceEligibility?.length ? <p className="text-xs text-zinc-500">资格信息尚未提供，保留待核验。</p> : null}
+              </details>
             </li>
           ))}
         </ul>
       ) : null}
-      {state === "ready" && observations.length > 0 ? <section className="space-y-3" aria-labelledby="opening-observations-heading">
-        <h3 id="opening-observations-heading" className="text-sm font-semibold text-zinc-800">已保存的观察</h3>
-        <p className="text-xs leading-5 text-zinc-500">每次原练习只计当前生效版本。纠正和撤回保留历史，不增加练习次数。</p>
-        {observations.map((record) => <ObservationRevisionCard key={record.rootObservationId ?? record.id} record={record} onChanged={() => setRevision((value) => value + 1)} />)}
-      </section> : null}
-      <LearningAttemptForm key={courseId} courseId={courseId} onRecorded={() => setRevision((value) => value + 1)} />
+      <CourseHistory key={courseId} courseId={courseId} requirements={[...new Set(summary.flatMap(item => item.requirementKey == null ? [] : [item.requirementKey]))]} onChanged={onReload} />
     </section>
   );
 }

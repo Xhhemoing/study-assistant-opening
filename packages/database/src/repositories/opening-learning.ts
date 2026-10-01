@@ -1,7 +1,8 @@
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { HelpExposure, LearningObservation, LearningSessionCreateInput, ObservationInput, ObservationRevisionInput, ProblemRef, Scope } from "@aistudy/contracts";
-import { admitLearningSources, learningError, lockLearningOwner, lockLearningSession, mapLearningObservation } from "./opening-learning-facts";
+import { admitLearningSources, learningError, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, mapLearningObservation } from "./opening-learning-facts";
 import { reviseOpeningLearningObservation, readOpeningObservationHistory } from "./opening-observation-revisions";
 import { insertOpeningLearningObservation } from "./opening-learning-observations";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
@@ -38,18 +39,30 @@ export function createOpeningLearningRepository(sql: Sql) {
     },
     async upsertProblemRef(scope: Scope, ref: ProblemRef & { sessionId: string }): Promise<void> {
       await sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         const session = await lockLearningSession(tx, scope, ref.sessionId);
         if (!(session.source_ids as string[]).includes(ref.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
         await admitLearningSources(tx, scope, [ref.sourceId]);
-        await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
+        const changed = await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
           VALUES (${ref.problemId},${scope.workspaceId},${ref.sessionId},${ref.sourceId},${ref.sourceVersion},${ref.physicalPage},${ref.chunkId},${ref.stemSnapshot},${ref.artifactKind})
           ON CONFLICT(problem_id) DO UPDATE SET source_id=EXCLUDED.source_id,source_version=EXCLUDED.source_version,physical_page=EXCLUDED.physical_page,
             chunk_id=EXCLUDED.chunk_id,stem_snapshot=EXCLUDED.stem_snapshot,artifact_kind=EXCLUDED.artifact_kind,session_id=EXCLUDED.session_id,updated_at=now()
-          WHERE opening_problem_refs.workspace_id=${scope.workspaceId}`;
+          WHERE opening_problem_refs.workspace_id=${scope.workspaceId}
+            AND (opening_problem_refs.source_id,opening_problem_refs.source_version,opening_problem_refs.physical_page,opening_problem_refs.chunk_id,
+              opening_problem_refs.stem_snapshot,opening_problem_refs.artifact_kind,opening_problem_refs.session_id)
+              IS DISTINCT FROM (EXCLUDED.source_id,EXCLUDED.source_version,EXCLUDED.physical_page,EXCLUDED.chunk_id,EXCLUDED.stem_snapshot,EXCLUDED.artifact_kind,EXCLUDED.session_id)
+          RETURNING problem_id`;
+        if (changed.length) {
+          await nextWorkspaceLearningHistoryRevision(tx, scope);
+          const roots = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
+            JOIN opening_learning_item_versions v ON v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
+            WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND v.problem_id=${ref.problemId}`;
+          await invalidateOpeningLearningEligibility(tx, scope, { rootIds: roots.map(row => String(row.root_id)) });
+        }
       });
     },
     async insertHelpExposure(scope: Scope, exposure: Omit<HelpExposure, "createdAt"> & { createdAt?: string }): Promise<HelpExposure> {
-      return sql.begin((tx) => insertOpeningDeliveredHelp(tx, scope, exposure));
+      return sql.begin(async (tx) => { await lockWorkspaceLearningHistory(tx, scope); return insertOpeningDeliveredHelp(tx, scope, exposure); });
     },
     async listDeliveredExposures(scope: Scope, sessionId: string): Promise<Array<"hinted" | "revealed">> {
       if (!await getSession(scope, sessionId)) throw learningError("NOT_FOUND", "session not found");

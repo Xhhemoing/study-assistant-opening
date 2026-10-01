@@ -7,8 +7,8 @@ const scope = { workspaceId: "10000000-0000-4000-8000-000000000001", ownerUserId
 const privateId = "10000000-0000-4000-8000-000000000003";
 const publicId = "10000000-0000-4000-8000-000000000004";
 const output: ProviderOutput = { text: "answer", candidates: [], citedChunkIds: [], requestId: "provider-id", inputTokens: 2, outputTokens: 1 };
-const input = { text: "question", sourceIds: [], mode: "listen" as const, history: [] };
-const oldHistory = [{ role: "assistant" as const, text: "OLD-PRIVATE-HISTORY" }];
+const input = { text: "allowed question", sourceIds: [], mode: "listen" as const, history: [] };
+const oldHistory = [{ role: "assistant" as const, text: "OLD-PRIVATE-HISTORY", provenanceId: "20000000-0000-4000-8000-000000000009" }];
 function fixture() {
   const state = { epoch: 2, excluded: [privateId] };
   const sourceChunks = [privateId, publicId].map((sourceId, index): SourceChunk => ({
@@ -24,13 +24,17 @@ function fixture() {
     snapshot: vi.fn(async () => ({ epoch: state.epoch, excludedSourceIds: [...state.excluded] })),
     currentEpoch: vi.fn(async () => state.epoch),
   };
+  const provenance = {
+    resolveHistory: vi.fn(async () => []),
+    record: vi.fn(async () => "30000000-0000-4000-8000-000000000001"),
+  };
   const service = createEphemeralTutorService({
     sources: { listOwnedIds: async (_scope, ids) => ids.filter(id => [privateId, publicId].includes(id.toLowerCase())) },
     chunks: { listForSources: async (_scope, ids) => sourceChunks.filter(chunk => ids.map(id => id.toLowerCase()).includes(chunk.sourceId)) },
-    privacy, budget, provider: { complete }, requestKey: () => "ephemeral-request",
+    privacy, budget, provider: { complete }, requestKey: () => "ephemeral-request", provenance,
     config: { maxContextCharacters: 12_000, reservedCents: 10, maxOutputTokens: 128, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
-  return { state, complete, budget, service, privacy };
+  return { state, complete, budget, service, privacy, provenance };
 }
 
 describe("ephemeral privacy admission", () => {
@@ -69,8 +73,9 @@ describe("ephemeral privacy admission", () => {
   });
   it("retains history from the unchanged server epoch", async () => {
     const f = fixture();
+    f.provenance.resolveHistory.mockResolvedValue([{ sourceId: publicId, sourceVersion: 1 }]);
     const reply = await f.service.replyEphemeral(scope, { ...input, history: oldHistory, historyPrivacyEpoch: 2 });
-    expect(f.complete.mock.calls[0]![0].history).toEqual(oldHistory);
+    expect(f.complete.mock.calls[0]![0].history).toEqual([{ role: "assistant", text: "OLD-PRIVATE-HISTORY" }]);
     expect(reply).toMatchObject({ privacyEpoch: 2, historyDiscarded: false });
   });
   it("stops epoch drift during budget reservation before sending and releases the unused reservation", async () => {

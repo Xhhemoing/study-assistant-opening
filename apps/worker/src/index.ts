@@ -2,8 +2,8 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
-import { createOpeningProvider } from "@aistudy/ai";
-import { loadOpeningModel, loadOpeningTutorConfig } from "@aistudy/config";
+import { resolveTutorModel } from "./runtime/tutor-model";
+import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
@@ -32,7 +32,7 @@ export function processSmokeJob(input: unknown): {
 
 export async function main(): Promise<void> {
   const runner = await preflightParser();
-  const openingModel = loadOpeningModel();
+  const openingModel = loadOpeningModelCatalog();
   const redis = createRedisConnection({ url: process.env.REDIS_URL ?? "redis://127.0.0.1:6379" });
   const sql = createSqlClient(process.env.DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/aistudy");
   const repository = createOpeningJobRepository(sql);
@@ -54,6 +54,7 @@ export async function main(): Promise<void> {
   const remind = createRemindHandler({
     record: (id, input) => reminders.recordAttempt(id, input),
     isCurrent: (id, at) => reminders.isCurrent(id, at),
+    externalConfig: (job) => reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
     send: (input, signal) => feishu.send(input, signal),
   });
   const handlers = createHandlers(parse, { retest, remind });
@@ -64,13 +65,12 @@ export async function main(): Promise<void> {
     tutorJobs,
     chunks,
     budget,
-    provider: openingModel.apiKey && openingModel.dailyCapCents > 0
-      ? createOpeningProvider({ baseUrl: openingModel.baseUrl, apiKey: openingModel.apiKey, model: openingModel.name })
-      : null,
+    provider: null,
+    resolveModel: (scope, mode) => resolveTutorModel(sql, scope, mode),
     config: {
       ...loadOpeningTutorConfig(),
-      inputCentsPerMillion: openingModel.inputCentsPerMillion,
-      outputCentsPerMillion: openingModel.outputCentsPerMillion,
+      inputCentsPerMillion: 0,
+      outputCentsPerMillion: 0,
     },
     privacy: {
       getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),

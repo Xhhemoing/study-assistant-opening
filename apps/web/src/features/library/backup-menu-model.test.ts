@@ -41,8 +41,8 @@ describe("backup menu model", () => {
       package: packed,
     });
     const copy = backupCopy(2);
-    expect(copy.headline).toContain("完整备份");
-    expect(copy.disclaimer).toContain("不会覆盖");
+    expect(copy.headline).toContain("原生内容备份");
+    expect(copy.restoreHint).toContain("不会覆盖");
     expect(copy.restoreHint).toMatch(/拒绝|跳过/);
     expect(copy.resultSummary).toContain("2");
     expect(`${copy.headline}${copy.disclaimer}`).not.toMatch(/无损|lossless/i);

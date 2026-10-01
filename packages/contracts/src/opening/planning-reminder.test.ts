@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reminderEnqueueInputSchema, reminderListSchema, reminderSchema, taskStatusUpdateInputSchema } from "./planning";
+import { reminderEnqueueInputSchema, reminderListSchema, reminderSchema, taskItemSchema, taskStatusUpdateInputSchema } from "./planning";
 
 const reminder = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -13,6 +13,23 @@ const reminder = {
 };
 
 describe("reminder contract", () => {
+  it("accepts the real task version while preserving old task responses", () => {
+    const task = { id: reminder.taskId, title: "Due task", minutes: 25, dueAt: reminder.dueAt, priority: 1, status: "pending" };
+    expect(taskItemSchema.parse({ ...task, version: 4 }).version).toBe(4);
+    expect(taskItemSchema.safeParse(task).success).toBe(true);
+    expect(taskItemSchema.safeParse({ ...task, version: 0 }).success).toBe(false);
+  });
+  it("accepts an explicit single-task request with its current version", () => {
+    expect(reminderEnqueueInputSchema.parse({ clientKey: "single-due-01", taskId: reminder.taskId, expectedVersion: 3 }))
+      .toEqual({ clientKey: "single-due-01", channel: "in_app", taskId: reminder.taskId, expectedVersion: 3 });
+  });
+
+  it.each([{ taskId: reminder.taskId }, { expectedVersion: 1 },
+    { taskId: reminder.taskId, expectedVersion: 0 }, { taskId: reminder.taskId, expectedVersion: 1.5 },
+    { taskId: "bad", expectedVersion: 1 }, { taskId: reminder.taskId, expectedVersion: 1, dueAt: reminder.dueAt },
+  ])("rejects incomplete or caller-controlled single-due selection %j", input => {
+    expect(reminderEnqueueInputSchema.safeParse({ clientKey: "single-due-01", ...input }).success).toBe(false);
+  });
   it("requires a receipt field and does not treat due as sent", () => {
     expect(reminderSchema.parse(reminder).status).toBe("due");
     expect(reminderSchema.parse({ ...reminder, channel: "feishu", status: "disabled" }).status).toBe("disabled");

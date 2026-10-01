@@ -1,4 +1,5 @@
 import { readOpeningBackupVersionRows } from "./opening-backup-versions";
+import { readOpeningMemoryDeletions, type OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
@@ -15,6 +16,7 @@ export type OpeningBackupSourceSnapshot = {
   workspaceId: string;
   privacyEpoch: number;
   deletionJournal: OpeningDeletionMark[];
+  memoryDeletions: OpeningMemoryDeletions;
   sources: OpeningBackupSource[];
 };
 
@@ -41,6 +43,7 @@ export function readOpeningBackupSources(
       WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
       LIMIT 1`;
     if (!owners.length) throw new OpeningBackupSourceError();
+    const memoryDeletions = await readOpeningMemoryDeletions(tx, scope.workspaceId);
     const marks = await tx`
       SELECT source_id, deleted_at, asset_deleted_at FROM opening_privacy_exclusions
       WHERE workspace_id = ${scope.workspaceId}
@@ -50,6 +53,7 @@ export function readOpeningBackupSources(
     return {
       workspaceId: scope.workspaceId,
       privacyEpoch: Number((owners[0] as { privacy_epoch: number }).privacy_epoch),
+      memoryDeletions,
       deletionJournal: marks.map((row) => {
         const mark = row as { source_id: string; deleted_at: string | Date; asset_deleted_at?: string | Date | null };
         return { sourceId: mark.source_id, deletedAt: iso(mark.deleted_at), ...(mark.asset_deleted_at ? { assetDeletedAt: iso(mark.asset_deleted_at) } : {}) };

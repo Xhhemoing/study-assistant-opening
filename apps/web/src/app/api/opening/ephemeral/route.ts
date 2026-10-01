@@ -6,9 +6,10 @@ import {
 } from "../../../../features/opening/runtime";
 import { EphemeralServiceError } from "../../../../features/opening/tutor/ephemeral-service";
 import { OpeningBudgetError } from "@aistudy/database";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningModelRoutingError, OpeningProviderError } from "@aistudy/ai";
 
 function ephemeralError(error: unknown): Response {
+  if (error instanceof OpeningModelRoutingError) return Response.json({ error: { code: error.code, message: error.message } }, { status: 409 });
   if (error instanceof EphemeralServiceError) {
     return Response.json(
       { error: { code: error.code, message: error.message } },

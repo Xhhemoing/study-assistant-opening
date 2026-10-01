@@ -32,8 +32,11 @@ function makeFakeSql() {
   const sources = new Map<string, FakeRow>();
   let jobInserts = 0;
   let outboxInserts = 0;
+  let historyRevision = 0;
   const tag = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
+    // Nested postgres.js fragments evaluate as standalone tagged calls before the outer query composes.
+    if (query === "FALSE" || query.startsWith("p.privacy_source_ids") || query.startsWith("p.root_observation_id")) return query;
     if (query.startsWith("INSERT INTO opening_sources")) {
       const [id, workspaceId, name, mime, bytes, sha256] = values as [
         string,
@@ -65,6 +68,13 @@ function makeFakeSql() {
       return row && row.workspace_id === workspaceId ? [row] : [];
     }
     if (query.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
+    if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: historyRevision }];
+    if (query.startsWith("UPDATE opening_workspace_history_revisions")) {
+      historyRevision += 1;
+      return [{ revision: historyRevision }];
+    }
+    if (query.startsWith("DELETE FROM opening_learning_eligibility")) return [];
     if (query.startsWith("INSERT INTO opening_source_versions")) return [];
     if (query.startsWith("UPDATE opening_sources SET upload_url_expires_at")) {
       const row = sources.get(values[1] as string);

@@ -124,7 +124,7 @@ type ReviewResult = {
 
 历史分页以有效观察根为单位，`occurredAt DESC, rootObservationId DESC` 排序；纠错不移动根的位置，真实新练习才有新发生时间。`recordedAt` 与 occurredAt 分开，补录不能混入此前翻页快照。
 
-采用课程/owner 作用域内的普通 `historyRevision` 计数行：写事实/修订时在同一事务锁定并递增，事件保存所得 revision；事务回滚不推进。首屏在短一致读事务取已提交 revision；随后游标携带此 revision 和排序边界，只取其以内每个根最后有效修订。不用 `nextval()`、客户端时间或单独 snapshotAsOf 日期推断提交先后，不保持跨 HTTP 长事务。这是普通数据版本与事务，不是新的冻结基线、哈希或门禁。
+采用 workspace/owner 作用域内的普通事务 revision 计数行：写事实/修订时，在既有 session/course/root/activity/task 锁之前锁定独立计数行，仅实际新增事实时递增并将 revision 存入观察行；事务回滚不推进。保留既有 course historyRevision 兼容消费方，但它不能单独重建跨课程迁入/迁出的完整修订链。首屏在短一致读事务只读已提交水位，不插入或锁定计数行；随后游标携带此 revision 和根排序边界，先从完整修订链选择水位以内有效头，再过滤课程/要求和当前隐私。不用 `nextval()`、客户端时间或单独 snapshotAsOf 日期推断提交先后，不保持跨 HTTP 长事务。这是普通数据版本与事务，不是新的冻结基线、哈希或门禁。
 
 所有观察/修订写入口必须使用同一版本规则；旧已提交数据在迁移时纳入明确起始 revision，身份/正确性未知仍未知。来源适用性与当前权限在读取时重新检查；隐私删除立即屏蔽事实正文、摘要和引用，优先于历史快照。“无遗漏”只针对该快照内仍有权读取的记录。返回计数说明所对应的 revision 与当前可见性。
 
@@ -266,7 +266,114 @@ npx tsc -p packages/database/tsconfig.json --noEmit
 
 Opening 本片只覆盖 source 关系，不含 document/block/card 正文与关系，也没有完整恢复执行器或干净环境恢复演练；未来执行器仍须在事务中重查当前状态/删除记录，恢复期间不派发外部任务。真实 Provider、Worker 运行效果和实际恢复后的提醒行为未验收。资产永久删除/停止供模型使用的完整操作闭环、临时片段主动保存及其他 S5 要求继续待办，不进入 S6 扩张。未新增迁移、未运行生产迁移，未执行 commit、push、merge 或部署；回退保留已有设置/归档/隐私事实及恢复保护，不删除字段或回退启用水位。
 
-**2026-09-30（Asia/Shanghai）材料操作与关联片段：实施中。**用户已明确选择：主动保存的临时对话片段保留来源关联，原材料的隐私限制继续约束相关笔记，不创建绕过原限制的无来源副本。A 负责材料引用影响、停止供模型使用、资产删除与部分对象清理重试，唯一迁移编号 0034；B 负责无正文临时来源凭据、显式保存为关联笔记、原生笔记读取及备份/恢复保护，唯一迁移编号 0035。两个数据库迁移只在隔离测试库验证，源操作与关联笔记尚未完成审查/集成；原账本和验收复选框不提升。公共导出由 A 单一写入，测试数据库按短窗口串行使用。
+**2026-09-30（Asia/Shanghai）材料操作与关联片段：技术完成，待用户浏览器验收。**本条是该切片的最新交接，不提升完整 S5、验收复选框或原账本（仍为 15 verified / 28 planned）。用户明确选择：主动保存的临时对话片段保留来源关联，原材料的隐私限制继续约束笔记。两条 `gpt-6-astra / high` 支线实现，`gpt-6-sol / ultra` 独立审查及窄复查，`gpt-6-sol / high` 核对组合差异；均为实际派单配置。公共导出由 A 单一写入，数据库检查按短窗口串行执行。
+
+- **A／材料操作：**`opening-source-actions.ts`、`opening-source-actions-privacy.ts`、sources/privacy/course-membership 仓储、`source-service.ts`、impact/actions/deletions 路由与 inbox 材料控件；`0034_opening_source_actions.sql`。确认前展示全部课程引用（包括归档课程）；停止供模型使用保留原件和关系；删除移除全部关系并限制可追溯回答/记忆/关联笔记的正文读取。对象清理回执独立于 source 行，可刷新后重试；实际协调 upload copy、parse、attach 与删除，保留当前/历史对象及签名上传链接租期的清理信息。删除事实是 `asset_deleted_at`，不是待清理数组。Opening 备份携带删除事实，不携带 object keys 或上传租期，旧包不得削弱当前永久删除。
+- **B／关联片段：**`opening-ephemeral-provenance.ts`、`opening-note-provenance.ts`、`native-note-privacy.ts`、library/native backup 仓储、tutor/snippet 契约与服务、snippets 路由、assistant 消息模型和保存对话框；`0035_opening_note_provenance.sql`。临时回执只存身份与来源版本，不存正文、prompt 或回复。预览/编辑/取消只在页面状态中；确认时仅保存选定/编辑的片段。来源来自服务端回执，修改笔记不解除关联。AI 排除后仍可本人阅读已有笔记，但新保存/导出/恢复不能绕过排除；永久删除来源后限制正文、历史修订、搜索和修订提案。原生备份保持关联并重新检查目标工作区当前隐私事实。
+
+**检查与失败修复：**材料动作初始 5 项因方法缺失失败；实现后扩展至真实 PostgreSQL/MinIO 与 copy/parse/attach 竞态 12/12。过程中修正测试的非公开导入和阻塞 PID 预期，使用真实锁队列而非 sleep。既有来源隐私/写回/Worker/备份回归 23/23、源动作 handler 4/4；材料和备份最近单元共 93 项通过（分组重叠不重复累加）。真实 MinIO 完成合成 staging/current/historical 对象 PUT→存在→删除→不存在，未清空桶。
+
+B 的既有 AI 输入严格校验最初不接受 provenanceId，扩展该边界并保留角色/大小/未知字段限制后服务端/契约/AI 单元 32/32；原生隐私/领域单元 7/7、UI 五文件 79/79。note/snippet/native/library 组合最终 27/27；先前失败分别涉及 append-only 修订夹具清理、原生包携带无法恢复的 Opening source 关系，以及跨工作区测试提前撞 ID 冲突。修正隔离夹具与不支持的关系导出，保留约束；跨工作区用新文档/块/修订 ID 和 reject 策略证明来源拒绝且零写入。ephemeral handler 子套件 15/15，覆盖五类结果、20 表正文标记/数量扫描、console 与恢复卡；它所在的早期联跑命令因 note 反例整体失败，不把该整条命令记为通过。note 后由上述成功组合及本次审查修复回归覆盖，未重复未变化的 ephemeral 检查。
+
+**独立审查发现两项并已修复/复查：**
+
+1. 按 ID 读取/审核/冲突解决修订提案会绕过关联笔记的删除限制。`revision-proposals.ts` 现在在同一事务先锁 workspace，再复用 `openingNoteReadable`；覆盖 create/list/get/review/resolve、所有快照与 terminal replay。真实同命令 RED 7 失败/16 通过→GREEN 23/23，包括四种状态和 get/review/resolve 的 pg_locks 确定性交错，断言提案/文档/blocks/revisions 无写入；既有 proposal handler 4/4。保留 AI-only 排除时的本人阅读与操作、普通软删的终态重放。新增测试入口严格 TS 曾有一个 Promise 联合推断错误，改为 `track<unknown>` 后 0 diagnostics，不改变测试行为。
+2. 确认输入固定 max(1000) 与合法课程引用数量不一致，1001 引用的 exclude/delete 固定 400。`sources.ts` 仅移除该无业务依据的上限，保留每项 UUID、strict、版本、授权与服务端集合重查。新增 `source-actions.test.ts` 实际 RED 2/3→新契约 3 项与既有 client 4 项共 7/7；第 1001 个非法 UUID 仍拒绝。删除确认文案同步明确关联片段笔记及修订正文受影响。
+
+Sol 实际读取最终差异、新增测试与必要调用链，确认两项修复无新增可触发实质缺陷。截至本片各检查对应的代码版本，database/AI/contracts/domain/web 类型检查、所属改动文件 lint/diff 通过；新增/改动测试入口另作严格编译。之后并行修改的组合验证边界见下文，不用旧结果替新代码背书。未运行全仓 test/build/CI 或浏览器。以下为主要实际命令；B 通过 `buildOpeningE2eEnvironment()` 构造环境并覆盖到 `aistudy_opening_test`、`OPENING_TEST_DB=1`、`OPENING_RELEASE=0`、`NODE_ENV=test` 后以 spawnSync 运行列出的 Node 子进程参数，未对预览库运行这些测试：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-source-actions.test.ts tests/integration/opening-source-actions-race.test.ts --maxWorkers 1 --no-file-parallelism
+& '.local/opening-e2e/check-service-tests.ps1' --project handler tests/integration/handler/opening-source-actions.test.ts --maxWorkers 1 --no-file-parallelism
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-tutor-privacy-input.test.ts tests/integration/opening-tutor-provenance.test.ts tests/integration/opening-privacy-writeback-race.test.ts tests/integration/opening-worker-privacy-race.test.ts tests/integration/opening-context-provenance-backup.test.ts --maxWorkers 1 --no-file-parallelism
+node node_modules/vitest/vitest.mjs run --project unit packages/contracts/src/opening/source-actions.test.ts apps/web/src/features/opening/inbox/source-actions-client.test.ts
+# B 实际 Node 子进程命令；须在上述隔离环境中执行。
+node node_modules/vitest/vitest.mjs run --project integration tests/integration/opening-note-provenance.test.ts tests/integration/revision-proposal-repository.test.ts
+node node_modules/vitest/vitest.mjs run --project handler tests/integration/handler/revision-proposals.test.ts
+node node_modules/vitest/vitest.mjs run --project integration --project handler tests/integration/opening-note-provenance.test.ts tests/integration/handler/opening-snippets.test.ts tests/integration/native-backup-roundtrip.test.ts tests/integration/library-repository.test.ts
+node node_modules/typescript/bin/tsc -p packages/database/tsconfig.json --noEmit
+node node_modules/typescript/bin/tsc --noEmit -p apps/web/tsconfig.json
+node node_modules/eslint/bin/eslint.js packages/database/src/repositories/revision-proposals.ts tests/integration/opening-note-provenance.test.ts
+```
+
+**环境、用户检验与回退：**0034/0035 已在隔离测试库及本地预览库 `aistudy_opening_e2e` 经既有迁移器验证，预览迁移前后均为 36 users / 2 courses，没有重置数据或生产迁移。已有真实 PostgreSQL SELECT、Redis PONG 和 MinIO 健康/对象操作证据；本片最后 `/login`、`/opening/library?tab=materials`、`/opening/library?tab=notes`、`/opening/assistant` 在 `http://127.0.0.1:3100` 均 HTTP 200，仅代表服务可达。早前一次 Next dev 渲染出现 JSON EOF，后续入口读取已成功，未据此进行无依据的业务修复。模型端口 18081 最后实测未监听，真实模型流程 BLOCKED；没有启动 mock 来冒充实际模型验收。
+
+用户登录已有本地账号，准备同一材料在两门课程的关系（其中一门归档），在材料页检查影响列表、停止供模型使用保留原件、删除的跨课程效果及清理回执/重试。模型环境准备好后，在助理“不保存本轮”中完成两轮，选早期消息片段，验证预览/编辑/取消不生成笔记、确认只保存片段并能打开；之后对原材料做 AI 排除/删除，核对本人阅读与正文限制的区别。已有修订提案在来源永久删除后读取/审核/冲突解决应不可用且不产生新修订。交互、视觉、响应式、真机及真实效果均待用户浏览器验收。
+
+原生包仍不含 Opening 原件；本轮不是全平台恢复执行器或干净环境恢复演练。已下载、外部、在途副本不属于对象清理保证。回退必须保留 0034 删除事实/待清理回执和 0035 来源关联，不能去掉正文读取/导出/恢复限制；已删除对象字节不能靠代码回退恢复。不得修改已应用迁移的正文/checksum（0034 首条历史注释不代表当前删除语义）。本轮团队未执行 commit/push/merge/deploy；期间观察到分支 HEAD 由外部推进至 `dc5f176`，已按新基线保留内容。package/lockfile/CI/唯一任务账本未改，暂存区为空。
+
+本片最后仅运行一次 `graphify update .`，退出码 0：代码图为 14,819 节点、33,600 边、718 社区，生成物未暂存。限制：37 个 SQL 文件因缺少 tree_sitter_sql 未索引，8 个 JSON/config 文件未提取节点；社区变化后部分标签按 hub 命名，未调用 LLM 刷新标签或为文档重新提取语义。
+
+**收尾时的并行任务边界：**发现同工作区的用户任务“优化模型路由与课程学习体验”正在修改 ephemeral/runtime/预算调用/公共导出、Today 界面，并新增 `0036_opening_ai_settings.sql`。这些不是本片改动，本片的已通过结果不等于它们的组合验证通过。已向该任务传达文件所有权、0034/0035 不可修改、测试库窗口已释放，以及新路由稳定后需覆盖 ephemeral/snippets 交叠回归；0036 的验证与预览应用由该任务负责，本片未声称已验证。Today 后续支线先协调其正在写入的 UI 文件；无材料记忆备份支线与之独立。模型与原生恢复的外部限制仍保留。
+
+**2026-09-30（Asia/Shanghai）记忆删除备份与 Today 恢复提示：审查/修复。**A/B 实现及静态独立审查已完成；数据库检查与下述两处跨任务接入尚未完成，不记为技术完成，不提升完整 S5、验收复选框或原账本（仍为 15 verified / 28 planned）。本轮复用 A/B `gpt-6-astra / high`、独立审查 `gpt-6-sol / ultra`、集成交付核对 `gpt-6-sol / high`，按唯一文件所有权执行；未新增迁移、未改 0034–0036 或公共导出。
+
+- **A／无材料记忆删除事实：**database 的 `opening-backup-records/sources/compose/current/prepare.ts`、新增 `opening-backup-memory-deletions.ts`，以及 domain 的 `backup-policy/validation/compose/apply-plan.ts` 和近测试。复用既有 `status='deleted'` memory 行投影仅含 ID/时间的 owner-scoped `memoryDeletions`，不读取正文，不新增 journal 表。DB 快照必带事实，归档字段可选以兼容旧包；含 memory 正文或新 metadata 的预检必须接入真实当前工作区事实，不能缺省为空。归档与当前删除事实叠加，并检查 compose/current/apply 边界漂移。新导出原本就过滤 deleted memory 正文，本次不是修复新导出泄露；没有生产恢复执行器，也未声称已复现实际恢复后的复活。公共记忆删除、原对话正文与 deleteSourceText 语义未变。
+- **B／Today 恢复事实：**`today-service.ts/.test.ts`、`today-read.ts/.test.ts`、`today-resume-view.tsx`、`handler/opening-today-read.test.ts`。核对 owner、精确材料版本、上传/解析状态、版本可用性、永久删除及 chunk/page；失效选材不计为可恢复，位置不能恢复时清除派生页码，保留对话、用户原文和候选计数。AI-only 排除材料以 `manualSourceCount` 表示仍可本人手工阅读，不计为自动恢复。没有写回历史 turn。
+
+**实际检查与修复链：**A 的新记忆用例 RED 12 失败/1 通过，compose/current 边界另 4 失败；贯通事实后最终 14 个近 unit 文件 185/185。domain/database 包 typecheck、26 个改动/新增文件分两组定向 lint/diff 通过。B 初始 RED 15 失败/9 通过→24/24；自动/手工分离后新增表达 RED 3 失败/34 通过→37/37；6 文件 lint、严格测试/import TS 与 diff 通过。B 的旧 SQL mock 无参 tuple 曾产生 2 个严格 TS 诊断，补 mock 签名后为 0。负责人另跑 web tsc，exit 0；四个受影响 backup integration 入口严格编译发现 `opening-learning-history-backup.test.ts:87` 的已知 fixture 表可能 undefined，原实现者仅补非空断言，重跑同四入口严格 TS 为 0 diagnostics、单文件 lint/diff 通过。该严格编译不等于运行 integration。
+
+Sol 实际读取稳定 diff、未跟踪测试及必要调用链，核对墓碑→owner 快照→compose→预检/apply-plan、Today→实际恢复选择/页码校验，未发现本轮新增的可确认实质缺陷。Sol 集成核对未发现下述两处之外的确定静态接口遗漏；没有重复已有效的测试。主要实际命令（均在 pwsh 中以 `$ErrorActionPreference = 'Stop'` 开始）：
+
+```text
+node node_modules/vitest/vitest.mjs run --project unit packages/domain/src/opening/backup-memory-deletion.test.ts packages/domain/src/opening/backup-privacy.test.ts packages/domain/src/opening/backup-apply-plan.test.ts packages/domain/src/opening/backup-compose.test.ts packages/domain/src/opening/backup-context-provenance.test.ts packages/domain/src/opening/backup-learning-state.test.ts packages/domain/src/opening/backup-policy.test.ts packages/domain/src/opening/backup-source-deletion.test.ts packages/domain/src/opening/backup-learning-history.test.ts packages/database/src/repositories/opening-backup-compose.test.ts packages/database/src/repositories/opening-backup-current.test.ts packages/database/src/repositories/opening-backup-sources.test.ts packages/database/src/repositories/opening-backup-prepare.test.ts packages/database/src/repositories/opening-backup-prepare-failure.test.ts
+node node_modules/vitest/vitest.mjs run --project unit apps/web/src/features/opening/planning/today-service.test.ts apps/web/src/features/opening/planning/today-read.test.ts
+npm run typecheck -w @aistudy/domain
+npm run typecheck -w @aistudy/database
+node node_modules/typescript/bin/tsc --noEmit -p apps/web/tsconfig.json
+```
+
+严格 backup 测试编译使用 tsconfig.base.json 和四个 roots：`opening-memory-deletion-backup.test.ts`、`opening-context-provenance-backup.test.ts`、`opening-backup-compose-repository.test.ts`、`opening-learning-history-backup.test.ts`；TypeScript Program 设 noEmit、incremental:false、composite:false、jsx:ReactJSX。
+
+**尚未完成：**隔离测试库 `127.0.0.1:15432/aistudy_opening_test` 仍由并行用户任务“优化模型路由与课程学习体验”持有，尚未明确释放；本团队未抢用、清库或另起服务。Today handler 的 11 项及 A 的 memory-deletion/privacy/context-provenance/compose/learning-history integration 尚未运行，不宣称通过。窗口移交后按既有隔离环境串行执行最近套件，保留 `aistudy_opening_e2e` 预览数据。
+
+两个跨任务文件已交其唯一 owner 补齐，本团队未越权写入：① `TodayDashboard` 正常态走 `today-overview.tsx` 的 `TodayLearningContext`，尚需消费 manualSourceCount 并将自动材料数写为“可恢复 N 份”；`TodayResumeBody` 的新文案不代表正常页面已显示。② `opening-learning-state-backup.test.ts` 的 archive(snapshot) 已带 memoryDeletions，但 validate/apply 调用尚需传真实当前 snapshot.memoryDeletions，不能从旧 archive 取或补空数组；其 ai_settings 往返检查由模型路由任务负责。上述两处完成后只补必要受影响检查，再完成本片最终交接与一次 Graphify 更新。
+
+**用户检验与后续：**待正常态接入完成，在 `/opening/today` 用已有材料、阅读位置和已保存对话检查恢复卡；在材料页对测试材料 AI 排除或永久删除，再回 Today，预期自动可恢复数量/页码准确、手工阅读提示准确且原对话仍可打开。页面交互、视觉/响应式、真实模型和实际恢复演练均未验证，继续待用户检验；本轮没有运行浏览器、全仓检查、生产迁移、commit/push/merge/deploy。无需数据库迁移回滚；代码回退不得去掉当前删除事实叠加保护或伪装旧调用已安全兼容。只读定位另确认 S5 仍缺“归档后对已接受补测事项显式请求单项提醒”的入口；现有批量提醒继续受归档/设置/启用水位限制。该项作为下一最小切片，不因此将完整 S5 记为完成，也不复制新的 backlog。
+
+**2026-09-30（Asia/Shanghai，本轮增量交接）记忆删除备份与 Today 恢复提示：技术完成，待用户浏览器验收。**本条更新上一条尚未完成项；不提升完整 S5、原账本或用户验收状态。原备份/服务差异已由 Sol 独立审查；随后补齐的 Today 正常态 UI/client 差异也已由 `gpt-6-sol / ultra` 实际只读审查，未发现本轮新增的确定实质缺陷。
+
+- **真实隔离数据库检查：**负责人串行执行 memory-deletion/privacy/context-provenance/compose/learning-history 五个 integration 文件，35/35；随后 `opening-learning-state-backup.test.ts` 6/6，exit 0（11:12:25 开始，6.91 秒）。后者仅修正六处预检/apply 的当前 `memoryDeletions` 接线，保留并行模型任务的 AI 设置往返、拒绝密钥及微秒启用水位用例。结果仅覆盖这些实际路径，不代替尚未新增的 AI 设置 schema 反例或恢复执行器。
+- **Today handler：**实际首次 9 通过/2 失败；失败一为 assistant `context_source_refs=NULL` 代表未知来源，应隔离而非计入候选；夹具先验证 0，再显式写 `[]` 验证精确 1。失败二为版本字符串被数据库约束提前拒绝，改用可持久化但超出材料 int 范围的 `2147483648` 并断言读回，再验证不可恢复。生产读取与约束未削弱。原命令复查 11/11、exit 0。
+- **正常态接入：**`today-overview.tsx/.test.ts` 已消费 `manualSourceCount`，将自动材料标为“可恢复 N 份材料”。RED 3 失败/5 通过→8/8；与单提醒 UI/client 组合四文件 81/81。API 表驱动数组展开触发严格 TS 失败后改对象行并断言 ZodError，单独 35/35；web tsc、五测试入口严格 TS 0 diagnostics、changed-file lint/diff 通过。后续并行模型任务明确复用本接入，不重复写入。
+
+本次实际数据库命令均通过已检查的 `.local/opening-e2e/check-service-tests.ps1`，只指向 `127.0.0.1:15432/aistudy_opening_test` 且 `OPENING_TEST_DB=1`：
+
+```text
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-memory-deletion-backup.test.ts tests/integration/opening-privacy.test.ts tests/integration/opening-context-provenance-backup.test.ts tests/integration/opening-backup-compose-repository.test.ts tests/integration/opening-learning-history-backup.test.ts --maxWorkers 1 --no-file-parallelism
+& '.local/opening-e2e/check-service-tests.ps1' --project handler tests/integration/handler/opening-today-read.test.ts --maxWorkers 1 --no-file-parallelism
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-learning-state-backup.test.ts --maxWorkers 1 --no-file-parallelism
+```
+
+**环境与协调：**原角色句柄曾为 interrupted/notLoaded，负责人据实际状态取得短 DB 窗口；随后模型/课程任务恢复，已按新状态更正并在 6/6 进程退出后明确归还窗口。PostgreSQL 原有 pgdata 完整，初次服务启动遇崩溃恢复尚未就绪，读取日志确认恢复结束后 `pg_isready` 与既有 `services.ps1 start` 成功；未 initdb、reset、seed 或替换数据。Redis 16379、MinIO 19000 就绪，预览数据核对为 36 users / 2 courses。11:10 并行任务确认旧 Next 已无进程，使用既有环境单独启动 `next dev` 3100（不使用会 prepare/reset 的 server.mjs），`/api/health`=200、未认证 `/api/opening/ai-settings`=401；没有启动 Worker、模型 fixture 或真实供应商调用。HTTP 仅证明服务可达。三包 database/worker/web 的并行任务实际直接 tsc 分别在 11:14:01–11:14:11、11:14:11–11:14:22、11:14:22–11:14:28 完成，均 exit 0；后续受代码变化影响的包仍须补必要检查。
+
+**用户检验：**登录已有本地预览账号，在 `/opening/today` 准备已保存对话、阅读位置及材料；AI 排除与永久删除后分别检查手工阅读提示、自动可恢复材料数/页码与原对话。记忆旧包恢复只完成预检/计划的真实 DB 边界检查，未完成生产恢复执行器或干净环境演练；真实模型、交互、视觉/响应式与设备效果均未验证。Graphify 的本片最终增量更新尚待当前提醒差异稳定后统一执行；没有 Git 或发布动作。
+
+**正在推进的 S5 单项提醒：实现中／稳定 UI 已审查。**A (`gpt-6-astra / high`) 独占 contracts/planning、task version mapper、reminder repository/service/route、Worker remind/dispatch 及其近测试；B 的 TaskContext/client 提醒 UI 已冻结，Sol (`gpt-6-sol / ultra`) 已实际审查，无确定缺陷。单项请求携带 taskId/expectedVersion，只授权本次任务/版本/到期；不重开课程或账号自动开关，界面固定 in_app 且明确不发送外部推送。发现原仓储只写 job 未产出 worker 所需 outbox，正在同事务补既有 outbox；仅 remind 使用既有 outbox ID 区分合法恢复投递并维持同事件重派去重。静默期 queued 的后续投递也在补真实连通检查。receipt/unknown/failed 不得隐式重发；实时配置/任务状态/owner/隐私 epoch 保护保留。新后端与完整 DB/Redis 运输链路仍待验证和独立审查，不宣称提醒端到端完成，实际飞书 transport 未接通。
+
+**2026-09-30（Asia/Shanghai，15:10 后交接）S5 单项到期提醒：技术完成，待用户浏览器验收。**本条更新上面的“实现中”状态，不提升完整计划、原账本（15 verified / 28 planned）或用户验收状态。两条 Astra/high 实现与 Sol/ultra 独立审查按文件所有权并行；模型角色曾返回上游拒绝，未计作执行，恢复后仍使用原模型配置。期间原模型/课程任务已完成自己冻结范围的交接，未把其改动当成本团队新产物。
+
+- **行为与范围：**contracts 的 `planning.ts/planning-tasks.ts` 及近测试定义兼容的单项 `{ clientKey, channel?, taskId, expectedVersion }`；database 的 `opening-reminders/plans/retest-task` 保留真实版本、owner、到期与状态检查、隐私 epoch、事务锁和幂等。单项动作不重开账号/课程自动开关，也不恢复课程归档。web `reminder-service`、TaskContext 的 `task-reminder` 与 client API 提供明确 pending/冲突/未知结果；UI 固定 in_app，明确不发送外部推送。worker `remind/dispatch` 和 `index.ts` 的一行实时配置接线完成内部投递，保留其他 owner 的模型/计费差异。
+- **真实连通：**新建与已知 suppressed 恢复同事务产生既有 outbox。仅 remind 使用 outbox 主键区分运输事件，同一事件重派不重复执行，新一次合法恢复不会撞上保留的旧 Redis completed ID。静默期通过绝对 `availableAt` 重排，dispatcher 停机后只等剩余时间；全天静默按既有定义次日复查。记录 CAS 失败不产生事件。receipt、unknown、failed 不隐式重发。
+- **缺陷与复查：**原链路只写 job 不写 outbox，初始运输 RED 3 项，修后真实 DB/Redis 覆盖。旧 queued 行没有任何 outbox 的升级场景另得 unit 2 项及真实 Redis 1 项失败；在原 job 锁和事务内仅为显式、未发送 queued 行补一次事件，复查通过。Sol 独立发现 JSONB 的 `enabled: "false"` 被 Boolean 转成 true、非法静默分钟可能允许外发；readConfig 在持久化边界严格检查 boolean、recipient 与 0..1439 整数分钟，非法配置禁用。JSONB RED 为 unit 9 项/delivery 7 项失败，其中一个 JSON null 夹具误写 SQL NULL 提前撞 NOT NULL，改为 JSON 文本的 jsonb 转换；字符串启用值和小数静默值确实触发过发送替身。最终同近命令 unit30/30、真实 repo+delivery20/20。Sol 已定向复查这两项修复及其测试，未发现新确定缺陷。
+
+**实际验证（重叠用例不累加）：**前轮提醒八个 unit 文件65/65，后续新增仓储分支由30/30覆盖；关闭/归档消费者40/40；reminder handler6/6。四个 integration 文件先57/58，唯一失败为旧消费者 fixture 未注入新实时配置依赖，补真实 repository 接线后原命令58/58；最新两文件 repo5+delivery15=20/20（session82609，exit0）覆盖后续修复。真实链路仅最终外部 send 使用测试替身，不宣称供应商通过。database 类型检查、两新增测试入口严格 TS 0 diagnostics、改动 lint/diff通过；此前对应 contracts/worker/web 检查复用，后续 S6 的 contracts/web 又按其实际变更复查。worker 的 npm 包装依赖 Bash，使用直接 tsc 等价编译命令，不冒充运行了 Bash 包装门禁。
+
+```text
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-reminders.test.ts tests/integration/opening-learning-preferences-consumers.test.ts tests/integration/opening-reminder-delivery.test.ts tests/integration/opening-learning-state-backup.test.ts
+& '.local/opening-e2e/check-service-tests.ps1' --project handler tests/integration/handler/opening-reminders.test.ts
+& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-reminder-delivery.test.ts tests/integration/opening-reminders.test.ts
+node node_modules/vitest/vitest.mjs run --project unit packages/database/src/repositories/opening-reminders.test.ts
+node node_modules/typescript/bin/tsc -p apps/worker/tsconfig.json --noEmit
+node node_modules/typescript/bin/tsc -p packages/database/tsconfig.json --noEmit
+```
+
+全局 Vitest 配置本身 maxWorkers=1，integration/handler fileParallelism=false。每个数据库窗口均明确转交且进程退出后释放。中途服务再次停止、15432 ECONNREFUSED 导致0项执行，没有把随附“No test files found”当作文件缺失或通过，也没有盲重试；沿既有 pgdata 恢复，读取 PostgreSQL crash recovery 日志、pg_isready 成功后启动 Redis/MinIO再跑原命令，preview仍36 users/2 courses。先前失效会话19762未记为GREEN。纯 Next dev 预览重新在3100启动，未用 server/prepare/reset/seed，未启动真实 Worker、模型 fixture 或供应商；健康接口200，实际交互仍待用户。
+
+**关联备份与隐私收尾：**领域 `backup-learning-state.ts/.test.ts` 补非null ai_settings 的共享 strict schema，absent/null兼容旧包；新增非法/密钥/额外字段7项真实RED→领域45/45，最新真实 learning-state-backup6/6，Sol窄审无确定缺陷。并行模型任务最新 ai-settings repository4/4、ephemeral handler18/18、snippets handler3/3；snippets曾保留旧断言，错误期待剔除未知历史后的新回复没有receipt。只修夹具：验证旧history没有送provider、新可信refs为[]，再显式构造旧NULL来源receipt，保留unknown409、foreign404及零笔记写入；其Sol已窄审。可编辑片段未新增逐字正文绑定；不声称后端能证明任意编辑文本与receipt逐字相同。
+
+**用户验收：**登录本地预览后进入 `/opening/today`，选中已接受且到期的待办，确认“仅本次到期提醒”；预期只处理所选真实版本，自动开关和归档保持原状，草稿不变；版本冲突、未知结果不显示伪成功或自动重试。UI明确只是应用内提醒。真实 Feishu 适配器仍未接实际 transport，因此外部推送 BLOCKED；没有运行浏览器、真机或真实模型验收。无迁移、commit/push/merge/deploy。
 
 **修改：**`packages/contracts/src/workspace-preferences.ts`、`packages/database/src/repositories/preferences.ts`、`apps/web/src/features/settings/settings-view.tsx`、`apps/web/src/features/opening/sources/source-service.ts`、`apps/web/src/features/opening/tutor/ephemeral-service.ts`、既有隐私准入/写回仓储及 retest/remind Worker。
 
@@ -284,6 +391,67 @@ Opening 本片只覆盖 source 关系，不含 document/block/card 正文与关�
 **完成与回退：**D04、D06、E06 通过；关闭及归档对在途作业真实生效。回退保持关闭/隐私排除优先，不重启积压自动操作。
 
 ### S6：准确摘要、分页快照与成长展示
+
+**2026-09-30 首片：201+ 观察摘要响应修复，技术完成，待用户浏览器验收。**A收尾提醒时，B按不重叠文件实现；Sol/ultra独立只读审查，Sol/high补唯一缺失的真实handler检查。原domain成长语义、用户既有课程UI/模型改动均保留。没有把本片当作完整S6完成。
+
+- **真实RED→修复：**同技能/requirement的201条观察经过真实read-service/client，会在总evidenceIds与recentPerformance.evidenceIds触发Zod max(200)，另复现新增完整计数字段未支持与UI误用代表数组长度。首轮3失败/31通过。新增web-only `summary-response.ts`，在完整summarize之后最多选20个确定代表；ID、资格明细与近期代表对齐，保留至少一个近期代表及相关错误/unknown/不可用说明。状态、完整sampleCount、历史错误与unknown计数保持原值，不从样本重算；超过20才附兼容的recentPerformance.evidenceCount，小摘要保留旧形状。输入不原地修改，domain/Worker仍保留完整201个ID/资格与候选根身份。
+- **精确十文件：**web learning的 `read-service.ts/.test.ts`、新增 `summary-response.ts/.test.ts`、`course-view.tsx/.test.ts`；contracts的 `learning.ts/learning-summary.test.ts`；client `learning-client.test.ts`；handler `opening-learning-read.test.ts`。course-view已由原模型/课程任务明确移交，本片仅显示完整近期计数与“代表证据”，保留练习、修订、材料/笔记入口。
+- **实际GREEN：**五个unit文件58/58，contracts/web直接tsc均exit0，六个测试入口严格TS为0，十文件定向lint及末次受影响三文件复查、diff通过。Sol实际读取diff/新文件及domain、client、route消费路径，未发现确定缺陷。交付角色在明确DB窗口运行handler，一文件2/2、exit0，5.30秒；包含空/匿名/不存在课程，以及201有效头→纠正后物理202行但有效仍201、unknown不升级的真实DB+HTTP契约检查，随后确认进程退出并归还窗口。
+
+```text
+node node_modules/vitest/vitest.mjs run --project unit packages/contracts/src/opening/learning-summary.test.ts apps/web/src/features/opening/learning/read-service.test.ts apps/web/src/features/opening/learning/summary-response.test.ts apps/web/src/features/opening/client/learning-client.test.ts apps/web/src/features/opening/learning/course-view.test.ts
+node node_modules/typescript/bin/tsc -p packages/contracts/tsconfig.json --noEmit
+node node_modules/typescript/bin/tsc -p apps/web/tsconfig.json --noEmit
+& '.local/opening-e2e/check-service-tests.ps1' --project handler tests/integration/handler/opening-learning-read.test.ts --maxWorkers 1 --no-file-parallelism
+```
+
+**用户检验与剩余范围：**进入 `/opening/courses/<courseId>` 的学习记录。准备同技能/requirement有201条有效观察的测试课程；本轮未向预览库注入该数据。预期页面可读、观察与近期数量完整，展开最多20条代表资格，反例不被升级，练习入口保留。待用户浏览器验收。数据库当前仍全量读有效头并逐项读资格；完整观察列表、分组聚合/资格投影、固定revision分页与规模实测仍未完成，不用响应有界代替它们。
+
+**2026-09-30 第二片：固定版本历史分页，技术完成，待用户浏览器验收。**按用户加速要求，两条主实现与一条备份子任务并行，显式配置均为 `gpt-6-astra / high`；`gpt-6-sol / ultra` 独立审查与剩余数据库检查交叠。新建集成角色时触发并发上限，负责人直接完成唯一缺失的新 handler 检查，Sol 复核沿用实际证据；没有为凑角色重复检查。完整 S6 的资格投影、分组聚合和规模测量仍未完成，账本保持 15 verified / 28 planned，未提升用户确认状态。
+
+- **A／快照与数据库：**新增 `0037_opening_learning_history_snapshot.sql`、contracts `learning-history.ts/.test.ts`、database `opening-learning-history-read.ts` 和 `opening-learning-history-cursor.ts`；窄改 `opening-learning-facts.ts`、`opening-learning-observations.ts`、`opening-observation-revisions.ts` 及必要公共导出。普通 workspace/owner 计数行先于原有学习锁；仅实际新增事实分配正水位，重放/回滚不推进，迁移旧行为0且移除写入默认值。先在完整链按固定R选头，再筛课程/要求及当前整链隐私，返回R内effectiveHeadId；原始根排序保留数据库微秒，隐藏边界仍能续页。游标有界且重新验证作用域/筛选/水位/边界，不充当授权凭证；复用既有privacy_epoch。最初只比较可见计数的方案在当前单调隐私入口下未证实泄漏，不将它记为已复现安全漏洞。
+- **备份子任务：**修改 `opening-backup-records.ts`、`opening-backup-record-table-queries.ts`、domain `backup-compose-validation.ts`、`backup-policy.ts`、`backup-apply-plan.ts` 及近测试。新包保存并校验事实序号和owner计数器；只有新表与全部新字段均缺失才视为旧包，显式补零而不猜旧提交顺序。计数器在观察前恢复；仍叠加当前删除事实，不回放jobs/outbox。`opening-learning-history-backup.test.ts` 是既有文件的增量，保留原断言，不是新建替代。
+- **B／用户入口：**新增 `history-service.ts/.test.ts`、`/api/opening/courses/[id]/observations/history/route.ts`、client `history-client.ts/.test.ts`、`course-history.tsx/.test.ts`、`course-history-state.ts/.test.ts` 和新 handler；窄改 `course-view.tsx/.test.ts`。课程页停止全量观察请求，默认50/最大200，支持手动续页/刷新以及全部、未指定、空串与精确要求筛选；保留摘要、练习、单根完整修订链和409保留草稿。可见性变化先清旧页/卡片，失败不回显旧敏感内容，异步旧结果不得混入新scope。
+
+**检查、失败修复与独立审查：**契约11/11；分页、旧writer/修订三个integration文件26/26；历史备份与记录导出12/12；旧读取handler2/2、新历史handler5/5。真实交错证明A已分配未提交、B等待counter锁时，第三连接立即读旧R；A/B提交后旧cursor不纳入新事实。另覆盖201根、跨课程迁入/迁出、legacy0链、回滚/重放、微秒、撤回、隐私隐藏边界及伪造/错scope游标。微秒首次失败是夹具被驱动截成毫秒，改为显式text::timestamptz后原命令通过；备份首次9/12，分别补旧裸夹具counter0，以及将两个新恢复用例错误传入的空journal改为当前owner快照journal，具体拒绝为JOURNAL_DRIFT，没有放宽生产保护。八个测试roots严格TS最终0诊断；六处已创建夹具table非空断言及末尾空行只作最小修复。
+
+备份子任务真实RED11项→近unit36/36；扩展19文件首次236/239，负责人实读发现旧lineage测试将先执行的memory tombstone查询误作正文导出。仅将选择器限定到正文导出别名，全部安全断言保留，单文件5/5、最终原19文件集合239/239、lint/diff通过。B旧页面真实RED1失败/10通过→五近文件65/65。
+
+Sol实际读取核心/备份/HTTP/UI差异与未跟踪文件，发现单页历史没有后续分页请求，另一活跃标签成功排除材料后旧正文不会主动清除。交原B修复：`source-actions-client.ts/.test.ts`、`course-history-state.ts/.test.ts`、`course-history.tsx`，新增窄 `client/privacy-change.ts/.test.ts`。真实客户端链RED4失败/10通过→五受影响文件48/48；最终仅整理测试替身后state15/15、严格TS0诊断。有效成功exclude/delete才发无正文同页通知和BroadcastChannel固定字符串，controller立即清页/卡片并递增代际，旧append/refresh不能回填；409/500/非法成功响应及retry_cleanup不通知，普通focus不清草稿。Sol只复核七个修复文件及受影响链，无新增确定缺陷。contracts/database/domain/web所属包类型检查、相关lint/diff均通过，不代表浏览器通过。
+
+主要实际命令（pwsh脚本首行均为 `$ErrorActionPreference = 'Stop'`；现有Vitest配置 `maxWorkers: 1` 且integration/handler `fileParallelism: false`）：
+
+```text
+pwsh -File .local/opening-e2e/check-service-tests.ps1 --project integration tests/integration/opening-learning-history-pagination.test.ts tests/integration/opening-observation-revisions.test.ts tests/integration/opening-learning-attempts.test.ts
+pwsh -File .local/opening-e2e/check-service-tests.ps1 --project integration tests/integration/opening-learning-history-backup.test.ts tests/integration/opening-backup-records-repository.test.ts
+& '.local/opening-e2e/check-service-tests.ps1' --project handler tests/integration/handler/opening-learning-history.test.ts --maxWorkers 1 --no-file-parallelism
+node node_modules/vitest/vitest.mjs run --project unit packages/contracts/src/opening/learning-history.test.ts
+$files = @(rg --files packages/domain/src/opening packages/database/src/repositories -g '*backup*.test.ts')
+node node_modules/vitest/vitest.mjs run --project unit @files
+node node_modules/vitest/vitest.mjs run --project unit apps/web/src/features/opening/client/privacy-change.test.ts apps/web/src/features/opening/inbox/source-actions-client.test.ts apps/web/src/features/opening/learning/course-history-state.test.ts apps/web/src/features/opening/learning/course-history.test.ts apps/web/src/features/opening/learning/course-view.test.ts
+node node_modules/typescript/bin/tsc -p apps/web/tsconfig.json --noEmit --incremental false
+```
+
+**本地预览、用户检验与限制：**负责人确认仅0037待应用后，通过既有 `scripts/db-migrate.ts` 将其应用到本地 `127.0.0.1:15432/aistudy_opening_e2e`，迁移前后36 users /2 courses /0 observations一致，没有reset/seed或生产迁移。`http://127.0.0.1:3100` 的health、login、courses及一个实际课程页均HTTP200，仅说明入口可达。登录已有账号，进入课程的“学习记录与证据”→“已保存的观察 · 按固定快照翻阅”：当前预览可先检查空态；分页检验需准备至少51条测试观察及不同要求，预期首批50、续页无重复、筛选不串页、新作答/纠错待刷新进入新快照。单页展开卡片后，在同源另一活跃标签排除/删除其材料，预期旧页立即清空并重读；普通切回标签不丢草稿。浏览器不支持或禁用BroadcastChannel时仅保证同页通知，跨标签需显式刷新/后续请求，不覆盖跨设备、离线或休眠补发。
+
+当前读取仍扫描并资格评估全部候选，尚未完成SQL资格投影/分组聚合或1千/1万/10万规模测量；响应有界不等于查询成本有界。没有生产恢复执行器，不保证恢复前cursor继续有效；真实模型、飞书、浏览器、真机和恢复演练未验证。本片不运行全仓test/build/CI，不执行commit/push/merge/deploy。回退可关闭新入口，但须保留新增字段、计数器及正确writer，不得恢复默认0或删除隐私/修订保护。下一片继续S6资格投影与分组摘要，完成共享数据接口后再并行消费方，S7/S8仍在原计划范围。
+**本片收尾：**稳定差异与修复复核完成后，负责人仅运行一次 `graphify update .`，exit0：14,972节点、34,115边、719社区；38个SQL因缺tree_sitter_sql未索引，8个JSON/config未提取节点。185个社区按hub重命名，未调用LLM重标注或文档语义重提取。生成物未暂存；之后仅补本交接文字，不重复更新代码图。分支仍 `feat/opening-release`、HEAD `dc5f176`，暂存区为空；新历史测试进程已退出，隔离数据库窗口空闲归负责人。
+
+**2026-09-30 第三片：资格投影、分组摘要与规模测量，实现中。**复用两条 `gpt-6-astra / high` 主实现：A 独占 database 的批量资格上下文、current-head 派生投影、分组聚合、语义水位接入及 `0038_opening_learning_eligibility.sql`/数据库导出；B 独占 contracts/domain 的聚合与页面契约、HTTP/client/UI 消费及其近测试。迁移编号已实读确认上一项为0037，尚未把0038记成已应用。共享契约只由B写、数据库水位与迁移只由A写，任务计划只由负责人写；A可把明确不重叠的外层业务writer交子Agent。测试数据库串行分配，稳定差异再进入Sol独立审查，不为增加Agent复制调查或重复有效检查。拟复用0037普通workspace/owner水位覆盖影响摘要的真实业务变化，投影重建不推进；固定历史R的比较允许非观察变化留下的序号空隙。完整接口、锁顺序和同步失效仍在本片实现与验证中。
+
+**改前实际测量：**新增且默认skip的 `tests/integration/opening-learning-summary-performance.test.ts`，只在 `OPENING_SUMMARY_PERF=1` 和 `127.0.0.1:15432/aistudy_opening_test` 运行。1千合成观察、10个分组、800核验正确/200核验错误、每条独立attempt/problem/item、共享一个来源版本，走真实课程授权→证据读取→领域汇总→响应投影。首轮可见样本每请求6004 SQL（6002 SELECT及BEGIN/COMMIT），总耗时4307.549 /4172.646 /4666.063 /3959.623 ms，响应90843 bytes、200代表ID；证据读取占绝大多数。机器AMD Ryzen 7 H 260/16逻辑CPU、总内存16388202496 bytes，首轮开始空闲434872320 bytes；20ms采样应用RSS峰246820864–258977792 bytes，包含测试进程及导入开销，不是请求净内存。新连接首读也被seed温热数据库，不是物理冷缓存；10k/100k、EXPLAIN/扫描行、数据库内存、HTTP和并发仍未测，不据此承诺容量。
+
+**测量修复与检查：**首次seed的JSON字符串被postgres.js再次编码，改为既有恢复路径使用的 `::text::json` 后通过；通过用例的日志被隐藏，改stdout后重跑得到上列可见指标。启用1k为1/1 passed，默认不设开关为1/1 skipped，单文件lint和严格TS为0。`gpt-6-sol / ultra` 独立实读harness、fixture及真实读链，发现finally只reset业务表/关连接，遗漏本次fixture的基础身份与课程。原作者仅改性能文件，按两个scope/owner定向清理并保证测量连接关闭失败时仍执行fixture清理/关闭；负责人实读修复。必要1k复查1/1 passed，users93→93、workspaces93→93、courses18→18、sessions50→50，未清理既有基础记录；新样本总耗时5434.060 /4427.985 /4163.715 /4253.665 ms，仍6004 SQL，响应91059 bytes。两次独立合成样本的响应字节不同，尚未单独归因，不能当作代码优化结果。最终单文件lint exit0、严格TS Diagnostics0。Sol已实读性能清理修复与关闭失败的finally路径，未发现确定问题；上述测量不代表新投影已经实现或通过。
+
+实际测量命令为：在pwsh中首行设 `$ErrorActionPreference = 'Stop'`，设置 `$env:OPENING_SUMMARY_PERF = '1'` 和 `$env:OPENING_SUMMARY_PERF_RECORDS = '1000'`，运行 `& '.local/opening-e2e/check-service-tests.ps1' --project integration tests/integration/opening-learning-summary-performance.test.ts --maxWorkers 1 --no-file-parallelism --silent=false`。性能任务结束已关闭连接并释放数据库窗口，交A串行执行本片数据库检查。浏览器、真机及真实模型仍待用户/外部环境；未运行全仓test/build/CI，未提交、推送、合并或部署，原账本仍不提升。
+**第三片实际推进（仍实现中）：**批量context近unit先捕获8头49读，改为集合读取后1/1通过、最多9读；这是模拟SQL边界的真实repository/evaluator测试，不冒充数据库负载测量。实际ID列表已改原生UUID数组参数，避免100k档展开参数超限；read-repair安装改为单条集合UPSERT，保留每root的旧head/inputR/policy比较及RETURNING安装数量。新0038经既有测试globalSetup仅应用于隔离test库，首个事实与投影同事务的真实integration1/1通过。邻近attempt和revision/privacy回归已有通过；新分组SQL尚在实现，两个response解析失败来自尚未落盘的历史成功/适用性完整计数契约，不作为通过。
+
+共享契约已实际完成 `learning-summary-page.ts/.test.ts` 与opening/index导出：32/32、contracts tsc/lint退出0。拒绝路径真实RED为根aggregate默默剥离未知status字段，补strict后GREEN；updating明确没有旧组结论，携带pendingProjectionCount并固定evaluatedAt、snapshotRevision。其后继续domain/UI及必要完整计数字段。writer子任务八个业务文件及两个近测试15/15、lint0；Sol独立读取后发现snooze字符串格式不同但时刻相同会误增版本，已交原实现者加回归并最小修复，尚未记为修复完成。
+
+**负责人改后复测：**同一性能命令、1千条/10组/原完整摘要链，实际exit0、1/1，测试3.57秒、总工具报告9.49秒，进程74598已退出。每请求11 SQL（9 SELECT、BEGIN/COMMIT）；application-first及三次warm总耗时479.523 /387.345 /371.800 /347.042 ms，证据读取419.763 /378.964 /366.220 /338.697 ms；响应91086 bytes、200代表ID，1000总数及200历史错误断言通过。开始空闲内存474714112 bytes，采样RSS峰274251776 bytes；不声称内存减少。相对于改前6004 SQL，这一实测支持消除逐观察数据库往返后的读取改善；仍非物理冷缓存、HTTP或新投影页验收，也未运行10k/100k。窗口已归还A，继续新分页/失效/并发回归；其他实现仅在测量结束后恢复类型与unit检查。
+**201+ 摘要片收尾记录（历史）：**上述两片冻结并完成审查后，仅运行一次 `graphify update .`，session13163最终exit0：14,892节点、33,856边、693社区，生成物未暂存；37个SQL文件因缺少tree_sitter_sql未索引，8个JSON/config文件未提取节点，194个社区采用hub重命名，未调用LLM重新标注或重新提取文档语义。随后只补本交接文字，不重复更新代码图。当前分支仍`feat/opening-release`、HEAD `dc5f176`，暂存区为空。单独启动的Next dev（本地进程记录`s6-web-preview`）已验证 `/api/health`、`/login`、`/opening/today`、`/opening/courses` HTTP200；这不是浏览器或真实模型验收。现无活跃数据库测试，窗口归负责人；不启动后续迁移或修改既有0034–0036来伪装分页已完成。
+
+**2026-09-30 第三片收尾整合（本轮同步前统一验证）：**第三片差异在提交前做了一次统一完整性验证，不替代各子任务原有窄范围结果，也不提升原账本。本地隔离环境（`services.ps1 start` 启动 15432/16379/19000）实际运行：9 个 TS 配置 typecheck 全部 0 诊断；全部 unit 288 文件 / 1988 项通过；integration 82 文件与 handler 30 文件经 `.local/opening-e2e/check-service-tests.ps1` 全部通过；worker/web 构建通过；全部新增/修改文件定向 lint 0 错误。过程中修复四处夹具与新语义的漂移，均为“夹具落后于有意行为变更”，非业务缺陷：①`source-service.test.ts` 假 SQL 补工作区修订计数行与资格失效查询（含嵌套模板片段透传）；②`ephemeral-privacy.test.ts` 对齐上下文选择（非空白查询只保留词法匹配 chunk）与历史 provenance 解析语义；③`opening-backup-compose-repository.test.ts` 备份表数 25→26（新增 `opening_workspace_history_revisions`）；④`opening-learning-history-backup.test.ts` 中 delivered help 现在也是学习语义事实、推进工作区修订，观察序号为 2–4、计数器为 4。另把 HEAD 上就已落后的 `identity-migration-compatibility.test.ts` 期望迁移列表补到 0038。`check-service-tests.ps1` 因 PowerShell 5.1 内联引号/JSON 解析不兼容改为 `print-isolated-env.mjs` 辅助文件（该文件在 `.local/` 不入库）；性能测试默认 skip 保持不变。浏览器、真机、真实模型、10k/100k 规模档与生产恢复演练仍待用户/外部环境；原账本不提升。
 
 **修改：**`packages/contracts/src/opening/learning.ts`、`packages/domain/src/opening/learning-summary.ts`、`apps/web/src/features/opening/learning/read-service.ts`、`packages/database/src/repositories/opening-learning.ts`、`docs/product/UX_AND_AI_POLICY.md`。
 

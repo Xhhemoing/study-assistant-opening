@@ -68,7 +68,7 @@ export async function readOpeningBackupTableRows(
       o.problem_id, a.id AS retest_id, o.answer, o.outcome, o.assistance, o.client_key, o.occurred_at,
       o.source_turn_ids, o.verdict_source, o.reference_source_id, o.evidence_verdict,
       o.attempt_id, o.item_version_id, o.requirement_key, o.started_at, o.submitted_at, o.recorded_at,
-      o.source_versions, o.reference_check, o.submitted_intent, o.history_revision,
+      o.source_versions, o.reference_check, o.submitted_intent, o.history_revision, o.workspace_history_revision,
       o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id
     FROM opening_learning_observations o
     JOIN opening_learning_sessions l ON l.id = o.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
@@ -93,7 +93,8 @@ export async function readOpeningBackupTableRows(
         SELECT 1 FROM unnest(o.source_turn_ids) ref(turn_id) WHERE NOT ${includedTurn(tx, id, userId, tx`ref.turn_id`)}
       )
       AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`o.problem_id`, tx`o.session_id`)})
-    ORDER BY o.id`);
+    ORDER BY o.id`)
+    .map(row => ({ ...row, workspace_history_revision: Number(row.workspace_history_revision) }));
   tables.opening_assistant_candidates = asRows(await tx`
     SELECT a.id, a.workspace_id, a.conversation_id, a.source_turn_id, a.source_ids, a.payload, a.status, a.created_at, a.updated_at,
       a.task_accept_client_key, a.task_accept_intent, a.task_result_ref
@@ -159,6 +160,10 @@ export async function readOpeningBackupTableRows(
     WHERE a.workspace_id = ${id} ORDER BY a.client_key`);
   tables.opening_source_versions = asRows(await readOpeningBackupVersionRows(tx, { workspaceId: id, ownerUserId: userId }))
     .map(row => ({ ...row, bytes: row.bytes === null ? null : Number(row.bytes) }));
+  tables.opening_workspace_history_revisions = asRows(await tx`
+    SELECT workspace_id, owner_user_id, revision FROM opening_workspace_history_revisions
+    WHERE workspace_id=${id} AND owner_user_id=${userId}`)
+    .map(row => ({ ...row, revision: Number(row.revision) }));
   tables.opening_learning_history_revisions = asRows(await tx`
     SELECT workspace_id, owner_user_id, course_id, revision FROM opening_learning_history_revisions
     WHERE workspace_id=${id} AND owner_user_id=${userId} ORDER BY course_id`);

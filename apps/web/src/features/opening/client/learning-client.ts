@@ -1,11 +1,12 @@
 import {
   learningSummarySchema,
+  courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
   learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningObservationSchema,
   type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
   observationHistorySchema, observationRevisionInputSchema, observationRevisionResultSchema,
   type ObservationRevisionInput,
-  type LearningSummary,
+  type LearningSummary, type CourseLearningSummaryInput,
   type ObservationInput,
 } from "@aistudy/contracts";
 import { z } from "zod";
@@ -56,6 +57,15 @@ export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return z.array(learningSummarySchema).parse(body);
+    },
+
+    /** Fixed-snapshot, complete group summary. Legacy getSummary remains available. */
+    async getSummaryPage(input: CourseLearningSummaryInput, signal?: AbortSignal) {
+      const target = courseLearningSummaryInputSchema.parse(input);
+      const query = new URLSearchParams({ limit: String(target.limit) });
+      if (target.groupCursor !== undefined) query.set("groupCursor", target.groupCursor);
+      const body = await request(`/api/opening/courses/${target.courseId}/learning/summary?${query}`, { method: "GET", signal }, fetchImpl);
+      return courseLearningSummaryPageSchema.parse(body);
     },
 
     async listObservations(courseId: string) {

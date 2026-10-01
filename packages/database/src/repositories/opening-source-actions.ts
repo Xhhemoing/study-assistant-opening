@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import type { SourceActionInput, SourceDeletion, SourceImpact } from "@aistudy/contracts";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
 type Cleanup = { keys: string[]; notBefore: string | null };
@@ -40,6 +42,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
 
     async apply(scope: OpeningScope, id: string, input: Exclude<SourceActionInput, { action: "retry_cleanup" }>, keys: Keys, now: Date): Promise<{ deleted: boolean; cleanup: Cleanup }> {
       return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await owner(tx, scope, true);
         const sourceRows = await tx`SELECT version, upload_url_expires_at FROM opening_sources
           WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
@@ -59,6 +62,8 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
           VALUES(${randomUUID()},${scope.workspaceId},${id},${now}) ON CONFLICT(workspace_id,source_id) DO NOTHING`;
         // Both first exclusion and later asset deletion fence in-flight model/writeback snapshots.
         await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
+        await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         if (input.action === "exclude") return { deleted: false, cleanup: { keys: [], notBefore: null } };
 
         const versions = await tx`SELECT version FROM opening_source_versions WHERE workspace_id=${scope.workspaceId} AND source_id=${id}

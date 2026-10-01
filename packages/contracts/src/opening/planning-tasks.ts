@@ -4,6 +4,7 @@ import { candidateRefSchema, reviewResultSchema } from "./candidate-review";
 
 export const taskItemSchema = z.object({
   id: uuidSchema,
+  version: z.number().int().positive().optional(),
   title: z.string().min(1).max(240),
   minutes: z.number().int().positive().max(24 * 60),
   dueAt: isoDateTimeSchema.nullable(),

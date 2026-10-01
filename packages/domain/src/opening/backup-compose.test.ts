@@ -19,7 +19,7 @@ const backupTables = [
 function input(overrides: Partial<OpeningBackupComposeInput> = {}): OpeningBackupComposeInput {
   return {
     records: {
-      privacyEpoch: 4,
+      privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
       deletionJournal: [],
       tables: Object.fromEntries(backupTables.map((table) => [table, table === "opening_sources"
         ? [{ id: sourceId, workspace_id: workspaceId, version: 2, bytes: 12, sha256: hash }]
@@ -28,7 +28,7 @@ function input(overrides: Partial<OpeningBackupComposeInput> = {}): OpeningBacku
     staging: {
       snapshot: {
         workspaceId,
-        privacyEpoch: 4,
+        privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
         deletionJournal: [],
         sources: [{ sourceId, version: 2, bytes: 12, sha256: hash }],
       },
@@ -39,6 +39,33 @@ function input(overrides: Partial<OpeningBackupComposeInput> = {}): OpeningBacku
 }
 
 describe("composeOpeningBackupDraft", () => {
+  it("carries independent memory tombstones without including their original bodies", () => {
+    const value = input();
+    const memoryDeletions = { workspaceId, memories: [{ memoryId: sourceId, deletedAt: "2026-09-30T00:00:00.000Z" }] };
+    Object.assign(value.records, { memoryDeletions });
+    Object.assign(value.staging.snapshot, { memoryDeletions });
+    const result = composeOpeningBackupDraft(value);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.backup).toHaveProperty("memoryDeletions", memoryDeletions);
+  });
+
+  it("rejects memory deletion drift between records and object staging", () => {
+    const value = input();
+    Object.assign(value.records, { memoryDeletions: { workspaceId, memories: [] } });
+    Object.assign(value.staging.snapshot, { memoryDeletions: { workspaceId,
+      memories: [{ memoryId: sourceId, deletedAt: "2026-09-30T00:00:00.000Z" }] } });
+    expect(composeOpeningBackupDraft(value)).toMatchObject({ ok: false, code: "JOURNAL_MISMATCH" });
+  });
+
+  it("rejects a missing memory fact read or a foreign empty snapshot", () => {
+    const missing = input();
+    Object.assign(missing.records, { memoryDeletions: undefined });
+    expect(composeOpeningBackupDraft(missing)).toMatchObject({ ok: false, code: "INVALID_INPUT" });
+    const foreign = input();
+    foreign.records.memoryDeletions = { workspaceId: sourceId, memories: [] };
+    expect(composeOpeningBackupDraft(foreign)).toMatchObject({ ok: false, code: "WORKSPACE_MISMATCH" });
+  });
+
   it("joins matching records and staged objects into a validated draft", () => {
     const result = composeOpeningBackupDraft(input());
     expect(result.ok).toBe(true);

@@ -51,7 +51,7 @@ const roots: string[] = [];
 
 function recordsSnapshot(): OpeningBackupRecordSnapshot {
   return {
-    privacyEpoch: 4,
+    privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
     deletionJournal: [],
     tables: Object.fromEntries(tables.map((name) => [name, name === "opening_sources"
       ? [{ id: sourceId, workspace_id: workspaceId, version: 1, bytes: 4, sha256: hash }]
@@ -63,7 +63,7 @@ function staged(name: string): OpeningSourceStaging {
   return {
     directory: path.join(roots[roots.length - 1]!, name),
     snapshot: {
-      workspaceId, privacyEpoch: 4, deletionJournal: [],
+      workspaceId, privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] }, deletionJournal: [],
       sources: [{ sourceId, version: 1, bytes: 4, sha256: hash }],
     },
     objects: [{ sourceId, sha256: hash, bytes: 4, archivePath: `objects/${sourceId}/v1.bin`, actualSha256: hash }],

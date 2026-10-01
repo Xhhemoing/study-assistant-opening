@@ -22,7 +22,7 @@ const sql = {} as Sql;
 function snapshot(overrides: Partial<OpeningBackupSourceSnapshot> = {}): OpeningBackupSourceSnapshot {
   return {
     workspaceId,
-    privacyEpoch: 4,
+    privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
     deletionJournal: [{ sourceId: sourceB, deletedAt: "2026-09-21T00:00:00.000Z" }],
     sources: [{ sourceId: sourceA, version: 3, bytes: 12, sha256: hashA }],
     ...overrides,
@@ -30,6 +30,35 @@ function snapshot(overrides: Partial<OpeningBackupSourceSnapshot> = {}): Opening
 }
 
 describe("assertOpeningBackupSnapshotCurrent", () => {
+  it("rejects changed memory deletion facts even when the source inventory is unchanged", async () => {
+    const expected = { ...snapshot(), memoryDeletions: { workspaceId, memories: [] } };
+    readSources.mockResolvedValue({ ...snapshot(), memoryDeletions: { workspaceId,
+      memories: [{ memoryId: sourceA, deletedAt: "2026-09-30T00:00:00.000Z" }] } });
+    await expect(assertOpeningBackupSnapshotCurrent(sql, scope, expected)).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("rejects missing current memory facts instead of treating them as empty", async () => {
+    const expected = { ...snapshot(), memoryDeletions: { workspaceId, memories: [] } };
+    readSources.mockResolvedValue({ ...snapshot(), memoryDeletions: undefined } as unknown as OpeningBackupSourceSnapshot);
+    await expect(assertOpeningBackupSnapshotCurrent(sql, scope, expected)).rejects.toThrow();
+  });
+
+  it("normalizes memory IDs and compares a copy while the caller mutates its facts", async () => {
+    const mark = { memoryId: sourceA.toUpperCase(), deletedAt: "2026-09-30T00:00:00.000Z" };
+    const expected = snapshot({ memoryDeletions: { workspaceId: workspaceId.toUpperCase(), memories: [mark] } });
+    readSources.mockImplementation(async () => {
+      expected.memoryDeletions.memories.length = 0;
+      return snapshot({ memoryDeletions: { workspaceId, memories: [{ ...mark, memoryId: sourceA }] } });
+    });
+    await expect(assertOpeningBackupSnapshotCurrent(sql, scope, expected)).resolves.toBeUndefined();
+  });
+
+  it("rejects a foreign empty memory snapshot before a live read", async () => {
+    const expected = snapshot({ memoryDeletions: { workspaceId: sourceA, memories: [] } });
+    await expect(assertOpeningBackupSnapshotCurrent(sql, scope, expected)).rejects.toThrow();
+    expect(readSources).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     readSources.mockReset();
   });

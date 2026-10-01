@@ -9,6 +9,7 @@ import {
   type OpeningBackupSourceSnapshot,
 } from "./opening-backup-sources";
 import type { OpeningScope } from "./opening-sources";
+import { copyMemoryDeletions } from "./opening-backup-memory-deletions";
 
 export type OpeningSourceStaging = {
   directory: string;
@@ -31,6 +32,7 @@ function copySnapshot(snapshot: OpeningBackupSourceSnapshot): OpeningBackupSourc
     workspaceId: snapshot.workspaceId,
     privacyEpoch: snapshot.privacyEpoch,
     deletionJournal: snapshot.deletionJournal.map((mark) => ({ ...mark })),
+    memoryDeletions: copyMemoryDeletions(snapshot.memoryDeletions, snapshot.workspaceId),
     sources: snapshot.sources.map((source) => ({ ...source })),
   };
 }

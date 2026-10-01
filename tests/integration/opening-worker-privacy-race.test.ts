@@ -90,7 +90,7 @@ describe("opening worker privacy race (handler/repository)", () => {
         SELECT privacy_epoch FROM workspaces WHERE id = ${fixture.scope.workspaceId}`;
       expect(Number(epoch[0]?.privacy_epoch)).toBe(0);
       barrier.release();
-      await waitUntilBlocked(observer.sql, writerPid, deletePid, "completeTurn", /FROM workspaces[\s\S]*FOR UPDATE/i);
+      await waitUntilBlocked(observer.sql, writerPid, deletePid, "completeTurn", /opening_workspace_history_revisions|FROM workspaces[\s\S]*FOR UPDATE/i);
       held.release();
       const gateDone = held.done;
       held = undefined;

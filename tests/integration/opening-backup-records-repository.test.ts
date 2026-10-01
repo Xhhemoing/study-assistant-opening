@@ -125,10 +125,10 @@ it("exports retest business state without dangling transport candidate reference
     VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, 'fractions', ARRAY[]::uuid[])`;
   await sql`INSERT INTO opening_learning_observations (
     id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, retest_id,
-    answer, outcome, assistance, client_key, source_turn_ids, verdict_source
+    answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision
   ) VALUES (
     ${observationId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${sessionId}, ${courseId}, 'fractions',
-    ARRAY[]::uuid[], ${candidateId}, 'answer', 'correct', 'independent', ${observationId}, ARRAY[]::uuid[], 'self_report'
+    ARRAY[]::uuid[], ${candidateId}, 'answer', 'correct', 'independent', ${observationId}, ARRAY[]::uuid[], 'self_report', 0
   )`;
 
   const { tables } = await readOpeningBackupRecords(sql, scope);

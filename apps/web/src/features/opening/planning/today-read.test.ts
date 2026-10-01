@@ -47,3 +47,23 @@ describe("independent Today resume and review state", () => {
     expect(visibleTodayTasks([{ ...tasks[0]!, status: "done" }], "a")[0]?.status).toBe("done");
   });
 });
+
+it("keeps manual material separate from automatic resume and preserves the conversation link", () => {
+  const state = resolveTodayResume({ hasSession: true, loadFailed: false,
+    lastConversation: { ...conversation, sourceVersions: {}, currentPage: null, manualSourceCount: 1 } });
+  expect(state.continueItem?.manualSourceCount).toBe(1);
+  const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
+  expect(html).toContain(`/opening/assistant?conversation=${conversation.id}`);
+  expect(html).toContain(conversation.lastUserText);
+  expect(html).toContain("1 份材料仅供手工阅读");
+  expect(html).not.toContain("上次读到第");
+  expect(html).not.toContain("可恢复");
+});
+it("describes only automatic materials as recoverable", () => {
+  const state = resolveTodayResume({ hasSession: true, loadFailed: false,
+    lastConversation: { ...conversation, sourceVersions: { "33333333-3333-4333-8333-333333333333": 4 }, currentPage: null, manualSourceCount: 1 } });
+  const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
+  expect(html).toContain("可恢复 1 份材料");
+  expect(html).toContain("1 份材料仅供手工阅读");
+  expect(html).not.toContain("上次读到第");
+});

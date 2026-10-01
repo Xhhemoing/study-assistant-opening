@@ -81,6 +81,34 @@ afterAll(async () => {
 });
 
 describe("opening reminder handlers (P03)", () => {
+  it("enqueues only the selected current task and rejects stale, foreign, or incomplete intent", async () => {
+    const created = await createTask(req("/api/opening/tasks", "POST", taskBody("Selected due", "selected-task-01")));
+    const selected = await created.json() as { id: string; version: number };
+    expect(selected.version).toBe(1);
+    await createTask(req("/api/opening/tasks", "POST", taskBody("Unrelated due", "unrelated-task-01")));
+    const other = await createTask(req("/api/opening/tasks", "POST", taskBody("Foreign due", "foreign-task-01"), otherCookie));
+    const foreign = await other.json() as { id: string };
+    const input = { clientKey: "selected-reminder-01", taskId: selected.id, expectedVersion: selected.version };
+    const first = await enqueueReminders(req("/api/opening/reminders", "POST", input));
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({ reminders: [{ taskId: selected.id, taskVersion: 1, receiptId: null }] });
+    expect((await enqueueReminders(req("/api/opening/reminders", "POST", input))).status).toBe(200);
+    expect((await enqueueReminders(req("/api/opening/reminders", "POST", { ...input, expectedVersion: 2 }))).status).toBe(409);
+    expect((await enqueueReminders(req("/api/opening/reminders", "POST", { ...input, taskId: foreign.id }))).status).toBe(404);
+    expect((await enqueueReminders(req("/api/opening/reminders", "POST", { clientKey: input.clientKey, taskId: selected.id }))).status).toBe(400);
+    expect(await sql`SELECT id FROM opening_jobs WHERE kind='remind'`).toHaveLength(1);
+  });
+
+  it("rejects a non-due explicit task with 422 and creates no job", async () => {
+    const created = await createTask(req("/api/opening/tasks", "POST", { ...taskBody("No due date", "not-due-task-01"), dueAt: null }));
+    const task = await created.json() as { id: string; version: number };
+    const response = await enqueueReminders(req("/api/opening/reminders", "POST", {
+      clientKey: "not-due-reminder-01", taskId: task.id, expectedVersion: task.version,
+    }));
+    expect(response.status).toBe(422);
+    expect(await sql`SELECT id FROM opening_jobs WHERE kind='remind'`).toHaveLength(0);
+  });
+
   it("returns 401 without a session", async () => {
     const response = await listReminders(req("/api/opening/reminders", "GET", undefined, ""));
     expect(response.status).toBe(401);

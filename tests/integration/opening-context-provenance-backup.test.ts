@@ -54,7 +54,7 @@ it("exports historical multi-version context references and rejects their replay
   expect(before.tables.opening_assistant_candidates.map(row => row.id)).toContain(candidate);
   const backup: OpeningBackup = JSON.parse(JSON.stringify({ format: "opening-backup", version: 1, workspaceId: scope.workspaceId,
     ...before, objects: [] }));
-  expect(planOpeningRestoreApply(backup, [], { confirmLocalRestore: true }).ok).toBe(true);
+  expect(planOpeningRestoreApply(backup, [], { confirmLocalRestore: true, currentMemoryDeletions: before.memoryDeletions }).ok).toBe(true);
   expect((backup.tables.opening_turns as Record<string, unknown>[]).find(row => row.id === mixed)?.context_source_refs).toEqual(refs);
 
   await rows.exclude(a);
@@ -62,8 +62,8 @@ it("exports historical multi-version context references and rejects their replay
   expect(after.tables.opening_turns.map(row => row.id).sort()).toEqual([clean, user].sort());
   expect(after.tables.opening_memories.map(row => row.id)).toEqual([cleanMemory]);
   expect(after.tables.opening_assistant_candidates.map(row => row.id)).toEqual([cleanCandidate]);
-  expect(validateOpeningRestore(backup, after.deletionJournal).errors).toContain("table opening_turns references a deleted source");
-  expect(planOpeningRestoreApply(backup, after.deletionJournal, { confirmLocalRestore: true })).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
+  expect(validateOpeningRestore(backup, after.deletionJournal, after.memoryDeletions).errors).toContain("table opening_turns references a deleted source");
+  expect(planOpeningRestoreApply(backup, after.deletionJournal, { confirmLocalRestore: true, currentMemoryDeletions: after.memoryDeletions })).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
   expect(await sql`SELECT text FROM opening_turns WHERE id = ${user}`).toEqual([{ text: "Keep my original notes" }]);
 });
 

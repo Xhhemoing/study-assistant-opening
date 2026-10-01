@@ -55,9 +55,11 @@ export function backupRows(sql: Sql, scope: OpeningScope) {
     },
     async observation(session: string, sources: string[] = [], turns: string[] = [], problem: string | null = null) {
       const id = randomUUID();
+      await sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+        VALUES (${w},${u},0) ON CONFLICT DO NOTHING`;
       await sql`INSERT INTO opening_learning_observations
-        (id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, problem_id, answer, outcome, assistance, client_key, source_turn_ids, verdict_source)
-        VALUES (${id}, ${w}, ${u}, ${session}, ${courseId}, 'Recall', ${sources}, ${problem}, 'Answer', 'unverified', 'unknown', ${id}, ${turns}, 'unknown')`;
+        (id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, problem_id, answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision)
+        VALUES (${id}, ${w}, ${u}, ${session}, ${courseId}, 'Recall', ${sources}, ${problem}, 'Answer', 'unverified', 'unknown', ${id}, ${turns}, 'unknown', 0)`;
       return id;
     },
     async candidate(conversation: string, turn: string, sources: string[] = []) {

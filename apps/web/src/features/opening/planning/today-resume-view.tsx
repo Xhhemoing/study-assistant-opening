@@ -11,7 +11,8 @@ export function TodayResumeBody({ state }: { state: TodayResumeState }) {
     {item ? <article className="border-b border-zinc-200 bg-white px-5 py-5">
       <h2 className="text-sm font-semibold text-zinc-900">继续：{item.title}</h2>
       {item.lastUserText ? <p className="mt-2 break-words text-sm leading-6 text-zinc-600">{item.lastUserText}</p> : null}
-      <p className="mt-3 text-sm text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "从上次对话继续"}{Object.keys(item.sourceVersions ?? {}).length ? ` · 已关联 ${Object.keys(item.sourceVersions ?? {}).length} 份材料` : ""}</p>
+      <p className="mt-3 text-sm text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "从上次对话继续"}{Object.keys(item.sourceVersions ?? {}).length ? ` · 可恢复 ${Object.keys(item.sourceVersions ?? {}).length} 份材料` : ""}</p>
+      {(item.manualSourceCount ?? 0) > 0 ? <p className="mt-2 text-sm text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
       <Link className={primary} href={`/opening/assistant?conversation=${encodeURIComponent(item.conversationId)}`}>继续学习</Link>
     </article> : <><EmptyState title="还没有可继续的对话" description="向助理提问后，可以从这里回到已保存的对话。" /><Link className={primary} href="/opening/assistant">向助理提问</Link></>}
     {(state.pendingReviews?.count ?? 0) > 0 ? <article className="border-b border-zinc-200 bg-white px-5 py-5">

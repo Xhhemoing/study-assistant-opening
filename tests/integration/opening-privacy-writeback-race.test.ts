@@ -129,7 +129,7 @@ describe("opening privacy writeback true overlap", () => {
       await waitUntilBlocked(observer.sql, deleteSession.pid, gate.pid, "deleteMemory", /FROM opening_memories[\s\S]*FOR UPDATE/i);
       const completed = track(realJobs.completeTurn(turnInput(ids)));
       inFlight.push(completed);
-      await waitUntilBlocked(observer.sql, writerSession.pid, deleteSession.pid, "completeTurn", /FROM workspaces[\s\S]*FOR UPDATE/i);
+      await waitUntilBlocked(observer.sql, writerSession.pid, deleteSession.pid, "completeTurn", /opening_workspace_history_revisions|FROM workspaces[\s\S]*FOR UPDATE/i);
       held.release();
       const gateDone = held.done;
       held = undefined;
@@ -177,7 +177,7 @@ describe("opening privacy writeback true overlap", () => {
         id: ids.memoryId, expectedVersion: 0, deleteSourceText: false, clientKey: "race-del-2",
       }));
       inFlight.push(deleted);
-      await waitUntilBlocked(observer.sql, deleteSession.pid, writerSession.pid, "deleteMemory", /FROM workspaces[\s\S]*FOR UPDATE/i);
+      await waitUntilBlocked(observer.sql, deleteSession.pid, writerSession.pid, "deleteMemory", /opening_workspace_history_revisions|FROM workspaces[\s\S]*FOR UPDATE/i);
       held.release();
       const gateDone = held.done;
       held = undefined;

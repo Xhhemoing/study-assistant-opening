@@ -1,5 +1,6 @@
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
+import { copyMemoryDeletions, type OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import {
   readOpeningBackupSources,
   type OpeningBackupSource,
@@ -22,6 +23,7 @@ type Expected = {
   workspaceId: string;
   privacyEpoch: number;
   deletionJournal: OpeningDeletionMark[];
+  memoryDeletions: OpeningMemoryDeletions;
   sources: OpeningBackupSource[];
 };
 
@@ -45,6 +47,7 @@ function copyExpected(scope: OpeningScope, snapshot: OpeningBackupSourceSnapshot
     workspaceId: snapshot.workspaceId.toLowerCase(),
     privacyEpoch: snapshot.privacyEpoch,
     deletionJournal: canonicalJournal(snapshot.deletionJournal),
+    memoryDeletions: copyMemoryDeletions(snapshot.memoryDeletions, scope.workspaceId),
     sources: canonicalSources(snapshot.sources),
   };
 }
@@ -82,6 +85,11 @@ function canonicalSources(sources: readonly OpeningBackupSource[]): OpeningBacku
 
 function sameTuples(expected: Expected, live: Expected): boolean {
   return expected.privacyEpoch === live.privacyEpoch
+    && expected.memoryDeletions.memories.length === live.memoryDeletions.memories.length
+    && expected.memoryDeletions.memories.every((mark, index) => {
+      const current = live.memoryDeletions.memories[index];
+      return current?.memoryId === mark.memoryId && current.deletedAt === mark.deletedAt;
+    })
     && expected.deletionJournal.length === live.deletionJournal.length
     && expected.sources.length === live.sources.length
     && expected.deletionJournal.every((mark, index) => {

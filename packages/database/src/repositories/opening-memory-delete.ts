@@ -3,6 +3,8 @@ import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { parseContextSourceRefs } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 export type MemoryDeletionReceipt = {
   memoryId: string;
@@ -19,6 +21,7 @@ export function deleteOwnedMemory(
   input: { id: string; expectedVersion: number; deleteSourceText: boolean; clientKey: string },
 ): Promise<MemoryDeletionReceipt> {
   return sql.begin(async (tx) => {
+    await lockWorkspaceLearningHistory(tx, scope);
     const owners = await tx`
       SELECT id, privacy_epoch FROM workspaces
       WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
@@ -69,14 +72,23 @@ export function deleteOwnedMemory(
       UPDATE workspaces SET privacy_epoch = privacy_epoch + 1, updated_at = now()
       WHERE id = ${scope.workspaceId}
       RETURNING privacy_epoch`;
+    const uniqueSourceIds = [...new Set(sourceIds)];
+    const existingExclusions = uniqueSourceIds.length ? await tx`SELECT source_id FROM opening_privacy_exclusions
+      WHERE workspace_id=${scope.workspaceId} AND source_id IN ${tx(uniqueSourceIds)}` : [];
+    const previouslyExcluded = new Set(existingExclusions.map((exclusion) => String(exclusion.source_id)));
+    const newlyExcluded = uniqueSourceIds.filter((sourceId) => !previouslyExcluded.has(sourceId));
     const excludedSourceIds: string[] = [];
-    for (const sourceId of [...new Set(sourceIds)]) {
+    for (const sourceId of uniqueSourceIds) {
       await tx`
         INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at)
         VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, ${input.id}, ${deletedAt})
         ON CONFLICT (workspace_id, source_id) DO UPDATE
           SET memory_id = EXCLUDED.memory_id, deleted_at = EXCLUDED.deleted_at`;
       excludedSourceIds.push(sourceId);
+    }
+    if (newlyExcluded.length) {
+      await nextWorkspaceLearningHistoryRevision(tx, scope);
+      await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: newlyExcluded });
     }
     if (input.deleteSourceText) {
       for (const turnId of turnIds) {

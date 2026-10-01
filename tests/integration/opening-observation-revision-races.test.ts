@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningPlansRepository, createOpeningRetestRepository, readOpeningRetestReviewCandidates, reviseOpeningLearningObservation } from "@aistudy/database";
+import { createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository, readOpeningRetestReviewCandidates, reviseOpeningLearningObservation } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
@@ -21,6 +21,7 @@ function beforeCommit(sql: Sql) {
 }
 async function setup() {
   const f=await learningAttemptFixture(fixture), original=await f.submit(await f.start()), candidateId=randomUUID();
+  await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope, { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
   await createOpeningRetestRepository(fixture.sql).saveCandidates(fixture.scope,[{ id:candidateId,courseId:f.courseId,skillLabel:"fractions",sourceIds:[f.sourceId],
     dueAt:"2026-09-29T10:00:00Z",prompt:"Try again",accepted:false,kind:"task",evidenceRootIds:[original.id],evidenceObservationIds:[original.id] }]);
   const input={ title:"Try again",minutes:20,dueAt:null,priority:1,candidateId,clientKey:randomUUID(),inputSnapshot:{kind:"retest" as const,candidateId,heuristic:true as const} };
@@ -35,7 +36,7 @@ it.each(["revise","accept"] as const)("coordinates acceptance and correction wit
   try {
     await Promise.race([barrier.opened,winner.then(()=>{throw new Error("commit barrier bypassed");})]);
     const loser=track<unknown>(first==="revise"?accept(b.sql):revise(b.sql)); pending.push(loser);
-    await waitUntilBlocked(fixture.sql,b.pid,a.pid,"evidence history",/opening_learning_history_revisions/);
+    await waitUntilBlocked(fixture.sql,b.pid,a.pid,"evidence history",/opening_(?:workspace_|learning_)history_revisions/);
     barrier.release();await winner;
     if(first==="revise") await expect(loser).rejects.toMatchObject({code:"NOT_FOUND"}); else await loser;
     const [row]=await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${seed.candidateId}`;

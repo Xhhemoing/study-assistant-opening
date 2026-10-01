@@ -33,3 +33,5 @@ export {
   EPHEMERAL_HISTORY_MAX_TURNS,
   stripEphemeralCandidates,
 } from "./opening/conversation-policy";
+
+export { selectedOpeningModelId, resolveOpeningModel, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";

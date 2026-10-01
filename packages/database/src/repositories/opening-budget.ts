@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { openingModelSnapshotSchema, type OpeningModelSnapshot } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
@@ -21,9 +22,11 @@ export type BudgetReservationRecord = {
   amountCents: number;
   requestId: string;
   state: string;
+  modelSnapshot: OpeningModelSnapshot | null;
 };
 
 export type ReserveInput = {
+  modelSnapshot?: OpeningModelSnapshot;
   purpose: string;
   amountCents: number;
   requestId: string;
@@ -55,6 +58,7 @@ function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
     amountCents: Number(row.amount_cents),
     requestId: row.request_id as string,
     state: row.state as string,
+    modelSnapshot: row.model_snapshot == null ? null : openingModelSnapshotSchema.parse(row.model_snapshot),
   };
 }
 
@@ -93,13 +97,14 @@ export function createOpeningBudgetRepository(sql: Sql, options: { dailyCapCents
       if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
         throw new OpeningBudgetError("CONFLICT", "amount must be a positive integer");
       }
+      const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
       return sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
         if (existing.length) {
           const row = mapReservation(existing[0] as Record<string, unknown>);
-          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || row.amountCents !== input.amountCents || row.state !== 'reserved') {
+          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || row.amountCents !== input.amountCents || row.state !== 'reserved' || JSON.stringify(row.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
           return row;
@@ -107,8 +112,8 @@ export function createOpeningBudgetRepository(sql: Sql, options: { dailyCapCents
         // Count all unresolved calls, including old ones, plus today's completed spend.
         // A late settlement is charged on both its reservation day and settlement day.
         const rows = await tx`
-          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, request_id)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.requestId}
+          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, request_id, model_snapshot)
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}
           WHERE ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE workspace_id=${scope.workspaceId} AND (state='reserved' OR

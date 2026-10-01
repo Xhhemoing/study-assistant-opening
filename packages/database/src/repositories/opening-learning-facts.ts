@@ -5,6 +5,22 @@ export function learningError(code: "NOT_FOUND" | "VALIDATION" | "CONFLICT", mes
   return Object.assign(new Error(message), { code });
 }
 export const learningIso = (value: unknown): string | null => value == null ? null : new Date(value as string | Date).toISOString();
+/** Lock before any owner/course/root/activity/task lock; readers never lock this row. */
+export async function lockWorkspaceLearningHistory(tx: TransactionSql, scope: Scope): Promise<void> {
+  const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owners.length) throw learningError("NOT_FOUND", "workspace not found");
+  await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+    VALUES (${scope.workspaceId},${scope.ownerUserId},0) ON CONFLICT DO NOTHING`;
+  await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+}
+/** Advance once for a real learning-semantic mutation, in the transaction holding the counter lock. Non-observation mutations leave valid gaps in fixed-R history. */
+export async function nextWorkspaceLearningHistoryRevision(tx: TransactionSql, scope: Scope): Promise<number> {
+  const [row] = await tx`UPDATE opening_workspace_history_revisions SET revision=revision+1
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING revision`;
+  if (!row) throw learningError("CONFLICT", "workspace history counter missing");
+  return Number(row.revision);
+}
 export async function lockLearningOwner(tx: TransactionSql, scope: Scope): Promise<void> {
   const rows = await tx`SELECT id FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
   if (!rows.length) throw learningError("NOT_FOUND", "workspace not found");

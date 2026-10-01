@@ -14,6 +14,7 @@ import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
 import { insertOpeningTask } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 export { OpeningPlanError };
 export type { OpeningPlanErrorCode } from "./opening-plan-error";
@@ -38,6 +39,7 @@ function fingerprintHardBlocks(blocks: TimeBlock[]): string {
 function mapTask(row: Record<string, unknown>): TaskItem {
   return {
     id: row.id as string,
+    version: Number(row.version),
     title: row.title as string,
     minutes: Number(row.minutes),
     dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
@@ -77,6 +79,7 @@ export function createOpeningPlansRepository(sql: Sql) {
 
     async updateTaskStatus(scope: OpeningScope, taskId: string, input: TaskStatusUpdateInput): Promise<TaskItem> {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         // Lock the linked activity before the task. Observation submission and
         // task completion use the same order, so concurrent decisions cannot
         // deadlock while both try to reconcile the pair.
@@ -117,6 +120,7 @@ export function createOpeningPlansRepository(sql: Sql) {
         const updated = await tx`UPDATE opening_tasks SET status=${input.status}, version=version + 1, updated_at=now()
           WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
           RETURNING *`;
+        if (activity) await nextWorkspaceLearningHistoryRevision(tx, scope);
         return mapTask(updated[0] as Record<string, unknown>);
       });
     },

@@ -1,5 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { createOpeningLearningClient } from "./learning-client";
+import { createOpeningLearningReadService } from "../learning/read-service";
+import { learningObservation, qualifiedInput } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 
 const COURSE = "11111111-1111-4111-8111-111111111111";
 const SESSION = "22222222-2222-4222-8222-222222222222";
@@ -30,6 +32,19 @@ it("parses a genuine empty summary without inventing skills", async () => {
   });
   const client = createOpeningLearningClient(fetchImpl as unknown as typeof fetch);
   await expect(client.getSummary(COURSE)).resolves.toEqual([]);
+});
+
+it("reads the paginated summary through its opaque cursor without using legacy response parsing", async () => {
+  const page = {
+    status: "ready", groups: [], snapshotRevision: 4, nextCursor: "cursor+/=", evaluatedAt: ISO,
+    pendingProjectionCount: 0,
+  };
+  const fetchImpl = vi.fn(async (url: string) => {
+    expect(url).toBe(`/api/opening/courses/${COURSE}/learning/summary?limit=10&groupCursor=cursor%2B%2F%3D`);
+    return Response.json(page);
+  });
+  const client = createOpeningLearningClient(fetchImpl as unknown as typeof fetch);
+  await expect(client.getSummaryPage({ courseId: COURSE, limit: 10, groupCursor: "cursor+/=" })).resolves.toEqual(page);
 });
 
 const ATTEMPT = "33333333-3333-4333-8333-333333333333";
@@ -84,4 +99,20 @@ it("reads real empty current-head records and courses through their server route
   expect(await client.listObservations(COURSE)).toEqual([]);
   expect(fetchImpl).toHaveBeenCalledWith(`/api/opening/courses/${COURSE}/observations`, expect.objectContaining({ method: "GET" }));
   expect(await client.listRevisionCourses()).toEqual([{ id: COURSE, title: "Fractions" }]);
+});
+
+it("reads a 201-observation service response through the strict HTTP client", async () => {
+  const observations = Array.from({ length: 201 }, (_, index) => ({ ...learningObservation, id: `44444444-4444-4444-8444-${String(index).padStart(12, "0")}` }));
+  const service = createOpeningLearningReadService({
+    assertOwnedCourse: async () => undefined, readCourseObservationHeads: async () => observations,
+    readCourseEvidence: async () => ({ observations, evidenceContexts: Object.fromEntries(observations.map(row => [row.id, qualifiedInput])) }),
+    now: () => ISO,
+  });
+  const response = await service.summarizeLearning({ workspaceId: COURSE, ownerUserId: SESSION }, learningObservation.courseId);
+  const client = createOpeningLearningClient(async () => Response.json(response));
+  const result = await client.getSummary(learningObservation.courseId);
+  expect(result[0]).toMatchObject({ sampleCount: 201, status: "observed_independent", recentPerformance: { evidenceCount: 201 } });
+  expect(result[0]?.evidenceIds).toHaveLength(20);
+  expect(result[0]?.recentPerformance?.evidenceIds).toHaveLength(20);
+  expect(result[0]?.evidenceEligibility?.map(row => row.observationId)).toEqual(result[0]?.evidenceIds);
 });

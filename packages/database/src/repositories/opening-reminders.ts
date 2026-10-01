@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
-import type { Reminder } from "@aistudy/contracts";
+import type { Reminder, ReminderEnqueueInput } from "@aistudy/contracts";
 import {
   externalChannelConfigured,
   isRetestActivityDue,
@@ -28,6 +28,7 @@ type ReminderPayload = {
   clientKey: string | null;
   configured: boolean;
   suppressed?: boolean;
+  explicitDue?: boolean;
 };
 
 const EXTERNAL_KEY = "remind-external-config";
@@ -116,7 +117,6 @@ export function createOpeningReminderRepository(sql: Sql) {
         };
         if (ref.status !== "pending") continue;
         const activity = activityByTask.get(ref.id);
-        if (activity && !(await automaticReminderAllowed(sql, scope, activity))) continue;
         if (activity ? !isRetestActivityDue(activity, now) : !isQueueableDueTask(ref, now) || !dueAt) continue;
         if (!dueAt && !activity) continue;
         const effectiveDueAt = activity?.times.scheduledStartAt ?? activity?.times.recommendedAt ?? dueAt;
@@ -128,6 +128,8 @@ export function createOpeningReminderRepository(sql: Sql) {
           channel: "in_app",
         });
         const existing = byKey.get(key) as Record<string, unknown> | undefined;
+        const explicitDue = (existing?.payload as ReminderPayload | undefined)?.explicitDue === true;
+        if (activity && !explicitDue && !(await automaticReminderAllowed(sql, scope, activity))) continue;
         reminders.push(existing
           ? mapReminder(existing, configured)
           : {
@@ -151,7 +153,7 @@ export function createOpeningReminderRepository(sql: Sql) {
           const task = taskById.get(payload.taskId);
           const activity = activityByTask.get(payload.taskId);
           if (!task || Number(task.version) !== payload.taskVersion || currentDueAt(task, activity, now) !== payload.dueAt) continue;
-          if (activity && !(await automaticReminderAllowed(sql, scope, activity, String(row.id)))) continue;
+          if (activity && !payload.explicitDue && !(await automaticReminderAllowed(sql, scope, activity, String(row.id)))) continue;
         }
         reminders.push(mapReminder(row, configured));
       }
@@ -160,10 +162,11 @@ export function createOpeningReminderRepository(sql: Sql) {
 
     async enqueue(
       scope: OpeningScope,
-      input: { clientKey: string; channel: ReminderChannel },
+      input: ReminderEnqueueInput,
       now = new Date(),
     ): Promise<Reminder[]> {
       if (input.clientKey.length < 8) throw new OpeningPlanError("VALIDATION", "clientKey required");
+      const explicit = "taskId" in input ? input : null;
       const config = await readConfig(sql, scope);
       const configured = externalChannelConfigured(config);
       if (input.channel !== "in_app" && !configured) {
@@ -171,7 +174,9 @@ export function createOpeningReminderRepository(sql: Sql) {
       }
       const tasks = await sql`
         SELECT id, title, due_at, status, version FROM opening_tasks
-        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND (${explicit?.taskId ?? null}::uuid IS NULL OR id=${explicit?.taskId ?? null}::uuid)`;
+      if (explicit && !tasks.length) throw new OpeningPlanError("NOT_FOUND", "task not found");
       const activities = await sql`SELECT * FROM opening_retest_activities
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
       const activityByTask = new Map(activities.map((row) => {
@@ -188,12 +193,13 @@ export function createOpeningReminderRepository(sql: Sql) {
           dueAt,
           status: task.status as "pending" | "done" | "skipped",
         };
-        if (ref.status !== "pending") continue;
+        if (explicit && ref.version !== explicit.expectedVersion) throw new OpeningPlanError("CONFLICT", "task version is stale");
         const activity = activityByTask.get(ref.id);
-        if (activity ? !isRetestActivityDue(activity, now) : !isQueueableDueTask(ref, now) || !dueAt) continue;
-        if (!dueAt && !activity) continue;
-        const effectiveDueAt = activity?.times.scheduledStartAt ?? activity?.times.recommendedAt ?? dueAt;
-        if (!effectiveDueAt) continue;
+        const effectiveDueAt = currentDueAt(task, activity, now);
+        if (!effectiveDueAt) {
+          if (explicit) throw new OpeningPlanError("VALIDATION", "task is not currently due");
+          continue;
+        }
         const payload: ReminderPayload = {
           taskId: ref.id,
           taskVersion: ref.version,
@@ -204,6 +210,7 @@ export function createOpeningReminderRepository(sql: Sql) {
           outcome: null,
           clientKey: input.clientKey,
           configured,
+          ...(explicit ? { explicitDue: true } : {}),
         };
         const key = reminderIdempotencyKey({
           taskId: ref.id, version: ref.version, dueAt: effectiveDueAt, channel: input.channel,
@@ -211,24 +218,53 @@ export function createOpeningReminderRepository(sql: Sql) {
         const rows = await sql.begin(async (tx) => {
           await lockLearningOwner(tx, scope);
           if (activity) {
-            if (!activity.courseId) return null;
+            if (!activity.courseId) {
+              if (explicit) throw new OpeningPlanError("NOT_FOUND", "retest course not found");
+              return null;
+            }
             await lockLearningPreferences(tx, scope, activity.courseId);
           }
           // Match task completion/submission: preference locks, then activity, then task.
           const currentActivities = await tx`SELECT * FROM opening_retest_activities
             WHERE task_id=${ref.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
           const currentActivity = currentActivities[0] ? mapOpeningRetestActivity(currentActivities[0] as Record<string, unknown>) : undefined;
-          if (currentActivity?.activityId !== activity?.activityId || currentActivity?.courseId !== activity?.courseId) return null;
+          if (currentActivity?.activityId !== activity?.activityId || currentActivity?.courseId !== activity?.courseId) {
+            if (explicit) throw new OpeningPlanError("CONFLICT", "task activity changed");
+            return null;
+          }
           const [currentTask] = await tx`SELECT id,title,due_at,status,version FROM opening_tasks
             WHERE id=${ref.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
-          if (!currentTask || Number(currentTask.version) !== ref.version || currentDueAt(currentTask, currentActivity, now) !== effectiveDueAt) return null;
-          if (currentActivity && !(await automaticReminderAllowed(tx, scope, currentActivity))) return null;
-          return insertRemindJob(tx, scope, key, { ...payload, title: String(currentTask.title) });
+          if (!currentTask) {
+            if (explicit) throw new OpeningPlanError("NOT_FOUND", "task not found");
+            return null;
+          }
+          if (Number(currentTask.version) !== ref.version) {
+            if (explicit) throw new OpeningPlanError("CONFLICT", "task version is stale");
+            return null;
+          }
+          if (currentDueAt(currentTask, currentActivity, now) !== effectiveDueAt) {
+            if (explicit) throw new OpeningPlanError("VALIDATION", "task is no longer currently due");
+            return null;
+          }
+          if (!explicit && currentActivity && !(await automaticReminderAllowed(tx, scope, currentActivity))) return null;
+          if (explicit && input.channel !== "in_app") {
+            const currentConfig = await readConfig(tx, scope);
+            if (!externalChannelConfigured(currentConfig) || currentConfig?.recipientId !== scope.ownerUserId) {
+              throw new OpeningPlanError("VALIDATION", "external reminder channel is disabled");
+            }
+          }
+          const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+            WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          return insertRemindJob(tx, scope, key, { ...payload, title: String(currentTask.title) }, Number(workspace!.privacy_epoch));
         });
         if (!rows) continue;
         queued.push({ ...mapReminder(rows.row, configured), created: rows.created });
       }
       return queued;
+    },
+
+    async getExternalConfig(scope: OpeningScope): Promise<ExternalReminderConfig | null> {
+      return readConfig(sql, scope);
     },
 
     async saveExternalConfig(scope: OpeningScope, config: ExternalReminderConfig): Promise<void> {
@@ -260,7 +296,7 @@ export function createOpeningReminderRepository(sql: Sql) {
 
     async isCurrent(id: string, now = new Date()): Promise<boolean> {
       return sql.begin(async (tx) => {
-        const rows = await tx`SELECT j.payload, j.workspace_id AS job_workspace_id,
+        const rows = await tx`SELECT j.payload, j.privacy_epoch, j.workspace_id AS job_workspace_id,
             j.owner_user_id AS job_owner_user_id,
             a.*, a.id AS activity_id, t.id AS task_id,
             t.status AS task_status, t.version AS task_version, t.due_at
@@ -275,69 +311,122 @@ export function createOpeningReminderRepository(sql: Sql) {
         const payload = row.payload as ReminderPayload;
         if (row.task_id == null || Number(row.task_version) !== payload.taskVersion || row.task_status !== "pending") return false;
         const activity = row.activity_id == null ? null : mapOpeningRetestActivity(row);
+        const scope = { workspaceId: String(row.job_workspace_id), ownerUserId: String(row.job_owner_user_id) };
+        await lockLearningOwner(tx, scope);
+        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (Number(workspace!.privacy_epoch) !== Number(row.privacy_epoch)) return false;
         if (activity) {
           if (!activity.courseId) return false;
-          const scope = { workspaceId: String(row.job_workspace_id), ownerUserId: String(row.job_owner_user_id) };
           await lockLearningPreferences(tx, scope, activity.courseId);
-          if (!(await automaticReminderAllowed(tx, scope, activity, id))) return false;
-          const effectiveDueAt = activity.times.scheduledStartAt ?? activity.times.recommendedAt;
-          return effectiveDueAt === payload.dueAt && isRetestActivityDue(activity, now);
+          if (!payload.explicitDue && !(await automaticReminderAllowed(tx, scope, activity, id))) return false;
         }
-        const dueAt = row.due_at == null ? null : new Date(row.due_at as string | Date).toISOString();
-        return dueAt === payload.dueAt && isQueueableDueTask({
-          id: String(row.task_id), version: Number(row.task_version), dueAt, status: "pending",
-        }, now);
+        // Recheck after the preference locks using the same activity/task order as enqueue.
+        const currentActivities = await tx`SELECT * FROM opening_retest_activities
+          WHERE task_id=${payload.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        const currentActivity = currentActivities[0] ? mapOpeningRetestActivity(currentActivities[0] as Record<string, unknown>) : undefined;
+        if (currentActivity?.activityId !== activity?.activityId || currentActivity?.courseId !== activity?.courseId) return false;
+        const [task] = await tx`SELECT id,title,due_at,status,version FROM opening_tasks
+          WHERE id=${payload.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        return Number(task?.version) === payload.taskVersion && currentDueAt(task, currentActivity, now) === payload.dueAt;
       }) as Promise<boolean>;
     },
 
     async recordAttempt(
       id: string,
-      input: { receiptId: string | null; outcome: ReminderPayload["outcome"]; state: "succeeded" | "failed" | "outcome_unknown" | "queued"; suppressed?: boolean },
+      input: { receiptId: string | null; outcome: ReminderPayload["outcome"]; state: "succeeded" | "failed" | "outcome_unknown" | "queued"; suppressed?: boolean; availableAt?: string },
     ): Promise<boolean> {
-      const rows = await sql`
+      return sql.begin(async tx => {
+        const rows = await tx`
         UPDATE opening_jobs
         SET state = ${input.state},
-            payload = payload || ${sql.json({ receiptId: input.receiptId, outcome: input.outcome, suppressed: input.suppressed ?? false } as never)},
-            result = ${sql.json({ receiptId: input.receiptId, outcome: input.outcome } as never)},
+            payload = payload || ${tx.json({ receiptId: input.receiptId, outcome: input.outcome, suppressed: input.suppressed ?? false } as never)},
+            result = ${tx.json({ receiptId: input.receiptId, outcome: input.outcome } as never)},
             updated_at = now()
         WHERE id = ${id} AND state = 'running' AND kind = ${"remind"}
-        RETURNING id`;
-      return rows.length > 0;
+        RETURNING id,workspace_id`;
+        if (!rows.length) return false;
+        if (input.state === "queued") {
+          await enqueueReminderTransport(tx, String(rows[0]!.workspace_id), id, input.availableAt);
+        }
+        return true;
+      });
     },
   };
 }
 
-async function readConfig(sql: Sql, scope: OpeningScope): Promise<ExternalReminderConfig | null> {
+async function readConfig(sql: Sql | TransactionSql, scope: OpeningScope): Promise<ExternalReminderConfig | null> {
   const rows = await sql`
     SELECT payload FROM opening_jobs
     WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
       AND key = ${EXTERNAL_KEY} AND kind = ${"remind"} LIMIT 1`;
   if (!rows.length) return null;
-  const payload = (rows[0] as Record<string, unknown>).payload as ExternalReminderConfig;
+  const raw: unknown = rows[0]!.payload;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const payload = raw as Record<string, unknown>;
+  if (typeof payload.enabled !== "boolean" || !(payload.recipientId === null || typeof payload.recipientId === "string")) return null;
+  const quiet = payload.quietHours;
+  if (quiet !== null && (!quiet || typeof quiet !== "object" || Array.isArray(quiet))) return null;
+  const hours = quiet as Record<string, unknown> | null;
+  const minute = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value < 1440;
+  if (hours !== null && (!minute(hours.startMinute) || !minute(hours.endMinute))) return null;
   return {
-    enabled: Boolean(payload.enabled),
-    recipientId: payload.recipientId ?? null,
-    quietHours: payload.quietHours ?? null,
+    enabled: payload.enabled,
+    recipientId: payload.recipientId,
+    quietHours: hours === null ? null : { startMinute: hours.startMinute as number, endMinute: hours.endMinute as number },
   };
 }
 
-async function insertRemindJob(sql: Sql | TransactionSql, scope: OpeningScope, key: string, payload: ReminderPayload) {
+async function insertRemindJob(sql: Sql | TransactionSql, scope: OpeningScope, key: string, payload: ReminderPayload, privacyEpoch: number) {
   const inserted = await sql`
     INSERT INTO opening_jobs (
       id, workspace_id, owner_user_id, key, kind, payload, state, privacy_epoch
     ) VALUES (
       ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${key}, ${"remind"},
-      ${sql.json(payload as never)}, ${"queued"}, ${0}
+      ${sql.json(payload as never)}, ${"queued"}, ${privacyEpoch}
     )
     ON CONFLICT (workspace_id, key) DO NOTHING
     RETURNING *`;
-  if (inserted.length) return { row: inserted[0] as Record<string, unknown>, created: true };
+  if (inserted.length) {
+    const row = inserted[0] as Record<string, unknown>;
+    await enqueueReminderTransport(sql, scope.workspaceId, String(row.id));
+    return { row, created: true };
+  }
   const existing = await sql`
     SELECT * FROM opening_jobs
-    WHERE workspace_id = ${scope.workspaceId} AND key = ${key} AND kind = ${"remind"}`;
+    WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+      AND key = ${key} AND kind = ${"remind"} FOR UPDATE`;
   const row = existing[0] as Record<string, unknown> | undefined;
   if (!row) throw new OpeningPlanError("NOT_FOUND", "reminder disappeared after conflict");
+  const previous = row.payload as ReminderPayload;
+  if (payload.explicitDue && !previous.receiptId && previous.outcome !== "unknown" && row.state !== "outcome_unknown") {
+    if (row.state === "running" && !previous.explicitDue) {
+      throw new OpeningPlanError("CONFLICT", "automatic reminder is already running");
+    }
+    const recover = row.state === "succeeded" && previous.suppressed === true && previous.outcome == null;
+    const promote = row.state === "queued" || row.state === "succeeded" && payload.channel === "in_app";
+    if (recover || promote) {
+      const [updated] = await sql`UPDATE opening_jobs SET
+          payload=payload || ${sql.json({ explicitDue: true, suppressed: false, configured: payload.configured, clientKey: payload.clientKey } as never)},
+          state=${recover ? "queued" : String(row.state)}, privacy_epoch=${privacyEpoch}, updated_at=now()
+        WHERE id=${row.id as string} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        RETURNING *`;
+      if (recover) await enqueueReminderTransport(sql, scope.workspaceId, String(row.id));
+      else if (row.state === "queued" && (previous.outcome == null || previous.outcome === "quiet")) {
+        // Pre-outbox reminder rows can only be repaired by this explicit, locked request.
+        const events = await sql`SELECT id FROM opening_outbox
+          WHERE workspace_id=${scope.workspaceId} AND job_id=${row.id as string} LIMIT 1`;
+        if (!events.length) await enqueueReminderTransport(sql, scope.workspaceId, String(row.id));
+      }
+      return { row: updated as Record<string, unknown>, created: false };
+    }
+  }
   return { row, created: false };
+}
+
+async function enqueueReminderTransport(sql: Sql | TransactionSql, workspaceId: string, jobId: string, availableAt?: string) {
+  await sql`INSERT INTO opening_outbox (workspace_id,job_id,topic,payload)
+    VALUES (${workspaceId},${jobId},'opening.job.enqueue',${sql.json({ jobId, kind: "remind", ...(availableAt ? { availableAt } : {}) } as never)})`;
 }
 
 export type OpeningReminderRepository = ReturnType<typeof createOpeningReminderRepository>;

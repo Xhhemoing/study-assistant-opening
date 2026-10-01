@@ -10,6 +10,7 @@ const turnId = "44444444-4444-4444-8444-444444444444";
 const conversationId = "55555555-5555-4555-8555-555555555555";
 const candidateId = "66666666-6666-4666-8666-666666666666";
 const mark = { sourceId, deletedAt: "2026-09-29T00:00:00.000Z" };
+const currentMemoryDeletions = { workspaceId, memories: [] };
 const row = (fields: Record<string, unknown>) => ({ workspace_id: workspaceId, ...fields });
 const turn = (fields: Record<string, unknown>) => row({
   id: turnId, conversation_id: conversationId, role: "assistant", source_ids: [], citations: [], source_versions: {},
@@ -38,29 +39,29 @@ describe("context provenance at the backup boundary", () => {
     [{ sourceId: "not-a-uuid", sourceVersion: 1 }],
   ].map(context_source_refs => ({ context_source_refs })))("rejects malformed context references $context_source_refs", (fields) => {
     expect(sourceReferences(fields)).toBeNull();
-    expect(validateOpeningRestore(backup([turn(fields)]), []).allowed).toBe(false);
+    expect(validateOpeningRestore(backup([turn(fields)]), [], currentMemoryDeletions).allowed).toBe(false);
   });
 
   it.each([{}, { context_source_refs: null }])("quarantines legacy assistant and dependent memory with unknown provenance %j", (fields) => {
     const input = backup([turn(fields)]);
-    input.tables.opening_memories = [row({ status: "active", source_turn_ids: [turnId] })];
-    expect(validateOpeningRestore(input, []).allowed).toBe(false);
+    input.tables.opening_memories = [row({ id: candidateId, status: "active", source_turn_ids: [turnId] })];
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(false);
   });
 
   it.each([undefined, null, "system"])("rejects missing or unknown turn role %s even with explicit empty provenance", (role) => {
-    expect(validateOpeningRestore(backup([turn({ role, context_source_refs: [] })]), []).allowed).toBe(false);
+    expect(validateOpeningRestore(backup([turn({ role, context_source_refs: [] })]), [], currentMemoryDeletions).allowed).toBe(false);
   });
 
   it("accepts explicit empty assistant provenance and its linked memory", () => {
     const input = backup([turn({ context_source_refs: [] })]);
-    input.tables.opening_memories = [row({ status: "active", source_turn_ids: [turnId] })];
-    expect(validateOpeningRestore(input, []).allowed).toBe(true);
+    input.tables.opening_memories = [row({ id: candidateId, status: "active", source_turn_ids: [turnId] })];
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(true);
   });
 
   it.each([{}, { context_source_refs: null }])("preserves original user leaves with legacy provenance %j", (fields) => {
     const input = backup([turn({ role: "user", text: "Original user text", ...fields })]);
     const before = structuredClone(input);
-    expect(validateOpeningRestore(input, []).allowed).toBe(true);
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(true);
     expect(input).toEqual(before);
   });
 
@@ -70,12 +71,12 @@ describe("context provenance at the backup boundary", () => {
       { sourceId, sourceVersion: 2 },
       { sourceId: otherSourceId, sourceVersion: 3 },
     ] })]);
-    input.tables.opening_memories = [row({ status: "active", source_turn_ids: [turnId] })];
+    input.tables.opening_memories = [row({ id: candidateId, status: "active", source_turn_ids: [turnId] })];
     input.tables.opening_assistant_candidates = [row({ id: candidateId, conversation_id: conversationId,
       source_turn_id: turnId, source_ids: [], payload: {} })];
     const before = structuredClone(input);
-    expect(validateOpeningRestore(input, []).allowed).toBe(true);
-    expect(validateOpeningRestore(input, [mark]).errors).toContain("table opening_turns references a deleted source");
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(true);
+    expect(validateOpeningRestore(input, [mark], currentMemoryDeletions).errors).toContain("table opening_turns references a deleted source");
     expect(input).toEqual(before);
   });
 
@@ -83,6 +84,6 @@ describe("context provenance at the backup boundary", () => {
     const input = backup([]);
     input.tables.opening_assistant_candidates = [row({ id: candidateId, conversation_id: conversationId,
       source_turn_id, source_ids: [], payload: {} })];
-    expect(validateOpeningRestore(input, []).allowed).toBe(false);
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(false);
   });
 });

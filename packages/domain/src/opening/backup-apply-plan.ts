@@ -1,10 +1,12 @@
 import { learningStateRestoreErrors, type OpeningRestoreLearningState } from "./backup-learning-state";
 import {
   validateOpeningRestore,
+  normalizeOpeningRestoreHistory,
   type OpeningBackup,
   type OpeningDeletionMark,
+  type OpeningMemoryDeletions,
 } from "./backup-policy";
-import { isJournal, isRecord, isUuid } from "./backup-validation";
+import { isJournal, isRecord, isUuid, sameMemoryDeletions } from "./backup-validation";
 
 export type OpeningRestoreApplyPlan = {
   batches: Array<{ table: string; rows: number }>;
@@ -17,6 +19,8 @@ type OpeningRestoreApplyOptions = {
   availableCourseIds?: readonly string[];
   /** Actual owner-scoped target state, not values read from the archive. */
   currentLearningState?: OpeningRestoreLearningState;
+  /** Owner-scoped live DB read, never copied from the archive. */
+  currentMemoryDeletions?: OpeningMemoryDeletions;
 };
 
 export type OpeningRestoreApplyPlanResult =
@@ -35,6 +39,7 @@ const APPLY_ORDER = [
   "opening_learning_sessions",
   "opening_problem_refs",
   "opening_learning_history_revisions",
+  "opening_workspace_history_revisions",
   "opening_learning_item_versions",
   "opening_learning_attempts",
   "opening_turns",
@@ -79,11 +84,13 @@ function courseReferences(tables: Record<string, unknown[]>): { ids: string[]; e
 
 /**
  * Plans a restore apply; it never executes one. Requires an explicit local confirmation
- * flag, the structural privacy preflight, and an unchanged current journal. The executor
- * must still re-verify the journal in its own transaction and never restore credentials,
+ * flag, the structural privacy preflight, and unchanged source/memory deletion facts. The executor
+ * must still re-read both deletion inventories in its own transaction and never restore credentials,
  * sessions, queues, budgets, or paid jobs. Re-read current learning state in that transaction;
  * retain activation triggers and do not dispatch external jobs while restoring. A clean-target
- * plan does not prove that a future executor suppresses reminder backlog. This is not authorization.
+ * plan does not prove that a future executor suppresses reminder backlog. Apply the rows returned
+ * by normalizeOpeningRestoreHistory, including explicit legacy zero revisions. Never infer
+ * workspace order from course revisions or promise pre-restore cursor validity. This is not authorization.
  */
 export function planOpeningRestoreApply(
   backup: unknown,
@@ -93,11 +100,15 @@ export function planOpeningRestoreApply(
   if (!isRecord(options) || options.confirmLocalRestore !== true) {
     return { ok: false, code: "REQUIRES_EXPLICIT_CONFIRMATION", errors: ["explicit local confirmation is required"] };
   }
-  const preview = validateOpeningRestore(structuralCopy(backup), currentDeletionJournal);
+  const preview = validateOpeningRestore(structuralCopy(backup), currentDeletionJournal, options.currentMemoryDeletions);
   if (!preview.allowed) {
     return { ok: false, code: "PREFLIGHT_REJECTED", errors: preview.errors };
   }
-  const journal = backup as OpeningBackup;
+  const journal = normalizeOpeningRestoreHistory(backup as OpeningBackup);
+  if (journal !== backup) {
+    const normalizedPreview = validateOpeningRestore(structuralCopy(journal), currentDeletionJournal, options.currentMemoryDeletions);
+    if (!normalizedPreview.allowed) return { ok: false, code: "PREFLIGHT_REJECTED", errors: normalizedPreview.errors };
+  }
   const stateErrors = learningStateRestoreErrors(journal.tables, journal.workspaceId, options.currentLearningState);
   if (stateErrors.length) return { ok: false, code: "PREFLIGHT_REJECTED", errors: stateErrors };
   const references = courseReferences(journal.tables);
@@ -124,6 +135,9 @@ export function planOpeningRestoreApply(
   if (!isJournal(journal.deletionJournal) || !sameJournal(journal, currentDeletionJournal)) {
     return { ok: false, code: "JOURNAL_DRIFT", errors: ["current deletion journal diverged from the backup"] };
   }
+  if (options.currentMemoryDeletions && !sameMemoryDeletions(
+    journal.memoryDeletions ?? { workspaceId: journal.workspaceId, memories: [] }, options.currentMemoryDeletions,
+  )) return { ok: false, code: "JOURNAL_DRIFT", errors: ["current memory deletion facts diverged from the backup"] };
   const tables = journal.tables;
   return {
     ok: true,

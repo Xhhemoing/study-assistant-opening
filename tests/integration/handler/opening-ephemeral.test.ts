@@ -128,7 +128,7 @@ describe("POST /api/opening/ephemeral", () => {
       outputTokens: 2,
     });
     const response = await POST(postEphemeral({
-      text: "explain this", sourceIds: [sourceId], mode: "explain", history: [],
+      text: "explain this", sourceIds: [sourceId], chunkId, mode: "explain", history: [],
     }));
     expect(response.status).toBe(200);
     const body = await response.json();
@@ -201,7 +201,7 @@ it("filters real privacy exclusions in mixed ephemeral material without changing
   const receipt = await excludeThroughMemory(workspaceId, privateId);
   const before = await ephemeralCounts();
   complete.mockResolvedValue({ text: 'allowed answer', candidates: [], citedChunkIds: [], requestId: 'mixed', inputTokens: 3, outputTokens: 1 });
-  const response = await POST(postEphemeral({ text: 'explain', sourceIds: [privateId, allowedId], mode: 'explain', history: [] }));
+  const response = await POST(postEphemeral({ text: 'explain', sourceIds: [privateId, allowedId], currentPage: 1, mode: 'explain', history: [] }));
   expect(response.status).toBe(200);
   expect(response.headers.get('cache-control')).toBe('no-store');
   expect(await response.json()).toMatchObject({ privacyEpoch: receipt.privacyEpoch, historyDiscarded: false });
@@ -219,7 +219,7 @@ it("isolates the previous temporary reply after real deletion advances the epoch
   const workspaceId = await workspaceForCookie();
   const privateId = await seedEphemeralSource(workspaceId, 'PRIVATE-OLD-SOURCE');
   complete.mockResolvedValueOnce({ text: 'PRIVATE-OLD-REPLY', candidates: [], citedChunkIds: [], requestId: 'first', inputTokens: 3, outputTokens: 1 });
-  const first = await POST(postEphemeral({ text: 'read', sourceIds: [privateId], mode: 'listen', history: [] }));
+  const first = await POST(postEphemeral({ text: 'read', sourceIds: [privateId], currentPage: 1, mode: 'listen', history: [] }));
   expect(first.status).toBe(200);
   const previous = await first.json();
   const receipt = await excludeThroughMemory(workspaceId, privateId);
@@ -232,6 +232,55 @@ it("isolates the previous temporary reply after real deletion advances the epoch
   expect(JSON.stringify(complete.mock.calls[1]![0])).not.toContain('PRIVATE-OLD');
 });
 
+it.each(["missing", "invalid"] as const)("discards %s history receipts and issues usable provenance for the new reply", async receiptKind => {
+  const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+  const workspaceId = await workspaceForCookie();
+  const sourceId = await seedEphemeralSource(workspaceId, "CURRENT-ALLOWED-MATERIAL");
+  const privacyEpoch = Number((await sql`SELECT privacy_epoch FROM workspaces WHERE id=${workspaceId}`)[0]!.privacy_epoch);
+  complete.mockResolvedValue({ text: "fresh answer", candidates: [], citedChunkIds: [], requestId: "fresh", inputTokens: 3, outputTokens: 1 });
+  const response = await POST(postEphemeral({
+    text: "read this page", sourceIds: [sourceId], currentPage: 1, mode: "listen", historyPrivacyEpoch: privacyEpoch,
+    history: [{ role: "assistant", text: "UNVERIFIED-OLD-HISTORY", ...(receiptKind === "invalid" ? { provenanceId: randomUUID() } : {}) }],
+  }));
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body.historyDiscarded).toBe(true);
+  expect(body.provenanceId).toEqual(expect.any(String));
+  expect(complete.mock.calls[0]![0]!.history).toEqual([]);
+  expect(JSON.stringify(complete.mock.calls[0]![0])).not.toContain("UNVERIFIED-OLD-HISTORY");
+  expect(complete.mock.calls[0]![0]!.chunks.map((chunk: { sourceId: string }) => chunk.sourceId)).toEqual([sourceId]);
+  const receipt = (await sql`SELECT context_source_refs FROM opening_ephemeral_provenance WHERE id=${body.provenanceId}`)[0]!;
+  expect(receipt.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }]);
+
+  const followup = await POST(postEphemeral({
+    text: "continue", sourceIds: [], mode: "listen", historyPrivacyEpoch: body.privacyEpoch,
+    history: [{ role: "assistant", text: body.text, provenanceId: body.provenanceId }],
+  }));
+  expect(followup.status).toBe(200);
+  expect((await followup.json()).historyDiscarded).toBe(false);
+  expect(complete.mock.calls[1]![0]!.history).toEqual([{ role: "assistant", text: "fresh answer" }]);
+});
+
+it("rejects a revoked receipt even when the request supplies the latest privacy epoch", async () => {
+  const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+  const workspaceId = await workspaceForCookie();
+  const sourceId = await seedEphemeralSource(workspaceId, "REVOKED-SOURCE-MATERIAL");
+  complete.mockResolvedValue({ text: "REVOKED-OLD-ANSWER", candidates: [], citedChunkIds: [], requestId: "old", inputTokens: 3, outputTokens: 1 });
+  const first = await POST(postEphemeral({ text: "read this page", sourceIds: [sourceId], currentPage: 1, mode: "listen", history: [] }));
+  expect(first.status).toBe(200);
+  const prior = await first.json();
+  expect(prior.provenanceId).toEqual(expect.any(String));
+  const exclusion = await excludeThroughMemory(workspaceId, sourceId);
+  complete.mockResolvedValue({ text: "new answer", candidates: [], citedChunkIds: [], requestId: "new", inputTokens: 3, outputTokens: 1 });
+  const next = await POST(postEphemeral({
+    text: "continue", sourceIds: [], mode: "listen", historyPrivacyEpoch: exclusion.privacyEpoch,
+    history: [{ role: "assistant", text: prior.text, provenanceId: prior.provenanceId }],
+  }));
+  expect(next.status).toBe(200);
+  expect((await next.json()).historyDiscarded).toBe(true);
+  expect(complete.mock.calls[1]![0]!.history).toEqual([]);
+  expect(JSON.stringify(complete.mock.calls[1]![0])).not.toContain("REVOKED");
+});
 it("rejects an all-excluded selection without reserving or sending", async () => {
   const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
   const workspaceId = await workspaceForCookie();

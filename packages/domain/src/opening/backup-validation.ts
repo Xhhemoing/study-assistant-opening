@@ -1,3 +1,5 @@
+import type { OpeningMemoryDeletions } from "./backup-policy";
+
 // Structural preflight only; this is not a database row schema or an archive reader.
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -17,6 +19,30 @@ export function isJournal(value: unknown): value is Array<{ sourceId: string; de
 
 export function isTables(value: unknown): value is Record<string, Record<string, unknown>[]> {
   return isRecord(value) && Object.values(value).every((rows) => Array.isArray(rows) && rows.every(isRecord));
+}
+
+/** Content-free, workspace-bound facts; an omitted live read is not an empty result. */
+export function isMemoryDeletions(value: unknown, workspaceId: string): value is OpeningMemoryDeletions {
+  if (!isRecord(value) || !isUuid(value.workspaceId) || value.workspaceId.toLowerCase() !== workspaceId.toLowerCase()
+    || Object.keys(value).some(key => key !== "workspaceId" && key !== "memories") || !Array.isArray(value.memories)) return false;
+  const seen = new Set<string>();
+  return value.memories.every(mark => {
+    if (!isRecord(mark) || Object.keys(mark).some(key => key !== "memoryId" && key !== "deletedAt")
+      || !isUuid(mark.memoryId) || typeof mark.deletedAt !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T/.test(mark.deletedAt) || !Number.isFinite(Date.parse(mark.deletedAt))) return false;
+    const id = mark.memoryId.toLowerCase();
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+export function sameMemoryDeletions(left: OpeningMemoryDeletions, right: OpeningMemoryDeletions): boolean {
+  if (!isMemoryDeletions(left, right.workspaceId) || !isMemoryDeletions(right, left.workspaceId)
+    || left.memories.length !== right.memories.length) return false;
+  const key = (mark: OpeningMemoryDeletions["memories"][number]) => `${mark.memoryId.toLowerCase()}\u0000${new Date(mark.deletedAt).toISOString()}`;
+  const keys = new Set(left.memories.map(key));
+  return right.memories.every(mark => keys.has(key(mark)));
 }
 
 function isHash(value: unknown): value is string {

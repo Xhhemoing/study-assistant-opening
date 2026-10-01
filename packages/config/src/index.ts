@@ -14,3 +14,5 @@ export {
   assertOpeningTestDatabase,
   setup as openingTestDatabaseSetup,
 } from "./test-database";
+
+export { loadOpeningModelCatalog, OpeningModelConfigurationError, type OpeningModelCatalog } from "./opening-model-catalog";

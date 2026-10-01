@@ -1,6 +1,7 @@
 import {
   providerOutputSchema,
   type MemoryItem,
+  type OpeningModelSnapshot,
   type ProviderOutput,
   type ProviderInput,
   type SourceChunk,
@@ -47,6 +48,7 @@ export type TutorTurnDeps = {
   };
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
+  resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number }>;
   config: {
     maxContextCharacters: number;
     reservedCents: number;
@@ -138,12 +140,14 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
         mediaCapability: "text_only", imageParts: [],
       };
+      const selected = await deps.resolveModel?.(scope, mode);
       const rates = {
-        inputCentsPerMillion: deps.config.inputCentsPerMillion,
-        outputCentsPerMillion: deps.config.outputCentsPerMillion,
+        inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
+        outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,
       };
       const output = await runBudgetedCall({
-        provider: deps.provider,
+        provider: selected?.provider ?? deps.provider,
+        modelSnapshot: selected?.modelSnapshot,
         budget: scopedBudget,
         input,
         requestId: `tutor:${claimed.id}`,

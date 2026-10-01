@@ -472,7 +472,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
           {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; onNew(); }}><Plus size={15} aria-hidden /></button> : null}
         </div>
       </header>
-      {task ? <TaskContext task={task} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
+      {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
       {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} />}
       {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
       {error || recoveryRequired ? <div className="mx-5 mb-2 border border-red-200 bg-red-50 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-red-800">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}

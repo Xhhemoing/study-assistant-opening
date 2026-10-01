@@ -15,6 +15,20 @@ const due: Reminder = {
 };
 
 describe("opening reminder service", () => {
+  it("passes the validated single-task intent without broadening it to the due batch", async () => {
+    const enqueue = vi.fn(async () => [due]);
+    const service = createOpeningReminderService({ list: async () => ({ reminders: [], externalDelivery: "disabled" }), enqueue });
+    const input = { clientKey: "single-due-01", taskId: due.taskId, expectedVersion: 1 };
+    expect(await service.enqueue(scope, input)).toEqual([due]);
+    expect(enqueue).toHaveBeenCalledWith(scope, { ...input, channel: "in_app" });
+  });
+
+  it("maps a single-task not-due rejection to 422", async () => {
+    const service = createOpeningReminderService({ list: async () => ({ reminders: [], externalDelivery: "disabled" }),
+      enqueue: async () => { throw Object.assign(new Error("task is not currently due"), { code: "VALIDATION" }); } });
+    await expect(service.enqueue(scope, { clientKey: "single-due-01", taskId: due.taskId, expectedVersion: 1 }))
+      .rejects.toMatchObject({ status: 422, code: "VALIDATION" });
+  });
   it("lists in-app dues without claiming a push was delivered", async () => {
     const service = createOpeningReminderService({
       list: async () => ({ reminders: [due], externalDelivery: "disabled" }),

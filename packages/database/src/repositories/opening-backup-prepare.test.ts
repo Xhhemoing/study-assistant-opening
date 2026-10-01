@@ -33,7 +33,7 @@ function snapshot(): OpeningBackupSourceSnapshot {
   const body = new TextEncoder().encode("abcd");
   return {
     workspaceId,
-    privacyEpoch: 4,
+    privacyEpoch: 4, memoryDeletions: { workspaceId, memories: [] },
     deletionJournal: [],
     sources: [{
       sourceId,

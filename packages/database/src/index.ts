@@ -66,3 +66,8 @@ export * from "./repositories/opening-learning-read";
 export { mapLearningObservation } from "./repositories/opening-learning-facts";
 export * from "./schema/opening-learning-attempts";
 export * from "./repositories/opening-observation-revisions";
+
+export { createOpeningAiSettingsRepository } from "./repositories/opening-ai-settings";
+export { readOpeningCourseLearningHistory } from "./repositories/opening-learning-history-read";
+export * from "./repositories/opening-learning-eligibility";
+export { readOpeningCourseLearningSummary } from "./repositories/opening-learning-summary-read";

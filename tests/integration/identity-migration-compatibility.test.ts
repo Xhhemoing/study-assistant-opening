@@ -195,6 +195,18 @@ describe("identity migration compatibility", () => {
       "0024_opening_planning.sql",
       "0025_opening_turn_intent_snapshot.sql",
       "0026_opening_turn_outcome_unknown.sql",
+      "0027_opening_assistant_task_acceptance.sql",
+      "0028_opening_learning_attempts.sql",
+      "0029_opening_observation_revisions.sql",
+      "0030_opening_retest_activities.sql",
+      "0031_opening_learning_preferences.sql",
+      "0032_opening_learning_activation.sql",
+      "0033_opening_context_provenance.sql",
+      "0034_opening_source_actions.sql",
+      "0035_opening_note_provenance.sql",
+      "0036_opening_ai_settings.sql",
+      "0037_opening_learning_history_snapshot.sql",
+      "0038_opening_learning_eligibility.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -259,6 +271,18 @@ describe("identity migration compatibility", () => {
       "0024_opening_planning.sql",
       "0025_opening_turn_intent_snapshot.sql",
       "0026_opening_turn_outcome_unknown.sql",
+      "0027_opening_assistant_task_acceptance.sql",
+      "0028_opening_learning_attempts.sql",
+      "0029_opening_observation_revisions.sql",
+      "0030_opening_retest_activities.sql",
+      "0031_opening_learning_preferences.sql",
+      "0032_opening_learning_activation.sql",
+      "0033_opening_context_provenance.sql",
+      "0034_opening_source_actions.sql",
+      "0035_opening_note_provenance.sql",
+      "0036_opening_ai_settings.sql",
+      "0037_opening_learning_history_snapshot.sql",
+      "0038_opening_learning_eligibility.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -578,6 +602,18 @@ describe("identity migration compatibility", () => {
       "0024_opening_planning.sql",
       "0025_opening_turn_intent_snapshot.sql",
       "0026_opening_turn_outcome_unknown.sql",
+      "0027_opening_assistant_task_acceptance.sql",
+      "0028_opening_learning_attempts.sql",
+      "0029_opening_observation_revisions.sql",
+      "0030_opening_retest_activities.sql",
+      "0031_opening_learning_preferences.sql",
+      "0032_opening_learning_activation.sql",
+      "0033_opening_context_provenance.sql",
+      "0034_opening_source_actions.sql",
+      "0035_opening_note_provenance.sql",
+      "0036_opening_ai_settings.sql",
+      "0037_opening_learning_history_snapshot.sql",
+      "0038_opening_learning_eligibility.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

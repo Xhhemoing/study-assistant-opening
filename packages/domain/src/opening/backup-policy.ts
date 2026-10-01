@@ -1,7 +1,11 @@
 import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
-import { isJournal, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
+import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
+export type OpeningMemoryDeletions = {
+  workspaceId: string;
+  memories: Array<{ memoryId: string; deletedAt: string }>;
+};
 
 export type OpeningBackupObject = {
   sourceId: string;
@@ -17,6 +21,8 @@ export type OpeningBackup = {
   workspaceId: string;
   privacyEpoch: number;
   deletionJournal: OpeningDeletionMark[];
+  /** Absent only in legacy archives; current target facts must still be supplied. */
+  memoryDeletions?: OpeningMemoryDeletions;
   tables: Record<string, unknown[]>;
   objects: OpeningBackupObject[];
 };
@@ -29,7 +35,7 @@ export type RestorePreview = {
 
 const TABLE_ALLOWLIST = [
   ...LEARNING_STATE_TABLES,
-  "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions",
+  "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_workspace_history_revisions",
   "opening_source_chunks",
   "opening_conversations",
   "opening_turns",
@@ -48,6 +54,62 @@ const TABLE_ALLOWLIST = [
   "opening_plan_acceptances",
 ] as const;
 
+function validateWorkspaceHistory(
+  tables: Record<string, Record<string, unknown>[]>,
+  errors: string[],
+): void {
+  const observations = tables.opening_learning_observations ?? [];
+  if (!("opening_workspace_history_revisions" in tables)) {
+    if (observations.some(row => "workspace_history_revision" in row)) {
+      errors.push("workspace history counter inventory is missing");
+    }
+    return;
+  }
+  const counters = new Map<string, number>();
+  const validRevision = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+  const scopeKey = (row: Record<string, unknown>): string | null => isUuid(row.workspace_id) && isUuid(row.owner_user_id)
+    ? `${row.workspace_id.toLowerCase()}/${row.owner_user_id.toLowerCase()}` : null;
+  for (const row of tables.opening_workspace_history_revisions) {
+    const key = scopeKey(row);
+    if (!key || !validRevision(row.revision)) {
+      errors.push("workspace history counter scope or revision is invalid");
+      continue;
+    }
+    if (counters.has(key)) errors.push("workspace history counter is duplicated");
+    counters.set(key, row.revision);
+  }
+  for (const row of observations) {
+    const key = scopeKey(row), revision = row.workspace_history_revision;
+    if (!key || !validRevision(revision)) {
+      errors.push("learning observation workspace history scope or revision is invalid");
+      continue;
+    }
+    const counter = counters.get(key);
+    if (counter === undefined || counter < revision) {
+      errors.push("workspace history counter does not cover learning observations");
+    }
+  }
+}
+
+/**
+ * Convert a structurally validated legacy archive for restore, without inferring chronology.
+ * Callers must validate the result before applying it. This does not execute a restore or
+ * preserve pre-restore cursors; the executor still owns scope checks and the target transaction.
+ */
+export function normalizeOpeningRestoreHistory(backup: OpeningBackup): OpeningBackup {
+  if ("opening_workspace_history_revisions" in backup.tables) return backup;
+  const observations = backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined;
+  if (observations?.some(row => "workspace_history_revision" in row)) return backup;
+  const owners = new Set((observations ?? [])
+    .map(row => row.owner_user_id).filter(isUuid).map(owner => owner.toLowerCase()));
+  return { ...backup, tables: {
+    ...backup.tables,
+    ...(observations ? { opening_learning_observations: observations.map(row => ({ ...row, workspace_history_revision: 0 })) } : {}),
+    opening_workspace_history_revisions: [...owners].map(owner => ({
+      workspace_id: backup.workspaceId, owner_user_id: owner, revision: 0,
+    })),
+  } };
+}
 function validateRetestReferences(
   tables: Record<string, Record<string, unknown>[]>,
   errors: string[],
@@ -190,6 +252,7 @@ function validateRetestReferences(
 export function validateOpeningRestore(
   backup: unknown,
   currentDeletionJournal: readonly OpeningDeletionMark[],
+  currentMemoryDeletions?: OpeningMemoryDeletions,
 ): RestorePreview {
   const reject = (error: string): RestorePreview => ({ allowed: false, errors: [error], recordCounts: {} });
   if (!isRecord(backup) || backup.format !== "opening-backup" || backup.version !== 1) {
@@ -203,6 +266,18 @@ export function validateOpeningRestore(
   }
   const errors: string[] = [];
   const tables = backup.tables;
+  const needsMemoryFacts = (tables.opening_memories?.length ?? 0) > 0 || backup.memoryDeletions !== undefined;
+  if ((needsMemoryFacts || currentMemoryDeletions !== undefined)
+    && !isMemoryDeletions(currentMemoryDeletions, backup.workspaceId)) {
+    errors.push("current owner-scoped memory deletion facts are required");
+  }
+  if (backup.memoryDeletions !== undefined && !isMemoryDeletions(backup.memoryDeletions, backup.workspaceId)) {
+    errors.push("invalid archived memory deletion facts");
+  }
+  const deletedMemories = new Set([
+    ...(isMemoryDeletions(backup.memoryDeletions, backup.workspaceId) ? backup.memoryDeletions.memories : []),
+    ...(isMemoryDeletions(currentMemoryDeletions, backup.workspaceId) ? currentMemoryDeletions.memories : []),
+  ].map(mark => mark.memoryId.toLowerCase()));
   const deleted = new Set([...backup.deletionJournal, ...currentDeletionJournal]
     .map((mark) => mark.sourceId.toLowerCase()));
   const workspaceId = backup.workspaceId.toLowerCase();
@@ -271,6 +346,8 @@ export function validateOpeningRestore(
       }
       if (name === "opening_sources" && "upload_url_expires_at" in row) errors.push("upload capabilities cannot be restored");
       if (name === "opening_memories") {
+        if (!isUuid(row.id)) errors.push("memory identity is missing or invalid");
+        else if (deletedMemories.has(row.id.toLowerCase())) errors.push("deleted memory cannot be restored");
         if (row.status === "deleted") errors.push("deleted memory cannot be restored");
         const turnIds = parseUuidArray(row.source_turn_ids);
         if (!turnIds || turnIds.length === 0 || turnIds.some((id) => !turns.has(id.toLowerCase()))) {
@@ -279,6 +356,7 @@ export function validateOpeningRestore(
       }
     }
   }
+  validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);
   validateBackupLearningState(tables, errors);
   for (const object of backup.objects as OpeningBackupObject[]) {

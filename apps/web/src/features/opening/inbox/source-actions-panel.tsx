@@ -65,7 +65,7 @@ export function SourceActionsPanel({ record, onClose, onChanged, onResult, api =
       </div> : <div className="space-y-3">
         <p className="text-sm text-zinc-700">{action === "exclude"
           ? "后续模型请求不再使用这份材料及可追溯的派生内容。原件、历史记录与课程引用保留；此处不提供重新允许使用。"
-          : "将移除这份材料在所有课程中的引用，并清理已知原件和衍生图片。关联的模型回答与记忆不再显示，您输入的原文保留。已下载、外部及在途副本不属于本次清理范围。"}</p>
+          : "将移除这份材料在所有课程中的引用，并清理已知原件和衍生图片。关联的模型回答、记忆、关联片段笔记及其修订正文不再显示，您输入的原文保留。已下载、外部及在途副本不属于本次清理范围。"}</p>
         <div className="flex flex-wrap gap-2"><button type="button" disabled={busy} className={action === "delete" ? danger : ui.primary} onClick={() => void confirm()}>{busy ? "处理中…" : action === "delete" ? "确认删除材料" : "确认停止供模型使用"}</button>
           <button type="button" disabled={busy} className={ui.quiet} onClick={() => setAction(null)}>取消</button></div>
       </div>}

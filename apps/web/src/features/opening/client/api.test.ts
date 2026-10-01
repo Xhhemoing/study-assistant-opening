@@ -347,3 +347,32 @@ it("leaves legacy temporary responses without provenance unavailable for saving"
   const result = await api.replyEphemeral({ text: "question", sourceIds: [], mode: "listen", history: [] });
   expect(result.provenanceId).toBeNull();
 });
+
+describe("single task reminders", () => {
+  const reminder = { id: S, taskId: U, taskVersion: 3, dueAt: ISO, channel: "in_app", status: "due", receiptId: null, outcome: null };
+  const input = { taskId: U, expectedVersion: 3, clientKey: "single-reminder-1" };
+  it("keeps the server task version needed for an explicit reminder", async () => {
+    const api = createOpeningApi(vi.fn(async () => jsonResponse({ tasks: [{ id: U, title: "Review", minutes: 15, dueAt: ISO, priority: 1, status: "pending", version: 3 }] })) as unknown as typeof fetch);
+    expect((await api.listTasks()).tasks[0]).toMatchObject({ version: 3 });
+  });
+  it.each([201, 200])("posts only one task intent and parses the %s response", async status => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ reminders: [reminder] }, status));
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.requestTaskReminder(input)).resolves.toEqual({ reminders: [reminder] });
+    expect(fetchImpl).toHaveBeenCalledWith("/api/opening/reminders", expect.objectContaining({ method: "POST", body: JSON.stringify({ clientKey: input.clientKey, channel: "in_app", taskId: U, expectedVersion: 3 }) }));
+  });
+  it.each([404, 409, 422])("preserves a definitive %s error without retrying", async status => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: { code: "CONFLICT", message: "task changed" } }, status));
+    await expect(createOpeningApi(fetchImpl as unknown as typeof fetch).requestTaskReminder(input)).rejects.toMatchObject({ status, code: "CONFLICT", message: "task changed" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("rejects an invalid single-task target before a write", async () => {
+    const fetchImpl = vi.fn();
+    await expect(createOpeningApi(fetchImpl).requestTaskReminder({ ...input, expectedVersion: 0 })).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  it.each([{ reminders: [] }, { reminders: [{ ...reminder, taskId: S }] }, { reminders: [{ ...reminder, taskVersion: 4 }] }])("does not report another or missing task reminder as this request's success", async ({ reminders }) => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ reminders }));
+    await expect(createOpeningApi(fetchImpl as unknown as typeof fetch).requestTaskReminder(input)).rejects.toMatchObject({ name: "ZodError" });
+  });
+});

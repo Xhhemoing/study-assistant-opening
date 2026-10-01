@@ -1,4 +1,5 @@
 import { isRecord, isUuid } from "./backup-validation";
+import { openingAiSettingsSchema } from "@aistudy/contracts";
 
 type Row = Record<string, unknown>;
 export type OpeningRestoreLearningState = {
@@ -31,6 +32,9 @@ export function validateBackupLearningState(tables: Record<string, Row[]>, error
   const accounts = tables.workspace_preferences ?? [];
   if (accounts.length > 1) errors.push("workspace preferences are duplicated");
   for (const row of accounts) {
+    if (row.ai_settings != null && !openingAiSettingsSchema.safeParse(row.ai_settings).success) {
+      errors.push("workspace AI settings are invalid");
+    }
     if (!validState(row) || (row.default_entry != null && !["learn", "explore", "library"].includes(String(row.default_entry)))) {
       errors.push("workspace learning preferences are invalid or incomplete");
     }

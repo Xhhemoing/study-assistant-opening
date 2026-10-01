@@ -5,6 +5,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { retestActivitySchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 export type CreateRetestActivityInput = {
   activityId?: string;
@@ -63,7 +64,7 @@ async function persist(tx: TransactionSql, scope: OpeningScope, activity: Retest
   return mapOpeningRetestActivity(rows[0] as ActivityRow);
 }
 
-/** Coordinates a task mutation with its single linked retest activity. */
+/** Nested helper: the task/observation transaction owns the semantic counter lock and revision. */
 export async function transitionRetestActivityForTask(
   tx: TransactionSql,
   scope: OpeningScope,
@@ -74,7 +75,10 @@ export async function transitionRetestActivityForTask(
     WHERE task_id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
   if (!rows.length) return null;
   const current = mapOpeningRetestActivity(rows[0] as ActivityRow);
-  return persist(tx, scope, transitionRetestActivity(current, command));
+  const next = transitionRetestActivity(current, command);
+  if (command.type === "snooze" && (next.snoozedUntil === null ? current.snoozedUntil === null
+      : current.snoozedUntil !== null && Date.parse(next.snoozedUntil) === Date.parse(current.snoozedUntil))) return current;
+  return persist(tx, scope, next);
 }
 
 async function readByAcceptanceIdentity(
@@ -92,6 +96,7 @@ async function readByAcceptanceIdentity(
       AND task_id=${input.taskId} FOR UPDATE` as ActivityRow[];
 }
 
+/** Nested helper: the accepting task transaction owns the semantic counter lock and revision. */
 export async function insertAcceptedRetestActivity(
   tx: TransactionSql, scope: OpeningScope, input: CreateRetestActivityInput & { taskId: string; acceptedAt: string },
 ): Promise<RetestActivity> {
@@ -120,6 +125,7 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
   return {
     async createProposed(scope: OpeningScope, input: CreateRetestActivityInput): Promise<RetestActivity> {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         const existing = await tx`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} AND skill_label=${input.skillLabel}
           AND requirement_key IS NOT DISTINCT FROM ${input.requirementKey ?? null} AND purpose='retest'
@@ -132,7 +138,10 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
         ) VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.courseId},${input.skillLabel},${input.requirementKey ?? null},'retest',${input.cycleId},
           ${input.candidateId ?? null},${input.taskId ?? null},'proposed',1,${input.proposedAt ?? null},${input.notBeforeAt ?? null},${input.recommendedAt ?? null},${input.scheduledStartAt ?? null},${input.deadlineAt ?? null})
           ON CONFLICT DO NOTHING RETURNING *`;
-        if (rows.length) return mapOpeningRetestActivity(rows[0] as ActivityRow);
+        if (rows.length) {
+          await nextWorkspaceLearningHistoryRevision(tx, scope);
+          return mapOpeningRetestActivity(rows[0] as ActivityRow);
+        }
         const current = await tx`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} AND skill_label=${input.skillLabel}
           AND requirement_key IS NOT DISTINCT FROM ${input.requirementKey ?? null} AND purpose='retest'
@@ -151,10 +160,20 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
       return this.transition(scope, activityId, { type: "accept", taskId, at });
     },
     async transition(scope: OpeningScope, activityId: string, command: RetestActivityCommand): Promise<RetestActivity> {
-      return sql.begin(async (tx) => persist(tx, scope, transitionRetestActivity(await readLocked(tx, scope, activityId), command)));
+      return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const current = await readLocked(tx, scope, activityId);
+        const next = transitionRetestActivity(current, command);
+        if (command.type === "snooze" && (next.snoozedUntil === null ? current.snoozedUntil === null
+      : current.snoozedUntil !== null && Date.parse(next.snoozedUntil) === Date.parse(current.snoozedUntil))) return current;
+        const updated = await persist(tx, scope, next);
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
+        return updated;
+      });
     },
     async completeForTask(scope: OpeningScope, taskId: string, command: Extract<RetestActivityCommand, { type: "complete" }>): Promise<RetestActivity> {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         // Keep the activity -> task lock order shared with observation
         // submission and task status updates.
         const activities = await tx`SELECT * FROM opening_retest_activities
@@ -169,6 +188,7 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
           await tx`UPDATE opening_tasks SET status='done', version=version + 1, updated_at=now()
             WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         }
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
         return completed;
       });
     },

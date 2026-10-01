@@ -8,6 +8,7 @@ import { acceptAssistantTask } from "./opening-task-candidate-accept";
 import { OpeningPlanError } from "./opening-plan-error";
 import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
 import { insertAcceptedRetestActivity } from "./opening-retest-activities";
+import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 export function retestPayloadHash(input: TaskCreateInput): string {
   return createHash("sha256")
@@ -28,6 +29,7 @@ export function retestPayloadHash(input: TaskCreateInput): string {
 function mapTask(row: Record<string, unknown>): TaskItem {
   return {
     id: row.id as string,
+    version: Number(row.version),
     title: row.title as string,
     minutes: Number(row.minutes),
     dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
@@ -146,6 +148,7 @@ export async function insertOpeningTask(
     return acceptAssistantTask(sql, scope, input, insert);
   }
   return sql.begin(async (tx) => {
+    if (input.inputSnapshot?.kind === "retest") await lockWorkspaceLearningHistory(tx, scope);
     const replay = await prepareRetestTask(tx, scope, input);
     if (replay) return replay;
     const task = await insert(tx);
@@ -168,6 +171,7 @@ export async function insertOpeningTask(
         recommendedAt: candidate.dueAt ?? null,
         acceptedAt: new Date().toISOString(),
       });
+      await nextWorkspaceLearningHistoryRevision(tx, scope);
     }
     return task;
   });

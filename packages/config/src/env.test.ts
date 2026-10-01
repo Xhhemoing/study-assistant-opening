@@ -46,6 +46,12 @@ describe("loadEnv", () => {
     }
   });
 
+  it("loads a complete directory while ignoring unused legacy endpoint and prices", () => {
+    const model = { id: "new", label: "New", providerId: "p", providerLabel: "P", modelName: "new-model", baseUrl: "https://provider.example/v1", apiKeyEnv: "NEW_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
+    const source = { ...valid, OPENING_MODEL_CATALOG: JSON.stringify([model]), NEW_KEY: "new-key", OPENING_MODEL_API_KEY: "old-key", OPENING_MODEL_BASE_URL: "obsolete-endpoint", OPENING_MODEL_DAILY_CAP_CENTS: "100", OPENING_MODEL_INPUT_CENTS_PER_MILLION: "0", OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "0" };
+    expect(loadEnv(source).openingModel).toMatchObject({ name: "new-model", apiKey: "new-key", inputCentsPerMillion: 10, dailyCapCents: 100 });
+    expect(() => loadEnv({ ...source, OPENING_MODEL_CATALOG: "" })).toThrow();
+  });
   it("rejects missing AUTH_SECRET", () => {
     const { AUTH_SECRET: _omit, ...rest } = valid;
     expect(() => loadEnv(rest)).toThrow(EnvValidationError);
@@ -116,5 +122,13 @@ describe("loadOpeningTutorConfig", () => {
       reservedCents: 50,
       maxOutputTokens: 1024,
     });
+  });
+});
+
+describe("optional opening model catalog environment", () => {
+  it("keeps the catalog server-only and accepts an explicit model directory", async () => {
+    const { loadOpeningModelCatalog } = await import("./opening-model-catalog");
+    expect(loadOpeningModelCatalog({ OPENING_MODEL_CATALOG: "[]" }).models).toEqual([]);
+    expect(() => loadOpeningModelCatalog({ OPENING_MODEL_CATALOG: "invalid-private-config" })).toThrow(/服务器模型目录配置无效/);
   });
 });

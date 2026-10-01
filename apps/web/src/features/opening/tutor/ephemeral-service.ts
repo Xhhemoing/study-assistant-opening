@@ -5,6 +5,7 @@ import {
   type EphemeralTurnInput,
   type EphemeralTurnResponse,
   type ProviderInput,
+  type OpeningModelSnapshot,
   type ProviderOutput,
   type SourceChunk,
   type TutorMode,
@@ -58,6 +59,8 @@ export type EphemeralTutorDeps = {
   provenance?: EphemeralProvenanceRepository;
   budget: BudgetedRepository;
   provider: EphemeralProvider | null;
+  modelSnapshot?: OpeningModelSnapshot;
+  resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<{ provider: EphemeralProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number }>;
   config: {
     maxContextCharacters: number;
     reservedCents: number;
@@ -106,7 +109,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (input.sourceIds.length && !allowedSourceIds.length) {
         throw new EphemeralServiceError("SOURCE_EXCLUDED", "所选材料已停止供 AI 使用，请取消选择后重试。", 409);
       }
-      const historyDiscarded = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
+      const epochChanged = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
       const chunks = allowedSourceIds.length
         ? await deps.chunks.listForSources(scope, allowedSourceIds)
         : [];
@@ -122,10 +125,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         preferChunkId: input.chunkId ?? undefined,
         preferPage: input.currentPage ?? undefined,
       });
-      const history = historyDiscarded ? [] : input.history;
-      const historyRefs = history.length ? await deps.provenance?.resolveHistory(scope, history, privacy.epoch) ?? null : [];
-      const contextSourceRefs = historyRefs === null ? null : mergeContextSourceRefs(
-        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs,
+      const historyToResolve = epochChanged ? [] : input.history;
+      const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
+      const historyDiscarded = epochChanged || historyRefs === null;
+      const history = historyDiscarded ? [] : historyToResolve;
+      const contextSourceRefs = mergeContextSourceRefs(
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [],
       );
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode),
@@ -137,15 +142,17 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         mediaCapability: "text_only",
         imageParts: [],
       };
+      const selected = await deps.resolveModel?.(scope, input.mode);
       const rates = {
-        inputCentsPerMillion: deps.config.inputCentsPerMillion,
-        outputCentsPerMillion: deps.config.outputCentsPerMillion,
+        inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
+        outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,
       };
       const requestId = deps.requestKey?.() ?? `eph:${randomUUID()}`;
       let output: ProviderOutput;
       try {
         output = await runBudgetedCall({
-          provider: deps.provider,
+          provider: selected?.provider ?? deps.provider,
+          modelSnapshot: selected?.modelSnapshot ?? deps.modelSnapshot,
           budget: deps.budget,
           input: providerInput,
           requestId,
