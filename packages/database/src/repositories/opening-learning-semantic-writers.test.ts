@@ -216,6 +216,7 @@ describe("learning semantic revision writers", () => {
       if (query.startsWith("SELECT p.assessment_enabled")) return [{ account_assessment: true, account_retest: true }];
       if (query.includes("opening_learning_history_revisions")) return [];
       if (query.startsWith("SELECT id FROM opening_retest_activities")) return proposed ? [{ id: activityId }] : [];
+      if (query.startsWith("SELECT id, status, reason FROM opening_retest_activities")) return [];
       if (query.startsWith("INSERT INTO opening_jobs")) return [{ id: candidateId }];
       if (query.startsWith("INSERT INTO opening_retest_activities")) { proposed = true; return [{ id: activityId }]; }
       throw new Error(query);

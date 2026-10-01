@@ -20,6 +20,8 @@ export type CreateRetestActivityInput = {
   recommendedAt?: string | null;
   scheduledStartAt?: string | null;
   deadlineAt?: string | null;
+  /** Set when this proposal reopens a terminal activity as a new evidence cycle. */
+  reopenedFromActivityId?: string | null;
 };
 
 type ActivityRow = Record<string, unknown>;
@@ -134,9 +136,9 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
         const id = input.activityId ?? randomUUID();
         const rows = await tx`INSERT INTO opening_retest_activities (
           id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id, candidate_id, task_id,
-          status, version, proposed_at, not_before_at, recommended_at, scheduled_start_at, deadline_at
+          status, version, proposed_at, not_before_at, recommended_at, scheduled_start_at, deadline_at, reopened_from_activity_id
         ) VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.courseId},${input.skillLabel},${input.requirementKey ?? null},'retest',${input.cycleId},
-          ${input.candidateId ?? null},${input.taskId ?? null},'proposed',1,${input.proposedAt ?? null},${input.notBeforeAt ?? null},${input.recommendedAt ?? null},${input.scheduledStartAt ?? null},${input.deadlineAt ?? null})
+          ${input.candidateId ?? null},${input.taskId ?? null},'proposed',1,${input.proposedAt ?? null},${input.notBeforeAt ?? null},${input.recommendedAt ?? null},${input.scheduledStartAt ?? null},${input.deadlineAt ?? null},${input.reopenedFromActivityId ?? null})
           ON CONFLICT DO NOTHING RETURNING *`;
         if (rows.length) {
           await nextWorkspaceLearningHistoryRevision(tx, scope);

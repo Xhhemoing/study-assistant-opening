@@ -85,6 +85,31 @@ export function createOpeningRetestRepository(sql: Sql) {
               AND purpose='retest' AND status IN ('proposed','accepted','in_progress')
             FOR UPDATE`;
           if (active.length) continue;
+          // A terminal history alone does not authorize a new cycle: policy
+          // upgrades and worker retries must not regenerate a declined or
+          // finished proposal for unchanged evidence. Only genuinely new
+          // evidence roots (or no recorded evidence at all) may start one.
+          const prior = await tx`SELECT id, status, reason FROM opening_retest_activities
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND course_id=${candidate.courseId} AND skill_label=${candidate.skillLabel}
+              AND requirement_key IS NOT DISTINCT FROM ${candidate.requirementKey ?? null}
+              AND purpose='retest' AND status IN ('completed','declined','cancelled','invalidated','superseded')
+            ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`;
+          const priorRow = prior[0] as { id: string; status: string; reason: string | null } | undefined;
+          const candidateRoots = [...new Set(candidate.evidenceRootIds ?? [])].sort();
+          if (priorRow && priorRow.reason === "evidence_changed") {
+            // Evidence already changed under this identity: the reconciler
+            // recorded the change, so a new cycle with the fresh roots is legitimate.
+          } else if (priorRow) {
+            const seen = await tx`SELECT payload FROM opening_jobs
+              WHERE id=(SELECT candidate_id FROM opening_retest_activities WHERE id=${priorRow.id})
+                AND workspace_id=${scope.workspaceId}`;
+            const priorPayload = (seen[0] as { payload?: { evidenceRootIds?: string[] } } | undefined)?.payload;
+            const priorRoots = [...new Set((Array.isArray(priorPayload?.evidenceRootIds) ? priorPayload.evidenceRootIds : []) as string[])].sort();
+            const sameEvidence = priorRoots.length > 0 && priorRoots.length === candidateRoots.length
+              && priorRoots.every((root, index) => root === candidateRoots[index]);
+            if (sameEvidence) continue;
+          }
           const id = candidate.id || randomUUID();
           const row = { ...candidate, id, accepted: false, kind: "task" as const };
           const inserted = await tx`INSERT INTO opening_jobs (id,workspace_id,owner_user_id,key,kind,payload,privacy_epoch,state)

@@ -218,11 +218,13 @@ type ReviewResult = {
 **接口/数据：**新增 `opening_retest_activities` 保存第 3.3 节业务字段、taskId、候选来源、cycleId、版本与决定。`transitionRetest(activity, command, context)` 为纯状态规则；repository 同事务写观察/活动/task。现有 job 仅承担运输与执行，使用活动引用；迁移提供旧 jobId→activityId 的稳定映射和旧接受路由兼容。
 
 - [ ] V4 先覆盖未来接受项误到期、终态重复提醒、任务 done 无观察、skipped/snooze、取消/提交竞态及 policy 升级重复候选。
-- [ ] 迁移旧 payload 中可证明的候选、接受结果、taskId 与时间；task done 但无观察时 completed/unverified，不推断正确；无法协调的关联标记待核对而非再次入队。
-- [ ] 按第 3.3 节落实四类时间、状态和新周期条件；生成端与接受端均通过唯一约束/事务保证最多一个当前业务对象。
-- [ ] 通用任务写入口通过同一个应用服务协调活动；同库写入不另加 outbox。外部提醒继续复用现有作业能力并在发送前重读权威状态。
-- [ ] 当前 `listAcceptedSkillLabels` 类读取不得继续充当到期集合；来源/要求更新显示依据变化，任务硬截止仍由用户或明确来源确认。
-- [ ] 将业务活动与终态加入备份清单，保留必要旧 job 业务映射但不恢复运输 job；验证恢复后已完成/拒绝项不重建或重发。
+- [x] 迁移旧 payload 中可证明的候选、接受结果、taskId 与时间；task done 但无观察时 completed/unverified，不推断正确；无法协调的关联标记待核对而非再次入队。
+- [x] 按第 3.3 节落实四类时间、状态和新周期条件；生成端与接受端均通过唯一约束/事务保证最多一个当前业务对象。
+- [x] 通用任务写入口通过同一个应用服务协调活动；同库写入不另加 outbox。外部提醒继续复用现有作业能力并在发送前重读权威状态。
+- [x] 当前 `listAcceptedSkillLabels` 类读取不得继续充当到期集合；来源/要求更新显示依据变化，任务硬截止仍由用户或明确来源确认。
+- [x] 将业务活动与终态加入备份清单，保留必要旧 job 业务映射但不恢复运输 job；验证恢复后已完成/拒绝项不重建或重发。
+
+**2026-09-29 S4 收尾：**E03/E04 语义缺口已闭合：(1) `createProposed` 现在持久化 `reopened_from_activity_id`，重开链接此前被丢弃；(2) `saveCandidates` 在活跃身份检查后新增前次终态检查——同一业务身份最近一次终态活动（completed/declined/cancelled/invalidated/superseded，`FOR UPDATE`）除 `reason='evidence_changed'` 外，需比较前次 job payload 的 `evidenceRootIds` 与新候选排序后的根集合，仅新可比证据根（或修订产生的 evidence_changed）授权新周期；policy 升级/Worker 重放同一证据不再重新生成已拒绝或已完成活动（E03：不创建新周期，仅显式重开/新证据根推进 cycleId）。生命周期测试新增三项：done 后补交答案保持 completed/unverified、重开完成项创建关联 `reopenedFromActivityId` 的新活动/新任务、拒绝提议不因重放证据重新生成而新证据根授权新周期。适配影响：修订消费方测试改为修订后（ reconciler 标记 evidence_changed）用修正后 head 生成 pending——修订前同证据自动再生成按 3.3 节属于被禁止行为；模拟 writer 测试补充新的终态查询桩。V4 组：单元 1988 全绿（含 retest-policy/retest-activity/remind），集成 105 个 S4 相关测试全绿；全量集成 529 项中 5 项失败均经 stash 基线复核为 S3 遗留（task-acceptance-backup 恢复、source-actions-race 超时、tutor privacy/provenance），与 S4 无关。任务台账不提前提升，S4 整片待用户浏览器/真实模型验收后再评。
 
 **完成与回退：**C01–C05、E03–E04 通过，提醒从业务状态推导。可停止自动生成/提醒并保留任务；不回退到把所有 accepted 都当 due 的读取。
 

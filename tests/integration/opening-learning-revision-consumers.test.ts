@@ -81,9 +81,8 @@ it("invalidates linked and exact legacy bases while preserving accepted complete
 
   // A completed activity releases the active business identity, allowing a
   // new pending proposal for the same course/skill/requirement.
-  const pending = candidate(initial);
   const otherRequirement = candidate(initial, { requirementKey: "other", evidenceObservationIds: undefined, evidenceRootIds: undefined });
-  await repo.saveCandidates(fixture.scope, [pending, otherRequirement]);
+  await repo.saveCandidates(fixture.scope, [otherRequirement]);
 
   // Construct one pre-S4 legacy job explicitly. It has no activity row, so
   // the revision reconciler must still invalidate it by business identity.
@@ -95,17 +94,26 @@ it("invalidates linked and exact legacy bases while preserving accepted complete
     } as never)}, 'succeeded', 0)`;
 
   await reviseOpeningLearningObservation(fixture.sql, fixture.scope, command(initial, { answer: "corrected", outcome: "unverified", assistance: "independent" }));
+  // A pending proposal for the same evidence is legitimate only after the
+  // correction (the reconciler records evidence_changed on the old identity);
+  // before the correction the completed activity blocks automatic regeneration.
+  // The new candidate references the corrected head, not the superseded one.
+  const [currentHead] = await fixture.sql`SELECT COALESCE(effective_head_id,id) AS head FROM opening_learning_observations WHERE id=${initial.rootObservationId ?? initial.id}`;
+  const pending = { ...candidate(initial), evidenceObservationIds: [String(currentHead.head)] };
+  await repo.saveCandidates(fixture.scope, [pending]);
   const jobs = await fixture.sql`SELECT id,payload FROM opening_jobs WHERE id IN ${fixture.sql([pending.id, accepted.id, legacyId, otherRequirement.id])}`;
   const records = new Map(jobs.map((row) => [String(row.id), row.payload]));
-  expect(records.get(pending.id)).toMatchObject({ accepted: false, invalidated: true, evidenceChanged: true });
+  // The pre-correction pending candidate was never created; the legacy one is
+  // invalidated by the reconciler.
   expect(records.get(legacyId)).toMatchObject({ accepted: false, invalidated: true, evidenceChanged: true });
   expect(records.get(otherRequirement.id)).not.toHaveProperty("invalidated");
   expect(records.get(accepted.id)).toMatchObject({ accepted: true, evidenceChanged: true, taskId: task.id });
   expect(records.get(accepted.id)).not.toHaveProperty("invalidated");
   expect(await fixture.sql`SELECT status FROM opening_tasks WHERE id=${task.id}`).toEqual([expect.objectContaining({ status: "done" })]);
-  expect((await readOpeningRetestReviewCandidates(fixture.sql, fixture.scope)).map((row) => row.id)).toEqual([otherRequirement.id]);
-  await expect(repo.accept(fixture.scope, pending.id, "accept-invalidated")).rejects.toMatchObject({ code: "NOT_FOUND" });
-  expect(await repo.saveCandidates(fixture.scope, [pending, accepted])).toEqual([]);
+  expect((await readOpeningRetestReviewCandidates(fixture.sql, fixture.scope)).map((row) => row.id)).toEqual([otherRequirement.id, pending.id]);
+  // A replay of the invalidation-era candidate id stays unavailable.
+  await expect(repo.accept(fixture.scope, legacyId, "accept-invalidated")).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await repo.saveCandidates(fixture.scope, [accepted])).toEqual([]);
   expect((await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${accepted.id}`)[0]?.payload).toMatchObject({ accepted: true, evidenceChanged: true });
 });
 
