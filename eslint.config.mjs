@@ -20,8 +20,6 @@ export default tseslint.config(
       ".claude/**",
       ".github/**",
       ".pi/**",
-      ".hermes/**",
-      "project/**",
       // Local runtimes and scratch downloads are not project source.
       ".local/**",
       ".tmp/**",

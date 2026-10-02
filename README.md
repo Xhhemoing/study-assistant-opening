@@ -38,7 +38,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 - [核心数据模型与预测系统](docs/architecture/DATA_MODEL_AND_PREDICTION.md)
 - [资源平台、开源与商业化](docs/business/OPEN_SOURCE_AND_MARKETPLACE.md)
 - [旧版备考中心实施计划，仅作历史参考](docs/roadmap/EXECUTION_PLAN.md)
-- [Hermes 执行计划](.hermes/plans/2026-07-21_191637-aistudy-project-plan.md)
+- [智学课 → Notion AI Meeting 转写流水线](scripts/notion-meeting-pipeline/README.md)
 
 ## 当前阶段
 
@@ -110,19 +110,3 @@ npm run typecheck -w @aistudy/web
 pc-sync.sh push AIstudy
 pc-sync.sh pull AIstudy
 ```
-
-## GitHub 一键同步
-
-首次登录 GitHub 后，在项目目录执行：
-
-```bash
-./sync.sh
-```
-
-也可以直接指定提交说明：
-
-```bash
-./sync.sh "docs: update project plan"
-```
-
-脚本会自动检查 GitHub 登录状态、提交当前变更并推送到 `origin` 的当前分支。它不保存 Token，认证由 GitHub CLI 管理。

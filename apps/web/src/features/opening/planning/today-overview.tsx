@@ -23,15 +23,15 @@ export function summarizeTodayPlan(tasks: TaskItem[], plan: TodayPlan) {
 
 export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[]; plan: TodayPlan; onArrange: () => void }) {
   const summary = summarizeTodayPlan(tasks, plan);
-  return <section className="border-b border-zinc-200 px-4 py-3" aria-labelledby="today-plan-overview-heading">
-    <h3 id="today-plan-overview-heading" className="text-xs font-semibold text-zinc-800">今日已确认计划</h3>
-    {!plan.acceptedVersion ? <><p className="mt-2 text-xs leading-5 text-zinc-500">还未确认今天的时间安排。可以直接选任务学习。</p><button type="button" onClick={onArrange} className={`${secondaryButtonClass} mt-2`}>安排可用时间</button></>
-      : !summary.total ? <p className="mt-2 text-xs leading-5 text-zinc-500">今天已确认的计划没有学习任务，可从下方队列继续。</p>
-        : <><dl className="mt-3 grid grid-cols-3 gap-2 text-xs">
-          <div><dt className="text-zinc-500">计划内已完成</dt><dd className="mt-1 font-semibold tabular-nums text-zinc-800">{summary.done}/{summary.total} 项</dd></div>
-          <div><dt className="text-zinc-500">待做</dt><dd className="mt-1 font-semibold tabular-nums text-zinc-800">{summary.pending} 项</dd></div>
-          <div><dt className="text-zinc-500">待做预计</dt><dd className="mt-1 font-semibold tabular-nums text-zinc-800">{summary.pendingMinutes} 分钟</dd></div>
-        </dl><details className="mt-2 text-[11px] leading-5 text-zinc-500"><summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">统计范围与依据</summary><p>{plan.date} 已确认计划中的任务当前状态；完成时间可能早于今天。预计时间来自已确认时间块，不是实际学习时长。</p>{summary.skipped ? <p>{summary.skipped} 项已跳过。</p> : null}{summary.unavailable ? <p>{summary.unavailable} 项暂不在当前队列中，未推断其完成状态。</p> : null}</details></>}
+  return <section className="border-y border-zinc-200/80 bg-gradient-to-b from-white to-zinc-50/50 px-5 py-4" aria-labelledby="today-plan-overview-heading">
+    <h3 id="today-plan-overview-heading" className="text-sm font-semibold text-zinc-900">今日已确认计划</h3>
+    {!plan.acceptedVersion ? <><p className="mt-2 text-sm leading-6 text-zinc-500">还未确认今天的时间安排。可以直接选任务学习。</p><button type="button" onClick={onArrange} className={`${secondaryButtonClass} mt-3`}>安排可用时间</button></>
+      : !summary.total ? <p className="mt-2 text-sm leading-6 text-zinc-500">今天已确认的计划没有学习任务,可从下方队列继续。</p>
+        : <><dl className="mt-4 grid grid-cols-3 gap-3">
+          <div className="rounded-lg bg-white px-3 py-2.5 shadow-xs ring-1 ring-zinc-900/5"><dt className="text-xs text-zinc-500">计划内已完成</dt><dd className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-zinc-900">{summary.done}<span className="ml-1 text-base font-normal text-zinc-400">/ {summary.total}</span></dd></div>
+          <div className="rounded-lg bg-white px-3 py-2.5 shadow-xs ring-1 ring-zinc-900/5"><dt className="text-xs text-zinc-500">待做</dt><dd className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-emerald-700">{summary.pending}<span className="ml-1 text-base font-normal text-zinc-400">项</span></dd></div>
+          <div className="rounded-lg bg-white px-3 py-2.5 shadow-xs ring-1 ring-zinc-900/5"><dt className="text-xs text-zinc-500">待做预计</dt><dd className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-zinc-900">{summary.pendingMinutes}<span className="ml-1 text-base font-normal text-zinc-400">分</span></dd></div>
+        </dl><details className="mt-3 text-xs leading-6 text-zinc-500"><summary className="cursor-pointer py-1.5 hover:text-zinc-700 focus-visible:ring-2 focus-visible:ring-emerald-600/50">统计范围与依据</summary><p className="pt-1">{plan.date} 已确认计划中的任务当前状态；完成时间可能早于今天。预计时间来自已确认时间块,不是实际学习时长。</p>{summary.skipped ? <p className="pt-1">{summary.skipped} 项已跳过。</p> : null}{summary.unavailable ? <p className="pt-1">{summary.unavailable} 项暂不在当前队列中,未推断其完成状态。</p> : null}</details></>}
   </section>;
 }
 

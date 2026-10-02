@@ -64,36 +64,36 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
       // The parent shows the error; retain this intent's idempotency key.
     } finally { locked.current = false; setSending(false); }
   }
-  return <form ref={form} className="shrink-0 bg-white px-4 pb-3 pt-2 sm:px-5" onSubmit={handleSubmit}>
-    <div className="rounded-lg border border-zinc-300 bg-white transition-colors duration-150 focus-within:border-emerald-700 motion-reduce:transition-none">
-      <textarea className="max-h-40 min-h-20 w-full resize-y rounded-t-lg border-0 bg-transparent px-3 py-3 text-base leading-7 text-zinc-800 outline-none placeholder:text-zinc-500 disabled:opacity-60 md:text-sm"
+  return <form ref={form} className="shrink-0 border-t border-zinc-200/70 bg-white px-4 pb-3 pt-3 sm:px-5" onSubmit={handleSubmit}>
+    <div className="overflow-hidden rounded-xl border border-zinc-300 bg-white shadow-sm shadow-zinc-900/5 transition-[border-color,box-shadow] duration-200 focus-within:border-emerald-600 focus-within:shadow-md focus-within:shadow-emerald-600/10 motion-reduce:transition-none">
+      <textarea className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-3.5 text-base leading-7 text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 md:text-sm"
         value={draft} disabled={blocked} onChange={(event) => onDraftChange(event.target.value)}
         onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
         onKeyDown={(event) => { if (shouldSubmitShortcut({ key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, isComposing: event.nativeEvent.isComposing || composing.current })) { event.preventDefault(); form.current?.requestSubmit(); } }}
         placeholder="自由交流，或基于已选材料提问…" aria-label="消息输入" />
-      <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/50 px-3 py-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           {onContext ? <button type="button" className={secondaryButtonClass} aria-label="选择参考材料" title={contextLabel} onClick={onContext}><Paperclip size={14} aria-hidden /></button> : null}
-          <select className="min-h-10 max-w-40 rounded-md bg-zinc-50 px-2 text-xs text-zinc-700 focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-50 md:min-h-8" value={mode} disabled={blocked} onChange={(event) => setMode(event.target.value as TutorMode)} aria-label="辅导模式">
+          <select className="min-h-10 max-w-40 rounded-lg bg-white px-2.5 text-xs text-zinc-700 shadow-xs ring-1 ring-zinc-900/5 transition-[box-shadow,ring] duration-150 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-50 motion-reduce:transition-none md:min-h-8" value={mode} disabled={blocked} onChange={(event) => setMode(event.target.value as TutorMode)} aria-label="辅导模式">
             {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
-          <label className="flex items-center gap-1 text-zinc-500"><LockKeyhole size={12} aria-hidden />
-            <select className="min-h-10 max-w-28 rounded bg-transparent px-1 text-xs focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-60 md:min-h-8" value={effectivePrivacy} disabled={practiceMode || blocked || !onPrivacyChange} onChange={(event) => onPrivacyChange?.(event.target.value as ComposerPrivacy)} aria-label="隐私模式">
+          <label className="flex items-center gap-1.5 text-zinc-500"><LockKeyhole size={13} aria-hidden />
+            <select className="min-h-10 max-w-28 rounded-lg bg-transparent px-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-60 motion-reduce:transition-none md:min-h-8" value={effectivePrivacy} disabled={practiceMode || blocked || !onPrivacyChange} onChange={(event) => onPrivacyChange?.(event.target.value as ComposerPrivacy)} aria-label="隐私模式">
               <option value="saved">保存对话</option>{!practiceMode ? <option value="ephemeral">不保存本轮</option> : null}
             </select>
           </label>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           {pending && onCancel ? <button type="button" className={secondaryButtonClass} onClick={onCancel}><Square size={12} aria-hidden />取消</button> : null}
-          <button type="submit" className="inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-zinc-900 text-white transition-colors duration-150 hover:bg-zinc-700 focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 motion-reduce:transition-none md:size-8" disabled={blocked || !draft.trim()} aria-label="发送" title="发送 · Ctrl / ⌘ + Enter">
-            {blocked ? <LoaderCircle size={16} className="motion-safe:animate-spin" aria-hidden /> : <ArrowUp size={17} aria-hidden />}
+          <button type="submit" className="inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-white shadow-md shadow-zinc-900/20 transition-[background-color,transform,box-shadow] duration-200 ease-out-expo hover:bg-zinc-800 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus-visible:ring-offset-2 active:scale-95 disabled:pointer-events-none disabled:bg-zinc-100 disabled:text-zinc-400 disabled:shadow-none motion-reduce:transition-none motion-reduce:active:scale-100 md:size-9" disabled={blocked || !draft.trim()} aria-label="发送" title="发送 · Ctrl / ⌘ + Enter">
+            {blocked ? <LoaderCircle size={17} className="motion-safe:animate-spin" aria-hidden /> : <ArrowUp size={18} aria-hidden />}
           </button>
         </div>
       </div>
     </div>
-    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] leading-4 text-zinc-500">
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs leading-5 text-zinc-500">
       <span>{practiceMode ? "练习辅导会保存对话并记录帮助。" : effectivePrivacy === "ephemeral" ? "本轮仅保留在当前标签页；刷新后不会恢复。" : contextLabel ?? "AI 可能出错，请核对原始材料。"}</span>
-      <span className="hidden sm:inline">Ctrl / ⌘ + Enter 发送</span>
+      <span className="hidden tabular-nums sm:inline">⌘ + Enter 发送</span>
     </div>
   </form>;
 }
