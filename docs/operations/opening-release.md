@@ -50,18 +50,28 @@ SHA and does not replace release-SHA CI.
 
 ## Readiness checks
 
-`node scripts/opening-readiness.mjs` aggregates probe results and fails closed:
-`ready: true` requires every check green **and** a configured alert destination.
-An unconfigured destination is reported as `alertDelivery: "unconfigured"` with
-the note that monitoring exists locally but nobody is receiving alerts — this
-is stated, never hidden. Output is metadata only; credentials and user content
-are never printed.
+`npx tsx scripts/opening-readiness.mjs` runs real probes
+(`scripts/opening-readiness-probes.mjs`) and fails closed: `ready: true`
+requires every required check (`REQUIRED_CHECKS`) to have run and returned
+`ok: true` **and** a configured alert destination. A check that was not run is
+reported as `probe not run`. An unconfigured destination is reported as
+`alertDelivery: "unconfigured"`; `"configured"` means a URL is set, not that an
+alert was delivered. Output is metadata only; credentials and user content are
+never printed. Exit code is 0 only when ready.
 
-Required environment variables for a full run: `DATABASE_URL`, `REDIS_URL`,
-`S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
-Feature flags reported as checks: `AI_PROVIDER_API_KEY`,
-`OPENING_DAILY_CAP`, `OPENING_REGISTRATION_LOCKED`, `ALERT_WEBHOOK_URL`,
-`OPENING_BACKUP_MAX_AGE_HOURS` (default 24h).
+Required environment: `DATABASE_URL`, `REDIS_URL`, `S3_ENDPOINT`, `S3_REGION`,
+`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PUBLIC_BASE_URL`.
+
+| Check | Probe |
+| --- | --- |
+| `database` / `redis` / `storage` | `select 1`, `PING`, S3 `HeadBucket` (5s timeout) |
+| `workerBacklog` | no outbox row pending >10 min, no `failed` outbox row, no non-reminder job or tutor job queued >10 min. Failed outbox rows have no automatic re-drive yet, so they stay red until handled |
+| `https` | `PUBLIC_BASE_URL` is https and its `/api/health` returns 200 |
+| `registrationLocked` | `OPENING_RELEASE` parsed like the web app (`1`/`true`/`yes`) |
+| `ownerSetup` | at least one user exists |
+| `providerConfigured` / `dailyCap` | product model catalog: default model `available`, `OPENING_MODEL_DAILY_CAP_CENTS > 0` (needs `tsx`) |
+| `backupFreshness` | `OPENING_BACKUP_ARCHIVE_PATH` mtime within `OPENING_BACKUP_MAX_AGE_HOURS` (default 24h) |
+| alert destination | `ALERT_WEBHOOK_URL` non-empty |
 
 ## Backup and restore boundary
 
