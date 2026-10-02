@@ -141,7 +141,8 @@ type ReviewResult = {
 - 5 个失败定位为 4 个测试文件的过时前提，不是已证实的生产隐私泄漏：`opening-task-acceptance-backup.test.ts` 手动恢复遗漏 `context_source_refs` 和 `attempt_id`；`opening-tutor-provenance.test.ts` 首轮问题与材料无词项交集，材料未入选而非记忆丢失来源；`opening-tutor-privacy-input.test.ts` 同样缺少相关性前提；`opening-source-actions-race.test.ts` 实际阻塞在新增的 workspace history revision 锁，旧断言却限定 `workspaces` SQL。
 - 本批仅同步上述恢复列、让相关性测试数据匹配并断言首轮实际模型材料输入、将竞态断言保持为真实 PID 阻塞与最终对象清理，不再固定内部锁表。没有修改生产实现、数据库保护、超时配置或 CI 门禁。
 - 定向隔离 integration 4 文件 **12 passed**；context/tutor-turn/source-service 单元 3 文件 **63 passed**；4 文件 ESLint 通过。额外严格编译这 4 个集成入口有 3 个既有诊断（TS2352 不完整存储桩、TS2345 联合 Promise 推断、TS2532 数组索引）；读取 `HEAD` 原文件编译得到相同 3 项，本批不记严格编译通过、不扩展无关修复。
-- 修复后的完整远端 CI 结果待推送后确认；S0 复选框与任务账本不提升。未运行浏览器或真实模型验收，无生产迁移；回退仅撤回本批测试调整。
+- `6114b53` 的 [CI run 36957627123](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/36957627123) 已通过原 5 个失败用例；integration 为 **524 passed / 4 failed / 1 skipped**。新增 4 个失败均来自 `card-multi-goal-state.test.ts` 的共用夹具：固定考试日 `2026-10-01` 在次日违反 `course_goals_exam_date_check`。考试日期及后续更新改用数据库 `CURRENT_DATE` 加未来天数，保留固定复习时钟与原数据库约束；定向回归 **4 passed**，该文件严格 TypeScript **0 diagnostics**，ESLint 通过。
+- 日期夹具修复后的完整远端 CI 结果待推送后确认；S0 复选框与任务账本不提升。未主动运行浏览器或真实模型验收，无生产迁移；回退仅撤回本批测试调整。
 
 **修改/核对：**`scripts/opening-test-db.mjs`、`tests/integration/opening-fixture.ts`、`apps/worker/src/parsers/parser-config.ts`、`apps/worker/src/parsers/parser-preflight.ts`、`services/parser/requirements-lock.txt`、`.github/workflows/ci.yml`、`docs/operations/ci.md`、`scripts/opening-e2e/environment.mjs`。沿用 [隔离验收环境](2026-09-24-opening-isolated-acceptance.md)。
 

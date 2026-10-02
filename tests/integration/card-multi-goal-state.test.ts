@@ -96,9 +96,9 @@ describe("card multi-goal personal SRS state", () => {
       visibility: "course",
     });
 
-    await insertGoal(courseA, "final-exam", 2, "2026-12-01");
+    await insertGoal(courseA, "final-exam", 2, 120);
     await insertGoal(courseA, "interest", 1, null);
-    await insertGoal(courseB, "maintenance", 4, "2026-10-01");
+    await insertGoal(courseB, "maintenance", 4, 60);
   });
 
   afterAll(async () => {
@@ -109,8 +109,9 @@ describe("card multi-goal personal SRS state", () => {
     courseId: string,
     kind: GoalKind,
     priority: number,
-    examDate: string | null,
+    examDaysFromToday: number | null,
   ): Promise<string> {
+    // The DB enforces a non-past exam date independently of the fixed review clock.
     const rows = await sql<{ id: string }[]>`
       INSERT INTO course_goals (
         workspace_id, course_id, kind, title, priority, intensity,
@@ -118,7 +119,7 @@ describe("card multi-goal personal SRS state", () => {
       )
       VALUES (
         ${workspaceId}, ${courseId}, ${kind}, ${kind}, ${priority}, 0.5,
-        ${sql.json(defaultGoalAbilities(kind))}, 'goal-1', true, ${examDate}
+        ${sql.json(defaultGoalAbilities(kind))}, 'goal-1', true, CURRENT_DATE + ${examDaysFromToday}::int
       )
       RETURNING id
     `;
@@ -192,7 +193,7 @@ describe("card multi-goal personal SRS state", () => {
     expect(eventCount[0]?.count).toBe(2);
 
     const beforeGoals = await cards.getState({ workspaceId, ownerUserId, cardId });
-    await sql`UPDATE course_goals SET priority = 99, exam_date = '2027-01-15' WHERE course_id = ${courseB}`;
+    await sql`UPDATE course_goals SET priority = 99, exam_date = CURRENT_DATE + 180 WHERE course_id = ${courseB}`;
     const afterGoals = await cards.getState({ workspaceId, ownerUserId, cardId });
     expect(afterGoals).toEqual(beforeGoals);
   });
