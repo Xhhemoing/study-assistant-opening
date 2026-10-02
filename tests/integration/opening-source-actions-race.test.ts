@@ -36,7 +36,8 @@ describe("source deletion serialization", () => {
     try {
       await entered.promise;
       deletion = track(createOpeningSourceService(b.sql, s.adapter).actOnSource(principal(), id, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }));
-      await waitUntilBlocked(f.sql, b.pid, a.pid, "deletion behind copy", /workspaces/);
+      // Observe the actual blocker, not which internal lock is acquired first.
+      await waitUntilBlocked(f.sql, b.pid, a.pid, "deletion behind copy");
       release.resolve();
       await complete; await deletion;
       expect(s.objects.size).toBe(0); expect(await f.sql`SELECT id FROM opening_sources WHERE id=${id}`).toHaveLength(0);

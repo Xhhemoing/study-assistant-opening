@@ -29,9 +29,9 @@ async function source() {
   });
   return id;
 }
-async function append(conversationId: string, sourceIds: string[] = []) {
+async function append(conversationId: string, sourceIds: string[] = [], text = "continue") {
   return createOpeningConversationRepository(f.sql).appendSavedTurn({
-    scope: f.scope, conversationId, text: "continue", sourceIds, mode: "explain",
+    scope: f.scope, conversationId, text, sourceIds, mode: "explain",
     clientKey: randomUUID(), learningSessionId: null, currentPage: null, chunkId: null,
   });
 }
@@ -60,8 +60,11 @@ describe("saved tutor material provenance", () => {
     const conversations = createOpeningConversationRepository(f.sql);
     const memories = createOpeningMemoryRepository(f.sql);
     const firstConversation = await conversations.create(f.scope, { title: "first", courseId: null });
-    const first = await append(firstConversation.id, [id]);
-    await handler("first-secret-answer", "first-secret-memory").run(first.jobId);
+    // Exercise inherited provenance from material actually selected for the model.
+    const first = await append(firstConversation.id, [id], "Explain ancestor material");
+    const firstCall = handler("first-secret-answer", "first-secret-memory");
+    await firstCall.run(first.jobId);
+    expect(firstCall.calls[0]?.chunks).toEqual([expect.objectContaining({ sourceId: id, sourceVersion: 0 })]);
     const confirm = async (turnId: string) => {
       const rows = await f.sql<{ id: string }[]>`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${turnId}`;
       return memories.decideMemoryCandidate(f.scope, { id: rows[0]!.id,

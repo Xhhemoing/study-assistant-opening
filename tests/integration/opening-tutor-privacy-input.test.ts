@@ -21,7 +21,8 @@ const SECRET_A = "secret-prior-answer-rp1";
 const CHUNK = "secret-chunk-text-rp1";
 const ALLOWED = "allowed-chunk-text-rp1";
 const FOLLOW = "follow-up-without-sources-rp1";
-const SELECTED = "follow-up-selects-excluded-rp1";
+// Match both chunks without putting either secret/allowed marker in the request.
+const SELECTED = "follow-up-selects-excluded-rp1 chunk";
 
 beforeAll(async () => {
   fixture = await createOpeningFixture();

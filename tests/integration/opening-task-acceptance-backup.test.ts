@@ -46,8 +46,8 @@ it.each([false, true])("restores an accepted task and its receipt from an archiv
       await tx`DELETE FROM opening_tasks WHERE workspace_id = ${scope.workspaceId}`;
       await tx`DELETE FROM opening_conversations WHERE workspace_id = ${scope.workspaceId}`;
       await tx`INSERT INTO opening_conversations SELECT * FROM json_populate_recordset(NULL::opening_conversations, ${JSON.stringify(tables.opening_conversations)}::text::json)`;
-      await tx`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, client_key, learning_session_id, current_page, chunk_id, source_ids, citations, created_at, intent_hash, source_versions)
-        SELECT id, workspace_id, conversation_id, role, text, mode, status, client_key, learning_session_id, current_page, chunk_id, source_ids, citations, created_at, intent_hash, source_versions FROM json_populate_recordset(NULL::opening_turns, ${JSON.stringify(tables.opening_turns)}::text::json)`;
+      await tx`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, client_key, learning_session_id, current_page, chunk_id, source_ids, citations, created_at, intent_hash, source_versions, context_source_refs, attempt_id)
+        SELECT id, workspace_id, conversation_id, role, text, mode, status, client_key, learning_session_id, current_page, chunk_id, source_ids, citations, created_at, intent_hash, source_versions, context_source_refs, attempt_id FROM json_populate_recordset(NULL::opening_turns, ${JSON.stringify(tables.opening_turns)}::text::json)`;
       await tx`INSERT INTO opening_assistant_candidates SELECT * FROM json_populate_recordset(NULL::opening_assistant_candidates, ${JSON.stringify(tables.opening_assistant_candidates)}::text::json)`;
       await tx`INSERT INTO opening_tasks SELECT * FROM json_populate_recordset(NULL::opening_tasks, ${JSON.stringify(tables.opening_tasks)}::text::json)`;
     });
