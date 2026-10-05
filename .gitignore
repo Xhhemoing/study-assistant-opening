@@ -57,3 +57,6 @@ NUL
 # Dedicated Opening acceptance build
 .next-opening-e2e/
 .next-preview/
+
+# Local agent self-improvement logs (removed from the repo in b31feb7)
+.learnings/

@@ -1,3 +1,5 @@
+> 2026-10-05 注：本执行游标停在 2026-09-25，已滞后；任务状态以 `tasks.json` 为准，最新进度见 [progress-analysis-2026-10-05.md](../progress-analysis-2026-10-05.md) 与 [2026-10-05 仓库 review](../../../quality/2026-10-05-opening-repo-review.md)。
+
 # Opening 全计划连续执行记录
 
 基线：feat/opening-release / 8d616c0 + 保留既有未提交改动。用户要求按计划连续推进；实现/复核模型使用 xhh-grok/grok-4.7（覆盖旧执行计划中的4.6指令）。原43任务账本和依赖不变；本文件是执行游标，不是verified证据。
