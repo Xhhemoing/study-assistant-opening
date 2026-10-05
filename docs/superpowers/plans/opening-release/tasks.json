@@ -423,8 +423,10 @@
         "T03"
       ],
       "plan": "10-media-knowledge.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-05-opening-release/k02a-tutor-policy-verified.md"
+      ]
     },
     {
       "id": "K02",
