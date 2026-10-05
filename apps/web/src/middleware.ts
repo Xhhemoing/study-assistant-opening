@@ -14,6 +14,13 @@ export function legacyOpeningRedirectPath(pathname: string): string | null {
   return rule ? rule.target(pathname) : null;
 }
 
+/** Production never derives the trusted origin from the request Host header. */
+export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string): string | null {
+  const configured = env.PUBLIC_BASE_URL?.trim();
+  if (configured) return configured;
+  return env.NODE_ENV === "production" ? null : requestOrigin;
+}
+
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const legacyRedirect = legacyOpeningRedirectPath(pathname);
@@ -29,8 +36,13 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const publicBaseUrl =
-    process.env.PUBLIC_BASE_URL?.trim() || request.nextUrl.origin;
+  const publicBaseUrl = cookieAuthBaseUrl(process.env, request.nextUrl.origin);
+  if (!publicBaseUrl) {
+    return NextResponse.json(
+      { error: { code: "CONFIGURATION", message: "PUBLIC_BASE_URL must be configured in production" } },
+      { status: 500 },
+    );
+  }
   const origin = request.headers.get("origin");
   if (isAllowedCookieAuthOrigin(origin, publicBaseUrl)) {
     return NextResponse.next();

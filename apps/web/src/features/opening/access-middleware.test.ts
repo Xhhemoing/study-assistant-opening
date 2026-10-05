@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { middleware } from "../../middleware";
+import { cookieAuthBaseUrl, middleware } from "../../middleware";
 import { OPENING_TEST_FIXTURE_ORIGIN } from "./access-policy";
 
 const publicBase = "https://study.example";
@@ -60,5 +60,30 @@ describe("opening same-origin middleware", () => {
     vi.stubEnv("OPENING_RELEASE", "1");
     const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
     expect(response.status).toBe(200);
+  });
+});
+
+describe("cookie-auth base URL configuration", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("fails closed for mutations when production has no PUBLIC_BASE_URL", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_BASE_URL", "");
+    const response = middleware(request("POST", publicBase));
+    expect(response.status).toBe(500);
+    expect(response.headers.get("x-middleware-next")).toBeNull();
+    expect(await response.json()).toMatchObject({ error: { code: "CONFIGURATION" } });
+  });
+
+  it("still serves reads when production has no PUBLIC_BASE_URL", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_BASE_URL", "");
+    expect(middleware(request("GET", publicBase)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("falls back to the request origin only outside production", () => {
+    expect(cookieAuthBaseUrl({ NODE_ENV: "development" } as NodeJS.ProcessEnv, "http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    expect(cookieAuthBaseUrl({ NODE_ENV: "production" } as NodeJS.ProcessEnv, "http://127.0.0.1:3000")).toBeNull();
+    expect(cookieAuthBaseUrl({ NODE_ENV: "production", PUBLIC_BASE_URL: " https://study.example " } as NodeJS.ProcessEnv, "http://evil.example")).toBe("https://study.example");
   });
 });
