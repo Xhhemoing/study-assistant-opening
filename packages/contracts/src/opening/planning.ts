@@ -6,7 +6,7 @@ export const weekSessionSchema = z
     courseName: z.string().min(1).max(200),
     /** Optional course binding; courseName remains the timetable display label (RU-05). */
     courseId: uuidSchema.nullable().optional(),
-    weekday: z.number().int().min(0).max(6),
+    weekday: z.number().int().min(1).max(7),
     weeks: z.array(z.number().int().positive()).min(1).max(60),
     startPeriod: z.number().int().positive(),
     endPeriod: z.number().int().positive(),

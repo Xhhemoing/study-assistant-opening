@@ -133,6 +133,14 @@ describe("F02 opening contracts", () => {
     expect(memoryDecisionSchema.safeParse({
       id: U, expectedVersion: 0, action: "confirm", clientKey: "decision-1",
     }).success).toBe(true);
+    expect(memoryDecisionSchema.parse({
+      id: U, expectedVersion: 2, action: "replace", clientKey: "replace-1",
+      text: "先看定义", sourceTurnIds: [U2],
+    })).toMatchObject({ action: "replace", expectedVersion: 2, text: "先看定义", sourceTurnIds: [U2] });
+    expect(memoryDecisionSchema.safeParse({
+      id: U, expectedVersion: 2, action: "replace", clientKey: "replace-2",
+      text: "先看定义", sourceTurnIds: [],
+    }).success).toBe(false);
   });
 
   it("observation problemId; hinted/revealed block independent (RU-04)", () => {
@@ -164,6 +172,12 @@ describe("F02 opening contracts", () => {
     expect(verdictSourceSchema.options).toEqual([
       "self_report", "reference_checked", "model_suggestion", "unknown",
     ]);
+  });
+
+  it("weekSession uses Monday-through-Sunday 1..7 consistently with timetable expansion", () => {
+    const base = { courseName: "Calc", weekday: 1, weeks: [1, 2], startPeriod: 1, endPeriod: 2 };
+    expect(weekSessionSchema.safeParse({ ...base, weekday: 7 }).success).toBe(true);
+    expect(weekSessionSchema.safeParse({ ...base, weekday: 0 }).success).toBe(false);
   });
 
   it("weekSession enforces startPeriod <= endPeriod (RU-05)", () => {

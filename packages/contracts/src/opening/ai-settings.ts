@@ -36,6 +36,7 @@ export const openingModelSummarySchema = openingModelSnapshotSchema.extend({
   label: z.string().min(1).max(120),
   providerLabel: z.string().min(1).max(120),
   availability: z.enum(["available", "missing_key", "budget_disabled", "pricing_missing"]),
+  supportsVision: z.boolean().optional(),
 });
 export type OpeningModelSummary = z.infer<typeof openingModelSummarySchema>;
 export const openingAiSettingsResponseSchema = z.object({

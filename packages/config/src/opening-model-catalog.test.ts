@@ -3,6 +3,10 @@ import { loadOpeningModelCatalog } from "./opening-model-catalog";
 const entry = { id: "fast", label: "Fast", providerId: "p", providerLabel: "Provider", modelName: "opaque-model", baseUrl: "https://provider.example/v1", apiKeyEnv: "PROVIDER_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
 const env = { OPENING_MODEL_CATALOG: JSON.stringify([entry]), OPENING_MODEL_DAILY_CAP_CENTS: "100", PROVIDER_KEY: "private-key" };
 describe("server model catalog", () => {
+  it("enables vision only by an explicit server capability", () => {
+    expect(loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsVision: true }]) }).models[0]).toMatchObject({ supportsVision: true });
+    expect(loadOpeningModelCatalog(env).models[0]?.supportsVision).toBe(false);
+  });
   it("preserves all legacy environment defaults", () => {
     expect(loadOpeningModelCatalog({})).toMatchObject({ defaultModelId: "default", dailyCapCents: 0, models: [{ id: "default", modelName: "gpt-4o-mini", availability: "missing_key" }] });
   });

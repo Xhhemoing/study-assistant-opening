@@ -16,6 +16,7 @@ const modelSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
   inputCentsPerMillion: z.number().finite().nonnegative(),
   outputCentsPerMillion: z.number().finite().nonnegative(),
+  supportsVision: z.boolean().default(false),
 }).strict();
 const catalogSchema = z.array(modelSchema).max(32).superRefine((models, ctx) => {
   if (new Set(models.map(model => model.id)).size !== models.length) ctx.addIssue({ code: "custom", message: "model ids must be unique" });
@@ -38,7 +39,7 @@ export function loadOpeningModelCatalog(source: NodeJS.ProcessEnv = process.env)
     const entries = directory
       ? catalogSchema.parse(JSON.parse(directory))
       : [{ id: "default", label: legacy!.name, providerId: "default", providerLabel: "默认供应商", modelName: legacy!.name,
-          baseUrl: legacy!.baseUrl, apiKeyEnv: "OPENING_MODEL_API_KEY", inputCentsPerMillion: legacy!.inputCentsPerMillion, outputCentsPerMillion: legacy!.outputCentsPerMillion }];
+          baseUrl: legacy!.baseUrl, apiKeyEnv: "OPENING_MODEL_API_KEY", supportsVision: false, inputCentsPerMillion: legacy!.inputCentsPerMillion, outputCentsPerMillion: legacy!.outputCentsPerMillion }];
     const models = entries.map(({ apiKeyEnv, ...entry }) => {
       const apiKey = source[apiKeyEnv]?.trim() ?? "";
       const availability = !apiKey ? "missing_key" as const : dailyCapCents <= 0 ? "budget_disabled" as const

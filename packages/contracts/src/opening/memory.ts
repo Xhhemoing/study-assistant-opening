@@ -12,7 +12,7 @@ export const memoryItemSchema = z
     sourceTurnIds: z.array(uuidSchema).max(32),
     version: z.number().int().nonnegative(),
     expiresAt: isoDateTimeSchema.nullable(),
-    status: z.enum(["active", "rejected", "deleted"]),
+    status: z.enum(["active", "rejected", "deleted", "superseded"]),
     /** When the card was created (why/when surface). */
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
@@ -28,14 +28,29 @@ export const memoryItemSchema = z
     }
   });
 
-export const memoryDecisionSchema = z
-  .object({
+export const memoryDecisionSchema = z.discriminatedUnion("action", [
+  z.object({
     id: uuidSchema,
     expectedVersion: z.number().int().nonnegative(),
-    action: z.enum(["confirm", "reject", "delete"]),
+    action: z.enum(["confirm", "reject"]),
     clientKey: z.string().min(8).max(200),
-  })
-  .strict();
+  }).strict(),
+  z.object({
+    id: uuidSchema,
+    expectedVersion: z.number().int().nonnegative(),
+    action: z.literal("delete"),
+    clientKey: z.string().min(8).max(200),
+    deleteSourceText: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    id: uuidSchema,
+    expectedVersion: z.number().int().nonnegative(),
+    action: z.literal("replace"),
+    clientKey: z.string().min(8).max(200),
+    text: z.string().trim().min(1).max(4000),
+    sourceTurnIds: z.array(uuidSchema).min(1).max(32),
+  }).strict(),
+]);
 
 export type MemoryItem = z.infer<typeof memoryItemSchema>;
 export type MemoryDecision = z.infer<typeof memoryDecisionSchema>;
