@@ -1,11 +1,10 @@
 import type { OpeningJobRecord } from "@aistudy/database";
 import { OpeningProviderError } from "@aistudy/ai";
-import { assertCurrentEpoch } from "./privacy-guard";
 
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
 export type JobRepository = {
   claim(id: string): Promise<OpeningJobRecord | null>;
-  /** Optional M02 workspace epoch — wire in opening-jobs when allowlisted. */
+  /** M02 workspace epoch; implemented by createOpeningJobRepository. Optional only for unit doubles. */
   workspacePrivacyEpoch?(workspaceId: string): Promise<number>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
 };
@@ -20,16 +19,16 @@ export function isUnknownOutcome(error: unknown): boolean {
   return error instanceof OpeningProviderError && UNKNOWN_OUTCOME_CODES.has(error.code);
 }
 
-/** Dispatch + writeback: workspace privacy epoch must still match the job snapshot. */
-async function validateWorkspaceEpoch(repository: JobRepository, job: OpeningJobRecord): Promise<boolean> {
+/**
+ * Dispatch + writeback: workspace privacy epoch must still match the job snapshot.
+ * Only a real mismatch is reported as a privacy change. Lookup failures propagate:
+ * before dispatch the claimed job stays retryable, after the handler it is recorded
+ * as failed with the actual error instead of masquerading as an epoch change.
+ */
+async function workspaceEpochIsCurrent(repository: JobRepository, job: OpeningJobRecord): Promise<boolean> {
   if (!repository.workspacePrivacyEpoch) return true;
-  try {
-    const current = await repository.workspacePrivacyEpoch(job.workspaceId);
-    assertCurrentEpoch(job.privacyEpoch, current);
-    return true;
-  } catch {
-    return false;
-  }
+  const current = await repository.workspacePrivacyEpoch(job.workspaceId);
+  return current === job.privacyEpoch;
 }
 
 export async function runJob(
@@ -39,13 +38,13 @@ export async function runJob(
 ): Promise<boolean> {
   const job = await repository.claim(jobId);
   if (!job || !canClaimJob(job.state)) return false;
-  if (!(await validateWorkspaceEpoch(repository, job))) {
+  if (!(await workspaceEpochIsCurrent(repository, job))) {
     await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" });
     return false;
   }
   try {
     const result = await handler(job, job.payload);
-    if (!(await validateWorkspaceEpoch(repository, job))) {
+    if (!(await workspaceEpochIsCurrent(repository, job))) {
       await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" });
       return false;
     }

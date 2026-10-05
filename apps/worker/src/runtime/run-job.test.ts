@@ -89,6 +89,31 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     expect(finished).toEqual(["succeeded"]);
   });
 
+  it("propagates a pre-dispatch epoch lookup failure without running or finishing the job", async () => {
+    const finished: string[] = [];
+    let ran = false;
+    const repository = {
+      claim: async () => baseJob(),
+      workspacePrivacyEpoch: async (): Promise<number> => { throw new Error("connection reset"); },
+      finish: async (_id: string, state: "succeeded" | "failed" | "outcome_unknown") => { finished.push(state); return true; },
+    };
+    await expect(runJob(repository, "job-1", async () => { ran = true; return {}; })).rejects.toThrow("connection reset");
+    expect(ran).toBe(false);
+    expect(finished).toEqual([]);
+  });
+
+  it("records a post-handler epoch lookup failure as that error, not as a privacy change", async () => {
+    let calls = 0;
+    const finished: Array<{ state: string; value: unknown }> = [];
+    const repository = {
+      claim: async () => baseJob(),
+      workspacePrivacyEpoch: async () => { calls += 1; if (calls > 1) throw new Error("connection reset"); return 1; },
+      finish: async (_id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown) => { finished.push({ state, value }); return true; },
+    };
+    await runJob(repository, "job-1", async () => ({ ok: true }));
+    expect(finished).toEqual([{ state: "failed", value: { error: "connection reset" } }]);
+  });
+
   it("uses the workspace epoch for parse jobs even when source metadata is unavailable", async () => {
     const finished: string[] = [];
     const repository = {
