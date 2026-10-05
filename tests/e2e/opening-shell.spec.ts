@@ -18,12 +18,12 @@ test.describe("opening shell", () => {
         await page.setViewportSize(viewport);
         await page.goto("/opening/today");
         await expect(
-          page.getByRole("navigation", { name: "Opening navigation" }),
+          page.getByRole("navigation", { name: "学习工作台导航" }),
         ).toBeVisible();
-        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" })).toBeVisible();
-        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "助理" })).toBeVisible();
-        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" })).toHaveAttribute(
+        await expect(page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "今日" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "助理" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "课程" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "今日" })).toHaveAttribute(
           "aria-current",
           "page",
         );
@@ -42,8 +42,11 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      await expect(page.getByRole("heading", { name: "还没有学习记录", exact: true })).toBeVisible();
-      await expect(page.getByRole("link", { name: "向助理提问", exact: true })).toHaveAttribute("href", "/opening/assistant");
+      // Today is now a dashboard (queue + embedded assistant); a fresh owner sees the neutral start prompt, not fabricated progress.
+      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeAttached();
+      await expect(page.getByText("从一个问题、一次练习或一篇笔记开始", { exact: true })).toBeVisible();
+      await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "课程与自主练习", exact: true })).toHaveAttribute("href", "/opening/courses");
     } finally {
       await context.close();
     }
@@ -55,11 +58,11 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      const today = page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "今日" });
+      const today = page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "今日" });
       await today.focus();
       await expect(today).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("navigation", { name: "Opening navigation" }).getByRole("link", { name: "助理" })).toBeFocused();
+      await expect(page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "助理" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(page).toHaveURL(/\/opening\/assistant$/);
     } finally {
@@ -72,7 +75,7 @@ test.describe("opening shell", () => {
     try {
       const page = await context.newPage();
       await page.goto("/opening/today");
-      await expect(page).toHaveURL(/\/login$/);
+      await expect(page).toHaveURL(/\/login\?returnTo=%2Fopening%2Ftoday$/);
     } finally {
       await context.close();
     }

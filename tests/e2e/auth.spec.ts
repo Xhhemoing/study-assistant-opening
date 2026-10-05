@@ -15,7 +15,7 @@ test.describe("authentication through the live web server", () => {
     await page.getByLabel("显示名称").fill("Browser User");
     await page.getByLabel("邮箱").fill(userInput("browser-user").email);
     await page.getByLabel("密码", { exact: true }).fill("password123");
-    await page.getByLabel("确认密码").fill("password123");
+    await page.getByLabel("确认密码", { exact: true }).fill("password123");
     await page.getByRole("button", { name: "创建账户" }).click();
 
     await expect(page).toHaveURL(/\/onboarding$/);
