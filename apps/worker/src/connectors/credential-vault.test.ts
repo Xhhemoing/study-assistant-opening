@@ -21,6 +21,12 @@ describe("connection credential vault", () => {
     const tampered = Buffer.from(a.ciphertext); tampered[0] = tampered[0]! ^ 1;
     expect(() => decrypt({ ...a, ciphertext: tampered })).toThrow();
   });
+  it("rejects a truncated authentication tag", () => {
+    const a = encryptConnectionCredential(input);
+    expect(a.authTag.length).toBe(16);
+    expect(() => decrypt({ ...a, authTag: a.authTag.subarray(0, 4) })).toThrow();
+    expect(() => decrypt({ ...a, authTag: a.authTag.subarray(0, 12) })).toThrow();
+  });
   it("decrypts a retained old key after rotation, and refuses an unknown keyId", () => {
     const encrypted = encryptConnectionCredential(input);
     vi.stubEnv("OPENING_CONNECTION_PREVIOUS_KEYS", JSON.stringify({ "test-key": process.env.OPENING_CONNECTION_KEY }));

@@ -3,6 +3,8 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:
 export type EncryptedCredential = {
   keyId: string; nonce: Buffer; ciphertext: Buffer; authTag: Buffer; payloadHash: string;
 };
+/** Full 128-bit GCM tag; shorter (truncated) tags must never authenticate. */
+const AUTH_TAG_LENGTH = 16;
 export class CredentialVaultError extends Error {
   readonly code = "CREDENTIAL_VAULT_CONFIG";
 }
@@ -48,7 +50,7 @@ export function encryptConnectionCredential(input: {
 }): EncryptedCredential {
   const { keyId, key } = activeKey();
   const nonce = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: AUTH_TAG_LENGTH });
   cipher.setAAD(aad(input.workspaceId, input.connectionId, keyId));
   return {
     keyId, nonce, ciphertext: Buffer.concat([cipher.update(input.secret, "utf8"), cipher.final()]),
@@ -58,7 +60,7 @@ export function encryptConnectionCredential(input: {
 export function decryptConnectionCredential(input: EncryptedCredential & {
   workspaceId: string; connectionId: string;
 }): string {
-  const decipher = createDecipheriv("aes-256-gcm", readKey(input.keyId), input.nonce);
+  const decipher = createDecipheriv("aes-256-gcm", readKey(input.keyId), input.nonce, { authTagLength: AUTH_TAG_LENGTH });
   decipher.setAAD(aad(input.workspaceId, input.connectionId, input.keyId));
   decipher.setAuthTag(input.authTag);
   return Buffer.concat([decipher.update(input.ciphertext), decipher.final()]).toString("utf8");
