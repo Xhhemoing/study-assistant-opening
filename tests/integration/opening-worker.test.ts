@@ -55,7 +55,7 @@ describe("opening worker runtime", () => {
     expect(await runJob(repository, freshId, async () => ({ ok: true }))).toBe(false);
   });
 
-  it("guards parse jobs against changed source privacy epochs", async () => {
+  it("guards parse jobs against changed workspace privacy epochs", async () => {
     const repository = createOpeningJobRepository(fixture.sql);
     const sourceId = randomUUID();
     const jobId = randomUUID();
@@ -63,10 +63,17 @@ describe("opening worker runtime", () => {
       VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'source', 'text/plain', 1, ${"a".repeat(64)}, 1, 'uploaded', 'not_started')`;
     await fixture.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
       VALUES (${jobId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${randomUUID()}, 'parse', ${fixture.sql.json({ sourceId })}, 0)`;
-    let called = false;
-    expect(await runJob(repository, jobId, async () => { called = true; return {}; })).toBe(false);
-    expect(called).toBe(false);
-    expect((await fixture.sql`SELECT state, result FROM opening_jobs WHERE id = ${jobId}`)[0].state).toBe("failed");
+    // The job snapshot is epoch 0; a privacy deletion has since advanced the workspace epoch.
+    await fixture.sql`UPDATE workspaces SET privacy_epoch = 1 WHERE id = ${fixture.scope.workspaceId}`;
+    try {
+      let called = false;
+      expect(await runJob(repository, jobId, async () => { called = true; return {}; })).toBe(false);
+      expect(called).toBe(false);
+      expect((await fixture.sql`SELECT state, result FROM opening_jobs WHERE id = ${jobId}`)[0].state).toBe("failed");
+    } finally {
+      // fixture.reset() does not touch workspaces; restore the epoch for later cases.
+      await fixture.sql`UPDATE workspaces SET privacy_epoch = 0 WHERE id = ${fixture.scope.workspaceId}`;
+    }
   });
 
   it("keeps deterministic jobs visible across independent queue stacks", async () => {
