@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { summarizeOpeningHealth } from "./route";
+import { summarizeOpeningHealth } from "./health-summary";
 
 describe("opening health response", () => {
   it("returns only coarse status and never exposes probe details", () => {
