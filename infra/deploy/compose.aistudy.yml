@@ -1,0 +1,38 @@
+# 服务器生产编排：23.251.32.22（hermes）。由 scripts/deploy-hermes.sh 驱动。
+# 数据库迁移在启动前以一次性容器执行；web/worker 共享 deploy.env 变量。
+services:
+  migrate:
+    image: aistudy-web:latest
+    working_dir: /app
+    env_file: /opt/aistudy/deploy.env
+    entrypoint: ["node", "node_modules/tsx/dist/cli.mjs", "./scripts/db-migrate.ts"]
+    restart: "no"
+
+  web:
+    image: aistudy-web:latest
+    restart: unless-stopped
+    env_file: /opt/aistudy/deploy.env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: aistudy-worker:latest
+    restart: unless-stopped
+    env_file: /opt/aistudy/deploy.env
+    environment:
+      NODE_ENV: production
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
