@@ -1,91 +1,101 @@
 #!/usr/bin/env bash
-# 固定化部署脚本：把最新代码部署到 23.251.32.22（SSH 别名 hermes）。
+# 固定化部署：把当前 HEAD 部署到 23.251.32.22（SSH 别名 hermes）。
 #
-# 前置条件（首次使用前人工完成一次）：
-#   1. 服务器已安装 Docker 与 docker compose 插件（脚本会检测）。
-#   2. 本机 ~/.ssh/id_ed25519 的公钥已加入服务器 /root/.ssh/authorized_keys，
-#      且 sshd 允许 root 公钥登录（PermitRootLogin prohibit-password 或 without-password）。
-#      验证：ssh hermes 'echo ok'   ← 必须免密成功。
-#   3. 服务器 /opt/aistudy/deploy.env 已按 .env.example 配好生产变量
-#      （DATABASE_URL/REDIS_URL/S3_*/AUTH_SECRET/OPENING_CONNECTION_KEY/OPENING_MODEL_* 等）。
+# 服务器真实布局（2026-10-05 确认）：
+#   源码   /opt/aistudy          （tar 覆盖同步，服务器上无 .git）
+#   构建   /opt/aistudy/apps/web/.next/standalone  （Next standalone）
+#   运行   systemd: aistudy-web.service（127.0.0.1:18090）
+#   依赖   本机 postgres16(5432) / redis(6379) / docker minio(9000)
+#   配置   /opt/aistudy/.env.production（systemd EnvironmentFile，密码等敏感值不进 git）
 #
 # 用法：
-#   bash scripts/deploy-hermes.sh            # 完整部署：拉代码 -> 构建 -> 迁移 -> 滚动重启 -> 健康检查
-#   bash scripts/deploy-hermes.sh --status   # 只看服务状态
-#   bash scripts/deploy-hermes.sh --logs     # 跟踪 web+worker 日志
-#   bash scripts/deploy-hermes.sh --rollback # 回到上一个镜像 tag
+#   bash scripts/../infra/deploy/deploy-hermes.sh deploy     # 同步→构建→迁移→重启→健康检查
+#   bash infra/deploy/deploy-hermes.sh status|logs|restart|rollback
 set -euo pipefail
 
-HOST_ALIAS="${HOST_ALIAS:-hermes}"
-REMOTE_DIR="${REMOTE_DIR:-/opt/aistudy}"
-COMPOSE_FILE="$REMOTE_DIR/compose.aistudy.yml"
+HOST="${HOST:-hermes}"
+DIR="${DIR:-/opt/aistudy}"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+SHA="$(git rev-parse --short HEAD)"
 
-run() { echo "==> [server] $*"; ssh -o BatchMode=yes "$HOST_ALIAS" "$*"; }
+sshq() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"; }
+die() { echo "[!] $*" >&2; exit 1; }
 
-check_ssh() {
-  if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST_ALIAS" true 2>/dev/null; then
-    cat >&2 <<'EOF'
-[!] 无法免密 SSH 到 hermes（23.251.32.22）。当前服务器 root 只接受密码登录，
-    本机公钥（aistudy-hermes-sync）未在服务器 authorized_keys 中或 root 禁止公钥登录。
-    修复（任选其一）：
-      A) 手动执行：ssh-copy-id -i ~/.ssh/id_ed25519.pub root@23.251.32.22
-         （输入一次密码即可，以后部署免密）
-      B) 或在服务器上执行：
-         mkdir -p ~/.ssh && echo '<本机 cat ~/.ssh/id_ed25519.pub 的内容>' >> ~/.ssh/authorized_keys
-    完成后运行：ssh hermes 'echo ok' 验证，再执行本脚本。
-EOF
-    exit 1
-  fi
+check_ssh() { sshq true 2>/dev/null || die "无法免密 SSH 到 $HOST，先 ssh-copy-id（见 docs/operations/hermes-deployment.md）"; }
+require_clean_push() {
+  local remote_sha
+  remote_sha="$(git ls-remote study-assistant-opening "refs/heads/$BRANCH" | cut -f1)"
+  [ "$(git rev-parse HEAD)" = "$remote_sha" ] || die "HEAD($SHA) 未推送到 study-assistant-opening/$BRANCH($remote_sha)，先 git push"
+  echo "==> 部署提交: $SHA ($BRANCH)"
 }
 
-bootstrap_server() {
-  run "mkdir -p $REMOTE_DIR"
-  # 首次初始化：上传 compose 文件（幂等）
-  scp -q infra/deploy/compose.aistudy.yml "$HOST_ALIAS:$COMPOSE_FILE"
-  if ! run "test -f $REMOTE_DIR/deploy.env"; then
-    echo "[!] 服务器缺少 $REMOTE_DIR/deploy.env —— 请按 .env.example 填好生产变量后上传：" >&2
-    echo "    scp .env.production hermes:$REMOTE_DIR/deploy.env" >&2
-    exit 1
-  fi
+sync_source() {
+  echo "==> 打包 HEAD 并上传（tar-over-ssh，不含 .git/node_modules/.next）"
+  local archive="/tmp/aistudy-src-$SHA.tar.gz"
+  git archive --format=tar.gz -o "$archive" HEAD
+  scp -q "$archive" "$HOST:/tmp/aistudy-src.tar.gz" && rm -f "$archive"
+  sshq "set -e
+    mkdir -p $DIR
+    # 保留服务器本地配置与运行期文件
+    cp -f $DIR/.env.production /tmp/aistudy-env.production.keep 2>/dev/null || true
+    find $DIR -mindepth 1 -maxdepth 1 ! -name '.env.production' ! -name '.local' -exec rm -rf {} +
+    tar -xzf /tmp/aistudy-src.tar.gz -C $DIR
+    cp -f /tmp/aistudy-env.production.keep $DIR/.env.production 2>/dev/null || true
+    rm -f /tmp/aistudy-src.tar.gz /tmp/aistudy-env.production.keep
+    echo synced:\$(ls $DIR | wc -l) 项"
 }
 
-deploy() {
-  local sha
-  sha="$(git rev-parse --short HEAD)"
-  echo "==> 部署提交: $sha（分支 $(git rev-parse --abbrev-ref HEAD)）"
-
-  echo "==> [server] 拉取代码"
-  run "cd $REMOTE_DIR/app && git fetch origin && git reset --hard origin/feat/opening-release"
-
-  echo "==> [server] 构建镜像（web + worker）"
-  run "cd $REMOTE_DIR/app && docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env build"
-
-  echo "==> [server] 数据库迁移（新版本启动前执行，additive 迁移可安全重放）"
-  run "cd $REMOTE_DIR/app && docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env run --rm migrate"
-
-  echo "==> [server] 滚动重启 web + worker"
-  run "cd $REMOTE_DIR/app && docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env up -d --wait"
-
-  echo "==> [server] 健康检查 /api/health"
-  run "curl -fsS --max-time 10 http://127.0.0.1:3000/api/health"
-
-  echo "==> 部署完成 ✅（$sha）"
+build_server() {
+  echo "==> [server] npm ci + 构建 standalone（磁盘 89% 满，先清理缓存）"
+  sshq "set -e
+    cd $DIR
+    npm cache clean --force >/dev/null 2>&1 || true
+    [ -d node_modules ] && rm -rf node_modules
+    npm ci --no-audit --no-fund 2>&1 | tail -2
+    npm run build 2>&1 | tail -4
+    test -f apps/web/.next/standalone/apps/web/server.js"
 }
 
-status()   { run "docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env ps"; }
-logs()     { run "docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env logs -f --tail=100 web worker"; }
-rollback() {
-  run "cd $REMOTE_DIR/app && docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env down"
-  run "cd $REMOTE_DIR/app && PREVIOUS=\$(docker images --format '{{.Repository}}:{{.Tag}}' 'aistudy-web' | sed -n 2p) \
-    && docker tag \$PREVIOUS aistudy-web:rollback \
-    && docker compose -f $COMPOSE_FILE --env-file $REMOTE_DIR/deploy.env up -d --no-deps web"
-  echo "==> 已回滚 web 到上一镜像（worker 未动，按需手动处理）"
+migrate_server() {
+  echo "==> [server] 数据库迁移（additive，可重放）"
+  sshq "set -e
+    cd $DIR
+    set -a; . ./.env.production; set +a
+    npx tsx ./scripts/db-migrate.ts 2>&1 | tail -3"
+}
+
+restart_services() {
+  echo "==> [server] 重启 aistudy-web（并安装 worker 服务，如尚未安装）"
+  # worker 服务文件随仓库分发（infra/deploy/aistudy-worker.service），首次安装
+  sshq "set -e
+    if [ ! -f /etc/systemd/system/aistudy-worker.service ] && [ -f $DIR/infra/deploy/aistudy-worker.service ]; then
+      cp $DIR/infra/deploy/aistudy-worker.service /etc/systemd/system/
+      systemctl daemon-reload
+      echo 'worker 服务已安装（disabled，需要时 systemctl enable --now aistudy-worker）'
+    fi
+    systemctl restart aistudy-web.service"
+}
+
+health() {
+  echo "==> 健康检查"
+  sshq "set -e
+    for i in \$(seq 1 12); do
+      sleep 2
+      body=\$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
+      case \"\$body\" in '\"status\":\"ok\"'*) echo \"\$body\"; exit 0;; esac
+    done
+    echo 'health check failed'; journalctl -u aistudy-web -n 15 --no-pager; exit 1"
+  echo "==> 部署完成 ✅ $SHA"
 }
 
 case "${1:-deploy}" in
-  deploy)    check_ssh; bootstrap_server; deploy ;;
-  --status)  check_ssh; status ;;
-  --logs)    check_ssh; logs ;;
-  --rollback) check_ssh; rollback ;;
-  *) echo "用法: $0 [deploy|--status|--logs|--rollback]" >&2; exit 2 ;;
+  deploy)   check_ssh; require_clean_push; sync_source; build_server; migrate_server; restart_services; health ;;
+  sync)     check_ssh; require_clean_push; sync_source ;;
+  build)    check_ssh; build_server ;;
+  migrate)  check_ssh; migrate_server ;;
+  restart)  check_ssh; restart_services; health ;;
+  status)   check_ssh; sshq "systemctl status aistudy-web.service --no-pager -l | head -12; curl -fsS --max-time 5 http://127.0.0.1:18090/api/health"; echo ;;
+  logs)     check_ssh; sshq "journalctl -u aistudy-web -f -n 50 --no-pager" ;;
+  rollback) die "回退：在本地 git checkout <旧提交> 后执行 deploy（源码级部署天然可回退）；迁移按约定不回退" ;;
+  *) echo "用法: $0 [deploy|sync|build|migrate|restart|status|logs|rollback]" >&2; exit 2 ;;
 esac
