@@ -187,5 +187,6 @@ export {
 } from "./retest-activity";
 
 export * from "./ai-settings";
+export * from "./model-providers";
 export * from "./learning-history";
 export * from "./learning-summary-page";

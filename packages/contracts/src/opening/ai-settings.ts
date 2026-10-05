@@ -35,8 +35,10 @@ export type OpeningModelSnapshot = z.infer<typeof openingModelSnapshotSchema>;
 export const openingModelSummarySchema = openingModelSnapshotSchema.extend({
   label: z.string().min(1).max(120),
   providerLabel: z.string().min(1).max(120),
-  availability: z.enum(["available", "missing_key", "budget_disabled", "pricing_missing"]),
+  availability: z.enum(["available", "missing_key", "budget_disabled", "pricing_missing", "vault_disabled"]),
   supportsVision: z.boolean().optional(),
+  /** Absent for the server env catalog; "workspace" marks a web-managed custom model. */
+  source: z.enum(["server", "workspace"]).optional(),
 });
 export type OpeningModelSummary = z.infer<typeof openingModelSummarySchema>;
 export const openingAiSettingsResponseSchema = z.object({

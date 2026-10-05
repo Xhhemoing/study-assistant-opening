@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
-const mocks = vi.hoisted(() => ({ catalog: vi.fn(), get: vi.fn(), provider: vi.fn() }));
+const mocks = vi.hoisted(() => ({ catalog: vi.fn(), get: vi.fn(), provider: vi.fn(), models: vi.fn() }));
 vi.mock("@aistudy/config", async original => ({ ...await original<typeof import("@aistudy/config")>(), loadOpeningModelCatalog: mocks.catalog }));
-vi.mock("@aistudy/database", async original => ({ ...await original<typeof import("@aistudy/database")>(), createOpeningAiSettingsRepository: () => ({ get: mocks.get }) }));
+vi.mock("@aistudy/database", async original => ({
+  ...await original<typeof import("@aistudy/database")>(),
+  createOpeningAiSettingsRepository: () => ({ get: mocks.get }),
+  createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
+}));
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
 import { resolveTutorModel } from "./tutor-model";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -12,6 +16,7 @@ beforeEach(() => {
   mocks.catalog.mockReturnValue({ models: [model], defaultModelId: "chosen", dailyCapCents: 100 });
   mocks.get.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false });
   mocks.provider.mockReturnValue({ complete: vi.fn() });
+  mocks.models.mockResolvedValue([]);
 });
 describe("shared tutor model selection", () => {
   it("joins one owner-scoped choice to provider options and the exact ledger prices", async () => {

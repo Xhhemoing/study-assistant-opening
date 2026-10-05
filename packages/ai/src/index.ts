@@ -35,3 +35,4 @@ export {
 } from "./opening/conversation-policy";
 
 export { selectedOpeningModelId, resolveOpeningModel, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";
+export { mergeOpeningCatalog, type WorkspaceCatalogModel } from "./opening/catalog-merge";

@@ -2,6 +2,8 @@
 
 设置入口：`/settings` → **AI 模型与供应商**。此设置作用于 Opening 持久辅导和临时对话；旧 mock 回复不因此成为真实模型请求。供应商目录、密钥和价格由部署者配置，网页只保存当前工作区的模型选择与辅导模式映射。
 
+除服务器目录外，工作区所有者还可以在 **自定义供应商与密钥** 面板中自行添加供应商（OpenAI 兼容 baseUrl）、模型与 API 密钥（详见下文“工作区自定义供应商”）；两类目录合并后供模型路由选择，服务器目录优先。
+
 ## 服务器配置
 
 不设置 `OPENING_MODEL_CATALOG` 时，原 `OPENING_MODEL_*` 配置继续作为 id 为 `default` 的单一模型。原日预算开关和正价格要求保留。设置目录后，下面的原配置仍负责全工作区共享日上限：
@@ -25,7 +27,18 @@ SECONDARY_MODEL_API_KEY=
 - 目录地址来自受信任的部署配置；客户端不能新增地址。使用 HTTPS；本地测试允许 loopback HTTP。地址不得包含用户名、密码、查询参数或片段。
 - 输入/输出价格都是**同一记账币种的分 / 百万 token**，日上限也使用这一币种的分。跨供应商原币种不同时，部署者必须先统一换算价格；系统不自动换汇，也不声称本地估价等于供应商账单。
 - 密钥缺失、价格为零或日上限为零会显示不可用。配置仅表示具备调用条件，不代表完成真实供应商连通性和质量验证。
-- 将相同目录、密钥和日上限配置到 web 与 worker，重启两者。目录变化需要重启；工作区路由偏好保存后无需重启。
+- 将相同目录、密钥和日上限配置到 web 与 worker，重启两者。目录变化需要重启；工作区路由偏好保存后无需重启；工作区自定义供应商保存后立即生效，同样无需重启。
+
+## 工作区自定义供应商（BYOK）
+
+工作区所有者可在 `/settings` 的「自定义供应商与密钥」面板中自行维护供应商、模型与密钥，无需修改服务器环境变量或重启服务：
+
+- **能力与限制**：每个工作区最多 8 个供应商、共 16 个自定义模型；合并后（服务器目录 + 自定义）仍受 32 个模型总量上限约束，服务器目录优先。模型 id 为稳定 UUID。
+- **密钥处理**：密钥用 `OPENING_CONNECTION_KEY`（AES-256-GCM，域分离为 `opening-model-provider`）加密后存库，仅写入不回读——API 只返回 `hasApiKey`、尾 4 位提示与更新时间；浏览器、本地存储和日志均不落密钥明文。轮换 `OPENING_CONNECTION_KEY` 时通过 `OPENING_CONNECTION_PREVIOUS_KEYS` 仍可解密旧密文。
+- **地址要求**：远程接口必须 HTTPS（本地开发允许 loopback HTTP），不得包含用户信息、查询参数或片段。地址由工作区所有者自行填写；自托管部署应自行评估该用户对 endpoint 的控制权，可选通过部署环境限制出站网络。
+- **可用性语义**：与服务器目录一致——缺密钥 `missing_key`、日上限为零 `budget_disabled`、加密不可用 `vault_disabled`；自定义模型价格为正数（分 / 百万 token），共享同一 `OPENING_MODEL_DAILY_CAP_CENTS` 日上限与费用记录。
+- **API**：`GET/POST /api/opening/model-providers`、`PUT/DELETE /api/opening/model-providers/{id}`、`POST /api/opening/model-providers/{id}/models`、`PUT/DELETE /api/opening/model-providers/{id}/models/{modelId}`，仅工作区所有者可访问。
+- **数据**：`0043_opening_model_providers.sql` 新增 `opening_model_providers`、`opening_model_provider_models`、`opening_model_provider_credentials` 三表（随工作区级联删除）。原生备份目前不包含这三张表；迁移服务器前请另行记录供应商配置并重新录入密钥。
 
 ## 用户设置
 

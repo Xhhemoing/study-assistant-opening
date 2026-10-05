@@ -6,7 +6,8 @@ export const tutorRouteLabels: Array<{ mode: TutorMode; label: string }> = [
   { mode: "explain", label: "解释" }, { mode: "think_together", label: "共同思考" },
 ];
 export const availabilityLabels: Record<OpeningModelSummary["availability"], string> = {
-  available: "已配置", missing_key: "缺少服务器密钥", budget_disabled: "服务器日预算未启用", pricing_missing: "缺少服务器价格",
+  available: "已配置", missing_key: "缺少服务器密钥", budget_disabled: "服务器日预算未启用",
+  pricing_missing: "缺少服务器价格", vault_disabled: "密钥加密不可用",
 };
 export function modelOptions(models: OpeningModelSummary[], providerId: string, selectedId: string | null) {
   return models.filter(model => !providerId || model.providerId === providerId || model.id === selectedId);

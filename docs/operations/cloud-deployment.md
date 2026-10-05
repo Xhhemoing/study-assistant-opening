@@ -34,6 +34,10 @@ AUTH_SECRET=<random value of at least 32 characters>
 SESSION_COOKIE_SECURE=true
 SESSION_TTL_SECONDS=604800
 AUTH_COOKIE_NAME=aistudy_session
+# Required for Opening connection credentials and workspace-managed model provider keys:
+# base64 of exactly 32 random bytes; keep in the server/worker secret store.
+# OPENING_CONNECTION_KEY=<base64 of 32 random bytes>
+# OPENING_CONNECTION_KEY_ID=primary
 ```
 
 `AUTH_SECRET`, `DATABASE_URL`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` must be stored as protected secrets. R2/S3 credentials are used only by server code and must never be exposed as public frontend variables.

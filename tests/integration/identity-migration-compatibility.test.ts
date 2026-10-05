@@ -211,6 +211,7 @@ describe("identity migration compatibility", () => {
       "0040_opening_timetable_weekday.sql",
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
+      "0043_opening_model_providers.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -291,6 +292,7 @@ describe("identity migration compatibility", () => {
       "0040_opening_timetable_weekday.sql",
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
+      "0043_opening_model_providers.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -626,6 +628,7 @@ describe("identity migration compatibility", () => {
       "0040_opening_timetable_weekday.sql",
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
+      "0043_opening_model_providers.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

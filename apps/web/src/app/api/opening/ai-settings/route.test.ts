@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), catalog: vi.fn(), scope: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), catalog: vi.fn(), scope: vi.fn(), models: vi.fn() }));
 vi.mock("../../../../features/opening/runtime", () => ({ requireOpeningScope: mocks.scope }));
 vi.mock("@aistudy/config", async importOriginal => ({ ...await importOriginal<typeof import("@aistudy/config")>(), loadOpeningModelCatalog: mocks.catalog }));
-vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<typeof import("@aistudy/database")>(), createOpeningAiSettingsRepository: () => ({ get: mocks.get, set: mocks.set }) }));
+vi.mock("@aistudy/database", async importOriginal => ({
+  ...await importOriginal<typeof import("@aistudy/database")>(),
+  createOpeningAiSettingsRepository: () => ({ get: mocks.get, set: mocks.set }),
+  createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
+}));
 import { ApiError } from "../../../../features/auth/service";
 import { GET, PUT } from "./route";
 import { switchRoutingMode } from "../../../../features/settings/ai-settings-model";
@@ -16,6 +20,7 @@ beforeEach(() => {
   mocks.catalog.mockReturnValue({ models: [model], defaultModelId: "one", dailyCapCents: 100 });
   mocks.get.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false });
   mocks.set.mockResolvedValue(undefined);
+  mocks.models.mockResolvedValue([]);
 });
 describe("AI settings HTTP boundary", () => {
   it("returns only public model metadata, never keys, endpoints or key variable names", async () => {
