@@ -182,3 +182,68 @@
 | `eslint .` | 21111 errors，全部位于 `apps/web/.next-preview`（构建产物）|
 | `gh run view 36960887137 --log-failed` | 浏览器失败明细见 §4.1 |
 | 未运行 | unit/integration/handler/browser 测试、构建、数据库与 Docker 相关检查 |
+
+## 处理记录 2026-10-05
+
+Heidi 回复“请你分析并解决”后，按授权范围处理。分支 `feat/opening-release` 上全部为小步提交，只做快进推送到 `study-assistant-opening`，没有 force push，也没有改写历史。`tasks.json` 状态未改；AIstudy `origin` 和 PR #2 未触碰；三条分叉线未合并；`.tmp` 归档未删。
+
+### 已完成提交
+
+| SHA | 内容 | 证明 |
+|---|---|---|
+| `78caaff` | `git rm` 掉 `undefined/` 下两个 tsx 缓存文件，`.gitignore` 加 `undefined/`；ESLint 忽略 `**/.next-preview/**` | 全量 `eslint .` exit 0 |
+| `e7ae27c` | 浏览器用例对齐当前 UI：`auth.spec.ts` 的“确认密码”用 exact 定位；`opening-shell.spec.ts` 导航名改为“学习工作台导航”，空状态和登录跳转断言同步更新 | e2e tsc 与 eslint 通过；CI 37273710573 中 auth 和 opening-shell 已不在失败列表 |
+| `25c5762` | Worker 启动时用 `loadWorkerEnv` 校验基础设施 env：生产环境缺变量直接失败（fail closed），非生产才保留本地默认值 | `worker-env.test.ts` 4 个用例 |
+| `3f62121` | 生产环境未配置 `PUBLIC_BASE_URL` 时，middleware 对 cookie 鉴权的写请求返回 500 CONFIGURATION | `access-middleware.test.ts` 新增 3 个用例 |
+| `2f4ba3a` | `run-job` 只有真实 epoch 不一致才记为“privacy epoch changed”；epoch 查询本身出错时不再伪装成隐私变化 | 新增 2 个用例，旧代码上确认失败 |
+| `3fd3503` | AES-GCM 加解密固定 `authTagLength: 16`，截断的 tag 不再能通过认证 | 新增用例，旧代码上确认 RED（Node 24 接受 4/12 字节 tag） |
+| `a72cdd0` | RP2：补 worker 侧单测，`completeTurn` 因 epoch drift 被拒时走 `fail()`，不走 `markUnknown` | `tutor-turn.test.ts` 29/29 |
+| `ec0b713` | 证据文档：P02/P03 追加 2026-10-05 更正节（不改原文）；M02/M03 追加“浏览器验收仍待做”的说明 | 见下文 |
+| `69060f1` | 集成测试 `identity-migration-compatibility` 的期望迁移列表补上 0039–0042 | CI 37272218428 集成测试通过 |
+| `867c7d6` | 集成测试 `opening-worker` 的 parse epoch 用例：显式推进 workspace epoch，用例结束后恢复 | 同上 |
+| `3bbe030` | 修复：a8d7c8d 去掉了“以 epoch 当版本”的围栏后，解析失败可能覆盖新版本的 source 状态（代码注释写明不允许）。现在 parse job 的 payload 带 `sourceVersion`，`failOpeningJob` 只更新对应版本；旧 payload 不加围栏。按 a8d7c8d 的设计，epoch 变化改为期望 `PARSE_STALE` | `opening-job-failure.test.ts` 4/4；CI 集成测试通过 |
+| `2e018bb` | 修复：`route.ts` 导出了非路由字段 `summarizeOpeningHealth`，导致 `next build` 失败，Playwright webServer 起不来。逻辑和测试移到 `features/opening/health/` | CI 37273710573 的 build 通过，浏览器测试得以运行 |
+| `eb98177` | e2e：document-editor 的两个“新建笔记”链接改用 `.first()` 消除歧义；opening-upload 把测试超时调到 180s（原 90s 小于用例内部 120s 的等待） | e2e tsc/eslint 通过；待最终 CI 验证 |
+
+### 本地门禁（Windows，Node v24.18.0）
+
+- tsc：8 个包和 `tsconfig.e2e.json` 全部 exit 0。全量 `eslint .` exit 0。
+- unit：`--project unit` 309 个文件、2077 个用例全部通过。
+- contract：18 passed / 1 failed。失败的是 `ci-workflow.test.ts` 中需要 `bash` 的用例，原因是本机没有 bash，属环境问题，CI 上通过。
+- handler 和 integration 无法在本机运行：15432 上共享的 `aistudy_opening_test` 已被 `codex/personal-use-integration-next` 线迁移过（`MIGRATION_UNKNOWN_HISTORY: 0027_opening_recovery.sql`）。因其他线也在用，没有重置。另有 17 个 SQL 文件的工作区副本是旧的 CRLF（属性是 `eol=lf`），导致 checksum drift，已按索引内容重新检出，内容不变。这两类测试以 CI 的全新数据库为准。
+
+### CI 结果（`Xhhemoing/study-assistant-opening`）
+
+| run | 提交 | 结果 |
+|---|---|---|
+| 37270915283 | `ec0b713` | Integration 失败：7 failed / 537 passed（3 个文件）。原因是迁移列表过期、parse epoch 用例过期、解析失败投影的版本围栏。浏览器测试未运行 |
+| 37272218428 | `3bbe030` | Integration 和 Route handler 全部通过；浏览器测试的 webServer `next build` 类型错误（health route 导出） |
+| 37273710573 | `2e018bb` | Browser：16 failed / 27 passed / 3 skipped（上次 run 36960887137 为 20 failed / 23 passed）。Build 因此被跳过 |
+
+最后一次推送（含本文档）的 CI 结果见交付报告。
+
+### 剩余浏览器失败分类（run 37273710573）
+
+- **遗留界面（需产品决定，不是代码回归）**，共 13 个：command-palette ×2、document-relations、document-tags、free-exploration、knowledge-links、native-backup、notebook-preview ×3、onboarding-paths（Path C）、today-plan ×2（走 `/learn`）、workspace-navigation（Learn/Explore/Library）。a8d7c8d 把导航收敛为三个 Opening 入口，middleware 也把 `/learn` 等重定向到 `/opening/*`。这些用例仍按旧界面断言。要退役还是改写成 Opening 版本，需要 Heidi 决定。
+- **已修，待最终 CI 验证**：document-editor（定位歧义）、opening-upload（超时预算）。
+
+### 验证结论（RP1 / RP2，未改账本）
+
+- RP1：已核实 `opening-tutor-history.ts` 的隐私过滤，以及 `tests/integration/opening-tutor-history.test.ts`、`opening-tutor-privacy-input.test.ts` 的覆盖。
+- RP2：已核实 `opening-tutor-jobs.ts` 的 `FOR UPDATE` 加 `expectedPrivacyEpoch`、`opening-tutor-terminal.test.ts:268`、两个真实并发集成测试（`opening-privacy-writeback-race`、`opening-worker-privacy-race`），以及本次补的 worker 单测。`rp2-writeback-race.md:72` 记的缺口（worker 的 fail() 全链路）已由 `opening-worker-privacy-race.test.ts` 和本次单测覆盖。
+- 两项代码和测试层面均可支持 verified，但账本状态按约定由 Heidi 决定。本次因数据库原因没能在本机复跑这两个集成测试，CI Integration 已通过。
+
+### Worktree / 分支清理
+
+- 已移除 worktree（普通 `git worktree remove`，不带 `--force`）：pu02、pu04、pu05、pu06。移除前已确认 `status --porcelain` 干净，`git cherry` 相对 `codex/personal-use-integration-next` 为 0 个未包含补丁。被忽略的 `.local/` 本地证据日志已先备份到 `E:\Project\.worktree-local-archive-2026-10-05\`。
+- pu05b：git 已注销该 worktree，但目录 `E:\Project\study-assistant-pu05b\node_modules` 残留。里面是指向 `study-assistant-personal-use\node_modules` 的 junction，目标已核实完好。残留目录未手工删除。
+- pu03：未移除。`.local/docling-venv` 和 `hf-home` 是指向 `C:\Users\86080\.cache\...` 与 `D:\CodexTaskCache\...` 的 junction，为避免误删外部缓存，暂不处理。
+- 分支：6 个分支执行 `git branch -d` 全部被拒（"not fully merged"）。它们的补丁只是以等价补丁的形式存在于 integration-next，并没有合并进当前 HEAD。按约定未使用 `-D`，分支保留。
+
+### 仍需 Heidi 决定
+
+1. 13 个遗留界面浏览器用例：退役，还是改写为 Opening 版本。
+2. RP1/RP2（以及 P02/P03 的复核）是否在 `tasks.json` 中提升或保持现状。P02 没有 reviewer 记录。
+3. 本机测试库：给本分支单独建一个库，或决定重置共享的 15432 库。
+4. 删除 pu05b 残留目录（只删 junction）、pu03 的处理方式，以及 6 个分支是否用 `-D` 删除。
+5. 以下仍待确认：b31feb7 的非 UI 删除（`.learnings/*`、`TODO.md`、`.hermes.md`、`sync.sh`、`demos/pelican-bicycle.html`、pi-sparkle skills ×2 份、2026-07-21 计划文档、`AGENTS.md` 重写、ESLint 去掉的 `.hermes/**` 和 `project/**` 忽略项）；AIstudy origin 的 SSH 问题和 PR #2；三条分叉线如何合并；AC01–AC12 占位；`.tmp` 归档；是否允许 agent 在本地运行 Playwright；Notion 看板访问权限。
