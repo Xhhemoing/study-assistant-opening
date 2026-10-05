@@ -32,6 +32,7 @@ export type OpeningSourceRepository = {
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
   completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void> }): Promise<SourceRecord>;
+  retryParseWithJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number }): Promise<SourceRecord>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
   markParseState(scope: OpeningScope, id: string, state: SourceRecord["parseState"], error?: unknown): Promise<SourceRecord>;
   /**
@@ -157,8 +158,11 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
     async completeWithParseJob(scope, id, input) {
       return sql.begin(async (tx) => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        const owners = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Workspace not found");
+        if (Number((owners[0] as Record<string, unknown>).privacy_epoch ?? 0) !== input.privacyEpoch) {
+          throw new OpeningSourceError("CONFLICT", "Workspace privacy settings changed; retry the upload");
+        }
         const currentRows = await tx`SELECT * FROM opening_sources WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         const current = mapSource(currentRows[0] as Record<string, unknown>);
@@ -176,6 +180,33 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
+        return mapSource(sourceRows[0] as Record<string, unknown>);
+      });
+    },
+    async retryParseWithJob(scope, id, input) {
+      return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const owners = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Workspace not found");
+        if (Number((owners[0] as Record<string, unknown>).privacy_epoch ?? 0) !== input.privacyEpoch) {
+          throw new OpeningSourceError("CONFLICT", "Workspace privacy settings changed; retry parsing");
+        }
+        const currentRows = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
+        if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+        const current = mapSource(currentRows[0] as Record<string, unknown>);
+        if (current.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "Only uploaded sources can be parsed again");
+        if (current.parseState !== "failed") throw new OpeningSourceError("CONFLICT", "Only failed sources can be parsed again");
+        if (current.error?.code === "PRIVACY_EXCLUDED") throw new OpeningSourceError("CONFLICT", "Excluded sources cannot be parsed again");
+        const sourceRows = await tx`UPDATE opening_sources
+          SET parse_state='queued', error=NULL, updated_at=now()
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded' AND parse_state='failed'
+          RETURNING *`;
+        if (!sourceRows.length) throw new OpeningSourceError("CONFLICT", "Source parse state changed; refresh and try again");
+        const jobId = randomUUID();
+        await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+          VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
+        await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+          VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
         return mapSource(sourceRows[0] as Record<string, unknown>);
       });
     },

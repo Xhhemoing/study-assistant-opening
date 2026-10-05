@@ -98,4 +98,20 @@ describe("opening source upload completion boundary", () => {
     expect(Object.keys(record)).not.toContain("courseId");
     expect(revision()).toBe(0);
   });
+
+  it("rejects a completion job when the workspace epoch changed before the transaction lock", async () => {
+    const { sql, revision } = transactionalSql((q) => {
+      if (q.startsWith("SELECT id, privacy_epoch FROM workspaces")) return [{ id: W, privacy_epoch: 8 }];
+      if (q.startsWith("SELECT * FROM opening_sources")) return [pendingRow()];
+      throw new Error("unexpected: " + q);
+    });
+    const repo = createOpeningSourceRepository(sql);
+    await expect(repo.completeWithParseJob(scope, S, {
+      key: "parse:source:v0",
+      payload: { sourceId: S },
+      privacyEpoch: 7,
+      actual: { bytes: 12, sha256: SHA, mime: "application/pdf" },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(revision()).toBe(0);
+  });
 });

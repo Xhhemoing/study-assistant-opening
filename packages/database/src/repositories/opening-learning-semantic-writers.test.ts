@@ -136,6 +136,7 @@ describe("learning semantic revision writers", () => {
   it.each([false, true])("memory deletion advances semantic revision only for new exclusions (already excluded: %s)", async (alreadyExcluded) => {
     const db = database((query) => {
       if (query.startsWith("SELECT * FROM opening_memories")) return [{ id: memoryId, status: "active", version: 1, source_turn_ids: [turnId] }];
+      if (query.startsWith("SELECT id, status FROM opening_memories") && query.includes("last_decision_client_key")) return [];
       if (query.startsWith("SELECT source_ids, context_source_refs")) return [{ source_ids: [sourceId], context_source_refs: null }];
       if (query.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return alreadyExcluded ? [{ source_id: sourceId }] : [];
       if (query.startsWith("UPDATE opening_memories") || query.startsWith("INSERT INTO opening_privacy_exclusions")) return [];
@@ -145,6 +146,31 @@ describe("learning semantic revision writers", () => {
     expect(db.epoch()).toBe(1);
     expect(db.revision()).toBe(alreadyExcluded ? 0 : 1);
     expect(db.invalidations).toHaveLength(alreadyExcluded ? 0 : 1);
+  });
+
+  it.each(["another memory", "another operation on this memory"] as const)("rejects a deletion clientKey already used for %s", async reuse => {
+    const db = database((query) => {
+      if (query.startsWith("SELECT * FROM opening_memories")) return [{
+        id: memoryId, status: "active", version: 1, source_turn_ids: [],
+        ...(reuse === "another operation on this memory" ? { last_decision_client_key: "delete-memory" } : {}),
+      }];
+      if (query.startsWith("SELECT id, status FROM opening_memories") && query.includes("last_decision_client_key")) {
+        return reuse === "another memory" ? [{ id: id(10), status: "rejected" }] : [{ id: memoryId, status: "active" }];
+      }
+      throw new Error(query);
+    });
+
+    await expect(deleteOwnedMemory(db.sql, scope, {
+      id: memoryId,
+      expectedVersion: 1,
+      deleteSourceText: false,
+      clientKey: "delete-memory",
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(db.epoch()).toBe(0);
+    expect(db.revision()).toBe(0);
+    expect(db.queries).not.toEqual(expect.arrayContaining([
+      expect.stringContaining("UPDATE opening_memories SET status = 'deleted'"),
+    ]));
   });
 
   it("counts a proposed activity once and returns an existing cycle without increment", async () => {

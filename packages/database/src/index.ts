@@ -28,6 +28,8 @@ export * from "./migration-preflight";
 export * from "./schema/opening-sources";
 export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
+export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
+export { readOpeningSourceContent } from "./repositories/opening-source-content";
 export * from "./repositories/opening-source-actions";
 export { createOpeningEphemeralProvenanceRepository, EphemeralProvenanceError, type EphemeralProvenanceRepository } from "./repositories/opening-ephemeral-provenance";
 export { createOpeningNoteRepository, OpeningNoteError } from "./repositories/opening-note-provenance";
@@ -50,12 +52,16 @@ export * from "./repositories/opening-context-provenance";
 
 export * from "./schema/opening-memory";
 export * from "./repositories/opening-memory";
+export * from "./repositories/opening-memory-replace";
 
 export * from "./repositories/opening-privacy";
 export * from "./repositories/opening-retests";
 export * from "./schema/opening-planning";
 export * from "./repositories/opening-plans";
 export * from "./repositories/opening-reminders";
+export * from "./repositories/opening-connections";
+export * from "./schema/opening-connections";
+export * from "./storage/opening-credential-vault";
 export * from "./repositories/opening-review-candidates";
 export * from "./schema/opening-retest-activities";
 export * from "./repositories/opening-retest-activities";

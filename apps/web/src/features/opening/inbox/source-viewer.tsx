@@ -25,22 +25,26 @@ export function sourceViewerCopy(input: {
 
 export function SourceViewer({
   record,
+  latestRecord = record,
   requestedVersion,
   download,
 }: {
   record: Pick<SourceRecord, "name" | "uploadState" | "parseState" | "version">;
+  latestRecord?: Pick<SourceRecord, "name" | "uploadState" | "parseState" | "version">;
   requestedVersion: number;
   download: SourceDownloadView;
 }) {
+  const currentVersion = Math.max(latestRecord.version, download.currentVersion);
+  const versionMismatch = download.versionMismatch || currentVersion !== requestedVersion;
   const copy = sourceViewerCopy({
     requestedVersion,
-    currentVersion: download.currentVersion,
-    versionMismatch: download.versionMismatch,
+    currentVersion,
+    versionMismatch,
   });
   return (
     <section className="space-y-3 border-t border-zinc-200 bg-white py-4">
-      <h2 className="text-base font-semibold text-zinc-950">{record.name}</h2>
-      <p className="text-sm text-zinc-700">{sourceStatusLabel(record)}</p>
+      <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2>
+      <p className="text-sm text-zinc-700">{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
       <p className="text-sm text-amber-800">{copy}</p>
       <a
         className={ui.primary}

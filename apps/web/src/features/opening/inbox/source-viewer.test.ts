@@ -19,6 +19,35 @@ const record = {
 } satisfies SourceRecord;
 
 describe("source viewer download link", () => {
+  it("shows the latest processing state while preserving the pinned download version", () => {
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: { ...record, parseState: "running" },
+      latestRecord: { ...record, parseState: "ready", version: 2 },
+      requestedVersion: 2,
+      download: { url: "https://minio.local/signed", expiresAt: "2026-09-21T00:15:00Z", version: 2, currentVersion: 2, versionMismatch: false },
+    }));
+    expect(html).toContain("可以用于提问");
+    expect(html).not.toContain("正在解析");
+    expect(html).toContain("打开原件 v2");
+  });
+  it("does not apply a newer version's ready status to a pinned old original", () => {
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: { ...record, parseState: "failed" },
+      latestRecord: { ...record, parseState: "ready", version: 3 },
+      requestedVersion: 2,
+      download: { url: "https://minio.local/signed", expiresAt: "2026-09-21T00:15:00Z", version: 2, currentVersion: 2, versionMismatch: false },
+    }));
+    expect(html).not.toContain("可以用于提问");
+    expect(html).toContain("不是当前版本 v3");
+  });
+  it("respects a newer current version returned by the download endpoint", () => {
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: { ...record, parseState: "ready" }, requestedVersion: 2,
+      download: { url: "https://minio.local/signed", expiresAt: "2026-09-21T00:15:00Z", version: 2, currentVersion: 3, versionMismatch: true },
+    }));
+    expect(html).toContain("不是当前版本 v3");
+    expect(html).not.toContain("可以用于提问");
+  });
   it("pins the requested source version and explains a mismatch", () => {
     expect(sourceDownloadHref(record.id, 0)).toBe(
       `/api/opening/sources/${record.id}/download?version=0`,
@@ -39,7 +68,8 @@ describe("source viewer download link", () => {
         },
       }),
     );
-    expect(html).toContain("原件已保存，解析失败");
+    expect(html).toContain("这是历史版本");
+    expect(html).not.toContain("可以用于提问");
     expect(html).toContain("href=\"https://minio.local/signed\"");
     expect(html).toContain("v0");
     expect(html).toContain("不是当前版本");

@@ -4,17 +4,23 @@ import { isAllowedCookieAuthOrigin, isOpeningRelease } from "./features/opening/
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /** Legacy mock-backed experiences must not masquerade as official entries. */
-const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean }[] = [
-  { test: (p) => p === "/learn" || p === "/explore" || p.startsWith("/preview") },
+const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (pathname: string) => string }[] = [
+  { test: (p) => p === "/learn", target: () => "/opening/today" },
+  { test: (p) => p === "/explore" || p === "/preview" || p.startsWith("/explore/") || p.startsWith("/preview/"), target: () => "/opening/today" },
 ];
+
+export function legacyOpeningRedirectPath(pathname: string): string | null {
+  const rule = LEGACY_OPENING_REDIRECTS.find((candidate) => candidate.test(pathname));
+  return rule ? rule.target(pathname) : null;
+}
 
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  if (
-    isOpeningRelease() &&
-    LEGACY_OPENING_REDIRECTS.some((rule) => rule.test(pathname))
-  ) {
-    return NextResponse.redirect(new URL("/opening/today", request.url));
+  const legacyRedirect = legacyOpeningRedirectPath(pathname);
+  if (isOpeningRelease() && legacyRedirect) {
+    const target = request.nextUrl.clone();
+    target.pathname = legacyRedirect;
+    return NextResponse.redirect(target);
   }
   if (!UNSAFE_METHODS.has(request.method)) {
     return NextResponse.next();

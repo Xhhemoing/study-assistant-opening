@@ -131,8 +131,9 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
     },
     async sourcePrivacyEpoch(sourceId, workspaceId) {
       const rows = await sql`
-        SELECT version AS privacy_epoch FROM opening_sources
-        WHERE id = ${sourceId} AND workspace_id = ${workspaceId}
+        SELECT w.privacy_epoch FROM opening_sources s
+        JOIN workspaces w ON w.id = s.workspace_id
+        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspaceId}
         LIMIT 1
       `;
       return rows.length ? Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0) : null;

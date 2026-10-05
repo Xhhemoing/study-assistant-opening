@@ -18,21 +18,41 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
     if (!job) return false;
-    if (job.kind !== "parse" || job.owner_user_id !== workspace.owner_user_id ||
-        Number(job.privacy_epoch) !== Number(workspace.privacy_epoch)) return true;
+    if (job.kind !== "parse" || job.owner_user_id !== workspace.owner_user_id) return true;
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
       ? job.payload.sourceId : null;
     if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return true;
-    // Source snapshots currently use the job epoch as the version (as runJob does).
-    // Never replace ready/new-version/excluded state with a stale failure.
-    const error = { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable: false };
-    await tx`
-      UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
-      WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
-        AND s.version = ${job.privacy_epoch} AND s.upload_state = 'uploaded'
-        AND s.parse_state IN ('not_started', 'queued', 'running')
-        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
-          WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
+    // The job epoch fences privacy changes; source version is independent.
+    // Never replace ready/new-version/excluded state. Excluded rows receive a
+    // terminal privacy error below so the inbox does not spin forever.
+    const stale = Number(job.privacy_epoch) !== Number(workspace.privacy_epoch);
+    const error = stale
+      ? { code: "PARSE_STALE", message: "隐私设置已变化，解析结果已丢弃。", retryable: false }
+      : { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable: false };
+    if (stale) {
+      await tx`
+        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
+        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
+          AND s.upload_state = 'uploaded'
+          AND s.parse_state IN ('not_started', 'queued', 'running')
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+            WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
+      await tx`
+        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json({ code: "PRIVACY_EXCLUDED", message: "材料已从学习上下文中排除。", retryable: false })}, updated_at = now()
+        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
+          AND s.upload_state = 'uploaded'
+          AND s.parse_state IN ('not_started', 'queued', 'running')
+          AND EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+            WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
+    } else {
+      await tx`
+        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
+        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
+          AND s.upload_state = 'uploaded'
+          AND s.parse_state IN ('not_started', 'queued', 'running')
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+            WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
+    }
     return true;
   });
 }

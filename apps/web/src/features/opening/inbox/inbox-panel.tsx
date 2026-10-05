@@ -1,40 +1,42 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { SourceContent } from "./source-content";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { CaptureDialog } from "./capture-dialog";
 import { putPrivateBytes } from "./put-private";
 import { SourceRow } from "./source-row";
 import { SourceViewer, type SourceDownloadView } from "./source-viewer";
-import { createUploadClient, type UploadRejected } from "./upload-client";
+import { createUploadClient } from "./upload-client";
 import { sourceStatusLabel } from "./upload-state";
+import { createUploadQueue, type UploadQueueItem } from "./upload-queue";
 import { shouldRefreshSources, startSourceRefresh } from "./source-refresh";
 import { EmptyState, ui } from "../design/ui";
 import { SourceActionsPanel, sourceActionNotice } from "./source-actions-panel";
 import { SourceCleanupPanel } from "./source-cleanup-panel";
 
-type Notice = { sourceId?: string; text: string; ticket?: UploadRejected["ticket"] };
+type Notice = { sourceId?: string; text: string };
 
-function percent(loaded: number, total: number): number {
-  if (total <= 0) return 0;
-  return Math.round((loaded / total) * 100);
-}
-
-export function InboxPanel({ api, sources, onChanged, filter = "" }: {
+export function InboxPanel({ api, sources, onChanged, filter = "", visibleSources, selectedIds, onToggle, selectionDisabled = false, renderMetadata }: {
   api: OpeningApi;
   sources: SourceRecord[];
   onChanged: () => Promise<void>;
   filter?: string;
+  visibleSources?: SourceRecord[];
+  selectedIds?: ReadonlySet<string>;
+  onToggle?: (id: string) => void;
+  selectionDisabled?: boolean;
+  renderMetadata?: (record: SourceRecord) => ReactNode;
 }) {
-  const [busy, setBusy] = useState(false);
   const [managedId, setManagedId] = useState<string | null>(null);
-  const [bytes, setBytes] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [view, setView] = useState<{ record: SourceRecord; download: SourceDownloadView; requestedVersion: number } | null>(null);
-  const fileRef = useRef<File | null>(null);
+  const [queueItems, setQueueItems] = useState<UploadQueueItem[]>([]);
   const [refreshError, setRefreshError] = useState(false);
   const processing = shouldRefreshSources(sources);
+  const displayed = visibleSources ?? sources.filter(record => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
+  const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
   useEffect(() => {
     if (!processing) return;
     let mounted = true;
@@ -47,33 +49,30 @@ export function InboxPanel({ api, sources, onChanged, filter = "" }: {
   const client = useMemo(() => createUploadClient({
     begin: (input) => api.beginUpload(input),
     complete: (id) => api.completeUpload(id),
-    put: async (url, body, onProgress, mime) => {
-      await putPrivateBytes(url, body, mime, (loaded, total) => {
-        setBytes(percent(loaded, total));
-        onProgress(loaded);
-      });
-    },
+    put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded)),
   }), [api]);
 
-  async function upload(file: File, resume?: Notice) {
-    fileRef.current = file;
-    setBusy(true);
-    setBytes(0);
-    const buffer = new Uint8Array(await file.arrayBuffer());
-    const result = await client.uploadFile(
-      { name: file.name, type: file.type, bytes: buffer },
-      resume?.ticket && resume.sourceId
-        ? { resumeSourceId: resume.sourceId, ticket: resume.ticket }
-        : {},
-    );
-    setBusy(false);
-    if ("phase" in result) {
-      setNotice({ sourceId: result.sourceId, text: result.message, ticket: result.ticket });
-      return;
-    }
-    setNotice(null);
-    setBytes(null);
-    await onChanged();
+  const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
+    onBytes,
+    ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket } : {}),
+  })), [client]);
+  const uploading = queueItems.some((item) => item.state === "idle" || item.state === "uploading");
+
+  async function uploadFiles(files: File[]) {
+    const localFiles = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      type: file.type,
+      bytes: new Uint8Array(await file.arrayBuffer()),
+    })));
+    uploadQueue.add(localFiles);
+    setQueueItems(uploadQueue.snapshot());
+    await uploadQueue.start(setQueueItems);
+    if (uploadQueue.snapshot().some((item) => item.state === "saved")) await onChanged();
+  }
+
+  async function retryQueuedUpload(id: string) {
+    await uploadQueue.retry(id, setQueueItems);
+    if (uploadQueue.snapshot().some((item) => item.id === id && item.state === "saved")) await onChanged();
   }
 
   async function openOriginal(record: SourceRecord, version = record.version) {
@@ -83,53 +82,57 @@ export function InboxPanel({ api, sources, onChanged, filter = "" }: {
 
   return (
     <section className="space-y-3">
-      <CaptureDialog disabled={busy} onFile={(file) => void upload(file)} />
+      <CaptureDialog disabled={uploading} onFiles={(files) => void uploadFiles(files)} />
       {refreshError ? <p className="text-sm text-amber-800" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
-      {notice?.ticket && fileRef.current ? (
-        <button
-          className={ui.secondary}
-          onClick={() => {
-            const file = fileRef.current;
-            if (file && notice.ticket && notice.sourceId) {
-              void upload(file, notice);
-            }
-          }}
-          type="button"
-        >
-          用同一材料重试
-        </button>
-      ) : null}
-      {bytes != null ? <p className="text-xs tabular-nums text-zinc-700">已上传 {bytes}%</p> : null}
       {notice ? <p className="text-sm text-amber-800" role="status">{notice.text}</p> : null}
+      {queueItems.length ? (
+        <ul className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3" aria-label="上传队列">
+          {queueItems.map((item) => (
+            <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="min-w-0 flex-1 break-words text-zinc-800">{item.file.name}</span>
+              <span className="text-zinc-500" role="status">
+                {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.state === "saved" ? "已保存，正在解析" : item.message ?? "上传失败"}
+              </span>
+              {item.state === "failed" ? <button className={ui.secondary} onClick={() => void retryQueuedUpload(item.id)} type="button">重试</button> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <SourceCleanupPanel revision={sources} />
       <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
-        {sources.filter((record) => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())).map((record) => (
+        {displayed.map((record) => (
           <li key={record.id}>
-            <SourceRow
+            <div className="flex items-start gap-2 px-2 py-2">
+              {onToggle ? <input aria-label={`选择材料 ${record.name}`} type="checkbox" checked={selectedIds?.has(record.id) ?? false} disabled={selectionDisabled} onChange={() => onToggle(record.id)} className="mt-3 size-4 shrink-0 accent-emerald-700" /> : null}
+            <div className="min-w-0 flex-1"><SourceRow
               notice={notice?.sourceId === record.id ? notice.text : undefined}
               onOpen={record.uploadState === "uploaded" ? () => void openOriginal(record) : undefined}
               onRetry={record.uploadState === "pending" ? async () => {
                 await client.retryComplete(record.id);
                 await onChanged();
+              } : record.uploadState === "uploaded" && record.parseState === "failed" && record.error?.code !== "PRIVACY_EXCLUDED" ? async () => {
+                await api.retryParse(record.id);
+                await onChanged();
               } : undefined}
               record={record}
               onManage={() => setManagedId(value => value === record.id ? null : record.id)}
-            />
+            />{renderMetadata?.(record)}</div></div>
             {managedId === record.id ? <SourceActionsPanel record={record} onClose={() => setManagedId(null)} onChanged={onChanged} onResult={result => {
               setNotice({ text: sourceActionNotice(result) });
-              if (result.deleted) { setView(value => value?.record.id === record.id ? null : value); fileRef.current = null; }
+              if (result.deleted) setView(value => value?.record.id === record.id ? null : value);
             }} /> : null}
             <p className="sr-only">{sourceStatusLabel(record)}</p>
           </li>
         ))}
       </ul>
-      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !sources.some((record) => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) ? <p className="py-4 text-sm text-zinc-500">没有匹配的材料。</p> : null}
-      {view ? (
-        <SourceViewer
+      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !displayed.length ? <p className="py-4 text-sm text-zinc-500">没有匹配的材料。</p> : null}
+      {view && currentViewRecord ? (
+        <><SourceViewer
           download={view.download}
           record={view.record}
+          latestRecord={currentViewRecord}
           requestedVersion={view.requestedVersion}
-        />
+        /><SourceContent key={`${view.record.id}:${view.requestedVersion}`} sourceId={view.record.id} version={view.requestedVersion} /></>
       ) : null}
     </section>
   );

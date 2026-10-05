@@ -32,6 +32,7 @@ function makeFakeSql() {
   const sources = new Map<string, FakeRow>();
   let jobInserts = 0;
   let outboxInserts = 0;
+  const jobEpochs: number[] = [];
   let historyRevision = 0;
   const tag = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
@@ -68,6 +69,8 @@ function makeFakeSql() {
       return row && row.workspace_id === workspaceId ? [row] : [];
     }
     if (query.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (query.startsWith("SELECT id, privacy_epoch FROM workspaces")) return [{ id: values[0], privacy_epoch: 7 }];
+    if (query.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: historyRevision }];
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) {
@@ -81,6 +84,16 @@ function makeFakeSql() {
       if (row) row.upload_url_expires_at = values[0];
       return [];
     }
+    if (query.startsWith("UPDATE opening_sources SET parse_state")) {
+      const id = values.find((value): value is string => typeof value === "string" && sources.has(value));
+      const row = id ? sources.get(id) : undefined;
+      if (row) {
+        row.parse_state = "queued";
+        row.error = null;
+        return [row];
+      }
+      return [];
+    }
     if (query.startsWith("UPDATE opening_sources")) {
       const [id, workspaceId] = values as [string, string];
       const row = sources.get(id);
@@ -92,6 +105,7 @@ function makeFakeSql() {
     }
     if (query.startsWith("INSERT INTO opening_jobs")) {
       jobInserts += 1;
+      jobEpochs.push(Number(values.at(-1)));
       return [{ id: values[0], state: "queued" }];
     }
     if (query.startsWith("INSERT INTO opening_outbox")) {
@@ -101,11 +115,13 @@ function makeFakeSql() {
     throw new Error(`unexpected sql: ${query}`);
   }) as unknown as Sql & {
     counts(): { jobInserts: number; outboxInserts: number };
+    jobEpochs(): number[];
     sources: Map<string, FakeRow>;
   };
   tag.json = ((value: unknown) => value) as never;
   tag.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(tag as unknown as Sql)) as never;
   tag.counts = () => ({ jobInserts, outboxInserts });
+  tag.jobEpochs = () => [...jobEpochs];
   tag.sources = sources;
   return tag;
 }
@@ -203,6 +219,43 @@ describe("opening signed upload service", () => {
     expect(sql.counts()).toEqual({ jobInserts: 1, outboxInserts: 1 });
     expect(has(`staging/${ticket.source.id}`)).toBe(false);
     expect(has(`final/${ticket.source.id}/v0`)).toBe(true);
+    expect(sql.jobEpochs()).toEqual([7]);
+  });
+
+  it("requeues a failed uploaded source without creating a second source", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "failed.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const stored = sql.sources.get(ticket.source.id);
+    if (!stored) throw new Error("missing source");
+    stored.parse_state = "failed";
+
+    const retried = await svc.retryParse(principal, ticket.source.id);
+
+    expect(retried.id).toBe(ticket.source.id);
+    expect(retried.parseState).toBe("queued");
+    expect(sql.counts()).toEqual({ jobInserts: 2, outboxInserts: 2 });
+    expect(sql.jobEpochs()).toEqual([7, 7]);
+  });
+
+  it("does not retry a source excluded by privacy deletion", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "excluded.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const stored = sql.sources.get(ticket.source.id);
+    if (!stored) throw new Error("missing source");
+    stored.parse_state = "failed";
+    stored.error = { code: "PRIVACY_EXCLUDED", message: "excluded", retryable: false };
+    await expect(svc.retryParse(principal, ticket.source.id)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("replays an already-uploaded completion without new inserts", async () => {

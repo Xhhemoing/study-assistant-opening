@@ -13,6 +13,12 @@ it("keeps practice and note creation available for a course without materials or
   expect(html).not.toMatch(/\s(?:aria-)?disabled(?:=|>)/u);
 });
 
+it("keeps Opening note actions under the Opening library", () => {
+  const html = renderToStaticMarkup(createElement(CourseStudyActions, { assetCount: 0, goalCount: 0, opening: true }));
+  expect(html).toContain('href="/opening/library?tab=notes"');
+  expect(html).not.toContain('href="/library/new"');
+});
+
 it("links practice and record actions to existing sections while records are still loading", () => {
   const html = renderToStaticMarkup(createElement(CourseLearningView, { courseId: "course" }));
   expect(html).toContain('id="course-practice"');

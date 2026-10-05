@@ -32,6 +32,7 @@ export type UploadClientDeps = {
   begin: (input: UploadInput) => Promise<UploadTicket>;
   complete: (sourceId: string) => Promise<SourceRecord>;
   put: PutFn;
+  resolvePutUrl?: (ticket: UploadTicket) => string;
 };
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -54,14 +55,23 @@ export function createUploadClient(deps: UploadClientDeps) {
           message: "不支持这个格式，未改名也未创建材料。",
         };
       }
-      const ticket = progress.resumeSourceId
-        ? progress.ticket
-        : await deps.begin({
-          name: file.name.slice(0, 180),
-          mime,
-          bytes: file.bytes.byteLength,
-          sha256: await sha256Hex(file.bytes),
-        });
+      let ticket: UploadTicket | undefined;
+      try {
+        ticket = progress.resumeSourceId
+          ? progress.ticket
+          : await deps.begin({
+            name: file.name.slice(0, 180),
+            mime,
+            bytes: file.bytes.byteLength,
+            sha256: await sha256Hex(file.bytes),
+          });
+      } catch {
+        return {
+          phase: "interrupted",
+          keptLocal: true,
+          message: "上传准备失败，原件仍在本地。",
+        };
+      }
       if (!ticket || (progress.resumeSourceId && ticket.source.id !== progress.resumeSourceId)) {
         return {
           phase: "interrupted",
@@ -71,7 +81,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         };
       }
       try {
-        await deps.put(ticket.uploadUrl, file.bytes, (loaded) => {
+        await deps.put(deps.resolvePutUrl?.(ticket) ?? ticket.uploadUrl, file.bytes, (loaded) => {
           progress.onBytes?.(loaded, file.bytes.byteLength);
         }, mime);
       } catch {
@@ -83,7 +93,17 @@ export function createUploadClient(deps: UploadClientDeps) {
           message: "上传中断，原件仍在本地。未标记为已上传。",
         };
       }
-      return deps.complete(ticket.source.id);
+      try {
+        return await deps.complete(ticket.source.id);
+      } catch {
+        return {
+          phase: "interrupted",
+          sourceId: ticket.source.id,
+          ticket,
+          keptLocal: true,
+          message: "上传已暂存，但保存确认失败，仍可重试。",
+        };
+      }
     },
     retryComplete(sourceId: string): Promise<SourceRecord> {
       return deps.complete(sourceId);

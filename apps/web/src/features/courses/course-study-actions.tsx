@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ArrowRight, BookOpen, ClipboardList } from "lucide-react";
 import { ui } from "../opening/design/ui";
 
-export function CourseStudyActions({ assetCount, goalCount }: { assetCount: number; goalCount: number }) {
+export function CourseStudyActions({ assetCount, goalCount, opening = false }: { assetCount: number; goalCount: number; opening?: boolean }) {
   return <section className="border-b border-zinc-200 pb-5" aria-labelledby="course-study-heading">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h2 id="course-study-heading" className="text-sm font-semibold text-zinc-800">开始这次学习</h2>
@@ -13,7 +13,7 @@ export function CourseStudyActions({ assetCount, goalCount }: { assetCount: numb
       <a className={ui.primary} href="#course-practice">开始独立练习<ArrowRight size={14} aria-hidden="true" /></a>
       <a className={ui.secondary} href="#course-assets"><BookOpen size={14} aria-hidden="true" />查看课程材料</a>
       <a className={ui.quiet} href="#course-learning-records"><ClipboardList size={14} aria-hidden="true" />查看学习记录</a>
-      <Link className={ui.quiet} href="/library/new">写一篇笔记</Link>
+      <Link className={ui.quiet} href={opening ? "/opening/library?tab=notes" : "/library/new"}>写一篇笔记</Link>
     </nav>
     <p className="mt-2 text-xs leading-5 text-zinc-500">没有材料或目标也能开始；独立练习和自报记录不需要 AI。</p>
   </section>;

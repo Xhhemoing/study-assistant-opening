@@ -7,6 +7,12 @@ it("distinguishes stored originals from parsed material", () => {
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "ready" })).toBe("可以用于提问");
 });
 
+it("accepts audio files without renaming them to another type", () => {
+  expect(resolveUploadMime({ name: "lecture.mp3", type: "audio/mpeg" })).toBe("audio/mpeg");
+  expect(resolveUploadMime({ name: "lecture.m4a", type: "" })).toBe("audio/mp4");
+  expect(resolveUploadMime({ name: "lecture.wav", type: "audio/wav" })).toBe("audio/wav");
+});
+
 it("rejects unknown and legacy powerpoint without renaming them to pdf", () => {
   expect(resolveUploadMime({ name: "notes.md", type: "" })).toBe("text/markdown");
   expect(resolveUploadMime({ name: "notes.markdown", type: "text/markdown" })).toBe("text/markdown");
@@ -18,4 +24,8 @@ it("rejects unknown and legacy powerpoint without renaming them to pdf", () => {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   );
   expect(resolveUploadMime({ name: "a.bin", type: "application/octet-stream" })).toBeNull();
+});
+
+it("does not use an extension when a declared unsupported MIME is present", () => {
+  expect(resolveUploadMime({ name: "renamed.pdf", type: "application/octet-stream" })).toBeNull();
 });
