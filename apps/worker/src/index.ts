@@ -4,7 +4,7 @@ import { PLATFORM_NAME } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
-import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
+import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
@@ -32,18 +32,19 @@ export function processSmokeJob(input: unknown): {
 }
 
 export async function main(): Promise<void> {
+  const env = loadWorkerEnv();
   const runner = await preflightParser();
   const openingModel = loadOpeningModelCatalog();
-  const redis = createRedisConnection({ url: process.env.REDIS_URL ?? "redis://127.0.0.1:6379" });
-  const sql = createSqlClient(process.env.DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/aistudy");
+  const redis = createRedisConnection({ url: env.redisUrl });
+  const sql = createSqlClient(env.databaseUrl);
   const repository = createOpeningJobRepository(sql);
   const privacyRepo = createOpeningPrivacyRepository(sql);
   const learning = createOpeningLearningRepository(sql);
   const retests = createOpeningRetestRepository(sql);
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
-  const storage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" });
-  const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: process.env.PARSER_TEMP_DIR ?? ".tmp/opening-parser" });
+  const storage = new OpeningS3(env.s3);
+  const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir });
   const retest = createRetestCandidateHandler({
     readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),
     readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),

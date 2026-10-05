@@ -16,3 +16,4 @@ export {
 } from "./test-database";
 
 export { loadOpeningModelCatalog, OpeningModelConfigurationError, type OpeningModelCatalog } from "./opening-model-catalog";
+export { loadWorkerEnv, type WorkerEnv } from "./worker-env";
