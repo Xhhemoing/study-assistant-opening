@@ -31,3 +31,7 @@ Q03 restore execution, production recovery drill, and final publication protocol
 ### M03 boundary
 
 This is not browser acceptance, external model retention assurance, or a claim that provider-side zero retention exists. The saved/no-save selector and refresh behavior await user browser acceptance. Task verification covers implemented behavior and automated tests only.
+
+## Note 2026-10-05
+
+Browser acceptance for M02 (deletion-choice UI) and M03 (saved/no-save selector, refresh behavior) is **still pending**. The `verified` status in `tasks.json` covers backend behavior and automated tests only, not user browser acceptance or release approval. See `docs/quality/2026-10-05-opening-repo-review.md`. CI browser tests on `feat/opening-release` were still failing at review time; no agent Playwright run was performed for M02/M03.

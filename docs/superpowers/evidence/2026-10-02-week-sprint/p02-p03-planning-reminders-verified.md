@@ -50,3 +50,43 @@ The first integration attempt without `REDIS_URL` failed in fixture setup (`REDI
 ## User acceptance and boundaries
 
 Manual browser checks remain pending: create/accept a day plan from real tasks, observe 409 on stale accept, view today queue with reminder states (in-app due/sent/unknown/quiet/disabled), and confirm no claim of external push without configured credentials. External Feishu delivery requires real credentials and belongs to Q02. Ledger update: P02/P03 moved planned → verified with this file as evidence; plan validator passes with the dependency graph intact.
+
+## Correction 2026-10-05 (appended; original record above left unchanged)
+
+Review `docs/quality/2026-10-05-opening-repo-review.md` found that this evidence cannot be reproduced as written. Rechecked on `feat/opening-release` @ `a72cdd0` (Windows host, Node v24.18.0) on 2026-10-05:
+
+1. **Command lists name files that do not exist in the repo.** `tests/integration/opening-plans.test.ts`, `tests/integration/opening-today-read.test.ts` and `packages/database/src/repositories/opening-task-candidate-accept.test.ts` are not tracked. That is why the recorded counts read "2 passed" for a 4-file and a 3-file command. The real integration scope is `opening-reminders.test.ts` + `opening-reminder-delivery.test.ts`; the real repository unit scope is `opening-plans.test.ts` + `opening-retest-task.test.ts`.
+2. **Environment line is inconsistent.** It says PostgreSQL on 5433, and the integration command uses `postgres:postgres@127.0.0.1:5433`, while the repo helper `.local/opening-e2e/check-service-tests.ps1` uses `opening:...@127.0.0.1:15432`. On 2026-10-05 only 15432 (PostgreSQL) and 16379 (Redis) were listening; 5433 and 6379 were not.
+3. **No reviewer record exists for P02** (no separate review run / reviewer note was found for this slice); P03 likewise relies on this single self-report.
+
+### Reruns on 2026-10-05 (real output, summarized lines)
+
+Unit (no DB), via `.local/opening-e2e/check-service-tests.ps1`:
+
+```text
+--project unit packages/domain/src/opening/day-planner.test.ts packages/domain/src/opening/reminder-policy.test.ts packages/domain/src/opening/planning-time.test.ts
+ Test Files  3 passed (3)
+      Tests  37 passed (37)
+--project unit apps/worker/src/jobs/remind.test.ts
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+--project unit apps/web/src/features/opening/planning/
+ Test Files  10 passed (10)
+      Tests  79 passed (79)
+--project unit packages/database/src/repositories/opening-plans.test.ts packages/database/src/repositories/opening-retest-task.test.ts (+ nonexistent opening-task-candidate-accept.test.ts)
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+```
+
+Handler and integration (DB-backed): **NOT rerun, the test DB was unusable for this branch.** Both projects' `globalSetup` (`scripts/opening-test-db.mjs`) aborted before any test ran:
+
+```text
+# first attempt: stale CRLF working copies of 17 SQL files (16 migrations + 1 fixture; attr eol=lf) -> checksum mismatch
+MigrationRegistryError: Checksum drift for migration: 0001_library.sql   { code: 'MIGRATION_CHECKSUM_DRIFT' }
+# after re-checking-out those files with LF (content identical to the index)
+MigrationRegistryError: Unknown migration in registry: 0027_opening_recovery.sql   { code: 'MIGRATION_UNKNOWN_HISTORY' }
+```
+
+`0027_opening_recovery.sql` belongs to the `codex/personal-use-integration-next` line (also `codex/m4-integration`, pu05b, pu06), not `feat/opening-release`. The shared `aistudy_opening_test` database on 15432 was last migrated by that line. It was **not** reset, because other lines use it. The handler/integration P02/P03 results above therefore remain **unreproduced** until either a dedicated test DB is provisioned for this branch or the shared one is reset by decision (Heidi). CI (`Service tests` job, fresh DB) is the current independent signal.
+
+Status in `tasks.json` was **not** changed by this correction.
