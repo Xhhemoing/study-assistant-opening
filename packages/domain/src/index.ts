@@ -148,6 +148,23 @@ export {
 } from "./opening/assistance";
 
 export {
+  makeTutorInstruction,
+  recommendTutorAction,
+  exposureLevelForMode as exposureLevelForDeepenMode,
+  normalizeDeepenMode,
+  assertCitationsForPage,
+  assertNoMasteryPercentage,
+  freshRetestExposure,
+  variantProblemRef,
+  PageCitationError,
+  type DeepenTutorMode,
+  type ThinTutorAction,
+  type ThinTutorActionKind,
+  type RecommendTutorActionInput,
+} from "./opening/tutor-policy";
+
+
+export {
   isMemoryEligible,
   memoriesForContext,
   memoriesForReview,

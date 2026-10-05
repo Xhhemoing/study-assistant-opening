@@ -1,3 +1,4 @@
+export { makeTutorInstruction } from "@aistudy/domain";
 import {
   providerOutputSchema,
   type MemoryItem,
@@ -8,7 +9,7 @@ import {
   type TutorMode,
 } from "@aistudy/contracts";
 import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
-import { instructionWithMemories } from "@aistudy/domain";
+import { instructionWithMemories, makeTutorInstruction } from "@aistudy/domain";
 import type {
   ContextSourceRef,
   OpeningBudgetRepository,
@@ -25,18 +26,6 @@ import {
   type BudgetedRepository,
 } from "../runtime/budgeted-call";
 
-export function makeTutorInstruction(mode: TutorMode): string {
-  switch (mode) {
-    case "listen":
-      return "倾听并确认理解；不要自动创建任务，不要擅自规划。";
-    case "hint":
-      return "提供下一步提示，不直接给出完整答案；引导学习者自己完成。";
-    case "explain":
-      return "解释概念并允许给出完整答案，同时标明依据。";
-    case "think_together":
-      return "与学习者共同思考，提出问题和候选路径，不直接改变计划。";
-  }
-}
 
 type Scope = { workspaceId: string; ownerUserId: string };
 
