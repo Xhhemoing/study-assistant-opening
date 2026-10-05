@@ -157,8 +157,10 @@
         "T03"
       ],
       "plan": "04-memory.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m01-memory-verified.md"
+      ]
     },
     {
       "id": "M02",
@@ -167,8 +169,10 @@
         "M01"
       ],
       "plan": "04-memory.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
     },
     {
       "id": "M03",
@@ -178,8 +182,10 @@
         "M02"
       ],
       "plan": "04-memory.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
     },
     {
       "id": "L01",
@@ -189,8 +195,10 @@
         "M01"
       ],
       "plan": "05-learning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l01-learning-verified.md"
+      ]
     },
     {
       "id": "L02",
@@ -199,8 +207,10 @@
         "L01"
       ],
       "plan": "05-learning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l02-learning-summary-retest-verified.md"
+      ]
     },
     {
       "id": "L03",
@@ -209,8 +219,10 @@
         "L02"
       ],
       "plan": "05-learning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
+      ]
     },
     {
       "id": "P01",
@@ -234,8 +246,10 @@
         "L01"
       ],
       "plan": "06-planning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
+      ]
     },
     {
       "id": "P03",
@@ -245,8 +259,10 @@
         "I03"
       ],
       "plan": "06-planning.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
+      ]
     },
     {
       "id": "U01",
@@ -270,8 +286,11 @@
         "U01"
       ],
       "plan": "07-experience.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
     },
     {
       "id": "U03",
@@ -284,8 +303,11 @@
         "U02"
       ],
       "plan": "07-experience.md",
-      "status": "planned",
-      "evidence": []
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
+        "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
+      ]
     },
     {
       "id": "Q01",
@@ -341,7 +363,7 @@
         "P02"
       ],
       "plan": "09-connections.md",
-      "status": "planned",
+      "status": "active",
       "evidence": []
     },
     {
