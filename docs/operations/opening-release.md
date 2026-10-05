@@ -48,6 +48,59 @@ memories needs a separate provenance contract. This is not an apply/drill or a
 publication protocol. Local evidence identifies the dirty worktree over its base
 SHA and does not replace release-SHA CI.
 
+## Local production preview
+
+Use the precompiled server for daily manual use rather than `next dev`:
+
+```bash
+npm run preview:build
+npm run preview:start -- --hostname 127.0.0.1 --port 3100
+```
+
+The build uses `.next-preview` and `tsconfig.preview.json`; development `.next`
+and isolated E2E `.next-opening-e2e` remain separate. Stop the development web
+server before building on a memory-constrained machine. Keep the existing Worker
+and PostgreSQL/Redis/S3 services running; preview does not reset, seed, or migrate
+the database and does not start a Worker.
+
+The launcher loads the root `.env`, then the optional ignored `.env.preview`,
+then inherited environment overrides. Set `PUBLIC_BASE_URL` to the preview origin
+and retain the existing database, bucket, authentication secret, and cookie name.
+For HTTP loopback use `SESSION_COOKIE_SECURE=false`; do not carry this setting
+into HTTPS deployment. Next.js also loads its normal web environment files.
+`OPENING_E2E=1` is rejected by the preview launcher.
+
+Code changes do not update a running preview: stop it, rebuild, and restart.
+Default `npm run preview` builds and starts on port 3000. Browser interaction
+acceptance belongs to the user; successful HTTP shell responses are not acceptance.
+These are local preview commands, not replacements for release CI gates.
+
+## Connection credential foundation (C01, active)
+
+Migrations `0041_opening_connections.sql` and `0042_opening_connection_lifecycle.sql`
+add owner-scoped connection metadata and encrypted credentials. This is not a
+working IMAP/DingTalk connector: check and sync return 503 without opening sockets;
+requested DingTalk scopes are not authorization grants. Import receipts, cursors,
+queue cancellation and connection-version/privacy-epoch writeback remain pending.
+
+Web credential writes require `OPENING_CONNECTION_KEY` (canonical base64 of 32
+random bytes) and a stable `OPENING_CONNECTION_KEY_ID`. Keep keys in the deployment
+secret store, not URLs, logs or backups. HTTPS and the existing same-origin mutation
+policy are required for deployed credential submission. Administrator-approved IMAP
+hosts go in `OPENING_IMAP_ALLOWED_HOSTS`; future socket adapters must additionally
+validate DNS/IP, prevent metadata access and enforce certificate-verified TLS.
+
+For key rotation, change both the active key and key ID, retaining old keys in
+`OPENING_CONNECTION_PREVIOUS_KEYS` as a JSON object keyed by their old IDs. Old
+ciphertexts and credential-request replays require those retained keys. Connection
+records and encrypted credentials are deliberately absent from current backups;
+restoring materials does not restore or authorize remote connections.
+
+Rollback: disable connection HTTP entry points and any future connection workers,
+then revoke connections to delete their credential envelopes and replay fingerprints.
+Retain the new tables and imported originals for repair; do not run a destructive
+SQL down migration or alter applied migration checksums.
+
 ## Readiness checks
 
 `npx tsx scripts/opening-readiness.mjs` runs real probes

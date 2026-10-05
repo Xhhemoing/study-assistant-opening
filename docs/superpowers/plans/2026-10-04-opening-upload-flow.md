@@ -31,11 +31,11 @@
 - `resolveUploadMime({ name, type })` returns the same supported MIME union for documents, images, and audio.
 - `createUploadQueue(client, files)` exposes queue items with `idle | uploading | saved | failed` and processes each file independently.
 
-- [ ] **Step 1: Write failing tests** for audio MIME resolution and queue continuation after one file fails.
-- [ ] **Step 2: Run `npx vitest run --project unit apps/web/src/features/opening/inbox/upload-state.test.ts apps/web/src/features/opening/inbox/upload-queue.test.ts` and verify the new assertions fail.
-- [ ] **Step 3: Add audio MIME/extension mappings and implement the smallest queue state machine using the existing `createUploadClient`.
-- [ ] **Step 4: Re-run the two tests and verify they pass.
-- [ ] **Step 5: Run ESLint on the changed files.**
+- [x] **Step 1: Write failing tests** for audio MIME resolution and queue continuation after one file fails.
+- [x] **Step 2: Run `npx vitest run --project unit apps/web/src/features/opening/inbox/upload-state.test.ts apps/web/src/features/opening/inbox/upload-queue.test.ts` and verify the new assertions fail.
+- [x] **Step 3: Add audio MIME/extension mappings and implement the smallest queue state machine using the existing `createUploadClient`.
+- [x] **Step 4: Re-run the two tests and verify they pass.
+- [x] **Step 5: Run ESLint on the changed files.**
 
 ### Task 2: Build the shared drag-and-drop surface
 
@@ -50,11 +50,11 @@
 - `UploadDropzone` accepts `disabled`, `multiple`, `accept`, `onFiles`, and renders a keyboard-accessible drop target.
 - `InboxPanel` and `UploadStrip` pass files to the same queue and render per-file status.
 
-- [ ] **Step 1: Write failing render tests for drag hint, keyboard trigger, multiple files, and unsupported-file message.
-- [ ] **Step 2: Run the focused test and verify it fails because the component does not exist.
-- [ ] **Step 3: Implement `UploadDropzone` with `onDragEnter/onDragOver/onDragLeave/onDrop`, a hidden input, and visible status text. Keep all layout in Tailwind classes.
-- [ ] **Step 4: Replace duplicated file input markup in both entry points and render queue progress without blocking existing materials.
-- [ ] **Step 5: Run focused component tests and ESLint.
+- [x] **Step 1: Write failing render tests for drag hint, keyboard trigger, multiple files, and unsupported-file message.
+- [x] **Step 2: Run the focused test and verify it fails because the component does not exist.
+- [x] **Step 3: Implement `UploadDropzone` with `onDragEnter/onDragOver/onDragLeave/onDrop`, a hidden input, and visible status text. Keep all layout in Tailwind classes.
+- [x] **Step 4: Replace duplicated file input markup in both entry points and render queue progress without blocking existing materials.
+- [x] **Step 5: Run focused component tests and ESLint.
 
 ### Task 3: Add parse retry and repair privacy epoch capture
 
@@ -76,11 +76,11 @@
 - Parse job creation receives `workspacePrivacyEpoch(scope.workspaceId)` and never hardcodes `0`.
 - Worker failure handling marks stale jobs as failed/excluded without leaving source parse state indefinitely pending.
 
-- [ ] **Step 1: Write failing tests for retrying a failed source and creating a job with the current workspace epoch.
-- [ ] **Step 2: Run the focused tests and verify the failures reproduce the current hardcoded epoch/no-retry behavior.
-- [ ] **Step 3: Implement repository/service/API retry path and workspace epoch lookup.
-- [ ] **Step 4: Wire `SourceRow` and `InboxPanel` to the retry API for `parseState=failed`.
-- [ ] **Step 5: Run focused tests, direct worker/web `tsc --noEmit`, and ESLint.
+- [x] **Step 1: Write failing tests for retrying a failed source and creating a job with the current workspace epoch.
+- [x] **Step 2: Run the focused tests and verify the failures reproduce the current hardcoded epoch/no-retry behavior.
+- [x] **Step 3: Implement repository/service/API retry path and workspace epoch lookup.
+- [x] **Step 4: Wire `SourceRow` and `InboxPanel` to the retry API for `parseState=failed`.
+- [x] **Step 5: Run focused tests, direct worker/web `tsc --noEmit`, and ESLint.
 
 ### Task 4: Keep Opening navigation inside Opening
 
@@ -99,20 +99,20 @@
 - Opening navigation exposes `/opening/today`, `/opening/assistant`, `/opening/courses`.
 - Course create/detail links preserve an `opening` origin and remain under `/opening/courses`.
 
-- [ ] **Step 1: Write failing navigation tests for exactly three Opening entries and nested legacy redirects.
-- [ ] **Step 2: Run the focused tests and verify current six-entry/nested-route behavior fails.
-- [ ] **Step 3: Update link builders and route redirects while preserving legacy routes for non-Opening callers.
-- [ ] **Step 4: Replace Assistant material-management link with `/opening/library` and keep the current conversation state intact.
-- [ ] **Step 5: Run targeted unit tests and direct web typecheck.
+- [x] **Step 1: Write failing navigation tests for exactly three Opening entries and nested legacy redirects.
+- [x] **Step 2: Run the focused tests and verify current six-entry/nested-route behavior fails.
+- [x] **Step 3: Update link builders and route redirects while preserving legacy routes for non-Opening callers.
+- [x] **Step 4: Replace Assistant material-management link with `/opening/library` and keep the current conversation state intact.
+- [x] **Step 5: Run targeted unit tests and direct web typecheck.
 
 ### Task 5: Final verification
 
 **Files:**
 - No production files unless a verification failure requires a targeted fix.
 
-- [ ] **Step 1: Run `npx vitest run --project unit` and record any pre-existing failure separately.**
-- [ ] **Step 2: Run `npx eslint` on all changed TypeScript/TSX files.**
-- [ ] **Step 3: Run `npx tsc -p apps/web/tsconfig.json --noEmit` and `npx tsc -p apps/worker/tsconfig.json --noEmit`.**
-- [ ] **Step 4: Run `git diff --check`.**
+- [x] **Step 1: Run `npx vitest run --project unit` and record any pre-existing failure separately.**
+- [x] **Step 2: Run `npx eslint` on all changed TypeScript/TSX files.**
+- [x] **Step 3: Run `npx tsc -p apps/web/tsconfig.json --noEmit` and `npx tsc -p apps/worker/tsconfig.json --noEmit`.**
+- [x] **Step 4: Run `git diff --check`.**
 - [ ] **Step 5: Provide manual browser acceptance steps for drag/drop, multi-file queue, parse retry, audio, and Opening navigation.**
 

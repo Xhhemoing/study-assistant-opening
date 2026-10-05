@@ -11,6 +11,9 @@
   "scripts": {
     "dev": "npm run dev -w @aistudy/web",
     "worker:dev": "npm run dev -w @aistudy/worker",
+    "preview:build": "bash scripts/run-heavy.sh node scripts/web-preview.mjs build",
+    "preview:start": "node scripts/web-preview.mjs start",
+    "preview": "npm run preview:build && npm run preview:start",
     "lint": "bash scripts/run-heavy.sh eslint .",
     "typecheck": "bash scripts/run-heavy.sh bash -c \"tsc -p packages/domain/tsconfig.json --noEmit && tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p packages/config/tsconfig.json --noEmit && tsc -p packages/database/tsconfig.json --noEmit && tsc -p packages/ai/tsconfig.json --noEmit && tsc -p packages/ui/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web && tsc -p tsconfig.e2e.json --noEmit\"",
 
