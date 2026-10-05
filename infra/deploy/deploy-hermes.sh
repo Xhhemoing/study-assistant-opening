@@ -77,7 +77,12 @@ build_server() {
     [ -d node_modules ] && rm -rf node_modules
     npm ci --no-audit --no-fund 2>&1 | tail -2
     npm run build 2>&1 | tail -4
-    test -f apps/web/.next/standalone/apps/web/server.js"
+    # standalone 不会自动带上静态资源，必须手动拷贝（缺失会导致页面无 JS/CSS，“正在进入 AIstudy”卡住）
+    mkdir -p apps/web/.next/standalone/apps/web/.next/static apps/web/.next/standalone/apps/web/public
+    cp -r apps/web/.next/static/* apps/web/.next/standalone/apps/web/.next/static/
+    [ -d apps/web/public ] && cp -r apps/web/public/* apps/web/.next/standalone/apps/web/public/ || true
+    test -f apps/web/.next/standalone/apps/web/server.js
+    [ \$(ls apps/web/.next/standalone/apps/web/.next/static 2>/dev/null | wc -l) -gt 0 ]"
 }
 
 migrate_server() {
