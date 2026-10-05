@@ -60,3 +60,6 @@ NUL
 
 # Local agent self-improvement logs (removed from the repo in b31feb7)
 .learnings/
+
+# Stray temp output when TMPDIR-like variables resolve to the literal string "undefined"
+undefined/
