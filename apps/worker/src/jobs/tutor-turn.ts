@@ -48,7 +48,8 @@ export type TutorTurnDeps = {
   };
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
-  resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number }>;
+  resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
+  pageImages?: (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
   config: {
     maxContextCharacters: number;
     reservedCents: number;
@@ -135,12 +136,14 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         memoryContext.memories,
         contextNow,
       );
+      const selected = await deps.resolveModel?.(scope, mode);
+      const imageParts = selected?.supportsVision && turn.currentPage != null && deps.pageImages
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: turn.sourceVersions, physicalPage: turn.currentPage }) : [];
       const input: ProviderInput = {
         instruction, text: turn.text, history,
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
-        mediaCapability: "text_only", imageParts: [],
+        mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only", imageParts,
       };
-      const selected = await deps.resolveModel?.(scope, mode);
       const rates = {
         inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
         outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,

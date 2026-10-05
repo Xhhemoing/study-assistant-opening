@@ -36,6 +36,32 @@ def document(text):
     return SimpleNamespace(pages=[1], texts=[SimpleNamespace(text=text, prov=[SimpleNamespace(page_no=1)])])
 
 
+def test_explicit_ocr_requires_all_offline_models(monkeypatch, tmp_path):
+    import pytest
+    monkeypatch.setenv('PARSER_OCR_MODEL_DIR', str(tmp_path))
+    with pytest.raises(FileNotFoundError, match='OCR'):
+        cli.create_converter()
+
+
+def test_explicit_ocr_pins_all_local_paths(monkeypatch, tmp_path):
+    from docling.datamodel.base_models import InputFormat
+    for name in ['ch_PP-OCRv4_det_mobile.pth', 'ch_ptocr_mobile_v2.0_cls_mobile.pth', 'ch_PP-OCRv4_rec_mobile.pth', 'ppocr_keys_v1.txt']:
+        (tmp_path / name).write_bytes(b'configured-model')
+    monkeypatch.setenv('PARSER_OCR_MODEL_DIR', str(tmp_path))
+    options = cli.create_converter().format_to_options[InputFormat.PDF].pipeline_options
+    assert options.do_ocr is True
+    assert options.ocr_options.backend == 'torch'
+    assert Path(options.ocr_options.rec_keys_path).parent == tmp_path
+    assert Path(options.ocr_options.det_model_path).parent == tmp_path
+    assert options.ocr_options.rapidocr_params['Global.log_level'] == 'critical'
+
+
+def test_table_body_is_kept_on_its_physical_page():
+    doc = document('caption')
+    doc.tables = [SimpleNamespace(prov=[SimpleNamespace(page_no=1)], export_to_markdown=lambda **_: '| x | y |\n| 1 | 2 |')]
+    assert cli.texts_by_page(doc)[1] == ['caption', '| x | y |\n| 1 | 2 |']
+
+
 def test_text_cap_is_preserved(monkeypatch, tmp_path, capsys):
     file = tmp_path / "test.pdf"
     file.write_bytes(b"input")

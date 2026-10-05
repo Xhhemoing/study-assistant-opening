@@ -92,6 +92,21 @@ describe("opening provider", () => {
     await expect(provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
   });
 
+  it("sends actual page images with source/page labels only when vision is explicitly enabled", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({ choices: [{ message: { content: JSON.stringify({ text: "analysis", citedChunkIds: [], candidates: [] }) } }] }));
+    const image = { mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: "00000000-0000-4000-8000-000000000002", physicalPage: 2 };
+    const request = { ...input, mediaCapability: "text_plus_page_images" as const, imageParts: [image] };
+    await expect(createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl }).complete(request)).rejects.toMatchObject({ code: "PROVIDER_MEDIA_UNSUPPORTED" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl, supportsVision: true }).complete(request);
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body.messages[1].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "text", text: expect.stringContaining("physical page 2") }),
+      { type: "image_url", image_url: { url: image.data, detail: "high" } },
+    ]));
+    await expect(createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", supportsVision: true, fetchImpl }).complete({ ...request, imageParts: [{ ...image, data: "https://untrusted/page.png" }] })).rejects.toMatchObject({ code: "PROVIDER_MEDIA_UNSUPPORTED" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it("rejects unsupported media without silently dropping the image", async () => {
     const fetchImpl = vi.fn();
     const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });

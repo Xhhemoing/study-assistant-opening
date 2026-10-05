@@ -41,6 +41,19 @@ $ErrorActionPreference = 'Stop'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-The CLI emits one JSON result on stdout. PDF and PPTX text extraction are supported; OCR, image extraction and image semantics remain deferred. Exit codes: 0 success, 2 usage, 3 unsupported MIME, 4 conversion failure/timeout, and 5 page/output bound violation. Node cancellation and capture limits remain in place.
+The CLI emits one JSON result on stdout. PDF and PPTX text and table extraction are supported. Image extraction and image semantics remain deferred. Exit codes: 0 success, 2 usage, 3 unsupported MIME, 4 conversion failure/timeout, and 5 page/output bound violation. Node cancellation and capture limits remain in place.
+
+## Optional Offline OCR
+
+OCR is off by default. To enable PDF OCR, explicitly set `PARSER_OCR_MODEL_DIR` to an absolute directory containing these RapidOCR 3.9.2 Torch PP-OCRv4 files:
+
+- `ch_PP-OCRv4_det_mobile.pth`
+- `ch_ptocr_mobile_v2.0_cls_mobile.pth`
+- `ch_PP-OCRv4_rec_mobile.pth`
+- `ppocr_keys_v1.txt`
+
+Prepare models online before worker startup, using RapidOCR's supported `EngineType.TORCH`, `OCRVersion.PPOCRV4`, and `ModelType.MOBILE` configuration for Det/Cls/Rec. `Global.model_root_dir` must be a Python `Path`, not a string. RapidOCR may place the recognition dictionary in its installed `models` directory; copy it into the configured OCR directory too. No uploaded document is involved in model setup. Runtime uses explicit local model and dictionary paths; missing files fail the parser check instead of triggering a document-time download. The existing locked Torch and RapidOCR dependencies are sufficient; ONNXRuntime is not required for this backend.
+
+Restart the worker with the environment variable to apply the setting. This does not reparse existing materials. Do not overwrite a cited version's chunks to enable OCR retroactively; existing citation targets must remain stable. OCR output, especially formulas, needs comparison with the original and is not proof of semantic correctness. A real single-page image-based PDF conversion succeeded locally; a 72-page CPU OCR probe exceeded 1,000 seconds. Large scanned documents require bounded batch/versioned reprocessing before they can be claimed usable.
 
 The lock has platform markers, including upstream Linux CUDA dependencies; this is not a custom CPU-only distribution. Windows checks and a Linux workflow definition do not prove a Linux run passed. The repository's actual GitHub `quality` job is the Linux acceptance evidence.

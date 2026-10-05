@@ -6,7 +6,7 @@ vi.mock("@aistudy/database", async original => ({ ...await original<typeof impor
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
 import { resolveTutorModel } from "./tutor-model";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
-const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1" };
+const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.catalog.mockReturnValue({ models: [model], defaultModelId: "chosen", dailyCapCents: 100 });
@@ -17,7 +17,7 @@ describe("shared tutor model selection", () => {
   it("joins one owner-scoped choice to provider options and the exact ledger prices", async () => {
     const selected = await resolveTutorModel({} as never, scope, "hint");
     expect(mocks.get).toHaveBeenCalledWith(scope);
-    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName });
+    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: true });
     expect(selected.modelSnapshot).toEqual({ id: "chosen", providerId: "secondary", modelName: "actual-model", inputCentsPerMillion: 5, outputCentsPerMillion: 7 });
     expect(selected.inputCentsPerMillion).toBe(5);
     expect(selected.outputCentsPerMillion).toBe(7);

@@ -53,6 +53,15 @@ describe("tutor turn handler", () => {
     return { deps, tutorJobs, chunks, budget, provider };
   }
 
+  it("passes authorized version-pinned page images to a visual model and keeps citations", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const image = { mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: chunkA.sourceId, physicalPage: 1 };
+    const pageImages = vi.fn(async () => [image]);
+    await createTutorTurnHandler({ ...deps, resolveModel: async () => ({ provider, supportsVision: true, modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 }, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }), pageImages })(claimedJob.id);
+    expect(pageImages).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: claimedJob.workspaceId }), expect.objectContaining({ sourceIds: [chunkA.sourceId], sourceVersions: { [chunkA.sourceId]: 0 }, physicalPage: 1 }));
+    expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [image] });
+    expect(tutorJobs.completeTurn).toHaveBeenCalled();
+  });
   it("uses one resolved model for provider dispatch, prices and ledger attribution", async () => {
     const { deps, provider, budget } = setup();
     const selectedProvider = { complete: vi.fn(async () => ({ text: "selected answer", citedChunkIds: [], candidates: [], requestId: "selected-request", inputTokens: 100, outputTokens: 50 })) };

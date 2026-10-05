@@ -36,6 +36,24 @@ def create_converter():
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
     options = PdfPipelineOptions(do_ocr=False)
+    ocr_dir = os.environ.get("PARSER_OCR_MODEL_DIR")
+    if ocr_dir:
+        from docling.datamodel.pipeline_options import RapidOcrOptions
+        from rapidocr import OCRVersion, ModelType
+        directory = Path(ocr_dir).resolve()
+        files = {"det": directory / "ch_PP-OCRv4_det_mobile.pth",
+                 "cls": directory / "ch_ptocr_mobile_v2.0_cls_mobile.pth",
+                 "rec": directory / "ch_PP-OCRv4_rec_mobile.pth",
+                 "keys": directory / "ppocr_keys_v1.txt"}
+        if not all(file.is_file() for file in files.values()):
+            raise FileNotFoundError("OCR requires prepared offline RapidOCR Torch PP-OCRv4 models and ppocr_keys_v1.txt in PARSER_OCR_MODEL_DIR")
+        params = {f"{stage}.ocr_version": OCRVersion.PPOCRV4 for stage in ("Det", "Cls", "Rec")}
+        params.update({f"{stage}.model_type": ModelType.MOBILE for stage in ("Det", "Cls", "Rec")})
+        params["Global.log_level"] = "critical"
+        options.do_ocr = True
+        options.ocr_options = RapidOcrOptions(backend="torch", lang=["ch"],
+            det_model_path=str(files["det"]), cls_model_path=str(files["cls"]), rec_model_path=str(files["rec"]),
+            rec_keys_path=str(files["keys"]), rapidocr_params=params)
     manifest = json.loads((Path(__file__).parents[1] / "model-manifest.json").read_text(encoding="utf-8"))
     layout = next(model for model in manifest["models"] if model["model"] == options.layout_options.model_spec.repo_id)
     options.layout_options.model_spec.revision = layout["revision"]
@@ -68,6 +86,11 @@ def texts_by_page(document):
         for provenance in item.prov:
             if provenance.page_no in result:
                 result[provenance.page_no].append(item.text)
+    for table in getattr(document, "tables", []):
+        text = table.export_to_markdown(doc=document)
+        for page_no in {provenance.page_no for provenance in table.prov}:
+            if page_no in result:
+                result[page_no].append(text)
     return result
 
 

@@ -11,9 +11,10 @@ export async function resolveTutorModel(sql: Sql, scope: Scope, mode: TutorMode)
   if (preference.invalidStoredSettings) throw new OpeningModelRoutingError("已保存的模型设置无效，请到设置重新保存或恢复服务器默认设置。");
   const model = resolveOpeningModel(catalog.models, preference.settings, mode, catalog.defaultModelId);
   return {
-    provider: createOpeningProvider({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName }),
+    provider: createOpeningProvider({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: model.supportsVision }),
     modelSnapshot: openingModelSnapshot(model),
     inputCentsPerMillion: model.inputCentsPerMillion,
     outputCentsPerMillion: model.outputCentsPerMillion,
+    supportsVision: model.supportsVision,
   };
 }

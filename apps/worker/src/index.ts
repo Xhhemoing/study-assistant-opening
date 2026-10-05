@@ -3,6 +3,7 @@ import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
+import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
@@ -67,6 +68,7 @@ export async function main(): Promise<void> {
     budget,
     provider: null,
     resolveModel: (scope, mode) => resolveTutorModel(sql, scope, mode),
+    pageImages: createSourcePageImages(sql, storage),
     config: {
       ...loadOpeningTutorConfig(),
       inputCentsPerMillion: 0,

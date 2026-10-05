@@ -28,6 +28,7 @@ import {
 } from "@aistudy/database";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
 import { resolveTutorModel } from "../../../../worker/src/runtime/tutor-model";
+import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -126,6 +127,7 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
           },
         },
         chunks,
+        pageImages: createSourcePageImages(sql, openingPageStorage()),
         provenance: createOpeningEphemeralProvenanceRepository(sql),
         privacy: {
           snapshot: privacySnapshot,

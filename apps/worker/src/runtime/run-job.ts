@@ -5,7 +5,6 @@ import { assertCurrentEpoch } from "./privacy-guard";
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
 export type JobRepository = {
   claim(id: string): Promise<OpeningJobRecord | null>;
-  sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
   /** Optional M02 workspace epoch — wire in opening-jobs when allowlisted. */
   workspacePrivacyEpoch?(workspaceId: string): Promise<number>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
@@ -19,14 +18,6 @@ export function canClaimJob(status: string): boolean {
 
 export function isUnknownOutcome(error: unknown): boolean {
   return error instanceof OpeningProviderError && UNKNOWN_OUTCOME_CODES.has(error.code);
-}
-
-async function validateParseSource(repository: JobRepository, job: OpeningJobRecord): Promise<boolean> {
-  if (job.kind !== "parse") return true;
-  const payload = job.payload as { sourceId?: unknown };
-  if (typeof payload.sourceId !== "string") return false;
-  const currentEpoch = await repository.sourcePrivacyEpoch(payload.sourceId, job.workspaceId);
-  return currentEpoch !== null && currentEpoch === job.privacyEpoch;
 }
 
 /** Dispatch + writeback: workspace privacy epoch must still match the job snapshot. */
@@ -48,10 +39,6 @@ export async function runJob(
 ): Promise<boolean> {
   const job = await repository.claim(jobId);
   if (!job || !canClaimJob(job.state)) return false;
-  if (!(await validateParseSource(repository, job))) {
-    await repository.finish(job.id, "failed", { error: "source privacy epoch changed; parse result discarded" });
-    return false;
-  }
   if (!(await validateWorkspaceEpoch(repository, job))) {
     await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" });
     return false;

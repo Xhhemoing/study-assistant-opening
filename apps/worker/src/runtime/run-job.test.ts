@@ -88,4 +88,19 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     expect(await runJob(repository, "job-1", async () => ({ ok: true }))).toBe(true);
     expect(finished).toEqual(["succeeded"]);
   });
+
+  it("uses the workspace epoch for parse jobs even when source metadata is unavailable", async () => {
+    const finished: string[] = [];
+    const repository = {
+      claim: async () => baseJob({ kind: "parse", payload: { sourceId: "source-1" }, privacyEpoch: 4 }),
+      sourcePrivacyEpoch: async () => null,
+      workspacePrivacyEpoch: async () => 4,
+      finish: async (_id: string, state: "succeeded" | "failed" | "outcome_unknown") => {
+        finished.push(state);
+        return true;
+      },
+    };
+    expect(await runJob(repository, "job-1", async () => ({ parsed: true }))).toBe(true);
+    expect(finished).toEqual(["succeeded"]);
+  });
 });

@@ -14,7 +14,7 @@ export async function chunksAtSnapshots(
   const groups = await Promise.all(sourceIds.map(async (sourceId) => {
     const version = versions[sourceId];
     if (version === undefined) throw new Error(`source material is unavailable: missing snapshot for ${sourceId}`);
-    const rows = await chunks.listChunksAtVersion(scope, sourceId, version);
+    const rows = (await chunks.listChunksAtVersion(scope, sourceId, version)).filter(chunk => chunk.text.trim());
     if (!rows.length) throw new Error(`source material is unavailable: missing chunks for ${sourceId}@${version}`);
     return rows;
   }));
