@@ -60,7 +60,8 @@ export type EphemeralTutorDeps = {
   budget: BudgetedRepository;
   provider: EphemeralProvider | null;
   modelSnapshot?: OpeningModelSnapshot;
-  resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<{ provider: EphemeralProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number }>;
+  resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<{ provider: EphemeralProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
+  pageImages?: (scope: EphemeralScope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
   config: {
     maxContextCharacters: number;
     reservedCents: number;
@@ -110,9 +111,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw new EphemeralServiceError("SOURCE_EXCLUDED", "所选材料已停止供 AI 使用，请取消选择后重试。", 409);
       }
       const epochChanged = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
-      const chunks = allowedSourceIds.length
+      const chunks = (allowedSourceIds.length
         ? await deps.chunks.listForSources(scope, allowedSourceIds)
-        : [];
+        : []).filter(chunk => chunk.text.trim());
+      if (allowedSourceIds.some(id => !chunks.some(chunk => chunk.sourceId === id))) {
+        throw new EphemeralServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
+      }
       const authorized: AuthorizedChunk[] = chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
       const selection = validatePageSelection(input, authorized);
       if (!selection.ok) {
@@ -132,6 +136,9 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [],
       );
+      const selected = await deps.resolveModel?.(scope, input.mode);
+      const imageParts = selected?.supportsVision && input.currentPage != null && deps.pageImages
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: input.currentPage }) : [];
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode),
         text: input.text,
@@ -139,10 +146,9 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         chunks: context,
         mode: input.mode,
         maxOutputTokens: deps.config.maxOutputTokens,
-        mediaCapability: "text_only",
-        imageParts: [],
+        mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only",
+        imageParts,
       };
-      const selected = await deps.resolveModel?.(scope, input.mode);
       const rates = {
         inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
         outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,

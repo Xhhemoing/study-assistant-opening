@@ -12,6 +12,7 @@ import { confirmOwnedMemory, rejectOwnedMemory } from "./opening-memory-decision
 import { deleteOwnedMemory } from "./opening-memory-delete";
 import { memoryUsesDeletedSource } from "./opening-source-actions-privacy";
 import { decideOwnedMemoryCandidate, type MemoryCandidateDecisionInput } from "./opening-memory-candidate";
+import { replaceOwnedMemory, type ReplaceMemoryInput } from "./opening-memory-replace";
 import {
   OpeningMemoryError,
   mapMemoryRow,
@@ -19,7 +20,7 @@ import {
   type ProposeMemoryInput,
 } from "./opening-memory-types";
 
-export { OpeningMemoryError, type OpeningMemoryErrorCode, type ProposeMemoryInput };
+export { OpeningMemoryError, type OpeningMemoryErrorCode, type ProposeMemoryInput, type ReplaceMemoryInput };
 
 function sameSources(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -116,6 +117,10 @@ export function createOpeningMemoryRepository(
       clientKey: string,
     ): Promise<MemoryItem> {
       return rejectOwnedMemory(sql, scope, id, expectedVersion, clientKey);
+    },
+
+    async replaceMemory(scope: OpeningScope, input: ReplaceMemoryInput): Promise<MemoryItem> {
+      return replaceOwnedMemory(sql, scope, input);
     },
 
     async deleteMemory(

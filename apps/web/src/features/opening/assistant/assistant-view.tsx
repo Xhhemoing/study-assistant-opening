@@ -17,6 +17,7 @@ import { replacePromptDraft, type StudyTask } from "../planning/study-task";
 import { MemoryPanel } from "./memory-panel";
 import { prepareSnippetDraft } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
+import { UploadStrip } from "./upload-strip";
 
 type Props = {
   api?: OpeningApi;
@@ -25,6 +26,9 @@ type Props = {
   task?: StudyTask | null;
   initialTitle?: string;
   startFresh?: boolean;
+  initialSourceIds?: string[];
+  initialPage?: number | null;
+  initialDraft?: string;
   embedded?: boolean;
 };
 
@@ -194,20 +198,22 @@ export function AssistantView(props: Props) {
   const [session, setSession] = useState(0);
   return <AssistantWorkspace key={session} {...props} initialConversationId={session ? null : props.initialConversationId}
     initialTitle={session ? undefined : props.initialTitle} startFresh={session ? true : props.startFresh}
+    initialSourceIds={session ? [] : props.initialSourceIds} initialPage={session ? null : props.initialPage}
+    initialDraft={session ? "" : props.initialDraft}
     onNew={() => setSession((value) => value + 1)} />;
 }
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, learningAttempt, task, initialTitle,
-  startFresh = false, embedded = false, onNew }: Props & { onNew: () => void }) {
+  startFresh = false, initialSourceIds = [], initialPage = null, initialDraft = "", embedded = false, onNew }: Props & { onNew: () => void }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [conversationId, setConversationId] = useState<string | null>(
     learningAttempt ? null : initialConversationId,
   );
   const [resume, setResume] = useState<ConversationResume | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
-  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? []);
-  const [currentPage, setCurrentPage] = useState("");
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? initialSourceIds);
+  const [currentPage, setCurrentPage] = useState(initialPage == null ? "" : String(initialPage));
   const [turns, setTurns] = useState<TurnRecord[]>([]);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initialDraft);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
@@ -481,8 +487,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
+      <UploadStrip api={api} onUploaded={refreshSources} disabled={pending || loading || recoveryRequired} />
       <SourcePageControls sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources} selectedSourceIds={selectedSourceIds} currentPage={currentPage} onSelectedSourceIdsChange={setSelectedSourceIds} onCurrentPageChange={setCurrentPage} disabled={pending || loading} />
-      <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
+      <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/opening/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
       <details className="mt-5 border-t border-zinc-200 pt-2"><summary className="flex min-h-10 cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700"><ShieldCheck size={14} aria-hidden />AI 记忆与待确认建议</summary><MemoryPanel api={api} /></details>
       <p className="mt-6 text-[11px] leading-5 text-zinc-500">选择资料不会发送消息。AI 建议需由你确认后才进入后续上下文。</p>
     </ResponsiveInspector>

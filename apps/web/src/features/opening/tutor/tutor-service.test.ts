@@ -46,6 +46,13 @@ describe("tutor-service RU-04 / continuity hooks", () => {
     expect(conversations.appendSavedTurn).toHaveBeenCalled();
   });
 
+  it.each([{ chunks: [] }, { chunks: [{ id: C, sourceId: S, sourceVersion: 1, page: 4, slideLabel: null, startMs: null, endMs: null, text: " \t", imageObjectKey: null }] }])("refuses a missing selected material even without a requested page (%#)", async ({ chunks }) => {
+    const { service, conversations, sourceChunks } = createService();
+    sourceChunks.listForSources.mockResolvedValueOnce(chunks);
+    await expect(service.submitTurn(scope, { conversationId: CONVERSATION, text: "read both", sourceIds: [S, OTHER_SOURCE], mode: "explain", clientKey: "missing-material", privacy: "saved" }))
+      .rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE", status: 422 });
+    expect(conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
   it("replays a saved turn after its source version no longer has the selected page", async () => {
     const { service, conversations, sourceChunks } = createService();
     sourceChunks.listForSources.mockResolvedValueOnce([]);

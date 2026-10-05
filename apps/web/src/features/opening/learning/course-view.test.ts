@@ -107,3 +107,11 @@ it("offers fixed-snapshot history controls instead of rendering the former full 
   expect(html).toContain("按固定快照翻阅");
   expect(html).toContain("刷新历史（新快照）");
 });
+
+it("shows representative observation identifiers and capture times", () => {
+  const observationId = summary[0]?.evidenceIds[0];
+  expect(observationId).toBeTruthy();
+  const html = renderToStaticMarkup(createElement(CourseLearningRecords, { ...props, state: "ready" }));
+  expect(html).toContain(observationId!);
+  expect(html).toContain("记录时间");
+});

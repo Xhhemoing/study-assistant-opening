@@ -33,8 +33,21 @@ export function deleteOwnedMemory(
       FOR UPDATE`;
     if (!rows.length) throw new OpeningMemoryError("NOT_FOUND", "memory not found");
     const row = rows[0] as Record<string, unknown>;
+    const keyOwners = await tx`
+      SELECT id, status FROM opening_memories
+      WHERE workspace_id = ${scope.workspaceId}
+        AND last_decision_client_key = ${input.clientKey}
+      ORDER BY id
+      FOR UPDATE`;
+    const matchingDeletionReplay = row.status === "deleted" && row.last_decision_client_key === input.clientKey;
+    if (keyOwners.length && !matchingDeletionReplay) {
+      throw new OpeningMemoryError("CONFLICT", "clientKey was already used for another memory operation");
+    }
+    if (keyOwners.some((item) => String((item as { id: string }).id) !== input.id)) {
+      throw new OpeningMemoryError("CONFLICT", "clientKey was already used for another memory operation");
+    }
     const deletedAt = new Date();
-    if (row.status === "deleted" && row.last_decision_client_key === input.clientKey) {
+    if (matchingDeletionReplay) {
       const excl = await tx`
         SELECT source_id FROM opening_privacy_exclusions
         WHERE workspace_id = ${scope.workspaceId} AND memory_id = ${input.id}`;

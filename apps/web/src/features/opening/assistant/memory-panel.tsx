@@ -6,6 +6,20 @@ import type { OpeningApi } from "../client/api";
 import Link from "next/link";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 
+export function memorySourceSummary(sourceTurnIds: string[], sourceIds?: string[]): string {
+  const turns = `来源轮次：${sourceTurnIds.length ? sourceTurnIds.join("、") : "无"}`;
+  return sourceIds === undefined
+    ? turns
+    : `${turns} · 关联材料：${sourceIds.length ? sourceIds.join("、") : "无"}`;
+}
+
+export function formatMemoryTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
+}
+
 export function MemoryPanel({ api }: { api: OpeningApi }) {
   const [candidates, setCandidates] = useState<AssistantCandidateRecord[]>([]);
   const [memories, setMemories] = useState<Awaited<ReturnType<OpeningApi["listMemory"]>>["items"]>([]);
@@ -44,7 +58,8 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
   }
 
   async function removeMemory(memory: (typeof memories)[number]) {
-    if (!window.confirm("删除这条已确认记忆？原始学习材料不会被删除。")) return;
+    if (!window.confirm("删除这条已确认记忆？这不会自动删除来源对话文本。")) return;
+    const deleteSourceText = window.confirm("同时删除来源对话文本？此操作不可恢复。点击“确定”将删除来源文本，点击“取消”只删除记忆。\n\n注意：原始上传材料不会被删除。\n");
     setBusyId(memory.id);
     setMessage("");
     try {
@@ -52,7 +67,8 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
         id: memory.id,
         expectedVersion: memory.version,
         action: "delete",
-        clientKey: `memory-delete-${memory.id}-${memory.version}`,
+        deleteSourceText,
+        clientKey: `memory-delete-${memory.id}-${memory.version}-${deleteSourceText ? "text" : "memory"}`,
       });
       await refresh();
     } catch (error) {
@@ -77,7 +93,7 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
           {memories.map((memory) => (
             <div key={memory.id} className="border-b border-zinc-200 py-3">
               <p className="text-sm text-zinc-800">{memory.text}</p>
-              <p className="mt-1 text-xs text-zinc-500">{memory.kind === "temporary" ? "临时记忆" : "确认记忆"} · {memory.sourceTurnIds.length} 个来源轮次</p>
+              <p className="mt-1 break-all text-xs text-zinc-500">{memory.kind === "temporary" ? "临时记忆" : "确认记忆"} · {memorySourceSummary(memory.sourceTurnIds)} · 创建于 <time dateTime={memory.createdAt}>{formatMemoryTime(memory.createdAt)}</time></p>
               <button type="button" disabled={busyId === memory.id} onClick={() => void removeMemory(memory)} className={`${secondaryButtonClass} mt-2 text-red-700`}>删除记忆</button>
             </div>
           ))}
@@ -90,7 +106,7 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
           return (
             <li key={row.id} className="border-b border-zinc-200 py-3">
               <p className="text-sm text-zinc-800">{row.candidate.text}</p>
-              <p className="mt-1 text-xs text-zinc-500">来源：本轮回答关联的材料；确认后才会进入后续上下文。</p>
+              <p className="mt-1 break-all text-xs text-zinc-500">{memorySourceSummary([row.sourceTurnId], row.sourceIds)} · 创建于 <time dateTime={row.createdAt}>{formatMemoryTime(row.createdAt)}</time>。确认后才会进入后续上下文。</p>
               <div className="mt-2 flex gap-2">
                 <button type="button" disabled={busyId === row.id} onClick={() => void decide(row, "confirm")} className={buttonClass}>确认</button>
                 <button type="button" disabled={busyId === row.id} onClick={() => void decide(row, "reject")} className={secondaryButtonClass}>不记住</button>

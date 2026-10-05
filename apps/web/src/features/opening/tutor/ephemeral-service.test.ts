@@ -92,6 +92,17 @@ describe("ephemeral tutor service", () => {
     expect(f.budget.settle).toHaveBeenCalledWith("res-1", 16);
   });
 
+  it("does not silently ignore images on the temporary route", async () => {
+    const complete = vi.fn(async () => output);
+    const images = [{ mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId, physicalPage: 2 }];
+    const service = createEphemeralTutorService({ sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
+      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+      budget: { reserve: async () => ({ id: "r" }), settle: async () => {}, release: async () => {}, markUnknown: async () => {} },
+      provider: { complete }, resolveModel: async () => ({ provider: { complete }, supportsVision: true, modelSnapshot: { id: "v", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
+      pageImages: async () => images, config: { maxContextCharacters: 12000, maxOutputTokens: 256, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 } });
+    await service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId], currentPage: 2, mode: "explain", history: [] });
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: images });
+  });
   it("blocks an unavailable temporary route without a fallback provider or charge", async () => {
     const f = deps({ resolveModel: async () => { throw new Error("route unavailable"); } });
     await expect(f.service.replyEphemeral(scope, { text: "hello", sourceIds: [], mode: "listen", history: [] })).rejects.toThrow("route unavailable");
@@ -171,6 +182,13 @@ describe("ephemeral tutor service", () => {
     expect(page.complete).not.toHaveBeenCalled();
   });
 
+  it.each([{ chunks: [] }, { chunks: [{ ...chunk, text: " \n\t" }] }, { chunks: [chunk] }])("refuses missing material in a selection before calling or charging the provider (%#)", async ({ chunks }) => {
+    const f = deps({ chunks, sources: [sourceId, foreignSource] });
+    await expect(f.service.replyEphemeral(scope, { text: "read both", sourceIds: [sourceId, foreignSource], mode: "explain", history: [] }))
+      .rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE", status: 422 });
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.budget.reserve).not.toHaveBeenCalled();
+  });
   it("keeps only citation ids that belong to the authorized context", async () => {
     const { service } = deps({
       complete: async () => ({

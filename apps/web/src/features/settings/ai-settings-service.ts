@@ -12,7 +12,7 @@ export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiS
     ...preference, defaultModelId: catalog.defaultModelId, dailyCapCents: catalog.dailyCapCents,
     models: catalog.models.map(model => ({
       id: model.id, providerId: model.providerId, providerLabel: model.providerLabel,
-      label: model.label, modelName: model.modelName, availability: model.availability,
+      label: model.label, modelName: model.modelName, availability: model.availability, supportsVision: model.supportsVision,
       inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
     })),
   };

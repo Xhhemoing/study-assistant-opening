@@ -26,6 +26,7 @@ import {
 export type TutorHttpErrorCode =
   | PageSelectionCode
   | "NOT_FOUND"
+  | "SOURCE_UNAVAILABLE"
   | "VALIDATION"
   | "CONFLICT";
 
@@ -67,7 +68,7 @@ export function createTutorService(deps: {
   ): Promise<AuthorizedChunk[]> {
     if (sourceIds.length === 0) return [];
     const chunks = await deps.sourceChunks.listForSources(scope, [...sourceIds]);
-    return chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
+    return chunks.filter(chunk => chunk.text.trim()).map(({ id, sourceId, page }) => ({ id, sourceId, page }));
   }
 
   return {
@@ -150,13 +151,17 @@ export function createTutorService(deps: {
       );
 
       if (!existing) {
+        const authorized = await authorizedChunksFor(scope, input.sourceIds);
+        if (input.sourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
+          throw new TutorServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
+        }
         const selection = validatePageSelection(
           {
             sourceIds: input.sourceIds,
             currentPage: input.currentPage,
             chunkId: input.chunkId,
           },
-          await authorizedChunksFor(scope, input.sourceIds),
+          authorized,
         );
         if (!selection.ok) {
           throw mapPageSelectionToHttp(selection.code);

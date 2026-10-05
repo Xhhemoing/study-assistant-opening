@@ -275,6 +275,15 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return sourceRecordSchema.parse(body);
     },
 
+    async retryParse(sourceId: string): Promise<SourceRecord> {
+      const body = await request(
+        `/api/opening/sources/${sourceId}/retry`,
+        { method: "POST", body: JSON.stringify({}) },
+        fetchImpl,
+      );
+      return sourceRecordSchema.parse(body);
+    },
+
     async getSourceDownload(sourceId: string, version: number): Promise<SourceDownload> {
       const body = await request(
         `/api/opening/sources/${sourceId}/download?version=${version}`,

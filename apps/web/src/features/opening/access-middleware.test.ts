@@ -12,6 +12,10 @@ function request(method: string, origin?: string, base = publicBase) {
   });
 }
 
+function pageRequest(pathname: string) {
+  return new NextRequest(`${publicBase}${pathname}`);
+}
+
 describe("opening same-origin middleware", () => {
   beforeEach(() => {
     vi.stubEnv("NODE_ENV", "production");
@@ -50,5 +54,11 @@ describe("opening same-origin middleware", () => {
   it("does not apply mutation checks to a read request", () => {
     const response = middleware(request("GET", "https://foreign.example"));
     expect(response.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("keeps legacy course links outside the Opening redirect", () => {
+    vi.stubEnv("OPENING_RELEASE", "1");
+    const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
+    expect(response.status).toBe(200);
   });
 });

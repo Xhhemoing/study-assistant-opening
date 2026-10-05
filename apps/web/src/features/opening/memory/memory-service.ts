@@ -99,7 +99,7 @@ export function createOpeningMemoryService(sql: Sql) {
             id: decision.id,
             expectedVersion: decision.expectedVersion,
             clientKey: decision.clientKey,
-            deleteSourceText: false,
+            deleteSourceText: decision.deleteSourceText ?? false,
           });
           return {
             id: receipt.memoryId,
@@ -124,6 +124,16 @@ export function createOpeningMemoryService(sql: Sql) {
             decision.expectedVersion,
             decision.clientKey,
           );
+          return toCard(item);
+        }
+        if (decision.action === "replace") {
+          const item = await repo.replaceMemory(scopeOf(principal), {
+            id: decision.id,
+            expectedVersion: decision.expectedVersion,
+            clientKey: decision.clientKey,
+            text: decision.text,
+            sourceTurnIds: decision.sourceTurnIds,
+          });
           return toCard(item);
         }
         const item = await repo.reject(

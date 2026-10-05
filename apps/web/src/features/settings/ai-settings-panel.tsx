@@ -15,7 +15,7 @@ function ModelSelect({ label, models, supplier, value, fallback, onChange }: {
     <select className={ui.input} value={value ?? ""} onChange={event => onChange(event.target.value || null)}>
       <option value="">{fallback}</option>
       {missing ? <option value={value!}>已移除的模型（{value}）</option> : null}
-      {modelOptions(models, supplier, value).map(model => <option key={model.id} value={model.id}>{model.providerLabel} · {model.label}{model.availability === "available" ? "" : `（${availabilityLabels[model.availability]}）`}</option>)}
+      {modelOptions(models, supplier, value).map(model => <option key={model.id} value={model.id}>{model.providerLabel} · {model.label}{model.supportsVision ? " · 视觉" : " · 文本"}{model.availability === "available" ? "" : `（${availabilityLabels[model.availability]}）`}</option>)}
     </select>
   </label>;
 }
@@ -47,7 +47,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
       {stale ? <p className="text-xs leading-6 text-amber-800" role="alert">{draft.mode === "manual" ? "手动锁定的模型已移除，请在上方重新选择手动模型，或恢复服务器默认设置。" : "自动路由中有模型已移除，请重新选择默认模型或对应规则，或恢复服务器默认设置。"}</p> : null}
       {selected.map(model => <p className="break-words text-xs leading-6 text-zinc-500" key={model.id}>{model.label}（{model.modelName}）：输入 {model.inputCentsPerMillion}、输出 {model.outputCentsPerMillion} 分 / 百万 token。</p>)}
     </div>
-    <div className="space-y-1 text-xs leading-6 text-zinc-500"><p>仅支持文本。价格由服务器配置；所有供应商须由部署者换算为同一记账币种，不自动换汇。工作区共享日上限 {data.dailyCapCents} 分（UTC 日界），切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。任何所选模型不可用时都会停止，不会自动重试或改用其他供应商。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>这里选择已部署模型。新增供应商、模型、密钥或价格需要管理员更新服务器目录，并同步重启网页与任务服务。</p><p>设置中的原生备份暂不包含模型选择与路由，请在迁移服务器前另行记录。</p></div>
+    <div className="space-y-1 text-xs leading-6 text-zinc-500"><p>支持文本模型；标记为“视觉”的模型可分析指定 PDF 页图像。价格由服务器配置；所有供应商须由部署者换算为同一记账币种，不自动换汇。工作区共享日上限 {data.dailyCapCents} 分（UTC 日界），切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。任何所选模型不可用时都会停止，不会自动重试或改用其他供应商。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>这里选择已部署模型。新增供应商、模型、密钥或价格需要管理员更新服务器目录，并同步重启网页与任务服务。</p><p>设置中的原生备份暂不包含模型选择与路由，请在迁移服务器前另行记录。</p></div>
     <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || stale || routes.some(route => route.problem !== null) || (!dirty && data.saved && !data.invalidStoredSettings)} onClick={onSave}>{busy ? <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}保存模型设置</button><button type="button" className={ui.secondary} disabled={busy || (!data.saved && !dirty)} onClick={onReset}>恢复服务器默认设置</button></div>
   </div>;
 }

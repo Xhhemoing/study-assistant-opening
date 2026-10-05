@@ -24,6 +24,13 @@ const SOURCE_LABEL: Record<string, string> = {
   unknown: "未知",
 };
 
+function formatEvidenceTime(value: string | number): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "时间未知"
+    : date.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
+}
+
 function resultLabel(item: LearningSummary): string {
   if (item.recentPerformance && item.status === "observed_independent") return "最近观察到独立完成";
   if (item.recentPerformance && item.status === "needs_check") return "最近一次需要核验";
@@ -85,7 +92,7 @@ function SummaryGroup({ group }: { group: LearningSummaryAggregate }) {
         <div><dt className="inline">核验活动：</dt><dd className="inline">已接受 {group.openChecks.acceptedCount} · 进行中 {group.openChecks.inProgressCount} · 到期 {group.openChecks.dueCount}</dd></div>
       </dl>
       <p className="py-1 leading-5">证据来源：{sourceLabels} · {group.representatives.length ? `${group.representatives.length} 条代表证据` : "无代表证据"}</p>
-      {group.representatives.map((representative, index) => <div key={representative.observationId} className="py-1"><span>代表观察 {index + 1}</span><LearningEvidenceEligibilityDetails eligibility={representative.eligibility} versionApplicability={representative.versionApplicability} /></div>)}
+      {group.representatives.map((representative, index) => <div key={representative.observationId} className="py-1"><span className="break-all">代表观察 {index + 1} · 观察 ID：{representative.observationId} · 记录时间：<time dateTime={new Date(representative.attemptAt).toISOString()}>{formatEvidenceTime(representative.attemptAt)}</time></span><LearningEvidenceEligibilityDetails eligibility={representative.eligibility} versionApplicability={representative.versionApplicability} /></div>)}
       {!group.representatives.length ? <p className="py-1">资格信息尚未提供，保留待核验。</p> : null}
     </details>
   </li>;
@@ -146,8 +153,8 @@ export function CourseLearningRecords({ courseId, state, error, summary, onReloa
               <details className="w-full text-xs text-zinc-500"><summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">查看来源与资格</summary>
                 {item.recentPerformance ? <p className="py-2 leading-5">近期结果依据最近的 {item.recentPerformance.evidenceCount ?? item.recentPerformance.evidenceIds.length} 条原始作答；纠正记录不增加练习次数。</p> : null}
                 {item.historicalIncorrectCount !== undefined && item.unverifiedCount !== undefined ? <p className="py-2 leading-5">更早的记录中有 {item.historicalIncorrectCount} 条核验错误；当前共 {item.unverifiedCount} 条记录尚未核验。历史仍可查看。</p> : null}
-                <p className="py-2 leading-5">证据来源：{item.evidenceSources?.map((source) => SOURCE_LABEL[source] ?? source).join("、") || "无"} · {item.evidenceIds.length ? `${item.evidenceIds.length} 条代表证据` : "无"}</p>
-                {item.evidenceEligibility?.map(({ observationId, eligibility, versionApplicability }, index) => <div key={observationId} className="py-1"><span className="text-xs text-zinc-500">{item.recentPerformance?.evidenceIds.includes(observationId) ? "最近代表观察" : "代表观察"} {index + 1}</span><LearningEvidenceEligibilityDetails eligibility={eligibility} versionApplicability={versionApplicability} /></div>)}
+                <p className="break-all py-2 leading-5">证据来源：{item.evidenceSources?.map((source) => SOURCE_LABEL[source] ?? source).join("、") || "无"} · {item.evidenceIds.length ? `${item.evidenceIds.length} 条代表证据` : "无"} · 观察 ID：{item.evidenceIds.join("、") || "无"} · 记录时间：{item.lastObservedAt ? <time dateTime={item.lastObservedAt}>{formatEvidenceTime(item.lastObservedAt)}</time> : "未知"}</p>
+                {item.evidenceEligibility?.map(({ observationId, eligibility, versionApplicability }, index) => <div key={observationId} className="py-1"><span className="break-all text-xs text-zinc-500">{item.recentPerformance?.evidenceIds.includes(observationId) ? "最近代表观察" : "代表观察"} {index + 1} · 观察 ID：{observationId}</span><LearningEvidenceEligibilityDetails eligibility={eligibility} versionApplicability={versionApplicability} /></div>)}
                 {!item.evidenceEligibility?.length ? <p className="text-xs text-zinc-500">资格信息尚未提供，保留待核验。</p> : null}
               </details>
             </li>

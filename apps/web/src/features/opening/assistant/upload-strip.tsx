@@ -1,9 +1,13 @@
 "use client";
 
-import { LoaderCircle, Upload } from "lucide-react";
-import { useState, type ChangeEvent } from "react";
-import { resolveUploadPutUrl, type OpeningApi } from "../client/api";
-import { resolveUploadMime } from "../inbox/upload-state";
+import { useMemo, useState } from "react";
+import type { OpeningApi } from "../client/api";
+import { resolveUploadPutUrl } from "../client/api";
+import { putPrivateBytes } from "../inbox/put-private";
+import { createUploadClient } from "../inbox/upload-client";
+import { createUploadQueue, type UploadQueueItem } from "../inbox/upload-queue";
+import { UploadDropzone } from "../inbox/upload-dropzone";
+import { ui } from "../design/ui";
 
 type Props = {
   api: OpeningApi;
@@ -11,78 +15,53 @@ type Props = {
   disabled?: boolean;
 };
 
-async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function mimeOf(file: File): ReturnType<typeof resolveUploadMime> {
-  return resolveUploadMime({ name: file.name, type: file.type });
-}
-
 export function UploadStrip({ api, onUploaded, disabled }: Props) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  const [items, setItems] = useState<UploadQueueItem[]>([]);
+  const client = useMemo(() => createUploadClient({
+    begin: (input) => api.beginUpload(input),
+    complete: (id) => api.completeUpload(id),
+    put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded)),
+    resolvePutUrl: resolveUploadPutUrl,
+  }), [api]);
+  const queue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
+    onBytes,
+    ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket } : {}),
+  })), [client]);
+  const busy = disabled || items.some((item) => item.state === "idle" || item.state === "uploading");
 
-  async function onChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    const mime = mimeOf(file);
-    if (!mime) {
-      setMessage("不支持这个格式。请使用 PDF、PPT、PPTX、HTML、Markdown、PNG、JPEG 或 WEBP。");
-      return;
-    }
-    setBusy(true);
-    setMessage("");
-    try {
-      const buffer = await file.arrayBuffer();
-      const sha256 = await sha256Hex(buffer);
-      const ticket = await api.beginUpload({
-        name: file.name.slice(0, 180),
-        mime,
-        bytes: file.size,
-        sha256,
-      });
-      const putUrl = resolveUploadPutUrl(ticket);
-      const put = await fetch(putUrl, {
-        method: "PUT",
-        headers: { "content-type": mime },
-        body: buffer,
-      });
-      if (!put.ok) {
-        throw new Error(`上传对象失败 (${put.status})`);
-      }
-      await api.completeUpload(ticket.source.id);
-      setMessage(`已上传：${ticket.source.name}`);
-      await onUploaded();
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "上传失败");
-    } finally {
-      setBusy(false);
-    }
+  async function uploadFiles(files: File[]) {
+    const localFiles = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      type: file.type,
+      bytes: new Uint8Array(await file.arrayBuffer()),
+    })));
+    queue.add(localFiles);
+    setItems(queue.snapshot());
+    await queue.start(setItems);
+    await onUploaded();
+  }
+
+  async function retry(id: string) {
+    await queue.retry(id, setItems);
+    await onUploaded();
   }
 
   return (
-    <div className="flex items-center gap-3 border-b border-zinc-200 px-3 py-2">
-      <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm">
-        {busy ? (
-          <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
-        ) : (
-          <Upload className="h-4 w-4" aria-hidden />
-        )}
-        上传材料
-        <input
-          type="file"
-          className="sr-only"
-          disabled={disabled || busy}
-          onChange={onChange}
-          accept=".pdf,.ppt,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,audio/*"
-        />
-      </label>
-      {message ? <span className="text-xs text-zinc-600">{message}</span> : null}
+    <div className="space-y-2 border-b border-zinc-200 px-3 py-3">
+      <UploadDropzone disabled={busy} onFiles={(files) => void uploadFiles(files)} />
+      {items.length ? (
+        <ul className="space-y-1.5" aria-label="助手上传队列">
+          {items.map((item) => (
+            <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="min-w-0 flex-1 break-words text-zinc-700">{item.file.name}</span>
+              <span className="text-zinc-500" role="status">
+                {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.state === "saved" ? "已保存，正在解析" : item.message ?? "上传失败"}
+              </span>
+              {item.state === "failed" ? <button className={ui.secondary} onClick={() => void retry(item.id)} type="button">重试</button> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
