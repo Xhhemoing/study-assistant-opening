@@ -256,3 +256,5 @@ Heidi 回复“请你分析并解决”后，按授权范围处理。分支 `fea
   2. Playwright 的 webServer 只启动 web，不启动 worker，所以 CI 中解析永远不会进入 failed，“原件已保存，解析失败”这个前提根本不成立。
   - 处理：`6483377` 把用例改到材料库页面，通过 `#upload input[type=file]` 上传，验证“打开原件 v0”的下载内容与原文件一致，reload 后再验证一次；所有动作加了有界超时。不再断言解析结果，真实解析由 `OPENING_E2E` 隔离环境下的 opening-workflow 用例覆盖。是否要在浏览器 CI 中启动 worker（及解析器），需要 Heidi 决定。
 - **today-plan ×2**：访问的是 `/learn` 和 `/learn/goals/new`。标题“今日任务”和“选择今天的安排”分别来自旧版 `features/learn/today-plan-view.tsx` 和 `features/today-plan/plan-options.tsx`，middleware 会把 `/learn` 重定向到 `/opening/today`。归入遗留集合，未改动。遗留用例因此共 14 个：前述 12 个加 today-plan ×2。
+
+- run 37279183997（`534eb73`，含 `6483377`）：Browser 29 passed / 14 failed / 3 skipped，opening-upload 已通过；其余步骤全部通过，Build 仍因浏览器失败被跳过。剩余 14 个全部属于遗留集合，等待 Heidi 决定退役还是改写。
