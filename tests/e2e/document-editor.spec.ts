@@ -18,7 +18,8 @@ test("opens the server-backed note editor from Library", async ({ browser, baseU
 
     const page = await context.newPage();
     await page.goto("/library");
-    await page.getByRole("link", { name: "新建笔记" }).click();
+    // The Library header now has an icon link and a primary button, both "新建笔记" -> /library/new.
+    await page.getByRole("link", { name: "新建笔记" }).first().click();
     await expect(page).toHaveURL(/\/library\/[0-9a-f-]{36}$/);
     await expect(page.getByRole("heading", { name: "编辑笔记" })).toBeVisible();
     await expect(page.locator(".bn-editor")).toBeVisible();

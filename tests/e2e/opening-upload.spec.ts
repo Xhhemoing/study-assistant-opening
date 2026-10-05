@@ -14,6 +14,8 @@ test.describe("opening upload", () => {
     browser,
     baseURL,
   }) => {
+    // The failed-parse label alone may take up to 120s on CI; keep the test budget above it.
+    test.setTimeout(180_000);
     const context = await browser.newContext({ baseURL });
     try {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
