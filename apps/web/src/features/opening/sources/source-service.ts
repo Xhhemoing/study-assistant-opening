@@ -48,7 +48,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const key = storage.stagingKey(id); const head = await storage.headObject(key); if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
       const digest = await storage.streamDigest(key, source.bytes + 1); if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
       const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime }; validateStoredUpload(source, actual);
-      const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id }, privacyEpoch: await privacy.getWorkspaceEpoch(scope), actual,
+      const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id, sourceVersion: source.version }, privacyEpoch: await privacy.getWorkspaceEpoch(scope), actual,
         beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(id, current.version), { expectedEtag: head.etag }),
       }); await storage.deleteObject(key); return done;
     },
@@ -58,7 +58,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const source = await sources.get(scope, id);
       return sources.retryParseWithJob(scope, id, {
         key: `parse:${id}:v${source.version}:retry:${randomUUID()}`,
-        payload: { sourceId: id },
+        payload: { sourceId: id, sourceVersion: source.version },
         privacyEpoch: await privacy.getWorkspaceEpoch(scope),
       });
     },

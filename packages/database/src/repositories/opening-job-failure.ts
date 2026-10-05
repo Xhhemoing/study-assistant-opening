@@ -22,6 +22,12 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
       ? job.payload.sourceId : null;
     if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return true;
+    // Parse jobs carry the source version they target (payload.sourceVersion). A failure
+    // for an older version must never overwrite a newer version's state. Jobs without the
+    // field (created before it existed) stay unfenced, as before.
+    const rawVersion = job.payload && typeof job.payload === "object" && "sourceVersion" in job.payload
+      ? job.payload.sourceVersion : null;
+    const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
     // The job epoch fences privacy changes; source version is independent.
     // Never replace ready/new-version/excluded state. Excluded rows receive a
     // terminal privacy error below so the inbox does not spin forever.
@@ -34,6 +40,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
         UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
         WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
           AND s.upload_state = 'uploaded'
+          AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
           AND s.parse_state IN ('not_started', 'queued', 'running')
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
@@ -41,6 +48,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
         UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json({ code: "PRIVACY_EXCLUDED", message: "材料已从学习上下文中排除。", retryable: false })}, updated_at = now()
         WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
           AND s.upload_state = 'uploaded'
+          AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
           AND s.parse_state IN ('not_started', 'queued', 'running')
           AND EXISTS (SELECT 1 FROM opening_privacy_exclusions e
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
@@ -49,6 +57,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
         UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
         WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
           AND s.upload_state = 'uploaded'
+          AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
           AND s.parse_state IN ('not_started', 'queued', 'running')
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;

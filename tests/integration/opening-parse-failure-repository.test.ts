@@ -20,7 +20,7 @@ async function seed() {
     VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'broken.pdf', 'application/pdf', 44, ${"a".repeat(64)}, 0, 'uploaded', 'not_started')`;
   const repository = createOpeningJobRepository(fixture.sql);
   const job = await repository.createOnce(fixture.scope, {
-    key: randomUUID(), kind: "parse", payload: { sourceId }, privacyEpoch: 0,
+    key: randomUUID(), kind: "parse", payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0,
   });
   return { sourceId, job, repository, sources: createOpeningSourceRepository(fixture.sql) };
 }
@@ -52,8 +52,15 @@ describe("parse failure source projection", () => {
         throw new Error("conversion failed");
       })).toBe(true);
       const record = await sources.get(fixture.scope, sourceId);
-      expect(record.parseState).toBe(change === "ready" || change === "unsupported" ? change : "not_started");
-      expect(record.error).toBeNull();
+      if (change === "epoch") {
+        // a8d7c8d: a job made stale by a privacy change is surfaced as a terminal
+        // PARSE_STALE failure so the inbox does not stay pending forever.
+        expect(record.parseState).toBe("failed");
+        expect(record.error).toMatchObject({ code: "PARSE_STALE", retryable: false });
+      } else {
+        expect(record.parseState).toBe(change === "ready" || change === "unsupported" ? change : "not_started");
+        expect(record.error).toBeNull();
+      }
       expect((await fixture.sql`SELECT state FROM opening_jobs WHERE id = ${job.id}`)[0]?.state).toBe("failed");
     });
   }
@@ -83,7 +90,9 @@ describe("parse failure source projection", () => {
       });
       expect(await pending).toBe(true);
       expect((await repository.get(fixture.scope, job.id)).state).toBe("failed");
-      expect((await sources.get(fixture.scope, sourceId)).parseState).toBe("not_started");
+      // The failure is projected only after the epoch change commits, so it sees
+      // the job as stale and records PARSE_STALE rather than a parse failure.
+      expect(await sources.get(fixture.scope, sourceId)).toMatchObject({ parseState: "failed", error: { code: "PARSE_STALE" } });
     } finally {
       await Promise.allSettled(pending ? [pending] : []);
       await Promise.all([closeRace(gate.sql), closeRace(writer.sql), closeRace(observer.sql)]);
