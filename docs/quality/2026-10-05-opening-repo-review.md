@@ -247,3 +247,12 @@ Heidi 回复“请你分析并解决”后，按授权范围处理。分支 `fea
 3. 本机测试库：给本分支单独建一个库，或决定重置共享的 15432 库。
 4. 删除 pu05b 残留目录（只删 junction）、pu03 的处理方式，以及 6 个分支是否用 `-D` 删除。
 5. 以下仍待确认：b31feb7 的非 UI 删除（`.learnings/*`、`TODO.md`、`.hermes.md`、`sync.sh`、`demos/pelican-bicycle.html`、pi-sparkle skills ×2 份、2026-07-21 计划文档、`AGENTS.md` 重写、ESLint 去掉的 `.hermes/**` 和 `project/**` 忽略项）；AIstudy origin 的 SSH 问题和 PR #2；三条分叉线如何合并；AC01–AC12 占位；`.tmp` 归档；是否允许 agent 在本地运行 Playwright；Notion 看板访问权限。
+
+### 补充 2026-10-05 下午（CI 37276189357 之后）
+
+- run 37276189357（`cc0b233`）：Browser 28 passed / 15 failed / 3 skipped，Build 被跳过，其余步骤全部通过。document-editor 已通过。
+- **opening-upload 根因**：属测试漂移，并叠加了 CI 环境前提缺失。产品本身没有问题，3bbe030 也不是原因：新上传的 source 版本为 0，payload 的 `sourceVersion` 也是 0，围栏条件一致。
+  1. a8d7c8d 用 `UploadDropzone` 替换了带“选择文件或拍照”label 的选择器，同时把材料列表、“查看原件”和原件查看器从 `/opening/assistant` 移到 `/opening/library?tab=materials`（助手页只留上传条）。`getByLabel("选择文件或拍照").setInputFiles` 找不到元素，而该动作没有超时，于是一直等到整个测试超时（90s、180s 都一样，日志里也只有超时、没有断言错误）。
+  2. Playwright 的 webServer 只启动 web，不启动 worker，所以 CI 中解析永远不会进入 failed，“原件已保存，解析失败”这个前提根本不成立。
+  - 处理：`6483377` 把用例改到材料库页面，通过 `#upload input[type=file]` 上传，验证“打开原件 v0”的下载内容与原文件一致，reload 后再验证一次；所有动作加了有界超时。不再断言解析结果，真实解析由 `OPENING_E2E` 隔离环境下的 opening-workflow 用例覆盖。是否要在浏览器 CI 中启动 worker（及解析器），需要 Heidi 决定。
+- **today-plan ×2**：访问的是 `/learn` 和 `/learn/goals/new`。标题“今日任务”和“选择今天的安排”分别来自旧版 `features/learn/today-plan-view.tsx` 和 `features/today-plan/plan-options.tsx`，middleware 会把 `/learn` 重定向到 `/opening/today`。归入遗留集合，未改动。遗留用例因此共 14 个：前述 12 个加 today-plan ×2。
