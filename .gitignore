@@ -63,3 +63,7 @@ NUL
 
 # Stray temp output when TMPDIR-like variables resolve to the literal string "undefined"
 undefined/
+
+# 部署凭据只存仓库外（%USERPROFILE%/.aistudy-deploy/）
+.aistudy-deploy/
+*.secret
