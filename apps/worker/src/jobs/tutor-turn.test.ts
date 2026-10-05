@@ -315,6 +315,24 @@ describe("tutor turn handler", () => {
     }));
   });
 
+  it("records a definitive failure (not unknown) when completeTurn rejects on privacy epoch drift", async () => {
+    const { deps, tutorJobs, budget } = setup();
+    const privacy = {
+      getWorkspaceEpoch: vi.fn(async () => 7),
+      listExcludedSourceIds: vi.fn(async () => []),
+    };
+    tutorJobs.completeTurn.mockRejectedValueOnce(
+      Object.assign(new Error("privacy epoch drift: expected 7 current 8"), { code: "CONFLICT" }),
+    );
+
+    await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toThrow(/privacy epoch drift/);
+
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ expectedPrivacyEpoch: 7 }));
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "privacy epoch drift: expected 7 current 8");
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+  });
+
   it("puts confirmed memory into the provider instruction and omits candidates", async () => {
     const { deps, provider } = setup();
     const memories = {
