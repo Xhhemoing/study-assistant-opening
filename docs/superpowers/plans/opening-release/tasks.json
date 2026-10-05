@@ -416,10 +416,22 @@
       "evidence": []
     },
     {
+      "id": "K02a",
+      "owner": "EXPERIENCE+AI",
+      "dependsOn": [
+        "L02",
+        "T03"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
       "id": "K02",
       "owner": "EXPERIENCE+AI+DATA",
       "dependsOn": [
         "K01",
+        "K02a",
         "L02",
         "T03"
       ],

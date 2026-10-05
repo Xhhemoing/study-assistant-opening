@@ -52,11 +52,29 @@ it('rejects a self prerequisite', () => {
 - [ ] 重跑单测、`npm run test:integration -- opening-knowledge`：重复提取幂等、非法引用、跨课程越权、循环、人工更正不被覆盖、删除/重建竞态。人工审查一门课的章节覆盖、关键先修和引用支持度，记录分母；不凭图形漂亮认定知识结构正确。
 - [ ] 回滚关闭知识构建任务与读入口，保留新增表和原始资料；不可降级到无引用生成图，数据库恢复走Q03。
 
+### K02a: Material-anchored tutoring deepen (thin slice)
+
+**Owner:** EXPERIENCE+AI. **Depends:** L02,T03.
+**Research:** `docs/quality/2026-10-05-k02-deeptutor-fold-in.md` §5 — fold DeepTutor *patterns* (page-locator citation + side-read; next-step hint vs full explain) into existing T03/L02 surfaces. **No parallel DeepTutor roadmap.**
+**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`（page/`skillLabel`/optional-nodeId 路径）；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`（可无 `nodeId` 返回 clarify|guided|worked_example|independent_variant）。
+**Modify:** T03 tutor worker / mode prompts（`hint`↔guided、「下一步提示」；`explain`/`worked_example`↔full + L01 reveal）；可选 U02/U03 page-sticky citation chips → 既有 viewer/`TurnInput.currentPage`。
+**Interfaces:** `recommendTutorAction` 的 thin 形态可用 `skillLabel`+`sourceIds`+`currentPage`（`nodeId` optional）；不要求 KnowledgeNode / SkillEvidence。
+
+- [ ] Mode policy：`makeTutorInstruction('hint')` 含下一步提示且禁止直接给最终答案；`'explain'` / worked_example 允许完整解答并标记 reveal。
+- [ ] Exposure wash：session 内 hint/explain 后客户端 `assistance:'independent'` → 服务端仍 `hinted`/`revealed`；新 L02 retest session 不继承 exposure。
+- [ ] Page citation：`currentPage=N` 的 citations.chunk.page = N；发明页码 → `page_not_in_sources`。
+- [ ] Variant identity：assisted 成功后推荐 **不同** problemRef 的 `independent_variant`；同题再答不能升为 `observed_independent`。
+- [ ] Retest close：接受 L02 candidate → 无协助完成 → due 清除；API/UI **无 mastery %**。
+- [ ] No K01 required：空 knowledge snapshot / 无 SkillEvidence 行时，tutor-actions 仍可从 page/skillLabel 观察返回动作。
+
+**Do-not-fold（见 research §3）：** GraphRAG / LightRAG / RAG-Anything；multi-agent Partners/subagents；Mastery Path / mastery % gates；OpenMAIC multi-agent classroom；whiteboard + TTS；one-click classroom generation。
+
 ### K02: Skill-linked evidence, targeted tutoring and retest feedback
 
-**Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,L02,T03.
-**Create:** `packages/domain/src/opening/tutor-policy.ts`、`tutor-policy.test.ts`；`packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/<next-opening-skill-evidence-migration>.sql`（实施时按仓库实际顺序分配编号）；`apps/web/src/features/opening/learning/tutor-actions.ts`；`apps/web/src/app/api/opening/courses/[id]/tutor-actions/route.ts`；`tests/integration/opening-adaptive-loop.test.ts`。
-**Modify:** L01 observation service、L02 retest worker、T03 tutor worker（各自小适配模块，不继续扩大超过200行的文件）。
+**Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,K02a,L02,T03.
+**Research:** `docs/quality/2026-10-05-k02-deeptutor-fold-in.md` §5 — K02b / full slice：SkillEvidence + migration `0029` + `nodeId`-required recommendation；保留 K02/K01 集成门禁。
+**Create:** `packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/<next-opening-skill-evidence-migration>.sql`（实施时按仓库实际顺序分配编号；计划称 0029）；`tests/integration/opening-adaptive-loop.test.ts`。
+**Modify:** L01 observation service、L02 retest worker；在 K02a 的 tutor-policy/tutor-actions 上补 `nodeId` 必填路径与 K01 snapshot 自适应回路（各自小适配模块，不继续扩大超过200行的文件）。
 **Interfaces:** `recommendTutorAction({nodeId,hasCheckedIndependent,hasAssistance,retestDue}):TutorAction['kind']`；服务端从SkillEvidence/Observation加载标志，客户端不可自报已核验独立。
 
 - [ ] 写帮助曝光不能被误当独立掌握的失败测试：
@@ -71,3 +89,4 @@ it('asks for independent transfer after assisted success', () => {
 - [ ] 复用L02重测队列、T03材料辅导和P02候选任务，不另造评分系统。完成重测关闭对应due项、追加新证据并更新下一步建议；同题复述、看答案后答对、新题独立和延迟表现分开。用户可纠正错因；不要把OCR错误算学科错误。
 - [ ] 重跑单测和`npm run test:integration -- opening-adaptive-loop`，验证“提示→新题→延迟→更新计划候选”及跨技能不污染。效果报告比较独立新题、延迟正确率、提示依赖和耗时，保留样本量/难度差异；不作因果疗效或全面提分保证。
 - [ ] 0029追加SkillEvidence关联，保持LearningEvent v1兼容。回滚停用新投影，保留L01原始观察与既有辅导功能，不删除学习历史。
+

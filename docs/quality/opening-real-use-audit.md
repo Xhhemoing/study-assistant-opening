@@ -124,7 +124,10 @@
 | AC10 | 同一答案分别来自看例题、提示、新题独立、延迟 | 标签与证据不同；生成答案未经核验不当参考 | L01,L02,Q02 |
 | AC11 | 弱网、关闭上传页、模型超时、晚到旧回答 | 原件/草稿可恢复；不重复写；不自动再次收费 | I01,I03,T01,T03,U02,U03 |
 | AC12 | 拒绝计划、当天没上传、删除记忆后恢复备份 | 不视为没学习/人格；不改正式计划；不复活删除 | M02,P02,Q03,Q01 |
+| AC13 | **（proposed / 未验收）** 上传课件→选材料+物理页→至少调用 (`hint` **或** `guided`) **且** (`worked_example` **或** independent variant/retest)，带 page citation；无 mastery % | 提案见 `docs/quality/2026-10-05-k02-deeptutor-fold-in.md` §5；**勿当作已通过** | K02a,T03,L02,U02 |
 
+
+> **K02a / DeepTutor fold-in（proposed，非通过状态）：** 扩展 **AC06 / AC10** — 更细 mode 的 exposure 标签（hint vs explain）；`worked_example` 不得升级独立性；新 variant retest 路径。新增 **AC13**（上表，proposed）。详见 `docs/quality/2026-10-05-k02-deeptutor-fold-in.md` §5。以上均为提案，**不要发明假的 pass 状态**。
 语义金标由人工核对：课程事实、页码、公式关键符号、提示是否泄露完整答案。fake provider 只验协议与错误路径；真实模型验语义，真机验上传/切换。样本分层与分母必须报告，不预填准确率或延迟承诺。
 
 ## 6. 落地顺序与研究停止条件

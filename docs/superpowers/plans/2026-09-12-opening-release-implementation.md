@@ -77,7 +77,8 @@
 | C03 | PIPELINE | 钉钉实际获准通知/文件接入 | C01,I01,I03 | 09-connections.md |
 | V01 | PIPELINE | 录音转写、视频音轨/关键帧与时间引用 | X01,I02,I03 | 10-media-knowledge.md |
 | K01 | AI+DATA | 课程知识结构生成、纠正与增量更新 | X01,C01,I02,T02 | 10-media-knowledge.md |
-| K02 | EXPERIENCE+AI+DATA | 技能证据、针对性辅导与重测反馈 | K01,L02,T03 | 10-media-knowledge.md |
+| K02a | EXPERIENCE+AI | 材料锚定辅导加深（thin slice；page cite + hint/explain） | L02,T03 | 10-media-knowledge.md |
+| K02 | EXPERIENCE+AI+DATA | 技能证据、针对性辅导与重测反馈 | K01,K02a,L02,T03 | 10-media-knowledge.md |
 | P04 | AI+EXPERIENCE | 多源事项归并及低选择负担的主动安排 | C02,C03,K02,P02,M01 | 11-proactive-acceptance.md |
 | U04 | EXPERIENCE | 连接/知识/媒体/今日行动真实交互 | C02,C03,V01,K02,P04 | 11-proactive-acceptance.md |
 | Q04 | QA+INTEGRATOR | CAP01–06真实验收及扩展隐私恢复 | U04,Q02 | 11-proactive-acceptance.md |
@@ -93,7 +94,7 @@
 - F02契约定型之前，不并行写消费方接口。变更F02由INTEGRATOR合并，任务作者不能擅改字段。
 - F03后可并行I01/I03/T01；P01与U01只依赖已冻结契约，可并行。
 - T03后可并行准备记忆、学习和计划的独立契约/纯规则/测试；完整验收仍遵守tasks.json中的M01→L01→P02依赖。数据库迁移始终由DATA按顺序合入，迁移序号不阻止独立叶模块开发。
-- 落盘迁移：0016 sources，0017 conversations，0018 jobs/outbox/budget，0019 paper learning，0020 source_chunks，0021 assistant_candidates，0022 memories/privacy（M01），0023 memory privacy epoch（M02，2026-09-20 协调者从0024改配——迁移加载器强制连续编号，禁止占位与例外）。P02 使用 0024 timetable/plans/reminders；当前工作区新增 0025 opening turn intent snapshot；本 H6 切片新增 0026 opening turn outcome unknown；未来预留：0027 connections/imports（C01），0028 knowledge（K01），0029 skill evidence（K02）。保留C01/P02、K01/C01、K02/K01的集成门禁；若需拆分依赖，先证明契约/隐私/来源边界独立，再由集成者改任务图。不复用已发布号；新迁移编号一律由集成者分配，实现者不得自选。
+- 落盘迁移：0016 sources，0017 conversations，0018 jobs/outbox/budget，0019 paper learning，0020 source_chunks，0021 assistant_candidates，0022 memories/privacy（M01），0023 memory privacy epoch（M02，2026-09-20 协调者从0024改配——迁移加载器强制连续编号，禁止占位与例外）。P02 使用 0024 timetable/plans/reminders；当前工作区新增 0025 opening turn intent snapshot；本 H6 切片新增 0026 opening turn outcome unknown；未来预留：0027 connections/imports（C01），0028 knowledge（K01），0029 skill evidence（K02）。保留C01/P02、K01/C01、K02/K01的集成门禁；K02a 已按 thin-slice 证明仅依赖 L02+T03（见 docs/quality/2026-10-05-k02-deeptutor-fold-in.md）；若需拆分依赖，先证明契约/隐私/来源边界独立，再由集成者改任务图。不复用已发布号；新迁移编号一律由集成者分配，实现者不得自选。
 - X01为F02旁的增量契约门禁，不重开或篡改F02已验证记录；C02/C03与V01可独立推进，钉钉实接权限不阻塞邮箱/媒体离线开发。扩展接口见`opening-release/capability-interfaces.md`。
 - 所有`package.json`、lockfile、包index、vitest配置、全局导航、migration注册由INTEGRATOR单写；子任务提交变更清单而非抢写。
 - 禁止多个agent同时修改同一工作树中的同一文件；并行代码任务使用独立分支/工作树再集成。
