@@ -6,6 +6,7 @@
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
+| 2026-10-06 | [框架与算法优化调研](2026-10-06-framework-algorithm-optimization-research.md) | exploring | Opening 全栈框架、AI/检索/规划算法、连接器、可靠性 | 保持 PostgreSQL 事实源与 AI 治理骨架；优先解决 web/worker 边界、可评测检索、AI 失败恢复和回调幂等，复杂算法按证据再升级 | 框架/runtime、检索评测、AI retry、DingTalk callback、worker queue ADR、后续功能切片 |
 | 2026-09-30 | [开学版专家问题与本地实验队列](../quality/opening-plan-research-backlog.md) | exploring | Opening、Parser、Provider、检索、学习证据、规划、隐私、恢复与性能 | 保留 8 项待研问题；本轮补充自动路由的评价目标、供应商/密钥管理、今日信息取舍和分学科课程学习路径，区分保守实现与待验证决策；尚未调用外部专家 | 原 I02/T01/I03/M02/Q02/Q03 落点，以及 Settings/Today/Course 的后续决策；不自动批准新算法、网页密钥管理或学习效果承诺 |
 | 2026-09-06 | [对标 DeepStudent 的产品与架构研究](2026-09-06-deepstudent-benchmark.md) | exploring | 产品定位、Learn、Explore、Library、Practice、Review、AI 治理、分发 | 不要复制 DeepStudent 桌面工作台；闭合服务端权威学习闭环。Learn 主读仍 Mock 是最大缺口；保留 AI 候选+审核，不跟随 Craft/AGPL/FSRS | 仅作研究笔记；不自动改 PRD。后续只服务 P0：Learn 主读、Goals/plan-state、门禁、开源治理 |
 | 2026-08-06 | [Notion 导入兼容、自由笔记编辑与简洁界面调研](2026-08-06-notion-import-and-freeform-editor-research.md) | exploring | Library、Editor、Portability、View | 采用 Notion HTML ZIP 保真导入 + MD/CSV 有损备路径，输出 ImportReport 并保留原始导出为证据；数据库视图首期降级表格；画布投影与数据库引擎暂不采用 | 笔记本产品设计、Portability 契约、Notion 导入器任务、编辑工作台设计 |
