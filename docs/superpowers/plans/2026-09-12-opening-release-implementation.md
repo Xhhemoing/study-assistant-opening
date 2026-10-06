@@ -73,6 +73,7 @@
 | Q03 | INTEGRATOR+QA | 打包、恢复与运行监督能力 | P03,M02 | 08-delivery.md |
 | X01 | INTEGRATOR | 扩展契约与开源库制品核验 | F02 | 09-connections.md |
 | C01 | DATA+PIPELINE | 连接授权、凭据、游标、来源与撤销 | X01,F03,M02,P02 | 09-connections.md |
+| C01B | DATA+PIPELINE | 导入回执、游标与撤销收口 | X01,F03,M02,P02,C01 | 09-connections.md |
 | C02 | PIPELINE | 学校自建邮箱IMAP增量同步及附件 | C01,I01,I03 | 09-connections.md |
 | C03 | PIPELINE | 钉钉实际获准通知/文件接入 | C01,I01,I03 | 09-connections.md |
 | V01 | PIPELINE | 录音转写、视频音轨/关键帧与时间引用 | X01,I02,I03 | 10-media-knowledge.md |

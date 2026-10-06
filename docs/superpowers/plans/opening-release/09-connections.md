@@ -48,6 +48,18 @@ it('does not conflate two mailbox generations', () => {
 - [ ] 事务保存connection/import receipt/游标；唯一约束覆盖connection/container/generation/remoteId。撤销删凭据、增版本并取消队列；运行中旧版本不得写回。暂停/撤销不擅删原邮箱，也不隐式删除已导入原件；独立删除走M02并留下阻止重导入的墓碑。
 - [ ] 同命令复测：跨workspace、日志秘密检查、重复导入、撤销竞态、备份无凭据。迁移测试`npm run test:integration -- migration`。回滚先关闭连接worker、撤销凭据，保留新表与原件供修复，不执行破坏性down migration。
 
+### C01B: Import receipts, cursors and revocation closure
+
+**Owner:** DATA+PIPELINE. **Depends:** X01,F03,M02,P02,C01.
+**Create:** `packages/database/src/schema/opening-imports.ts`、`packages/database/src/repositories/opening-imports.ts`、`packages/database/src/migrations/0045_opening_imports.sql`；`tests/integration/opening-imports.test.ts`。
+**Modify:** `packages/database/src/repositories/opening-connections.ts`（撤销只取消该连接的排队任务）、`packages/database/src/index.ts`（导出）。
+**Interfaces:** `opening_import_receipts`唯一约束覆盖connection/container/generation/remoteId；`opening_import_cursors`按connection+container保存游标与generation；写入同时校验连接版本与workspace。
+
+- [x] 先写集成测试：receipt事务插入与幂等重放、游标随generation安全更新、跨workspace/跨generation隔离、已撤销/过期版本/外部连接拒绝写入、撤销只取消本连接排队任务。
+- [x] 实现迁移0045与imports仓储；撤销删凭据、增版本并取消本连接排队任务，运行中旧版本由既有版本检查阻止写回。
+- [x] 门禁：`node node_modules/vitest/vitest.mjs run --project integration tests/integration/opening-imports.test.ts`、`node node_modules/vitest/vitest.mjs run --project handler tests/integration/handler/opening-connections.test.ts`、`npx tsc -p packages/database/tsconfig.json --noEmit`。
+- 不在本票：真实IMAP/钉钉check/sync适配器（C02/C03，现状保持503 fail-closed）、push与hosted CI、浏览器验收。
+
 ### C02: School-hosted IMAP ingestion with open-source adapters
 
 **Owner:** PIPELINE. **Depends:** C01,I01,I03.
