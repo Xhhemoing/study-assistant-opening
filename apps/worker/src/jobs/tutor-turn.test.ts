@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
+import { DEFAULT_STRATEGY_TEMPLATE_ID, PageCitationError } from "@aistudy/domain";
 import { createTutorTurnHandler, makeTutorInstruction } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -24,7 +25,7 @@ describe("tutor turn handler", () => {
   const chunkB: SourceChunk = { ...chunkA, id: "00000000-0000-4000-8000-00000000000b", page: 2, text: "Einstein refined gravity" };
   const secondSourceId = "00000000-0000-4000-8000-000000000007";
   const chunkC: SourceChunk = { ...chunkA, id: "00000000-0000-4000-8000-00000000000c", sourceId: secondSourceId, text: "Momentum is conserved" };
-  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: [chunkA.sourceId], currentPage: 1, chunkId: chunkA.id, learningSessionId: null as string | null };
+  const turn = { text: "explain the laws of motion", mode: "explain", sourceIds: [chunkA.sourceId], currentPage: 1, chunkId: chunkA.id, learningSessionId: null as string | null, strategyTemplateId: null as string | null };
   const claimedJob = { id: "00000000-0000-4000-8000-00000000000j", workspaceId: "00000000-0000-4000-8000-000000000002", ownerUserId: "00000000-0000-4000-8000-000000000003", conversationId: "00000000-0000-4000-8000-000000000004", userTurnId: "00000000-0000-4000-8000-000000000005", assistantTurnId: "00000000-0000-4000-8000-000000000006", status: "running" as const, mode: "explain", error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
@@ -64,7 +65,7 @@ describe("tutor turn handler", () => {
   });
   it("uses one resolved model for provider dispatch, prices and ledger attribution", async () => {
     const { deps, provider, budget } = setup();
-    const selectedProvider = { complete: vi.fn(async () => ({ text: "selected answer", citedChunkIds: [], candidates: [], requestId: "selected-request", inputTokens: 100, outputTokens: 50 })) };
+    const selectedProvider = { complete: vi.fn(async () => ({ text: "selected answer", citedChunkIds: [chunkA.id], candidates: [], requestId: "selected-request", inputTokens: 100, outputTokens: 50 })) };
     const modelSnapshot = { id: "selected", providerId: "other", modelName: "other-model", inputCentsPerMillion: 10_000, outputCentsPerMillion: 20_000 };
     const resolveModel = vi.fn(async () => ({ provider: selectedProvider, modelSnapshot, ...modelSnapshot }));
     await createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id);
@@ -287,7 +288,8 @@ describe("tutor turn handler", () => {
   });
 
   it("carries uncited chunks, history and injected memory references with distinct versions", async () => {
-    const { deps, tutorJobs } = setup({ provider: async () => ({ text: "mixed", citedChunkIds: [],
+    const { deps, tutorJobs } = setup({ provider: async () => ({ text: "mixed", citedChunkIds: [
+      chunkA.id],
       requestId: null, candidates: [{ kind: "memory", text: "mixed memory", temporary: false }], inputTokens: 1, outputTokens: 1 }) });
     tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 1 }] });
     const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [] })) };
@@ -393,5 +395,49 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
       helpExposure: expect.objectContaining({ sessionId }),
     }));
+  });
+
+  it("injects the selected strategy suffix without changing mode instruction", async () => {
+    const { deps, provider } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
+      strategyTemplateId: DEFAULT_STRATEGY_TEMPLATE_ID,
+    }));
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const input = provider.complete.mock.calls[0]![0] as { instruction: string };
+    expect(input.instruction).toContain(makeTutorInstruction("explain"));
+    expect(input.instruction).toContain("所有结论必须锚定所选材料的具体物理页");
+  });
+
+  it("falls back to the default strategy for unknown template ids", async () => {
+    const { deps, provider } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
+      strategyTemplateId: "missing-template",
+    }));
+
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const input = provider.complete.mock.calls[0]![0] as { instruction: string };
+    expect(input.instruction).toContain(makeTutorInstruction("explain"));
+    expect(input.instruction).toContain("不得编造页码");
+  });
+
+  it("rejects empty citations instead of completing a page-backed turn", async () => {
+    const { deps, tutorJobs, provider } = setup({ provider: async () => ({ text: "F = ma", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 }) });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toBeInstanceOf(PageCitationError);
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "page_not_in_sources");
+  });
+
+  it("rejects citations outside the selected physical page before writeback", async () => {
+    const { deps, tutorJobs, provider } = setup({ chunks: [chunkA, chunkB], provider: async () => ({ text: "F = ma", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 }) });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toBeInstanceOf(PageCitationError);
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "page_not_in_sources");
   });
 });

@@ -40,6 +40,7 @@ type SavedTurnIntent = {
   chunkId: string | null;
   learningSessionId: string | null;
   attemptId?: string | null;
+  strategyTemplateId?: string | null;
 };
 
 function hashSavedTurnIntent(intent: SavedTurnIntent): string {
@@ -242,6 +243,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       sourceIds: string[];
       learningSessionId: string | null;
   attemptId?: string | null;
+      strategyTemplateId?: string | null;
       currentPage: number | null;
       chunkId: string | null;
       privacy?: "saved";
@@ -370,12 +372,13 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            intent_hash, source_versions, attempt_id
+            intent_hash, source_versions, attempt_id, strategy_template_id
           ) VALUES (
             ${turnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'user', ${input.text}, ${input.mode}, 'complete',
             ${input.clientKey}, ${input.learningSessionId}, ${input.currentPage},
-            ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}, ${input.attemptId ?? null}
+            ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}, ${input.attemptId ?? null},
+            ${input.strategyTemplateId ?? null}
           )
           ON CONFLICT (workspace_id, client_key) WHERE client_key IS NOT NULL
           DO NOTHING
@@ -403,12 +406,13 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            source_versions, attempt_id
+            source_versions, attempt_id, strategy_template_id
           ) VALUES (
             ${assistantTurnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'assistant', '', ${input.mode}, 'pending',
             NULL, ${input.learningSessionId}, ${input.currentPage},
-            ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}, ${input.attemptId ?? null}
+            ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}, ${input.attemptId ?? null},
+            ${input.strategyTemplateId ?? null}
           )
         `;
         await tx`

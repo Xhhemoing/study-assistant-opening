@@ -24,6 +24,7 @@ export const openingTurns = pgTable("opening_turns", {
   currentPage: integer("current_page"),
   chunkId: uuid("chunk_id"),
   sourceIds: uuid("source_ids").array().notNull().default([]),
+  strategyTemplateId: text("strategy_template_id"),
   intentHash: text("intent_hash"),
   sourceVersions: jsonb("source_versions").notNull().default({}),
   contextSourceRefs: jsonb("context_source_refs").$type<Array<{ sourceId: string; sourceVersion: number }> | null>(),

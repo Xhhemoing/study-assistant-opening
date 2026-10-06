@@ -162,6 +162,14 @@ export {
   type ThinTutorActionKind,
   type RecommendTutorActionInput,
 } from "./opening/tutor-policy";
+export {
+  DEFAULT_STRATEGY_TEMPLATE_ID,
+  getStrategyTemplate,
+  listStrategyTemplates,
+  resolveStrategyTemplate,
+  strategyTemplateSchema,
+  type StrategyTemplate,
+} from "./opening/strategy-registry";
 
 
 export {

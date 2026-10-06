@@ -267,9 +267,10 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       chunkId: string | null;
       learningSessionId: string | null;
       attemptId?: string | null;
+      strategyTemplateId: string | null;
     } | null> {
       const rows = await sql`
-        SELECT text, mode, source_ids, source_versions, current_page, chunk_id, learning_session_id, attempt_id FROM opening_turns
+        SELECT text, mode, source_ids, source_versions, current_page, chunk_id, learning_session_id, attempt_id, strategy_template_id FROM opening_turns
         WHERE id = ${id} AND workspace_id = ${workspaceId} LIMIT 1
       `;
       if (!rows.length) return null;
@@ -283,6 +284,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         chunkId: (row.chunk_id as string | null) ?? null,
         learningSessionId: (row.learning_session_id as string | null) ?? null,
         attemptId: (row.attempt_id as string | null) ?? null,
+        strategyTemplateId: (row.strategy_template_id as string | null) ?? null,
       };
     },
 

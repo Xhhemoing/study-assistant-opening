@@ -27,6 +27,7 @@ export const turnInputSchema = z
     attemptId: uuidSchema.nullable().optional(),
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
+    strategyTemplateId: z.string().min(1).max(100).optional(),
   })
   .strict();
 

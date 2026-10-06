@@ -9,7 +9,12 @@ import {
   type TutorMode,
 } from "@aistudy/contracts";
 import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
-import { instructionWithMemories, makeTutorInstruction } from "@aistudy/domain";
+import {
+  assertCitationsForPage,
+  instructionWithMemories,
+  makeTutorInstruction,
+  resolveStrategyTemplate,
+} from "@aistudy/domain";
 import type {
   ContextSourceRef,
   OpeningBudgetRepository,
@@ -120,11 +125,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         historySourceRefs, memoryContext.sourceRefs,
       );
       const mode = claimed.mode as TutorMode;
-      const instruction = instructionWithMemories(
+      const baseInstruction = instructionWithMemories(
         makeTutorInstruction(mode),
         memoryContext.memories,
         contextNow,
       );
+      const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
+      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`;
       const selected = await deps.resolveModel?.(scope, mode);
       const imageParts = selected?.supportsVision && turn.currentPage != null && deps.pageImages
         ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: turn.sourceVersions, physicalPage: turn.currentPage }) : [];
@@ -151,6 +158,16 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       });
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       const citations = resolveCitations(validated.citedChunkIds, context);
+      // Strategy guard: strict page anchoring happens after citation
+      // resolution and before any successful writeback or help exposure.
+      if (turn.currentPage != null && turn.sourceIds.length > 0) {
+        assertCitationsForPage(
+          citations.map((citation) => ({
+            page: context.find((chunk) => chunk.id === citation.chunkId)?.page ?? null,
+          })),
+          turn.currentPage,
+        );
+      }
       const contextSourceIds = [...new Set(contextSourceRefs.map((ref) => ref.sourceId))].filter(
         (id) => !excluded.has(id),
       );
