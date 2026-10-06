@@ -32,3 +32,11 @@
 - Browser acceptance (strategy selector UI = LAB-U01) not implemented and not run; per repo convention owned by the user.
 - Push, hosted CI and bound-SHA evidence pending user authorization; no tasks.json promotion for A01/B01 (not part of the 43-task ledger), RP1/RP2 promoted with this note as evidence.
 - Real-model behavior of the injected suffix is untested (fixture provider only), consistent with prior K02a evidence.
+
+## LAB-U01 follow-up (same day, commit fa4e760)
+
+- Implemented the first tutor-actions UI consumer during practice help: chips fed by the B01 server-derived endpoint (client `listTutorActions`), pure intent mapping (`tutor-action-intents.ts`), chip component (`tutor-action-chips.tsx`).
+- Click semantics per design §4: guided/worked_example prefill the matching composer mode + prompt (user confirms send); independent_variant prefills a no-hint-first variant request naming skill/problemRef; delayed_retest deep-links the existing L02 accept flow — only this explicit click accepts unaccepted due activities for the skill, already-accepted ones surface a pointer to the today queue; clarify opens the material/page selector.
+- No progress denominator, no mastery wording; chips disabled while pending/loading/recovering.
+- Verification: web typecheck exit 0; targeted ESLint exit 0; opening feature unit 544 passed (544 tests incl. new intent tests); full unit+contract 2142 passed / 12 skipped / 1 todo.
+- Not run: browser acceptance (user-owned), hosted CI, push.

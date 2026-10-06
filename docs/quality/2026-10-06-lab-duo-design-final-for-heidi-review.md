@@ -1,6 +1,6 @@
 # Lab 双 Agent 方案 · 最终版（供 Heidi 审阅）· 2026-10-06
 
-> **实施状态（2026-10-06）：** LAB-A01/B01 已实现并本地验证（evidence：`../superpowers/evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md`）；LAB-U01（策略选择器 UI）与 LAB-B02（微问，预挂）未实现。其余决议状态不变。
+> **实施状态（2026-10-06）：** LAB-A01/B01/U01 已实现并本地验证（evidence：`../superpowers/evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md`）；LAB-B02（微问，预挂）未实现。其余决议状态不变。
 
 **状态：** 最终方案草案 v2，取代 `2026-10-05-lab-duo-design-for-heidi-review.md`；未授权开票/改 K02。
 **产生方式：** 草案经四条独立只读子线核查后修订——事实核查（8 项声明逐条对码）、独立设计审查（Critical/Warning 分级）、基线验证（K02a 聚焦单测实跑）、微问与存储专项。子线模型按 `docs/operations/codex-team.md` 2026-10-02 路由（`opening-sol-worker` / `opening-sol-reviewer` @ `tokenfree-sol/gpt-6.1-sol`）。
