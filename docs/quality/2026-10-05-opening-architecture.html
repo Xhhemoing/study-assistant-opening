@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening（开学版学习助手）架构总览 · 2026-10-05</title>
+<style>
+:root{
+  --bg:#f4f6fb; --card:#ffffff; --ink:#1d2433; --muted:#5d6779; --line:#e3e7f0;
+  --brand:#5b5bf0; --brand2:#18b8c9;
+  --done:#2e7d32; --done-bg:#e3f4e4; --partial:#a8730a; --partial-bg:#fff4cc;
+  --planned:#6b7280; --planned-bg:#eef0f3; --blocked:#c62828; --blocked-bg:#fde2e4;
+  --shadow:0 1px 2px rgba(20,30,60,.05),0 8px 24px rgba(20,30,60,.07);
+  --radius:16px;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Segoe UI",sans-serif;color:var(--ink);
+  background:radial-gradient(1200px 600px at 90% -10%,rgba(91,91,240,.12),transparent 60%),radial-gradient(900px 500px at -10% 10%,rgba(24,184,201,.10),transparent 60%),var(--bg);}
+code,pre{font-family:var(--mono);font-size:.88em}
+code{background:#f0f2f8;border:1px solid #e4e7f0;border-radius:6px;padding:.05em .38em;color:#3b3f9e;word-break:break-word}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* hero */
+.hero{position:relative;overflow:hidden;color:#fff;padding:44px 32px 36px;
+  background:linear-gradient(135deg,#3b3fd8 0%,#5b5bf0 40%,#18b8c9 100%);}
+.hero::after{content:"";position:absolute;inset:auto -80px -120px auto;width:380px;height:380px;border-radius:50%;background:rgba(255,255,255,.10)}
+.hero .inner{max-width:1280px;margin:0 auto;position:relative;z-index:1}
+.hero .kicker{display:inline-block;font-size:12px;letter-spacing:.12em;text-transform:uppercase;background:rgba(255,255,255,.18);padding:3px 10px;border-radius:999px}
+.hero h1{margin:12px 0 6px;font-size:32px;line-height:1.25;font-weight:750}
+.hero p.lead{margin:0;max-width:880px;opacity:.95;font-size:16px}
+.flow-pills{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 6px}
+.flow-pills span{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);padding:4px 12px;border-radius:999px;font-size:13px;backdrop-filter:blur(4px)}
+.flow-pills i{font-style:normal;opacity:.7;align-self:center}
+.not{margin-top:10px;font-size:13.5px;opacity:.9}
+
+/* layout */
+.wrap{max-width:1280px;margin:0 auto;padding:28px 24px 64px;display:grid;grid-template-columns:240px minmax(0,1fr);gap:28px}
+nav.toc{position:sticky;top:18px;align-self:start;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 14px;font-size:14px;max-height:calc(100vh - 36px);overflow:auto}
+nav.toc h4{margin:0 0 8px;font-size:12px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+nav.toc a{display:block;padding:6px 10px;border-radius:8px;color:var(--ink)}
+nav.toc a:hover{background:#f1f2fe;text-decoration:none}
+nav.toc a.active{background:linear-gradient(90deg,rgba(91,91,240,.14),rgba(24,184,201,.08));color:#3b3fd8;font-weight:600}
+nav.toc a.sub{padding-left:22px;font-size:13px;color:var(--muted)}
+main{min-width:0}
+section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:24px 26px;margin-bottom:22px;scroll-margin-top:18px}
+section h2{margin:0 0 14px;font-size:22px;display:flex;align-items:center;gap:10px}
+section h2 .num{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:10px;font-size:14px;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand2))}
+section h3{font-size:17px;margin:22px 0 10px;padding-left:10px;border-left:4px solid var(--brand)}
+.muted{color:var(--muted)}
+
+/* KPIs */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:22px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px;position:relative;overflow:hidden}
+.kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--c,var(--brand))}
+.kpi .label{font-size:12.5px;color:var(--muted)}
+.kpi .val{font-size:24px;font-weight:750;margin:2px 0}
+.kpi .sub{font-size:12.5px;color:var(--muted)}
+.bar{height:8px;background:#eceff5;border-radius:99px;overflow:hidden;margin-top:6px}
+.bar > b{display:block;height:100%;background:linear-gradient(90deg,#43a047,#7cc47f)}
+
+/* callouts */
+.callout{border-radius:12px;padding:12px 16px;margin:12px 0;border:1px solid;font-size:14.5px}
+.callout.info{background:#eef2ff;border-color:#d6dcff}
+.callout.warn{background:var(--partial-bg);border-color:#f1d77a}
+.callout.danger{background:var(--blocked-bg);border-color:#f5b5bb}
+.callout.ok{background:var(--done-bg);border-color:#bfe3c1}
+.callout b:first-child{margin-right:4px}
+
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12.5px;font-weight:650;white-space:nowrap;border:1px solid}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.pill.done{color:var(--done);background:var(--done-bg);border-color:#bfe3c1}
+.pill.partial{color:var(--partial);background:var(--partial-bg);border-color:#f1d77a}
+.pill.planned{color:var(--planned);background:var(--planned-bg);border-color:#d5d9e0;border-style:dashed}
+.pill.blocked{color:var(--blocked);background:var(--blocked-bg);border-color:#f5b5bb}
+.pill.verdict{color:#3b3fd8;background:#eef0ff;border-color:#d6dcff}
+.pill.verdict::before{display:none}
+
+.legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.legend .item{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:linear-gradient(180deg,#fff,#fafbfe)}
+.legend .item p{margin:6px 0 0;font-size:13.5px;color:var(--muted)}
+
+/* tables */
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+thead th{background:#f6f7fc;font-size:12.5px;letter-spacing:.03em;color:var(--muted);position:sticky;top:0}
+tbody tr:hover{background:#fafbff}
+tbody tr:last-child td{border-bottom:none}
+tr.row-blocked td:first-child{box-shadow:inset 3px 0 0 var(--blocked)}
+tr.row-partial td:first-child{box-shadow:inset 3px 0 0 #e0a800}
+tr.row-planned td:first-child{box-shadow:inset 3px 0 0 #b0b6c0}
+tr.row-done td:first-child{box-shadow:inset 3px 0 0 #43a047}
+td.id{font-family:var(--mono);font-size:13px;white-space:nowrap;color:#3b3f9e}
+
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.filters button{cursor:pointer;font:inherit;font-size:13px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 12px;color:var(--ink)}
+.filters button.on{background:#1d2433;color:#fff;border-color:#1d2433}
+
+/* mermaid */
+.diagram{border:1px solid var(--line);border-radius:14px;background:
+  linear-gradient(#fff,#fff) padding-box,
+  radial-gradient(circle at 1px 1px,#e8ebf3 1px,transparent 1.5px) 0 0/18px 18px;
+  padding:16px;overflow-x:auto;text-align:center}
+.diagram pre.mermaid{margin:0;background:transparent;border:none}
+.diagram svg{display:block;margin:0 auto;min-width:1250px;height:auto}
+.diagram-hint{font-size:12px;color:var(--muted);margin:6px 2px 0}
+.diagram .fallback{display:none;text-align:left;white-space:pre;font-size:12px;color:var(--muted)}
+.diagram.failed .fallback{display:block}
+.diagram.failed pre.mermaid{display:none}
+.howto{font-size:14px;color:var(--muted);margin-top:10px}
+
+/* grids & cards */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:linear-gradient(180deg,#fff,#fbfcff)}
+.card h4{margin:0 0 8px;font-size:15px}
+.card ul,.card ol{margin:0;padding-left:20px}
+.card li{margin:3px 0}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0}
+.steps > li{counter-increment:s;position:relative;padding:10px 12px 10px 52px;border:1px solid var(--line);border-radius:12px;margin:10px 0;background:#fff}
+.steps > li::before{content:counter(s);position:absolute;left:12px;top:10px;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand2));font-size:13px}
+.steps ul{margin:4px 0 0;padding-left:18px}
+pre.code{background:#0f1426;color:#dfe6ff;border-radius:12px;padding:16px 18px;overflow-x:auto;line-height:1.55;font-size:13px;margin:10px 0}
+pre.code .c{color:#7f8bb3}
+pre.code .k{color:#ff9ac1}
+pre.code .s{color:#a5e8a0}
+
+/* compare */
+.cmp td.diff{background:#fff8e1}
+.cmp td.pri{font-weight:700;text-align:center;width:64px}
+.diffs{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px}
+.diffs .card{border-left:4px solid #e0a800}
+.diffs .tag{font-family:var(--mono);font-weight:700;color:var(--partial)}
+
+/* lab */
+.roles{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:stretch;margin:14px 0}
+.role{border-radius:14px;padding:14px 16px;border:1px solid var(--line)}
+.role.a{background:linear-gradient(160deg,#eef2ff,#fff)}
+.role.b{background:linear-gradient(160deg,#e6fbfd,#fff)}
+.role h4{margin:0 0 6px}
+.role ul{margin:0;padding-left:18px;font-size:14px}
+.swap{display:grid;place-items:center;font-size:22px;color:var(--muted)}
+
+/* deps */
+.chain{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px;border:1px dashed var(--line);border-radius:12px;margin:10px 0;background:#fcfcff}
+.chain .node{border:1px solid var(--line);background:#fff;border-radius:10px;padding:5px 10px;font-size:13.5px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.chain .arrow{color:var(--muted)}
+.chain .gate{border-style:dashed;background:#fff8e1;border-color:#f1d77a}
+
+/* anti-goals */
+.nogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
+.no{display:flex;gap:10px;align-items:flex-start;border:1px solid #f6d0d3;background:linear-gradient(180deg,#fff,#fff6f7);border-radius:12px;padding:10px 12px;font-size:14px}
+.no .x{flex:none;width:22px;height:22px;border-radius:7px;background:var(--blocked);color:#fff;display:grid;place-items:center;font-weight:800;font-size:12px;margin-top:2px}
+
+/* decisions */
+.decisions{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.decisions li{display:grid;grid-template-columns:44px 1fr;gap:12px;border:1px solid var(--line);border-radius:14px;padding:14px;background:linear-gradient(180deg,#fff,#fbfbff)}
+.decisions li.hot{border-color:#f1d77a;background:linear-gradient(180deg,#fffbea,#fff)}
+.decisions li.red{border-color:#f5b5bb;background:linear-gradient(180deg,#fff3f4,#fff)}
+.decisions .n{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;font-weight:800;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand2))}
+.decisions li.hot .n{background:linear-gradient(135deg,#e0a800,#f3c94f)}
+.decisions li.red .n{background:linear-gradient(135deg,#c62828,#ef5350)}
+.decisions h4{margin:0 0 4px;font-size:15.5px}
+.decisions p{margin:0;font-size:14px;color:var(--muted)}
+.opt{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.opt span{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:2px 8px;background:#fff}
+.opt span.vs{border:none;background:none;color:var(--muted);padding:2px 0}
+
+footer{max-width:1280px;margin:0 auto;padding:0 24px 40px;color:var(--muted);font-size:13px}
+.footnote{border-top:1px dashed var(--line);padding-top:14px}
+
+@media (max-width:960px){.wrap{grid-template-columns:1fr}nav.toc{position:relative;top:0;max-height:none}.roles{grid-template-columns:1fr}.swap{transform:rotate(90deg)}}
+
+@media print{
+  body{background:#fff;font-size:12px}
+  .hero{background:#3b3fd8 !important;-webkit-print-color-adjust:exact;print-color-adjust:exact;padding:20px}
+  .hero::after,nav.toc,.filters{display:none}
+  .wrap{display:block;padding:10px 0}
+  section,.kpi{box-shadow:none;break-inside:avoid-page;page-break-inside:avoid}
+  section{border-color:#ccc}
+  .diagram{break-inside:avoid;overflow:visible}
+  .diagram svg{max-width:100% !important;min-width:0 !important;height:auto}
+  .pill,.callout,tr,.no,.decisions li{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  tbody tr{display:table-row !important}
+  a{color:inherit}
+  pre.code{white-space:pre-wrap}
+}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="inner">
+    <span class="kicker">Architecture · 2026-10-05（上海时间）</span>
+    <h1>Opening（开学版学习助手）架构总览</h1>
+    <p class="lead">一页看清 Opening 现在“跑通了什么、卡在哪、下一步怎么接”。定位是 <b>study-OS</b>，<b>以材料为锚</b>的辅导（带页码引用）。</p>
+    <div class="flow-pills">
+      <span>📄 上传资料</span><i>→</i><span>选页</span><i>→</i><span>材料锚定辅导 · 页码引用</span><i>→</i><span>观察学习证据</span><i>→</i><span>延迟重测 / 计划</span>
+    </div>
+    <div class="not">它<b>不是</b> DeepTutor 的多模式套件，也<b>不是</b> OpenMAIC 的多智能体课堂。</div>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="toc" id="toc">
+    <h4>目录</h4>
+    <a href="#overview">概览</a>
+    <a href="#legend">0 · 状态图例</a>
+    <a href="#runtime">1 · 运行时数据流</a>
+    <a href="#lab">2 · Lab A↔B 闭环</a>
+    <a href="#modules">3 · 模块完成状态</a>
+    <a href="#algo">4 · 关键算法</a>
+    <a class="sub" href="#algo-cite">4.1 T02 页码引用</a>
+    <a class="sub" href="#algo-k02a">4.2 K02a mode→exposure</a>
+    <a class="sub" href="#algo-decide">4.3 Decide 对照 ⚠️</a>
+    <a class="sub" href="#algo-learn">4.4 L01 / L02 / L03</a>
+    <a class="sub" href="#algo-tpl">4.5 策略模板</a>
+    <a href="#deps">5 · 依赖与解锁顺序</a>
+    <a href="#nogo">6 · 明确不做</a>
+    <a href="#decide">7 · 请 Heidi 决策</a>
+  </nav>
+
+  <main>
+    <!-- overview -->
+    <section id="overview">
+      <h2><span class="num">★</span>概览 · 给 Heidi</h2>
+      <div class="kpis">
+        <div class="kpi" style="--c:#43a047">
+          <div class="label">Plan 进度（verified）</div>
+          <div class="val">25 / 43</div>
+          <div class="bar"><b style="width:58.1%"></b></div>
+          <div class="sub">约 25 项已 verified</div>
+        </div>
+        <div class="kpi" style="--c:#e0a800">
+          <div class="label">K02a · tip <code>a33b824</code></div>
+          <div class="val"><span class="pill partial">Partial</span></div>
+          <div class="sub">门禁已绿，正在等 Reviewer PASS → Ops push</div>
+        </div>
+        <div class="kpi" style="--c:#c62828">
+          <div class="label">C01 学校适配器</div>
+          <div class="val"><span class="pill blocked">Blocked · 503</span></div>
+          <div class="sub">需要 Heidi 处理（凭据或外部服务）</div>
+        </div>
+        <div class="kpi" style="--c:#9aa1ad">
+          <div class="label">Lab 双 Agent</div>
+          <div class="val"><span class="pill planned">Planned</span></div>
+          <div class="sub">仍是设计草案，没有开票</div>
+        </div>
+      </div>
+      <div class="callout warn"><b>👀 重点看：</b><a href="#algo-decide">§4.3</a>（B 的 Decide 顺序和 K02a 现有代码<b>不一致</b>，需要你拍板）和 <a href="#nogo">§6</a> 的“明确不做”。完整 K02 等 K01。</div>
+      <div class="grid2">
+        <div class="card">
+          <h4>📦 仓库</h4>
+          <ul>
+            <li><code>Xhhemoing/study-assistant-opening</code></li>
+            <li>分支 <code>feat/opening-release</code></li>
+            <li>本地 <code>E:\Project\study-assistant-opening</code></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>🧾 依据（box · <code>/workspace/opening-research/</code>）</h4>
+          <ul style="font-size:13.5px">
+            <li><code>2026-10-05-lab-agent-duo-research.md</code></li>
+            <li><code>2026-10-05-lab-duo-design-for-heidi-review.md</code></li>
+            <li><code>2026-10-05-k02-deeptutor-fold-in.md</code></li>
+            <li><code>contracts-f02-i02-t01-t02.md</code> · <code>learning-flow-t01-t02.md</code></li>
+            <li><code>repo-extract/{k02-extract*,lab-duo-extract}.txt</code>（含 <code>tasks.json</code> 快照，及 <code>a33b824</code> 的 <code>tutor-policy.ts</code>、<code>tutor-turn.ts</code>、<code>page-selection.ts</code>）</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout danger"><b>🔒 证据规则（全局硬约束）：</b>只有三种判定
+        <span class="pill verdict">FLOW_VERIFIED</span>
+        <span class="pill verdict">LEARNING_EFFECT_OBSERVED</span>
+        <span class="pill verdict">MASTERY_NOT_ESTABLISHED</span>；
+        <b>不出现掌握度 %</b>；<code>hinted</code> / <code>revealed</code> <b>永远不会</b>变成 <code>observed_independent</code>。</div>
+    </section>
+
+    <!-- legend -->
+    <section id="legend">
+      <h2><span class="num">0</span>状态图例</h2>
+      <div class="legend">
+        <div class="item"><span class="pill done">Done</span> <span class="muted">· 绿 <code>done</code></span><p><code>tasks.json</code> 为 <code>verified</code>，并且有 evidence 文件</p></div>
+        <div class="item"><span class="pill partial">Partial</span> <span class="muted">· 黄 <code>partial</code></span><p>代码/门禁已有，但还没过 Reviewer、还没 push，或证据不完整、有已知缺口（会写备注）</p></div>
+        <div class="item"><span class="pill planned">Planned</span> <span class="muted">· 灰 <code>planned</code></span><p>只有计划或设计，还没实现；<b>不代表票已解锁</b></p></div>
+        <div class="item"><span class="pill blocked">Blocked</span> <span class="muted">· 红 <code>blocked</code></span><p>有外部阻塞（需要 Heidi 决策、凭据或外部服务），无法自己往前推</p></div>
+      </div>
+      <div class="callout info"><b>规则：</b>拿不准的一律标 <b>Partial + 备注</b>，不往上抬。</div>
+    </section>
+
+    <!-- runtime -->
+    <section id="runtime">
+      <h2><span class="num">1</span>运行时数据流 / 控制流（端到端）</h2>
+      <div class="diagram" id="d1">
+<pre class="mermaid">
+flowchart TD
+    classDef done fill:#c8e6c9,stroke:#2e7d32,color:#1b1b1b
+    classDef partial fill:#fff3c4,stroke:#b8860b,color:#1b1b1b
+    classDef planned fill:#eeeeee,stroke:#757575,color:#1b1b1b,stroke-dasharray:4 3
+    classDef blocked fill:#ffcdd2,stroke:#c62828,color:#1b1b1b
+
+    User(["学习者 · Web UI U01-U03"]):::done
+
+    subgraph Ingest["资料摄取 I01-I03"]
+        Upload["I01 签名上传 · 原件保存"]:::done
+        Parse["I02 解析 Docling · page_no 物理页 · PPTX page_no = slide_index+1"]:::done
+        Worker["I03 worker runtime · opening_jobs"]:::done
+    end
+
+    subgraph Tutor["材料锚定辅导 T01-T03 + K02a"]
+        PageSel["页选择 RU-03 · validatePageSelection"]:::done
+        Ctx["T02 selectContext · preferPage / preferChunkId · 关键词序 非GraphRAG"]:::done
+        Budget["T01 runBudgetedCall · 预算预留 · 隐私 epoch 校验"]:::done
+        Turn["T03 tutor-turn · makeTutorInstruction mode"]:::done
+        Cite["T02 resolveCitations + K02a assertCitationsForPage"]:::partial
+        K02a["K02a tutor-policy · mode→exposure · tutor-actions 推荐"]:::partial
+    end
+
+    subgraph Learn["学习证据 L01-L03"]
+        L01["L01 resolveAssistance · 曝光 hinted/revealed"]:::done
+        L02["L02 summarizeObservations · suggestRetestAt 默认2天"]:::done
+        L03["L03 learning read API · 三判定 · 无 Mock"]:::done
+    end
+
+    subgraph Plan["计划 / 记忆 / 连接"]
+        Mem["M01-M03 课程级记忆"]:::done
+        P02["P02/P03 候选任务 · 提醒 · 需用户确认"]:::done
+        C01["C01 学校适配器 · 503"]:::blocked
+        K01["K01 知识节点"]:::planned
+        K02full["K02 完整 · SkillEvidence 0029"]:::planned
+    end
+
+    User -->|"上传 PDF/PPTX"| Upload --> Worker --> Parse
+    Parse -->|"chunks + page"| PageSel
+    User -->|"选资料 + 选页 currentPage"| PageSel
+    User -->|"提问 + mode chip"| Turn
+    PageSel --> Ctx --> Turn
+    Mem -->|"listContext"| Turn
+    Turn --> Budget -->|"ProviderInput text_only 或 text_plus_page_images"| Turn
+    Turn --> Cite -->|"页码引用 chips"| User
+    Turn -->|"delivered help 且绑定 learningSessionId"| L01
+    K02a -.->|"ThinTutorAction 推荐"| User
+    L01 --> L02 --> L03 -->|"三判定摘要"| User
+    L01 --> K02a
+    L02 -->|"retestDue"| K02a
+    L02 -->|"accept 候选 · scheduled:false"| P02
+    C01 -.->|"依赖"| K01 -.->|"依赖"| K02full
+    K02a -.->|"K02 PASS 后才并入"| K02full
+</pre>
+        <div class="fallback">⚠️ Mermaid 未能加载（离线或 CDN 不可达），下面是图源码。</div>
+      </div>
+      <p class="howto"><b>怎么读：</b>实线是已经跑通的路径（在 <code>a33b824</code> 的 <code>tutor-turn.ts</code> 摘录里能看到：隐私排除 → <code>chunksAtSnapshots</code> → <code>selectContext</code> → <code>runBudgetedCall</code> → <code>resolveCitations</code>）；虚线是推荐或依赖关系。K02a 只<b>推荐</b>动作，不自动开任务；P02 任务一定要用户确认。</p>
+    </section>
+
+    <!-- lab -->
+    <section id="lab">
+      <h2><span class="num">2</span>Lab A↔B 闭环 + 与 K02a / T / L 的连接 <span class="pill planned">设计草案 · 未开票</span></h2>
+      <div class="roles">
+        <div class="role a">
+          <h4>🧑‍🏫 Agent A · 讲解</h4>
+          <ul>
+            <li>= 现有 tutor-turn，复用 T03 单一 tutor 通道</li>
+            <li><code>normalizeDeepenMode</code>：guided→hint · worked_example→explain</li>
+            <li>Teach segment · <code>segmentPolicy</code> page / outline / fixedChars</li>
+            <li><code>exposureLevelForMode</code>：hint→hinted · explain→revealed</li>
+          </ul>
+        </div>
+        <div class="swap">⇄</div>
+        <div class="role b">
+          <h4>🔍 Agent B · 监督闭环（只推荐）</h4>
+          <ul>
+            <li>= policy / recommend 服务 · LAB-B01 草案</li>
+            <li>Observe：L01 曝光 + L02 due + 结果</li>
+            <li>ClassifyWeakPoints：weakLabels 按页 / skillLabel，非 %</li>
+            <li>Decide：确定性优先级表（<a href="#algo-decide">§4.3</a>）</li>
+          </ul>
+        </div>
+      </div>
+      <div class="diagram" id="d2">
+<pre class="mermaid">
+flowchart LR
+    classDef done fill:#c8e6c9,stroke:#2e7d32,color:#1b1b1b
+    classDef partial fill:#fff3c4,stroke:#b8860b,color:#1b1b1b
+    classDef planned fill:#eeeeee,stroke:#757575,color:#1b1b1b,stroke-dasharray:4 3
+
+    ST["StrategyTemplate · LAB-A01 草案"]:::planned
+    UI["UI 策略选择 + 推荐 chips · LAB-U01 草案"]:::planned
+
+    subgraph A["Agent A 讲解 · 复用 T03 单一 tutor 通道"]
+        Norm["normalizeDeepenMode · guided→hint · worked_example→explain"]:::partial
+        Teach["Teach segment · segmentPolicy page/outline/fixedChars"]:::planned
+        Exp["exposureLevelForMode · hint→hinted · explain→revealed"]:::partial
+    end
+
+    subgraph B["Agent B 监督闭环 · 只推荐 · LAB-B01 草案"]
+        Obs["Observe · L01 曝光 + L02 due + 结果"]:::planned
+        Weak["ClassifyWeakPoints · weakLabels 页/skillLabel 非%"]:::planned
+        Dec["Decide · 确定性优先级表 §4.3"]:::planned
+    end
+
+    K02aRec["K02a recommendTutorAction · ThinTutorAction"]:::partial
+    L01n["L01 resolveAssistance"]:::done
+    L02n["L02 retest 队列"]:::done
+    L03n["L03 三判定"]:::done
+    Gate["assertNoMasteryPercentage"]:::partial
+
+    ST --> Teach
+    ST --> Dec
+    UI -->|"用户点选 mode"| Norm --> Teach --> Exp --> L01n
+    L01n --> Obs
+    L02n --> Obs
+    Obs --> Weak --> Dec
+    Dec -->|"包装 / 选择"| K02aRec --> Gate --> UI
+    Dec -->|"delayed_retest 需用户 accept"| L02n
+    L02n --> L03n --> UI
+</pre>
+        <div class="fallback">⚠️ Mermaid 未能加载（离线或 CDN 不可达），下面是图源码。</div>
+      </div>
+      <div class="callout info"><b>🔗 关键约束：</b>A 和 B 是<b>同一条 LLM 通道上的两个逻辑角色</b>（A = 现有 tutor-turn；B = policy/recommend 服务），不是两个独立 agent 进程，也没有 director 图。每次 tutor turn 只做一次 T01 预算预留。B 的输出只是 <code>ThinTutorAction[]</code>，必须等用户确认后才进入 T03 mode 或 L02 accept。</div>
+    </section>
+
+    <!-- modules -->
+    <section id="modules">
+      <h2><span class="num">3</span>模块 / 功能完成状态</h2>
+      <div class="callout info">来源：<code>tasks.json</code> 快照（<code>repo-extract/k02-extract.txt</code>，baseCommit <code>e7639c9</code>）+ 本次给定的上下文。完整 plan 共 <b>43 项</b>，<code>verified</code> 计 <b>25 项</b>（B00–B02、F01–F03、I01–I03、T01–T03、M01–M03、L01–L03、P01–P03、U01–U03、X01），和“约 25/43”一致。快照之后状态有没有变<b>没有复核</b>。CI 除 14 个过时的 browser 测试外全绿（数字照给定口径，没有再跑）。</div>
+      <div class="filters" id="filters">
+        <button class="on" data-f="all">全部</button>
+        <button data-f="done">🟩 Done</button>
+        <button data-f="partial">🟨 Partial</button>
+        <button data-f="planned">⬜ Planned</button>
+        <button data-f="blocked">🟥 Blocked</button>
+      </div>
+      <div class="tbl-wrap">
+      <table id="modtable">
+        <thead><tr><th>模块 / 功能</th><th>ID</th><th>完成状态</th><th>备注</th></tr></thead>
+        <tbody>
+          <tr class="row-done" data-s="done"><td>基线 / 质量 / 浏览器边界</td><td class="id">B00–B02</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>测试 DB 护栏 + 注册 / owner</td><td class="id">F01</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>Opening 共享契约冻结</td><td class="id">F02</td><td><span class="pill done">Done</span></td><td>verified（<code>packages/contracts/src/opening/</code>）</td></tr>
+          <tr class="row-done" data-s="done"><td>sources / jobs / outbox + fixtures</td><td class="id">F03</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>签名上传 / 原件保存</td><td class="id">I01</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>文档解析（Docling）与音频保存</td><td class="id">I02</td><td><span class="pill done">Done</span></td><td>verified；FORMULA <code>orig</code> 不能当讲解正文；音频转写另外验收</td></tr>
+          <tr class="row-done" data-s="done"><td>worker runtime</td><td class="id">I03</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>真实模型适配 + 预算账本</td><td class="id">T01</td><td><span class="pill done">Done</span></td><td>verified；<code>AI_DAILY_LIMIT_CENTS=0</code> 默认关闭收费调用</td></tr>
+          <tr class="row-done" data-s="done"><td>有来源的上下文检索 + 页引用</td><td class="id">T02</td><td><span class="pill done">Done</span></td><td>verified；关键词 / 页优先，<b>非 GraphRAG</b></td></tr>
+          <tr class="row-done" data-s="done"><td>材料锚定 tutor（HTTP + worker）</td><td class="id">T03</td><td><span class="pill done">Done</span></td><td>verified；modes <code>hint/explain/listen/think_together</code></td></tr>
+          <tr class="row-done" data-s="done"><td>课程级记忆</td><td class="id">M01–M03</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>学习观察 + 曝光</td><td class="id">L01</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>可解释状态 + 小批重测</td><td class="id">L02</td><td><span class="pill done">Done</span></td><td>verified；2 天启发式，不用 FSRS/BKT</td></tr>
+          <tr class="row-done" data-s="done"><td>学习读取 API（无 Mock）</td><td class="id">L03</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>课表 / 时间约束</td><td class="id">P01</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>候选任务 / 提醒</td><td class="id">P02–P03</td><td><span class="pill done">Done</span></td><td>verified；重测 accept 后 <code>scheduled:false</code>，不自动排日历</td></tr>
+          <tr class="row-done" data-s="done"><td>体验层 shell / 上传 / 学习页</td><td class="id">U01–U03</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-done" data-s="done"><td>连接基座</td><td class="id">X01</td><td><span class="pill done">Done</span></td><td>verified</td></tr>
+          <tr class="row-partial" data-s="partial"><td>浏览器 E2E 测试集</td><td class="id">（CI）</td><td><span class="pill partial">Partial</span></td><td>14 个 browser 测试已过时，需要更新；不影响其他 CI 绿</td></tr>
+          <tr class="row-planned" data-s="planned"><td>交付 QA</td><td class="id">Q01–Q03</td><td><span class="pill planned">Planned</span></td><td></td></tr>
+          <tr class="row-blocked" data-s="blocked"><td>学校适配器</td><td class="id">C01</td><td><span class="pill blocked">Blocked</span></td><td><code>tasks.json</code> 为 <code>active</code>；503 阻塞需要 <b>Heidi</b> 处理（凭据或外部服务）</td></tr>
+          <tr class="row-planned" data-s="planned"><td>连接下游</td><td class="id">C02–C03</td><td><span class="pill planned">Planned</span></td><td>依赖 C01（上游被阻塞）</td></tr>
+          <tr class="row-planned" data-s="planned"><td>媒体</td><td class="id">V01</td><td><span class="pill planned">Planned</span></td><td></td></tr>
+          <tr class="row-planned" data-s="planned"><td>知识节点</td><td class="id">K01</td><td><span class="pill planned">Planned</span></td><td>依赖 C01，所以实际上被 C01 卡住</td></tr>
+          <tr class="row-partial" data-s="partial"><td><b>K02a</b> 材料锚定深化（thin）</td><td class="id">K02a</td><td><span class="pill partial">Partial</span></td><td>tip <code>a33b824</code>：hint/guided、explain/worked_example、independent_variant、delayed_retest、页码引用；门禁 unit43 / handler3 / integ36 / tsc 已绿；<b>等 Reviewer PASS → Ops push</b>。快照的 <code>tasks.json</code> 里还没有 K02a 行</td></tr>
+          <tr class="row-planned" data-s="planned"><td>K02 完整（SkillEvidence / 0029 / nodeId）</td><td class="id">K02</td><td><span class="pill planned">Planned</span></td><td>等 K01</td></tr>
+          <tr class="row-planned" data-s="planned"><td>主动 / 验收</td><td class="id">P04, U04, Q04</td><td><span class="pill planned">Planned</span></td><td>依赖完整 K02 等</td></tr>
+          <tr class="row-planned" data-s="planned"><td>复审加固</td><td class="id">RP1–RP6</td><td><span class="pill planned">Planned</span></td><td></td></tr>
+          <tr class="row-planned" data-s="planned"><td>Lab 策略模板 + 注入 T03</td><td class="id">LAB-A01</td><td><span class="pill planned">Planned</span></td><td>只是设计草案，<b>没有开票</b>；最早要 K02 PASS 后（解锁时机待 Heidi 定：K02a PASS 还是完整 K02 PASS）</td></tr>
+          <tr class="row-planned" data-s="planned"><td>Lab Supervisor 推荐层</td><td class="id">LAB-B01</td><td><span class="pill planned">Planned</span></td><td>同上；依赖 LAB-A01</td></tr>
+          <tr class="row-planned" data-s="planned"><td>Lab UI（策略选择 + chips）</td><td class="id">LAB-U01</td><td><span class="pill planned">Planned</span></td><td>同上；和 plan 里的 U01 不是同一个东西</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <!-- algorithms -->
+    <section id="algo">
+      <h2><span class="num">4</span>关键算法</h2>
+
+      <h3 id="algo-cite">4.1 T02 页码引用（page cite）</h3>
+      <ol class="steps">
+        <li><b>页选择校验</b>（<code>page-selection.ts</code> · <code>validatePageSelection</code>，RU-03：选中文件 ≠ 选中页）
+          <ul>
+            <li>只在授权 chunk 中、且 <code>sourceId ∈ sourceIds</code> 的范围内匹配。</li>
+            <li>没给 <code>currentPage</code> 和 <code>chunkId</code> 时 → <code>matchedChunkIds=[]</code>，<b>不编页码</b>。</li>
+            <li><code>chunkId</code> 不在池里 → <code>chunk_not_in_sources</code>；<code>currentPage</code> 没有命中 → <code>page_not_in_sources</code>；chunk 的页和 currentPage 不一致 → <code>page_chunk_mismatch</code>。</li>
+            <li><code>page</code> 一律是<b>物理页</b>；PPTX 的 <code>slideLabel</code> 不当页码用，<code>page_no = slide_index + 1</code>。</li>
+          </ul></li>
+        <li><b>选上下文</b>：<code>selectContext({chunks, query, maxCharacters, preferChunkId, preferPage})</code> → 只取 <code>MAX_PROVIDER_CHUNKS</code> 条；用精确 / 关键词排序，不用 GraphRAG；先排除隐私源，再按 <code>sourceVersions</code> 快照取 chunk。</li>
+        <li><b>生成后校验</b>：<code>resolveCitations(citedChunkIds, context)</code> 只认真正进了上下文的 chunk。</li>
+        <li><b>K02a 页粘性</b>：<code>assertCitationsForPage(citations, currentPage)</code> 要求引用<b>非空，且每一条</b>都满足 <code>page === currentPage</code>，否则抛 <code>PageCitationError{code:'page_not_in_sources'}</code>。</li>
+        <li><b>多模态</b>：只有 <code>supportsVision</code>、有 <code>currentPage</code> 并且配置了 <code>pageImages</code> 时才发 <code>text_plus_page_images</code>，否则一律 <code>text_only</code>。</li>
+      </ol>
+
+      <h3 id="algo-k02a">4.2 K02a：mode → exposure</h3>
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>输入 mode</th><th><code>normalizeDeepenMode</code></th><th><code>exposureLevelForMode</code></th><th>讲解约束（<code>makeTutorInstruction</code>）</th></tr></thead>
+        <tbody>
+          <tr><td><code>hint</code></td><td>hint</td><td><span class="pill partial">hinted</span></td><td>只给下一步提示，不给最终答案</td></tr>
+          <tr><td><code>guided</code></td><td>hint</td><td><span class="pill partial">hinted</span></td><td>同上</td></tr>
+          <tr><td><code>explain</code></td><td>explain</td><td><span class="pill blocked">revealed</span></td><td>允许完整解答，并标明材料依据</td></tr>
+          <tr><td><code>worked_example</code></td><td>explain</td><td><span class="pill blocked">revealed</span></td><td>同上</td></tr>
+          <tr><td><code>listen</code> / <code>think_together</code></td><td>原样</td><td><span class="pill planned">null</span></td><td>倾听 / 共同思考，不自动建任务</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:6px 0 0">注：本表 pill 颜色仅用于区分曝光级别，不代表模块状态。</p>
+      <div class="grid2" style="margin-top:12px">
+        <div class="card"><h4>🧼 防“洗白”</h4><code>assistedItemBlocksIndependent</code>：答题和受帮助的题是同一个 <code>problemRef</code>，或者 <code>canBecomeObservedIndependent</code> 判否 → 不能算独立。</div>
+        <div class="card"><h4>🔀 变式身份</h4><code>variantProblemRef(ref)</code> → <code>ref:variant</code>（已经是 variant 的就变成 <code>-2</code>），保证 <code>independent_variant</code> 是<b>新题</b>。</div>
+        <div class="card"><h4>⏳ 延迟重测</h4><code>freshRetestExposure()</code> 返回 <code>[]</code>，新 session 不继承之前的曝光。</div>
+        <div class="card"><h4>🚧 出参闸门</h4><code>assertNoMasteryPercentage</code> 拒绝 <code>mastery</code>、<code>masteryPercent</code>、<code>masteryPercentage</code>、<code>mastery_pct</code> 字段。</div>
+      </div>
+
+      <h3 id="algo-decide">4.3 Agent B · Decide 优先级表（设计 §4.2）与 K02a 现有代码对照 ⚠️</h3>
+      <div class="tbl-wrap">
+      <table class="cmp">
+        <thead><tr><th>优先级</th><th>设计稿（LAB-B01 拟实现）</th><th>K02a <code>recommendTutorAction</code> @ <code>a33b824</code>（现网逻辑）</th></tr></thead>
+        <tbody>
+          <tr><td class="pri">1</td><td class="diff"><code>!hasPage</code> → <code>clarify</code></td><td class="diff"><code>retestDue</code> → <code>delayed_retest</code></td></tr>
+          <tr><td class="pri">2</td><td class="diff"><code>retestDue</code> → <code>delayed_retest</code></td><td class="diff"><code>assistedSuccessOnCurrentItem &amp;&amp; problemRef</code> → <code>independent_variant</code>（变式 ref）</td></tr>
+          <tr><td class="pri">3</td><td><code>assistedSuccess ∥ last==revealed</code> → <code>independent_variant</code></td><td>曝光含 <code>revealed</code> → <code>independent_variant</code></td></tr>
+          <tr><td class="pri">4</td><td class="diff"><code>stuckAfterHint</code> → <code>worked_example</code></td><td class="diff">曝光含 <code>hinted</code> → <code>worked_example</code>（<b>不要求 stuck</b>）</td></tr>
+          <tr><td class="pri">5</td><td class="diff"><code>microQRemaining&gt;0</code> → <code>guided</code> + 可选微问</td><td class="diff"><code>currentPage==null</code> → <code>clarify</code></td></tr>
+          <tr><td class="pri">6</td><td class="diff">否则 → <code>guided</code> 或 <code>path_suggestion_only</code></td><td class="diff">否则 → <code>guided</code></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:6px 0 0">黄色底色 = 两侧存在差异的行（按 (a)(b)(c) 标注整理）。</p>
+      <div class="callout warn"><b>差异（需要 Heidi 拍板，不影响 K02a 评审）：</b></div>
+      <div class="diffs">
+        <div class="card"><span class="tag">(a)</span> <b><code>clarify</code> 的位置</b><br>设计放在最前（没选页就先澄清），代码放在第 5 位（没选页但有 due 或曝光时，仍会推荐重测或变式）。</div>
+        <div class="card"><span class="tag">(b)</span> <b>hinted 后</b><br>代码只要 hinted 就推 <code>worked_example</code>，设计要求 <code>stuckAfterHint</code> 信号。</div>
+        <div class="card"><span class="tag">(c)</span> <b>新增分支</b><br>微问和 <code>path_suggestion_only</code> 是新增分支，K02a 没有。</div>
+      </div>
+      <div class="callout ok"><b>💡 建议：</b>LAB-B01 做成<b>包装层</b>，不改 K02a 的 tip。同一优先级用 <code>pathSuggestion</code> 打破平局（数字小的优先）。每条分支都用表驱动单测覆盖。</div>
+      <div class="grid2">
+        <div class="card"><h4>weakPointRules（默认）</h4>
+          <ul>
+            <li>revealed 之后独立作答错 → 记为 weak</li>
+            <li>连续 2 次 hinted 没有进展 → weak</li>
+            <li>L02 重测失败 → weak，<code>retestCadenceDays</code> 缩短一档</li>
+            <li>weak 只按页或 skillLabel 打标签，<b>不出百分比</b></li>
+          </ul></div>
+        <div class="card"><h4>微问</h4>
+          <code>microQuestionBudget</code> 默认 3 次 / 会话；每题的证据短语必须在当前授权 chunk 里找得到，否则丢弃这道题。</div>
+      </div>
+
+      <h3 id="algo-learn">4.4 L01 / L02 / L03</h3>
+      <div class="grid2">
+        <div class="card"><h4>L01 · <code>resolveAssistance(declared, exposures)</code></h4>
+          <ul>
+            <li>服务端曝光<b>覆盖</b>客户端自报。</li>
+            <li><code>('independent',['hinted'])→hinted</code></li>
+            <li><code>('independent',['hinted','revealed'])→revealed</code></li>
+            <li><code>('unknown',[])→unknown</code></li>
+            <li>只有绑定了显式 <code>learningSessionId</code> 的 hint/explain turn 才记 <code>delivered:true</code>。</li>
+            <li>新的重测 session 不继承曝光；<code>clientKey</code> 保证幂等；跨 workspace 一律 NOT_FOUND。</li>
+          </ul></div>
+        <div class="card"><h4>L02 · <code>summarizeObservations</code> + <code>suggestRetestAt(occurredAt, delayDays)</code></h4>
+          <ul>
+            <li>空 → 空，不凭空造掌握度。</li>
+            <li>未核验、模型判定或自报 → <code>needs_check</code>。</li>
+            <li>只有“独立 + 正确 + reference_checked”才是 <code>observed_independent</code>（意思是“有限的观察证据”，<b>不是掌握</b>）。</li>
+            <li>accept 过的到期重测 → <code>needs_review</code>。</li>
+            <li>候选默认 1 题、2 天、可编辑，跳过已经 <code>observed_independent</code> 的题和缺少来源 ref 的题（不编题干）。</li>
+            <li>accept 幂等，<code>scheduled:false</code>；接 P02 时必须用户确认。</li>
+          </ul></div>
+        <div class="card"><h4>L03 · read API</h4>
+          <ul>
+            <li><code>createOpeningLearningClient(fetch)</code></li>
+            <li>HTTP 错误直接抛错，<b>绝不用 demo 数据补位</b>。</li>
+            <li>对外文案只用三判定。</li>
+          </ul></div>
+      </div>
+      <h4 style="margin:18px 0 8px">三判定的含义</h4>
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>判定</th><th>能说明什么</th><th>不能说明什么</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pill verdict">FLOW_VERIFIED</span></td><td>流程实现了，也跑通了（测试 / 日志）</td><td>学习效果</td></tr>
+          <tr><td><span class="pill verdict">LEARNING_EFFECT_OBSERVED</span></td><td>新题独立作答或延迟重测有观察到的表现</td><td>掌握、因果疗效</td></tr>
+          <tr><td><span class="pill verdict">MASTERY_NOT_ESTABLISHED</span></td><td>默认就是这个：首发版本不宣称掌握</td><td>—</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <h3 id="algo-tpl">4.5 策略模板（<code>StrategyTemplate</code> 草案 · LAB-A01）</h3>
+<pre class="code"><span class="k">type</span> StrategyTemplate = {
+  id: string; name: string;
+  <span class="c">// Agent A</span>
+  languageLevel: <span class="s">'zh-CN-plain'</span> | <span class="s">'zh-CN-term'</span> | <span class="s">'en-US-plain'</span> | <span class="s">'en-US-technical'</span>;
+  depth: <span class="s">'shallow'</span> | <span class="s">'standard'</span> | <span class="s">'deep'</span>;          <span class="c">// 只影响讲解粒度，禁止映射成掌握度</span>
+  segmentPolicy: <span class="s">'page'</span> | <span class="s">'outline'</span> | <span class="s">'fixedChars'</span>; <span class="c">// outline 需 K01/大纲可用</span>
+  modes: Array&lt;<span class="s">'hint'</span> | <span class="s">'guided'</span> | <span class="s">'explain'</span> | <span class="s">'worked_example'</span>&gt;;
+  citationPolicy: <span class="s">'require_page'</span> | <span class="s">'prefer_page'</span> | <span class="s">'general_ok'</span>;
+  <span class="c">// Agent B</span>
+  weakPointRules: <span class="s">'default'</span> | <span class="s">'strict'</span>;
+  microQuestionBudget: number;  <span class="c">// 0..10，默认 3</span>
+  retestCadenceDays: number;    <span class="c">// 默认 2；不是 FSRS</span>
+  pathSuggestion: <span class="s">'balanced'</span> | <span class="s">'prefer_retest'</span> | <span class="s">'prefer_forward'</span>;
+};
+<span class="c">// session runtime: segmentIndex, microQUsed, lastHandoffAt, weakLabels[]</span></pre>
+      <p><code>require_page</code> 时如果没有合法页码引用 → 拒答或转 Clarify（复用 <code>assertCitationsForPage</code>）。</p>
+    </section>
+
+    <!-- deps -->
+    <section id="deps">
+      <h2><span class="num">5</span>依赖与解锁顺序 <span class="muted" style="font-size:14px;font-weight:400">（只写现状，不宣称解锁）</span></h2>
+      <div class="chain">
+        <span class="node"><span class="pill partial">Partial</span> K02a (<code>a33b824</code>) Reviewer PASS</span><span class="arrow">→</span>
+        <span class="node">Ops push</span><span class="arrow">→</span>
+        <span class="node gate">🤔 Heidi 决定门槛：K02a PASS 还是完整 K02 PASS</span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">LAB-A01</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">LAB-B01</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">LAB-U01</span></span>
+        <span class="muted" style="font-size:13px">（目前都<b>没有开票</b>）</span>
+      </div>
+      <div class="chain">
+        <span class="node"><span class="pill blocked">C01 · Blocked 503</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">K01</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">K02 完整</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">P04 / U04</span></span><span class="arrow">→</span>
+        <span class="node"><span class="pill planned">Q04</span></span>
+      </div>
+    </section>
+
+    <!-- anti-goals -->
+    <section id="nogo">
+      <h2><span class="num">6</span>明确不做（Anti-goals）</h2>
+      <div class="nogrid">
+        <div class="no"><span class="x">✕</span><div><b>OpenMAIC 多智能体课堂</b>：director-graph / agent-roster / LangGraph 扇出</div></div>
+        <div class="no"><span class="x">✕</span><div><b>OpenMAIC 白板 + TTS</b>，以及 PlaybackEngine 照搬</div></div>
+        <div class="no"><span class="x">✕</span><div><b>一键生成课堂</b>（<code>generate-classroom</code>）：会绕过“上传 → 选页 → tutor”的验收路径</div></div>
+        <div class="no"><span class="x">✕</span><div><b>DeepTutor GraphRAG / LightRAG / RAG-Anything</b>（T02 已禁）</div></div>
+        <div class="no"><span class="x">✕</span><div><b>DeepTutor Partners / subagent</b>，以及两个独立 LLM agent 进程并发</div></div>
+        <div class="no"><span class="x">✕</span><div><b>Mastery Path / 掌握度 %</b>（包括 <code>QUANTITATIVE_GATE≈0.9</code>），以及把 <code>depth</code> 或进度条做成“掌握度”</div></div>
+        <div class="no"><span class="x">✕</span><div>把 hinted/revealed 的作答洗成 <code>observed_independent</code>；同一题看完答案再答对也不算独立</div></div>
+        <div class="no"><span class="x">✕</span><div>B 自动 accept 重测或静默建 P02 任务</div></div>
+        <div class="no"><span class="x">✕</span><div>固定题环（讲完必出 N 题）</div></div>
+        <div class="no"><span class="x">✕</span><div>在 K02a tip 上继续加 Lab 功能，或重开 K02a</div></div>
+        <div class="no"><span class="x">✕</span><div>把 Docling FORMULA <code>orig</code> 当讲解正文；把 PPTX <code>slideLabel</code> 当页码</div></div>
+        <div class="no"><span class="x">✕</span><div>大段照抄 DeepTutor（Apache-2.0）或 OpenMAIC（MIT）的代码或 prompt；只借鉴模式，确有大段复制要保留署名</div></div>
+      </div>
+    </section>
+
+    <!-- decisions -->
+    <section id="decide">
+      <h2><span class="num">7</span>请 Heidi 决策 🗳️</h2>
+      <ol class="decisions">
+        <li class="hot"><span class="n">1</span><div>
+          <h4>§4.3 的 Decide 顺序 <span class="pill partial">设计稿 ≠ K02a 现网</span></h4>
+          <p>按设计稿（clarify 最先 + 要求 stuckAfterHint），还是跟 K02a 现网顺序对齐？详见 <a href="#algo-decide">§4.3 差异 (a)(b)(c)</a>。</p>
+          <div class="opt"><span>设计稿：clarify 最先 + stuckAfterHint</span><span class="vs">vs</span><span>对齐 K02a 现网顺序</span></div></div></li>
+        <li><span class="n">2</span><div>
+          <h4>形态</h4>
+          <p>接受“单 tutor 通道 + B 作为推荐服务”？</p></div></li>
+        <li><span class="n">3</span><div>
+          <h4>LAB-U01 范围</h4>
+          <p>只做 chips + 策略选择，还是带分段进度条（0/N，不是 %）？</p>
+          <div class="opt"><span>chips + 策略选择</span><span class="vs">vs</span><span>+ 分段进度条 0/N</span></div></div></li>
+        <li><span class="n">4</span><div>
+          <h4>微问</h4>
+          <p>默认预算 3 次是否合适？是否强制 <code>require_page</code>？</p></div></li>
+        <li class="hot"><span class="n">5</span><div>
+          <h4>解锁时机</h4>
+          <p>K02a PASS 后就开 LAB-A01，还是等完整 K02 PASS？</p>
+          <div class="opt"><span>K02a PASS 后</span><span class="vs">vs</span><span>完整 K02 PASS 后</span></div></div></li>
+        <li class="red"><span class="n">6</span><div>
+          <h4>C01 的 503 阻塞 <span class="pill blocked">Blocked</span></h4>
+          <p>需要你提供凭据，或确认外部服务。</p></div></li>
+      </ol>
+    </section>
+  </main>
+</div>
+
+<footer>
+  <div class="footnote"><i>UNRUN：这份文档没有跑任何测试、CI，也没有 push、开票或修改 <code>tasks.json</code>；状态来自 box 上的摘录和给定上下文。</i><br>
+  源文件：<code>/workspace/opening-research/2026-10-05-opening-architecture.md</code></div>
+</footer>
+
+<script type="module">
+// keep raw sources for fallback before mermaid mutates them
+document.querySelectorAll('.diagram').forEach(d => {
+  const src = d.querySelector('pre.mermaid').textContent;
+  d.querySelector('.fallback').textContent += '\n\n' + src.trim();
+});
+try {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({
+    startOnLoad: false, securityLevel: 'strict', theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif',
+      fontSize: '14px', primaryColor: '#eef2ff', primaryBorderColor: '#8b8ff5',
+      lineColor: '#7a8199', clusterBkg: '#f7f8ff', clusterBorder: '#c9cdf5', edgeLabelBackground: '#ffffff'
+    },
+    flowchart: { useMaxWidth: true, curve: 'basis', htmlLabels: true, padding: 12, nodeSpacing: 40, rankSpacing: 50 }
+  });
+  await mermaid.run({ querySelector: 'pre.mermaid' });
+} catch (e) {
+  console.error(e);
+  document.querySelectorAll('.diagram').forEach(d => d.classList.add('failed'));
+}
+</script>
+<script>
+// status filters
+document.getElementById('filters').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#filters button').forEach(x => x.classList.toggle('on', x === b));
+  const f = b.dataset.f;
+  document.querySelectorAll('#modtable tbody tr').forEach(tr => {
+    tr.style.display = (f === 'all' || tr.dataset.s === f) ? '' : 'none';
+  });
+});
+// TOC scrollspy
+const links = [...document.querySelectorAll('#toc a')];
+const targets = links.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+const spy = () => {
+  let cur = targets[0];
+  for (const t of targets) if (t.getBoundingClientRect().top < 120) cur = t;
+  links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + cur.id));
+};
+addEventListener('scroll', spy, { passive: true }); spy();
+</script>
+</body>
+</html>
