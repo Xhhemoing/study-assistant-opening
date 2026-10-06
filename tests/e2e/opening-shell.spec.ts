@@ -27,6 +27,9 @@ test.describe("opening shell", () => {
           "aria-current",
           "page",
         );
+        // Carried over from the retired workspace-navigation spec: the shell
+        // must not introduce horizontal overflow at any viewport width.
+        await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       }
     } finally {
       await context.close();

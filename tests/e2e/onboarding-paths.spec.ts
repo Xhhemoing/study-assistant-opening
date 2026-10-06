@@ -56,7 +56,7 @@ test("creates a course with a final-exam goal (Path B)", async ({ browser, baseU
   }
 });
 
-test("promotes an exploration candidate into a new course (Path C)", async ({ browser, baseURL }) => {
+test("promotes an exploration candidate into library content (Path C)", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
     await register(context, "path-c");
@@ -75,9 +75,21 @@ test("promotes an exploration candidate into a new course (Path C)", async ({ br
     await page.locator('[data-onboarding-path="promote-exploration"]').click();
     await expect(page).toHaveURL(/\/explore/);
 
+    // The exploration workspace surfaces candidates on its review page.
     await page.goto(`/explore/${explorationId}`);
-    await page.getByRole("button", { name: "转为课程" }).click();
-    await expect(page).toHaveURL(/\/learn\/courses\//);
+    await page.getByRole("link", { name: "候选沉淀" }).click();
+    await expect(page).toHaveURL(new RegExp(`/explore/${explorationId}/promotions`));
+    await expect(page.getByRole("heading", { name: "Course Seed" })).toBeVisible();
+
+    // Accepting a note promotion materialises it as a library document.
+    await page.getByRole("button", { name: "接受候选" }).click();
+    const noteLink = page.getByRole("link", { name: "打开笔记" });
+    await expect(noteLink).toBeVisible();
+    await noteLink.click();
+
+    await expect(page).toHaveURL(/\/library\/[0-9a-f-]+$/);
+    await expect(page.getByText("编辑笔记")).toBeVisible();
+    await expect(page.getByRole("link", { name: "返回来源探索" })).toBeVisible();
   } finally {
     await context.close();
   }

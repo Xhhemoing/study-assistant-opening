@@ -35,7 +35,8 @@ test("finds a note through the global command palette and navigates to it", asyn
     await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 
-    const input = page.getByRole("combobox", { name: "搜索笔记和操作" });
+    // The palette input is labelled 搜索页面、笔记和课程 since the opening release.
+    const input = page.getByRole("combobox", { name: "搜索页面、笔记和课程" });
     await expect(input).toBeVisible();
     const searching = page.waitForResponse((response) =>
       new URL(response.url()).pathname === "/api/search" && response.ok(),
@@ -63,9 +64,10 @@ test("shows the no-match state for an unknown query", async ({ browser, baseURL 
     await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 
-    const input = page.getByRole("combobox", { name: "搜索笔记和操作" });
+    const input = page.getByRole("combobox", { name: "搜索页面、笔记和课程" });
+    await expect(input).toBeVisible();
     await input.fill("绝不存在的关键词xyz");
-    await expect(page.getByText("没有匹配内容")).toBeVisible();
+    await expect(page.getByText("没有匹配的页面或内容")).toBeVisible();
   } finally {
     await context.close();
   }

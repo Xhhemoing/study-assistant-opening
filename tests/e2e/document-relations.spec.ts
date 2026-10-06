@@ -28,6 +28,9 @@ test("creates, retypes, and deletes an outgoing relation across reloads", async 
     const page = await context.newPage();
 
     await page.goto(`/library/${encodeURIComponent(source.id)}`);
+    // Properties (relations/backlinks/tags) live in a side inspector that
+    // starts closed; open it before asserting on its panels.
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByRole("heading", { name: "关联笔记" })).toBeVisible();
     await page.getByRole("textbox", { name: "关联目标 ID" }).fill(target.id);
     const createRequest = page.waitForResponse((response) =>
@@ -46,11 +49,14 @@ test("creates, retypes, and deletes an outgoing relation across reloads", async 
     await typeSelect.selectOption("supports");
     await updateRequest;
     await page.reload();
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByRole("combobox", { name: "已有关联类型" })).toHaveValue("supports");
 
     await page.goto(`/library/${encodeURIComponent(target.id)}`);
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByRole("link", { name: "Relation source" })).toBeVisible();
     await page.goto(`/library/${encodeURIComponent(source.id)}`);
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     const deleteRequest = page.waitForResponse((response) =>
       response.url().includes(`/api/documents/${encodeURIComponent(source.id)}/relations/`) &&
       response.request().method() === "DELETE" && response.status() === 204,
@@ -59,6 +65,7 @@ test("creates, retypes, and deletes an outgoing relation across reloads", async 
     await deleteRequest;
     await expect(page.getByText("还没有从这篇笔记发出的关联")).toBeVisible();
     await page.reload();
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByText("还没有从这篇笔记发出的关联")).toBeVisible();
   } finally {
     await context.close();

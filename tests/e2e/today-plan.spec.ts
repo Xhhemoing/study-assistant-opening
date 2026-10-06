@@ -19,7 +19,10 @@ test("shows today's plan with task reasons and skip does not mark failure", asyn
     await page.goto("/learn");
     await expect(page.getByRole("heading", { name: "今日任务" })).toBeVisible();
     await expect(page.getByText(/分钟/).first()).toBeVisible();
-    const firstReason = page.locator("ul li p").first();
+    // Reasons live in a collapsed <details>「安排依据」; expand the first one.
+    const firstReasonToggle = page.getByText("安排依据").first();
+    await firstReasonToggle.click();
+    const firstReason = page.locator("ul li details p").first();
     await expect(firstReason).toBeVisible();
     await expect(firstReason).not.toHaveText(/失败/);
 

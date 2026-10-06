@@ -51,7 +51,7 @@ test("reserves and removes protected exploration time", async ({ browser, baseUR
     await start.fill("18:30");
     await end.fill("19:15");
 
-    await page.getByRole("button", { name: "添加" }).click();
+    await page.getByRole("button", { name: "添加", exact: true }).click();
     await expect(page.getByText("18:30 – 19:15")).toBeVisible();
 
     await page.getByRole("button", { name: "移除 18:30–19:15 预留时段" }).click();

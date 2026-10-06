@@ -24,6 +24,8 @@ test("persists normalized document tags and clears them", async ({ browser, base
 
     const page = await context.newPage();
     await page.goto(`/library/${encodeURIComponent(documentId)}`);
+    // Tags live in the properties inspector; open it before asserting.
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     const input = page.getByRole("textbox", { name: "新增标签" });
     await input.fill("  \uFF34\uFF2F\uFF30\uFF29\uFF23  ");
     await page.getByRole("button", { name: "添加标签" }).click();
@@ -34,11 +36,13 @@ test("persists normalized document tags and clears them", async ({ browser, base
     await expect(page.getByText("TOPIC", { exact: true })).toHaveCount(1);
 
     await page.reload();
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByText("TOPIC", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "移除标签 TOPIC" }).click();
     await expect(page.getByText("还没有标签")).toBeVisible();
 
     await page.reload();
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByText("还没有标签")).toBeVisible();
   } finally {
     await context.close();

@@ -42,6 +42,8 @@ test("persists a wiki link and shows the backlink on the target note", async ({ 
     await indexing;
 
     await page.goto(`/library/${encodeURIComponent(target.id)}`);
+    // Backlinks live in the properties inspector; open it on the target note.
+    await page.getByRole("button", { name: "笔记属性与关联" }).click();
     await expect(page.getByRole("heading", { name: "反向链接" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Knowledge link source" })).toHaveAttribute(
       "href",

@@ -20,16 +20,23 @@ test("persists a goal-free exploration, blocks, branch, and close/resume state",
     await page.getByLabel("内容类型").selectOption("open_question");
     await page.getByLabel("探索内容").fill("What should branch next?");
     await page.getByRole("button", { name: "添加内容" }).click();
-    await page.getByLabel("分支标题").fill("Alternative path");
+    // dc5f176 renamed the form label from 「分支标题」 to 「从当前分支继续」.
+    await page.getByLabel("从当前分支继续").fill("Alternative path");
     await page.getByRole("button", { name: "创建分支" }).click();
+    await expect(page.getByRole("button", { name: /Alternative path/ })).toBeVisible();
     await page.getByRole("button", { name: "关闭探索" }).click();
-    await expect(page.getByText("已关闭")).toBeVisible();
+    // The heading description reads 「已关闭 · N 个分支」 and a closed hint
+    // appears in the composer; assert on the first status text only.
+    await expect(page.getByText(/已关闭/).first()).toBeVisible();
     await page.getByRole("button", { name: "恢复探索" }).click();
-    await expect(page.getByText("进行中")).toBeVisible();
+    await expect(page.getByText(/进行中/).first()).toBeVisible();
     await page.reload();
     await expect(page.getByText("The root branch is durable")).toBeVisible();
     await expect(page.getByText("What should branch next?")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Alternative path" })).toBeVisible();
+    // After reload the first branch is selected again; the branch lineage
+    // must still list the created child branch.
+    await expect(page.getByRole("navigation", { name: "分支谱系" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Alternative path/ })).toBeVisible();
   } finally {
     await context.close();
   }

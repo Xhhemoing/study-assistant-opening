@@ -23,14 +23,14 @@ test("exports a native workspace backup and shows a non-overwriting restore poli
 
     const page = await context.newPage();
     await page.goto("/settings/export");
-    await expect(page.getByRole("heading", { name: "完整备份" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "导出完整备份" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "原生内容备份" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "导出原生内容备份" })).toBeVisible();
     await expect(page.getByText("不会覆盖").first()).toBeVisible();
     await expect(page.getByText("拒绝（发现已存在 ID 时整体失败）")).toBeVisible();
     await expect(page.getByText("跳过（保留现有记录，不覆盖）")).toBeVisible();
 
     const downloadPromise = page.waitForEvent("download");
-    await page.getByRole("button", { name: "导出完整备份" }).click();
+    await page.getByRole("button", { name: "导出原生内容备份" }).click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toMatch(/\.json$/);
   } finally {
