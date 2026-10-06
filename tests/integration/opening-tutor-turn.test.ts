@@ -543,7 +543,9 @@ describe("opening tutor turn durable path (guarded)", () => {
     const actualChunkId = (await fixture.sql`SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId}`)[0].id as string;
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({
-        text: "once", citedChunkIds: [], candidates: [],
+        // require_page policy (LAB-A01): a page-backed turn must anchor to
+        // the selected physical page; cite the real chunk (page 1 = current).
+        text: "once", citedChunkIds: [actualChunkId], candidates: [],
       }) } }],
       usage: { prompt_tokens: 10, completion_tokens: 5 },
     })));
