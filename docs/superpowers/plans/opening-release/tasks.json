@@ -378,8 +378,10 @@
     "P02"
    ],
    "plan": "09-connections.md",
-   "status": "active",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "docs/superpowers/evidence/2026-10-06-opening-release/c01-connections-verified.md"
+   ]
   },
   {
    "id": "C02",
