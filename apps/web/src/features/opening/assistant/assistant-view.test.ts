@@ -43,7 +43,7 @@ describe("AssistantView pending job discovery", () => {
     })).toEqual({ kind: "unavailable", message: "database unavailable" });
   });
 
-  it("does not auto-poll a terminal outcome_unknown discovery", () => {
+  it("shows a recovered unknown outcome without auto-polling", () => {
     expect(pendingJobDiscoveryState({
       ok: true,
       job: {
@@ -52,7 +52,11 @@ describe("AssistantView pending job discovery", () => {
         error: { message: "provider timeout" },
         updatedAt: ISO,
       },
-    })).toEqual({ kind: "none" });
+    })).toEqual({
+      kind: "unknown",
+      pending: false,
+      hint: "回答结果状态未知：provider timeout。请勿重复提交。",
+    });
   });
 });
 

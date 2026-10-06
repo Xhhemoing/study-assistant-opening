@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { Composer, shouldSubmitShortcut } from "./composer";
+import { Composer, logicalSendFingerprint, nextClientKey, shouldSubmitShortcut } from "./composer";
 
 function markup(practiceMode: boolean) {
   return renderToStaticMarkup(createElement(Composer, {
@@ -50,5 +50,23 @@ describe("composer keyboard shortcut", () => {
     expect(shouldSubmitShortcut({ key: "Enter", ctrlKey: true, metaKey: false, isComposing: false })).toBe(true);
     expect(shouldSubmitShortcut({ key: "Enter", ctrlKey: false, metaKey: true, isComposing: false })).toBe(true);
     expect(shouldSubmitShortcut({ key: "a", ctrlKey: true, metaKey: false, isComposing: false })).toBe(false);
+  });
+});
+
+describe("composer logical-send idempotency", () => {
+  it("reuses the same client key for an unchanged unconfirmed retry and mints on content drift", () => {
+    const fingerprint = logicalSendFingerprint({
+      text: "  explain this  ", mode: "explain", sourceIds: ["b", "a"], currentPage: 2,
+    });
+    const first = nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: fingerprint });
+    const retry = nextClientKey({ clientKey: first.clientKey, fingerprint: first.fingerprint, nextFingerprint: fingerprint });
+    expect(retry).toEqual(first);
+
+    const changed = nextClientKey({
+      clientKey: first.clientKey, fingerprint: first.fingerprint,
+      nextFingerprint: logicalSendFingerprint({ text: "different", mode: "explain", sourceIds: ["a", "b"], currentPage: 2 }),
+    });
+    expect(changed.clientKey).not.toBe(first.clientKey);
+    expect(changed.fingerprint).not.toBe(first.fingerprint);
   });
 });

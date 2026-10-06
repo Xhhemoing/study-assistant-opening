@@ -123,8 +123,8 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           AND j.workspace_id = ${scope.workspaceId}
           AND c.workspace_id = ${scope.workspaceId}
           AND c.owner_user_id = ${scope.ownerUserId}
+          AND j.status IN ('queued', 'running', 'outcome_unknown')
           AND t.status = 'pending'
-          AND j.status IN ('queued', 'running')
         ORDER BY j.created_at DESC
         LIMIT 1
       `;

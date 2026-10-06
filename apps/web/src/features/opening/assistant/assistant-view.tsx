@@ -111,7 +111,8 @@ export function jobStatusHint(job: JobStatusResponse): string {
 export type PendingJobDiscovery =
   | { kind: "none" }
   | { kind: "unavailable"; message: string }
-  | { kind: "active"; activeJobId: string; pending: true; hint: string };
+  | { kind: "active"; activeJobId: string; pending: true; hint: string }
+  | { kind: "unknown"; pending: false; hint: string };
 
 /** Null is no pending job. A lookup error must stay unavailable, not empty. */
 export function pendingJobDiscoveryState(
@@ -121,7 +122,11 @@ export function pendingJobDiscoveryState(
     const message = result.error instanceof Error ? result.error.message : "服务暂时不可用";
     return { kind: "unavailable", message };
   }
-  if (!result.job || (result.job.status !== "queued" && result.job.status !== "running")) {
+  if (!result.job) return { kind: "none" };
+  if (result.job.status === "outcome_unknown") {
+    return { kind: "unknown", pending: false, hint: jobStatusHint(result.job) };
+  }
+  if (result.job.status !== "queued" && result.job.status !== "running") {
     return { kind: "none" };
   }
   return {
@@ -308,15 +313,19 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
+      } else if (discovered.kind === "unknown") {
+        setActiveJobId(null);
+        setPending(false);
+        setPendingHint(discovered.hint);
       } else {
         setActiveJobId(null);
         setPending(false);
         setPendingHint("");
       }
-      return true;
     },
     [api, learningAttempt],
   );
+
 
   useEffect(() => {
     let cancelled = false;

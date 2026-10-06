@@ -119,7 +119,7 @@ describe("opening conversation repository", () => {
 
 describe("opening tutor jobs repository", () => {
   it("discovers only an active pending job in the owner-scoped conversation", async () => {
-    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running')")
+    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running', 'outcome_unknown')") && query.includes("t.status = 'pending'")
       ? [{
           id: "job-1",
           status: "queued",
@@ -137,6 +137,25 @@ describe("opening tutor jobs repository", () => {
     });
     expect(sql.calls[0]).toContain("owner_user_id");
     expect(sql.calls[0]).toContain("conversation_id");
+  });
+
+  it("discovers a recovered unknown outcome without marking it active", async () => {
+    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running', 'outcome_unknown')")
+      ? [{
+          id: "job-unknown",
+          status: "outcome_unknown",
+          error: { message: "provider timeout" },
+          updated_at: "2026-09-13T12:00:00.000Z",
+        }]
+      : []);
+    const repository = createOpeningTutorJobsRepository(sql);
+
+    await expect(repository.findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-unknown",
+      status: "outcome_unknown",
+      error: { message: "provider timeout" },
+      updatedAt: "2026-09-13T12:00:00.000Z",
+    });
   });
 
   it("returns no pending job when the owner-scoped conversation is empty", async () => {
