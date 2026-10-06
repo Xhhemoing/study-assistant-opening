@@ -53,8 +53,21 @@ describe("connection handlers", () => {
     expect(response.status).toBe(201); const c = await response.json();
     expect(c.allowedScopes).toEqual([]); expect(c.state).toBe("needs_authorization");
     expect((await check(req("POST", { clientKey: randomUUID() }), context(c.id))).status).toBe(503);
-    expect((await sync(req("POST", { clientKey: randomUUID() }), context(c.id))).status).toBe(503);
+    const needsAuth = await sync(req("POST", { clientKey: randomUUID() }), context(c.id));
+    expect(needsAuth.status).toBe(200);
+    expect(await needsAuth.json()).toMatchObject({ status: "needs_authorization", imported: 0, skipped: 0, allowedScopes: [] });
     const text = await (await list(req("GET"))).text(); expect(text).not.toContain(secret); expect(text).not.toContain("ciphertext");
+
+    await f.sql`UPDATE opening_connections SET state='ready', allowed_scopes=${f.sql.array(["messages.read"])} WHERE id=${c.id}`;
+    const ready = await sync(req("POST", { clientKey: randomUUID() }), context(c.id));
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toMatchObject({
+
+      status: "unsupported_history_read",
+      imported: 0,
+      skipped: 0,
+      allowedScopes: ["messages.read"],
+    });
   });
   it("fails closed without a key and does not mutate the connection", async () => {
     const c = await create(); vi.stubEnv("OPENING_CONNECTION_KEY", "");

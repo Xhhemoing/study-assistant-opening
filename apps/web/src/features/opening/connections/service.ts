@@ -6,6 +6,7 @@ import {
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
+import { createSyncDingTalkHandler } from "../../../../../worker/src/jobs/sync-dingtalk";
 
 const clientKeySchema = z.string().min(8).max(200);
 const keyInput = z.object({ clientKey: clientKeySchema }).strict();
@@ -53,12 +54,22 @@ export function createOpeningConnectionService(sql: Sql) {
       const id = uuidSchema.parse(rawId); const input = revokeInput.parse(raw);
       try { return await repo.revoke(scope, id, input.expectedVersion, input.clientKey); } catch (error) { return mapped(error); }
     },
-    async unavailable(scope: Scope, rawId: string, raw: unknown) {
+    async checkUnavailable(scope: Scope, rawId: string, raw: unknown) {
       const id = uuidSchema.parse(rawId); keyInput.parse(raw);
       try {
         const connection = await repo.get(scope, id);
         if (connection.state === "revoked") throw new ApiError("CONFLICT", "连接已撤销。", 409);
       } catch (error) { return mapped(error); }
+      throw new ApiError("CONFIGURATION", "连接状态检查尚未实现，未执行远程检查。", 503);
+    },
+    async unavailable(scope: Scope, rawId: string, raw: unknown) {
+      const id = uuidSchema.parse(rawId); keyInput.parse(raw);
+      let connection;
+      try {
+        connection = await repo.get(scope, id);
+        if (connection.state === "revoked") throw new ApiError("CONFLICT", "连接已撤销。", 409);
+      } catch (error) { return mapped(error); }
+      if (connection.kind === "dingtalk") return createSyncDingTalkHandler(sql)({ connectionId: id });
       throw new ApiError("CONFIGURATION", "连接适配器尚未实现，未执行远程检查或同步。", 503);
     },
   };

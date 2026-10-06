@@ -7,8 +7,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   let response: Response;
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    await createOpeningConnectionService(sql).unavailable(scope, (await context.params).id, await readOpeningJsonBody(request, 16_384));
-    throw new Error("unavailable connector returned unexpectedly");
+    const result = await createOpeningConnectionService(sql).unavailable(scope, (await context.params).id, await readOpeningJsonBody(request, 16_384));
+    response = Response.json(result, { headers: { "Cache-Control": "no-store" } });
+    return response;
   } catch (error) { response = jsonError(mapDomainError(error)); }
   response.headers.set("Cache-Control", "no-store");
   return response;

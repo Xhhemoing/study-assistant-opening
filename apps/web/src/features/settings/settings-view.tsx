@@ -13,6 +13,7 @@ import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { DiagnosticsPanel } from "./diagnostics-panel";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
+import { DingTalkConnectionsPanel } from "./dingtalk-connections-panel";
 
 type WorkspaceEntry = "learn" | "explore" | "library";
 const entries: Array<{ value: WorkspaceEntry; label: string }> = [
@@ -150,6 +151,7 @@ export function SettingsView() {
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
         <AiSettingsPanel />
         <ProviderSettingsPanel />
+        <DingTalkConnectionsPanel />
         {loading ? <LoadingRows label="正在读取设置" /> : null}
         {error ? <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert"><p className="text-sm text-red-700">{error}</p><button className={ui.secondary} onClick={() => void loadSettings()} type="button"><RefreshCw aria-hidden="true" size={14} />重新读取</button></div> : null}
         {!loading ? <>
