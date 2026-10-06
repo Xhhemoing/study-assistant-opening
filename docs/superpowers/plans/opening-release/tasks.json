@@ -563,8 +563,10 @@
     "U01"
    ],
    "plan": "12-review-hardening.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "docs/superpowers/evidence/2026-10-06-opening-release/rp6-today-resume-verified.md"
+   ]
   }
  ]
 }
