@@ -393,8 +393,10 @@
     "I03"
    ],
    "plan": "09-connections.md",
-   "status": "planned",
-   "evidence": []
+   "status": "active",
+   "evidence": [
+    "docs/superpowers/evidence/2026-10-06-opening-release/c02-imap-code-slice.md"
+   ]
   },
   {
    "id": "C03",
