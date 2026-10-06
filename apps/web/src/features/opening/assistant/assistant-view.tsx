@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ConversationResume, ConversationSummary, LearningAttempt, SourceRecord, TurnRecord } from "@aistudy/contracts";
+import type { ConversationResume, ConversationSummary, LearningAttempt, SourceRecord, TutorMode, TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { MessageList } from "./message-list";
@@ -18,6 +18,8 @@ import { MemoryPanel } from "./memory-panel";
 import { prepareSnippetDraft } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
 import { UploadStrip } from "./upload-strip";
+import type { ThinTutorAction } from "@aistudy/domain";
+import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 
 type Props = {
   api?: OpeningApi;
@@ -144,6 +146,24 @@ export function assistantContextHint(selectedSourceIds: string[]): string {
     : `已选材料：${selectedSourceIds.length} 份`;
 }
 
+const TUTOR_ACTION_LABELS: Record<ThinTutorAction["kind"], string> = {
+  clarify: "选择材料或页码",
+  guided: "开始引导提示",
+  worked_example: "看完整例题",
+  independent_variant: "独立做变式题",
+  delayed_retest: "开始到期复习",
+};
+
+export function tutorActionLabel(kind: ThinTutorAction["kind"]): string {
+  return TUTOR_ACTION_LABELS[kind];
+}
+
+/** Chip prefill text per action kind; sent only after the user confirms. */
+export function presetPromptForMode(mode: "hint" | "explain"): string {
+  return mode === "hint"
+    ? "请只给下一步提示，不要直接给完整答案。"
+    : "请给一道完整例题讲解，并标明材料依据。";
+}
 export function mergeChatMessages(
   saved: ChatMessageView[],
   ephemeral: ChatMessageView[],
@@ -226,11 +246,33 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
   const [ephemeralPrivacyEpoch, setEphemeralPrivacyEpoch] = useState<number>();
   const [snippetDraft, setSnippetDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
+  const [tutorActions, setTutorActions] = useState<ThinTutorAction[]>([]);
+  const [tutorActionError, setTutorActionError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const [modePrefill, setModePrefill] = useState<{ mode: TutorMode; nonce: number } | null>(null);
 
   const refreshSources = useCallback(async () => {
     setSources(await api.listSources());
   }, [api]);
+
+  const refreshTutorActions = useCallback(async () => {
+    if (!learningAttempt) {
+      setTutorActions([]);
+      setTutorActionError("");
+      return;
+    }
+    setTutorActionError("");
+    try {
+      const result = await api.listTutorActions({
+        courseId: learningAttempt.courseId,
+        skillLabel: learningAttempt.skillLabel,
+        sessionId: learningAttempt.sessionId,
+      });
+      setTutorActions(result);
+    } catch (err) {
+      setTutorActionError(err instanceof Error ? err.message : "无法读取推荐动作");
+    }
+  }, [api, learningAttempt]);
 
   const refreshConversation = useCallback(
     async (id: string) => {
@@ -282,6 +324,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     (async () => {
       try {
         await refreshSources();
+        await refreshTutorActions();
         if (cancelled) return;
         if (initialConversationId && !learningAttempt) {
           setConversationId(initialConversationId);
@@ -314,7 +357,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     return () => {
       cancelled = true;
     };
-  }, [api, conversationId, initialConversationId, learningAttempt, refreshConversation, refreshSources, reload, startFresh]);
+  }, [api, conversationId, initialConversationId, learningAttempt, refreshConversation, refreshSources, refreshTutorActions, reload, startFresh]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -464,6 +507,56 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     }
   }
 
+  function handleTutorAction(action: ThinTutorAction): void {
+    applyTutorActionIntent(tutorActionIntent(action));
+  }
+
+  function applyTutorActionIntent(intent: TutorActionIntent): void {
+    if (pending || loading || recoveryRequired) return;
+    switch (intent.kind) {
+      case "clarify":
+        setContextOpen(true);
+        return;
+      case "guided":
+      case "worked_example": {
+        // Chips prefill the matching composer mode, per Lab design v2 §4;
+        // the user confirms before anything is sent.
+        setModePrefill({ mode: intent.mode, nonce: Date.now() });
+        setDraft(replacePromptDraft(draft, presetPromptForMode(intent.mode), () => true));
+        return;
+      }
+      case "independent_variant":
+        setDraft(replacePromptDraft(draft, intent.draft, () => true));
+        setPendingHint("独立做变式题：完成后请在练习表单里提交结果。");
+        return;
+      case "delayed_retest":
+        void acceptDueRetest(intent.action);
+        return;
+    }
+  }
+
+  async function acceptDueRetest(action: ThinTutorAction): Promise<void> {
+    setTutorActionError("");
+    try {
+      const retests = await api.listRetestCandidates();
+      // Only an explicit user click accepts; already-accepted due activities
+      // are opened instead of re-accepted (Lab design v2 §4).
+      const candidates = retests.filter((row) => !row.accepted && row.skillLabel === action.skillLabel);
+      if (candidates.length === 0) {
+        setPendingHint(`「${action.skillLabel}」没有待接受的重测任务；已接受的请到今日任务队列查看。`);
+        return;
+      }
+      const accepted: string[] = [];
+      for (const candidate of candidates) {
+        const outcome = await api.acceptRetest(candidate.id, `retest-${crypto.randomUUID()}`);
+        accepted.push(outcome.taskId);
+      }
+      setPendingHint(`已接受 ${accepted.length} 个到期重测任务；到今日任务队列开始。`);
+    } catch (err) {
+      setTutorActionError(err instanceof Error ? err.message : "无法接受到期重测");
+    }
+  }
+
   function setPrompt(value: string) {
     if (pending || loading || recoveryRequired) return;
     setDraft(replacePromptDraft(draft, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
@@ -482,7 +575,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
       {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} />}
       {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
       {error || recoveryRequired ? <div className="mx-5 mb-2 border border-red-200 bg-red-50 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-red-800">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
-      <Composer practiceMode={Boolean(learningAttempt)} draft={draft} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{tutorActionError}</p> : null}
+      {tutorActions.length > 0 && learningAttempt ? (
+        <div className="mx-5 mb-2 flex flex-wrap gap-1.5">
+          {tutorActions.map((action) => (
+            <button key={action.kind} type="button" className={secondaryButtonClass} title={action.reason} disabled={pending || loading || recoveryRequired} onClick={() => handleTutorAction(action)}>{tutorActionLabel(action.kind)}</button>
+          ))}
+        </div>
+      ) : null}
+
+      <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">

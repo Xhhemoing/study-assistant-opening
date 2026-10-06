@@ -13,6 +13,7 @@ import {
   shouldLoadConversationList,
   conversationForAssistant,
   selectionForResumedConversation,
+  presetPromptForMode,
 } from "./assistant-view";
 
 const JOB_ID = "33333333-3333-4333-8333-333333333333";
@@ -201,8 +202,7 @@ it("binds practice help to the server attempt and session rather than the conver
   expect(learningAttemptTurnContext()).toEqual({});
 });
 
-describe("practice conversation recovery", () => {
-  const courseA = { id: "conversation-a", courseId: "course-a", title: "A", updatedAt: ISO, lastTurnPreview: null };
+describe("practice conversation recovery", () => {  const courseA = { id: "conversation-a", courseId: "course-a", title: "A", updatedAt: ISO, lastTurnPreview: null };
   const courseB = { id: "conversation-b", courseId: "course-b", title: "B", updatedAt: ISO, lastTurnPreview: null };
 
   it("skips a newer conversation from another course", () => {
@@ -271,4 +271,11 @@ it("keeps server provenance on both messages from a temporary response", () => {
     { role: "user", origin: "ephemeral", provenanceId: JOB_ID },
     { role: "assistant", origin: "ephemeral", provenanceId: JOB_ID },
   ]);
+});
+
+describe("LAB-U01 chip prefill prompts", () => {
+  it("prefills guided with a hint-only prompt and worked_example with a full explanation prompt", () => {
+    expect(presetPromptForMode("hint")).toContain("不要直接给完整答案");
+    expect(presetPromptForMode("explain")).toContain("完整例题");
+  });
 });

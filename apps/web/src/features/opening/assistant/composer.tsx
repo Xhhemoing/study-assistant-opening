@@ -17,6 +17,8 @@ type Props = {
   onPrivacyChange?: (privacy: ComposerPrivacy) => void; onCancel?: () => void;
   onContext?: () => void; contextLabel?: string; draft: string;
   intent?: { sourceIds: readonly string[]; currentPage?: number | null; chunkId?: string | null };
+  /** Chip prefill: switches the selected mode once per nonce change. */
+  modePrefill?: { mode: TutorMode; nonce: number } | null;
   onDraftChange: (value: string) => void;
   onSubmit: (input: ComposerSubmit) => void | Promise<void | ComposerSubmitResult>;
 };
@@ -40,8 +42,15 @@ export function shouldSubmitShortcut(event: { key: string; ctrlKey: boolean; met
   return (event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing;
 }
 export function Composer({ practiceMode = false, disabled, pending, privacy = "saved", onPrivacyChange,
-  onCancel, onContext, contextLabel, draft, intent, onDraftChange, onSubmit }: Props) {
+  onCancel, onContext, contextLabel, draft, intent, modePrefill = null, onDraftChange, onSubmit }: Props) {
   const [selectedMode, setMode] = useState<TutorMode>("explain");
+  const lastPrefill = useRef<number | null>(null);
+  if (modePrefill && modePrefill.nonce !== lastPrefill.current) {
+    lastPrefill.current = modePrefill.nonce;
+    if (!practiceMode || modePrefill.mode === "hint" || modePrefill.mode === "explain") {
+      setMode(modePrefill.mode);
+    }
+  }
   const [sending, setSending] = useState(false);
   const modes = practiceMode ? MODES.filter((item) => item.value === "hint" || item.value === "explain") : MODES;
   const mode = modes.some((item) => item.value === selectedMode) ? selectedMode : "explain";

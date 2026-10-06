@@ -53,6 +53,18 @@ import { retestReviewSchema } from "../planning/review-types";
 
 export type { JobStatusResponse } from "@aistudy/contracts";
 
+const thinTutorActionSchema = z.object({
+  kind: z.enum(["clarify", "guided", "worked_example", "independent_variant", "delayed_retest"]),
+  skillLabel: z.string().min(1).max(200),
+  currentPage: z.number().int().positive().nullable(),
+  nodeId: z.string().uuid().nullable(),
+  problemRef: z.string().max(240).nullable(),
+  reason: z.string().min(1).max(2000),
+  evidenceIds: z.array(z.string()).max(200),
+});
+
+export type ThinTutorActionView = z.infer<typeof thinTutorActionSchema>;
+
 export class OpeningApiError extends Error {
   readonly status: number;
   readonly code: string | null;
@@ -346,6 +358,18 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       const body = await request(path, { method: "POST", body: JSON.stringify({ candidateRef: ref, clientKey }) }, fetchImpl);
       return z.object({ id: z.string().uuid(), status: z.literal("discarded") }).parse(body);
     },
+    async listTutorActions(input: { courseId: string; skillLabel: string; sessionId?: string | null; currentPage?: number | null }): Promise<ThinTutorActionView[]> {
+      const params = new URLSearchParams({ skillLabel: input.skillLabel });
+      if (input.sessionId) params.set("sessionId", input.sessionId);
+      if (input.currentPage != null) params.set("currentPage", String(input.currentPage));
+      const body = await request(
+        `/api/opening/courses/${input.courseId}/tutor-actions?${params}`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return z.object({ actions: z.array(thinTutorActionSchema) }).parse(body).actions;
+    },
+
     async getLearning(courseId: string) {
       const body = await request(`/api/opening/courses/${courseId}/learning`, { method: "GET" }, fetchImpl);
       return z.array(learningSummarySchema).parse(body);
