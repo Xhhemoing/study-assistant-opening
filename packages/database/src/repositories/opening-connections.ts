@@ -113,6 +113,9 @@ export function createOpeningConnectionsRepository(sql: Sql) {
         }
         await tx`DELETE FROM opening_connection_credentials WHERE connection_id=${id}`;
         await tx`DELETE FROM opening_connection_credential_requests WHERE connection_id=${id}`;
+        await tx`UPDATE opening_jobs SET state='cancelled', updated_at=now()
+          WHERE workspace_id=${scope.workspaceId} AND state='queued'
+          AND payload->>'connectionId'=${id}`;
         const [row] = await tx`UPDATE opening_connections SET version=version+1,state='revoked',
           allowed_scopes='{}',revoke_client_key=${clientKey},revoked_from_version=${expectedVersion},updated_at=now()
           WHERE id=${id} RETURNING *`;

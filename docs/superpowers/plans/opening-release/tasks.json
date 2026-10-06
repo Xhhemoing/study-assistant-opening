@@ -4,6 +4,21 @@
  "branch": "feat/opening-release",
  "tasks": [
   {
+   "id": "C01B",
+   "owner": "DATA+PIPELINE",
+   "dependsOn": [
+    "X01",
+    "F03",
+    "M02",
+    "P02"
+   ],
+   "plan": "09-connections.md",
+   "status": "verified",
+   "evidence": [
+    "docs/superpowers/evidence/2026-10-06-opening-release/c01b-imports-revocation.md"
+   ]
+  },
+  {
    "id": "B00",
    "owner": "INTEGRATOR",
    "dependsOn": [],

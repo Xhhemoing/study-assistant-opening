@@ -60,6 +60,8 @@ export * from "./schema/opening-planning";
 export * from "./repositories/opening-plans";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
+export * from "./schema/opening-imports";
+export * from "./repositories/opening-imports";
 export * from "./repositories/opening-model-providers";
 export * from "./schema/opening-connections";
 export * from "./storage/opening-credential-vault";
