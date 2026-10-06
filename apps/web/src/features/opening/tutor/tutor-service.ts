@@ -188,6 +188,7 @@ export function createTutorService(deps: {
         attemptId: input.attemptId ?? null,
         currentPage: input.currentPage ?? null,
         chunkId: input.chunkId ?? null,
+        strategyTemplateId: input.strategyTemplateId ?? null,
       });
 
       return {
