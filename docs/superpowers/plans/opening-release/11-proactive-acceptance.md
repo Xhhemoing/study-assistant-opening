@@ -13,7 +13,8 @@
 
 ### P04: Multisource candidate consolidation and low-choice planning
 
-**Owner:** AI+EXPERIENCE. **Depends:** C02,C03,K02,P02,M01.
+**Owner:** AI+EXPERIENCE. **Depends:** P04a,C02,C03,K02,P02,M01.
+**2026-10-08 拆分：** 不依赖连接器的每日草案（既有任务、到期补测、课表推导的空闲时间、昨日未完成顺延、未安排项建议）先由 [P04a](14-loop-closure.md) 交付；P04 在 P04a 的草案构建器上增加邮件/钉钉/课程资料候选、K02 卡点与来源修订去重，不另写排程入口。邮件与钉钉候选仍来自 C02/C03，因此保留这两项依赖。
 **Create:** `packages/domain/src/opening/action-digest.ts`、`action-digest.test.ts`；`apps/worker/src/jobs/extract-study-actions.ts`；`apps/web/src/features/opening/planning/action-service.ts`；`apps/web/src/app/api/opening/action-digest/route.ts`；`tests/integration/opening-action-digest.test.ts`。
 **Modify:** T03候选接受/拒绝与P02计划服务，仅增加来源修订与重排适配；不得静默改变旧API的确认含义。
 **Interfaces:** `buildActionDigest(candidates:ActionCandidate[]):ActionDigest`；提取worker从授权ImportReceipt与课程chunks输出候选，不能直接生成accepted任务。

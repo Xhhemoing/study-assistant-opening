@@ -68,7 +68,7 @@
 | U01 | EXPERIENCE | 今天/助理/课程移动端壳 | F02,F01 | 07-experience.md |
 | U02 | EXPERIENCE | 上传、原件和处理状态 | I01,I02,U01 | 07-experience.md |
 | U03 | EXPERIENCE | 对话/记忆/卡点/计划真实交互 | T03,M03,L03,P03,U02 | 07-experience.md |
-| Q01 | QA | 鉴权、并发、失败与删除集成 | U03,Q03 | 08-delivery.md |
+| Q01 | QA | 鉴权、并发、失败与删除集成 | U03,Q03,DL3,DL6,DL7,DL10 | 08-delivery.md |
 | Q02 | QA | 浏览器、手机和最终样本验收 | Q01 | 08-delivery.md |
 | Q03 | INTEGRATOR+QA | 打包、恢复与运行监督能力 | P03,M02 | 08-delivery.md |
 | X01 | INTEGRATOR | 扩展契约与开源库制品核验 | F02 | 09-connections.md |
@@ -79,8 +79,8 @@
 | V01 | PIPELINE | 录音转写、视频音轨/关键帧与时间引用 | X01,I02,I03 | 10-media-knowledge.md |
 | K01 | AI+DATA | 课程知识结构生成、纠正与增量更新 | X01,C01,I02,T02 | 10-media-knowledge.md |
 | K02a | EXPERIENCE+AI | 材料锚定辅导加深（thin slice；page cite + hint/explain） | L02,T03 | 10-media-knowledge.md |
-| K02 | EXPERIENCE+AI+DATA | 技能证据、针对性辅导与重测反馈 | K01,K02a,L02,T03 | 10-media-knowledge.md |
-| P04 | AI+EXPERIENCE | 多源事项归并及低选择负担的主动安排 | C02,C03,K02,P02,M01 | 11-proactive-acceptance.md |
+| K02 | EXPERIENCE+AI+DATA | 技能证据、针对性辅导与重测反馈 | K01,K02a,L02,T03,DL3,DL6 | 10-media-knowledge.md |
+| P04 | AI+EXPERIENCE | 多源事项归并及低选择负担的主动安排 | P04a,C02,C03,K02,P02,M01 | 11-proactive-acceptance.md |
 | U04 | EXPERIENCE | 连接/知识/媒体/今日行动真实交互 | C02,C03,V01,K02,P04 | 11-proactive-acceptance.md |
 | Q04 | QA+INTEGRATOR | CAP01–06真实验收及扩展隐私恢复 | U04,Q02 | 11-proactive-acceptance.md |
 | RP1 | DATA | 模型上下文统一隐私准入（历史+材料） | M02 | 12-review-hardening.md |
@@ -91,8 +91,15 @@
 | RP6 | EXPERIENCE | 今天页真实恢复入口 | T03,U01 | 12-review-hardening.md |
 | DL1 | EXPERIENCE | opening可达页去Mock收口（复习/练习入口、目标与指导模式） | L03,U03 | 13-daily-loop-gaps.md |
 | DL2 | EXPERIENCE | 今天队列任务完成/跳过 | P02,RP6 | 13-daily-loop-gaps.md |
-| DL3 | DATA+EXPERIENCE | 重测闭环：观察事务内入队与补测作答绑定retestId | L02,P02,DL2 | 13-daily-loop-gaps.md |
-| DL4 | EXPERIENCE | opening记忆卡片接入真实cards/reviews API | DL1,U03 | 13-daily-loop-gaps.md |
+| DL3 | DATA+EXPERIENCE | 重测闭环：观察事务内入队（题干提示）、今天页接受/忽略、建议时间不早于、补测绑定retestId | L02,P02,DL2,DL5 | 13-daily-loop-gaps.md |
+| DL4 | EXPERIENCE | opening记忆卡片接入真实cards/reviews API（核心闭环后的可选项） | DL1,U03,DL3,DL6 | 13-daily-loop-gaps.md |
+| DL5 | DATA+EXPERIENCE | 今天队列快速添加任务（幂等，需迁移）与分组 | DL2 | 14-loop-closure.md |
+| DL6 | EXPERIENCE+DATA | 练习判定可信化：参考自对照、帮助曝光自动带入、技能名复用 | L03,K02a | 14-loop-closure.md |
+| DL7 | AI+DATA | AI就绪清单、设置内每日额度与未知预留对账 | T01,T03 | 14-loop-closure.md |
+| DL8 | PIPELINE+AI | 照片材料作为视觉输入 | I02,T03 | 14-loop-closure.md |
+| DL9 | EXPERIENCE+DATA | 课表导入、默认空闲时间与一键安排（需迁移） | P01,P02,DL5 | 14-loop-closure.md |
+| P04a | EXPERIENCE+DATA | 每日自动草案：既有任务、到期补测、课表空闲与顺延 | DL2,DL3,DL9 | 14-loop-closure.md |
+| DL10 | INTEGRATOR+QA | Windows本地端到端运行手册与只读就绪自检 | I03,T01 | 14-loop-closure.md |
 
 ## 2. 可并行的边界与交接
 
@@ -121,7 +128,7 @@
 - **M0：基线可信** = B00-B02 + F01-F03。无安全持久化不堆功能。
 - **M1：能提交材料并求助** = I01-I03 + T01-T03 + U01-U02 + U03薄聊天切片。必须验证真实适配器材料传输、引用保存、任务结果刷新及跨端恢复；API局部通过不等于用户闭环完成，没有模型配置明确显示不可用。
 - **M2：会记住、能重测** = M01-M03 + L01-L03。隐私删除是长期记忆启用门禁。
-- **M3：每天用得起来** = P01-P03 + U03。协商确认、失败状态与移动端流程完整。
+- **M3：每天用得起来** = P01-P03 + U03 + DL1–DL3、DL5–DL7、DL9、P04a。协商确认、失败状态与移动端流程完整；手动加任务、补测闭环、可核对的练习判定、AI就绪与每日草案在真实链路上可用（2026-10-08扩展）。
 - **M4：基础可交付** = 先Q03打包/恢复实现，再Q01集成，再Q02最终验收。真实材料/模型/手机的结果单列，不能用fake测试替代；这不代表本轮新增需求全部满足。
 - **M5：新增核心需求完整覆盖** = X01/C01–C03/V01/K01–K02/P04/U04后通过Q04。学校邮箱和钉钉按实际授权验证；视频/录音理解、知识架构、动态学习与主动安排逐项验收。
 
@@ -129,7 +136,9 @@
 
 2026-09-21审查后新增：RP1–RP6为审查发现的工程修复项（隐私准入、原子写回、发送幂等、引用展示、CI门禁、今天页恢复入口），不扩大产品范围。M2门槛更新为M01–M03＋RP1＋RP2；M1的“跨端恢复”验收增加RP3的三个故障场景；M3今天页以RP6最小恢复入口为先行切片；RP4并入U03体验门禁；RP5为发布证据前置。详见[审查综合文档](../../plans/2026-09-21-review-synthesis.md)。
 
-2026-10-07每日学习闭环审查后新增：DL1–DL4（[每日闭环缺口](opening-release/13-daily-loop-gaps.md)）补齐正式入口去Mock、普通任务完成/跳过、重测自动提议与补测绑定`retestId`、记忆卡片接入真实API；均复用既有API/仓库，预计不新增迁移，不改变M0–M5范围定义。是否把DL1–DL3纳入M3“每天用得起来”与Q01依赖，需用户确认后另行调整。
+2026-10-07每日学习闭环审查后新增：DL1–DL4（[每日闭环缺口](opening-release/13-daily-loop-gaps.md)）补齐正式入口去Mock、普通任务完成/跳过、重测自动提议与补测绑定`retestId`、记忆卡片接入真实API；均复用既有API/仓库，预计不新增迁移，不改变M0–M5范围定义。是否把DL1–DL3纳入M3“每天用得起来”与Q01依赖，需用户确认后另行调整（已于2026-10-08经用户确认调整，见下段）。
+
+2026-10-08闭环第二轮审查后新增：DL5–DL10与P04a（[闭环第二轮](opening-release/14-loop-closure.md)）补齐今天页手动加任务与分组、参考自对照的可信判定、AI就绪清单/设置内额度/未知预留对账、照片视觉输入、课表导入与默认空闲时间、每日自动草案、Windows本地端到端运行手册。DL5与DL9需迁移，编号由INTEGRATOR分配；其余不新增迁移。经用户确认调整依赖：DL3增加DL5、DL4排到DL3/DL6之后、K02增加DL3与DL6（判定部分拆入DL6，不再被K01阻塞）、P04增加P04a、Q01增加DL3/DL6/DL7/DL10；M3扩为上述闭环任务。C02/C03保持active与原依赖，只在推荐顺序上排在DL1–DL3之后；DL8补M1照片路径但不回改M1已有验收。执行顺序见该文件“闭环优先级与排期”。
 
 复用原则：邮箱优先ImapFlow+MailParser；Docling/FFmpeg/faster-whisper承担解析；参考DeepTutor辅导流程，不复制另一套主后端。EmailEngine当前是商业备选，不默认购买。依据见`../../quality/opening-capability-reuse-research.md`。
 

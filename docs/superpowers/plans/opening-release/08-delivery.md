@@ -12,7 +12,8 @@ No production test connection. No fabricated reviewer, CI success, screenshot, A
 
 ### Q01: Cross-module negative and concurrency tests
 
-**Owner:** QA. **Depends:** U03,Q03.
+**Owner:** QA. **Depends:** U03,Q03,DL3,DL6,DL7,DL10.
+**2026-10-08 dependency update (user-approved):** the complete-flow step "plan proposal/accept -> retest" needs DL3 (transactional retest enqueue and `retestId`-bound attempts); observation verdict checks need DL6 (reference self-check); the "unconfigured provider and budget exhaustion" fault cases use DL7's readiness checklist and effective daily cap; running the handler/integration gates on isolated services on the Windows dev machine follows DL10. See [14](14-loop-closure.md).
 **Create:** `tests/integration/handler/opening-loop.test.ts`, `tests/integration/opening-concurrency.test.ts`, `tests/integration/opening-failure-recovery.test.ts`, `tests/contract/opening-safety-boundaries.test.ts`.
 **Modify:** `tests/integration/opening-backup-privacy.test.ts` (Q03 creates it before this task).
 **Interfaces:** reuse F03 fixture; no separate mock business database. Test helper may inject provider/storage/clock only at existing runtime boundaries.

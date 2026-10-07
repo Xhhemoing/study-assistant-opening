@@ -330,7 +330,11 @@
    "owner": "QA",
    "dependsOn": [
     "U03",
-    "Q03"
+    "Q03",
+    "DL3",
+    "DL6",
+    "DL7",
+    "DL10"
    ],
    "plan": "08-delivery.md",
    "status": "planned",
@@ -458,7 +462,9 @@
     "K01",
     "K02a",
     "L02",
-    "T03"
+    "T03",
+    "DL3",
+    "DL6"
    ],
    "plan": "10-media-knowledge.md",
    "status": "planned",
@@ -468,6 +474,7 @@
    "id": "P04",
    "owner": "AI+EXPERIENCE",
    "dependsOn": [
+    "P04a",
     "C02",
     "C03",
     "K02",
@@ -602,7 +609,8 @@
    "dependsOn": [
     "L02",
     "P02",
-    "DL2"
+    "DL2",
+    "DL5"
    ],
    "plan": "13-daily-loop-gaps.md",
    "status": "planned",
@@ -613,9 +621,89 @@
    "owner": "EXPERIENCE",
    "dependsOn": [
     "DL1",
-    "U03"
+    "U03",
+    "DL3",
+    "DL6"
    ],
    "plan": "13-daily-loop-gaps.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL5",
+   "owner": "DATA+EXPERIENCE",
+   "dependsOn": [
+    "DL2"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL6",
+   "owner": "EXPERIENCE+DATA",
+   "dependsOn": [
+    "L03",
+    "K02a"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL7",
+   "owner": "AI+DATA",
+   "dependsOn": [
+    "T01",
+    "T03"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL8",
+   "owner": "PIPELINE+AI",
+   "dependsOn": [
+    "I02",
+    "T03"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL9",
+   "owner": "EXPERIENCE+DATA",
+   "dependsOn": [
+    "P01",
+    "P02",
+    "DL5"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "P04a",
+   "owner": "EXPERIENCE+DATA",
+   "dependsOn": [
+    "DL2",
+    "DL3",
+    "DL9"
+   ],
+   "plan": "14-loop-closure.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL10",
+   "owner": "INTEGRATOR+QA",
+   "dependsOn": [
+    "I03",
+    "T01"
+   ],
+   "plan": "14-loop-closure.md",
    "status": "planned",
    "evidence": []
   }

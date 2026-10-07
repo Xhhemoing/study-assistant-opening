@@ -71,7 +71,8 @@ it('rejects a self prerequisite', () => {
 
 ### K02: Skill-linked evidence, targeted tutoring and retest feedback
 
-**Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,K02a,L02,T03.
+**Owner:** EXPERIENCE+AI+DATA. **Depends:** K01,K02a,L02,T03,DL3,DL6.
+**2026-10-08 拆分：** 参考自对照判定（`reference_checked` + `learner_self_compare`）、帮助曝光自动带入与技能名复用不需要知识结构，已拆为 [DL6](14-loop-closure.md)，不再被 K01 阻塞；重测入队与 `retestId` 绑定由 [DL3](13-daily-loop-gaps.md) 提供。K02 在二者之上只补 SkillEvidence、`nodeId` 与自适应，不重写判定或入队。
 **Research:** `docs/quality/2026-10-05-k02-deeptutor-fold-in.md` §5 — K02b / full slice：SkillEvidence + migration `0029` + `nodeId`-required recommendation；保留 K02/K01 集成门禁。
 **Create:** `packages/database/src/repositories/opening-skill-evidence.ts`、`migrations/<next-opening-skill-evidence-migration>.sql`（实施时按仓库实际顺序分配编号；计划称 0029）；`tests/integration/opening-adaptive-loop.test.ts`。
 **Modify:** L01 observation service、L02 retest worker；在 K02a 的 tutor-policy/tutor-actions 上补 `nodeId` 必填路径与 K01 snapshot 自适应回路（各自小适配模块，不继续扩大超过200行的文件）。
