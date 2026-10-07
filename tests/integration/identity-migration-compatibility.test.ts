@@ -212,6 +212,8 @@ describe("identity migration compatibility", () => {
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
       "0043_opening_model_providers.sql",
+      "0044_opening_turn_strategy.sql",
+      "0045_opening_imports.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
