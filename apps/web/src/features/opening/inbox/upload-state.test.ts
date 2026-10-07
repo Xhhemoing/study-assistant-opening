@@ -23,6 +23,8 @@ it("rejects unknown and legacy powerpoint without renaming them to pdf", () => {
   expect(resolveUploadMime({ name: "slides.pptx", type: "" })).toBe(
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   );
+  expect(resolveUploadMime({ name: "lesson.eml", type: "" })).toBe("message/rfc822");
+  expect(resolveUploadMime({ name: "lesson.eml", type: "message/rfc822" })).toBe("message/rfc822");
   expect(resolveUploadMime({ name: "a.bin", type: "application/octet-stream" })).toBeNull();
 });
 

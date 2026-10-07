@@ -11,6 +11,7 @@ export type UploadMime =
   | "audio/wav"
   | "text/markdown"
   | "text/html"
+  | "message/rfc822"
   | "application/vnd.ms-powerpoint";
 
 const BY_EXTENSION: Record<string, UploadMime> = {
@@ -21,6 +22,7 @@ const BY_EXTENSION: Record<string, UploadMime> = {
   jpeg: "image/jpeg",
   md: "text/markdown",
   markdown: "text/markdown",
+  eml: "message/rfc822",
   html: "text/html",
   htm: "text/html",
   ppt: "application/vnd.ms-powerpoint",
