@@ -14,6 +14,7 @@ const cases: [string, number[]][] = [
   ["application/vnd.openxmlformats-officedocument.presentationml.presentation", [0x50, 0x4b, 0x03, 0x04]],
   ["text/markdown", [...Buffer.from("# 标题\n正文")]],
   ["text/html", [...Buffer.from("<!doctype html>")]],
+  ["message/rfc822", [...Buffer.from("From: a@example.e")]],
   ["application/vnd.ms-powerpoint", [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]],
 ];
 

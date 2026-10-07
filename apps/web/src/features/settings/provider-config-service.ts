@@ -12,7 +12,7 @@ import { ApiError } from "../auth/service";
 
 function mapped(error: unknown): never {
   // Vault misconfiguration is a server problem; it must never surface as a client error.
-  if (error instanceof CredentialVaultError) throw new ApiError("CONFIGURATION", "模型密钥加密未配置或密钥不可用。", 503);
+  if (error instanceof CredentialVaultError) throw new ApiError("CONFIGURATION", "模型密钥加密未配置或密钥不可用：请设置 32 字节 base64 的 OPENING_CONNECTION_KEY。", 503);
   if (error instanceof OpeningModelProviderError) {
     throw new ApiError(
       error.code === "NOT_FOUND" ? "NOT_FOUND" : "CONFLICT",

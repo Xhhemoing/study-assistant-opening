@@ -11,6 +11,7 @@ const signatures: Record<string, (bytes: Uint8Array) => boolean> = {
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": (bytes) => startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]),
   "text/markdown": (bytes) => !bytes.some((value) => value === 0),
   "text/html": (bytes) => !bytes.some((value) => value === 0),
+  "message/rfc822": (bytes) => !bytes.some((value) => value === 0),
   "application/vnd.ms-powerpoint": (bytes) => startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
 };
 function startsWith(bytes: Uint8Array, signature: number[]): boolean { return signature.every((value, index) => bytes[index] === value); }
