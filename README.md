@@ -110,3 +110,7 @@ npm run typecheck -w @aistudy/web
 pc-sync.sh push AIstudy
 pc-sync.sh pull AIstudy
 ```
+
+## 许可证
+
+本项目代码以 [GNU AGPL-3.0](./LICENSE) 发布。以网络服务形式对外提供本项目的衍生版本时，须按许可证第 13 节向远程用户提供对应源代码。

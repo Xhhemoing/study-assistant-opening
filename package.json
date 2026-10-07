@@ -1,6 +1,7 @@
 {
   "name": "aistudy",
   "private": true,
+  "license": "AGPL-3.0-only",
   "version": "0.0.0",
   "description": "AIstudy lifelong learning platform",
   "workspaces": [
@@ -16,7 +17,6 @@
     "preview": "npm run preview:build && npm run preview:start",
     "lint": "bash scripts/run-heavy.sh eslint .",
     "typecheck": "bash scripts/run-heavy.sh bash -c \"tsc -p packages/domain/tsconfig.json --noEmit && tsc -p packages/contracts/tsconfig.json --noEmit && tsc -p packages/config/tsconfig.json --noEmit && tsc -p packages/database/tsconfig.json --noEmit && tsc -p packages/ai/tsconfig.json --noEmit && tsc -p packages/ui/tsconfig.json --noEmit && tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web && tsc -p tsconfig.e2e.json --noEmit\"",
-
     "test": "bash scripts/run-heavy.sh vitest run",
     "test:integration": "bash scripts/run-heavy.sh vitest run --project integration",
     "test:handler": "bash scripts/run-heavy.sh vitest run --project handler",
