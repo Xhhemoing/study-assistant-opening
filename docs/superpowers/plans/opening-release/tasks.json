@@ -573,6 +573,51 @@
    "evidence": [
     "../../evidence/2026-10-06-opening-release/rp6-today-resume-verified.md"
    ]
+  },
+  {
+   "id": "DL1",
+   "owner": "EXPERIENCE",
+   "dependsOn": [
+    "L03",
+    "U03"
+   ],
+   "plan": "13-daily-loop-gaps.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL2",
+   "owner": "EXPERIENCE",
+   "dependsOn": [
+    "P02",
+    "RP6"
+   ],
+   "plan": "13-daily-loop-gaps.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL3",
+   "owner": "DATA+EXPERIENCE",
+   "dependsOn": [
+    "L02",
+    "P02",
+    "DL2"
+   ],
+   "plan": "13-daily-loop-gaps.md",
+   "status": "planned",
+   "evidence": []
+  },
+  {
+   "id": "DL4",
+   "owner": "EXPERIENCE",
+   "dependsOn": [
+    "DL1",
+    "U03"
+   ],
+   "plan": "13-daily-loop-gaps.md",
+   "status": "planned",
+   "evidence": []
   }
  ]
 }

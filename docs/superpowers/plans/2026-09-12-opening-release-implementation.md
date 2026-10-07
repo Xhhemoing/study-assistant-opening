@@ -89,6 +89,10 @@
 | RP4 | EXPERIENCE | 引用证据展示与按版本查看 | T03 | 12-review-hardening.md |
 | RP5 | INTEGRATOR | 开发分支push CI门禁 | B02 | 12-review-hardening.md |
 | RP6 | EXPERIENCE | 今天页真实恢复入口 | T03,U01 | 12-review-hardening.md |
+| DL1 | EXPERIENCE | opening可达页去Mock收口（复习/练习入口、目标与指导模式） | L03,U03 | 13-daily-loop-gaps.md |
+| DL2 | EXPERIENCE | 今天队列任务完成/跳过 | P02,RP6 | 13-daily-loop-gaps.md |
+| DL3 | DATA+EXPERIENCE | 重测闭环：观察事务内入队与补测作答绑定retestId | L02,P02,DL2 | 13-daily-loop-gaps.md |
+| DL4 | EXPERIENCE | opening记忆卡片接入真实cards/reviews API | DL1,U03 | 13-daily-loop-gaps.md |
 
 ## 2. 可并行的边界与交接
 
@@ -124,6 +128,8 @@
 允许先交付M4收集真实反馈，但不再默认暂缓转写、外部数据接入和课程知识结构；它们已是CAP01–06明确需求。权限/硬件/效果不满足时保留blocked与临时降级说明，缩减完整交付范围需用户确认；手工导入不算自动同步，存储音频不算理解课堂。
 
 2026-09-21审查后新增：RP1–RP6为审查发现的工程修复项（隐私准入、原子写回、发送幂等、引用展示、CI门禁、今天页恢复入口），不扩大产品范围。M2门槛更新为M01–M03＋RP1＋RP2；M1的“跨端恢复”验收增加RP3的三个故障场景；M3今天页以RP6最小恢复入口为先行切片；RP4并入U03体验门禁；RP5为发布证据前置。详见[审查综合文档](../../plans/2026-09-21-review-synthesis.md)。
+
+2026-10-07每日学习闭环审查后新增：DL1–DL4（[每日闭环缺口](opening-release/13-daily-loop-gaps.md)）补齐正式入口去Mock、普通任务完成/跳过、重测自动提议与补测绑定`retestId`、记忆卡片接入真实API；均复用既有API/仓库，预计不新增迁移，不改变M0–M5范围定义。是否把DL1–DL3纳入M3“每天用得起来”与Q01依赖，需用户确认后另行调整。
 
 复用原则：邮箱优先ImapFlow+MailParser；Docling/FFmpeg/faster-whisper承担解析；参考DeepTutor辅导流程，不复制另一套主后端。EmailEngine当前是商业备选，不默认购买。依据见`../../quality/opening-capability-reuse-research.md`。
 
