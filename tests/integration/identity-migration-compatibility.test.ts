@@ -295,6 +295,8 @@ describe("identity migration compatibility", () => {
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
       "0043_opening_model_providers.sql",
+      "0044_opening_turn_strategy.sql",
+      "0045_opening_imports.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -631,6 +633,8 @@ describe("identity migration compatibility", () => {
       "0041_opening_connections.sql",
       "0042_opening_connection_lifecycle.sql",
       "0043_opening_model_providers.sql",
+      "0044_opening_turn_strategy.sql",
+      "0045_opening_imports.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations
