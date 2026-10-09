@@ -604,7 +604,7 @@
         "B02"
       ],
       "plan": "12-review-hardening.md",
-      "status": "active",
+      "status": "verified",
       "evidence": [
         "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md",
         "../../evidence/2026-10-09-opening-release/rp5-gha-quality-attempt.md",
@@ -620,7 +620,8 @@
         "../../evidence/2026-10-09-opening-release/rp5-upload-desktop-queued-accept.md",
         "../../evidence/2026-10-09-opening-release/rp5-opening-connections-200-accept.md",
         "../../evidence/2026-10-09-opening-release/rp5-browser-e2e-closed-loop-fix.md",
-        "../../evidence/2026-10-09-opening-release/rp5-browser-e2e-closed-loop-accept.md"
+        "../../evidence/2026-10-09-opening-release/rp5-browser-e2e-closed-loop-accept.md",
+        "../../evidence/2026-10-09-opening-release/rp5-gha-05217a5-quality-green.md"
       ]
     },
     {
