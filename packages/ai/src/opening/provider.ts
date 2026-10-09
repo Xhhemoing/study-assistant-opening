@@ -49,7 +49,8 @@ function endpointAllowed(baseUrl: string): boolean {
 function stripMarkdownFences(raw: string): string {
   const trimmed = raw.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i);
-  return fenced ? fenced[1].trim() : trimmed;
+  const inner = fenced?.[1];
+  return inner !== undefined ? inner.trim() : trimmed;
 }
 
 /** Parse answer JSON; tolerate fences, prose wrappers, or degrade to plain text. */
