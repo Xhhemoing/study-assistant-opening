@@ -24,6 +24,9 @@ export default tseslint.config(
       // Local runtimes and scratch downloads are not project source.
       ".local/**",
       ".tmp/**",
+      // Python virtualenvs (e.g. services/parser/.venv) are not project source.
+      "**/.venv/**",
+      "**/venv/**",
     ],
   },
   js.configs.recommended,

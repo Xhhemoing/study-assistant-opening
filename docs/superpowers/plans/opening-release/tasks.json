@@ -371,7 +371,8 @@
         "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore-accept.md",
         "../../evidence/2026-10-09-opening-release/q03-cli-live-restore.md",
         "../../evidence/2026-10-09-opening-release/q03-cli-live-restore-accept.md",
-        "../../evidence/2026-10-09-opening-release/q03-cli-accept-remaining.md"
+        "../../evidence/2026-10-09-opening-release/q03-cli-accept-remaining.md",
+        "../../evidence/2026-10-09-opening-release/q03-eslint-venv-ignore-accept.md"
       ]
     },
     {
