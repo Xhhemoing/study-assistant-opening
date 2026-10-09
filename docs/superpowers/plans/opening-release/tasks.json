@@ -815,11 +815,13 @@
         "DL3"
       ],
       "plan": "15-research-hardening.md",
-      "status": "active",
+      "status": "verified",
       "evidence": [
         "../../evidence/2026-10-09-opening-release/dl11-day-planner-earliest-accept.md",
         "../../evidence/2026-10-10-opening-release/dl11-plan-service-planningnow-accept.md",
-        "../../evidence/2026-10-10-opening-release/dl11-retest-submit-reject-early-accept.md"
+        "../../evidence/2026-10-10-opening-release/dl11-retest-submit-reject-early-accept.md",
+        "../../evidence/2026-10-10-opening-release/dl11-submit-reject-early-data-closeout-accept.md",
+        "../../evidence/2026-10-10-opening-release/dl11-verified.md"
       ]
     },
     {
