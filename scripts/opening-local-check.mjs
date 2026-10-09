@@ -57,10 +57,20 @@ export function evaluateOpeningLocalCheck({ ports, health, env, parserPythonExis
     if (!item || typeof item.key !== "string" || item.key.trim() === "") continue;
     lines.push(`ai-readiness ${item.key} ok: ${item.ok === true}`);
   }
-  const portsOk = ports.length > 0 && ports.every((item) => item.open === true);
+  // A partial collection must not be mistaken for a successful full check.
+  const portsComplete = CHECK_PORTS.every((required) =>
+    ports.some((item) => item.name === required.name && item.port === required.port),
+  );
+  const portsOk = portsComplete && ports.every((item) => item.open === true);
+  lines.push(`required ports complete: ${portsComplete}`);
   const healthOk = healthStatus === "ok" && HEALTH_CHECKS.every((name) => health?.checks?.[name] === "up");
-  const envOk = REQUIRED_ENV.every((name) => isSet(env?.[name]));
-  const readinessOk = readinessState === "ok" && items.length > 0 && items.every((item) => item?.ok === true);
+  // Match the test runner's explicit opt-in; "0" is set but does not enable it.
+  const testDbEnabled = env?.OPENING_TEST_DB === "1";
+  lines.push(`isolated test database enabled: ${testDbEnabled}`);
+  const envOk = REQUIRED_ENV.every((name) => isSet(env?.[name])) && testDbEnabled;
+  const readinessItemsValid = items.length > 0 && items.every((item) => isSet(item?.key));
+  lines.push(`ai-readiness items valid: ${readinessItemsValid}`);
+  const readinessOk = readinessState === "ok" && readinessItemsValid && items.every((item) => item?.ok === true);
   return {
     ok: portsOk && healthOk && envOk && parserPythonExists === true && readinessOk,
     lines,

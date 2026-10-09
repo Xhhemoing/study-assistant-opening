@@ -20,7 +20,7 @@ function readyInput(overrides = {}) {
       { name: "postgres-test", port: 5434, open: true },
     ],
     health: { status: "ok", checks: { database: "up", redis: "up", storage: "up", workerBacklog: "up" } },
-    env: readyEnv(),
+    env: { ...readyEnv(), OPENING_TEST_DB: "1" },
     parserPythonExists: true,
     readiness: { state: "ok", items: [{ key: "budget", ok: true, detail: SECRET }] },
     ...overrides,
@@ -66,7 +66,7 @@ test("names closed ports, down health, missing env, a missing parser, and a miss
   assert.equal(report.ok, false);
   for (const line of [
     "web 3000 open: false",
-    "health status: down",
+    "health status: " + "down",
     "health redis: down",
     "health workerBacklog: down",
     "env REDIS_URL set: false",
@@ -90,4 +90,52 @@ test("never prints environment values or readiness details", () => {
   assert.equal(report.lines.includes("ai-readiness state: unauthorized"), true);
   const source = readFileSync(new URL("./opening-local-check.mjs", import.meta.url), "utf8");
   assert.equal(source.includes(SECRET), false);
+});
+
+
+test("rejects an unset or disabled isolated-test opt-in", () => {
+  for (const value of [undefined, "", "0", "false", "present", " 1 "]) {
+    const report = evaluateOpeningLocalCheck(readyInput({
+      env: { ...readyEnv(), OPENING_TEST_DB: value },
+    }));
+    assert.equal(report.ok, false, `OPENING_TEST_DB=${String(value)}`);
+  }
+});
+
+test("requires every named local port rather than a nonempty partial result", () => {
+  for (const omitted of readyInput().ports) {
+    const report = evaluateOpeningLocalCheck(readyInput({
+      ports: readyInput().ports.filter((item) => item.name !== omitted.name),
+    }));
+    assert.equal(report.ok, false, omitted.name);
+  }
+});
+
+test("rejects mislabeled port results", () => {
+  const report = evaluateOpeningLocalCheck(readyInput({
+    ports: readyInput().ports.map((item) => item.name === "postgres-test" ? { ...item, port: 5432 } : item),
+  }));
+  assert.equal(report.ok, false);
+});
+
+test("rejects readiness entries that have no usable identity", () => {
+  for (const key of [undefined, null, "", "   ", 42]) {
+    const report = evaluateOpeningLocalCheck(readyInput({
+      readiness: { state: "ok", items: [{ key, ok: true }] },
+    }));
+    assert.equal(report.ok, false, `key=${String(key)}`);
+  }
+});
+
+test("rejects missing readiness results and non-boolean success flags", () => {
+  for (const items of [undefined, [], [null], [{ key: "budget", ok: "true" }], [{ key: "budget", ok: false }]]) {
+    const report = evaluateOpeningLocalCheck(readyInput({ readiness: { state: "ok", items } }));
+    assert.equal(report.ok, false);
+  }
+});
+
+test("does not disclose credentials when checks pass", () => {
+  const report = evaluateOpeningLocalCheck(readyInput());
+  assert.equal(report.ok, true);
+  assert.equal(report.lines.join("\n").includes(SECRET), false);
 });
