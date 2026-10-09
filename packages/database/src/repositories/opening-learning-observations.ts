@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility } from "@aistudy/domain";
+import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
@@ -33,7 +33,8 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     if (input.attemptId && (!attempt || attempt.session_id !== input.sessionId || attempt.course_id !== input.courseId)) throw learningError("VALIDATION", "attempt is outside this session");
     if (attempt && input.problemId && input.problemId !== attempt.problem_id) throw learningError("VALIDATION", "attempt problem mismatch");
     if (attempt) await admitLearningSources(tx, scope, attempt.source_ids as string[]);
-    const retestActivities = input.retestId ? await tx`SELECT id, candidate_id, course_id, skill_label, requirement_key, task_id, status
+    const retestActivities = input.retestId ? await tx`SELECT id, candidate_id, course_id, skill_label, requirement_key, task_id, status,
+      not_before_at, recommended_at, scheduled_start_at
       FROM opening_retest_activities
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND (candidate_id=${input.retestId} OR id=${input.retestId}) FOR UPDATE` : [];
@@ -79,6 +80,15 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
     const nowRows = await tx`SELECT clock_timestamp() AS at`;
     const submittedAt = learningIso(nowRows[0]!.at)!;
+    // DL11: authoritative earliest-allowed gate for any retest-linked observation submit
+    // (attempt submit and direct observation POST). Idempotent clientKey hits return above.
+    if (retestActivity) {
+      assertRetestSubmitEarliestAllowed({
+        notBeforeAt: learningIso(retestActivity.not_before_at),
+        recommendedAt: learningIso(retestActivity.recommended_at),
+        scheduledStartAt: learningIso(retestActivity.scheduled_start_at),
+      }, submittedAt);
+    }
     const problemId = attempt ? attempt.problem_id as string | null : input.problemId ?? null;
     const itemVersionId = attempt?.item_version_id as string | null ?? null;
     const referenceCheck = input.referenceCheck ? { attemptId: input.attemptId ?? null, problemId, itemVersionId,

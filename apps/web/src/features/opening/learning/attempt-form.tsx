@@ -6,7 +6,7 @@ import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
-import { withRetestSubmit, type RetestAttemptPrefill } from "./retest-attempt";
+import { formatRetestSubmitError, withRetestSubmit, type RetestAttemptPrefill } from "./retest-attempt";
 import { ReferenceCheckStep } from "./reference-check-step";
 import {
   isAssistanceAllowed,
@@ -165,7 +165,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
       setHelpOpen(false);
       setHelpOpenedOnce(false);
       onRecorded();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "保存失败，答案仍保留在此处"); }
+    } catch (reason) { setError(formatRetestSubmitError(reason)); }
     finally { setPending(false); }
   }
 
@@ -222,6 +222,11 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
           {retest ? (
             <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900" role="status">
               补测作答：将携带补测编号提交；完成后由服务器把对应任务标为已完成。
+            </p>
+          ) : null}
+          {retest?.recommendedAt && new Date(retest.recommendedAt).getTime() > Date.now() ? (
+            <p className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-6 text-sky-900" role="status">
+              建议最早作答时间尚未到达。仍可提交，但服务器会拒收过早的补测结果。
             </p>
           ) : null}
           {retest?.prompt ? (

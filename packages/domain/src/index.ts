@@ -259,8 +259,15 @@ export {
   reopenRetestActivity,
   transitionRetestActivity,
   RetestActivityTransitionError,
+  retestSubmitTooEarly,
+  assertRetestSubmitEarliestAllowed,
+  RetestSubmitTooEarlyError,
+  RETEST_SUBMIT_TOO_EARLY_CODE,
+  RETEST_SUBMIT_TOO_EARLY_MESSAGE,
   type RetestActivityCommand,
   type RetestActivityReopenInput,
+  type RetestSubmitEarliestTimes,
+  type RetestSubmitTooEarlyResult,
 } from "./opening/retest-activity";
 export {
   composeOpeningBackupDraft,

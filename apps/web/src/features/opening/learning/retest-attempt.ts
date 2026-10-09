@@ -5,6 +5,8 @@ export type RetestAttemptPrefill = {
   retestId: string;
   skillLabel: string;
   prompt: string;
+  /** Soft UX hint only; server still enforces earliest on submit. */
+  recommendedAt?: string | null;
 };
 
 /** Course practice deep link for a due retest task. */
@@ -22,6 +24,7 @@ export function retestPrefillFromProjection(retest: TaskRetestProjection): Retes
     retestId: retest.candidateId,
     skillLabel: retest.skillLabel,
     prompt: retest.prompt,
+    recommendedAt: retest.recommendedAt,
   };
 }
 
@@ -51,4 +54,26 @@ export function findRetestPrefill(
     if (task.retest?.candidateId === candidateId) return retestPrefillFromProjection(task.retest);
   }
   return null;
+}
+
+/** Map submit failures (incl. DL11 too-early) to a readable Chinese string for the form alert. */
+export function formatRetestSubmitError(reason: unknown): string {
+  if (reason && typeof reason === "object") {
+    const code = "code" in reason && typeof (reason as { code?: unknown }).code === "string"
+      ? (reason as { code: string }).code
+      : null;
+    const businessCode = "businessCode" in reason && typeof (reason as { businessCode?: unknown }).businessCode === "string"
+      ? (reason as { businessCode: string }).businessCode
+      : null;
+    const message = reason instanceof Error ? reason.message : null;
+    if (
+      businessCode === "RETEST_SUBMIT_TOO_EARLY"
+      || code === "RETEST_SUBMIT_TOO_EARLY"
+      || (message != null && message.includes("最早可作答"))
+    ) {
+      return message && message.trim() ? message : "补测尚未到最早可作答时间，请稍后再提交。";
+    }
+    if (message && message.trim()) return message;
+  }
+  return "保存失败，答案仍保留在此处";
 }

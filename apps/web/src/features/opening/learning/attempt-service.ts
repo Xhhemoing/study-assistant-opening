@@ -4,7 +4,7 @@ import {
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
 } from "@aistudy/database";
-import { prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
+import { assertRetestSubmitEarliestAllowed, prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
 
 function highestDeliveredAssistance(exposures: ReadonlyArray<"hinted" | "revealed">): "none" | "hinted" | "revealed" {
@@ -15,6 +15,39 @@ function highestDeliveredAssistance(exposures: ReadonlyArray<"hinted" | "reveale
 
 function notFound(message: string): never {
   throw Object.assign(new Error(message), { code: "NOT_FOUND" as const });
+}
+
+function validation(message: string): never {
+  throw Object.assign(new Error(message), { code: "VALIDATION" as const });
+}
+
+function isoOrNull(value: unknown): string | null {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+/** Load retest timing floors for submit earliest check (scoped by workspace owner). */
+async function loadRetestSubmitEarliestTimes(sql: Sql, scope: Scope, retestId: string) {
+  const rows = await sql`
+    SELECT not_before_at, recommended_at, scheduled_start_at
+    FROM opening_retest_activities
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND (candidate_id=${retestId} OR id=${retestId})
+  `;
+  if (rows.length !== 1) validation("retest activity is missing or ambiguous");
+  const row = rows[0] as {
+    not_before_at: unknown;
+    recommended_at: unknown;
+    scheduled_start_at: unknown;
+  };
+  return {
+    notBeforeAt: isoOrNull(row.not_before_at),
+    recommendedAt: isoOrNull(row.recommended_at),
+    scheduledStartAt: isoOrNull(row.scheduled_start_at),
+  };
 }
 
 export function createOpeningAttemptService(sql: Sql) {
@@ -52,6 +85,9 @@ export function createOpeningAttemptService(sql: Sql) {
       if (!input.retestId) {
         return learning.insertObservation(scope, base);
       }
+      // DL11: server re-checks earliest-allowed before inserting observation (UI disable is not a guarantee).
+      const earliestTimes = await loadRetestSubmitEarliestTimes(sql, scope, input.retestId);
+      assertRetestSubmitEarliestAllowed(earliestTimes, new Date());
       const current = await knowledge.get(scope, attempt.courseId);
       const skillLink = prepareRetestSkillLink({
         retestId: input.retestId,

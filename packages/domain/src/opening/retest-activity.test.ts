@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { retestActivitySchema, type RetestActivity } from "@aistudy/contracts";
 import {
+  assertRetestSubmitEarliestAllowed,
   isRetestActivityDue,
   reopenRetestActivity,
+  retestSubmitTooEarly,
+  RetestSubmitTooEarlyError,
+  RETEST_SUBMIT_TOO_EARLY_CODE,
+  RETEST_SUBMIT_TOO_EARLY_MESSAGE,
   transitionRetestActivity,
 } from "./retest-activity";
 
@@ -157,5 +162,86 @@ describe("transitionRetestActivity", () => {
     expect(reopened.cycleId).not.toBe(completed.cycleId);
     expect(reopened.times.recommendedAt).toBe(base.times.recommendedAt);
     expect(completed.status).toBe("completed");
+  });
+});
+
+describe("retestSubmitTooEarly / assertRetestSubmitEarliestAllowed", () => {
+  const now = "2026-09-15T12:00:00.000Z";
+
+  it("allows submit when no earliest floors are set", () => {
+    expect(retestSubmitTooEarly({}, now)).toBeNull();
+    expect(retestSubmitTooEarly({ notBeforeAt: null, recommendedAt: null, scheduledStartAt: null }, now)).toBeNull();
+    expect(() => assertRetestSubmitEarliestAllowed({}, now)).not.toThrow();
+  });
+
+  it("rejects when recommendedAt is still in the future", () => {
+    const early = retestSubmitTooEarly({ recommendedAt: "2026-09-15T16:00:00.000Z" }, now);
+    expect(early).toEqual({
+      code: RETEST_SUBMIT_TOO_EARLY_CODE,
+      reason: "scheduled_or_recommended",
+      earliestAt: "2026-09-15T16:00:00.000Z",
+      message: RETEST_SUBMIT_TOO_EARLY_MESSAGE,
+    });
+  });
+
+  it("prefers scheduledStartAt over recommendedAt as the due target", () => {
+    const early = retestSubmitTooEarly(
+      {
+        recommendedAt: "2026-09-15T10:00:00.000Z",
+        scheduledStartAt: "2026-09-15T18:00:00.000Z",
+      },
+      now,
+    );
+    expect(early?.earliestAt).toBe("2026-09-15T18:00:00.000Z");
+    expect(early?.reason).toBe("scheduled_or_recommended");
+  });
+
+  it("rejects on notBeforeAt even when recommendedAt is already past", () => {
+    const early = retestSubmitTooEarly(
+      {
+        recommendedAt: "2026-09-14T10:00:00.000Z",
+        notBeforeAt: "2026-09-15T16:00:00.000Z",
+      },
+      now,
+    );
+    expect(early).toMatchObject({
+      reason: "not_before",
+      earliestAt: "2026-09-15T16:00:00.000Z",
+    });
+  });
+
+  it("uses the later of notBeforeAt and due target as effective earliest", () => {
+    const early = retestSubmitTooEarly(
+      {
+        notBeforeAt: "2026-09-15T14:00:00.000Z",
+        recommendedAt: "2026-09-15T16:00:00.000Z",
+      },
+      now,
+    );
+    expect(early?.earliestAt).toBe("2026-09-15T16:00:00.000Z");
+    expect(early?.reason).toBe("scheduled_or_recommended");
+  });
+
+  it("allows submit once now reaches the earliest floor", () => {
+    expect(
+      retestSubmitTooEarly(
+        { recommendedAt: "2026-09-15T12:00:00.000Z", notBeforeAt: "2026-09-15T11:00:00.000Z" },
+        now,
+      ),
+    ).toBeNull();
+  });
+
+  it("assert throws RetestSubmitTooEarlyError with VALIDATION code and Chinese message", () => {
+    expect(() =>
+      assertRetestSubmitEarliestAllowed({ recommendedAt: "2026-09-20T10:00:00.000Z" }, now),
+    ).toThrow(RetestSubmitTooEarlyError);
+    try {
+      assertRetestSubmitEarliestAllowed({ recommendedAt: "2026-09-20T10:00:00.000Z" }, now);
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetestSubmitTooEarlyError);
+      expect((error as RetestSubmitTooEarlyError).code).toBe("VALIDATION");
+      expect((error as RetestSubmitTooEarlyError).businessCode).toBe(RETEST_SUBMIT_TOO_EARLY_CODE);
+      expect((error as RetestSubmitTooEarlyError).message).toBe(RETEST_SUBMIT_TOO_EARLY_MESSAGE);
+    }
   });
 });

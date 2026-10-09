@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   findRetestPrefill,
+  formatRetestSubmitError,
   isDueRetestSelection,
   parseRetestCandidateId,
   retestPracticeHref,
@@ -38,6 +39,7 @@ describe("retest attempt helpers", () => {
       retestId: candidateId,
       skillLabel: "分数加减",
       prompt: projection.prompt,
+      recommendedAt: projection.recommendedAt,
     });
   });
 
@@ -62,7 +64,21 @@ describe("retest attempt helpers", () => {
       retestId: candidateId,
       skillLabel: "分数加减",
       prompt: projection.prompt,
+      recommendedAt: projection.recommendedAt,
     });
     expect(findRetestPrefill([{ retest: projection }], activityId)).toBeNull();
+  });
+});
+
+describe("formatRetestSubmitError", () => {
+  it("preserves the Chinese too-early message from the server", () => {
+    const message = "补测尚未到最早可作答时间，请稍后再提交。";
+    expect(formatRetestSubmitError(Object.assign(new Error(message), { code: "VALIDATION" }))).toBe(message);
+    expect(formatRetestSubmitError(Object.assign(new Error("x"), { businessCode: "RETEST_SUBMIT_TOO_EARLY" }))).toBe("x");
+  });
+
+  it("falls back for unknown failures", () => {
+    expect(formatRetestSubmitError(new Error("network down"))).toBe("network down");
+    expect(formatRetestSubmitError("weird")).toBe("保存失败，答案仍保留在此处");
   });
 });

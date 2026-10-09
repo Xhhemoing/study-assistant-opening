@@ -56,7 +56,7 @@ import {
   type ManagedRelation,
   type SearchHit,
 } from "@aistudy/contracts";
-import { NativeBackupError, rankResults, type SearchDoc } from "@aistudy/domain";
+import { NativeBackupError, RetestSubmitTooEarlyError, rankResults, type SearchDoc } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import {
   AuthorizationError,
@@ -231,14 +231,33 @@ export class ApiError extends Error {
 }
 
 export function jsonError(error: ApiError): Response {
-  return Response.json(
-    { error: { code: error.code, message: error.message } },
-    { status: error.status },
-  );
+  const body: {
+    code: ApiErrorCode;
+    message: string;
+    businessCode?: string;
+    earliestAt?: string;
+    reason?: string;
+  } = { code: error.code, message: error.message };
+  const extra = error as ApiError & {
+    businessCode?: unknown;
+    earliestAt?: unknown;
+    reason?: unknown;
+  };
+  if (typeof extra.businessCode === "string") body.businessCode = extra.businessCode;
+  if (typeof extra.earliestAt === "string") body.earliestAt = extra.earliestAt;
+  if (typeof extra.reason === "string") body.reason = extra.reason;
+  return Response.json({ error: body }, { status: error.status });
 }
 
 export function mapDomainError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
+  if (error instanceof RetestSubmitTooEarlyError) {
+    return Object.assign(new ApiError("VALIDATION", error.message, 400), {
+      businessCode: error.businessCode,
+      earliestAt: error.earliestAt,
+      reason: error.reason,
+    });
+  }
   if (error instanceof EnvValidationError) {
     return new ApiError(
       "CONFIGURATION",

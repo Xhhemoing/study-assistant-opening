@@ -201,3 +201,92 @@ export function reopenRetestActivity(
     },
   });
 }
+
+/** Stable business code for API mapping when retest submit is before earliest allowed. */
+export const RETEST_SUBMIT_TOO_EARLY_CODE = "RETEST_SUBMIT_TOO_EARLY" as const;
+
+export const RETEST_SUBMIT_TOO_EARLY_MESSAGE =
+  "补测尚未到最早可作答时间，请稍后再提交。" as const;
+
+/** Timing fields used to decide whether a retest observation may be submitted yet. */
+export type RetestSubmitEarliestTimes = {
+  notBeforeAt?: string | null;
+  recommendedAt?: string | null;
+  scheduledStartAt?: string | null;
+};
+
+export type RetestSubmitTooEarlyResult = {
+  code: typeof RETEST_SUBMIT_TOO_EARLY_CODE;
+  reason: "not_before" | "scheduled_or_recommended";
+  earliestAt: string;
+  message: typeof RETEST_SUBMIT_TOO_EARLY_MESSAGE;
+};
+
+/**
+ * Same spirit as {@link isRetestActivityDue} timing (ignore status/snooze):
+ * due target = `scheduledStartAt ?? recommendedAt`; also respect `notBeforeAt`.
+ * Effective earliest is the max of those present floors; future → too early.
+ * Missing floors → not too early (no submit-time constraint).
+ */
+export function retestSubmitTooEarly(
+  times: RetestSubmitEarliestTimes,
+  now: Date | string,
+): RetestSubmitTooEarlyResult | null {
+  const currentTime = typeof now === "string" ? Date.parse(now) : now.getTime();
+  if (!Number.isFinite(currentTime)) {
+    throw new RetestActivityTransitionError("now must be a valid date");
+  }
+
+  const target = times.scheduledStartAt ?? times.recommendedAt ?? null;
+  let earliestMs = Number.NEGATIVE_INFINITY;
+  let earliestAt: string | null = null;
+  let reason: RetestSubmitTooEarlyResult["reason"] = "scheduled_or_recommended";
+
+  if (times.notBeforeAt) {
+    const ms = Date.parse(times.notBeforeAt);
+    if (Number.isFinite(ms) && ms > earliestMs) {
+      earliestMs = ms;
+      earliestAt = times.notBeforeAt;
+      reason = "not_before";
+    }
+  }
+  if (target) {
+    const ms = Date.parse(target);
+    if (Number.isFinite(ms) && ms > earliestMs) {
+      earliestMs = ms;
+      earliestAt = target;
+      reason = "scheduled_or_recommended";
+    }
+  }
+
+  if (earliestAt == null || earliestMs <= currentTime) return null;
+  return {
+    code: RETEST_SUBMIT_TOO_EARLY_CODE,
+    reason,
+    earliestAt,
+    message: RETEST_SUBMIT_TOO_EARLY_MESSAGE,
+  };
+}
+
+/** Thrown so API `mapDomainError` maps `code: VALIDATION` → 400 with Chinese message. */
+export class RetestSubmitTooEarlyError extends Error {
+  readonly code = "VALIDATION" as const;
+  readonly businessCode = RETEST_SUBMIT_TOO_EARLY_CODE;
+  readonly reason: RetestSubmitTooEarlyResult["reason"];
+  readonly earliestAt: string;
+
+  constructor(result: RetestSubmitTooEarlyResult) {
+    super(result.message);
+    this.name = "RetestSubmitTooEarlyError";
+    this.reason = result.reason;
+    this.earliestAt = result.earliestAt;
+  }
+}
+
+export function assertRetestSubmitEarliestAllowed(
+  times: RetestSubmitEarliestTimes,
+  now: Date | string = new Date(),
+): void {
+  const early = retestSubmitTooEarly(times, now);
+  if (early) throw new RetestSubmitTooEarlyError(early);
+}

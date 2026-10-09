@@ -41,11 +41,23 @@ vi.mock("@aistudy/domain", async () => {
   };
 });
 
+/** Tagged-template sql mock returning past earliest floors so submit proceeds. */
+function sqlPastRetest() {
+  const fn = async () => [
+    {
+      not_before_at: "2026-09-01T00:00:00.000Z",
+      recommended_at: "2026-09-01T00:00:00.000Z",
+      scheduled_start_at: null,
+    },
+  ];
+  return fn as never;
+}
+
 describe("attempt submit retest SkillEvidence enrichment", () => {
   it("adds nodeId+dimension transfer on independent retest submit", async () => {
     insertObservationMock.mockClear();
     const { createOpeningAttemptService } = await import("./attempt-service");
-    const service = createOpeningAttemptService({} as never);
+    const service = createOpeningAttemptService(sqlPastRetest());
     const scope = {
       workspaceId: "00000000-0000-4000-8000-0000000000w1",
       ownerUserId: "00000000-0000-4000-8000-0000000000u1",
