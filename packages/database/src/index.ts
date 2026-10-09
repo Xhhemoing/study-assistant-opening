@@ -127,6 +127,7 @@ export {
   createMemoryOpeningRestoreObjectPut,
   createOpeningS3RestoreObjectPut,
   parseOpeningRestoreObjectVersion,
+  resolveOpeningRestoreCliLiveDeps,
   OpeningBackupExportError,
   assembleOpeningBackupDraft,
   prepareOpeningSourceBackup,
@@ -160,5 +161,8 @@ export {
   type OpeningRestoreObjectStorage,
   type OpeningRestoreExecuteArgs,
   type OpeningRestoreExecuteResult,
+  type OpeningRestoreCliLiveDepsResult,
+  type OpeningRestoreCliLiveDepsOk,
+  type OpeningRestoreCliLiveDepsMissing,
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";

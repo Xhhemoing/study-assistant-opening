@@ -166,3 +166,18 @@ See `q03-live-minio-object-restore.md`.
 
 **Q03 stays `active`.** READY_FOR_DATA_ACCEPT (IMPLEMENT only).
 
+
+---
+
+## Post CLI-accept remaining (2026-10-09 ~22:54 CST)
+
+Data **ACCEPT** recorded (`q03-cli-live-restore-accept.md`). Agent-owned no-Docker restore slices (dry-run, empty-namespace, apply executor, live MinIO objectPut, CLI live restore) are done. **Q03 stays `active` / not verified.**
+
+Explicit remaining for Q03 **verified** (only):
+
+1. Docker/compose production image build + compose up (Docker CLI historically absent on this box)
+2. Full monorepo packaging green (lint / full typecheck / production build as a package)
+3. CI quality green on a release SHA that includes packaging/restore evidence
+4. Optional: encrypted-archive decrypt→CLI path if still in plan gaps
+
+No more meaningful no-Docker IMPLEMENT slices claimed without new env.

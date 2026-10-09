@@ -3,9 +3,11 @@
  * Dedicated empty workspace UUID + source keys only — never wipes shared DB/bucket.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { afterAll, describe, expect, it } from "vitest";
 import { assertOpeningTestDatabase } from "@aistudy/config";
@@ -300,5 +302,198 @@ describe.skipIf(!enabled)("opening export→archive→apply live MinIO E2E (dedi
       WHERE workspace_id = ${workspaceId} AND id = ${sourceId}
     `;
     expect(src).toMatchObject({ id: sourceId, name: "e2e.txt" });
+  });
+});
+
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+function spawnOpeningRestore(
+  args: string[],
+  childEnv: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; stderr: string; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [path.join(repoRoot, "node_modules/tsx/dist/cli.mjs"), "scripts/opening-restore.ts", ...args],
+      {
+        cwd: repoRoot,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+describe.skipIf(!enabled)("opening-restore CLI spawn APPLY_OK (live DB+S3)", () => {
+  const url = assertOpeningTestDatabase(
+    process.env.OPENING_TEST_DATABASE_URL ?? "",
+    process.env.OPENING_TEST_DB,
+  );
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const userId = randomUUID();
+  const workspaceId = randomUUID();
+  const sourceId = randomUUID();
+  const storage = createOpeningTestStorage();
+  const trackedKeys: string[] = [];
+  let scratch = "";
+
+  afterAll(async () => {
+    try {
+      for (const key of [...new Set(trackedKeys)]) {
+        try {
+          await storage.deleteObject(key);
+        } catch {
+          /* best-effort */
+        }
+      }
+      if (scratch) await rm(scratch, { recursive: true, force: true });
+      await sql`DELETE FROM workspaces WHERE id = ${workspaceId}`;
+      await sql`DELETE FROM users WHERE id = ${userId}`;
+    } finally {
+      if (storage.client instanceof S3Client) storage.client.destroy();
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  it("CLI confirm+draft+live env → APPLY_OK mutated=true (spawn scripts/opening-restore.ts)", async () => {
+    scratch = await mkdtemp(path.join(tmpdir(), "q03-cli-apply-"));
+    await sql`
+      INSERT INTO users (id, email, display_name, password_hash)
+      VALUES (${userId}, ${`${userId}@q03-cli.example`}, 'Q03 CLI', 'test')
+    `;
+    await sql`
+      INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceId}, ${userId})
+    `;
+
+    const body = new Uint8Array([9, 8, 7, 6]);
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const archivePath = `objects/${sourceId}/v1.bin`;
+    const stagingDir = path.join(scratch, "staging");
+    await mkdir(path.join(stagingDir, "objects", sourceId), { recursive: true });
+    await writeFile(path.join(stagingDir, archivePath), body);
+
+    const draft: OpeningBackup = {
+      format: "opening-backup",
+      version: 1,
+      workspaceId,
+      privacyEpoch: 0,
+      deletionJournal: [],
+      tables: Object.fromEntries(
+        OPENING_BACKUP_TABLES.map((name) => [
+          name,
+          name === "opening_sources"
+            ? [{
+                id: sourceId,
+                workspace_id: workspaceId,
+                name: "q03-cli.bin",
+                mime: "application/octet-stream",
+                bytes: body.byteLength,
+                sha256,
+                version: 1,
+                upload_state: "uploaded",
+                parse_state: "ready",
+              }]
+            : [],
+        ]),
+      ),
+      objects: [{
+        sourceId,
+        sha256,
+        bytes: body.byteLength,
+        archivePath,
+      }],
+    };
+    const draftPath = path.join(scratch, "draft.json");
+    await writeFile(draftPath, JSON.stringify(draft), "utf8");
+
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      OPENING_TEST_DATABASE_URL: url.toString(),
+      OPENING_RESTORE_DATABASE_URL: url.toString(),
+      // Prefer restore URL; keep S3_* from parent (.env / shell)
+    };
+
+    const spawned = await spawnOpeningRestore(
+      [
+        "--confirm-local-restore",
+        "--draft",
+        draftPath,
+        "--staging",
+        stagingDir,
+      ],
+      childEnv,
+    );
+
+    expect(spawned.stderr).toMatch(/APPLY_OK/);
+    expect(spawned.stderr).toMatch(/mutated=true/);
+    expect(spawned.stderr).not.toMatch(/LIVE_DEPS_MISSING|APPLY_EXECUTOR_DEFERRED/);
+    expect(spawned.code).toBe(0);
+
+    const finalKey = storage.finalKey(sourceId, 1);
+    trackedKeys.push(finalKey);
+    const head = await storage.headObject(finalKey);
+    expect(head.exists).toBe(true);
+    const digest = await storage.streamDigest(finalKey);
+    expect(digest.sha256).toBe(sha256);
+
+    const [row] = await sql`
+      SELECT id::text AS id, name FROM opening_sources
+      WHERE workspace_id = ${workspaceId} AND id = ${sourceId}
+    `;
+    expect(row).toMatchObject({ id: sourceId, name: "q03-cli.bin" });
+  });
+});
+
+describe.skipIf(!enabled)("opening-restore CLI spawn fail-closed without sql env", () => {
+  it("confirm+draft but no DB URL env → LIVE_DEPS_MISSING (not APPLY_OK)", async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), "q03-cli-nodeps-"));
+    try {
+      const workspaceId = randomUUID();
+      const draft: OpeningBackup = {
+        format: "opening-backup",
+        version: 1,
+        workspaceId,
+        privacyEpoch: 0,
+        deletionJournal: [],
+        tables: Object.fromEntries(OPENING_BACKUP_TABLES.map((name) => [name, []])),
+        objects: [],
+      };
+      const draftPath = path.join(scratch, "draft.json");
+      await writeFile(draftPath, JSON.stringify(draft), "utf8");
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        OPENING_RESTORE_DATABASE_URL: "",
+        OPENING_TEST_DATABASE_URL: "",
+        DATABASE_URL: "",
+      };
+      // Ensure emptied (some shells keep empty as unset — delete keys too)
+      delete childEnv.OPENING_RESTORE_DATABASE_URL;
+      delete childEnv.OPENING_TEST_DATABASE_URL;
+      delete childEnv.DATABASE_URL;
+
+      const spawned = await spawnOpeningRestore(
+        ["--confirm-local-restore", "--draft", draftPath],
+        childEnv,
+      );
+
+      expect(spawned.code).toBe(1);
+      expect(spawned.stderr).toMatch(/LIVE_DEPS_MISSING/);
+      expect(spawned.stderr).toMatch(/OPENING_RESTORE_DATABASE_URL\|OPENING_TEST_DATABASE_URL\|DATABASE_URL/);
+      expect(spawned.stderr).not.toMatch(/APPLY_OK/);
+      expect(spawned.stderr).not.toMatch(/minioadmin|postgres:\/\//);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });

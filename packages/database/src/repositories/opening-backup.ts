@@ -42,6 +42,12 @@ export {
   type OpeningRestoreExecuteArgs,
   type OpeningRestoreExecuteResult,
 } from "./opening-backup-apply";
+export {
+  resolveOpeningRestoreCliLiveDeps,
+  type OpeningRestoreCliLiveDepsResult,
+  type OpeningRestoreCliLiveDepsOk,
+  type OpeningRestoreCliLiveDepsMissing,
+} from "./opening-restore-cli-env";
 export { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
 import {
   executeOpeningRestoreApply,
