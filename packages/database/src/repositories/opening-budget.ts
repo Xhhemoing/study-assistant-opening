@@ -7,7 +7,7 @@ import {
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
-export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED";
+export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE";
 
 export class OpeningBudgetError extends Error {
   readonly code: OpeningBudgetErrorCode;
@@ -142,7 +142,7 @@ export function createOpeningBudgetRepository(
   return {
     async reserve(scope, input) {
       if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
-        throw new OpeningBudgetError("CONFLICT", "amount must be a positive integer");
+        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "amount must be a positive integer");
       }
       const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
       return sql.begin(async (tx) => {

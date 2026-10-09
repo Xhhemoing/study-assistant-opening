@@ -814,8 +814,11 @@
         "DL7"
       ],
       "plan": "15-research-hardening.md",
-      "status": "planned",
-      "evidence": []
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/bc1-budget-cost-contract-patch.md",
+        "../../evidence/2026-10-09-opening-release/bc1-budget-cost-contract-accept.md"
+      ]
     },
     {
       "id": "TZ01",
