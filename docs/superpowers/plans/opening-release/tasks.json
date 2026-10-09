@@ -608,7 +608,8 @@
         "../../evidence/2026-10-09-opening-release/rp5-gha-after-lint-fix.md",
         "../../evidence/2026-10-09-opening-release/rp5-gha-after-evidence-push.md",
         "../../evidence/2026-10-09-opening-release/rp5-unit-retest-null-accept.md",
-        "../../evidence/2026-10-09-opening-release/rp5-unit-ai-settings-409-accept.md"
+        "../../evidence/2026-10-09-opening-release/rp5-unit-ai-settings-409-accept.md",
+        "../../evidence/2026-10-09-opening-release/rp5-gha-after-unit-fixes.md"
       ]
     },
     {
