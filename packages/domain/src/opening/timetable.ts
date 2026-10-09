@@ -1,4 +1,5 @@
 import type { TimeBlock, WeekSession } from "@aistudy/contracts";
+import { zonedLocalInstant } from "./local-day-bounds";
 
 type PeriodTime = { start: string; end: string };
 type ExpandOptions = {
@@ -36,34 +37,6 @@ export function normalizeWeekSessions(rows: WeekSession[]): WeekSession[] {
   return result;
 }
 
-function partsAt(date: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(date).reduce<Record<string, string>>((all, part) => {
-    all[part.type] = part.value;
-    return all;
-  }, {});
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
-}
-
-function zonedInstant(local: string, timeZone: string): Date {
-  const wall = Date.parse(`${local}Z`);
-  if (!Number.isFinite(wall)) throw new RangeError(`invalid local date/time: ${local}`);
-  const offsets = new Set<number>();
-  for (let hour = -48; hour <= 48; hour += 6) {
-    const sample = new Date(wall + hour * 3_600_000);
-    const displayed = partsAt(sample, timeZone);
-    offsets.add(Date.parse(`${displayed}Z`) - sample.getTime());
-  }
-  const matches = [...offsets].map((offset) => new Date(wall - offset)).filter((date) => partsAt(date, timeZone) === local);
-  if (matches.length === 0) throw new RangeError(`nonexistent DST or invalid local time: ${local} in ${timeZone}`);
-  if (matches.length > 1) throw new RangeError(`ambiguous DST local time: ${local} in ${timeZone}`);
-  const first = matches[0];
-  if (!first) throw new RangeError(`no resolution for local time: ${local} in ${timeZone}`);
-  return first;
-}
-
 function validateClock(value: string, label: string): void {
   if (!clockPattern.test(value)) throw new RangeError(`${label} must use HH:mm`);
 }
@@ -86,8 +59,8 @@ export function expandWeekSessions(rows: WeekSession[], options: ExpandOptions):
     validateClock(end.end, `period ${row.endPeriod} end`);
     const day = new Date(monday + ((week - 1) * 7 + row.weekday - 1) * 86_400_000);
     const date = day.toISOString().slice(0, 10);
-    const from = zonedInstant(`${date}T${start.start}`, options.timeZone);
-    const to = zonedInstant(`${date}T${end.end}`, options.timeZone);
+    const from = zonedLocalInstant(`${date}T${start.start}`, options.timeZone);
+    const to = zonedLocalInstant(`${date}T${end.end}`, options.timeZone);
     if (to <= from) throw new RangeError("period end must be after period start");
     return { start: from.toISOString(), end: to.toISOString(), kind: "class" as const };
   }));

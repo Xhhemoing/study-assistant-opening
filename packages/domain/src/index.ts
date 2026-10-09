@@ -52,6 +52,13 @@ export {
 } from "./opening/timetable";
 export { deriveDayBlocks } from "./opening/day-blocks";
 export {
+  resolveLocalDayBounds,
+  isInstantOnLocalDay,
+  zonedLocalInstant,
+  assertValidLocalDate,
+  type LocalDayBounds,
+} from "./opening/local-day-bounds";
+export {
   buildDailyDraftInput,
   dailyDraftClientKey,
   localDateKeyInZone,

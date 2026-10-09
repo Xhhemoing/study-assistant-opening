@@ -827,8 +827,11 @@
         "DL7"
       ],
       "plan": "15-research-hardening.md",
-      "status": "planned",
-      "evidence": []
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/tz01-day-boundary-plan.md",
+        "../../evidence/2026-10-09-opening-release/tz01-day-boundary-accept.md"
+      ]
     }
   ]
 }

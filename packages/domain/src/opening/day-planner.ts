@@ -5,6 +5,7 @@ import {
   type TimeBlock,
 } from "@aistudy/contracts";
 import { availableTimeSlots } from "./planning-time";
+import { resolveLocalDayBounds } from "./local-day-bounds";
 
 export type DayPlanResult = {
   blocks: PlannedBlock[];
@@ -14,6 +15,14 @@ export type DayPlanResult = {
 export type PlanDayOptions = {
   /** Inclusive end of the planning day. Retests with recommendedAt after this are skipped. */
   dayEnd?: string;
+  /**
+   * Local calendar day (YYYY-MM-DD) with workspace IANA timeZone.
+   * When both set (and dayEnd omitted), day end is the exclusive nextDayStart
+   * from resolveLocalDayBounds — half-open [dayStart, nextDayStart).
+   * Priority: dayEnd > localDate+timeZone > UTC free-start fallback.
+   */
+  localDate?: string;
+  timeZone?: string;
   /**
    * When set, schedule pending tasks in this order (unknown ids fall back to
    * deadline/priority sort after preferred ones). Used by daily auto-draft carry-over.
@@ -40,18 +49,33 @@ function compareTasks(a: TaskItem, b: TaskItem): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-function resolveDayEndMs(free: readonly TimeBlock[], dayEnd?: string): number {
-  if (dayEnd) return Date.parse(dayEnd);
+type DayEndResolution = { endMs: number; exclusive: boolean };
+
+/**
+ * Priority: explicit dayEnd (inclusive) > localDate+timeZone (exclusive nextDayStart)
+ * > UTC date of earliest free start + 23:59:59.999Z (legacy fallback; §5.3 risk).
+ */
+function resolveDayEnd(free: readonly TimeBlock[], options: PlanDayOptions): DayEndResolution {
+  if (options.dayEnd) {
+    const endMs = Date.parse(options.dayEnd);
+    if (!Number.isFinite(endMs)) throw new RangeError(`invalid dayEnd: ${options.dayEnd}`);
+    return { endMs, exclusive: false };
+  }
+  if (options.localDate && options.timeZone) {
+    const { nextDayStart } = resolveLocalDayBounds(options.localDate, options.timeZone);
+    return { endMs: nextDayStart.getTime(), exclusive: true };
+  }
   const freeStarts = free.filter((block) => block.kind === "free").map((block) => Date.parse(block.start));
-  if (!freeStarts.length) return Infinity;
+  if (!freeStarts.length) return { endMs: Infinity, exclusive: false };
   const day = new Date(Math.min(...freeStarts)).toISOString().slice(0, 10);
-  return Date.parse(`${day}T23:59:59.999Z`);
+  return { endMs: Date.parse(`${day}T23:59:59.999Z`), exclusive: false };
 }
 
-function isRetestNotYetDue(task: TaskItem, dayEndMs: number): boolean {
+function isRetestNotYetDue(task: TaskItem, endMs: number, exclusive: boolean): boolean {
   const recommendedAt = task.retest?.recommendedAt;
   if (!recommendedAt) return false;
-  return Date.parse(recommendedAt) > dayEndMs;
+  const t = Date.parse(recommendedAt);
+  return exclusive ? t >= endMs : t > endMs;
 }
 
 /** Earliest allowable start: retest recommendedAt acts as not-before. */
@@ -106,7 +130,7 @@ export function planDay(
   free: readonly TimeBlock[],
   options: PlanDayOptions = {},
 ): DayPlanResult {
-  const dayEndMs = resolveDayEndMs(free, options.dayEnd);
+  const { endMs: dayEndMs, exclusive: dayEndExclusive } = resolveDayEnd(free, options);
   const planningNowMs = options.planningNow
     ? Date.parse(options.planningNow)
     : Number.NEGATIVE_INFINITY;
@@ -116,7 +140,7 @@ export function planDay(
     if (ids.has(task.id)) throw new Error(`duplicate task id: ${task.id}`);
     ids.add(task.id);
     return task;
-  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs));
+  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs, dayEndExclusive));
   const preferred = options.preferredOrder;
   if (preferred && preferred.length) {
     const rank = new Map(preferred.map((id, index) => [id, index]));

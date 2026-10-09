@@ -5,50 +5,17 @@ import type {
 } from "@aistudy/contracts";
 import { availableTimeSlots } from "./planning-time";
 import { expandWeekSessions } from "./timetable";
+import { assertValidLocalDate, zonedLocalInstant } from "./local-day-bounds";
 
 type ClockRange = { start: string; end: string };
 
-function partsAt(date: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-GB", {
+function localDateOf(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date).reduce<Record<string, string>>((all, part) => {
-    all[part.type] = part.value;
-    return all;
-  }, {});
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
-}
-
-function zonedInstant(local: string, timeZone: string): Date {
-  const wall = Date.parse(`${local}Z`);
-  if (!Number.isFinite(wall)) throw new RangeError(`invalid local date/time: ${local}`);
-  const offsets = new Set<number>();
-  for (let hour = -48; hour <= 48; hour += 6) {
-    const sample = new Date(wall + hour * 3_600_000);
-    const displayed = partsAt(sample, timeZone);
-    offsets.add(Date.parse(`${displayed}Z`) - sample.getTime());
-  }
-  const matches = [...offsets]
-    .map((offset) => new Date(wall - offset))
-    .filter((date) => partsAt(date, timeZone) === local);
-  if (matches.length === 0) {
-    throw new RangeError(`nonexistent DST or invalid local time: ${local} in ${timeZone}`);
-  }
-  if (matches.length > 1) {
-    throw new RangeError(`ambiguous DST local time: ${local} in ${timeZone}`);
-  }
-  const first = matches[0];
-  if (!first) throw new RangeError(`no resolution for local time: ${local} in ${timeZone}`);
-  return first;
-}
-
-function localDateOf(iso: string, timeZone: string): string {
-  return partsAt(new Date(iso), timeZone).slice(0, 10);
+  }).format(new Date(iso));
 }
 
 function addDays(date: string, days: number): string {
@@ -78,25 +45,25 @@ function rangeBlocks(
   timeZone: string,
 ): TimeBlock[] {
   if (!crossesMidnight(range)) {
-    const start = zonedInstant(`${date}T${range.start}`, timeZone);
-    const end = zonedInstant(`${date}T${range.end}`, timeZone);
+    const start = zonedLocalInstant(`${date}T${range.start}`, timeZone);
+    const end = zonedLocalInstant(`${date}T${range.end}`, timeZone);
     if (end <= start) throw new RangeError(`${kind} end must be after start`);
     return [{ start: start.toISOString(), end: end.toISOString(), kind }];
   }
   // Overnight: previous evening→this morning, and this evening→next morning.
   const prev = addDays(date, -1);
   const next = addDays(date, 1);
-  const morningEnd = zonedInstant(`${date}T${range.end}`, timeZone);
-  const eveningStart = zonedInstant(`${date}T${range.start}`, timeZone);
+  const morningEnd = zonedLocalInstant(`${date}T${range.end}`, timeZone);
+  const eveningStart = zonedLocalInstant(`${date}T${range.start}`, timeZone);
   return [
     {
-      start: zonedInstant(`${prev}T${range.start}`, timeZone).toISOString(),
+      start: zonedLocalInstant(`${prev}T${range.start}`, timeZone).toISOString(),
       end: morningEnd.toISOString(),
       kind,
     },
     {
       start: eveningStart.toISOString(),
-      end: zonedInstant(`${next}T${range.end}`, timeZone).toISOString(),
+      end: zonedLocalInstant(`${next}T${range.end}`, timeZone).toISOString(),
       kind,
     },
   ];
@@ -113,9 +80,7 @@ export function deriveDayBlocks(
   sessions: readonly WeekSession[],
   hardBlocks: readonly TimeBlock[] = [],
 ): TimeBlock[] {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new RangeError("date must be YYYY-MM-DD");
-  }
+  assertValidLocalDate(date);
   const { timeZone } = settings;
   const periodTimes = toPeriodTimes(settings.periodTimes);
   const classBlocks =
@@ -133,8 +98,8 @@ export function deriveDayBlocks(
   ];
   const sleepBlocks = rangeBlocks(date, settings.sleep, "sleep", timeZone);
 
-  const windowStart = zonedInstant(`${date}T${settings.dailyWindow.start}`, timeZone);
-  const windowEnd = zonedInstant(`${date}T${settings.dailyWindow.end}`, timeZone);
+  const windowStart = zonedLocalInstant(`${date}T${settings.dailyWindow.start}`, timeZone);
+  const windowEnd = zonedLocalInstant(`${date}T${settings.dailyWindow.end}`, timeZone);
   if (windowEnd <= windowStart) {
     throw new RangeError("dailyWindow end must be after start");
   }
