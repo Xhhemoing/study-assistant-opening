@@ -164,12 +164,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
         outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,
       };
+      // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
+      // reservation. requestId stays the same string today (attempt-scoped ids are
+      // a future option). Ephemeral (apps/web) wiring deferred — Experience out of scope.
+      const tutorOperationId = `tutor:${claimed.id}`;
       const output = await runBudgetedCall({
         provider: selected?.provider ?? deps.provider,
         modelSnapshot: selected?.modelSnapshot,
         budget: scopedBudget,
         input,
-        requestId: `tutor:${claimed.id}`,
+        requestId: tutorOperationId,
+        operationId: tutorOperationId,
         reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
         actualCents: (settled) => tutorActualCents(settled, rates),
         beforeSend: deps.privacy && jobEpoch !== null

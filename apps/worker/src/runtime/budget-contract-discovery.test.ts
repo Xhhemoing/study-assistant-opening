@@ -5,7 +5,11 @@
  *     apps/worker/src/runtime/budget-contract-discovery.test.ts
  */
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError } from "@aistudy/ai";
+import {
+  OpeningProviderError,
+  resolveEffectiveDailyCap,
+  mergeOpeningCatalog,
+} from "@aistudy/ai";
 import {
   ledgerActionForProviderError,
   runBudgetedCall,
@@ -217,5 +221,310 @@ describe("P0 family 4 — failed retries consuming budget", () => {
     expect(repo.reserved).toHaveLength(1);
     expect(repo.reserved[0]?.requestId).toBe("op-1");
     expect(repo.settled).toEqual([{ reservationId: "res-1", actualCents: 120 }]);
+  });
+});
+
+
+/**
+ * BC1 remaining AC matrix (worker/ai/database paths).
+ * Ephemeral caller operationId wiring lives in apps/web (Experience) — deferred
+ * here by design; contract locked below without editing web.
+ */
+describe("BC1 concurrency / cancel / late-result matrix", () => {
+  function casLedger(capCents: number) {
+    type Row = {
+      id: string;
+      requestId: string;
+      amountCents: number;
+      state: "reserved" | "released" | "completed";
+    };
+    const rows: Row[] = [];
+    let seq = 0;
+    const occupied = () =>
+      rows
+        .filter((r) => r.state === "reserved" || r.state === "completed")
+        .reduce((s, r) => s + r.amountCents, 0);
+    return {
+      rows,
+      api: {
+        reserve: async (input: { amountCents: number; requestId: string }) => {
+          const existing = rows.find((r) => r.requestId === input.requestId);
+          if (existing) {
+            if (existing.state !== "reserved") {
+              throw Object.assign(new Error("request already consumed"), { code: "CONFLICT" });
+            }
+            return { id: existing.id };
+          }
+          if (occupied() + input.amountCents > capCents) {
+            throw Object.assign(new Error("daily workspace budget exceeded"), { code: "BUDGET_EXCEEDED" });
+          }
+          seq += 1;
+          const id = `res-${seq}`;
+          rows.push({ id, requestId: input.requestId, amountCents: input.amountCents, state: "reserved" });
+          return { id };
+        },
+        release: async (requestId: string) => {
+          const row = rows.find((r) => r.requestId === requestId && r.state === "reserved");
+          if (!row) throw Object.assign(new Error("reservation not found"), { code: "NOT_FOUND" });
+          row.state = "released";
+        },
+        settle: async (reservationId: string, actualCents: number) => {
+          const row = rows.find((r) => r.id === reservationId && r.state === "reserved");
+          if (!row) throw Object.assign(new Error("reservation not found or already settled"), { code: "NOT_FOUND" });
+          row.amountCents = actualCents;
+          row.state = "completed";
+        },
+        markUnknown: async (reservationId: string) => {
+          const row = rows.find((r) => r.id === reservationId);
+          if (!row) throw Object.assign(new Error("reservation not found"), { code: "NOT_FOUND" });
+          // unknown retains reserved occupancy (opening-budget semantics)
+          return row;
+        },
+      },
+    };
+  }
+
+  it("two concurrent reserves cannot both consume the same remaining balance", async () => {
+    const { rows, api } = casLedger(500);
+    // Serialize the read-check-write behind a microtask turn so both callers
+    // observe the empty ledger before either commits — classic lost-update race
+    // unless reserve is atomic (casLedger is).
+    let chain: Promise<unknown> = Promise.resolve();
+    const atomicReserve = (input: { amountCents: number; requestId: string }) => {
+      const run = chain.then(async () => api.reserve(input));
+      // Keep the chain alive even when reserve rejects, so the sibling still runs.
+      chain = run.catch(() => undefined);
+      return run;
+    };
+    const settled = await Promise.allSettled([
+      runBudgetedCall({
+        ...base,
+        requestId: "conc-a",
+        reservedCents: 400,
+        provider: { complete: async () => output },
+        budget: { ...api, reserve: atomicReserve },
+      }),
+      runBudgetedCall({
+        ...base,
+        requestId: "conc-b",
+        reservedCents: 400,
+        provider: { complete: async () => output },
+        budget: { ...api, reserve: atomicReserve },
+      }),
+    ]);
+    const ok = settled.filter((r) => r.status === "fulfilled");
+    const bad = settled.filter((r) => r.status === "rejected");
+    expect(ok).toHaveLength(1);
+    expect(bad).toHaveLength(1);
+    expect((bad[0] as PromiseRejectedResult).reason).toMatchObject({ code: "BUDGET_EXCEEDED" });
+    const active = rows.filter((r) => r.state === "reserved" || r.state === "completed");
+    expect(active).toHaveLength(1);
+    expect(active.reduce((s, r) => s + r.amountCents, 0)).toBeLessThanOrEqual(500);
+  });
+
+  it("cancel before send releases and never settles or marks unknown", async () => {
+    const { rows, api } = casLedger(10_000);
+    const abortErr = Object.assign(new Error("ephemeral request aborted before sending"), { code: "ABORTED" });
+    await expect(
+      runBudgetedCall({
+        ...base,
+        requestId: "cancel-pre",
+        provider: { complete: async () => output },
+        budget: api,
+        beforeSend: async () => {
+          throw abortErr;
+        },
+      }),
+    ).rejects.toBe(abortErr);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("released");
+  });
+
+  it("PROVIDER_ABORTED after send marks unknown (no release / no settle)", async () => {
+    const { rows, api } = casLedger(10_000);
+    await expect(
+      runBudgetedCall({
+        ...base,
+        requestId: "cancel-post",
+        provider: {
+          complete: async () => {
+            throw new OpeningProviderError("PROVIDER_ABORTED", "aborted after send");
+          },
+        },
+        budget: api,
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_ABORTED" });
+    expect(ledgerActionForProviderError("PROVIDER_ABORTED")).toBe("markUnknown");
+    expect(rows[0]!.state).toBe("reserved");
+  });
+
+  it("late settle after release does not double-charge", async () => {
+    const { rows, api } = casLedger(10_000);
+    const reservation = await api.reserve({ amountCents: 300, requestId: "late-settle" });
+    await api.release("late-settle");
+    await expect(api.settle(reservation.id, 120)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(rows.filter((r) => r.state === "completed")).toHaveLength(0);
+    expect(rows[0]!.state).toBe("released");
+  });
+
+  it("unknown fee confirmation converges only once (second settle rejected)", async () => {
+    const { rows, api } = casLedger(10_000);
+    await runBudgetedCall({
+      ...base,
+      requestId: "once-settle",
+      provider: { complete: async () => output },
+      budget: api,
+    });
+    expect(rows[0]!.state).toBe("completed");
+    await expect(api.settle(rows[0]!.id, 99)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(rows.filter((r) => r.state === "completed")).toHaveLength(1);
+    expect(rows[0]!.amountCents).toBe(120);
+  });
+
+  it("release vs late settle race yields a single terminal state", async () => {
+    const { rows, api } = casLedger(10_000);
+    const reservation = await api.reserve({ amountCents: 200, requestId: "race-term" });
+    const results = await Promise.allSettled([
+      api.release("race-term"),
+      api.settle(reservation.id, 80),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: "NOT_FOUND" });
+    const terminal = rows[0]!.state;
+    expect(["released", "completed"]).toContain(terminal);
+    expect(rows.filter((r) => r.state === "reserved")).toHaveLength(0);
+  });
+});
+
+describe("BC1 ephemeral operationId deferral (document + lock)", () => {
+  it("without operationId, ephemeral-style unique requestIds double-reserve (web wiring deferred)", async () => {
+    // apps/web ephemeral-service uses `eph:${uuid}` unless requestKey is set and
+    // does not yet pass operationId. Experience is out of BC1 worker scope;
+    // this locks the gap so a later web slice must pass operationId to close it.
+    const { repo, api } = fakeBudget();
+    await expect(
+      runBudgetedCall({
+        ...base,
+        requestId: "eph:attempt-1",
+        reservedCents: 300,
+        provider: {
+          complete: async () => {
+            throw new OpeningProviderError("PROVIDER_UNAVAILABLE", "down", true);
+          },
+        },
+        budget: api,
+      }),
+    ).rejects.toThrow();
+    await runBudgetedCall({
+      ...base,
+      requestId: "eph:attempt-2",
+      reservedCents: 300,
+      provider: { complete: async () => output },
+      budget: api,
+    });
+    expect(repo.reserved.map((r) => r.requestId)).toEqual(["eph:attempt-1", "eph:attempt-2"]);
+    expect(repo.reserved.reduce((s, r) => s + r.amountCents, 0)).toBe(600);
+  });
+
+  it("ephemeral-style retries with shared operationId reuse one reserve (contract for future web wire)", async () => {
+    const { repo, api } = fakeBudget();
+    await expect(
+      runBudgetedCall({
+        ...base,
+        requestId: "eph:attempt-1",
+        operationId: "eph-op:client-key",
+        reservedCents: 300,
+        provider: {
+          complete: async () => {
+            throw new OpeningProviderError("PROVIDER_UNAVAILABLE", "down", true);
+          },
+        },
+        budget: api,
+      }),
+    ).rejects.toThrow();
+    await runBudgetedCall({
+      ...base,
+      requestId: "eph:attempt-2",
+      operationId: "eph-op:client-key",
+      reservedCents: 300,
+      provider: { complete: async () => output },
+      budget: api,
+    });
+    expect(repo.reserved).toHaveLength(1);
+    expect(repo.reserved[0]?.requestId).toBe("eph-op:client-key");
+  });
+});
+
+describe("BC1 settings/discovery vs ledger semantic alignment", () => {
+  it("resolveEffectiveDailyCap disabled (0) aligns with catalog budget_disabled", () => {
+    const effective = resolveEffectiveDailyCap({
+      envCapCents: 0,
+      workspaceCapCents: null,
+      confirmed: false,
+    });
+    expect(effective).toEqual({ capCents: 0, source: "disabled" });
+    const server = {
+      id: "m1",
+      providerId: "p",
+      providerLabel: "P",
+      label: "M",
+      modelName: "n",
+      baseUrl: "https://example.test/v1",
+      apiKey: "k",
+      supportsVision: false,
+      inputCentsPerMillion: 1,
+      outputCentsPerMillion: 1,
+      availability: "available" as const,
+      source: "server" as const,
+    };
+    const merged = mergeOpeningCatalog([server], [], {
+      defaultModelId: "m1",
+      dailyCapCents: effective.capCents,
+    });
+    expect(merged.models[0]!.availability).toBe("budget_disabled");
+  });
+
+  it("PROVIDER_DISABLED and BUDGET_EXCEEDED stay stable business codes (not INTERNAL)", async () => {
+    const { api } = fakeBudget();
+    await expect(
+      runBudgetedCall({ ...base, requestId: "dis", provider: null, budget: api }),
+    ).rejects.toMatchObject({ code: "PROVIDER_DISABLED" });
+
+    const { api: capped } = (() => {
+      const ledger = {
+        reserve: async () => {
+          throw Object.assign(new Error("daily workspace budget exceeded"), { code: "BUDGET_EXCEEDED" });
+        },
+        release: async () => undefined,
+        settle: async () => undefined,
+        markUnknown: async () => undefined,
+      };
+      return { api: ledger };
+    })();
+    const complete = vi.fn(async () => output);
+    await expect(
+      runBudgetedCall({
+        ...base,
+        requestId: "cap",
+        provider: { complete },
+        budget: capped,
+      }),
+    ).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("positive confirmed workspace cap is the ledger ceiling source", () => {
+    const effective = resolveEffectiveDailyCap({
+      envCapCents: 0,
+      workspaceCapCents: 1500,
+      confirmed: true,
+      pricingConfigured: true,
+    });
+    expect(effective.source).toBe("workspace");
+    expect(effective.capCents).toBe(1500);
+    expect(effective.capCents).toBeGreaterThan(0);
   });
 });

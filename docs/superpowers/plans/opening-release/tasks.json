@@ -814,10 +814,12 @@
         "DL7"
       ],
       "plan": "15-research-hardening.md",
-      "status": "active",
+      "status": "verified",
       "evidence": [
         "../../evidence/2026-10-09-opening-release/bc1-budget-cost-contract-patch.md",
-        "../../evidence/2026-10-09-opening-release/bc1-budget-cost-contract-accept.md"
+        "../../evidence/2026-10-09-opening-release/bc1-budget-cost-contract-accept.md",
+        "../../evidence/2026-10-09-opening-release/bc1-operationid-concurrency-slice.md",
+        "../../evidence/2026-10-09-opening-release/bc1-operationid-concurrency-accept.md"
       ]
     },
     {

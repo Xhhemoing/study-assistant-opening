@@ -119,6 +119,45 @@ describe("tutor turn handler", () => {
     expect(budget.settle).toHaveBeenCalledWith("res-1", 2);
   });
 
+  it("BC1: same tutor job retries reuse one ledger reservation (operationId)", async () => {
+    // Fake ledger mirrors opening-budget idempotency by requestId (operationId key).
+    const reservations: { requestId: string; id: string }[] = [];
+    const budget = {
+      reserve: vi.fn(async (_scope: unknown, input: { requestId: string }) => {
+        const hit = reservations.find((r) => r.requestId === input.requestId);
+        if (hit) return { id: hit.id };
+        const id = `res-${reservations.length + 1}`;
+        reservations.push({ requestId: input.requestId, id });
+        return { id };
+      }),
+      release: vi.fn(async () => ({})),
+      settle: vi.fn(async () => ({})),
+      markUnknown: vi.fn(async () => ({})),
+    };
+    const { deps, tutorJobs } = setup({
+      provider: async () => {
+        throw new OpeningProviderError("PROVIDER_UNAVAILABLE", "down", true);
+      },
+    });
+    deps.budget = budget;
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(budget.markUnknown).toHaveBeenCalledWith("res-1");
+    expect(budget.reserve).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ requestId: `tutor:${claimedJob.id}` }),
+    );
+    // Second attempt of the same durable job: claim again, reuse reserve key.
+    tutorJobs.claim.mockResolvedValueOnce(claimedJob);
+    budget.settle.mockClear();
+    const okProvider = { complete: vi.fn(async () => ({ text: "retry ok", citedChunkIds: [chunkA.id], requestId: null, candidates: [], inputTokens: 10, outputTokens: 5 })) };
+    deps.provider = okProvider;
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
+    expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
+    expect(okProvider.complete).toHaveBeenCalledOnce();
+  });
+
   it("does not dispatch or reserve when route resolution fails", async () => {
     const { deps, provider, budget, tutorJobs } = setup();
     const resolveModel = vi.fn(async () => { throw new Error("selected model removed"); });
