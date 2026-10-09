@@ -36,3 +36,4 @@ export {
 
 export { selectedOpeningModelId, resolveOpeningModel, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";
 export { mergeOpeningCatalog, type WorkspaceCatalogModel } from "./opening/catalog-merge";
+export { resolveEffectiveDailyCap, OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS, type ResolveEffectiveDailyCapInput, type EffectiveDailyCap } from "./opening/effective-cap";

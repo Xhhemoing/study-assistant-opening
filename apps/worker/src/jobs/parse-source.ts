@@ -12,6 +12,7 @@ import type { ParserRunner } from "../parsers/types";
 import type { OpeningSourceChunksRepository } from "@aistudy/database";
 
 export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED_SOURCE"; }
+const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
 
@@ -35,6 +36,16 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text);
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
       return { pages: chunks.length };
+    }
+    if (IMAGE_SOURCE_MIMES.has(source.mime)) {
+      const objectKey = deps.storage.finalKey(source.id, source.version);
+      // OCR text is optional: empty string is allowed when imageObjectKey is set.
+      await deps.chunks.replaceChunks(scope, {
+        sourceId: source.id,
+        sourceVersion: source.version,
+        chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: objectKey }],
+      });
+      return { pages: 1, imageOnly: true };
     }
     if (source.mime === "application/vnd.ms-powerpoint") {
       await deps.sources.markParseState(scope, source.id, "unsupported");

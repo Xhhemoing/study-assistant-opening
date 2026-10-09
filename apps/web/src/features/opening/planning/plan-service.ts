@@ -86,7 +86,7 @@ export function createOpeningPlanService(sql: Sql) {
     async proposePlan(scope: Scope, raw: unknown): Promise<PlanDraft> {
       const body = proposeBodySchema.parse(raw);
       const tasks = await repo.listTasks(scope);
-      const planned = planDay(tasks, body.free as TimeBlock[]);
+      const planned = planDay(tasks, body.free as TimeBlock[], { dayEnd: `${body.date}T23:59:59.999Z` });
       await repo.upsertHardBlocks(scope, body.date, body.free as TimeBlock[]);
       try {
         return await repo.proposePlan(scope, {

@@ -67,3 +67,6 @@ undefined/
 # 部署凭据只存仓库外（%USERPROFILE%/.aistudy-deploy/）
 .aistudy-deploy/
 *.secret
+
+# Box-local Linux dependency binaries/data (agent desktop preview stack)
+.local-linux/

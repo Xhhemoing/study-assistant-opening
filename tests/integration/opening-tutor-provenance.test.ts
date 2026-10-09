@@ -45,7 +45,7 @@ function handler(text: string, memoryText?: string) {
   const run = createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(f.sql),
     chunks: createOpeningSourceChunksRepository(f.sql),
-    budget: createOpeningBudgetRepository(f.sql, { dailyCapCents: 100_000 }),
+    budget: createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 }),
     privacy: createOpeningPrivacyRepository(f.sql), provider,
     memories: { listContext: (scope, now) => createOpeningMemoryRepository(f.sql).listContext(scope, now) },
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 256,

@@ -38,6 +38,7 @@ async function existingTask(tx: TransactionSql, scope: OpeningScope, input: Task
   return {
     id: row.id as string, title: row.title as string, minutes: Number(row.minutes), priority: Number(row.priority),
     status: row.status as TaskItem["status"], dueAt: row.due_at ? new Date(row.due_at as Date).toISOString() : null,
+    retest: null,
   };
 }
 

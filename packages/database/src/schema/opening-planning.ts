@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   doublePrecision,
   integer,
@@ -6,6 +7,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   date,
 } from "drizzle-orm/pg-core";
@@ -22,9 +24,15 @@ export const openingTasks = pgTable("opening_tasks", {
   status: text("status").notNull().default("pending"),
   version: integer("version").notNull().default(1),
   candidateId: uuid("candidate_id"),
+  /** Quick-add idempotency only; retest/assistant keep their own receipts. */
+  clientKey: text("client_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("opening_tasks_workspace_owner_client_key_uidx")
+    .on(table.workspaceId, table.ownerUserId, table.clientKey)
+    .where(sql`${table.clientKey} IS NOT NULL`),
+]);
 
 export const openingTimetableSessions = pgTable("opening_timetable_sessions", {
   id: uuid("id").primaryKey(),

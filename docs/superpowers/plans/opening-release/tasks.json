@@ -589,8 +589,10 @@
     "U03"
    ],
    "plan": "13-daily-loop-gaps.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-08-opening-release/dl1-no-mock-closure.md"
+   ]
   },
   {
    "id": "DL2",
@@ -600,8 +602,10 @@
     "RP6"
    ],
    "plan": "13-daily-loop-gaps.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl2-complete-skip.md"
+   ]
   },
   {
    "id": "DL3",
@@ -613,8 +617,10 @@
     "DL5"
    ],
    "plan": "13-daily-loop-gaps.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl3-retest-loop.md"
+   ]
   },
   {
    "id": "DL4",
@@ -636,8 +642,10 @@
     "DL2"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl5-quick-add-grouped-queue.md"
+   ]
   },
   {
    "id": "DL6",
@@ -647,8 +655,10 @@
     "K02a"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl6-reference-self-check.md"
+   ]
   },
   {
    "id": "DL7",
@@ -658,8 +668,10 @@
     "T03"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl7-ai-readiness.md"
+   ]
   },
   {
    "id": "DL8",
@@ -704,8 +716,11 @@
     "T01"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl10-local-check-accept.md",
+    "../../evidence/2026-10-09-opening-release/dl10-local-check-live.md"
+   ]
   }
  ]
 }

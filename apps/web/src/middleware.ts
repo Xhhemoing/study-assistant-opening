@@ -6,6 +6,15 @@ const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 /** Legacy mock-backed experiences must not masquerade as official entries. */
 const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (pathname: string) => string }[] = [
   { test: (p) => p === "/learn", target: () => "/opening/today" },
+  {
+    test: (p) =>
+      p === "/learn/review" || p.startsWith("/learn/review/") ||
+      p === "/learn/practice" || p.startsWith("/learn/practice/") ||
+      p === "/learn/goals" || p.startsWith("/learn/goals/") ||
+      p === "/learn/exams" || p.startsWith("/learn/exams/") ||
+      p === "/learn/marketplace" || p.startsWith("/learn/marketplace/"),
+    target: () => "/opening/today",
+  },
   { test: (p) => p === "/explore" || p === "/preview" || p.startsWith("/explore/") || p.startsWith("/preview/"), target: () => "/opening/today" },
 ];
 

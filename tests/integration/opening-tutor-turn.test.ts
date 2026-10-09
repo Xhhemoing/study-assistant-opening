@@ -78,7 +78,7 @@ function buildDeps(citedChunkId: string | null, providerError?: Error) {
   const deps = {
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql),
     chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 }),
+    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }),
     provider,
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 2_048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
   };

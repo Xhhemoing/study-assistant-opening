@@ -244,3 +244,96 @@ describe("opening plans handlers (P02)", () => {
     expect(stale.status).toBe(409);
   });
 });
+
+describe("opening task quick-add idempotency (DL5)", () => {
+  it("replays the same clientKey for candidateId null and returns the same id", async () => {
+    const body = {
+      title: "快速添加",
+      minutes: 25,
+      dueAt: null,
+      priority: 1,
+      candidateId: null,
+      clientKey: "quick-add-key-001",
+    };
+    const first = await createTask(req("/api/opening/tasks", "POST", body));
+    expect(first.status).toBe(201);
+    const created = await first.json();
+
+    const second = await createTask(req("/api/opening/tasks", "POST", body));
+    expect(second.status).toBe(201);
+    const replayed = await second.json();
+    expect(replayed.id).toBe(created.id);
+
+    const listed = await listTasks(req("/api/opening/tasks"));
+    expect(listed.status).toBe(200);
+    const { tasks } = await listed.json();
+    expect(tasks.filter((task: { title: string }) => task.title === "快速添加")).toHaveLength(1);
+  });
+
+  it("creates two rows for different clientKeys", async () => {
+    const base = {
+      title: "不同键",
+      minutes: 25,
+      dueAt: null,
+      priority: 1,
+      candidateId: null,
+    };
+    const a = await createTask(req("/api/opening/tasks", "POST", { ...base, clientKey: "quick-add-key-a1" }));
+    const b = await createTask(req("/api/opening/tasks", "POST", { ...base, clientKey: "quick-add-key-b2" }));
+    expect(a.status).toBe(201);
+    expect(b.status).toBe(201);
+    const taskA = await a.json();
+    const taskB = await b.json();
+    expect(taskA.id).not.toBe(taskB.id);
+
+    const listed = await listTasks(req("/api/opening/tasks"));
+    const { tasks } = await listed.json();
+    expect(tasks.filter((task: { title: string }) => task.title === "不同键")).toHaveLength(2);
+  });
+
+  it("conflicts when the same clientKey carries a different payload", async () => {
+    const key = "quick-add-key-conflict";
+    const first = await createTask(
+      req("/api/opening/tasks", "POST", {
+        title: "原标题",
+        minutes: 25,
+        dueAt: null,
+        priority: 1,
+        candidateId: null,
+        clientKey: key,
+      }),
+    );
+    expect(first.status).toBe(201);
+
+    const second = await createTask(
+      req("/api/opening/tasks", "POST", {
+        title: "改过的标题",
+        minutes: 25,
+        dueAt: null,
+        priority: 1,
+        candidateId: null,
+        clientKey: key,
+      }),
+    );
+    expect(second.status).toBe(409);
+  });
+
+  it("isolates the same clientKey across owners", async () => {
+    const otherCookie = await registerUser("other-quick-add");
+    const body = {
+      title: "跨用户",
+      minutes: 15,
+      dueAt: null,
+      priority: 1,
+      candidateId: null,
+      clientKey: "quick-add-shared-key",
+    };
+    const mine = await createTask(req("/api/opening/tasks", "POST", body));
+    const theirs = await createTask(req("/api/opening/tasks", "POST", body, otherCookie));
+    expect(mine.status).toBe(201);
+    expect(theirs.status).toBe(201);
+    const myTask = await mine.json();
+    const theirTask = await theirs.json();
+    expect(myTask.id).not.toBe(theirTask.id);
+  });
+});

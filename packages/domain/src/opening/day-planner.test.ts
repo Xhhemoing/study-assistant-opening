@@ -89,4 +89,57 @@ describe("planDay", () => {
     expect(planDay(tasks, slots)).toEqual(planDay([...tasks].reverse(), [...slots].reverse()));
     expect({ tasks, slots }).toEqual(original);
   });
+
+  it("skips retest tasks whose recommendedAt is after the planning day end", () => {
+    const future = task(1, {
+      retest: {
+        candidateId: id(9),
+        activityId: id(8),
+        courseId: id(7),
+        skillLabel: "fractions",
+        prompt: "隔天重做原题（先不看之前的答案）：1/2+1/3",
+        recommendedAt: "2026-09-16T10:00:00.000Z",
+      },
+    });
+    const dueToday = task(2, {
+      retest: {
+        candidateId: id(6),
+        activityId: id(5),
+        courseId: id(7),
+        skillLabel: "fractions",
+        prompt: "隔天重做原题（先不看之前的答案）：2/3",
+        recommendedAt: at("10:00"),
+      },
+    });
+    const ordinary = task(3);
+    const result = planDay([future, dueToday, ordinary], [slot("09:00", "12:00")], {
+      dayEnd: "2026-09-14T23:59:59.999Z",
+    });
+    expect(result.blocks.map((b) => b.taskId)).toEqual([id(2), id(3)]);
+    expect(result.unscheduledTaskIds).toEqual([]);
+  });
+
+  it("schedules a retest on the day its recommendedAt falls", () => {
+    const due = task(1, {
+      retest: {
+        candidateId: id(9),
+        activityId: id(8),
+        courseId: id(7),
+        skillLabel: "fractions",
+        prompt: "隔天重做",
+        recommendedAt: at("08:00"),
+      },
+    });
+    const result = planDay([due], [slot("09:00", "10:00")], { dayEnd: "2026-09-14T23:59:59.999Z" });
+    expect(result.blocks.map((b) => b.taskId)).toEqual([id(1)]);
+  });
+
+  it("keeps ordinary dueAt deadline behavior unchanged", () => {
+    const result = planDay([
+      task(1, { dueAt: at("08:00") }),
+      task(2, { dueAt: at("10:00") }),
+    ], [slot("09:00", "11:00")], { dayEnd: "2026-09-14T23:59:59.999Z" });
+    expect(result.unscheduledTaskIds).toEqual([id(1)]);
+    expect(result.blocks.map((b) => b.taskId)).toEqual([id(2)]);
+  });
 });

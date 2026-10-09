@@ -28,7 +28,7 @@ function tutorHandler(chunkId: string, provider: TutorTurnDeps["provider"] = {
 }) {
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql), chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 }), provider,
+    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }), provider,
     config: { maxContextCharacters: 12000, reservedCents: 10, maxOutputTokens: 1000, inputCentsPerMillion: 100, outputCentsPerMillion: 100 },
   });
 }
@@ -63,7 +63,7 @@ it.each(["hint", "explain"] as const)("records %s delivery through the actual tu
   const observation = await submitAttempt(req(answer()), params(attempt.id));
   expect(observation.status).toBe(201);
   const body = await observation.json() as LearningObservation;
-  expect(body.assistance).toBe("independent");
+  expect(body.assistance).toBe(mode === "hint" ? "hinted" : "revealed");
   expect(body.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown", reasonCodes: expect.arrayContaining(["help_before_submission"]) });
 
   const session = await f.learning.createSession(fixture.scope, { courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId] });

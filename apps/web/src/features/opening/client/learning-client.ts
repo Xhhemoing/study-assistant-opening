@@ -97,6 +97,15 @@ export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
       return learningAttemptSchema.parse(await request("/api/opening/attempts", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
+    async getAttempt(attemptId: string) {
+      const body = await request(`/api/opening/attempts/${attemptId}`, { method: "GET" }, fetchImpl);
+      return z.object({
+        attemptId: z.string().uuid(),
+        sessionId: z.string().uuid(),
+        deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
+      }).strict().parse(body);
+    },
+
     async submitAttempt(attemptId: string, input: LearningAttemptSubmitInput) {
       const payload = learningAttemptSubmitInputSchema.parse(input);
       return learningObservationSchema.extend({ allowsIndependent: z.boolean() }).parse(await request(`/api/opening/attempts/${attemptId}/submit`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));

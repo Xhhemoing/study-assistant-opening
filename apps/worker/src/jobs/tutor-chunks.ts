@@ -5,6 +5,11 @@ type Chunks = {
   listChunksAtVersion(scope: Scope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
 };
 
+function isUsableChunk(chunk: SourceChunk): boolean {
+  if (chunk.text.trim()) return true;
+  return Boolean(chunk.imageObjectKey);
+}
+
 export async function chunksAtSnapshots(
   chunks: Chunks,
   scope: Scope,
@@ -14,7 +19,7 @@ export async function chunksAtSnapshots(
   const groups = await Promise.all(sourceIds.map(async (sourceId) => {
     const version = versions[sourceId];
     if (version === undefined) throw new Error(`source material is unavailable: missing snapshot for ${sourceId}`);
-    const rows = (await chunks.listChunksAtVersion(scope, sourceId, version)).filter(chunk => chunk.text.trim());
+    const rows = (await chunks.listChunksAtVersion(scope, sourceId, version)).filter(isUsableChunk);
     if (!rows.length) throw new Error(`source material is unavailable: missing chunks for ${sourceId}@${version}`);
     return rows;
   }));

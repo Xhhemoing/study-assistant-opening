@@ -255,4 +255,49 @@ export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: 
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND candidate_id=${job.id} AND status='completed'`;
   }
+  // Self-compare / outcome revisions on a retest attempt must refresh the stored result.
+  if (input.currentIdentity) {
+    const heads = await tx`SELECT retest_id, outcome FROM opening_learning_observations
+      WHERE id=${input.headObservationId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    const head = heads[0];
+    if (head?.retest_id && (head.outcome === "correct" || head.outcome === "incorrect" || head.outcome === "unverified")) {
+      await tx`UPDATE opening_retest_activities
+        SET result=${String(head.outcome)}, reason='evidence_changed', updated_at=now()
+        WHERE id=${head.retest_id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND status='completed'`;
+    }
+  }
+}
+
+/** Latest attempt stem per skill, formatted as the delayed-retest prompt. Skills without a stem are omitted. */
+export const RETEST_STEM_PROMPT_PREFIX = "隔天重做原题（先不看之前的答案）：";
+
+export async function readLatestStemPromptsBySkill(
+  sql: Sql,
+  scope: OpeningScope,
+  courseId: string,
+): Promise<Record<string, string>> {
+  const rows = await sql`
+    SELECT DISTINCT ON (o.skill_label)
+      o.skill_label,
+      COALESCE(NULLIF(v.stem_snapshot, ''), NULLIF(p.stem_snapshot, '')) AS stem
+    FROM opening_learning_observations o
+    LEFT JOIN opening_learning_attempts a
+      ON a.id = o.attempt_id AND a.workspace_id = o.workspace_id AND a.owner_user_id = o.owner_user_id
+    LEFT JOIN opening_learning_item_versions v
+      ON v.id = a.item_version_id AND v.workspace_id = o.workspace_id
+    LEFT JOIN opening_problem_refs p
+      ON p.problem_id = COALESCE(o.problem_id, a.problem_id) AND p.workspace_id = o.workspace_id
+    WHERE o.workspace_id = ${scope.workspaceId}
+      AND o.owner_user_id = ${scope.ownerUserId}
+      AND o.course_id = ${courseId}
+      AND COALESCE(o.revision_kind, 'original') <> 'retract'
+    ORDER BY o.skill_label, o.occurred_at DESC, o.id DESC`;
+  const prompts: Record<string, string> = {};
+  for (const row of rows) {
+    const stem = row.stem as string | null | undefined;
+    if (!stem) continue;
+    prompts[String(row.skill_label)] = `${RETEST_STEM_PROMPT_PREFIX}${stem}`;
+  }
+  return prompts;
 }

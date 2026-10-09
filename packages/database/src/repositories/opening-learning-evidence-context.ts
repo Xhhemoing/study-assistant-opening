@@ -93,6 +93,24 @@ export async function readOpeningLearningEvidenceContexts(
       AND p.chunk_id IS NOT DISTINCT FROM v.chunk_id AND p.physical_page IS NOT DISTINCT FROM v.physical_page AND p.artifact_kind=v.artifact_kind
     WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.id =ANY(${itemIds}::uuid[])` : [];
   const matchingItems = new Set(items.map(row => String(row.id)));
+  // Same-problem prior reference checks count as revealed answer exposure for later attempts.
+  const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id,
+      o.submitted_at, o.recorded_at
+    FROM opening_learning_observations o
+    JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
+      AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
+      AND COALESCE(root.effective_head_id,root.id)=o.id
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
+      AND o.problem_id =ANY(${problemIds}::uuid[])
+      AND o.verdict_source='reference_checked'
+      AND o.attempt_id IS NOT NULL
+      AND (o.revision_kind IS DISTINCT FROM 'retract')` : [];
+  const priorsByProblem = new Map<string, Row[]>();
+  for (const row of priorReferenceHeads) {
+    const key = String(row.problem_id);
+    const entries = priorsByProblem.get(key) ?? [];
+    entries.push(row); priorsByProblem.set(key, entries);
+  }
   const helpByAttempt = new Map<string, Row[]>(), helpByProblem = new Map<string, Row[]>(), legacyHelp = new Map<string, Row[]>();
   const add = (map: Map<string, Row[]>, key: string, row: Row) => { const entries = map.get(key) ?? []; entries.push(row); map.set(key, entries); };
   for (const row of help) {
@@ -108,6 +126,26 @@ export async function readOpeningLearningEvidenceContexts(
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []),
     ].map(row => [String(row.id), row])).values()];
+    const startedMs = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
+    if (record.problemId && Number.isFinite(startedMs)) {
+      for (const prior of priorsByProblem.get(record.problemId) ?? []) {
+        if (String(prior.id) === record.id) continue;
+        if (record.attemptId && prior.attempt_id === record.attemptId) continue;
+        if (record.itemVersionId && prior.item_version_id && String(prior.item_version_id) !== record.itemVersionId) continue;
+        const checkedAt = prior.submitted_at ?? prior.recorded_at;
+        const checkedMs = checkedAt ? new Date(checkedAt as string | Date).getTime() : Number.NaN;
+        if (!Number.isFinite(checkedMs) || checkedMs >= startedMs) continue;
+        history.push({
+          id: `prior-reference:${prior.id}`,
+          attempt_id: prior.attempt_id,
+          problem_id: prior.problem_id,
+          level: "revealed",
+          delivered: true,
+          delivered_at: checkedAt,
+          history_revision: 0,
+        });
+      }
+    }
     const observation: EvidenceObservation = {
       attemptId: record.attemptId ?? null, problemId: record.problemId ?? null, itemVersionId: record.itemVersionId ?? null,
       courseId: record.courseId, requirementKey: record.requirementKey ?? null,

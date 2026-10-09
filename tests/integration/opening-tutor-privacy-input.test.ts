@@ -83,7 +83,7 @@ function handler(fetchImpl: typeof fetch) {
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql),
     chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { dailyCapCents: 100_000 }),
+    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }),
     provider: createOpeningProvider({
       baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl,
     }),

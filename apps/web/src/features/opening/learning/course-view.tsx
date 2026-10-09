@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { summarizeLearningAggregate } from "@aistudy/domain";
 import { LearningAttemptForm } from "./attempt-form";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { CourseHistory } from "./course-history";
 import { createCourseSummaryController, emptyCourseSummary, type CourseSummaryState } from "./course-summary-state";
+import { findRetestPrefill, parseRetestCandidateId, type RetestAttemptPrefill } from "./retest-attempt";
+import { collectSkillLabelOptions } from "./skill-label-options";
 import { LoadError, secondaryButtonClass } from "../design/ui";
 import type { LearningSummary } from "@aistudy/contracts";
 import type { LearningSummaryAggregate } from "@aistudy/contracts";
@@ -46,14 +49,45 @@ function nextStep(item: LearningSummary): string {
   return "先完成一次自己的尝试，再记录结果。";
 }
 
-export function CourseLearningView({ courseId }: { courseId: string }) {
+export function CourseLearningView({ courseId, retest: retestProp = null }: { courseId: string; retest?: RetestAttemptPrefill | null }) {
   const [revision, setRevision] = useState(0);
+  const [retest, setRetest] = useState<RetestAttemptPrefill | null>(retestProp);
+  const [retestNotice, setRetestNotice] = useState("");
+  const [skillLabels, setSkillLabels] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (retestProp) { setRetest(retestProp); setRetestNotice(""); return; }
+    const candidateId = parseRetestCandidateId(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("retest") : null);
+    if (!candidateId) { setRetest(null); setRetestNotice(""); return; }
+    let active = true;
+    setRetestNotice("正在读取补测预填…");
+    void createOpeningApi().listTasks().then(({ tasks }) => {
+      if (!active) return;
+      const found = findRetestPrefill(tasks, candidateId);
+      if (found) { setRetest(found); setRetestNotice(""); }
+      else { setRetest(null); setRetestNotice("找不到对应的补测任务，请从今天页重新进入。"); }
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      setRetest(null);
+      setRetestNotice(reason instanceof Error ? reason.message : "无法读取补测预填");
+    });
+    return () => { active = false; };
+  }, [courseId, retestProp]);
+
+  useEffect(() => {
+    let active = true;
+    void createOpeningLearningClient().getSummary(courseId).then((rows) => {
+      if (active) setSkillLabels(collectSkillLabelOptions(rows));
+    }).catch(() => { if (active) setSkillLabels([]); });
+    return () => { active = false; };
+  }, [courseId, revision]);
 
   return (
     <div className="space-y-6">
       <section id="course-practice" className="scroll-mt-6 space-y-3" aria-labelledby="course-practice-heading">
-        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-zinc-800">独立练习</h2><p className="mt-1 text-xs leading-6 text-zinc-500">选一个主题，用自己的话回忆或完成一道题；先保留自己的尝试，需要时再使用练习辅导。</p></div>
-        <LearningAttemptForm key={courseId} courseId={courseId} onRecorded={() => setRevision((value) => value + 1)} />
+        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-zinc-800">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-zinc-500">{retest ? "按补测提示完成作答；提交后由服务器关闭补测活动并标记任务完成，前端只重新读取。" : "选一个主题，用自己的话回忆或完成一道题；先保留自己的尝试，再对照参考核对，需要时再使用练习辅导。"}</p></div>
+        {retestNotice ? <p className="text-xs leading-6 text-amber-800" role="status">{retestNotice}</p> : null}
+        <LearningAttemptForm key={`${courseId}:${retest?.retestId ?? "practice"}`} courseId={courseId} retest={retest} skillLabels={skillLabels} onRecorded={() => setRevision((value) => value + 1)} />
       </section>
       <CourseSummaryPanel key={`${courseId}:${revision}`} courseId={courseId} />
     </div>

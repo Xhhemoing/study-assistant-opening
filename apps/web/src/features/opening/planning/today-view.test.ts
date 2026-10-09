@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
-import { TodayPlanView, TodayTaskList, localDateKey } from "./today-view";
+import { TodayGroupedQueue, TodayPlanView, TodayTaskList, localDateKey } from "./today-view";
 import { shouldCloseTodayQueue, shouldOpenTodayQueue } from "./today-dashboard";
 import { focusTodayTask } from "./today-task-selection";
 
@@ -64,4 +64,36 @@ it("keeps a focused deep-link queue open when async selection completes", () => 
   expect(shouldCloseTodayQueue("focus")).toBe(false);
   expect(shouldCloseTodayQueue("user")).toBe(true);
   expect(shouldCloseTodayQueue()).toBe(true);
+});
+
+it("renders Chinese queue group headings from groupTodayQueue", () => {
+  const tasks = [
+    { id: "11111111-1111-4111-8111-111111111111", title: "确认中", status: "pending" as const, minutes: 25, dueAt: null, priority: 1 },
+    { id: "22222222-2222-4222-8222-222222222222", title: "其他", status: "pending" as const, minutes: 15, dueAt: null, priority: 1 },
+    { id: "33333333-3333-4333-8333-333333333333", title: "逾期项", status: "pending" as const, minutes: 20, dueAt: "2026-10-01T00:00:00.000Z", priority: 1 },
+  ];
+  const groups = {
+    confirmed: [tasks[0]!],
+    dueRetests: [],
+    overdue: [tasks[2]!],
+    other: [tasks[1]!],
+    upcomingRetestCount: 2,
+    done: [],
+  };
+  const html = renderToStaticMarkup(createElement(TodayGroupedQueue, {
+    groups,
+    state: "ready",
+    plan: {
+      date: "2026-10-09",
+      acceptedVersion: 1,
+      blocks: [{ taskId: tasks[0]!.id, start: "2026-10-09T01:00:00.000Z", end: "2026-10-09T01:25:00.000Z", reason: "plan" }],
+      hardBlocks: [],
+    },
+  }));
+  expect(html).toContain("今日已确认");
+  expect(html).toContain("逾期");
+  expect(html).toContain("其他待办");
+  expect(html).toContain("确认中");
+  expect(html).toContain("逾期项");
+  expect(html).toContain("其他");
 });

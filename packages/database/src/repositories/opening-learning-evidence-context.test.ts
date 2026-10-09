@@ -47,6 +47,6 @@ describe("course evidence batch contexts", () => {
     expect(result.observations.map(row => evaluateEvidenceEligibility(
       result.evidenceContexts[row.id]!.observation, result.evidenceContexts[row.id]!.context,
     ).independentAttempt)).toEqual(Array(8).fill("yes"));
-    expect(fixture.queries()).toBeLessThanOrEqual(9);
+    expect(fixture.queries()).toBeLessThanOrEqual(10);
   });
 });

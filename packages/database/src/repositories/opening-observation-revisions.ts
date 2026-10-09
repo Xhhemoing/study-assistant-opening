@@ -56,6 +56,9 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     if (root.attempt_id && (!attemptRows[0] || attemptRows[0].session_id !== root.session_id || attemptRows[0].course_id !== session.course_id)) {
       throw learningError("VALIDATION", "observation attempt is outside its original session");
     }
+    if (replacement?.referenceCheck && replacement.answer !== previous.answer) {
+      throw learningError("VALIDATION", "reference check cannot change the answer");
+    }
     const editedAnswer = replacement && (replacement.answer !== previous.answer || replacement.outcome !== previous.outcome);
     const keepCheck = !editedAnswer && replacement?.referenceCheck === undefined
       && (replacement?.verdictSource === undefined || replacement.verdictSource === previous.verdictSource)

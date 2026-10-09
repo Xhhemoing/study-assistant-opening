@@ -61,6 +61,19 @@ describe("opening same-origin middleware", () => {
     const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
     expect(response.status).toBe(200);
   });
+  it.each([
+    "/learn/review",
+    "/learn/practice/x",
+    "/learn/goals",
+    "/learn/goals/new",
+    "/learn/exams",
+    "/learn/marketplace",
+  ])("redirects mock-backed legacy learning page %s", (pathname) => {
+    vi.stubEnv("OPENING_RELEASE", "1");
+    const response = middleware(pageRequest(pathname));
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/today`);
+  });
 });
 
 describe("cookie-auth base URL configuration", () => {
@@ -87,3 +100,4 @@ describe("cookie-auth base URL configuration", () => {
     expect(cookieAuthBaseUrl({ NODE_ENV: "production", PUBLIC_BASE_URL: " https://study.example " } as NodeJS.ProcessEnv, "http://evil.example")).toBe("https://study.example");
   });
 });
+

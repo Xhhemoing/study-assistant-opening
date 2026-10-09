@@ -1,5 +1,5 @@
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
-import { resolveUploadMime } from "./upload-state";
+import { resolveUploadMime, unsupportedUploadMessage } from "./upload-state";
 
 export type LocalUploadFile = {
   name: string;
@@ -52,7 +52,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         return {
           phase: "unsupported",
           keptLocal: true,
-          message: "不支持这个格式，未改名也未创建材料。",
+          message: unsupportedUploadMessage({ name: file.name, type: file.type }),
         };
       }
       let ticket: UploadTicket | undefined;

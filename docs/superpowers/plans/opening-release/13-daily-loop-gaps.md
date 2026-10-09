@@ -20,11 +20,11 @@
 **Modify:** `apps/web/src/middleware.ts`、`apps/web/src/features/opening/access-middleware.test.ts`、`apps/web/src/features/opening/shell/opening-shell.tsx`、`apps/web/src/features/courses/course-detail.tsx`（opening 分支不调用 `useStudyProvider`）、`apps/web/src/features/courses/course-study-actions.tsx`（如需去掉 `goalCount`）、`tests/contract/opening-no-mock.test.ts`、`tests/e2e/opening-release-redirects.spec.ts`（只补路径清单，由用户运行）。
 **Interfaces:** `legacyOpeningRedirectPath(pathname)` 扩展为前缀规则；`/learn/courses*` 保持现状（既有测试断言其不重定向，opening 课程页另有入口）。
 
-- [ ] 先写失败测试：`access-middleware.test.ts` 断言 `/learn/review`、`/learn/practice/x`、`/learn/goals`、`/learn/goals/new`、`/learn/exams`、`/learn/marketplace` 在 opening 模式重定向到 `/opening/today`，`/learn/courses/123` 仍返回 null。
-- [ ] 契约扫描改为从 `apps/web/src/app/(opening)` 页面入口出发，沿相对与 `@/` import 递归收集可达文件，禁止命中 `lib/data/mock`、`createMockProvider`、`lib/data/react`；先确认当前因 `course-detail.tsx` 失败（红）。
-- [ ] `course-detail.tsx` 的 opening 分支去掉目标区与指导模式区及其 provider 调用；旧平台路径行为不变，既有旧平台测试保持绿。必要时拆成 opening/legacy 两个小组件，不改旧平台逻辑。
-- [ ] 顶栏移除 `/learn/review` 链接（DL4 完成后改指 `/opening/cards`）；其余快捷入口不在本任务范围。
-- [ ] 验证：`node node_modules/vitest/vitest.mjs run --project unit apps/web/src/features/opening/access-middleware.test.ts`；`node node_modules/vitest/vitest.mjs run --project contract tests/contract/opening-no-mock.test.ts`；`npm run typecheck -w @aistudy/web`。重定向浏览器清单交用户验收。
+- [x] 先写失败测试：`access-middleware.test.ts` 断言 `/learn/review`、`/learn/practice/x`、`/learn/goals`、`/learn/goals/new`、`/learn/exams`、`/learn/marketplace` 在 opening 模式重定向到 `/opening/today`，`/learn/courses/123` 仍返回 null。
+- [x] 契约扫描改为从 `apps/web/src/app/(opening)` 页面入口出发，沿相对与 `@/` import 递归收集可达文件，禁止命中 `lib/data/mock`、`createMockProvider`、`lib/data/react`；先确认当前因 `course-detail.tsx` 失败（红）。
+- [x] `course-detail.tsx` 的 opening 分支去掉目标区与指导模式区及其 provider 调用；旧平台路径行为不变，既有旧平台测试保持绿。必要时拆成 opening/legacy 两个小组件，不改旧平台逻辑。
+- [x] 顶栏移除 `/learn/review` 链接（DL4 完成后改指 `/opening/cards`）；其余快捷入口不在本任务范围。
+- [x] 验证：`node node_modules/vitest/vitest.mjs run --project unit apps/web/src/features/opening/access-middleware.test.ts`；`node node_modules/vitest/vitest.mjs run --project contract tests/contract/opening-no-mock.test.ts`；`npm run typecheck -w @aistudy/web`。重定向浏览器清单交用户验收。
 
 **Acceptance:** opening 模式下，从 `/opening/*` 可达的页面不读写 Mock/localStorage 学习数据；旧 Mock 学习页统一重定向；扩展后的可达性契约扫描为绿。
 

@@ -53,3 +53,39 @@ describe("evaluateEvidenceEligibility correctness", () => {
     expect(evaluateEvidenceEligibility({ ...observation, outcome: "incorrect", verdictSource: "self_report" }, context).verifiedCorrect).toBe("unknown");
   });
 });
+
+  it("treats learner_self_compare whole_answer reference checks as verified and independent when otherwise complete", () => {
+    const result = evaluateEvidenceEligibility(observation, {
+      ...context,
+      referenceCheck: {
+        ...context.referenceCheck!,
+        method: "learner_self_compare 第3页",
+        scope: "whole_answer",
+      },
+    });
+    expect(result.verifiedCorrect).toBe("yes");
+    expect(result.independentAttempt).toBe("yes");
+    expect(result.reasonCodes).toContain("reference_checked_correct");
+  });
+
+  it("keeps learner_self_compare partial scope unverified", () => {
+    const result = evaluateEvidenceEligibility(observation, {
+      ...context,
+      referenceCheck: {
+        ...context.referenceCheck!,
+        method: "learner_self_compare 第3页",
+        scope: "partial",
+      },
+    });
+    expect(result.verifiedCorrect).toBe("unknown");
+    expect(result.reasonCodes).toContain("reference_check_scope_incomplete");
+  });
+
+  it("marks self_report as verification_source_untrusted", () => {
+    const result = evaluateEvidenceEligibility(
+      { ...observation, verdictSource: "self_report" },
+      context,
+    );
+    expect(result.verifiedCorrect).toBe("unknown");
+    expect(result.reasonCodes).toContain("verification_source_untrusted");
+  });

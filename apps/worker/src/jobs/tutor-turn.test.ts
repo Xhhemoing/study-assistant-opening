@@ -3,7 +3,7 @@ import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { DEFAULT_STRATEGY_TEMPLATE_ID, PageCitationError } from "@aistudy/domain";
-import { createTutorTurnHandler, makeTutorInstruction } from "./tutor-turn";
+import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
   it("keeps listening distinct from unsolicited planning", () => {
@@ -63,7 +63,50 @@ describe("tutor turn handler", () => {
     expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [image] });
     expect(tutorJobs.completeTurn).toHaveBeenCalled();
   });
-  it("uses one resolved model for provider dispatch, prices and ledger attribution", async () => {
+
+  it("rejects image-only sources when the model cannot see images without reserving budget", async () => {
+    const imageChunk: SourceChunk = { ...chunkA, text: "", imageObjectKey: "sources/photo.png" };
+    const { deps, provider, budget, tutorJobs } = setup({ chunks: [imageChunk] });
+    const resolveModel = vi.fn(async () => ({
+      provider, supportsVision: false,
+      modelSnapshot: { id: "text", providerId: "p", modelName: "t", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+      inputCentsPerMillion: 100, outputCentsPerMillion: 200,
+    }));
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow(VISION_REQUIRED_MESSAGE);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, VISION_REQUIRED_MESSAGE);
+  });
+
+  it("attaches page 1 for image-only sources on a vision model even without currentPage", async () => {
+    const imageChunk: SourceChunk = { ...chunkA, text: "", imageObjectKey: "sources/photo.png" };
+    const { deps, provider, tutorJobs } = setup({ chunks: [imageChunk] });
+    tutorJobs.getUserTurn = vi.fn(async () => ({ ...turn, currentPage: null, sourceVersions: { [chunkA.sourceId]: 0 } }));
+    const image = { mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: chunkA.sourceId, physicalPage: 1 };
+    const pageImages = vi.fn(async () => [image]);
+    await createTutorTurnHandler({
+      ...deps,
+      resolveModel: async () => ({
+        provider, supportsVision: true,
+        modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+        inputCentsPerMillion: 100, outputCentsPerMillion: 200,
+      }),
+      pageImages,
+    })(claimedJob.id);
+    expect(pageImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ physicalPage: 1 }));
+    expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [image] });
+    expect(tutorJobs.completeTurn).toHaveBeenCalled();
+  });
+
+  it("isImageOnlySourceChunks requires image keys and empty text", () => {
+    expect(isImageOnlySourceChunks([])).toBe(false);
+    expect(isImageOnlySourceChunks([chunkA])).toBe(false);
+    expect(isImageOnlySourceChunks([{ ...chunkA, text: "", imageObjectKey: "k" }])).toBe(true);
+    expect(isImageOnlySourceChunks([{ ...chunkA, text: "  ", imageObjectKey: "k" }])).toBe(true);
+    expect(isImageOnlySourceChunks([{ ...chunkA, text: "caption", imageObjectKey: "k" }])).toBe(false);
+  });
+
+    it("uses one resolved model for provider dispatch, prices and ledger attribution", async () => {
     const { deps, provider, budget } = setup();
     const selectedProvider = { complete: vi.fn(async () => ({ text: "selected answer", citedChunkIds: [chunkA.id], candidates: [], requestId: "selected-request", inputTokens: 100, outputTokens: 50 })) };
     const modelSnapshot = { id: "selected", providerId: "other", modelName: "other-model", inputCentsPerMillion: 10_000, outputCentsPerMillion: 20_000 };

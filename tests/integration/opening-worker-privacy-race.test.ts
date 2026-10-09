@@ -52,7 +52,7 @@ function handler(sql: Parameters<typeof createOpeningTutorJobsRepository>[0], fe
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(sql),
     chunks: createOpeningSourceChunksRepository(sql),
-    budget: createOpeningBudgetRepository(sql, { dailyCapCents: 100_000_000 }),
+    budget: createOpeningBudgetRepository(sql, { envCapCents: 100_000_000 }),
     provider: createOpeningProvider({
       baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl,
     }),

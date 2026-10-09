@@ -31,7 +31,8 @@ it.each(["hinted", "revealed"] as const)("does not qualify an answer corrected a
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   const original = await f.submit(attempt, { answer: "2", outcome: "incorrect" });
   const delivered = await f.help(attempt, level);
-  const corrected = await replace(original, { answer: "1", outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
+  const answered = await replace(original, { answer: "1", outcome: "correct" });
+  const corrected = await replace(answered, { answer: "1", outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
   expect(Date.parse(delivered.deliveredAt!)).toBeGreaterThan(Date.parse(original.submittedAt!));
   expect(Date.parse(corrected.recordedAt!)).toBeGreaterThan(Date.parse(delivered.deliveredAt!));
   expect(corrected).toMatchObject(capturedFacts(original));
@@ -76,20 +77,22 @@ it("does not treat an outcome or reference-check correction as a new answer", as
 it("uses only the latest answer change in the requested version's ancestry, even across attribution changes", async () => {
   const f = await learningAttemptFixture(fixture), destination = await learningAttemptFixture(fixture), attempt = await f.start();
   const original = await f.submit(attempt, { answer: "2", outcome: "incorrect" });
-  const firstAnswer = await replace(original, { answer: "1", outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
+  const firstAnswer = await replace(original, { answer: "1", outcome: "correct" });
+  const firstChecked = await replace(firstAnswer, { answer: "1", outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
   await f.help(attempt, "hinted");
-  const moved = await replace(firstAnswer, { courseId: destination.courseId });
+  const moved = await replace(firstChecked, { courseId: destination.courseId });
   expect(moved.eligibility?.independentAttempt).toBe("yes");
   const checked = await replace(moved, { referenceCheck: referenceCheck(f.sourceId) });
   expect(checked.eligibility?.independentAttempt).toBe("yes");
-  const newAnswer = await replace(checked, { answer: "1.0", referenceCheck: referenceCheck(f.sourceId) });
+  const rewritten = await replace(checked, { answer: "1.0", outcome: "correct" });
+  const newAnswer = await replace(rewritten, { answer: "1.0", outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
   expect(newAnswer.eligibility?.independentAttempt).toBe("no");
   const metadata = await replace(newAnswer, { skillLabel: "corrected label" });
   expect(metadata.eligibility?.independentAttempt).toBe("no");
   const restoredText = await replace(metadata, { answer: original.answer, outcome: original.outcome });
   expect(restoredText.eligibility?.independentAttempt).toBe("no");
   const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
-  expect(history.revisions.map(record => record.eligibility?.independentAttempt)).toEqual(["yes", "yes", "yes", "yes", "no", "no", "no"]);
+  expect(history.revisions.map(record => record.eligibility?.independentAttempt)).toEqual(["yes", "yes", "yes", "yes", "yes", "no", "no", "no", "no"]);
   for (const record of history.revisions) expect(record).toMatchObject(capturedFacts(original));
   const facts = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, moved);
   expect(facts.observation.submittedAt).toBe(Date.parse(original.submittedAt!));

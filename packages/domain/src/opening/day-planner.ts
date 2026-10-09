@@ -11,6 +11,11 @@ export type DayPlanResult = {
   unscheduledTaskIds: string[];
 };
 
+export type PlanDayOptions = {
+  /** Inclusive end of the planning day. Retests with recommendedAt after this are skipped. */
+  dayEnd?: string;
+};
+
 function deadline(task: TaskItem): number {
   return task.dueAt === null ? Infinity : Date.parse(task.dueAt);
 }
@@ -23,20 +28,41 @@ function compareTasks(a: TaskItem, b: TaskItem): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+function resolveDayEndMs(free: readonly TimeBlock[], dayEnd?: string): number {
+  if (dayEnd) return Date.parse(dayEnd);
+  const freeStarts = free.filter((block) => block.kind === "free").map((block) => Date.parse(block.start));
+  if (!freeStarts.length) return Infinity;
+  const day = new Date(Math.min(...freeStarts)).toISOString().slice(0, 10);
+  return Date.parse(`${day}T23:59:59.999Z`);
+}
+
+function isRetestNotYetDue(task: TaskItem, dayEndMs: number): boolean {
+  const recommendedAt = task.retest?.recommendedAt;
+  if (!recommendedAt) return false;
+  return Date.parse(recommendedAt) > dayEndMs;
+}
+
 /**
  * Proposes only; never changes task status or accepts a plan. Higher priority
  * numbers sort first after confirmed deadlines. Tasks remain indivisible;
  * impossible/overdue tasks are surfaced for a user-reviewed adjustment.
  * Pass confirmed free blocks AND all applicable class/sleep/meal/locked blocks.
+ * Retest tasks with recommendedAt after the planning day end are skipped (not
+ * listed as unscheduled) so delayed retests stay out of today's proposal.
  */
-export function planDay(tasks: readonly TaskItem[], free: readonly TimeBlock[]): DayPlanResult {
+export function planDay(
+  tasks: readonly TaskItem[],
+  free: readonly TimeBlock[],
+  options: PlanDayOptions = {},
+): DayPlanResult {
+  const dayEndMs = resolveDayEndMs(free, options.dayEnd);
   const ids = new Set<string>();
   const pending = tasks.map((raw) => {
     const task = taskItemSchema.parse(raw);
     if (ids.has(task.id)) throw new Error(`duplicate task id: ${task.id}`);
     ids.add(task.id);
     return task;
-  }).filter((task) => task.status === "pending").sort(compareTasks);
+  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs)).sort(compareTasks);
   const slots = availableTimeSlots(free).map((slot) => ({
     start: Date.parse(slot.start), end: Date.parse(slot.end),
   }));

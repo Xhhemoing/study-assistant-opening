@@ -35,6 +35,7 @@ function mapTask(row: Record<string, unknown>): TaskItem {
     dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
     priority: Number(row.priority),
     status: row.status as TaskItem["status"],
+    retest: null,
   };
 }
 
@@ -124,6 +125,44 @@ export async function consumeRetestCandidate(
   }
 }
 
+function sameQuickAddPayload(
+  row: Record<string, unknown>,
+  input: TaskCreateInput & { dueText?: string | null },
+): boolean {
+  const rowDue = row.due_at ? new Date(row.due_at as string | Date).toISOString() : null;
+  const inputDue = input.dueAt === null || input.dueAt === undefined ? null : new Date(input.dueAt).toISOString();
+  const rowDueText = (row.due_text as string | null | undefined) ?? null;
+  const inputDueText = input.dueText ?? null;
+  return (
+    row.title === input.title &&
+    Number(row.minutes) === input.minutes &&
+    Number(row.priority) === input.priority &&
+    rowDue === inputDue &&
+    rowDueText === inputDueText
+  );
+}
+
+/** Idempotent quick-add when candidateId is null and clientKey is set. Not via opening_jobs. */
+async function findQuickAddReplay(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  input: TaskCreateInput & { dueText?: string | null },
+): Promise<TaskItem | null> {
+  if (input.candidateId !== null || !input.clientKey) return null;
+  const rows = await tx`
+    SELECT * FROM opening_tasks
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND client_key = ${input.clientKey}
+    FOR UPDATE`;
+  if (!rows.length) return null;
+  const row = rows[0] as Record<string, unknown>;
+  if (!sameQuickAddPayload(row, input)) {
+    throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
+  }
+  return mapTask(row);
+}
+
 export async function insertOpeningTask(
   sql: Sql,
   scope: OpeningScope,
@@ -132,15 +171,17 @@ export async function insertOpeningTask(
   if (input.dueText && input.dueAt) {
     throw new OpeningPlanError("VALIDATION", "ambiguous dueText cannot become a formal deadline");
   }
+  // Quick-add stores client_key on the task row; candidate accepts keep their own receipts.
+  const taskClientKey = input.candidateId === null ? (input.clientKey ?? null) : null;
   const insert = async (tx: TransactionSql): Promise<TaskItem> => {
     const rows = await tx`
       INSERT INTO opening_tasks (
         id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
-        priority, status, version, candidate_id
+        priority, status, version, candidate_id, client_key
       ) VALUES (
         ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
         ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
-        ${input.candidateId}
+        ${input.candidateId}, ${taskClientKey}
       ) RETURNING *`;
     return mapTask(rows[0] as Record<string, unknown>);
   };
@@ -149,9 +190,19 @@ export async function insertOpeningTask(
   }
   return sql.begin(async (tx) => {
     if (input.inputSnapshot?.kind === "retest") await lockWorkspaceLearningHistory(tx, scope);
-    const replay = await prepareRetestTask(tx, scope, input);
-    if (replay) return replay;
-    const task = await insert(tx);
+    const retestReplay = await prepareRetestTask(tx, scope, input);
+    if (retestReplay) return retestReplay;
+    const quickReplay = await findQuickAddReplay(tx, scope, input);
+    if (quickReplay) return quickReplay;
+    let task: TaskItem;
+    try {
+      task = await insert(tx);
+    } catch (error) {
+      // Concurrent quick-add with the same clientKey: re-read under the unique index.
+      const raced = await findQuickAddReplay(tx, scope, input);
+      if (raced) return raced;
+      throw error;
+    }
     await consumeRetestCandidate(tx, scope, input, task.id);
     const candidateRows = await tx`SELECT payload FROM opening_jobs
       WHERE id=${input.candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}

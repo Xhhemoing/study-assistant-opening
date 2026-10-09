@@ -150,7 +150,7 @@ describe("createUploadClient", () => {
     });
     await expect(
       client.uploadFile({ name: "photo.heic", type: "", bytes: pdfBytes() }),
-    ).resolves.toMatchObject({ phase: "unsupported" });
+    ).resolves.toMatchObject({ phase: "unsupported", message: "请导出为 JPG 后上传" });
     expect(begin).not.toHaveBeenCalled();
   });
 });

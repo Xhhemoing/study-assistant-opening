@@ -26,3 +26,9 @@ it("links practice and record actions to existing sections while records are sti
   expect(html).toContain("开始本次练习");
   expect(html.indexOf('id="course-practice"')).toBeLessThan(html.indexOf('id="course-learning-records"'));
 });
+it("omits the goal counter when Opening hides goal data", () => {
+  const html = renderToStaticMarkup(createElement(CourseStudyActions, { assetCount: 0, opening: true }));
+  expect(html).not.toContain("个学习目标");
+  expect(html).toContain("0 份课程材料");
+});
+

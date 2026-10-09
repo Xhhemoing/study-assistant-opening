@@ -38,7 +38,7 @@ async function source() {
 }
 async function receipt(refs: ContextSourceRef[] | null, owner = scope) {
   const requestId = `test:${randomUUID()}`;
-  const reserved = await createOpeningBudgetRepository(sql, { dailyCapCents: 100_000 }).reserve(owner, { purpose: "tutor", amountCents: 1, requestId });
+  const reserved = await createOpeningBudgetRepository(sql, { envCapCents: 100_000 }).reserve(owner, { purpose: "tutor", amountCents: 1, requestId });
   const epoch = Number((await sql`SELECT privacy_epoch FROM workspaces WHERE id=${owner.workspaceId}`)[0]!.privacy_epoch);
   const exposedId = await provenance.record(owner, { requestId, privacyEpoch: epoch, contextSourceRefs: refs });
   return { id: reserved.id, exposedId, epoch };

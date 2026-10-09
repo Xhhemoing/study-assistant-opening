@@ -20,6 +20,7 @@ const BY_EXTENSION: Record<string, UploadMime> = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
+  webp: "image/webp",
   md: "text/markdown",
   markdown: "text/markdown",
   eml: "message/rfc822",
@@ -50,4 +51,17 @@ export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "pa
     return "原件已保存，正在解析";
   }
   return "原件已保存，正在解析";
+}
+
+export function isHeicUpload(input: { name: string; type: string }): boolean {
+  const declared = input.type.trim().toLowerCase();
+  if (declared === "image/heic" || declared === "image/heif") return true;
+  const extension = input.name.toLowerCase().split(".").pop() ?? "";
+  return extension === "heic" || extension === "heif";
+}
+
+/** Rejected upload tip. HEIC/HEIF stay unsupported; ask for JPG instead of decoding. */
+export function unsupportedUploadMessage(input: { name: string; type: string }): string {
+  if (isHeicUpload(input)) return "请导出为 JPG 后上传";
+  return "不支持这个格式，未改名也未创建材料。";
 }

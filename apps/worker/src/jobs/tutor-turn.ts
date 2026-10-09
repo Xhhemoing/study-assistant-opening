@@ -67,7 +67,18 @@ export type TutorTurnDeps = {
   };
 };
 
+
 const MAX_PROVIDER_CHUNKS = 64;
+
+/** True when every chunk is an image page with no usable text (photo sources). */
+export function isImageOnlySourceChunks(chunks: SourceChunk[]): boolean {
+  if (!chunks.length) return false;
+  return chunks.every(
+    (chunk) => chunk.imageObjectKey != null && chunk.imageObjectKey !== "" && !chunk.text.trim(),
+  );
+}
+
+export const VISION_REQUIRED_MESSAGE = "当前模型不能看图，请在设置中选择支持图片的模型";
 
 /**
  * Durable tutor turn: claim CAS, gather authorized chunks, build delimited
@@ -108,12 +119,15 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (!chunks.length && allowedSourceIds.length > 0) {
         throw new Error("all requested source material is unavailable");
       }
+      const imageOnlySources = isImageOnlySourceChunks(chunks);
+      // Photo sources default to page 1 so empty-text image chunks stay preferred.
+      const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
       const context = selectContext({
         chunks,
         query: turn.text,
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: turn.chunkId ?? undefined,
-        preferPage: turn.currentPage ?? undefined,
+        preferPage,
       }).slice(0, MAX_PROVIDER_CHUNKS);
       const { history, sourceRefs: historySourceRefs } = await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
       const contextNow = new Date().toISOString();
@@ -133,8 +147,14 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
       const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`;
       const selected = await deps.resolveModel?.(scope, mode);
-      const imageParts = selected?.supportsVision && turn.currentPage != null && deps.pageImages
-        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: turn.sourceVersions, physicalPage: turn.currentPage }) : [];
+      const supportsVision = selected?.supportsVision === true;
+      if (imageOnlySources && !supportsVision) {
+        throw new Error(VISION_REQUIRED_MESSAGE);
+      }
+      // Photo sources default to page 1 when the learner did not pick a page.
+      const pageForImages = turn.currentPage ?? (imageOnlySources ? 1 : null);
+      const imageParts = supportsVision && pageForImages != null && deps.pageImages
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: turn.sourceVersions, physicalPage: pageForImages }) : [];
       const input: ProviderInput = {
         instruction, text: turn.text, history,
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,

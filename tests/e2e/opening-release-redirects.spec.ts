@@ -28,7 +28,7 @@ test.describe("opening release redirects", () => {
     try {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
-      for (const path of ["/learn", "/explore", "/preview/notebook"]) {
+      for (const path of ["/learn", "/learn/review", "/learn/practice/mock-item", "/learn/goals", "/learn/exams", "/learn/marketplace", "/explore", "/preview/notebook"]) {
         await page.goto(path);
         await expect(page).toHaveURL(new URL("/opening/today", baseURL ?? "http://127.0.0.1:3000").toString());
         await expect(page.getByRole("navigation", { name: "Opening navigation" })).toBeVisible();
@@ -38,3 +38,4 @@ test.describe("opening release redirects", () => {
     }
   });
 });
+

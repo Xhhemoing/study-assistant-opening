@@ -3,6 +3,12 @@ import { OpeningS3, OpeningSourceError } from "@aistudy/database";
 import type { Scope } from "@aistudy/contracts";
 import { renderPdfPageImages } from "../parsers/pdf-page-images";
 
+const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function toDataUrl(mime: string, bytes: Buffer): string {
+  return `data:${mime};base64,${bytes.toString("base64")}`;
+}
+
 /** Only server-validated versions/pages; never accept user URLs or object keys. */
 export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
   return async (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => {
@@ -18,18 +24,37 @@ export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
       // A page selection is valid when any selected source contains it. Other
       // selected sources can still contribute text, but do not have to share
       // the same physical page or file format.
-      if (!rows.length || rows[0]!.mime !== "application/pdf") continue;
+      if (!rows.length) continue;
+      const mime = String(rows[0]!.mime);
+      if (IMAGE_SOURCE_MIMES.has(mime)) {
+        if (input.physicalPage !== 1) continue;
+        if (images.length >= 3) throw new OpeningSourceError("VALIDATION", "视觉分析每轮最多指定三份材料；请分批分析");
+        const url = await storage.presignGet(storage.finalKey(sourceId, version), { expiresInSeconds: 60, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
+        const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+        if (!response.ok || !response.body) throw new Error("原件读取失败，未发送模型请求");
+        const parts: Uint8Array[] = []; let bytes = 0;
+        for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+          bytes += chunk.byteLength;
+          if (bytes > 50 * 1024 * 1024) throw new Error("原件超出视觉分析大小限制");
+          parts.push(chunk);
+        }
+        const buffer = Buffer.concat(parts);
+        const mediaType = mime as "image/jpeg" | "image/png" | "image/webp";
+        images.push({ sourceId, physicalPage: 1, mediaType, data: toDataUrl(mediaType, buffer) });
+        continue;
+      }
+      if (mime !== "application/pdf") continue;
       if (images.length >= 3) throw new OpeningSourceError("VALIDATION", "视觉分析每轮最多指定三份 PDF；请分批分析");
       const url = await storage.presignGet(storage.finalKey(sourceId, version), { expiresInSeconds: 60, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok || !response.body) throw new Error("原件读取失败，未发送模型请求");
-      const chunks: Uint8Array[] = []; let bytes = 0;
+      const parts: Uint8Array[] = []; let bytes = 0;
       for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
         bytes += chunk.byteLength;
         if (bytes > 50 * 1024 * 1024) throw new Error("原件超出视觉分析大小限制");
-        chunks.push(chunk);
+        parts.push(chunk);
       }
-      images.push(...await renderPdfPageImages(Buffer.concat(chunks), [{ sourceId, physicalPage: input.physicalPage }]));
+      images.push(...await renderPdfPageImages(Buffer.concat(parts), [{ sourceId, physicalPage: input.physicalPage }]));
     }
     return images;
   };

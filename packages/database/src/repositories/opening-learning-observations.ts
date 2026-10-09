@@ -95,6 +95,32 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
       }
     }
     await refreshOpeningLearningEligibility(tx, scope, [id]);
+    // Ordinary observations enqueue a delayed-retest scan in the same transaction.
+    // Retest completions must not scan again (avoid immediate re-proposal).
+    if (!input.retestId) {
+      const jobId = randomUUID();
+      const scanKey = `retest-scan:${input.courseId}:${id}`;
+      const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+        WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      const privacyEpoch = Number((workspace as { privacy_epoch?: number } | undefined)?.privacy_epoch ?? 0);
+      const inserted = await tx`
+        INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+        VALUES (
+          ${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${scanKey}, ${"retest"},
+          ${tx.json({ courseId: input.courseId, observationId: id } as never)},
+          ${privacyEpoch}
+        )
+        ON CONFLICT (workspace_id, key) DO NOTHING
+        RETURNING id`;
+      if (inserted.length) {
+        await tx`
+          INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+          VALUES (
+            ${scope.workspaceId}, ${jobId}, ${"opening.job.enqueue"},
+            ${tx.json({ jobId, kind: "retest", courseId: input.courseId, observationId: id } as never)}
+          )`;
+      }
+    }
     return qualify(mapLearningObservation(rows[0]));
   });
 }

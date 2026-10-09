@@ -2,6 +2,16 @@ import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { candidateRefSchema, reviewResultSchema } from "./candidate-review";
 
+/** Read-model projection for a task created from an accepted retest proposal. */
+export const taskRetestProjectionSchema = z.object({
+  candidateId: uuidSchema,
+  activityId: uuidSchema,
+  courseId: uuidSchema,
+  skillLabel: z.string().min(1).max(200),
+  prompt: z.string().min(1).max(4000),
+  recommendedAt: isoDateTimeSchema.nullable(),
+}).strict();
+
 export const taskItemSchema = z.object({
   id: uuidSchema,
   version: z.number().int().positive().optional(),
@@ -10,6 +20,8 @@ export const taskItemSchema = z.object({
   dueAt: isoDateTimeSchema.nullable(),
   priority: z.number().finite(),
   status: z.enum(["pending", "done", "skipped"]),
+  /** Present for retest-origin tasks; null/omitted for ordinary tasks. */
+  retest: taskRetestProjectionSchema.nullable().optional(),
 }).strict();
 
 /** Stored with a retest-origin task. Not a calendar schedule. */
@@ -72,4 +84,5 @@ export type TaskCreateResult = z.infer<typeof taskCreateResultSchema>;
 export type TaskStatusUpdateInput = z.infer<typeof taskStatusUpdateInputSchema>;
 
 export type TaskItem = z.infer<typeof taskItemSchema>;
+export type TaskRetestProjection = z.infer<typeof taskRetestProjectionSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateInputSchema>;

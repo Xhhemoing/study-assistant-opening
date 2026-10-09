@@ -112,6 +112,8 @@ reported as `probe not run`. An unconfigured destination is reported as
 alert was delivered. Output is metadata only; credentials and user content are
 never printed. Exit code is 0 only when ready.
 
+Windows machines without bash or Docker follow [opening-local-windows.md](opening-local-windows.md). The read-only check is `node scripts/opening-local-check.mjs`. It reports ports, `/api/opening/health`, whether required variables are set, `PARSER_PYTHON`, and `GET /api/opening/ai-readiness`. It prints booleans only and does not start or stop services.
+
 Required environment: `DATABASE_URL`, `REDIS_URL`, `S3_ENDPOINT`, `S3_REGION`,
 `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PUBLIC_BASE_URL`.
 

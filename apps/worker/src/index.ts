@@ -1,7 +1,8 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
-import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createSqlClient, OpeningS3 } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository,
+  readLatestStemPromptsBySkill, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
@@ -50,6 +51,7 @@ export async function main(): Promise<void> {
     readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
     listDueRetests: (scope, courseId) => retests.listDueEvidence(scope, courseId),
     saveCandidates: (scope, candidates, epoch, jobId) => retests.saveCandidates(scope, candidates, epoch, jobId),
+    readStemPromptsBySkill: (scope, courseId) => readLatestStemPromptsBySkill(sql, scope, courseId),
   });
   const reminders = createOpeningReminderRepository(sql);
   const feishu = createFeishuReminderAdapter({ credential: process.env.FEISHU_REMINDER_CREDENTIAL ?? null });
@@ -61,7 +63,7 @@ export async function main(): Promise<void> {
   });
   const handlers = createHandlers(parse, { retest, remind });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
-  const budget = createOpeningBudgetRepository(sql, { dailyCapCents: openingModel.dailyCapCents });
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
     tutorJobs,

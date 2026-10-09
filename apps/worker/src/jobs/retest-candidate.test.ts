@@ -97,3 +97,27 @@ it("does not read evidence or publish when retest suggestions are disabled", asy
   expect(readCourseEvidence).not.toHaveBeenCalled();
   expect(saveCandidates).not.toHaveBeenCalled();
 });
+
+it("assembles prompts from stem snapshots when payload omits promptsBySkill", async () => {
+  const saveCandidates = vi.fn(async (_scope, candidates) => candidates);
+  const worker = createRetestCandidateHandler({
+    readCourseEvidence: async () => courseEvidence(null),
+    listDueRetests: async () => [],
+    saveCandidates,
+    readStemPromptsBySkill: async () => ({ fractions: "隔天重做原题（先不看之前的答案）：1/2+1/3" }),
+  });
+  const result = await worker(job, { courseId });
+  expect(result.candidates).toHaveLength(1);
+  expect(result.candidates[0]?.prompt).toContain("1/2+1/3");
+  expect(result.candidates[0]?.prompt.startsWith("隔天重做原题")).toBe(true);
+});
+
+it("does not invent a prompt when stem lookup returns nothing", async () => {
+  const worker = createRetestCandidateHandler({
+    readCourseEvidence: async () => courseEvidence(null),
+    listDueRetests: async () => [],
+    saveCandidates: async (_s, c) => c,
+    readStemPromptsBySkill: async () => ({}),
+  });
+  expect((await worker(job, { courseId })).candidates).toEqual([]);
+});

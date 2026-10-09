@@ -37,7 +37,7 @@ function fingerprintHardBlocks(blocks: TimeBlock[]): string {
 }
 
 function mapTask(row: Record<string, unknown>): TaskItem {
-  return {
+  const base: TaskItem = {
     id: row.id as string,
     version: Number(row.version),
     title: row.title as string,
@@ -45,6 +45,23 @@ function mapTask(row: Record<string, unknown>): TaskItem {
     dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
     priority: Number(row.priority),
     status: row.status as TaskItem["status"],
+    retest: null,
+  };
+  const activityId = row.retest_activity_id as string | null | undefined;
+  if (!activityId) return base;
+  const prompt = (row.retest_prompt as string | null | undefined) ?? base.title;
+  return {
+    ...base,
+    retest: {
+      candidateId: row.retest_candidate_id as string,
+      activityId,
+      courseId: row.retest_course_id as string,
+      skillLabel: row.retest_skill_label as string,
+      prompt,
+      recommendedAt: row.retest_recommended_at
+        ? new Date(row.retest_recommended_at as string | Date).toISOString()
+        : null,
+    },
   };
 }
 
@@ -64,9 +81,24 @@ export function createOpeningPlansRepository(sql: Sql) {
   return {
     async listTasks(scope: OpeningScope): Promise<TaskItem[]> {
       const rows = await sql`
-        SELECT * FROM opening_tasks
-        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-        ORDER BY created_at ASC`;
+        SELECT
+          t.*,
+          a.id AS retest_activity_id,
+          a.candidate_id AS retest_candidate_id,
+          a.course_id AS retest_course_id,
+          a.skill_label AS retest_skill_label,
+          a.recommended_at AS retest_recommended_at,
+          COALESCE(j.result->'inputSnapshot'->>'prompt', j.payload->>'prompt') AS retest_prompt
+        FROM opening_tasks t
+        LEFT JOIN opening_retest_activities a
+          ON a.task_id = t.id
+          AND a.workspace_id = t.workspace_id
+          AND a.owner_user_id = t.owner_user_id
+        LEFT JOIN opening_jobs j
+          ON j.id = a.candidate_id
+          AND j.workspace_id = t.workspace_id
+        WHERE t.workspace_id = ${scope.workspaceId} AND t.owner_user_id = ${scope.ownerUserId}
+        ORDER BY t.created_at ASC`;
       return rows.map((r) => mapTask(r as Record<string, unknown>));
     },
 

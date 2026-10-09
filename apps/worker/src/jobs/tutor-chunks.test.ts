@@ -11,3 +11,7 @@ describe("version-pinned tutor text", () => {
     expect(await chunksAtSnapshots({ listChunksAtVersion: async () => [chunk(""), { ...chunk("readable"), page: 2 }] }, scope, ["s"], { s: 1 })).toEqual([{ ...chunk("readable"), page: 2 }]);
   });
 });
+  it("keeps empty-text chunks that carry an image object key", async () => {
+    const imageChunk = { ...chunk(""), imageObjectKey: "sources/photo.png" };
+    expect(await chunksAtSnapshots({ listChunksAtVersion: async () => [imageChunk] }, scope, ["s"], { s: 1 })).toEqual([imageChunk]);
+  });

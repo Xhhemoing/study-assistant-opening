@@ -42,4 +42,9 @@ describe("mergeOpeningCatalog", () => {
   it("falls back to the first server model when the workspace default is null", () => {
     expect(mergeOpeningCatalog([server], [], { defaultModelId: null, dailyCapCents: 5 }).defaultModelId).toBe("server");
   });
+  it("recomputes server availability from the effective daily cap", () => {
+    const disabled = { ...server, availability: "budget_disabled" as const };
+    expect(mergeOpeningCatalog([disabled], [], { defaultModelId: "server", dailyCapCents: 0 }).models[0]!.availability).toBe("budget_disabled");
+    expect(mergeOpeningCatalog([disabled], [], { defaultModelId: "server", dailyCapCents: 100 }).models[0]!.availability).toBe("available");
+  });
 });

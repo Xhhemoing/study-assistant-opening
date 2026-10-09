@@ -95,7 +95,8 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const catalog = override ? null : loadOpeningModelCatalog();
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
-    dailyCapCents: catalog?.dailyCapCents ?? 100_000,
+    envCapCents: catalog?.dailyCapCents ?? 100_000,
+    pricingConfigured: Boolean(catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);

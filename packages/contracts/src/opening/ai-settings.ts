@@ -9,6 +9,10 @@ export const openingAiSettingsSchema = z.object({
     listen: modelId.nullable(), hint: modelId.nullable(),
     explain: modelId.nullable(), think_together: modelId.nullable(),
   }).strict(),
+  /** Optional per-workspace daily budget in cents; absent/null means unset. */
+  dailyCapCents: z.number().int().nonnegative().max(2_000).nullable().optional(),
+  /** ISO timestamp when the owner confirmed enabling a personal daily cap. */
+  budgetConfirmedAt: z.string().datetime({ offset: true }).nullable().optional(),
 }).strict().transform(settings => ({
   ...settings,
   // Compatibility with this feature's earlier saved shape, not a runtime fallback.
@@ -44,7 +48,11 @@ export type OpeningModelSummary = z.infer<typeof openingModelSummarySchema>;
 export const openingAiSettingsResponseSchema = z.object({
   models: z.array(openingModelSummarySchema).max(32),
   defaultModelId: modelId.nullable(),
+  /** Effective daily cap after resolveEffectiveDailyCap. */
   dailyCapCents: z.number().int().nonnegative(),
+  /** Env/ops ceiling the UI may not exceed when env cap > 0; otherwise personal ceiling. */
+  envCapCents: z.number().int().nonnegative(),
+  personalCeilingCents: z.number().int().nonnegative(),
   settings: openingAiSettingsSchema,
   saved: z.boolean(),
   invalidStoredSettings: z.boolean(),

@@ -1,26 +1,81 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, CalendarDays, ChevronDown, Circle, CircleCheck, Clock3 } from "lucide-react";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { canAcceptPlan } from "./plan-action";
 import { canProposePlan } from "./plan-input";
+import { QuickAddTask } from "./quick-add-task";
 import { focusTodayTask, visibleTodayTasks } from "./today-task-selection";
 import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
+import { RetestProposals } from "./retest-proposals";
+import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
 
 type SelectionSource = "focus" | "user";
-type Props = { api?: OpeningApi; date?: string; focusTaskId?: string; selectedId?: string; onSelect?: (task: StudyTask, source?: SelectionSource) => void };
+type Props = {
+  api?: OpeningApi;
+  date?: string;
+  focusTaskId?: string;
+  selectedId?: string;
+  reloadToken?: number;
+  timeZone?: string;
+  onSelect?: (task: StudyTask, source?: SelectionSource) => void;
+};
 type TaskLoadState = "loading" | "ready" | "error";
 type TodayTasks = Awaited<ReturnType<OpeningApi["listTasks"]>>["tasks"];
+
+const QUEUE_GROUP_LABELS = {
+  confirmed: "今日已确认",
+  dueRetests: "到期补测",
+  overdue: "逾期",
+  other: "其他待办",
+} as const;
+
 export function localDateKey(date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
-function timeLabel(value: string): string { return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }); }
-export function TodayPlanView({ api: supplied, date = localDateKey(), focusTaskId, selectedId, onSelect }: Props) {
+
+export function resolveTodayTimeZone(timeZone?: string): string {
+  if (timeZone && timeZone.trim()) return timeZone;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+  } catch {
+    return "Asia/Shanghai";
+  }
+}
+
+function timeLabel(value: string): string {
+  return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function upcomingRetestHint(tasks: TodayQueueTask[], now: Date, timeZone: string, count: number): string | null {
+  if (count <= 0) return null;
+  let earliest: Date | null = null;
+  for (const task of tasks) {
+    if (task.status !== "pending" || task.recommendedAt == null || task.recommendedAt === "") continue;
+    const at = new Date(task.recommendedAt);
+    if (!Number.isFinite(at.getTime()) || at.getTime() <= now.getTime()) continue;
+    if (!earliest || at.getTime() < earliest.getTime()) earliest = at;
+  }
+  if (!earliest) return `${count} 项补测将于日后到期`;
+  const day = earliest.toLocaleDateString("zh-CN", { timeZone, month: "numeric", day: "numeric" });
+  return `${count} 项补测将于 ${day} 到期`;
+}
+
+export function TodayPlanView({
+  api: supplied,
+  date = localDateKey(),
+  focusTaskId,
+  selectedId,
+  onSelect,
+  reloadToken = 0,
+  timeZone: timeZoneProp,
+}: Props) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
+  const timeZone = resolveTodayTimeZone(timeZoneProp);
   const [tasks, setTasks] = useState<TodayTasks>([]);
   const [loadState, setLoadState] = useState<TaskLoadState>("loading");
   const [plan, setPlan] = useState<Awaited<ReturnType<OpeningApi["getToday"]>> | null>(null);
@@ -29,14 +84,21 @@ export function TodayPlanView({ api: supplied, date = localDateKey(), focusTaskI
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const [freeStart, setFreeStart] = useState(""), [freeEnd, setFreeEnd] = useState("");
   const [planning, setPlanning] = useState(false), [all, setAll] = useState(false), [doneView, setDoneView] = useState(false);
+  const [nowTick, setNowTick] = useState(() => new Date());
   const refresh = useCallback(async () => {
     setLoadState("loading"); setError("");
     try {
       const [nextTasks, nextPlan, nextReminders] = await Promise.all([api.listTasks(), api.getToday(date), api.listReminders()]);
-      setTasks(nextTasks.tasks); setPlan(nextPlan); setReminders(nextReminders); setLoadState("ready");
+      setTasks(nextTasks.tasks); setPlan(nextPlan); setReminders(nextReminders); setNowTick(new Date()); setLoadState("ready");
     } catch (reason) { setLoadState("error"); setError(reason instanceof Error ? reason.message : "计划暂时无法读取"); }
   }, [api, date]);
   useEffect(() => { void refresh(); }, [refresh]);
+  const appliedReloadToken = useRef(reloadToken);
+  useEffect(() => {
+    if (appliedReloadToken.current === reloadToken) return;
+    appliedReloadToken.current = reloadToken;
+    void refresh();
+  }, [reloadToken, refresh]);
   useEffect(() => {
     if (loadState !== "ready" || !onSelect) return;
     const next = tasks.find((task) => task.id === selectedId) ?? tasks.find((task) => task.id === focusTaskId) ?? tasks.find((task) => task.status === "pending");
@@ -65,11 +127,24 @@ export function TodayPlanView({ api: supplied, date = localDateKey(), focusTaskI
     catch (reason) { setError(reason instanceof Error ? reason.message : "计划取消失败，草案已保留，请重试。"); }
     finally { setPending(false); }
   }
-  const remaining = tasks.filter((task) => task.status === "pending"), done = tasks.filter((task) => task.status === "done");
-  const displayed = doneView ? done : tasks;
-  const visibleCount = doneView ? Math.min(done.length, 3) : visibleTodayTasks(tasks, focusTaskId).filter((task) => task.status === "pending").length;
+  const queueTasks = useMemo((): TodayQueueTask[] => tasks.map((task) => ({
+    ...task,
+    recommendedAt: ("recommendedAt" in task && (task as TodayQueueTask).recommendedAt != null)
+      ? (task as TodayQueueTask).recommendedAt
+      : task.retest?.recommendedAt ?? null,
+  })), [tasks]);
+  const groups = useMemo(
+    () => groupTodayQueue(queueTasks, plan?.blocks ?? [], nowTick, timeZone),
+    [queueTasks, plan?.blocks, nowTick, timeZone],
+  );
+  const remaining = tasks.filter((task) => task.status === "pending");
+  const done = groups.done;
+  const selectablePending = groups.confirmed.length + groups.dueRetests.length + groups.overdue.length + groups.other.length;
+  const upcomingHint = upcomingRetestHint(queueTasks, nowTick, timeZone, groups.upcomingRetestCount);
   return <section className="flex min-h-full flex-col bg-white" aria-label="今日计划">
     <div className="border-b border-zinc-200/70 px-5 pb-3 pt-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-zinc-900">学习队列</h2><button type="button" aria-label="安排时间" aria-expanded={planning} aria-controls="opening-plan-editor" className={secondaryButtonClass} onClick={() => setPlanning(!planning)}><CalendarDays size={15} aria-hidden /></button></div><p className="mt-1 text-xs text-zinc-500">{loadState === "ready" ? `全部待办 ${remaining.length} 项 · 预计 ${remaining.reduce((sum, task) => sum + task.minutes, 0)} 分钟` : loadState === "error" ? "任务读取失败" : "正在读取任务"}</p></div>
+    {loadState === "ready" ? <RetestProposals api={api} onChanged={() => { void refresh(); }} /> : null}
+    {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
     {loadState === "ready" && plan ? <TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /> : null}
     {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4">
       <h3 className="text-xs font-semibold text-zinc-800">安排可用时间</h3>
@@ -83,15 +158,48 @@ export function TodayPlanView({ api: supplied, date = localDateKey(), focusTaskI
         <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void accept()} disabled={!canAcceptPlan({ pending, stale: draft.baseVersion !== plan?.acceptedVersion })} className={buttonClass}>确认变更</button><button type="button" onClick={() => void reject()} disabled={pending} className={secondaryButtonClass}>取消草案</button></div>
       </div> : null}
     </div> : null}
-    <div className="mx-4 my-3 flex rounded-lg bg-zinc-100 p-0.5" role="group" aria-label="队列筛选">{[false, true].map((completed) => <button key={String(completed)} type="button" aria-pressed={doneView === completed} onClick={() => { setDoneView(completed); setAll(false); }} className={`min-h-10 flex-1 rounded-md px-2 text-xs font-medium transition-[color,background-color,box-shadow] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 motion-reduce:transition-none md:min-h-8 ${doneView === completed ? "bg-white text-zinc-900 shadow-sm shadow-zinc-900/10" : "text-zinc-600 hover:text-zinc-900"}`}>{completed ? `已完成 ${done.length}` : `待办 ${remaining.length}`}</button>)}</div>
+    <div className="mx-4 my-3 flex rounded-lg bg-zinc-100 p-0.5" role="group" aria-label="队列筛选">{[false, true].map((completed) => <button key={String(completed)} type="button" aria-pressed={doneView === completed} onClick={() => { setDoneView(completed); setAll(false); }} className={`min-h-10 flex-1 rounded-md px-2 text-xs font-medium transition-[color,background-color,box-shadow] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 motion-reduce:transition-none md:min-h-8 ${doneView === completed ? "bg-white text-zinc-900 shadow-sm shadow-zinc-900/10" : "text-zinc-600 hover:text-zinc-900"}`}>{completed ? `已完成 ${done.length}` : `待办 ${selectablePending}`}</button>)}</div>
     {error ? <div className="mx-3 mb-3 border border-red-200 bg-red-50 p-3"><p className="text-xs leading-5 text-red-700" role="alert">{error}</p><button type="button" onClick={() => void refresh()} disabled={loadState === "loading" || pending} className={`${secondaryButtonClass} mt-2`}>重新读取</button></div> : null}
-    <TodayTaskList tasks={displayed} state={loadState} focusTaskId={doneView ? undefined : focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll={all} doneView={doneView} />
-    {(doneView ? done.length : remaining.length) > (doneView ? 3 : visibleCount) ? <button type="button" className={`${secondaryButtonClass} mx-3 mt-2`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${doneView ? done.length : remaining.length} 项`}<ChevronDown size={12} aria-hidden /></button> : null}
+    {!doneView && loadState === "ready" && upcomingHint ? <p className="mx-4 mb-2 text-[11px] leading-5 text-zinc-500" role="status">{upcomingHint}</p> : null}
+    {doneView
+      ? <TodayTaskList tasks={done} state={loadState} focusTaskId={undefined} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll={all} doneView />
+      : <TodayGroupedQueue groups={groups} state={loadState} focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} />}
+    {doneView && done.length > 3 ? <button type="button" className={`${secondaryButtonClass} mx-3 mt-2`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${done.length} 项`}<ChevronDown size={12} aria-hidden /></button> : null}
     <div className="mt-auto px-4 pb-4 pt-6"><p className="text-[11px] leading-5 text-zinc-500">队列包含历史任务，已完成不等于今日完成。<br />选择任务后继续；计时与浏览不会自动标记完成。</p>
       {reminders ? <details className="mt-3 border-t border-zinc-200 pt-2 text-[11px] text-zinc-500"><summary className="cursor-pointer py-2 focus-visible:ring-2 focus-visible:ring-emerald-700">提醒状态 · {reminders.reminders.length} 项</summary><p className="py-1 leading-5">外部渠道：{reminders.externalDelivery === "configured" ? "已配置" : "未配置"}；应用内列表不代表已送达。</p><ul className="space-y-1">{reminders.reminders.map((reminder) => <li key={reminder.id}>{reminder.status === "sent" && reminder.receiptId ? "已收到提供方回执" : reminder.outcome === "unknown" ? "发送结果未知，请勿自动重试" : reminder.outcome === "quiet" ? "静默时段，暂不发送" : reminder.outcome === "rate_limited" ? "提供方限流" : reminder.channel === "in_app" ? "应用内提醒" : "外部提醒未送达"}</li>)}</ul></details> : null}
     </div>
   </section>;
 }
+
+export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSelect, plan }: {
+  groups: ReturnType<typeof groupTodayQueue>;
+  state: TaskLoadState;
+  focusTaskId?: string;
+  selectedId?: string;
+  onSelect?: (task: StudyTask, source?: SelectionSource) => void;
+  plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null;
+}) {
+  if (state === "loading") return <p className="px-4 py-5 text-xs text-zinc-500" role="status">正在加载任务…</p>;
+  if (state === "error") return <p className="px-4 py-5 text-xs text-red-700">任务暂时无法读取，请重试。</p>;
+  const sections = [
+    { key: "confirmed" as const, tasks: groups.confirmed },
+    { key: "dueRetests" as const, tasks: groups.dueRetests },
+    { key: "overdue" as const, tasks: groups.overdue },
+    { key: "other" as const, tasks: groups.other },
+  ].filter((section) => section.tasks.length > 0);
+  if (!sections.length) {
+    return <div className="px-4 py-6"><p className="text-sm text-zinc-700">暂无待完成任务。</p><p className="mt-2 text-xs leading-6 text-zinc-500">继续探索或整理笔记，无需先创建任务。也可用上方快速添加。</p></div>;
+  }
+  return <div className="space-y-3" aria-label="分组学习队列">
+    {sections.map((section) => (
+      <div key={section.key}>
+        <h3 className="px-4 pb-1 text-[11px] font-semibold text-zinc-500">{QUEUE_GROUP_LABELS[section.key]} · {section.tasks.length}</h3>
+        <TodayTaskList tasks={section.tasks} state="ready" focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll doneView={false} />
+      </div>
+    ))}
+  </div>;
+}
+
 export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect, plan, showAll = false, doneView = false }: {
   tasks: TodayTasks; state: TaskLoadState; focusTaskId?: string; selectedId?: string; onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null; showAll?: boolean; doneView?: boolean;

@@ -8,6 +8,8 @@ export type RetestCandidateDeps = {
   listDueRetests(scope: Scope, courseId: string): Promise<RetestEvidenceIdentity[]>;
   /** Persist proposal rows (not calendar tasks). */
   saveCandidates(scope: Scope, candidates: RetestCandidate[], expectedPrivacyEpoch?: number, sourceJobId?: string): Promise<RetestCandidate[]>;
+  /** Latest stem prompts keyed by skill; used when the job payload omits promptsBySkill. */
+  readStemPromptsBySkill?: (scope: Scope, courseId: string) => Promise<Record<string, string>>;
   now?: () => string;
 };
 
@@ -34,6 +36,12 @@ export function createRetestCandidateHandler(deps: RetestCandidateDeps) {
     const now = (deps.now ?? (() => new Date().toISOString()))();
     const { observations, evidenceContexts } = await deps.readCourseEvidence(scope, body.courseId);
     const dueRetests = await deps.listDueRetests(scope, body.courseId);
+    const payloadPrompts = body.promptsBySkill ?? {};
+    const promptsBySkill = Object.keys(payloadPrompts).length
+      ? payloadPrompts
+      : deps.readStemPromptsBySkill
+        ? await deps.readStemPromptsBySkill(scope, body.courseId)
+        : {};
     const summaries = summarizeObservations(observations, now, {
       dueRetests, evidenceContexts,
     });
@@ -59,7 +67,7 @@ export function createRetestCandidateHandler(deps: RetestCandidateDeps) {
         summaries: [summary],
         now,
         sourceIdsBySkill: { [summary.skillLabel]: sourceIds },
-        promptsBySkill: body.promptsBySkill ?? {},
+        promptsBySkill,
         limit: limit - candidates.length,
         delayDays: body.delayDays,
       }).map((candidate) => ({

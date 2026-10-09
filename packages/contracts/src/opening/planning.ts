@@ -32,11 +32,13 @@ export const timeBlockSchema = z
 
 export {
   taskItemSchema,
+  taskRetestProjectionSchema,
   retestTaskSnapshotSchema,
   taskCreateInputSchema,
   taskCreateResultSchema,
   taskStatusUpdateInputSchema,
   type TaskItem,
+  type TaskRetestProjection,
   type TaskCreateInput,
   type TaskCreateResult,
   type TaskStatusUpdateInput,

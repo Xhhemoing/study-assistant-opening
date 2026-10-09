@@ -72,12 +72,13 @@ async function fetchDocuments(): Promise<SearchableDocument[]> {
   return searchableDocumentsResponseSchema.parse(await response.json()).documents;
 }
 
+export function createLegacyStudyProvider(userId: string): StudyDataProvider {
+  return withPersistedReviews(
+    withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
+  );
+}
 export function useStudyProvider(): StudyDataProvider | null {
   const userId = useCurrentUserId();
-  return useMemo(() => {
-    if (!userId) return null;
-    return withPersistedReviews(
-      withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
-    );
-  }, [userId]);
+  return useMemo(() => (userId ? createLegacyStudyProvider(userId) : null), [userId]);
 }
+

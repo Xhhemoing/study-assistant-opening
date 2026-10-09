@@ -18,6 +18,7 @@ import { MemoryPanel } from "./memory-panel";
 import { prepareSnippetDraft } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
 import { UploadStrip } from "./upload-strip";
+import { AiReadinessChecklist } from "./ai-readiness";
 import type { ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 
@@ -593,6 +594,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         </div>
       ) : null}
 
+      {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
       <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}

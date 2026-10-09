@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { resolveUploadMime, sourceStatusLabel } from "./upload-state";
+import { resolveUploadMime, sourceStatusLabel, unsupportedUploadMessage } from "./upload-state";
 
 it("distinguishes stored originals from parsed material", () => {
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" })).toBe("原件已保存，解析失败");
@@ -30,4 +30,14 @@ it("rejects unknown and legacy powerpoint without renaming them to pdf", () => {
 
 it("does not use an extension when a declared unsupported MIME is present", () => {
   expect(resolveUploadMime({ name: "renamed.pdf", type: "application/octet-stream" })).toBeNull();
+});
+
+it("tells HEIC uploaders to export JPG instead of decoding", () => {
+  expect(unsupportedUploadMessage({ name: "photo.heic", type: "" })).toBe("请导出为 JPG 后上传");
+  expect(unsupportedUploadMessage({ name: "photo.HEIF", type: "image/heif" })).toBe("请导出为 JPG 后上传");
+  expect(unsupportedUploadMessage({ name: "a.bin", type: "application/octet-stream" })).toBe("不支持这个格式，未改名也未创建材料。");
+});
+
+it("resolves webp by extension when MIME is empty", () => {
+  expect(resolveUploadMime({ name: "shot.webp", type: "" })).toBe("image/webp");
 });

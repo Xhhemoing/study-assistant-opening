@@ -5,7 +5,7 @@ import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsSchema, type OpeningAiSet
 import { effectiveModelRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode } from "./ai-settings-model";
 import { AiSettingsForm } from "./ai-settings-panel";
 const data: OpeningAiSettingsResponse = {
-  defaultModelId: "a", dailyCapCents: 200, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false,
+  defaultModelId: "a", dailyCapCents: 200, envCapCents: 200, personalCeilingCents: 2000, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false,
   models: [{ id: "a", providerId: "one", providerLabel: "One", label: "Model A", modelName: "a", inputCentsPerMillion: 10, outputCentsPerMillion: 20, availability: "available" },
     { id: "b", providerId: "two", providerLabel: "Two", label: "Model B", modelName: "b", inputCentsPerMillion: 30, outputCentsPerMillion: 40, availability: "missing_key" }],
 };

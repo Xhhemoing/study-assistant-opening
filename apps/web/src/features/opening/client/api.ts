@@ -37,6 +37,7 @@ import {
   taskCreateInputSchema,
   taskStatusUpdateInputSchema,
   taskCreateResultSchema,
+  taskItemSchema,
   type EphemeralTurnResponse,
   ephemeralTurnResponseSchema,
   assistantCandidateRecordSchema,
@@ -137,10 +138,7 @@ const todayPlanSchema = z.object({
   blocks: z.array(z.object({ taskId: z.string().uuid(), start: z.string(), end: z.string(), reason: z.string() })),
   hardBlocks: z.array(z.object({ start: z.string(), end: z.string(), kind: z.enum(["class", "sleep", "meal", "locked", "free"]) })),
 });
-const taskListSchema = z.object({ tasks: z.array(z.object({
-  version: z.number().int().positive().optional(),
-  id: z.string().uuid(), title: z.string(), minutes: z.number().int().positive(), dueAt: z.string().nullable(), priority: z.number(), status: z.enum(["pending", "done", "skipped"]),
-})) });
+const taskListSchema = z.object({ tasks: z.array(taskItemSchema) });
 
 /** Local opening staging PUT path (T03 sources HTTP). */
 export function stagingPutUrl(sourceId: string): string {
@@ -395,7 +393,7 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
 
     async listTasks(): Promise<{ tasks: TaskItem[] }> {
       const body = await request("/api/opening/tasks", { method: "GET" }, fetchImpl);
-      return taskListSchema.parse(body) as { tasks: TaskItem[] };
+      return taskListSchema.parse(body);
     },
 
     async proposePlan(input: unknown): Promise<PlanDraft> {

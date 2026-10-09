@@ -38,6 +38,17 @@ describe("opening context selection", () => {
     expect(result.map((item) => item.id)).toEqual(["b", "a"]);
   });
 
+
+  it("prefers empty-text image chunks on the requested page", () => {
+    const image: SourceChunk = {
+      id: "img", sourceId: "00000000-0000-0000-0000-000000000001", sourceVersion: 0,
+      page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: "sources/photo.png",
+    };
+    const other = chunk("a", "unrelated text", 2);
+    const result = selectContext({ chunks: [other, image], query: "what is on the photo", maxCharacters: 2000, preferPage: 1 });
+    expect(result.map((item) => item.id)).toEqual(["img"]);
+  });
+
   it("keeps zero-score preferred pages after the preferred chunk and before matches", () => {
     const result = selectContext({
       chunks: [chunk("a", "match", 2), chunk("b", "weak", 7), chunk("c", "unrelated", 3), chunk("d", "selected", 9)],

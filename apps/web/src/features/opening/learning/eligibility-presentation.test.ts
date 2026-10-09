@@ -32,7 +32,8 @@ describe("learning eligibility presentation", () => {
   it("renders a start-first form with missing-material uncertainty", () => {
     const html = renderToStaticMarkup(createElement(LearningAttemptForm, { courseId: "11111111-1111-4111-8111-111111111111", onRecorded: () => undefined }));
     expect(html).toContain("开始本次练习");
-    expect(html).toContain("不关联材料，保留为待核验记录");
+    expect(html).toContain("不关联题目材料，保留为待核验记录");
+    expect(html).toContain("题干为空时不会生成补测提议");
     expect(html).not.toContain("保存自报结果");
   });
 });
