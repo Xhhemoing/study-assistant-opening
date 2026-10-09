@@ -150,6 +150,18 @@ SHA, the remote CI gate is not done.
   strip credentials).
 - Cache must not hide missing dependencies: always `npm ci` from lockfile.
 
+## Opening release evidence index
+
+Machine index for the opening-release candidate tip (RP7). Cite the tip SHA plus
+the quality Actions URL; do not treat index presence as packaging verified or
+prod cutover.
+
+- JSON: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json)
+- Companion MD: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md)
+
+Rows whose commit SHA differs from the index tip are marked `stale` and need
+re-run on tip. Q03 ledger status is independent of this index.
+
 ## Opening parser and isolated test bootstrap
 
 Handler and integration projects validate `OPENING_TEST_DB=1` and the explicit

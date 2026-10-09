@@ -793,8 +793,15 @@
         "RP5"
       ],
       "plan": "15-research-hardening.md",
-      "status": "planned",
-      "evidence": []
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-10-10-opening-release/rp7-understand.md",
+        "../../evidence/2026-10-10-opening-release/rp7-plan.md",
+        "../../evidence/2026-10-10-opening-release/release-evidence-index.json",
+        "../../evidence/2026-10-10-opening-release/release-evidence-index.md",
+        "../../evidence/2026-10-10-opening-release/rp7-implement.md",
+        "../../evidence/2026-10-10-opening-release/rp7-accept.md"
+      ]
     },
     {
       "id": "DL11",
