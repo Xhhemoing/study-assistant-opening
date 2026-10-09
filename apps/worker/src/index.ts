@@ -15,7 +15,6 @@ import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
-import { createRetestCloseHandler } from "./jobs/retest-close";
 import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";

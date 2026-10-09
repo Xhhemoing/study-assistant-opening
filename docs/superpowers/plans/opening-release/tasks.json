@@ -367,7 +367,8 @@
     "../../evidence/2026-10-09-opening-release/q03-cheap-fixture-roundtrip.md",
     "../../evidence/2026-10-09-opening-release/q03-restore-apply-executor.md",
     "../../evidence/2026-10-09-opening-release/q03-restore-apply-accept.md",
-    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore.md"
+    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore.md",
+    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore-accept.md"
    ]
   },
   {
@@ -601,7 +602,9 @@
    "plan": "12-review-hardening.md",
    "status": "active",
    "evidence": [
-    "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md"
+    "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md",
+    "../../evidence/2026-10-09-opening-release/rp5-gha-quality-attempt.md",
+    "../../evidence/2026-10-09-opening-release/rp5-lint-fix-accept.md"
    ]
   },
   {

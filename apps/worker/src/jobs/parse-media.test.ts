@@ -205,7 +205,6 @@ describe("parse-media handler", () => {
     const fileBytes = Buffer.alloc(32, 3);
     let replaceInput: unknown;
     const putKeys: string[] = [];
-    const frameDirPlaceholder = "will-be-set-by-extract";
     const handler = createParseMediaHandler({
       sources: {
         get: async () => source({ bytes: fileBytes.byteLength }),
