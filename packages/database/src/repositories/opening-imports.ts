@@ -32,6 +32,14 @@ async function ownedConnection(tx: TransactionSql, scope: OpeningScope, id: stri
 
 export function createOpeningImportsRepository(sql: Sql) {
   return {
+    async findByIdentity(scope: OpeningScope, identity: ImportIdentity): Promise<{ id: string; sourceId: string } | null> {
+      const key = identityKey(identity);
+      const [row] = await sql`SELECT id, source_id FROM opening_import_receipts
+        WHERE workspace_id=${scope.workspaceId} AND connection_id=${identity.connectionId}
+          AND identity_key=${key}`;
+      if (!row) return null;
+      return { id: String(row.id), sourceId: String(row.source_id) };
+    },
     async commit(scope: OpeningScope, input: OpeningImportCommit): Promise<OpeningImportReceiptView> {
       return sql.begin(async tx => {
         const connection = await ownedConnection(tx, scope, input.identity.connectionId);

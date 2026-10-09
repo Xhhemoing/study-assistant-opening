@@ -5,7 +5,7 @@ import {
   type TutorActionObservationDeps,
 } from "../../../../../../features/opening/learning/tutor-actions";
 
-/** K02a thin tutor-actions: page/skillLabel path; nodeId optional; no mastery %. */
+/** K02 tutor-actions: thin page/skillLabel path, or nodeId + server SkillEvidence flags; no mastery %. */
 export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },

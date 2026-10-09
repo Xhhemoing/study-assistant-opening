@@ -9,6 +9,8 @@ import type { CourseAsset, CourseSummary } from "./course-model";
 import { CourseSettingsPanel } from "./course-settings-panel";
 import { createCourseStateClient } from "./course-state-client";
 import { CourseStudyActions } from "./course-study-actions";
+import { CourseKnowledge } from "../opening/knowledge/course-knowledge";
+import { MediaReader } from "../opening/sources/media-reader";
 
 export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; libraryHref: string }) {
   const [selected, setSelected] = useState<CourseAsset | null>(null);
@@ -67,8 +69,18 @@ export function CourseDetail({ id }: { id: string }) {
     <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href="/opening/courses"><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
       <CourseStudyActions assetCount={assets.length} opening />
+      <CourseKnowledge courseId={id} />
       <CourseLearningView courseId={id} />
       <section id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" aria-labelledby="course-assets-heading"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-assets-heading">课程材料</h2><Link className={ui.quiet} href="/opening/library?tab=materials">管理知识库</Link></div>{assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref="/opening/library?tab=notes" onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有挂接课程材料" description="笔记和材料可以先独立保存在知识库中。" />}</section>
+      {assets.some((asset) => asset.source) ? (
+        <section className="scroll-mt-6 space-y-4 border-t border-zinc-200 pt-5" aria-labelledby="course-media-heading">
+          <h2 className="text-sm font-semibold" id="course-media-heading">媒体阅读</h2>
+          <p className="text-xs leading-6 text-zinc-500">原件已保存但解析失败、仅音频转写、视觉覆盖不足会分别标明；不宣称掌握或视觉理解。</p>
+          {assets.filter((asset) => asset.source).map((asset) => (
+            <MediaReader key={asset.source!.id} sourceId={asset.source!.id} source={null} />
+          ))}
+        </section>
+      ) : null}
       <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />
       <Link className={ui.quiet} href="/opening/today"><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>

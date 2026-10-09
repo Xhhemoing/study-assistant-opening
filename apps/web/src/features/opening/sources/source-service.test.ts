@@ -99,6 +99,10 @@ function makeFakeSql() {
       const row = sources.get(id);
       if (row && row.workspace_id === workspaceId && row.upload_state === "pending") {
         row.upload_state = "uploaded";
+        if (query.includes("parse_state")) {
+          row.parse_state = "queued";
+          row.error = null;
+        }
         return [row];
       }
       return [];
@@ -220,6 +224,24 @@ describe("opening signed upload service", () => {
     expect(has(`staging/${ticket.source.id}`)).toBe(false);
     expect(has(`final/${ticket.source.id}/v0`)).toBe(true);
     expect(sql.jobEpochs()).toEqual([7]);
+  });
+
+  // C03 manual fallback honesty: ordinary inbox/source upload must stay `manual`
+  // and must never write connection import receipts (fake SQL throws on unexpected
+  // opening_import_receipts inserts, so a successful completeUpload is the proof).
+  it("does not create opening_import_receipt rows on ordinary upload completion", async () => {
+    const { svc, sql, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "export-screenshot.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await expect(svc.completeUpload(principal, ticket.source.id)).resolves.toMatchObject({
+      uploadState: "uploaded",
+    });
+    expect(sql.counts()).toEqual({ jobInserts: 1, outboxInserts: 1 });
   });
 
   it("requeues a failed uploaded source without creating a second source", async () => {

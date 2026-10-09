@@ -16,5 +16,5 @@ export function createQueue(kind: string, connection: IORedis): OpeningQueue {
 }
 
 export function createQueues(connection: IORedis): Record<string, OpeningQueue> {
-  return Object.fromEntries(["parse", "tutor", "retest", "remind"].map((kind) => [kind, createQueue(kind, connection)]));
+  return Object.fromEntries(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media"].map((kind) => [kind, createQueue(kind, connection)]));
 }

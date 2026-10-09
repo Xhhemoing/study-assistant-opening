@@ -85,4 +85,13 @@ describe("manual .eml import HTTP boundary", () => {
       bytes: expect.any(Number),
     });
   });
+
+  it("does not write opening_import_receipt rows for manual .eml fallback", async () => {
+    const before = await f.sql`SELECT count(*)::int AS count FROM opening_import_receipts WHERE workspace_id=${f.scope.workspaceId}`;
+    const response = await importEmail(emailForm("notes.eml"));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ manual: true });
+    const after = await f.sql`SELECT count(*)::int AS count FROM opening_import_receipts WHERE workspace_id=${f.scope.workspaceId}`;
+    expect(Number(after[0]!.count)).toBe(Number(before[0]!.count));
+  });
 });

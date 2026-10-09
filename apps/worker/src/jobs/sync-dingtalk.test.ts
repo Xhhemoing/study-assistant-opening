@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { syncDingTalk } from "./sync-dingtalk";
+import { checkDingTalk, syncDingTalk } from "./sync-dingtalk";
 
 const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222" };
 const base = {
@@ -17,6 +17,10 @@ const deps = (connection = base, allowedScopes: string[] = []) => ({
   imports: {},
   sources: {},
   privacy: {},
+  getGrantedScopes: async () => allowedScopes,
+});
+const checkDeps = (connection = base, allowedScopes: string[] = []) => ({
+  connections: { get: async () => connection },
   getGrantedScopes: async () => allowedScopes,
 });
 
@@ -44,6 +48,47 @@ describe("dingtalk sync boundary", () => {
       imported: 0,
       skipped: 0,
       allowedScopes: ["messages.read"],
+    });
+  });
+});
+
+describe("dingtalk check boundary", () => {
+  it("reports needs_authorization without calling remote APIs when no read capability", async () => {
+    const result = await checkDingTalk(checkDeps({ ...base, state: "needs_authorization" }, ["robot.send"]), {
+      ...scope,
+      connectionId: base.id,
+    });
+    expect(result).toEqual({
+      ok: false,
+      kind: "dingtalk",
+      status: "needs_authorization",
+      allowedScopes: ["robot.send"],
+    });
+  });
+
+  it("reports ready when an internal read capability is present without claiming history pull", async () => {
+    const result = await checkDingTalk(checkDeps(base, ["messages.read"]), {
+      ...scope,
+      connectionId: base.id,
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "dingtalk",
+      status: "ready",
+      allowedScopes: ["messages.read"],
+    });
+  });
+
+  it("reports unsupported_history_read for authorized non-ready states", async () => {
+    const result = await checkDingTalk(
+      checkDeps({ ...base, state: "error" as const }, ["events.read"]),
+      { ...scope, connectionId: base.id },
+    );
+    expect(result).toEqual({
+      ok: true,
+      kind: "dingtalk",
+      status: "unsupported_history_read",
+      allowedScopes: ["events.read"],
     });
   });
 });

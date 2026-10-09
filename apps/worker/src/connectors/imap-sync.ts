@@ -124,6 +124,19 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       skipped += 1;
       continue;
     }
+    const identity = {
+      connectionId: deps.connectionId,
+      container: deps.folder,
+      generation: cursor.uidValidity,
+      remoteId: String(uid),
+    };
+    // Receipt identity is connection/container/generation/UID — never Message-ID alone.
+    const existing = await deps.imports.findByIdentity(deps.scope, identity);
+    if (existing) {
+      skipped += 1;
+      cursor = nextImapCursor(cursor, uid);
+      continue;
+    }
     const fetched = await deps.client.fetchOne(
       String(uid),
       { source: true },
@@ -160,23 +173,14 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     });
     const receipt = await deps.imports.commit(deps.scope, {
       connectionVersion: deps.connectionVersion,
-      identity: {
-        connectionId: deps.connectionId,
-        container: deps.folder,
-        generation: cursor.uidValidity,
-        remoteId: String(uid),
-      },
+      identity,
       sourceId: source.id,
       cursor: {
         generation: cursor.uidValidity,
         cursor: nextImapCursor(cursor, uid),
       },
     });
-    cursor = {
-      folder: deps.folder,
-      uidValidity: cursor.uidValidity,
-      lastUid: Math.max(cursor.lastUid, uid),
-    };
+    cursor = nextImapCursor(cursor, uid);
     if (receipt.duplicate) skipped += 1;
     else imported += 1;
   }

@@ -358,8 +358,17 @@
     "M02"
    ],
    "plan": "08-delivery.md",
-   "status": "planned",
-   "evidence": []
+   "status": "active",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/q03-restore-apply-progress.md",
+    "../../evidence/2026-10-09-opening-release/q03-packaging-gaps.md",
+    "../../evidence/2026-10-09-opening-release/q03-continue-empty-namespace-readiness.md",
+    "../../evidence/2026-10-09-opening-release/q03-packaging-gates-run.md",
+    "../../evidence/2026-10-09-opening-release/q03-cheap-fixture-roundtrip.md",
+    "../../evidence/2026-10-09-opening-release/q03-restore-apply-executor.md",
+    "../../evidence/2026-10-09-opening-release/q03-restore-apply-accept.md",
+    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore.md"
+   ]
   },
   {
    "id": "X01",
@@ -397,10 +406,12 @@
     "I03"
    ],
    "plan": "09-connections.md",
-   "status": "active",
+   "status": "verified",
    "evidence": [
+    "../../evidence/2026-10-09-opening-release/c02-imap-sync-verified.md",
     "../../evidence/2026-10-06-opening-release/c02-imap-code-slice.md",
-    "../../evidence/2026-10-06-opening-release/c02-email-import-route.md"
+    "../../evidence/2026-10-06-opening-release/c02-email-import-route.md",
+    "../../evidence/2026-10-09-opening-release/c02-imap-sync-check-accept.md"
    ]
   },
   {
@@ -412,10 +423,12 @@
     "I03"
    ],
    "plan": "09-connections.md",
-   "status": "active",
+   "status": "verified",
    "evidence": [
+    "../../evidence/2026-10-09-opening-release/c03-dingtalk-verified.md",
+    "../../evidence/2026-10-09-opening-release/c03-dingtalk-check-accept.md",
     "../../evidence/2026-10-06-opening-release/c03-dingtalk-callback-slice.md"
-  ]
+   ]
   },
   {
    "id": "V01",
@@ -426,8 +439,14 @@
     "I03"
    ],
    "plan": "10-media-knowledge.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/v01-verified.md",
+    "../../evidence/2026-10-09-opening-release/v01-media-parse-accept.md",
+    "../../evidence/2026-10-09-opening-release/v01-media-parse-followup-accept.md",
+    "../../evidence/2026-10-09-opening-release/v01-media-parse-copy-jobid-accept.md",
+    "../../evidence/2026-10-09-opening-release/v01-k01-invalidate-accept.md"
+   ]
   },
   {
    "id": "K01",
@@ -439,8 +458,11 @@
     "T02"
    ],
    "plan": "10-media-knowledge.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/k01-course-knowledge.md",
+    "../../evidence/2026-10-09-opening-release/k01-knowledge-accept.md"
+   ]
   },
   {
    "id": "K02a",
@@ -467,8 +489,11 @@
     "DL6"
    ],
    "plan": "10-media-knowledge.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/k02-skill-evidence.md",
+    "../../evidence/2026-10-09-opening-release/k02-skill-evidence-accept.md"
+   ]
   },
   {
    "id": "P04",
@@ -482,8 +507,14 @@
     "M01"
    ],
    "plan": "11-proactive-acceptance.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/p04-verified.md",
+    "../../evidence/2026-10-09-opening-release/p04-overlay-0052-accept.md",
+    "../../evidence/2026-10-09-opening-release/p04-ai-extract-study-actions-accept.md",
+    "../../evidence/2026-10-09-opening-release/p04-experience-action-digest-accept.md",
+    "../../evidence/2026-10-09-opening-release/p04-import-chunks-wiring-accept.md"
+   ]
   },
   {
    "id": "U04",
@@ -496,8 +527,11 @@
     "P04"
    ],
    "plan": "11-proactive-acceptance.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/u04-capabilities-ui-accept.md",
+    "../../evidence/2026-10-09-opening-release/u04-verified.md"
+   ]
   },
   {
    "id": "Q04",
@@ -565,8 +599,10 @@
     "B02"
    ],
    "plan": "12-review-hardening.md",
-   "status": "planned",
-   "evidence": []
+   "status": "active",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md"
+   ]
   },
   {
    "id": "RP6",
@@ -632,8 +668,10 @@
     "DL6"
    ],
    "plan": "13-daily-loop-gaps.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl4-memory-cards.md"
+   ]
   },
   {
    "id": "DL5",
@@ -681,8 +719,10 @@
     "T03"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl8-image-vision.md"
+   ]
   },
   {
    "id": "DL9",
@@ -693,8 +733,10 @@
     "DL5"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/dl9-planning-timetable.md"
+   ]
   },
   {
    "id": "P04a",
@@ -705,8 +747,10 @@
     "DL9"
    ],
    "plan": "14-loop-closure.md",
-   "status": "planned",
-   "evidence": []
+   "status": "verified",
+   "evidence": [
+    "../../evidence/2026-10-09-opening-release/p04a-daily-auto-draft.md"
+   ]
   },
   {
    "id": "DL10",

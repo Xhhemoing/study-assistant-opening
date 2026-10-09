@@ -21,7 +21,14 @@ const REQUIRED_ENV = [
   "PUBLIC_BASE_URL",
 ];
 
-/** Every check a release depends on. A check that was never run is a failure. */
+/**
+ * Every check a release depends on. A check that was never run is a failure.
+ * Maps 08-delivery.md §Q03 readiness list:
+ * owner setup → ownerSetup; registration403 → registrationLocked;
+ * HTTPS → https; storage → storage; DB/Redis/worker → database/redis/workerBacklog;
+ * provider → providerConfigured; daily cap → dailyCap; backup freshness → backupFreshness.
+ * Alert destination honesty is separate (`alertDelivery`), not a probe name.
+ */
 export const REQUIRED_CHECKS = [
   "database",
   "redis",
@@ -87,8 +94,8 @@ export function buildReadinessReport({ env = process.env, checks }) {
 export function registrationCheck(env = process.env) {
   const raw = env.OPENING_RELEASE?.trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes"
-    ? { ok: true, detail: "OPENING_RELEASE closes registration" }
-    : { ok: false, detail: "OPENING_RELEASE is not enabled; registration stays open" };
+    ? { ok: true, detail: "OPENING_RELEASE closes registration (expect registration 403)" }
+    : { ok: false, detail: "OPENING_RELEASE is not enabled; registration stays open (no registration 403)" };
 }
 
 /**

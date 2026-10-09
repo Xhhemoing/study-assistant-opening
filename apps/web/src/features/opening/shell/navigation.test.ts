@@ -21,8 +21,8 @@ describe("workspace navigation", () => {
     expect(legacyOpeningRedirectPath("/learn/courses/123")).toBeNull();
   });
   it("redirects nested mock learning entries without touching course routes", () => {
-    expect(legacyOpeningRedirectPath("/learn/review")).toBe("/opening/today");
-    expect(legacyOpeningRedirectPath("/learn/review/abc")).toBe("/opening/today");
+    expect(legacyOpeningRedirectPath("/learn/review")).toBe("/opening/cards");
+    expect(legacyOpeningRedirectPath("/learn/review/abc")).toBe("/opening/cards");
     expect(legacyOpeningRedirectPath("/learn/practice/123")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/learn/goals/new")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/learn/exams")).toBe("/opening/today");

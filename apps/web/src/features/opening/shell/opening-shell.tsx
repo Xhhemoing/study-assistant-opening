@@ -1,7 +1,7 @@
 "use client";
 
 import { AppShell, getWorkspaceEntry } from "@aistudy/ui";
-import { BookOpen, ClipboardCheck, Compass, Focus, Library, Maximize2, MessageCircle, Notebook, PenLine, Sun } from "lucide-react";
+import { BookOpen, ClipboardCheck, Compass, Focus, Layers2, Library, Maximize2, MessageCircle, Notebook, PenLine, Sun } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
@@ -63,6 +63,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   })}</nav>;
   const quickActions = <>
     <Link href="/library/new" className={`${ui.quiet} max-sm:hidden`} aria-label="新建笔记" title="新建笔记"><PenLine size={14} aria-hidden="true" /><span className="hidden xl:inline" aria-hidden="true">写笔记</span></Link>
+    <Link href="/opening/cards" className={ui.icon} aria-label="记忆卡片" title="复习到期的记忆卡片" aria-current={pathname.startsWith("/opening/cards") ? "page" : undefined}><Layers2 size={16} aria-hidden="true" /></Link>
     <Link href="/opening/review" className={ui.icon} aria-label="待确认建议" title="审核 AI 生成的任务、记忆与补测建议" aria-current={pathname.startsWith("/opening/review") ? "page" : undefined}><ClipboardCheck size={16} aria-hidden="true" />{pendingCount > 0 ? <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white ring-2 ring-white motion-safe:animate-pop" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</Link>
   </>;
   return <>

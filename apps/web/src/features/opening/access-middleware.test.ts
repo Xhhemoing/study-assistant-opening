@@ -62,7 +62,6 @@ describe("opening same-origin middleware", () => {
     expect(response.status).toBe(200);
   });
   it.each([
-    "/learn/review",
     "/learn/practice/x",
     "/learn/goals",
     "/learn/goals/new",
@@ -73,6 +72,15 @@ describe("opening same-origin middleware", () => {
     const response = middleware(pageRequest(pathname));
     expect(response.status).toBe(307);
     expect(response.headers.get("location")).toBe(`${publicBase}/opening/today`);
+  });
+
+  it("redirects legacy review pages to opening memory cards", () => {
+    vi.stubEnv("OPENING_RELEASE", "1");
+    for (const pathname of ["/learn/review", "/learn/review/session"]) {
+      const response = middleware(pageRequest(pathname));
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(`${publicBase}/opening/cards`);
+    }
   });
 });
 

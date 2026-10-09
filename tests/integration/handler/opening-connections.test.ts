@@ -101,4 +101,21 @@ describe("connection handlers", () => {
     expect((await credential(req("PUT", { secret, clientKey: randomUUID() }), context(c.id))).status).toBe(409);
     expect(await f.sql`SELECT 1 FROM opening_connection_credentials WHERE connection_id=${c.id}`).toHaveLength(0);
   });
+  it("rejects revoked IMAP check and sync with 409 without calling a remote adapter stub message", async () => {
+    const c = await create();
+    const key = randomUUID();
+    expect((await credential(req("PUT", { secret, clientKey: key }), context(c.id))).status).toBe(204);
+    const ready = await createOpeningConnectionsRepository(f.sql).get(f.scope, c.id);
+    expect((await revoke(req("POST", { expectedVersion: ready.version, clientKey: randomUUID() }), context(c.id))).status).toBe(200);
+    const checkResponse = await check(req("POST", { clientKey: randomUUID() }), context(c.id));
+    expect(checkResponse.status).toBe(409);
+    const checkBody = await checkResponse.json();
+    expect(checkBody.error?.code).toBe("CONFLICT");
+    expect(JSON.stringify(checkBody)).not.toContain("连接适配器尚未实现");
+    const syncResponse = await sync(req("POST", { clientKey: randomUUID() }), context(c.id));
+    expect(syncResponse.status).toBe(409);
+    const syncBody = await syncResponse.json();
+    expect(syncBody.error?.code).toBe("CONFLICT");
+    expect(JSON.stringify(syncBody)).not.toContain("连接适配器尚未实现");
+  });
 });

@@ -119,6 +119,9 @@ it("scans Opening entry points and reachable shared modules", () => {
   const files = [...collectOpeningReachableFiles()].map((file) => path.relative(ROOT, file).replace(/\\/g, "/"));
   expect(files).toContain("apps/web/src/features/courses/course-detail.tsx");
   expect(files).toContain("apps/web/src/features/opening/shell/opening-shell.tsx");
+  expect(files).toContain("apps/web/src/app/(opening)/opening/cards/page.tsx");
+  expect(files).toContain("apps/web/src/features/opening/cards/card-review-view.tsx");
+  expect(files).toContain("apps/web/src/features/opening/cards/cards-client.ts");
   expect(files).not.toContain("apps/web/src/lib/data/react.ts");
   expect(files).not.toContain("apps/web/src/lib/data/mock/provider.ts");
   expect(files).not.toContain("apps/web/src/features/courses/legacy-course-detail.tsx");

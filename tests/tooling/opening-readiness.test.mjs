@@ -6,6 +6,8 @@ const {
   buildReadinessReport,
   httpsCheck,
   modelChecks,
+  ownerSetupCheck,
+  backupFreshnessCheck,
   registrationCheck,
   workerBacklogCheck,
 } = await import("../../scripts/opening-readiness.mjs");
@@ -156,3 +158,32 @@ test("https requires an https public URL and a 200 health response", () => {
   assert.equal(httpsCheck("https://study.example", null).ok, false);
   assert.equal(httpsCheck("https://study.example", 503).ok, false);
 });
+
+test("REQUIRED_CHECKS covers the §Q03 readiness list names", () => {
+  for (const name of [
+    "database", "redis", "storage", "workerBacklog", "https",
+    "registrationLocked", "ownerSetup", "providerConfigured", "dailyCap", "backupFreshness",
+  ]) {
+    assert.ok(REQUIRED_CHECKS.includes(name), name);
+  }
+  assert.equal(REQUIRED_CHECKS.length, 10);
+});
+
+test("ownerSetupCheck requires at least one user", () => {
+  assert.equal(ownerSetupCheck(0).ok, false);
+  assert.match(ownerSetupCheck(0).detail, /no owner/i);
+  assert.equal(ownerSetupCheck(1).ok, true);
+});
+
+test("backupFreshnessCheck fails closed without archive or when stale", () => {
+  assert.equal(backupFreshnessCheck(null).ok, false);
+  assert.equal(backupFreshnessCheck(2, 24).ok, true);
+  assert.equal(backupFreshnessCheck(25, 24).ok, false);
+  assert.match(backupFreshnessCheck(25, 24).detail, /exceeds/);
+});
+
+test("registrationLocked detail mentions registration 403 when locked", () => {
+  assert.match(registrationCheck({ OPENING_RELEASE: "true" }).detail, /403/);
+  assert.match(registrationCheck({ OPENING_RELEASE: "0" }).detail, /403/);
+});
+

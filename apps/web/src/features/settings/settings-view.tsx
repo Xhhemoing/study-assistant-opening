@@ -14,6 +14,8 @@ import { DiagnosticsPanel } from "./diagnostics-panel";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
 import { DingTalkConnectionsPanel } from "./dingtalk-connections-panel";
+import { SemesterSettingsForm } from "../opening/timetable/semester-settings-form";
+import { TimetableImport } from "../opening/timetable/timetable-import";
 
 type WorkspaceEntry = "learn" | "explore" | "library";
 const entries: Array<{ value: WorkspaceEntry; label: string }> = [
@@ -151,7 +153,26 @@ export function SettingsView() {
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
         <AiSettingsPanel />
         <ProviderSettingsPanel />
+        <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-connections-heading">
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900" id="opening-connections-heading">数据连接</h2>
+            <p className="mt-1 text-xs leading-6 text-zinc-500">邮箱与钉钉授权、暂停、撤销与手工导入。</p>
+          </div>
+          <div>
+            <Link className={ui.secondary} href="/opening/settings/connections">打开连接设置</Link>
+          </div>
+        </section>
         <DingTalkConnectionsPanel />
+        <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-planning-heading">
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900" id="opening-planning-heading">开学排程</h2>
+            <p className="mt-1 text-xs leading-6 text-zinc-500">导入课表并确认学期设置后，今天页可用「按建议安排」一键生成草案。</p>
+          </div>
+          <div className="space-y-8">
+            <SemesterSettingsForm />
+            <TimetableImport />
+          </div>
+        </section>
         {loading ? <LoadingRows label="正在读取设置" /> : null}
         {error ? <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert"><p className="text-sm text-red-700">{error}</p><button className={ui.secondary} onClick={() => void loadSettings()} type="button"><RefreshCw aria-hidden="true" size={14} />重新读取</button></div> : null}
         {!loading ? <>

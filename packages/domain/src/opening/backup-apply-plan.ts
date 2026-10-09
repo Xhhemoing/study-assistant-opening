@@ -28,7 +28,7 @@ export type OpeningRestoreApplyPlanResult =
   | { ok: false; code: "REQUIRES_EXPLICIT_CONFIRMATION" | "PREFLIGHT_REJECTED" | "JOURNAL_DRIFT"; errors: string[] };
 
 /** Fixed dependency order derived from the migrations' foreign keys. Never reorder freely. */
-const APPLY_ORDER = [
+export const OPENING_RESTORE_APPLY_ORDER = [
   "workspace_preferences",
   "courses",
   "opening_sources",
@@ -142,7 +142,7 @@ export function planOpeningRestoreApply(
   return {
     ok: true,
     plan: {
-      batches: APPLY_ORDER.map((table) => ({ table, rows: (tables[table] as unknown[] | undefined)?.length ?? 0 })),
+      batches: OPENING_RESTORE_APPLY_ORDER.map((table) => ({ table, rows: (tables[table] as unknown[] | undefined)?.length ?? 0 })),
       objectCount: journal.objects.length,
     },
   };

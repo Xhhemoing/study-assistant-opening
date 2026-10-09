@@ -8,6 +8,9 @@ import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { canAcceptPlan } from "./plan-action";
 import { canProposePlan } from "./plan-input";
 import { QuickAddTask } from "./quick-add-task";
+import { ActionDigest as ActionDigestCard } from "./action-digest";
+import { DailyDraftCard } from "./daily-draft-card";
+import { SuggestPlanCard } from "./suggest-plan-card";
 import { focusTodayTask, visibleTodayTasks } from "./today-task-selection";
 import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
@@ -146,6 +149,9 @@ export function TodayPlanView({
     {loadState === "ready" ? <RetestProposals api={api} onChanged={() => { void refresh(); }} /> : null}
     {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
     {loadState === "ready" && plan ? <TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /> : null}
+    {loadState === "ready" ? <ActionDigestCard api={api} onChanged={() => { void refresh(); }} onAdjust={() => setPlanning(true)} /> : null}
+    {loadState === "ready" && plan ? <DailyDraftCard api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={() => { void refresh(); }} /> : null}
+    {loadState === "ready" && plan ? <SuggestPlanCard api={api} date={date} acceptedVersion={plan.acceptedVersion} confirmedBlocks={plan.blocks} tasks={tasks} onChanged={() => { void refresh(); }} /> : null}
     {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4">
       <h3 className="text-xs font-semibold text-zinc-800">安排可用时间</h3>
       <label className="block text-xs text-zinc-600">开始<input aria-label="可用时间开始" type="datetime-local" value={freeStart} onChange={(event) => setFreeStart(event.target.value)} className={`${inputClass} mt-1`} disabled={pending} /></label>

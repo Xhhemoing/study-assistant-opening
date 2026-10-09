@@ -7,8 +7,11 @@ const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (pathname: string) => string }[] = [
   { test: (p) => p === "/learn", target: () => "/opening/today" },
   {
+    test: (p) => p === "/learn/review" || p.startsWith("/learn/review/"),
+    target: () => "/opening/cards",
+  },
+  {
     test: (p) =>
-      p === "/learn/review" || p.startsWith("/learn/review/") ||
       p === "/learn/practice" || p.startsWith("/learn/practice/") ||
       p === "/learn/goals" || p.startsWith("/learn/goals/") ||
       p === "/learn/exams" || p.startsWith("/learn/exams/") ||

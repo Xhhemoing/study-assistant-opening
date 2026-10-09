@@ -1,4 +1,4 @@
-﻿import type { Server } from "node:net";
+﻿import type { Server, Socket } from "node:net";
 import { createServer } from "node:net";
 
 export type OpeningImapMail = {
@@ -23,7 +23,10 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
   const mails = [...inputMails].sort((a, b) => a.uid - b.uid);
   let logoutCount = 0;
 
+  const sockets = new Set<Socket>();
   const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
     let buffer = "";
     const send = (line: string) => socket.write(`${line}\r\n`);
     const tagged = (tag: string, text = "OK done") => send(`${tag} ${text}`);
@@ -39,19 +42,25 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
         const spaceIndex = line.indexOf(" ");
         const tag = spaceIndex < 0 ? line : line.slice(0, spaceIndex);
         const rest = spaceIndex < 0 ? "" : line.slice(spaceIndex + 1);
-        const command = rest.toUpperCase();
-        if (command === "CAPABILITY") {
+        // ImapFlow sends "LOGIN \"user\" \"pass\"" — match the verb, not the whole rest.
+        const verbMatch = /^(\S+)(?:\s+(.*))?$/.exec(rest);
+        const verb = (verbMatch?.[1] ?? "").toUpperCase();
+        const args = verbMatch?.[2] ?? "";
+        if (verb === "CAPABILITY") {
           send("* CAPABILITY IMAP4rev1 UIDPLUS");
           tagged(tag, "OK CAPABILITY completed");
-        } else if (command === "LOGIN") {
+        } else if (verb === "LOGIN") {
           tagged(tag, "OK LOGIN completed");
-        } else if (command === "NAMESPACE") {
+        } else if (verb === "NAMESPACE") {
           send(`* NAMESPACE (("" "/")) NIL NIL`);
           tagged(tag, "OK NAMESPACE completed");
-        } else if (command.startsWith("LIST")) {
+        } else if (verb === "LIST") {
           send(`* LIST () "/" "INBOX"`);
           tagged(tag, "OK LIST completed");
-        } else if (command.startsWith("EXAMINE") || command.startsWith("SELECT")) {
+        } else if (verb === "LSUB") {
+          send(`* LSUB () "/" "INBOX"`);
+          tagged(tag, "OK LSUB completed");
+        } else if (verb === "EXAMINE" || verb === "SELECT") {
           send(`* ${mails.length} EXISTS`);
           send(`* 0 RECENT`);
           send(`* OK [UIDVALIDITY 42] UIDs valid`);
@@ -59,14 +68,16 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
           send(`* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)`);
           send(`* OK [PERMANENTFLAGS ()] read-only`);
           tagged(tag, "OK [READ-ONLY] EXAMINE completed");
-        } else if (command.startsWith("FETCH")) {
-          const match = /^FETCH\s+(\d+)(?::(\d+))?\s+\((.*)\)\s*$/i.exec(rest);
+        } else if (verb === "FETCH" || (verb === "UID" && /^FETCH\b/i.test(args))) {
+          const fetchArgs = verb === "UID" ? args.replace(/^FETCH\s+/i, "") : args;
+          // ImapFlow uses UID FETCH with ranges like 1:* and quoted atoms.
+          const match = /^(\d+)(?::(\d+|\*))?\s+\((.*)\)\s*$/i.exec(fetchArgs);
           if (!match) {
             tagged(tag, "BAD FETCH syntax");
             return;
           }
           const start = Number(match[1]);
-          const end = match[2] ? Number(match[2]) : start;
+          const end = match[2] === "*" ? Number.MAX_SAFE_INTEGER : match[2] ? Number(match[2]) : start;
           for (const mail of mails) {
             if (mail.uid < start || mail.uid > end) continue;
             const sequence = mails.indexOf(mail) + 1;
@@ -78,7 +89,7 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
             );
           }
           tagged(tag, "OK FETCH completed");
-        } else if (command === "LOGOUT") {
+        } else if (verb === "LOGOUT") {
           send(`* BYE Opening IMAP fixture closing`);
           tagged(tag, "OK LOGOUT completed");
           logoutCount += 1;
@@ -102,6 +113,10 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
     port: address.port,
     mails,
     close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      sockets.clear();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
       });

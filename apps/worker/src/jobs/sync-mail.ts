@@ -141,3 +141,67 @@ export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().data
     return { imported: result.imported, skipped: result.skipped, cursor: result.cursor };
   };
 }
+
+export type CheckMailResult = {
+  ok: true;
+  kind: "imap";
+};
+
+/**
+ * Minimal read-only IMAP connectivity check: allowlist host, decrypt vaulted
+ * credential, connect with rejectUnauthorized TLS, open selected folder or list,
+ * then logout. Never STOREs flags, EXPUNGEs, or sends mail.
+ */
+export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().databaseUrl)) {
+  return async function checkMail(input: SyncMailInput): Promise<CheckMailResult> {
+    const [row] = await sql`
+      SELECT c.*, w.owner_user_id
+      FROM opening_connections c
+      JOIN workspaces w ON w.id = c.workspace_id
+      WHERE c.id = ${input.connectionId}
+        AND c.kind = 'imap'
+        AND c.state <> 'revoked'
+      LIMIT 1
+    `;
+    if (!row) throw new Error("imap connection not found");
+    assertAllowedHost(String(row.host));
+
+    const [credential] = await sql`
+      SELECT key_id, nonce, ciphertext, auth_tag, payload_hash
+      FROM opening_connection_credentials
+      WHERE connection_id = ${input.connectionId}
+      LIMIT 1
+    `;
+    if (!credential) throw new Error("imap credential is missing");
+    const secret = decryptConnectionCredential({
+      workspaceId: String(row.workspace_id),
+      connectionId: input.connectionId,
+      keyId: String(credential.key_id),
+      nonce: credential.nonce as Buffer,
+      ciphertext: credential.ciphertext as Buffer,
+      authTag: credential.auth_tag as Buffer,
+      payloadHash: credential.payload_hash as string,
+    });
+
+    const client = new ImapFlow({
+      host: String(row.host),
+      port: Number(row.port),
+      secure: String(row.tls_mode) === "implicit",
+      auth: { user: String(row.username), pass: secret },
+      tls: { rejectUnauthorized: true },
+    });
+    try {
+      await client.connect();
+      const folders = (row.folders as ImapSetupInput["folders"]) ?? [];
+      const folder = folders[0];
+      if (folder) {
+        await client.mailboxOpen(folder, { readOnly: true });
+      } else {
+        await client.list();
+      }
+      return { ok: true, kind: "imap" };
+    } finally {
+      await client.logout().catch(() => undefined);
+    }
+  };
+}

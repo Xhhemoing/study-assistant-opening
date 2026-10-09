@@ -29,7 +29,7 @@ describe("opening worker runtime guards", () => {
   });
 
   it("exposes only supported handlers and rejects unknown kinds", async () => {
-    expect(Object.keys(handlers).sort()).toEqual(["parse", "remind", "retest", "tutor"]);
+    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "extract-study-actions", "parse", "parse-media", "remind", "retest", "tutor"]);
     await expect(handlers.parse({} as never, {})).rejects.toThrow("not implemented until I02/T02");
     expect(() => handlerForKind("unknown")).toThrow("unknown opening job kind");
   });

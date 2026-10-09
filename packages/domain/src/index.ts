@@ -50,6 +50,29 @@ export {
   expandWeekSessions,
   normalizeWeekSessions,
 } from "./opening/timetable";
+export { deriveDayBlocks } from "./opening/day-blocks";
+export {
+  buildDailyDraftInput,
+  dailyDraftClientKey,
+  localDateKeyInZone,
+  addLocalDays,
+  type BuildDailyDraftInputArgs,
+  type BuildDailyDraftInputResult,
+  type DailyDraftReason,
+  type DailyDraftReasonCode,
+} from "./opening/daily-draft";
+export {
+  buildActionDigest,
+  applySourceRevision,
+  blockerToDigestCandidate,
+  compareDigestCandidates,
+  resolveDedupeGroup,
+  assertDigestHasNoMasteryPercentage,
+  deltaTaskIdsForRevision,
+  type DigestActionCandidate,
+  type DigestActionStatus,
+  type ActionDigestView,
+} from "./opening/action-digest";
 export type { TimeBlock, WeekSession } from "@aistudy/contracts";
 export { scenarioToGoalKind } from "./planning/kinds";
 export { rankResults, type SearchDoc, type SearchHit } from "./search/query";
@@ -150,6 +173,8 @@ export {
 export {
   makeTutorInstruction,
   recommendTutorAction,
+  recommendAdaptiveTutorAction,
+  isAdaptiveTutorRecommendInput,
   exposureLevelForMode as exposureLevelForDeepenMode,
   normalizeDeepenMode,
   assertCitationsForPage,
@@ -161,7 +186,28 @@ export {
   type ThinTutorAction,
   type ThinTutorActionKind,
   type RecommendTutorActionInput,
+  type AdaptiveTutorRecommendInput,
+  type AdaptiveTutorActionKind,
 } from "./opening/tutor-policy";
+export {
+  RETEST_CLOSE_DEFAULT_DIMENSION,
+  nextTutorKindAfterRetestClose,
+  nodeIdForSkillLabel,
+  prepareRetestSkillLink,
+  shouldAppendRetestEvidence,
+  type RetestCloseAssistance,
+  type RetestCloseDimension,
+  type RetestCloseOutcome,
+  type RetestSkillLinkFields,
+} from "./opening/retest-close-evidence";
+export {
+  endOfLocalDayIso,
+  extractStudyActionCandidates,
+  resolveCandidateDueAt,
+  type DueResolution,
+  type ExtractStudyActionsOptions,
+  type ExtractableImportChunk,
+} from "./opening/extract-study-actions";
 export {
   DEFAULT_STRATEGY_TEMPLATE_ID,
   getStrategyTemplate,
@@ -218,12 +264,26 @@ export {
 } from "./opening/backup-compose";
 export {
   validateOpeningRestore,
+  normalizeOpeningRestoreHistory,
   type OpeningBackup,
   type OpeningBackupObject,
   type OpeningDeletionMark,
   type RestorePreview,
 } from "./opening/backup-policy";
+export {
+  planOpeningRestoreApply,
+  OPENING_RESTORE_APPLY_ORDER,
+  type OpeningRestoreApplyPlan,
+  type OpeningRestoreApplyPlanResult,
+} from "./opening/backup-apply-plan";
+export {
+  type OpeningRestoreLearningState,
+} from "./opening/backup-learning-state";
 
 export * from "./opening/evidence-eligibility";
 export { resolveLearningPreferences } from "./opening/learning-preferences";
 export { summarizeLearningAggregate, type AggregateLearningSummary } from "./opening/learning-summary-aggregate";
+export {
+  validateKnowledgeSnapshot,
+  KnowledgeGraphError,
+} from "./opening/knowledge-graph";

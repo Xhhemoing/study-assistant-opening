@@ -7,6 +7,7 @@ export const workspacePreferences = pgTable("workspace_preferences", {
     .references(() => workspaces.id, { onDelete: "cascade" }),
   defaultEntry: text("default_entry"),
   aiSettings: jsonb("ai_settings"),
+  planningSettings: jsonb("planning_settings"),
   assessmentEnabled: boolean("assessment_enabled"),
   retestSuggestionsEnabled: boolean("retest_suggestions_enabled"),
   automaticRemindersEnabled: boolean("automatic_reminders_enabled"),

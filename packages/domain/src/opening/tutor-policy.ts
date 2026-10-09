@@ -1,5 +1,14 @@
 import type { TutorMode } from "@aistudy/contracts";
 import { canBecomeObservedIndependent } from "@aistudy/contracts";
+import {
+  isAdaptiveTutorRecommendInput,
+  recommendAdaptiveTutorAction,
+  type AdaptiveTutorActionKind,
+  type AdaptiveTutorRecommendInput,
+} from "./tutor-policy-adaptive";
+
+export type { AdaptiveTutorActionKind, AdaptiveTutorRecommendInput } from "./tutor-policy-adaptive";
+export { recommendAdaptiveTutorAction, isAdaptiveTutorRecommendInput } from "./tutor-policy-adaptive";
 
 /** Modes accepted by K02a deepen path; aliases map onto T03 TutorMode. */
 export type DeepenTutorMode = TutorMode | "guided" | "worked_example";
@@ -119,10 +128,21 @@ export function assistedItemBlocksIndependent(input: {
   return !canBecomeObservedIndependent(input.assistance, input.outcome);
 }
 
-/** Thin recommend: page + skillLabel (+ optional nodeId). No K01 required. */
+/** Thin recommend: page + skillLabel (+ optional nodeId). No K01 required.
+ *  Overload: K02 nodeId path returns TutorAction kind (adaptive decision order).
+ */
+export function recommendTutorAction(
+  input: AdaptiveTutorRecommendInput,
+): AdaptiveTutorActionKind;
 export function recommendTutorAction(
   input: RecommendTutorActionInput,
-): ThinTutorAction {
+): ThinTutorAction;
+export function recommendTutorAction(
+  input: AdaptiveTutorRecommendInput | RecommendTutorActionInput,
+): AdaptiveTutorActionKind | ThinTutorAction {
+  if (isAdaptiveTutorRecommendInput(input)) {
+    return recommendAdaptiveTutorAction(input);
+  }
   const skillLabel = input.skillLabel.trim();
   if (!skillLabel) throw new Error("skillLabel is required");
   const base = {

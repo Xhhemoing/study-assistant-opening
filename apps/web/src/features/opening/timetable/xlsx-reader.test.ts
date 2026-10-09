@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
-import { parseTimetable } from "./xlsx-reader";
+import { parseTimetableSheets } from "./xlsx-reader";
+import { parseTimetable } from "./xlsx-reader.node";
 import { expandToTimeBlocks, parsePeriodTimes } from "./timezone";
 
 const fixture = "tests/fixtures/opening/timetable-synthetic.xlsx";
@@ -16,6 +17,23 @@ it("keeps raw text in a warning for a course without week information", async ()
   const result = await parseTimetable(fixture);
   expect(result.warnings.some((warning) => warning.raw === "English Composition")).toBe(true);
   expect(result.raw.some((cell) => cell.text === "English Composition")).toBe(true);
+});
+
+it("parseTimetableSheets maps synthetic rows without touching the filesystem", () => {
+  const result = parseTimetableSheets([
+    {
+      sheet: "Sheet1",
+      data: [
+        ["课程", "星期", "周次", "节"],
+        ["线性代数(1-8周) 1-2节", "周一", null, null],
+        ["English Composition", "周六", null, null],
+      ],
+    },
+  ]);
+  expect(result.sessions).toEqual([
+    expect.objectContaining({ courseName: "线性代数", weekday: 1, weeks: [1, 2, 3, 4, 5, 6, 7, 8], startPeriod: 1, endPeriod: 2 }),
+  ]);
+  expect(result.warnings.some((warning) => warning.raw === "English Composition")).toBe(true);
 });
 
 it("rejects missing or invalid absolute timetable configuration", () => {

@@ -7,6 +7,7 @@ import { admitLearningSources, learningError, learningIso, lockLearningHistory, 
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
+import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
   opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null } = {}) {
@@ -44,11 +45,26 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     if (retestActivity && attempt && retestActivity.requirement_key !== attempt.requirement_key) {
       throw learningError("VALIDATION", "retest requirement does not match the attempt");
     }
+    const skillNodeId = input.nodeId ?? null;
+    const skillDimension = input.dimension ?? null;
+    if ((skillNodeId == null) !== (skillDimension == null)) {
+      throw learningError("VALIDATION", "nodeId and dimension must be provided together for SkillEvidence");
+    }
     const intent = { sessionId: input.sessionId, courseId: input.courseId, skillLabel: input.skillLabel, sourceIds: [...new Set(input.sourceIds)].sort(),
       attemptId: input.attemptId ?? null, problemId: input.problemId ?? null, retestId: (retestActivity?.id as string | undefined) ?? null,
       answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource, referenceSourceId,
-      referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null };
+      referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
+      ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
     const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
+    const linkSkillEvidence = async (observationId: string) => {
+      if (!skillNodeId || !skillDimension) return;
+      await linkOpeningSkillEvidenceInTx(tx, scope, {
+        courseId: input.courseId,
+        nodeId: skillNodeId,
+        observationId,
+        dimension: skillDimension,
+      });
+    };
     const qualify = async (record: LearningObservation) => {
       const facts = await readOpeningLearningEvidenceContext(tx, scope, record);
       const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
@@ -57,6 +73,7 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     if (existing[0]) {
       const saved = existing[0].submitted_intent as typeof intent | null;
       if (!isDeepStrictEqual(saved, intent)) throw learningError("CONFLICT", "observation clientKey payload conflict");
+      await linkSkillEvidence(String(existing[0].id));
       return qualify(mapLearningObservation(existing[0]));
     }
     if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
@@ -95,6 +112,7 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
       }
     }
     await refreshOpeningLearningEligibility(tx, scope, [id]);
+    await linkSkillEvidence(id);
     // Ordinary observations enqueue a delayed-retest scan in the same transaction.
     // Retest completions must not scan again (avoid immediate re-proposal).
     if (!input.retestId) {

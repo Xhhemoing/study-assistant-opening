@@ -62,6 +62,12 @@ export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
 export * from "./schema/opening-imports";
 export * from "./repositories/opening-imports";
+export {
+  createOpeningImportChunksRepository,
+  listAuthorizedImportChunks,
+  channelFromConnectionKind,
+  type OpeningImportChunksRepository,
+} from "./repositories/opening-import-chunks";
 export * from "./repositories/opening-model-providers";
 export * from "./schema/opening-connections";
 export * from "./storage/opening-credential-vault";
@@ -77,6 +83,82 @@ export * from "./schema/opening-learning-attempts";
 export * from "./repositories/opening-observation-revisions";
 
 export { createOpeningAiSettingsRepository } from "./repositories/opening-ai-settings";
+export { createOpeningPlanningSettingsRepository } from "./repositories/opening-planning-settings";
 export { readOpeningCourseLearningHistory } from "./repositories/opening-learning-history-read";
 export * from "./repositories/opening-learning-eligibility";
 export { readOpeningCourseLearningSummary } from "./repositories/opening-learning-summary-read";
+
+export * from "./schema/opening-knowledge";
+export {
+  createOpeningKnowledgeRepository,
+  OpeningKnowledgeError,
+  type OpeningKnowledgeRepository,
+  type OpeningKnowledgeRecord,
+  type AuthorizedKnowledgeChunk,
+  type ReplaceKnowledgeInput,
+} from "./repositories/opening-knowledge";
+
+export * from "./schema/opening-skill-evidence";
+export {
+  createOpeningSkillEvidenceRepository,
+  linkOpeningSkillEvidenceInTx,
+  type OpeningSkillEvidenceRepository,
+  type LinkSkillEvidenceInput,
+  type SkillEvidenceRecord,
+  type NodeSkillEvidenceFlags,
+  type SkillEvidenceDimension,
+} from "./repositories/opening-skill-evidence";
+
+export * from "./schema/opening-action-digest-decisions";
+export {
+  createOpeningActionDigestDecisionsRepository,
+  type OpeningActionDigestDecisionsRepository,
+  type ActionCandidateStore,
+  type RecordActionDigestDecisionInput,
+  type ActionDigestDecisionStatus,
+} from "./repositories/opening-action-digest-decisions";
+
+export {
+  exportOpeningBackup,
+  publishOpeningBackupArchive,
+  previewOpeningRestore,
+  applyOpeningRestore,
+  executeOpeningRestoreApply,
+  createMemoryOpeningRestoreObjectPut,
+  createOpeningS3RestoreObjectPut,
+  parseOpeningRestoreObjectVersion,
+  OpeningBackupExportError,
+  assembleOpeningBackupDraft,
+  prepareOpeningSourceBackup,
+  readOpeningBackupRecords,
+  OPENING_BACKUP_TABLES,
+  OPENING_RESTORE_APPLY_ORDER,
+  OPENING_RESTORE_ROW_COLUMNS,
+  validateOpeningRestore,
+  writeOpeningBackupArchive,
+  encryptOpeningArchive,
+  decryptOpeningArchive,
+  snapshotOpeningBackupSources,
+  verifyOpeningBackupObjects,
+  createOpeningBackupReader,
+  evaluateOpeningRestoreEmptyNamespace,
+  readOpeningRestoreNamespaceCounts,
+  isOpeningRestoreNeverTable,
+  OPENING_RESTORE_NEVER_TABLES,
+  type OpeningBackupRecordSnapshot,
+  type OpeningBackupTable,
+  type OpeningSourceStaging,
+  type PublishOpeningBackupArchiveOptions,
+  type OpeningRestoreApplyArgs,
+  type OpeningRestoreApplyResult,
+  type OpeningRestoreApplyGuarantees,
+  type OpeningRestoreApplyPlan,
+  type OpeningBackupSource,
+  type OpeningRestoreNamespaceCounts,
+  type OpeningRestoreEmptyNamespaceResult,
+  type OpeningRestoreObjectPut,
+  type OpeningRestoreObjectStorage,
+  type OpeningRestoreExecuteArgs,
+  type OpeningRestoreExecuteResult,
+  planOpeningRestoreApply,
+} from "./repositories/opening-backup";

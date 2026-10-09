@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   aggregateHighestExposure,
   buildTutorActions,
+  createSkillEvidenceDepsFromDatabase,
   listTutorActionsForCourse,
   parseTutorActionsSearchParams,
   type TutorActionObservationDeps,
@@ -9,6 +10,8 @@ import {
 
 const COURSE = "11111111-1111-4111-8111-111111111111";
 const SESSION = "22222222-2222-4222-8222-222222222222";
+const NODE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const OBS = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const scope = { workspaceId: "workspace-1", ownerUserId: "user-1" };
 
 function createDeps(
@@ -19,6 +22,9 @@ function createDeps(
     getSession: vi.fn(async () => null),
     listDeliveredExposures: vi.fn(async () => []),
     listDueRetests: vi.fn(async () => []),
+    listSkillEvidenceForNode: vi.fn(async () => []),
+    hasAssistanceForNode: vi.fn(async () => false),
+    hasCheckedIndependentForNode: vi.fn(async () => false),
     ...overrides,
   };
 }
@@ -31,11 +37,13 @@ describe("K02a tutor-actions query", () => {
         skillLabel: "derivatives",
         sessionId: SESSION,
         currentPage: "5",
+        nodeId: NODE,
       }),
     );
     expect(parsed.courseId).toBe(COURSE);
     expect(parsed.query.sessionId).toBe(SESSION);
     expect(parsed.query.currentPage).toBe(5);
+    expect(parsed.query.nodeId).toBe(NODE);
     expect(parsed.sourceIds).toEqual([]);
   });
 
@@ -49,7 +57,7 @@ describe("K02a tutor-actions query", () => {
             sessionExposures: "revealed",
           }),
         ),
-    ).toThrow();
+    ).toThrow(/self-report|Unrecognized|sessionExposures/i);
     expect(
       () =>
         parseTutorActionsSearchParams(
@@ -57,6 +65,26 @@ describe("K02a tutor-actions query", () => {
           new URLSearchParams({ skillLabel: "derivatives", assistedSuccess: "1" }),
         ),
     ).toThrow();
+    expect(
+      () =>
+        parseTutorActionsSearchParams(
+          COURSE,
+          new URLSearchParams({
+            skillLabel: "derivatives",
+            hasCheckedIndependent: "true",
+          }),
+        ),
+    ).toThrow(/self-report|hasCheckedIndependent/i);
+    expect(
+      () =>
+        parseTutorActionsSearchParams(
+          COURSE,
+          new URLSearchParams({
+            skillLabel: "derivatives",
+            hasAssistance: "true",
+          }),
+        ),
+    ).toThrow(/self-report|hasAssistance/i);
   });
 });
 
@@ -125,6 +153,40 @@ describe("K02a tutor action recommendation", () => {
   });
 });
 
+describe("K02 nodeId adaptive recommendation", () => {
+  it("asks for independent transfer after assisted success on a node", () => {
+    const actions = buildTutorActions({
+      skillLabel: "chain rule",
+      currentPage: 2,
+      nodeId: NODE,
+      sourceIds: [],
+      sessionExposures: [],
+      retestDue: false,
+      hasAssistance: true,
+      hasCheckedIndependent: false,
+      evidenceIds: [OBS],
+    });
+    expect(actions[0]!.kind).toBe("independent_variant");
+    expect(actions[0]!.nodeId).toBe(NODE);
+    expect(actions[0]!.evidenceIds).toEqual([OBS]);
+    expect(actions[0]).not.toHaveProperty("masteryPercent");
+  });
+
+  it("clarifies when the node has no reliable evidence", () => {
+    const actions = buildTutorActions({
+      skillLabel: "chain rule",
+      currentPage: null,
+      nodeId: NODE,
+      sourceIds: [],
+      sessionExposures: [],
+      retestDue: false,
+      hasAssistance: false,
+      hasCheckedIndependent: false,
+    });
+    expect(actions[0]!.kind).toBe("clarify");
+  });
+});
+
 describe("aggregateHighestExposure", () => {
   it("does not let a hint mask a reveal", () => {
     expect(aggregateHighestExposure(["revealed", "hinted"])).toEqual([
@@ -132,6 +194,43 @@ describe("aggregateHighestExposure", () => {
     ]);
     expect(aggregateHighestExposure(["hinted", "hinted"])).toEqual(["hinted"]);
     expect(aggregateHighestExposure([])).toEqual([]);
+  });
+});
+
+describe("createSkillEvidenceDepsFromDatabase", () => {
+  it("stubs empty flags when the SkillEvidence repository is not landed", () => {
+    const deps = createSkillEvidenceDepsFromDatabase({} as never, {});
+    expect(deps).toBeTruthy();
+  });
+
+  it("binds to createOpeningSkillEvidenceRepository when present", async () => {
+    const listByNode = vi.fn(async () => [
+      { nodeId: NODE, observationId: OBS, dimension: "procedure" as const },
+    ]);
+    const flagsForNode = vi.fn(async () => ({
+      nodeId: NODE,
+      hasAssistance: true,
+      hasCheckedIndependent: false,
+      evidenceIds: [OBS],
+    }));
+    const deps = createSkillEvidenceDepsFromDatabase({} as never, {
+      createOpeningSkillEvidenceRepository: () => ({
+        listByNode,
+        flagsForNode,
+      }),
+    });
+    await expect(deps.listSkillEvidenceForNode(scope, NODE)).resolves.toEqual([
+      { nodeId: NODE, observationId: OBS, dimension: "procedure" },
+    ]);
+    await expect(deps.hasAssistanceForNode(scope, NODE)).resolves.toBe(true);
+    await expect(deps.hasCheckedIndependentForNode(scope, NODE)).resolves.toBe(
+      false,
+    );
+    await expect(deps.flagsForNode?.(scope, NODE)).resolves.toEqual({
+      hasAssistance: true,
+      hasCheckedIndependent: false,
+      evidenceIds: [OBS],
+    });
   });
 });
 
@@ -214,5 +313,56 @@ describe("listTutorActionsForCourse authorization", () => {
       deps,
     );
     expect(actions[0]!.kind).toBe("guided");
+  });
+
+  it("loads SkillEvidence flags on the server when nodeId is present", async () => {
+    const flagsForNode = vi.fn(async () => ({
+      hasAssistance: true,
+      hasCheckedIndependent: false,
+      evidenceIds: [OBS],
+    }));
+    const deps = createDeps({ flagsForNode });
+    const actions = await listTutorActionsForCourse(
+      {} as never,
+      scope,
+      COURSE,
+      new URLSearchParams({
+        skillLabel: "chain rule",
+        currentPage: "2",
+        nodeId: NODE,
+      }),
+      deps,
+    );
+    expect(actions[0]!.kind).toBe("independent_variant");
+    expect(actions[0]!.nodeId).toBe(NODE);
+    expect(actions[0]!.evidenceIds).toEqual([OBS]);
+    expect(flagsForNode).toHaveBeenCalledWith(scope, NODE);
+  });
+
+  it("falls back to discrete flag loaders when flagsForNode is absent", async () => {
+    const deps = createDeps({
+      flagsForNode: undefined,
+      listSkillEvidenceForNode: vi.fn(async () => [
+        { nodeId: NODE, observationId: OBS, dimension: "transfer" as const },
+      ]),
+      hasAssistanceForNode: vi.fn(async () => true),
+      hasCheckedIndependentForNode: vi.fn(async () => false),
+    });
+    const actions = await listTutorActionsForCourse(
+      {} as never,
+      scope,
+      COURSE,
+      new URLSearchParams({
+        skillLabel: "chain rule",
+        currentPage: "2",
+        nodeId: NODE,
+      }),
+      deps,
+    );
+    expect(actions[0]!.kind).toBe("independent_variant");
+    expect(actions[0]!.evidenceIds).toEqual([OBS]);
+    expect(deps.listSkillEvidenceForNode).toHaveBeenCalledWith(scope, NODE);
+    expect(deps.hasAssistanceForNode).toHaveBeenCalledWith(scope, NODE);
+    expect(deps.hasCheckedIndependentForNode).toHaveBeenCalledWith(scope, NODE);
   });
 });

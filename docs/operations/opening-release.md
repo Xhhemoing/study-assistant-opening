@@ -27,12 +27,23 @@ this does not establish a complete backup/restore drill. Commands and boundaries
 
 Not implemented yet (blocked or deliberately deferred):
 
-- Restore apply executor and the isolated restore drill. The planner exists;
-  execution still needs the publish-protocol decision and end-to-end recovery
-  evidence. Isolated PostgreSQL and MinIO are now available locally.
-- `scripts/opening-backup.ts` / `scripts/opening-restore.ts` CLI wrappers.
-- Docker packaging (`Dockerfile.opening-web`, `Dockerfile.opening-worker`,
-  `compose.opening.yml`, `opening.env.example`).
+- Isolated restore **drill** (fresh empty DB/S3 namespace + learning-loop verify)
+  and packaging image/compose green. Opening-scoped transactional row/object
+  **apply executor** now exists for confirm + validated backup + empty-namespace
+  + `sql` (`packages/database/.../opening-backup-apply.ts`; Data slice ACCEPT
+  2026-10-09 — see `q03-restore-apply-accept.md`). Dry-run / denied paths stay
+  `mutated: false`; secrets/API keys/sessions never restored; pending jobs
+  cancelled in-tx. CLI without a DB handle still reports deferred. Live S3
+  object restore, full live export→archive→apply E2E, and compose-fresh empty
+  namespace remain open. Shared `aistudy_opening_test` is populated (not an
+  empty-DB drill target). Docker CLI may be absent on some boxes.
+- Full backup CLI **DB+S3 export** path. Thin local publish CLI exists
+  (`scripts/opening-backup.ts` → archive/cipher, fail-closed if staging
+  incomplete) but does not assemble a live owner-scoped export end-to-end.
+- Docker **image build / compose up / packaging gates** green. Scaffold paths
+  exist (`Dockerfile.opening-*`, `compose.opening.yml`, `opening.env.example`);
+  packaging success is not deploy. See
+  `docs/superpowers/evidence/2026-10-09-opening-release/q03-packaging-gaps.md`.
 - CI-run evidence for the release SHA (see `docs/operations/ci.md`).
 
 ## Real export validation (2026-09-25)
@@ -117,16 +128,19 @@ Windows machines without bash or Docker follow [opening-local-windows.md](openin
 Required environment: `DATABASE_URL`, `REDIS_URL`, `S3_ENDPOINT`, `S3_REGION`,
 `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PUBLIC_BASE_URL`.
 
-| Check | Probe |
-| --- | --- |
-| `database` / `redis` / `storage` | `select 1`, `PING`, S3 `HeadBucket` (5s timeout) |
-| `workerBacklog` | no outbox row pending >10 min, no `failed` outbox row, no non-reminder job or tutor job queued >10 min. Failed outbox rows have no automatic re-drive yet, so they stay red until handled |
-| `https` | `PUBLIC_BASE_URL` is https and its `/api/health` returns 200 |
-| `registrationLocked` | `OPENING_RELEASE` parsed like the web app (`1`/`true`/`yes`) |
-| `ownerSetup` | at least one user exists |
-| `providerConfigured` / `dailyCap` | product model catalog: default model `available`, `OPENING_MODEL_DAILY_CAP_CENTS > 0` (needs `tsx`) |
-| `backupFreshness` | `OPENING_BACKUP_ARCHIVE_PATH` mtime within `OPENING_BACKUP_MAX_AGE_HOURS` (default 24h) |
-| alert destination | `ALERT_WEBHOOK_URL` non-empty |
+| Plan item (08-delivery §Q03) | Check / field | Probe |
+| --- | --- | --- |
+| DB | `database` | `select 1` (5s timeout) |
+| Redis / worker heartbeat | `redis` / `workerBacklog` | `PING`; no outbox pending >10m, no `failed` outbox, no non-reminder/tutor job queued >10m |
+| storage | `storage` | S3 `HeadBucket` (5s timeout) |
+| HTTPS | `https` | `PUBLIC_BASE_URL` is https and `/api/health` returns 200 |
+| registration403 | `registrationLocked` | `OPENING_RELEASE` parsed like the web app (`1`/`true`/`yes`); detail mentions expect registration 403 |
+| owner setup | `ownerSetup` | at least one user exists |
+| configured provider / daily cap | `providerConfigured` / `dailyCap` | product model catalog: default model `available`, `OPENING_MODEL_DAILY_CAP_CENTS > 0` (needs `tsx`) |
+| backup freshness | `backupFreshness` | `OPENING_BACKUP_ARCHIVE_PATH` mtime within `OPENING_BACKUP_MAX_AGE_HOURS` (default 24h) |
+| honest alert destination | `alertDelivery` | `ALERT_WEBHOOK_URL` non-empty → `"configured"` (not delivery proof); empty → `"unconfigured"` + note that nobody is receiving alerts |
+
+Public `GET /api/opening/health` exposes only coarse `database`/`redis`/`storage`/`workerBacklog` up/down. Full readiness (including alert honesty) is the CLI report above.
 
 ## Backup and restore boundary
 
@@ -149,7 +163,7 @@ These stay explicitly blocked and cannot be claimed from local runs:
 1. Real-model budget consumption and quality sampling (needs funded keys).
 2. Email/DingTalk reminder delivery (needs authorized accounts).
 3. Full legacy browser suite and fresh-machine/Docker installation verification (the isolated Opening suite passes locally).
-4. Backup restore drill (needs the apply executor and consistency/publish protocol; isolated services are available).
+4. Backup restore drill to a **fresh empty** DB/S3 namespace (then learning-loop verify). Apply executor slice is Data-ACCEPTed for confirm+sql+empty local path (`q03-restore-apply-accept.md`); still blocked on: isolated empty namespace (shared `aistudy_opening_test` populated; docker CLI often absent → no compose-fresh), live S3 object restore (integration used in-memory put), full live export→archive→apply E2E, and packaging image/compose green. Native `backup-restore` is a different package path. Q03 stays active / not verified until those gates close.
 5. Remote CI quality job bound to the release SHA (needs a pushed branch).
 
 ## Exclusive file publication (2026-09-25)

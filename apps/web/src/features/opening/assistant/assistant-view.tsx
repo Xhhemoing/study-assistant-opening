@@ -17,10 +17,12 @@ import { replacePromptDraft, type StudyTask } from "../planning/study-task";
 import { MemoryPanel } from "./memory-panel";
 import { prepareSnippetDraft } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
+import { CreateCardDialog } from "../cards/create-card-dialog";
 import { UploadStrip } from "./upload-strip";
 import { AiReadinessChecklist } from "./ai-readiness";
 import type { ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
+import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 
 type Props = {
   api?: OpeningApi;
@@ -252,6 +254,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
   const [ephemeralPrivacyEpoch, setEphemeralPrivacyEpoch] = useState<number>();
   const [snippetDraft, setSnippetDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
+  const [cardDraft, setCardDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
   const [tutorActions, setTutorActions] = useState<ThinTutorAction[]>([]);
   const [tutorActionError, setTutorActionError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
@@ -269,10 +272,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     }
     setTutorActionError("");
     try {
+      let nodeId: string | null = null;
+      try {
+        const knowledge = await api.getCourseKnowledge(learningAttempt.courseId);
+        nodeId = nodeIdForSkillLabel(knowledge.snapshot, learningAttempt.skillLabel);
+      } catch {
+        nodeId = null;
+      }
       const result = await api.listTutorActions({
         courseId: learningAttempt.courseId,
         skillLabel: learningAttempt.skillLabel,
         sessionId: learningAttempt.sessionId,
+        nodeId,
       });
       setTutorActions(result);
     } catch (err) {
@@ -582,7 +593,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         </div>
       </header>
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
-      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} />}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} onCreateCard={(message, selectedText) => setCardDraft(prepareSnippetDraft(message, selectedText))} />}
       {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
       {error || recoveryRequired ? <div className="mx-5 mb-2 border border-red-200 bg-red-50 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-red-800">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{tutorActionError}</p> : null}
@@ -595,9 +606,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
       ) : null}
 
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
+      {!learningAttempt ? <p className="mx-5 mb-2 text-[11px] leading-5 text-zinc-500"><Link href="/opening/settings/connections" className="underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800">数据连接与授权</Link>：不可用时显示不可用，不填充示例同步内容。</p> : null}
       <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
+    {cardDraft ? <CreateCardDialog draft={cardDraft} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
       <UploadStrip api={api} onUploaded={refreshSources} disabled={pending || loading || recoveryRequired} />

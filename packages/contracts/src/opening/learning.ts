@@ -114,10 +114,14 @@ export const observationInputSchema = z
     referenceSourceId: uuidSchema.nullable().optional(),
     /** Links a correction. Never an in-place rewrite of the parent row. */
     revisesObservationId: uuidSchema.nullable().optional(),
+    /** K02 optional SkillEvidence link; only written when both nodeId and dimension are set. */
+    nodeId: uuidSchema.optional(),
+    dimension: z.enum(["recall", "explain", "procedure", "transfer", "timed"]).optional(),
   })
   .strict();
 
 export const learningObservationSchema = observationInputSchema
+  .omit({ nodeId: true, dimension: true })
   .extend({
     ...learningObservationFactsShape,
     rootObservationId: uuidSchema.optional(),

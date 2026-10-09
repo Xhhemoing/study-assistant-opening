@@ -1,0 +1,166 @@
+{
+  "generatedAt": "2026-10-09T11:39:43.144Z",
+  "note": "Non-executing plan artifact from planOpeningRestoreApply. Documents what a mutating executor would stage; does NOT execute SQL or mutate DB/storage.",
+  "mutated": false,
+  "executed": false,
+  "planOpeningRestoreApply": {
+    "ok": true,
+    "plan": {
+      "batches": [
+        {
+          "table": "workspace_preferences",
+          "rows": 0
+        },
+        {
+          "table": "courses",
+          "rows": 0
+        },
+        {
+          "table": "opening_sources",
+          "rows": 1
+        },
+        {
+          "table": "course_asset_memberships",
+          "rows": 0
+        },
+        {
+          "table": "opening_source_versions",
+          "rows": 0
+        },
+        {
+          "table": "opening_source_chunks",
+          "rows": 0
+        },
+        {
+          "table": "opening_conversations",
+          "rows": 0
+        },
+        {
+          "table": "opening_learning_sessions",
+          "rows": 0
+        },
+        {
+          "table": "opening_problem_refs",
+          "rows": 0
+        },
+        {
+          "table": "opening_learning_history_revisions",
+          "rows": 0
+        },
+        {
+          "table": "opening_workspace_history_revisions",
+          "rows": 0
+        },
+        {
+          "table": "opening_learning_item_versions",
+          "rows": 0
+        },
+        {
+          "table": "opening_learning_attempts",
+          "rows": 0
+        },
+        {
+          "table": "opening_turns",
+          "rows": 0
+        },
+        {
+          "table": "opening_assistant_candidates",
+          "rows": 0
+        },
+        {
+          "table": "opening_help_exposures",
+          "rows": 0
+        },
+        {
+          "table": "opening_learning_observations",
+          "rows": 0
+        },
+        {
+          "table": "opening_memories",
+          "rows": 0
+        },
+        {
+          "table": "opening_privacy_exclusions",
+          "rows": 0
+        },
+        {
+          "table": "opening_tasks",
+          "rows": 0
+        },
+        {
+          "table": "opening_retest_activities",
+          "rows": 0
+        },
+        {
+          "table": "opening_timetable_sessions",
+          "rows": 0
+        },
+        {
+          "table": "opening_hard_blocks",
+          "rows": 0
+        },
+        {
+          "table": "opening_plan_state",
+          "rows": 0
+        },
+        {
+          "table": "opening_plan_drafts",
+          "rows": 0
+        },
+        {
+          "table": "opening_plan_acceptances",
+          "rows": 0
+        }
+      ],
+      "objectCount": 1
+    }
+  },
+  "documentedPseudoSteps": [
+    {
+      "kind": "row-batch",
+      "table": "opening_sources",
+      "rows": 1,
+      "pseudoSql": "INSERT INTO opening_sources (...) SELECT ... FROM backup draft — NOT EXECUTED"
+    },
+    {
+      "kind": "object-bytes",
+      "objectCount": 1,
+      "pseudoStep": "restore object bytes from archive by archivePath — NOT EXECUTED"
+    },
+    {
+      "kind": "guarantees",
+      "secretsRestored": false,
+      "apiKeysRestored": false,
+      "sessionsRestored": false,
+      "pendingJobs": "cancelled"
+    }
+  ],
+  "applyOrderReference": [
+    "workspace_preferences",
+    "courses",
+    "opening_sources",
+    "course_asset_memberships",
+    "opening_source_versions",
+    "opening_source_chunks",
+    "opening_conversations",
+    "opening_learning_sessions",
+    "opening_problem_refs",
+    "opening_learning_history_revisions",
+    "opening_workspace_history_revisions",
+    "opening_learning_item_versions",
+    "opening_learning_attempts",
+    "opening_turns",
+    "opening_assistant_candidates",
+    "opening_help_exposures",
+    "opening_learning_observations",
+    "opening_memories",
+    "opening_privacy_exclusions",
+    "opening_tasks",
+    "opening_retest_activities",
+    "opening_timetable_sessions",
+    "opening_hard_blocks",
+    "opening_plan_state",
+    "opening_plan_drafts",
+    "opening_plan_acceptances"
+  ]
+}

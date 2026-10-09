@@ -9,6 +9,7 @@ import {
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
 import { syncMailbox } from "../../apps/worker/src/connectors/imap-sync";
+import { importIdentityKey } from "../../apps/worker/src/connectors/import-identity";
 
 let f: OpeningFixture;
 let server: OpeningImapServer;
@@ -113,7 +114,12 @@ describe("isolated standard IMAP sync gate", () => {
     expect(Buffer.from(stored!).toString("utf8")).toBe(server.mails[0]!.source);
     const receipts = await f.sql`SELECT * FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`;
     expect(receipts).toHaveLength(1);
-    expect(receipts[0]?.remote_id).toBe("11");
+    expect(receipts[0]?.identity_key).toBe(importIdentityKey({
+      connectionId: fixtureConnection.id,
+      container: "INBOX",
+      generation: "42",
+      remoteId: "11",
+    }));
     const cursors = await f.sql`SELECT generation,cursor FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`;
     expect(cursors[0]?.generation).toBe("42");
     expect(cursors[0]?.cursor).toEqual({ folder: "INBOX", uidValidity: "42", lastUid: 11 });

@@ -79,7 +79,10 @@ describe("learning semantic revision writers", () => {
       sha256: "a".repeat(64), version: 0, upload_state: uploaded ? "uploaded" : "pending", parse_state: "not_started", created_at: at });
     const db = database((query) => {
       if (query.startsWith("SELECT * FROM opening_sources")) return [source()];
-      if (query.startsWith("UPDATE opening_sources SET upload_state")) { uploaded = true; return [source()]; }
+      if (query.startsWith("UPDATE opening_sources SET upload_state")) {
+        uploaded = true;
+        return [{ ...source(), parse_state: query.includes("parse_state") ? "queued" : "not_started" }];
+      }
       if (query.startsWith("INSERT INTO opening_source_versions") || query.startsWith("INSERT INTO opening_jobs") || query.startsWith("INSERT INTO opening_outbox")) return [];
       throw new Error(query);
     });

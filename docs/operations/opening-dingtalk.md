@@ -8,8 +8,14 @@
 - 当前连接创建后 `allowedScopes` 为空，状态为 `needs_authorization`；请求的 scope 不会被视为已授权能力。
 - 同步入口位于 `apps/worker/src/jobs/sync-dingtalk.ts`，只接受 `messages.read`、`events.read`、`files.read` 中的一个内部读能力；`robot.send` 不触发读取。
 - 因为钉钉没有历史群聊读取 API，同步入口即使具备读能力也返回 `unsupported_history_read`，不执行历史拉取。
+- 连接检查入口同文件的 `checkDingTalk` / `createCheckDingTalkHandler`：只做本地持久化判定，**不调用远程钉钉 API**。
+  - 已撤销 → HTTP 409（connections service 先行拒绝）。
+  - 无内部读能力 / `needs_authorization` → `{ ok: false, kind: "dingtalk", status: "needs_authorization", allowedScopes }`。
+  - 具备内部读能力 → `{ ok: true, kind: "dingtalk", status: "ready" | "unsupported_history_read", allowedScopes }`；`ready` 仅表示内部读能力已具备（可供回调/事件摄入），**不表示历史拉取可用**，也不发明远程健康探针。
+- HTTP：`POST /api/opening/connections/[id]/check` 对 `kind==="dingtalk"` 返回上述 JSON；对其它未实现 kind 仍 503 fail-closed。
 - 事件回调服务位于 `apps/web/src/features/opening/connections/dingtalk-callback-service.ts`，HTTP 边界位于 `apps/web/src/app/api/opening/connections/dingtalk/events/route.ts`。
 - 设置页提供最小钉钉连接面板；`/api/opening/connections/[id]/sync` 只返回钉钉授权/历史读取边界结果，不伪装历史同步。
+- 内部能力名与官方文档表面的对照见 `apps/worker/src/connectors/dingtalk-policy.ts` 文件头注释；`robot.send` ≠ `messages.read`。
 
 ## 官方文档核对结果
 

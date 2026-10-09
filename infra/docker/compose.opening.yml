@@ -1,0 +1,190 @@
+# Opening production-oriented Compose profile (scaffold).
+#
+# DISTINCT from infra/docker/compose.yml (dev defaults: public ports + passwords
+# aistudy/aistudy / minioadmin). Never deploy that development stack with
+# public default-password databases.
+#
+# Constraints encoded here:
+#   - DB / Redis / S3 published on loopback only (127.0.0.1)
+#   - Credentials MUST come from env (no in-file defaults)
+#   - Named volumes, healthchecks, CPU/memory limits, restart policy
+#   - No Docker socket mounts; no AI-facing shell service
+#
+# Not deployed. Copy opening.env.example → opening.env, fill secrets, then:
+#   docker compose -f infra/docker/compose.opening.yml --env-file infra/docker/opening.env up -d
+# TLS reverse proxy / request limits are out of band for this scaffold.
+
+name: aistudy-opening
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${OPENING_POSTGRES_USER:?set OPENING_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${OPENING_POSTGRES_PASSWORD:?set OPENING_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${OPENING_POSTGRES_DB:?set OPENING_POSTGRES_DB}
+    ports:
+      - "127.0.0.1:${OPENING_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - opening_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${OPENING_REDIS_PASSWORD:?set OPENING_REDIS_PASSWORD}"]
+    ports:
+      - "127.0.0.1:${OPENING_REDIS_PORT:-6379}:6379"
+    volumes:
+      - opening_redis_data:/data
+    environment:
+      REDISCLI_AUTH: ${OPENING_REDIS_PASSWORD:?set OPENING_REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OPENING_S3_ACCESS_KEY_ID:?set OPENING_S3_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${OPENING_S3_SECRET_ACCESS_KEY:?set OPENING_S3_SECRET_ACCESS_KEY}
+    ports:
+      - "127.0.0.1:${OPENING_S3_PORT:-9000}:9000"
+      - "127.0.0.1:${OPENING_S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - opening_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      OPENING_S3_ACCESS_KEY_ID: ${OPENING_S3_ACCESS_KEY_ID:?set OPENING_S3_ACCESS_KEY_ID}
+      OPENING_S3_SECRET_ACCESS_KEY: ${OPENING_S3_SECRET_ACCESS_KEY:?set OPENING_S3_SECRET_ACCESS_KEY}
+      OPENING_S3_BUCKET: ${OPENING_S3_BUCKET:?set OPENING_S3_BUCKET}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 \"$$OPENING_S3_ACCESS_KEY_ID\" \"$$OPENING_S3_SECRET_ACCESS_KEY\"; do sleep 1; done;
+      mc mb -p \"local/$$OPENING_S3_BUCKET\" || true;
+      exit 0;
+      "
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.opening-web
+    image: aistudy-opening-web:local
+    restart: unless-stopped
+    env_file:
+      - ${OPENING_ENV_FILE:-./opening.env}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "127.0.0.1:${OPENING_WEB_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    # No docker.sock. No privileged mode.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1536M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.opening-worker
+    image: aistudy-opening-worker:local
+    restart: unless-stopped
+    env_file:
+      - ${OPENING_ENV_FILE:-./opening.env}
+    environment:
+      NODE_ENV: production
+      PARSER_PYTHON: /opt/parser-venv/bin/python
+      PARSER_CWD: /opt/parser
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: /var/lib/aistudy/hf-home
+    volumes:
+      # Model cache only — never mount /var/run/docker.sock
+      - opening_hf_home:/var/lib/aistudy/hf-home
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # No docker.sock. No privileged mode. No shell sidecar for AI tools.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+volumes:
+  opening_pg_data:
+  opening_redis_data:
+  opening_minio_data:
+  opening_hf_home:

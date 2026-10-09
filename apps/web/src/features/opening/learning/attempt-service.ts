@@ -1,6 +1,10 @@
 import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
-import { resolveAssistance } from "@aistudy/domain";
+import {
+  createOpeningKnowledgeRepository,
+  createOpeningLearningAttemptRepository,
+  createOpeningLearningRepository,
+} from "@aistudy/database";
+import { prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
 
 function highestDeliveredAssistance(exposures: ReadonlyArray<"hinted" | "revealed">): "none" | "hinted" | "revealed" {
@@ -14,7 +18,9 @@ function notFound(message: string): never {
 }
 
 export function createOpeningAttemptService(sql: Sql) {
-  const attempts = createOpeningLearningAttemptRepository(sql), learning = createOpeningLearningRepository(sql);
+  const attempts = createOpeningLearningAttemptRepository(sql);
+  const learning = createOpeningLearningRepository(sql);
+  const knowledge = createOpeningKnowledgeRepository(sql);
   return {
     create(scope: Scope, raw: unknown) { return attempts.create(scope, learningAttemptCreateInputSchema.parse(raw)); },
     async get(scope: Scope, id: string) {
@@ -32,8 +38,32 @@ export function createOpeningAttemptService(sql: Sql) {
       const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
       const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId);
       const assistance = resolveAssistance(input.assistance, exposures);
-      return learning.insertObservation(scope, { ...input, assistance, attemptId: attempt.id, sessionId: attempt.sessionId,
-        courseId: attempt.courseId, skillLabel: attempt.skillLabel, sourceIds: attempt.sourceIds, problemId: attempt.problemId });
+      const base = {
+        ...input,
+        assistance,
+        attemptId: attempt.id,
+        sessionId: attempt.sessionId,
+        courseId: attempt.courseId,
+        skillLabel: attempt.skillLabel,
+        sourceIds: attempt.sourceIds,
+        problemId: attempt.problemId,
+      };
+      // K02 L02 close: resolve nodeId for independent retest so Data links SkillEvidence in the same tx.
+      if (!input.retestId) {
+        return learning.insertObservation(scope, base);
+      }
+      const current = await knowledge.get(scope, attempt.courseId);
+      const skillLink = prepareRetestSkillLink({
+        retestId: input.retestId,
+        assistance,
+        outcome: input.outcome,
+        skillLabel: attempt.skillLabel,
+        snapshot: current?.snapshot ?? null,
+      });
+      return learning.insertObservation(
+        scope,
+        skillLink ? { ...base, nodeId: skillLink.nodeId, dimension: skillLink.dimension } : base,
+      );
     },
   };
 }

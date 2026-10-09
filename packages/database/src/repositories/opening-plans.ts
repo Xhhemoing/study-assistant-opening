@@ -28,12 +28,19 @@ export type ProposePlanInput = {
   clientKey?: string | null;
 };
 
+
 function fingerprintHardBlocks(blocks: TimeBlock[]): string {
   const hard = blocks
     .filter((b) => b.kind !== "free")
     .map((b) => `${b.kind}:${b.start}:${b.end}`)
     .sort();
   return createHash("sha256").update(hard.join("|")).digest("hex");
+}
+
+/** Stable int4 pair for pg_advisory_xact_lock(workspace+date). */
+export function dailyDraftAdvisoryLockKeys(workspaceId: string, date: string): [number, number] {
+  const digest = createHash("sha256").update(`opening-daily-draft:${workspaceId}:${date}`).digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
 function mapTask(row: Record<string, unknown>): TaskItem {
@@ -65,10 +72,25 @@ function mapTask(row: Record<string, unknown>): TaskItem {
   };
 }
 
+function formatPlanDay(value: unknown): string {
+  if (value instanceof Date) {
+    // DATE columns come back as local midnight; use UTC Y-M-D from the instant
+    // postgres.js constructs for date-only values (UTC midnight of that day).
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(value.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const raw = String(value);
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1]!;
+  throw new OpeningPlanError("VALIDATION", `invalid plan day: ${raw}`);
+}
+
 function mapDraft(row: Record<string, unknown>): PlanDraft {
   return {
     id: row.id as string,
-    date: String(row.day),
+    date: formatPlanDay(row.day),
     version: Number(row.version),
     baseVersion: Number(row.base_version),
     status: row.status as PlanDraft["status"],
@@ -370,6 +392,153 @@ export function createOpeningPlansRepository(sql: Sql) {
           )`;
 
         return mapDraft(updated[0] as Record<string, unknown>);
+      });
+    },
+
+    async findDraftByProposeClientKey(
+      scope: OpeningScope,
+      day: string,
+      clientKey: string,
+    ): Promise<PlanDraft | null> {
+      const rows = await sql`
+        SELECT * FROM opening_plan_drafts
+        WHERE workspace_id = ${scope.workspaceId}
+          AND owner_user_id = ${scope.ownerUserId}
+          AND day = ${day}::date
+          AND propose_client_key = ${clientKey}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`;
+      if (!rows.length) return null;
+      return mapDraft(rows[0] as Record<string, unknown>);
+    },
+
+    /**
+     * Idempotent daily auto-draft: advisory xact lock → skip if accepted/rejected →
+     * return existing draft or insert one from `build`.
+     */
+    async ensureAutoDraft(
+      scope: OpeningScope,
+      day: string,
+      clientKey: string,
+      build: () => Promise<
+        | { kind: "propose"; input: ProposePlanInput }
+        | { kind: "skip"; reason: "no_settings" }
+      >,
+      countUnplannedPending: () => Promise<number>,
+    ): Promise<{
+      draft: PlanDraft | null;
+      skippedBecauseAccepted: boolean;
+      dailyDraftSkippedReason: "accepted" | "rejected" | "no_settings" | null;
+      unplannedPendingCount?: number;
+    }> {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
+      }
+      const [lockA, lockB] = dailyDraftAdvisoryLockKeys(scope.workspaceId, day);
+      return sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(${lockA}, ${lockB})`;
+
+        const stateRows = await tx`
+          SELECT accepted_version, accepted_blocks FROM opening_plan_state
+          WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date`;
+        const acceptedVersion = stateRows.length
+          ? Number((stateRows[0] as Record<string, unknown>).accepted_version)
+          : 0;
+        if (acceptedVersion > 0) {
+          const unplannedPendingCount = await countUnplannedPending();
+          return {
+            draft: null,
+            skippedBecauseAccepted: true,
+            dailyDraftSkippedReason: "accepted" as const,
+            unplannedPendingCount,
+          };
+        }
+
+        const existingRows = await tx`
+          SELECT * FROM opening_plan_drafts
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND day = ${day}::date
+            AND propose_client_key = ${clientKey}
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1`;
+        if (existingRows.length) {
+          const existing = mapDraft(existingRows[0] as Record<string, unknown>);
+          if (existing.status === "rejected") {
+            return {
+              draft: null,
+              skippedBecauseAccepted: false,
+              dailyDraftSkippedReason: "rejected" as const,
+            };
+          }
+          if (existing.status === "accepted") {
+            const unplannedPendingCount = await countUnplannedPending();
+            return {
+              draft: null,
+              skippedBecauseAccepted: true,
+              dailyDraftSkippedReason: "accepted" as const,
+              unplannedPendingCount,
+            };
+          }
+          return {
+            draft: existing,
+            skippedBecauseAccepted: false,
+            dailyDraftSkippedReason: null,
+          };
+        }
+
+        const built = await build();
+        if (built.kind === "skip") {
+          return {
+            draft: null,
+            skippedBecauseAccepted: false,
+            dailyDraftSkippedReason: built.reason,
+          };
+        }
+
+        const input = built.input;
+        // Persist hard blocks (non-free) for the day inside this transaction.
+        await tx`DELETE FROM opening_hard_blocks
+          WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+            AND day = ${day}::date`;
+        for (const b of input.free.filter((x) => x.kind !== "free")) {
+          await tx`
+            INSERT INTO opening_hard_blocks (
+              id, workspace_id, owner_user_id, day, start_at, end_at, kind
+            ) VALUES (
+              ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${day}::date,
+              ${b.start}, ${b.end}, ${b.kind}
+            )`;
+        }
+        const fp = fingerprintHardBlocks(input.free);
+        await tx`
+          INSERT INTO opening_plan_state (workspace_id, day, hard_blocks_fingerprint)
+          VALUES (${scope.workspaceId}, ${day}::date, ${fp})
+          ON CONFLICT (workspace_id, day) DO UPDATE
+            SET hard_blocks_fingerprint = EXCLUDED.hard_blocks_fingerprint, updated_at = now()`;
+
+        const baseVersion = 0;
+        const id = randomUUID();
+        const snapshot = {
+          tasks: input.tasks,
+          free: input.free,
+          proposedAt: new Date().toISOString(),
+          autoDraft: true,
+        };
+        const rows = await tx`
+          INSERT INTO opening_plan_drafts (
+            id, workspace_id, owner_user_id, day, version, base_version, status,
+            blocks, unscheduled_task_ids, input_snapshot, hard_blocks_fingerprint, propose_client_key
+          ) VALUES (
+            ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${day}::date, ${0}, ${baseVersion},
+            ${"draft"}, ${tx.json(input.blocks as never)}, ${tx.json(input.unscheduledTaskIds as never)},
+            ${tx.json(snapshot as never)}, ${fp}, ${clientKey}
+          ) RETURNING *`;
+        return {
+          draft: mapDraft(rows[0] as Record<string, unknown>),
+          skippedBecauseAccepted: false,
+          dailyDraftSkippedReason: null,
+        };
       });
     },
   };

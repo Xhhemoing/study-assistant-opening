@@ -85,6 +85,10 @@ function assertMatch(
   }
 }
 
+function parseJobKindForMime(mime: string): "parse" | "parse-media" {
+  return mime.startsWith("video/") || mime.startsWith("audio/") ? "parse-media" : "parse";
+}
+
 export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository {
   return {
     async create(scope, input) {
@@ -170,14 +174,15 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         if (current.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
         await input.beforeComplete?.(current);
-        const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;
+        const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', parse_state = 'queued', error = NULL, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;
         await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
           SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources
           WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded'
           ON CONFLICT(source_id,version) DO NOTHING`;
         const jobId = randomUUID();
-        await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
-        await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
+        const jobKind = parseJobKindForMime(current.mime);
+        await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, ${jobKind}, ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
+        await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: jobKind, sourceId: id } as never)})`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         return mapSource(sourceRows[0] as Record<string, unknown>);
@@ -203,10 +208,11 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
           RETURNING *`;
         if (!sourceRows.length) throw new OpeningSourceError("CONFLICT", "Source parse state changed; refresh and try again");
         const jobId = randomUUID();
+        const jobKind = parseJobKindForMime(current.mime);
         await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
-          VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, 'parse', ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
+          VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, ${jobKind}, ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
-          VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: 'parse', sourceId: id } as never)})`;
+          VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: jobKind, sourceId: id } as never)})`;
         return mapSource(sourceRows[0] as Record<string, unknown>);
       });
     },

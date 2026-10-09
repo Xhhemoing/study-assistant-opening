@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+# Opening production worker image (scaffold).
+# Node worker + isolated Python/Docling parser runtime in one image.
+# Constraints (Q03):
+#   - Do NOT mount the Docker socket into this image or compose service.
+#   - Do NOT expose an arbitrary shell tool to the AI / model runtime.
+#   - Parser is invoked via argv-only Node spawn (shell: false); see apps/worker parsers.
+# Build context: repository root.
+# Packaging success ≠ deployed. Model cache (HF_HOME) is prepared at deploy time;
+# conversion stays offline (HF_HUB_OFFLINE=1).
+
+FROM python:3.13-slim-bookworm AS parser-venv
+WORKDIR /parser-build
+COPY services/parser/requirements-lock.txt services/parser/pyproject.toml ./
+COPY services/parser/opening_parser ./opening_parser
+COPY services/parser/model-manifest.json ./model-manifest.json
+RUN python -m venv /opt/parser-venv \
+  && /opt/parser-venv/bin/pip install --no-cache-dir -r requirements-lock.txt \
+  && /opt/parser-venv/bin/pip install --no-cache-dir --no-deps . \
+  && /opt/parser-venv/bin/pip check
+
+FROM node:22-bookworm-slim AS node-bins
+
+FROM python:3.13-slim-bookworm AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PATH="/usr/local/node/bin:${PATH}"
+# Absolute paths required in production (apps/worker parser-config.ts).
+ENV PARSER_PYTHON=/opt/parser-venv/bin/python
+ENV PARSER_CWD=/opt/parser
+ENV HF_HUB_OFFLINE=1
+ENV HF_HOME=/var/lib/aistudy/hf-home
+
+COPY --from=node-bins /usr/local/bin/node /usr/local/node/bin/node
+COPY --from=node-bins /usr/local/lib/node_modules /usr/local/node/lib/node_modules
+RUN ln -s /usr/local/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/node/bin/npm \
+  && ln -s /usr/local/node/lib/node_modules/npm/bin/npx-cli.js /usr/local/node/bin/npx \
+  && groupadd --system --gid 1001 aistudy \
+  && useradd --system --uid 1001 --gid aistudy aistudy \
+  && mkdir -p /var/lib/aistudy/hf-home \
+  && chown -R aistudy:aistudy /var/lib/aistudy
+
+COPY --from=parser-venv /opt/parser-venv /opt/parser-venv
+COPY --from=parser-venv /parser-build/opening_parser /opt/parser/opening_parser
+COPY --from=parser-venv /parser-build/model-manifest.json /opt/parser/model-manifest.json
+COPY --from=parser-venv /parser-build/pyproject.toml /opt/parser/pyproject.toml
+
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY spikes ./spikes
+COPY tsconfig.base.json tsconfig.json ./
+COPY scripts ./scripts
+
+# tsx is the current worker start path (apps/worker package.json). Keep it until a compiled entry exists.
+RUN npm ci \
+  && chown -R aistudy:aistudy /app /opt/parser /opt/parser-venv
+
+USER aistudy
+
+# No EXPOSE of a shell or Docker API. Worker speaks only to DB/Redis/S3/model APIs.
+CMD ["npx", "tsx", "apps/worker/src/index.ts"]

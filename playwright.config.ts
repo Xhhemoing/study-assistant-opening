@@ -36,6 +36,8 @@ export default defineConfig({
       SESSION_COOKIE_SECURE: "false",
       SESSION_TTL_SECONDS: process.env.SESSION_TTL_SECONDS ?? "3600",
       AUTH_COOKIE_NAME: process.env.AUTH_COOKIE_NAME ?? "aistudy_session",
+      OPENING_IMAP_ALLOWED_HOSTS: process.env.OPENING_IMAP_ALLOWED_HOSTS ?? "mail.example.edu",
+      OPENING_IMAP_E2E_HOST: process.env.OPENING_IMAP_E2E_HOST ?? "mail.example.edu",
     },
   },
 });

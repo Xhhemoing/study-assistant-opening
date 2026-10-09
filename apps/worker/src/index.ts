@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
-import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository,
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
   readLatestStemPromptsBySkill, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
@@ -14,6 +14,12 @@ import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { createRemindHandler } from "./jobs/remind";
+import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
+import { createRetestCloseHandler } from "./jobs/retest-close";
+import { createParseMediaHandler } from "./jobs/parse-media";
+import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
+import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
 import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
@@ -61,7 +67,38 @@ export async function main(): Promise<void> {
     externalConfig: (job) => reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
     send: (input, signal) => feishu.send(input, signal),
   });
-  const handlers = createHandlers(parse, { retest, remind });
+  const knowledge = createOpeningKnowledgeRepository(sql);
+  const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
+    listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
+    get: (scope, courseId) => knowledge.get(scope, courseId),
+    replace: (scope, courseId, input) => knowledge.replace(scope, courseId, input),
+    resolveProvider: async (scope) => (await resolveTutorModel(sql, scope, "explain")).provider,
+  });
+  const parseMedia = createParseMediaHandler({
+    sources,
+    chunks,
+    storage,
+    tempDir: env.parserTempDir,
+    // Wire faster-whisper when the optional parser extra + offline weights exist;
+    // CONFIGURATION / blocked_not_configured otherwise (no auto-download).
+    transcribe: createPythonTranscribeAdapter(),
+    putObject: async ({ key, body, mime }) => {
+      await storage.client.send(
+        new PutObjectCommand({
+          Bucket: storage.bucket,
+          Key: key,
+          Body: body,
+          ContentType: mime,
+        }),
+      );
+    },
+  });
+  const importChunks = createOpeningImportChunksRepository(sql);
+  const extractStudyActions = createExtractStudyActionsHandler({
+    listAuthorizedImportChunks: (scope, courseId, receiptIds) =>
+      importChunks.listAuthorizedImportChunks(scope, courseId, receiptIds),
+  });
+  const handlers = createHandlers(parse, { retest, remind, "build-course-knowledge": buildCourseKnowledge, "parse-media": parseMedia, "extract-study-actions": extractStudyActions });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
   const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const memory = createOpeningMemoryRepository(sql);
@@ -116,3 +153,7 @@ export async function main(): Promise<void> {
 
 const entry = process.argv[1] ?? "";
 if (entry.endsWith("index.ts") || entry.endsWith("index.js")) void main();
+
+export { createRetestCloseHandler } from "./jobs/retest-close";
+
+export { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";

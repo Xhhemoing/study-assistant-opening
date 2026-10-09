@@ -29,7 +29,6 @@ import {
   type MemoryCandidateDecision,
   type MemoryItem,
   type PlanDraft,
-  type PlannedBlock,
   type TaskItem,
   type TaskCreateInput,
   type TaskStatusUpdateInput,
@@ -47,7 +46,19 @@ import {
   reminderSchema,
   reminderEnqueueInputSchema,
   learningSummarySchema,
+  knowledgeSnapshotSchema,
+  actionDigestSchema,
+  actionCandidateSchema,
+  connectionViewSchema,
+  imapSetupInputSchema,
+  mediaSegmentsResponseSchema,
   type ReminderList,
+  type KnowledgeSnapshot,
+  type ActionDigest,
+  type ActionCandidate,
+  type ConnectionView,
+  type ImapSetupInput,
+  type MediaSegmentsResponse,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -132,12 +143,17 @@ const summaryListSchema = z.array(conversationSummarySchema);
 const turnListSchema = z.array(turnRecordSchema);
 const sourceListSchema = z.array(sourceRecordSchema);
 const memoryCardSchema = memoryItemSchema.extend({ why: z.array(z.string()), when: z.string() });
+const dailyDraftSkippedReasonSchema = z.enum(["accepted", "rejected", "no_settings"]);
 const todayPlanSchema = z.object({
   date: z.string(),
   acceptedVersion: z.number().int().nonnegative(),
   blocks: z.array(z.object({ taskId: z.string().uuid(), start: z.string(), end: z.string(), reason: z.string() })),
   hardBlocks: z.array(z.object({ start: z.string(), end: z.string(), kind: z.enum(["class", "sleep", "meal", "locked", "free"]) })),
+  dailyDraft: planDraftSchema.nullable().optional(),
+  dailyDraftSkippedReason: dailyDraftSkippedReasonSchema.nullable().optional(),
+  unplannedPendingCount: z.number().int().nonnegative().optional(),
 });
+export type TodayPlanRead = z.infer<typeof todayPlanSchema>;
 const taskListSchema = z.object({ tasks: z.array(taskItemSchema) });
 
 /** Local opening staging PUT path (T03 sources HTTP). */
@@ -356,16 +372,44 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       const body = await request(path, { method: "POST", body: JSON.stringify({ candidateRef: ref, clientKey }) }, fetchImpl);
       return z.object({ id: z.string().uuid(), status: z.literal("discarded") }).parse(body);
     },
-    async listTutorActions(input: { courseId: string; skillLabel: string; sessionId?: string | null; currentPage?: number | null }): Promise<ThinTutorActionView[]> {
+    async listTutorActions(input: {
+      courseId: string;
+      skillLabel: string;
+      sessionId?: string | null;
+      currentPage?: number | null;
+      nodeId?: string | null;
+      sourceIds?: string[];
+    }): Promise<ThinTutorActionView[]> {
       const params = new URLSearchParams({ skillLabel: input.skillLabel });
       if (input.sessionId) params.set("sessionId", input.sessionId);
       if (input.currentPage != null) params.set("currentPage", String(input.currentPage));
+      if (input.nodeId) params.set("nodeId", input.nodeId);
+      if (input.sourceIds?.length) params.set("sourceIds", input.sourceIds.join(","));
       const body = await request(
         `/api/opening/courses/${input.courseId}/tutor-actions?${params}`,
         { method: "GET" },
         fetchImpl,
       );
       return z.object({ actions: z.array(thinTutorActionSchema) }).parse(body).actions;
+    },
+
+    async getCourseKnowledge(courseId: string): Promise<{
+      version: number;
+      snapshot: KnowledgeSnapshot;
+      sourceVersions: Record<string, number>;
+    }> {
+      const body = await request(
+        `/api/opening/courses/${courseId}/knowledge`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return z
+        .object({
+          version: z.number().int().nonnegative(),
+          snapshot: knowledgeSnapshotSchema,
+          sourceVersions: z.record(z.string(), z.number().int().nonnegative()),
+        })
+        .parse(body);
     },
 
     async getLearning(courseId: string) {
@@ -386,9 +430,9 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return reminderListSchema.parse(body);
     },
 
-    async getToday(date: string) {
+    async getToday(date: string): Promise<TodayPlanRead> {
       const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}`, { method: "GET" }, fetchImpl);
-      return todayPlanSchema.parse(body) as { date: string; acceptedVersion: number; blocks: PlannedBlock[]; hardBlocks: Array<{ start: string; end: string; kind: "class" | "sleep" | "meal" | "locked" | "free" }> };
+      return todayPlanSchema.parse(body);
     },
 
     async listTasks(): Promise<{ tasks: TaskItem[] }> {
@@ -409,6 +453,109 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
     async rejectPlan(draftId: string): Promise<PlanDraft> {
       const body = await request(`/api/opening/plans/${draftId}/reject`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
       return planDraftSchema.parse(body);
+    },
+
+    async getActionDigest(): Promise<ActionDigest> {
+      const body = await request("/api/opening/action-digest", { method: "GET" }, fetchImpl);
+      return actionDigestSchema.parse(body);
+    },
+
+    async decideActionDigest(input: {
+      decision: "accept" | "reject";
+      candidateId: string;
+      clientKey: string;
+    }): Promise<{ candidate: ActionCandidate; digest: ActionDigest }> {
+      const body = await request(
+        "/api/opening/action-digest",
+        { method: "POST", body: JSON.stringify(input) },
+        fetchImpl,
+      );
+      return z
+        .object({
+          candidate: actionCandidateSchema,
+          digest: actionDigestSchema,
+        })
+        .strict()
+        .parse(body);
+    },
+
+    async listConnections(): Promise<ConnectionView[]> {
+      const body = await request("/api/opening/connections", { method: "GET" }, fetchImpl);
+      const rows = Array.isArray(body)
+        ? body
+        : Array.isArray((body as { connections?: unknown } | null)?.connections)
+          ? (body as { connections: unknown[] }).connections
+          : [];
+      return z.array(connectionViewSchema).parse(rows);
+    },
+
+    async createImapConnection(input: ImapSetupInput): Promise<ConnectionView> {
+      const payload = imapSetupInputSchema.parse(input);
+      const body = await request(
+        "/api/opening/connections/imap",
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return connectionViewSchema.parse(body);
+    },
+
+    async putConnectionCredential(
+      connectionId: string,
+      input: { secret: string; clientKey: string },
+    ): Promise<void> {
+      await request(
+        `/api/opening/connections/${connectionId}/credential`,
+        { method: "PUT", body: JSON.stringify(input) },
+        fetchImpl,
+      );
+    },
+
+    async syncConnection(
+      connectionId: string,
+      input: { clientKey: string },
+    ): Promise<unknown> {
+      return request(
+        `/api/opening/connections/${connectionId}/sync`,
+        { method: "POST", body: JSON.stringify(input) },
+        fetchImpl,
+      );
+    },
+
+    async revokeConnection(
+      connectionId: string,
+      input: { expectedVersion: number; clientKey: string },
+    ): Promise<ConnectionView> {
+      const body = await request(
+        `/api/opening/connections/${connectionId}/revoke`,
+        { method: "POST", body: JSON.stringify(input) },
+        fetchImpl,
+      );
+      return connectionViewSchema.parse(body);
+    },
+
+    async importEmailManual(file: File): Promise<unknown> {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      const res = await fetchImpl("/api/opening/imports/email", { method: "POST", body: form });
+      const body = await parseJson(res);
+      if (!res.ok) {
+        const { message, code } = readError(body);
+        throw new OpeningApiError(
+          res.status,
+          message === "request failed" ? `request failed (${res.status})` : message,
+          code,
+        );
+      }
+      return body;
+    },
+
+    async getSourceSegments(sourceId: string): Promise<MediaSegmentsResponse> {
+      const body = await request(
+        `/api/opening/sources/${sourceId}/segments`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return mediaSegmentsResponseSchema.parse(body);
     },
   };
 }

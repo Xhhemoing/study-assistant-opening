@@ -111,3 +111,49 @@ describe("K02a tutor-policy", () => {
     expect(action.evidenceIds).toEqual([]);
   });
 });
+
+describe("K02 adaptive tutor-policy (nodeId path)", () => {
+  it("asks for independent transfer after assisted success", () => {
+    expect(
+      recommendTutorAction({
+        nodeId: "n",
+        hasCheckedIndependent: false,
+        hasAssistance: true,
+        retestDue: false,
+      }),
+    ).toBe("independent_variant");
+  });
+
+  it("prioritizes delayed retest when due", () => {
+    expect(
+      recommendTutorAction({
+        nodeId: "n",
+        hasCheckedIndependent: false,
+        hasAssistance: true,
+        retestDue: true,
+      }),
+    ).toBe("delayed_retest");
+  });
+
+  it("asks to clarify when there is no reliable evidence", () => {
+    expect(
+      recommendTutorAction({
+        nodeId: "n",
+        hasCheckedIndependent: false,
+        hasAssistance: false,
+        retestDue: false,
+      }),
+    ).toBe("clarify");
+  });
+
+  it("asks for a new independent context after checked independent evidence", () => {
+    expect(
+      recommendTutorAction({
+        nodeId: "n",
+        hasCheckedIndependent: true,
+        hasAssistance: false,
+        retestDue: false,
+      }),
+    ).toBe("independent_variant");
+  });
+});

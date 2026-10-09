@@ -14,6 +14,11 @@ export type DayPlanResult = {
 export type PlanDayOptions = {
   /** Inclusive end of the planning day. Retests with recommendedAt after this are skipped. */
   dayEnd?: string;
+  /**
+   * When set, schedule pending tasks in this order (unknown ids fall back to
+   * deadline/priority sort after preferred ones). Used by daily auto-draft carry-over.
+   */
+  preferredOrder?: readonly string[];
 };
 
 function deadline(task: TaskItem): number {
@@ -62,7 +67,21 @@ export function planDay(
     if (ids.has(task.id)) throw new Error(`duplicate task id: ${task.id}`);
     ids.add(task.id);
     return task;
-  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs)).sort(compareTasks);
+  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs));
+  const preferred = options.preferredOrder;
+  if (preferred && preferred.length) {
+    const rank = new Map(preferred.map((id, index) => [id, index]));
+    pending.sort((a, b) => {
+      const ra = rank.get(a.id);
+      const rb = rank.get(b.id);
+      if (ra !== undefined && rb !== undefined) return ra - rb;
+      if (ra !== undefined) return -1;
+      if (rb !== undefined) return 1;
+      return compareTasks(a, b);
+    });
+  } else {
+    pending.sort(compareTasks);
+  }
   const slots = availableTimeSlots(free).map((slot) => ({
     start: Date.parse(slot.start), end: Date.parse(slot.end),
   }));

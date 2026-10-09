@@ -1,0 +1,12 @@
+opening-restore: dry-run → ok=true code=DRY_RUN_OK
+  preview.allowed=true
+  preview.recordCounts={opening_sources:1}
+  plan.objectCount=1
+  plan.batches(non-empty)=opening_sources:1
+  guarantees: secretsRestored=false
+  guarantees: apiKeysRestored=false
+  guarantees: sessionsRestored=false
+  guarantees: pendingJobs=cancelled
+  mutated=false
+Exit 0 (dry-run plan only — not authorization to apply; no mutation).
+
