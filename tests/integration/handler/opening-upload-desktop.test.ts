@@ -104,7 +104,8 @@ describe("opening desktop upload handlers", () => {
 
     const completed = await completeUpload(request(`/api/opening/sources/${ticket.source.id}/complete`, "POST"), { params: Promise.resolve({ id: ticket.source.id }) });
     expect(completed.status).toBe(200);
-    expect((await completed.json() as { uploadState: string; parseState: string })).toMatchObject({ uploadState: "uploaded", parseState: "not_started" });
+    // completeWithParseJob sets queued + opens one parse job (asserted below).
+    expect((await completed.json() as { uploadState: string; parseState: string })).toMatchObject({ uploadState: "uploaded", parseState: "queued" });
 
     const refreshedList = await listSources(request("/api/opening/sources"));
     expect(refreshedList.status).toBe(200);
