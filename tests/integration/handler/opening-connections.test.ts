@@ -52,7 +52,15 @@ describe("connection handlers", () => {
     const response = await createDingtalk(req("POST", { label: "School notifications", requestedScopes: ["messages.read"], clientKey: randomUUID() }));
     expect(response.status).toBe(201); const c = await response.json();
     expect(c.allowedScopes).toEqual([]); expect(c.state).toBe("needs_authorization");
-    expect((await check(req("POST", { clientKey: randomUUID() }), context(c.id))).status).toBe(503);
+    // C03 durable local check: no remote probe; needs_authorization returns 200 with ok:false (not the old 503 stub).
+    const checkNeedsAuth = await check(req("POST", { clientKey: randomUUID() }), context(c.id));
+    expect(checkNeedsAuth.status).toBe(200);
+    expect(await checkNeedsAuth.json()).toMatchObject({
+      ok: false,
+      kind: "dingtalk",
+      status: "needs_authorization",
+      allowedScopes: [],
+    });
     const needsAuth = await sync(req("POST", { clientKey: randomUUID() }), context(c.id));
     expect(needsAuth.status).toBe(200);
     expect(await needsAuth.json()).toMatchObject({ status: "needs_authorization", imported: 0, skipped: 0, allowedScopes: [] });
