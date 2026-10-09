@@ -45,6 +45,39 @@ function endpointAllowed(baseUrl: string): boolean {
   return url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname));
 }
 
+/** Strip optional markdown code fences (```json ... ``` / ``` ... ```). */
+function stripMarkdownFences(raw: string): string {
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i);
+  return fenced ? fenced[1].trim() : trimmed;
+}
+
+/** Parse answer JSON; tolerate fences, prose wrappers, or degrade to plain text. */
+function parseAnswerContent(raw: string): unknown {
+  const stripped = stripMarkdownFences(raw);
+  const tryParse = (text: string): unknown | undefined => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+  };
+  const direct = tryParse(stripped);
+  if (direct !== undefined) return direct;
+  // Same pattern as build-course-knowledge: first `{` … last `}`.
+  const start = stripped.indexOf("{");
+  const end = stripped.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const extracted = tryParse(stripped.slice(start, end + 1));
+    if (extracted !== undefined) return extracted;
+  }
+  // GLM / non-strict models sometimes return prose only — still answer the turn.
+  if (stripped.length > 0) {
+    return { text: stripped, citedChunkIds: [], candidates: [] };
+  }
+  throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed answer JSON");
+}
+
 function parseOutput(body: unknown): ProviderOutput {
   const value = body as Record<string, unknown>;
   const choices = value?.choices;
@@ -58,12 +91,10 @@ function parseOutput(body: unknown): ProviderOutput {
   if (typeof messageValue.refusal === "string") {
     throw new OpeningProviderError("PROVIDER_REFUSAL", "provider refused the request");
   }
-  let content: unknown;
-  try {
-    content = JSON.parse(typeof messageValue.content === "string" ? messageValue.content : "");
-  } catch {
+  if (typeof messageValue.content !== "string") {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed answer JSON");
   }
+  const content = parseAnswerContent(messageValue.content);
   const answer = answerSchema.safeParse(content);
   if (!answer.success) {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid structured answer");

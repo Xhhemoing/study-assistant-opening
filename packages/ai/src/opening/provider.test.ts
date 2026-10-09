@@ -80,7 +80,6 @@ describe("opening provider", () => {
   });
 
   it.each([
-    "unstructured answer",
     JSON.stringify({ text: "answer", citedChunkIds: ["invented"], candidates: [] }),
     JSON.stringify({ text: "answer", citedChunkIds: [], candidates: [{ kind: "execute", command: "bad" }] }),
     JSON.stringify({ text: "answer", citedChunkIds: [], candidates: [], injected: true }),
@@ -90,6 +89,73 @@ describe("opening provider", () => {
       fetchImpl: vi.fn().mockResolvedValue(response({ choices: [{ message: { content } }] })),
     });
     await expect(provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+  });
+
+  const strictAnswer = { text: "GLM answer", citedChunkIds: [], candidates: [] as unknown[] };
+
+  it("parses strict JSON content unchanged", async () => {
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({
+        id: "req-strict",
+        choices: [{ message: { content: JSON.stringify(strictAnswer) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      })),
+    });
+    await expect(provider.complete(input)).resolves.toMatchObject({
+      text: "GLM answer", citedChunkIds: [], candidates: [], requestId: "req-strict",
+    });
+  });
+
+  it("strips markdown json fences around a valid answer object", async () => {
+    const fenced = "```json\n" + JSON.stringify(strictAnswer) + "\n```";
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({
+        choices: [{ message: { content: fenced } }],
+        usage: { prompt_tokens: 2, completion_tokens: 2 },
+      })),
+    });
+    await expect(provider.complete(input)).resolves.toMatchObject({ text: "GLM answer", citedChunkIds: [], candidates: [] });
+  });
+
+  it("extracts JSON object from glm-5.3 style prose prefix/suffix wrappers", async () => {
+    // Fixture mimicking Lant/glm-5.3 non-strict output seen in Hermes.
+    const wrapped = "好的，这是结构化回答：\n" + JSON.stringify(strictAnswer) + "\n希望对你有帮助。";
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({
+        choices: [{ message: { content: wrapped } }],
+        usage: { prompt_tokens: 4, completion_tokens: 3 },
+      })),
+    });
+    await expect(provider.complete(input)).resolves.toMatchObject({ text: "GLM answer", citedChunkIds: [], candidates: [] });
+  });
+
+  it("degrades non-empty plain text to a structured answer so the turn still replies", async () => {
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({
+        choices: [{ message: { content: "这是一段没有 JSON 的说明文字。" } }],
+        usage: { prompt_tokens: 5, completion_tokens: 8 },
+      })),
+    });
+    await expect(provider.complete(input)).resolves.toMatchObject({
+      text: "这是一段没有 JSON 的说明文字。",
+      citedChunkIds: [],
+      candidates: [],
+    });
+  });
+
+  it("still rejects empty content as malformed answer JSON", async () => {
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({ choices: [{ message: { content: "   " } }] })),
+    });
+    await expect(provider.complete(input)).rejects.toMatchObject({
+      code: "PROVIDER_RESPONSE",
+      message: "provider returned malformed answer JSON",
+    });
   });
 
   it("sends actual page images with source/page labels only when vision is explicitly enabled", async () => {
