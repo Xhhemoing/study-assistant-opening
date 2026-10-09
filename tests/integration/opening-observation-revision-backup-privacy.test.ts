@@ -52,7 +52,9 @@ it.each(["reference_source_id", "reference_check"] as const)(
     const chain = await seedAttemptChain(), referenceId = await chain.rows.source();
     await chain.rows.chunk(referenceId);
     await fixture.sql`UPDATE opening_learning_sessions SET source_ids=${[chain.f.sourceId, referenceId]} WHERE id=${chain.f.sessionId}`;
+    // DL6: replace carrying referenceCheck must keep the prior answer.
     const checked = await replace(chain.original.id, chain.original.id, {
+      answer: chain.original.answer,
       verdictSource: "reference_checked", referenceSourceId: referenceId,
       referenceCheck: { referenceSourceId: referenceId, method: "Compare every step", scope: "whole_answer" },
     });

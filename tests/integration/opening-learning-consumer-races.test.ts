@@ -61,9 +61,11 @@ it("rejects read-before-exclusion candidates at persistence, including unlinked 
   const before = await proposals(f.courseId);
   expect(before).toHaveLength(1);
   await fixture.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES (${fixture.scope.workspaceId},${f.sourceId})`;
+  const legacyId = randomUUID();
   expect(await repo.saveCandidates(fixture.scope, before)).toEqual([]);
-  expect(await repo.saveCandidates(fixture.scope, [{ ...before[0]!, id: randomUUID(), evidenceObservationIds: undefined, evidenceRootIds: undefined }])).toEqual([]);
-  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId} AND kind='retest'`).toEqual([]);
+  expect(await repo.saveCandidates(fixture.scope, [{ ...before[0]!, id: legacyId, evidenceObservationIds: undefined, evidenceRootIds: undefined }])).toEqual([]);
+  // Observation insert enqueues kind=retest scan jobs; assert only that rejected candidates were not persisted.
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE id IN ${fixture.sql([before[0]!.id, legacyId])}`).toEqual([]);
 });
 
 it("rejects stale evidence whose excluded ancestor reference is absent from current candidate sources", async () => {
