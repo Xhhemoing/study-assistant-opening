@@ -15,7 +15,8 @@ export const PALETTE_COMMANDS = [
   { id: "goals", label: "学习目标", description: "管理目标与时间安排", href: "/learn/goals", kind: "page" },
   { id: "review", label: "复习卡片", description: "开始到期卡片复习", href: "/learn/review", kind: "page" },
   { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/search", kind: "page" },
-  { id: "settings", label: "设置", description: "工作区入口与学习偏好", href: "/settings", kind: "page" },
+  { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/settings", kind: "page" },
+  { id: "settings-advanced", label: "高级设置", description: "AI 模型、默认入口与诊断", href: "/settings/advanced", kind: "page" },
   { id: "export", label: "导出与备份", description: "下载内容并管理完整备份", href: "/settings/export", kind: "page" },
 ] as const;
 
