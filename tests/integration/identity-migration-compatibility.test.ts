@@ -214,6 +214,13 @@ describe("identity migration compatibility", () => {
       "0043_opening_model_providers.sql",
       "0044_opening_turn_strategy.sql",
       "0045_opening_imports.sql",
+      "0046_opening_task_client_key.sql",
+      "0047_opening_planning_settings.sql",
+      "0048_opening_knowledge.sql",
+      "0049_opening_skill_evidence.sql",
+      "0050_opening_parse_media_job.sql",
+      "0051_opening_extract_study_actions_job.sql",
+      "0052_opening_action_digest_decisions.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -297,6 +304,13 @@ describe("identity migration compatibility", () => {
       "0043_opening_model_providers.sql",
       "0044_opening_turn_strategy.sql",
       "0045_opening_imports.sql",
+      "0046_opening_task_client_key.sql",
+      "0047_opening_planning_settings.sql",
+      "0048_opening_knowledge.sql",
+      "0049_opening_skill_evidence.sql",
+      "0050_opening_parse_media_job.sql",
+      "0051_opening_extract_study_actions_job.sql",
+      "0052_opening_action_digest_decisions.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -635,6 +649,13 @@ describe("identity migration compatibility", () => {
       "0043_opening_model_providers.sql",
       "0044_opening_turn_strategy.sql",
       "0045_opening_imports.sql",
+      "0046_opening_task_client_key.sql",
+      "0047_opening_planning_settings.sql",
+      "0048_opening_knowledge.sql",
+      "0049_opening_skill_evidence.sql",
+      "0050_opening_parse_media_job.sql",
+      "0051_opening_extract_study_actions_job.sql",
+      "0052_opening_action_digest_decisions.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations
