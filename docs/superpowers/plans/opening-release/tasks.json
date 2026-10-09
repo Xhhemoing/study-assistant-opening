@@ -338,7 +338,13 @@
       ],
       "plan": "08-delivery.md",
       "status": "planned",
-      "evidence": []
+      "evidence": [
+        "../../evidence/2026-10-10-opening-release/q01-prep-understand.md",
+        "../../evidence/2026-10-10-opening-release/q01-prep-plan.md",
+        "../../evidence/2026-10-10-opening-release/q01-prep-coverage.md",
+        "../../evidence/2026-10-10-opening-release/q01-prep-red-skeleton.md",
+        "../../evidence/2026-10-10-opening-release/q01-prep-accepted.md"
+      ]
     },
     {
       "id": "Q02",
