@@ -5,7 +5,6 @@ import {
   createOpeningImportsRepository,
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
-  type OpeningStorage,
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
