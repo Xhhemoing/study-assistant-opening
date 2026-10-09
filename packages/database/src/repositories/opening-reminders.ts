@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import type { Reminder, ReminderEnqueueInput } from "@aistudy/contracts";
 import {
+  DEFAULT_WORKSPACE_TIME_ZONE,
   externalChannelConfigured,
   isRetestActivityDue,
   isQueueableDueTask,
   reminderDeliveryState,
   reminderIdempotencyKey,
+  resolveWorkspaceTimeZone,
   type ExternalReminderConfig,
   type ReminderChannel,
 } from "@aistudy/domain";
@@ -29,6 +31,8 @@ type ReminderPayload = {
   configured: boolean;
   suppressed?: boolean;
   explicitDue?: boolean;
+  /** Workspace IANA TZ at enqueue; quiet-hours share planning day boundary. */
+  timeZone?: string;
 };
 
 const EXTERNAL_KEY = "remind-external-config";
@@ -172,6 +176,7 @@ export function createOpeningReminderRepository(sql: Sql) {
       if (input.channel !== "in_app" && !configured) {
         throw new OpeningPlanError("VALIDATION", "external reminder channel is disabled");
       }
+      const workspaceTimeZone = await readPlanningTimeZone(sql, scope);
       const tasks = await sql`
         SELECT id, title, due_at, status, version FROM opening_tasks
         WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
@@ -210,6 +215,7 @@ export function createOpeningReminderRepository(sql: Sql) {
           outcome: null,
           clientKey: input.clientKey,
           configured,
+          timeZone: workspaceTimeZone,
           ...(explicit ? { explicitDue: true } : {}),
         };
         const key = reminderIdempotencyKey({
@@ -353,6 +359,21 @@ export function createOpeningReminderRepository(sql: Sql) {
       });
     },
   };
+}
+
+
+async function readPlanningTimeZone(sql: Sql | TransactionSql, scope: OpeningScope): Promise<string> {
+  const rows = await sql`
+    SELECT planning_settings FROM workspace_preferences WHERE workspace_id = ${scope.workspaceId}
+  `;
+  const raw = rows[0]?.planning_settings;
+  if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
+    const tz = (raw as Record<string, unknown>).timeZone;
+    if (typeof tz === "string" && tz.trim().length > 0) {
+      return resolveWorkspaceTimeZone(tz);
+    }
+  }
+  return DEFAULT_WORKSPACE_TIME_ZONE;
 }
 
 async function readConfig(sql: Sql | TransactionSql, scope: OpeningScope): Promise<ExternalReminderConfig | null> {

@@ -216,6 +216,43 @@ describe("remind job", () => {
     });
     expect(result).toMatchObject({ status: "due", suppressed: true });
   });
+
+  it("TZ01: payload.timeZone wins over resolveTimeZone for quiet-hours wall clock", async () => {
+    const record = vi.fn(async () => true);
+    const send = vi.fn(async (): Promise<ReminderSendResult> => ({ receiptId: "unexpected" }));
+    // 2026-09-14T15:30Z = 23:30 Asia/Shanghai (in 22:00–07:00 quiet)
+    // same instant = 11:30 America/New_York (NOT in quiet)
+    const handler = createRemindHandler({
+      record,
+      send,
+      now: () => new Date("2026-09-14T15:30:00.000Z"),
+      externalConfig: async () => ({ ...liveConfig(), quietHours: { startMinute: 22 * 60, endMinute: 7 * 60 } }),
+      resolveTimeZone: async () => "America/New_York",
+    });
+    expect(await handler(job, payload({ timeZone: "Asia/Shanghai" }))).toMatchObject({
+      status: "due",
+      outcome: "quiet",
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledWith(job.id, expect.objectContaining({ outcome: "quiet" }));
+  });
+
+  it("TZ01: resolveTimeZone supplies workspace TZ when payload omits timeZone", async () => {
+    const record = vi.fn(async () => true);
+    const send = vi.fn(async (): Promise<ReminderSendResult> => ({ receiptId: "unexpected" }));
+    const resolveTimeZone = vi.fn(async () => "Asia/Shanghai");
+    const handler = createRemindHandler({
+      record,
+      send,
+      now: () => new Date("2026-09-14T15:30:00.000Z"),
+      externalConfig: async () => ({ ...liveConfig(), quietHours: { startMinute: 22 * 60, endMinute: 7 * 60 } }),
+      resolveTimeZone,
+    });
+    expect(await handler(job, payload())).toMatchObject({ status: "due", outcome: "quiet" });
+    expect(resolveTimeZone).toHaveBeenCalledWith(job);
+    expect(send).not.toHaveBeenCalled();
+  });
+
 });
 
 it("preserves an acknowledged provider receipt when a replay is no longer current", async () => {

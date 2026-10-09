@@ -1,8 +1,10 @@
 import type { OpeningJobRecord } from "@aistudy/database";
 import {
+  DEFAULT_WORKSPACE_TIME_ZONE,
   externalChannelConfigured,
   isWithinQuietHours,
   reminderDeliveryState,
+  resolveWorkspaceTimeZone,
   type ExternalReminderConfig,
   type QuietHours,
   type ReminderChannel,
@@ -25,6 +27,8 @@ export type RemindPayload = {
   receiptId: string | null;
   outcome: "acknowledged" | "rejected" | "unknown" | "quiet" | "rate_limited" | null;
   configured: boolean;
+  /** Workspace IANA TZ stamped at enqueue (quiet-hours / local day). */
+  timeZone?: string;
 };
 
 export type RemindRecord = {
@@ -40,7 +44,13 @@ export type RemindHandlerDeps = {
   send(input: ReminderSendInput, signal: AbortSignal): Promise<ReminderSendResult>;
   now?: () => Date;
   quietHours?: () => QuietHours | null;
+  /** Legacy static fallback when payload/resolveTimeZone omit TZ. */
   timeZone?: () => string;
+  /**
+   * Live workspace IANA TZ (planning_settings). Used when payload.timeZone
+   * is absent (older jobs). Prefer payload stamp set at enqueue.
+   */
+  resolveTimeZone?: (job: OpeningJobRecord) => string | Promise<string>;
   recipientId?: () => string | null;
   externalConfig?: (job: OpeningJobRecord) => ExternalReminderConfig | null | Promise<ExternalReminderConfig | null>;
   isCurrent?: (jobId: string, now: Date) => Promise<boolean>;
@@ -85,7 +95,7 @@ export function createRemindHandler(deps: RemindHandlerDeps) {
     }
     const quiet = liveConfig?.quietHours ?? null;
     const now = deps.now?.() ?? new Date();
-    const timeZone = deps.timeZone?.() ?? "Asia/Shanghai";
+    const timeZone = await resolveRemindTimeZone(deps, job, body);
     if (isWithinQuietHours(now, quiet, timeZone)) {
       await deps.record(job.id, { receiptId: null, outcome: "quiet", state: "queued",
         availableAt: nextQuietCheck(now, quiet!, timeZone) });
@@ -114,6 +124,24 @@ export function createRemindHandler(deps: RemindHandlerDeps) {
       channel: body.channel,
     };
   };
+}
+
+async function resolveRemindTimeZone(
+  deps: RemindHandlerDeps,
+  job: OpeningJobRecord,
+  body: RemindPayload,
+): Promise<string> {
+  // Priority: payload stamp (enqueue) > live planning TZ > legacy deps.timeZone > default.
+  if (typeof body.timeZone === "string" && body.timeZone.trim().length > 0) {
+    return resolveWorkspaceTimeZone(body.timeZone);
+  }
+  if (deps.resolveTimeZone) {
+    return resolveWorkspaceTimeZone(await deps.resolveTimeZone(job));
+  }
+  if (deps.timeZone) {
+    return resolveWorkspaceTimeZone(deps.timeZone());
+  }
+  return DEFAULT_WORKSPACE_TIME_ZONE;
 }
 
 function nextQuietCheck(now: Date, quiet: QuietHours, timeZone: string): string {

@@ -852,12 +852,15 @@
         "DL7"
       ],
       "plan": "15-research-hardening.md",
-      "status": "active",
+      "status": "verified",
       "evidence": [
         "../../evidence/2026-10-09-opening-release/tz01-day-boundary-plan.md",
         "../../evidence/2026-10-09-opening-release/tz01-day-boundary-accept.md",
         "../../evidence/2026-10-09-opening-release/tz01-ai-budget-local-day.md",
-        "../../evidence/2026-10-10-opening-release/tz01-ai-budget-local-day-accept.md"
+        "../../evidence/2026-10-10-opening-release/tz01-ai-budget-local-day-accept.md",
+        "../../evidence/2026-10-10-opening-release/tz01-data-gaps-closeout.md",
+        "../../evidence/2026-10-10-opening-release/tz01-data-gaps-closeout-accept.md",
+        "../../evidence/2026-10-10-opening-release/tz01-verified.md"
       ]
     }
   ]

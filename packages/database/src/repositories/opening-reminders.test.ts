@@ -64,6 +64,9 @@ function fixture(options: { linked?: boolean; status?: string; version?: number;
       row.privacy_epoch = values[2];
       return [row];
     }
+    if (query.includes("planning_settings FROM workspace_preferences")) {
+      return [{ planning_settings: { timeZone: "Asia/Shanghai" } }];
+    }
     if (query.includes("FROM opening_jobs")) return jobs;
     throw new Error(`Unexpected reminder SQL operation: ${query}`);
   };

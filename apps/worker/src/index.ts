@@ -1,8 +1,8 @@
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
-import { PLATFORM_NAME } from "@aistudy/domain";
+import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  readLatestStemPromptsBySkill, createSqlClient, OpeningS3 } from "@aistudy/database";
+  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3 } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
@@ -60,10 +60,19 @@ export async function main(): Promise<void> {
   });
   const reminders = createOpeningReminderRepository(sql);
   const feishu = createFeishuReminderAdapter({ credential: process.env.FEISHU_REMINDER_CREDENTIAL ?? null });
+  const planningSettings = createOpeningPlanningSettingsRepository(sql);
   const remind = createRemindHandler({
     record: (id, input) => reminders.recordAttempt(id, input),
     isCurrent: (id, at) => reminders.isCurrent(id, at),
     externalConfig: (job) => reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
+    // TZ01: live planning TZ for older jobs lacking payload.timeZone stamp.
+    resolveTimeZone: async (job) => {
+      const preference = await planningSettings.get({
+        workspaceId: job.workspaceId,
+        ownerUserId: job.ownerUserId,
+      });
+      return resolveWorkspaceTimeZone(preference.settings?.timeZone);
+    },
     send: (input, signal) => feishu.send(input, signal),
   });
   const knowledge = createOpeningKnowledgeRepository(sql);
@@ -99,6 +108,8 @@ export async function main(): Promise<void> {
   });
   const handlers = createHandlers(parse, { retest, remind, "build-course-knowledge": buildCourseKnowledge, "parse-media": parseMedia, "extract-study-actions": extractStudyActions });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
+  // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
+  // and counts completed spend via resolveBudgetLocalDay half-open bounds.
   const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({

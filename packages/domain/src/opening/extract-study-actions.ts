@@ -1,4 +1,5 @@
 import type { ActionCandidate } from "@aistudy/contracts";
+import { resolveLocalDayBounds } from "./local-day-bounds";
 
 /** Authorized import + course chunk text available to the extract worker. */
 export type ExtractableImportChunk = {
@@ -55,20 +56,11 @@ function localDateParts(instant: Date, timeZone: string): { y: number; m: number
   return { y: get("year"), m: get("month"), d: get("day") };
 }
 
-/** End-of-day UTC instant for a calendar day in the owner timezone. */
+/** Last inclusive instant of a local calendar day (TZ01: nextDayStart - 1ms). */
 export function endOfLocalDayIso(year: number, month: number, day: number, timeZone: string): string {
-  // Probe offsets around noon UTC equivalents for the wall date.
-  const wall = Date.UTC(year, month - 1, day, 23, 59, 59);
-  const offsets = [0, 8, 9, -5, -8, 1, 2, 5.5, 10, 12].map((h) => h * 3600_000);
-  const matches = offsets
-    .map((offset) => new Date(wall - offset))
-    .filter((date) => {
-      const p = localDateParts(date, timeZone);
-      return p.y === year && p.m === month && p.d === day;
-    });
-  if (matches[0]) return matches[0].toISOString();
-  // Fallback: treat as UTC end-of-day rather than inventing a sync-time due.
-  return new Date(Date.UTC(year, month - 1, day, 15, 59, 59)).toISOString();
+  const localDate = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const { nextDayStart } = resolveLocalDayBounds(localDate, timeZone);
+  return new Date(nextDayStart.getTime() - 1).toISOString();
 }
 
 /**
