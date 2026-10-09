@@ -17,7 +17,8 @@ test("switches guidance autonomy mode between free, advisory, and coach", async 
     expect(registered.status()).toBe(201);
 
     const page = await context.newPage();
-    await page.goto("/settings");
+    // Settings split: 计划自主权 / GuidanceModePicker lives on advanced settings.
+    await page.goto("/settings/advanced");
 
     const coach = page.locator('input[name="guidance-mode"][value="coach"]');
     const free = page.locator('input[name="guidance-mode"][value="free"]');
@@ -44,19 +45,22 @@ test("reserves and removes protected exploration time", async ({ browser, baseUR
     expect(registered.status()).toBe(201);
 
     const page = await context.newPage();
-    await page.goto("/settings");
+    await page.goto("/settings/advanced");
 
-    const start = page.getByLabel("开始");
-    const end = page.getByLabel("结束");
+    // Scope to protected-exploration so 「开始」/「结束」 never collide with timetable labels.
+    const exploration = page.locator('[aria-labelledby="protected-exploration-heading"]');
+    await expect(exploration).toBeVisible();
+    const start = exploration.getByLabel("开始");
+    const end = exploration.getByLabel("结束");
     await start.fill("18:30");
     await end.fill("19:15");
 
-    await page.getByRole("button", { name: "添加", exact: true }).click();
-    await expect(page.getByText("18:30 – 19:15")).toBeVisible();
+    await exploration.getByRole("button", { name: "添加", exact: true }).click();
+    await expect(exploration.getByText("18:30 – 19:15")).toBeVisible();
 
-    await page.getByRole("button", { name: "移除 18:30–19:15 预留时段" }).click();
-    await expect(page.getByText("18:30 – 19:15")).toHaveCount(0);
-    await expect(page.getByText("尚未预留任何探索时段。")).toBeVisible();
+    await exploration.getByRole("button", { name: "移除 18:30–19:15 预留时段" }).click();
+    await expect(exploration.getByText("18:30 – 19:15")).toHaveCount(0);
+    await expect(exploration.getByText("尚未预留任何探索时段。")).toBeVisible();
   } finally {
     await context.close();
   }
