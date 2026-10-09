@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Opening release evidence board (RP7)</title>
+  <style>
+    :root {
+      --bg: #fafafa; --card: #fff; --ink: #18181b; --muted: #71717a;
+      --line: #e4e4e7; --pass: #166534; --pass-bg: #dcfce7;
+      --fail: #991b1b; --fail-bg: #fee2e2; --stale: #92400e; --stale-bg: #fef3c7;
+      --unknown: #3f3f46; --unknown-bg: #f4f4f5; --pending: #1e40af; --pending-bg: #dbeafe;
+      --warn: #9a3412; --warn-bg: #ffedd5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--ink); background: var(--bg);
+    }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 .35rem; }
+    .sub { color: var(--muted); font-size: .85rem; margin: 0 0 1rem; }
+    .banner {
+      background: var(--warn-bg); color: var(--warn); border: 1px solid #fdba74;
+      border-radius: .75rem; padding: .75rem 1rem; margin-bottom: 1rem; font-size: .85rem;
+    }
+    .meta {
+      display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom: 1.25rem;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: .75rem;
+      padding: .85rem 1rem;
+    }
+    .card dt { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+    .card dd { margin: .2rem 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; word-break: break-all; }
+    .card a { color: #047857; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .75rem; }
+    .toolbar label { font-size: .8rem; color: var(--muted); }
+    select, button {
+      font: inherit; border: 1px solid var(--line); background: #fff; border-radius: .5rem;
+      padding: .35rem .6rem; min-height: 2rem;
+    }
+    button { cursor: pointer; }
+    button:hover { background: #f4f4f5; }
+    .source { font-size: .75rem; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: .75rem; overflow: hidden; }
+    th, td { text-align: left; padding: .65rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; font-size: .82rem; }
+    th { background: #f4f4f5; font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+    tr:last-child td { border-bottom: 0; }
+    .pill {
+      display: inline-block; border-radius: 999px; padding: .1rem .55rem; font-size: .72rem; font-weight: 600;
+    }
+    .pass { background: var(--pass-bg); color: var(--pass); }
+    .fail { background: var(--fail-bg); color: var(--fail); }
+    .stale { background: var(--stale-bg); color: var(--stale); }
+    .unknown { background: var(--unknown-bg); color: var(--unknown); }
+    .pending { background: var(--pending-bg); color: var(--pending); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
+    .muted { color: var(--muted); }
+    footer { margin-top: 1.25rem; font-size: .75rem; color: var(--muted); }
+    .err { color: var(--fail); font-size: .85rem; margin-bottom: .75rem; }
+    @media (max-width: 720px) {
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); padding: .5rem 0; }
+      td { border: 0; padding: .2rem .75rem; }
+      td::before { content: attr(data-label); display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Opening release evidence board</h1>
+    <p class="sub">RP7 只读看板 · 消费 <code>release-evidence-index.json</code> · 非生产切流 · 不改 <code>apps/web</code></p>
+    <div class="banner" role="note">
+      本索引 <strong>不等于</strong> 生产切流，也不等于 Q03 verified。tip 以外的历史绿灯标为 <strong>stale</strong>，需在 tip 上重跑。凭据不得进入索引。
+    </div>
+    <div id="error" class="err" hidden></div>
+    <div class="meta" id="meta"></div>
+    <div class="toolbar">
+      <label for="filter">结果筛选</label>
+      <select id="filter" aria-label="按结果筛选">
+        <option value="all">全部</option>
+        <option value="pass">pass</option>
+        <option value="fail">fail</option>
+        <option value="stale">stale</option>
+        <option value="pending">pending</option>
+        <option value="unknown">unknown</option>
+      </select>
+      <button type="button" id="reload">重新读取 JSON</button>
+      <span class="source" id="source"></span>
+    </div>
+    <div class="card" style="padding:0; overflow:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>checkName</th>
+            <th>result</th>
+            <th>commitSha</th>
+            <th>environment</th>
+            <th>runId</th>
+            <th>completedAt</th>
+            <th>artifact</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <footer>
+      打开方式：在本目录执行 <code>python3 -m http.server 8765</code> 后访问
+      <code>http://127.0.0.1:8765/release-evidence-board.html</code>。
+      <code>file://</code> 下若 fetch 失败会回退到页面内嵌快照（打开时冻结，需刷新前重新生成页面或用本地 HTTP）。
+      Companion：<a href="./release-evidence-index.md">release-evidence-index.md</a> ·
+      Plan：<a href="./rp7-plan.md">rp7-plan.md</a>
+    </footer>
+  </main>
+  <script id="embedded-index" type="application/json">{"tipSha":"05217a5ceaec7dfe924e3c9783f39bd0db63da51","qualityUrl":"https://github.com/Xhhemoing/study-assistant-opening/actions/runs/37958795828","updatedAt":"2026-10-10T00:50:16+08:00","checks":[{"commitSha":"05217a5ceaec7dfe924e3c9783f39bd0db63da51","checkName":"gha-quality","runId":"37958795828","environment":"github-actions","completedAt":"2026-10-09T16:44:33Z","result":"pass","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/rp5-gha-05217a5-quality-green.md"},{"commitSha":"05217a5ceaec7dfe924e3c9783f39bd0db63da51","checkName":"rp5-ci-gate","runId":"37958795828","environment":"github-actions","completedAt":"2026-10-09T16:44:33Z","result":"pass","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/rp5-gha-05217a5-quality-green.md"},{"commitSha":"030662f71d7d0df85376e165efcaa31c33293e6d","checkName":"q03-packaging-gates","runId":null,"environment":"local","completedAt":"2026-10-09T11:36:00Z","result":"stale","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/q03-packaging-gates-run.md"},{"commitSha":"8a22308666701bbc2ebfac01bc6aa4a2f81d4aa1","checkName":"q03-cli-live-restore","runId":null,"environment":"minio-live","completedAt":"2026-10-09T14:53:00Z","result":"stale","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/q03-cli-live-restore-accept.md"},{"commitSha":"fa3cc2664d6fdd8b4f12b17faba04ce640bebe0b","checkName":"q03-live-minio-object-restore","runId":null,"environment":"minio-live","completedAt":"2026-10-09T13:41:00Z","result":"stale","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/q03-live-minio-object-restore-accept.md"},{"commitSha":"030662f71d7d0df85376e165efcaa31c33293e6d","checkName":"q03-restore-apply","runId":null,"environment":"local","completedAt":"2026-10-09T13:12:00Z","result":"stale","artifact":"docs/superpowers/evidence/2026-10-09-opening-release/q03-restore-apply-accept.md"},{"commitSha":null,"checkName":"q01-user-acceptance","runId":null,"environment":"manual","completedAt":null,"result":"unknown","artifact":"planned"},{"commitSha":null,"checkName":"q02","runId":null,"environment":"manual","completedAt":null,"result":"unknown","artifact":"planned"},{"commitSha":null,"checkName":"q04","runId":null,"environment":"manual","completedAt":null,"result":"unknown","artifact":"planned"}]}</script>
+  <script>
+    const RESULT_CLASS = { pass: "pass", fail: "fail", stale: "stale", pending: "pending", unknown: "unknown" };
+    let indexData = null;
+
+    function shortSha(sha) {
+      if (!sha) return "—";
+      return sha.length > 7 ? sha.slice(0, 7) : sha;
+    }
+
+    function artifactHref(artifact) {
+      if (!artifact || artifact === "planned") return null;
+      if (/^https?:\/\//i.test(artifact)) return artifact;
+      // Prefer relative link from this evidence folder when path is repo-relative.
+      const prefix = "docs/superpowers/evidence/";
+      if (artifact.startsWith(prefix)) {
+        const rest = artifact.slice(prefix.length); // e.g. 2026-10-09-.../file.md
+        const parts = rest.split("/");
+        if (parts[0] === "2026-10-10-opening-release") return "./" + parts.slice(1).join("/");
+        return "../" + rest;
+      }
+      return artifact;
+    }
+
+    function renderMeta(data) {
+      const tipMatchPass = (data.checks || []).filter(c => c.result === "pass" && c.commitSha === data.tipSha).length;
+      const stale = (data.checks || []).filter(c => c.result === "stale").length;
+      const unknown = (data.checks || []).filter(c => c.result === "unknown" || c.result === "pending").length;
+      document.getElementById("meta").innerHTML = `
+        <div class="card"><dl><dt>tipSha</dt><dd>${data.tipSha || "—"}</dd></dl></div>
+        <div class="card"><dl><dt>qualityUrl</dt><dd>${data.qualityUrl ? `<a href="${data.qualityUrl}" target="_blank" rel="noopener">${data.qualityUrl}</a>` : "—"}</dd></dl></div>
+        <div class="card"><dl><dt>updatedAt</dt><dd>${data.updatedAt || "—"}</dd></dl></div>
+        <div class="card"><dl><dt>summary</dt><dd>tip-bound pass ${tipMatchPass} · stale ${stale} · unknown/pending ${unknown} · total ${(data.checks || []).length}</dd></dl></div>
+      `;
+    }
+
+    function renderRows(data, filter) {
+      const tbody = document.getElementById("rows");
+      const checks = (data.checks || []).filter(c => filter === "all" || c.result === filter);
+      if (!checks.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="muted">没有匹配的检查行。</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = checks.map(c => {
+        const cls = RESULT_CLASS[c.result] || "unknown";
+        const href = artifactHref(c.artifact);
+        const art = !c.artifact ? "—" : href
+          ? `<a href="${href}">${c.artifact}</a>`
+          : `<span class="muted">${c.artifact}</span>`;
+        const tipMismatch = c.commitSha && data.tipSha && c.commitSha !== data.tipSha
+          ? ` <span class="muted">(≠ tip)</span>` : "";
+        return `<tr>
+          <td data-label="checkName"><span class="mono">${c.checkName || "—"}</span></td>
+          <td data-label="result"><span class="pill ${cls}">${c.result || "unknown"}</span></td>
+          <td data-label="commitSha"><span class="mono" title="${c.commitSha || ""}">${shortSha(c.commitSha)}${tipMismatch}</span></td>
+          <td data-label="environment">${c.environment || "—"}</td>
+          <td data-label="runId"><span class="mono">${c.runId == null ? "—" : c.runId}</span></td>
+          <td data-label="completedAt"><span class="mono">${c.completedAt || "—"}</span></td>
+          <td data-label="artifact">${art}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function paint(data, sourceLabel) {
+      indexData = data;
+      document.getElementById("error").hidden = true;
+      document.getElementById("source").textContent = "数据来源：" + sourceLabel;
+      renderMeta(data);
+      renderRows(data, document.getElementById("filter").value);
+    }
+
+    async function load() {
+      const err = document.getElementById("error");
+      try {
+        const res = await fetch("./release-evidence-index.json", { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        paint(data, "release-evidence-index.json (live fetch)");
+      } catch (e) {
+        try {
+          const embedded = JSON.parse(document.getElementById("embedded-index").textContent);
+          paint(embedded, "页面内嵌快照（fetch 失败：file:// 或离线）");
+          err.hidden = false;
+          err.textContent = "无法 fetch JSON（" + (e && e.message ? e.message : e) + "），已显示内嵌快照。建议用本地 HTTP 打开以读最新文件。";
+        } catch (e2) {
+          err.hidden = false;
+          err.textContent = "无法加载证据索引：" + (e && e.message ? e.message : e);
+        }
+      }
+    }
+
+    document.getElementById("filter").addEventListener("change", () => {
+      if (indexData) renderRows(indexData, document.getElementById("filter").value);
+    });
+    document.getElementById("reload").addEventListener("click", () => void load());
+    void load();
+  </script>
+</body>
+</html>

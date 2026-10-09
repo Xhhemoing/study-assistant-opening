@@ -800,7 +800,11 @@
         "../../evidence/2026-10-10-opening-release/release-evidence-index.json",
         "../../evidence/2026-10-10-opening-release/release-evidence-index.md",
         "../../evidence/2026-10-10-opening-release/rp7-implement.md",
-        "../../evidence/2026-10-10-opening-release/rp7-accept.md"
+        "../../evidence/2026-10-10-opening-release/rp7-accept.md",
+        "../../evidence/2026-10-10-opening-release/release-evidence-board.html",
+        "../../evidence/2026-10-10-opening-release/rp7-experience-board.md",
+        "../../evidence/2026-10-10-opening-release/rp7-experience-board-accept.md",
+        "../../evidence/2026-10-10-opening-release/rp7-experience-board-data-accept.md"
       ]
     },
     {
@@ -810,9 +814,10 @@
         "DL3"
       ],
       "plan": "15-research-hardening.md",
-      "status": "planned",
+      "status": "active",
       "evidence": [
-        "../../evidence/2026-10-09-opening-release/dl11-day-planner-earliest-accept.md"
+        "../../evidence/2026-10-09-opening-release/dl11-day-planner-earliest-accept.md",
+        "../../evidence/2026-10-10-opening-release/dl11-plan-service-planningnow-accept.md"
       ]
     },
     {

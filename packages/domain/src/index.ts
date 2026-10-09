@@ -45,7 +45,7 @@ export {
 } from "./planning/planner";
 export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
-export { planDay, type DayPlanResult } from "./opening/day-planner";
+export { planDay, type DayPlanResult, type PlanDayOptions } from "./opening/day-planner";
 export {
   expandWeekSessions,
   normalizeWeekSessions,

@@ -19,6 +19,8 @@ import {
   dailyDraftClientKey,
   deriveDayBlocks,
   planDay,
+  resolveLocalDayBounds,
+  type PlanDayOptions,
 } from "@aistudy/domain";
 import {
   createOpeningPlansRepository,
@@ -83,6 +85,48 @@ export type TodayPlanResult = {
   unplannedPendingCount?: number;
 };
 
+/** Workspace default when settings omit timeZone (aligned with planning-settings / DL7). */
+export const DEFAULT_PLANNING_TIME_ZONE = "Asia/Shanghai";
+
+export type BuildServerPlanDayOptionsArgs = {
+  date: string;
+  timeZone: string;
+  now: Date;
+  preferredOrder?: readonly string[];
+};
+
+/**
+ * DL11: clamp with planningNow only when `now` falls on the workspace local day
+ * being planned. Past/future dates omit planningNow so historical proposes and
+ * tests keep slot.start as the floor (domain still applies retest recommendedAt).
+ * TZ01: prefer localDate+timeZone over naked UTC dayEnd.
+ */
+export function resolvePlanningNowForLocalDay(
+  date: string,
+  timeZone: string,
+  now: Date,
+): string | undefined {
+  const { dayStart, nextDayStart } = resolveLocalDayBounds(date, timeZone);
+  const t = now.getTime();
+  if (t < dayStart.getTime() || t >= nextDayStart.getTime()) return undefined;
+  return now.toISOString();
+}
+
+export function buildServerPlanDayOptions(args: BuildServerPlanDayOptionsArgs): PlanDayOptions {
+  const options: PlanDayOptions = {
+    localDate: args.date,
+    timeZone: args.timeZone,
+  };
+  const planningNow = resolvePlanningNowForLocalDay(args.date, args.timeZone, args.now);
+  if (planningNow !== undefined) {
+    options.planningNow = planningNow;
+  }
+  if (args.preferredOrder?.length) {
+    options.preferredOrder = args.preferredOrder;
+  }
+  return options;
+}
+
 function applyDraftReasons(
   blocks: PlannedBlock[],
   reasons: Record<string, { code: string; label: string }>,
@@ -102,8 +146,14 @@ function countUnplannedPending(tasks: TaskItem[], acceptedBlocks: PlannedBlock[]
   return tasks.filter((t) => t.status === "pending" && !planned.has(t.id)).length;
 }
 
-export function createOpeningPlanService(sql: Sql) {
+export type OpeningPlanServiceOptions = {
+  /** Test seam for DL11 planningNow; production uses wall clock. */
+  now?: () => Date;
+};
+
+export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanServiceOptions = {}) {
   const repo: OpeningPlansRepository = createOpeningPlansRepository(sql);
+  const clock = () => serviceOptions.now?.() ?? new Date();
 
   async function resolveFreeBlocks(scope: Scope, date: string): Promise<TimeBlock[] | null> {
     const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
@@ -135,7 +185,7 @@ export function createOpeningPlanService(sql: Sql) {
           return { kind: "skip", reason: "no_settings" };
         }
         const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
-        const timeZone = preference.settings?.timeZone ?? "Asia/Shanghai";
+        const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
         const tasks = await repo.listTasks(scope);
         const yesterday = addLocalDays(date, -1);
         const yesterdayState = await repo.getToday(scope, yesterday);
@@ -145,12 +195,13 @@ export function createOpeningPlanService(sql: Sql) {
           // Local-day filter is applied again inside buildDailyDraftInput.
           return true;
         });
+        const now = clock();
         const { orderedTaskIds, reasons } = buildDailyDraftInput({
           tasks,
           yesterdayAccepted,
           dueRetests,
           freeBlocks,
-          now: new Date(),
+          now,
           timeZone,
           date,
         });
@@ -158,10 +209,16 @@ export function createOpeningPlanService(sql: Sql) {
         const orderedTasks = orderedTaskIds
           .map((id) => byId.get(id))
           .filter((t): t is TaskItem => Boolean(t));
-        const planned = planDay(orderedTasks, freeBlocks, {
-          dayEnd: `${date}T23:59:59.999Z`,
-          preferredOrder: orderedTaskIds,
-        });
+        const planned = planDay(
+          orderedTasks,
+          freeBlocks,
+          buildServerPlanDayOptions({
+            date,
+            timeZone,
+            now,
+            preferredOrder: orderedTaskIds,
+          }),
+        );
         const blocks = applyDraftReasons(planned.blocks, reasons);
         return {
           kind: "propose",
@@ -241,11 +298,12 @@ export function createOpeningPlanService(sql: Sql) {
     async proposePlan(scope: Scope, raw: unknown): Promise<PlanDraft> {
       const body = proposeBodySchema.parse(raw);
       const tasks = await repo.listTasks(scope);
+      const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
+      const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];
       if (body.free !== undefined) {
         freeBlocks = body.free as TimeBlock[];
       } else {
-        const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
         if (!preference.saved || preference.invalidStoredSettings || preference.settings == null) {
           throw new OpeningPlanError(
             "VALIDATION",
@@ -261,7 +319,11 @@ export function createOpeningPlanService(sql: Sql) {
           throw new OpeningPlanError("VALIDATION", message);
         }
       }
-      const planned = planDay(tasks, freeBlocks, { dayEnd: `${body.date}T23:59:59.999Z` });
+      const planned = planDay(
+        tasks,
+        freeBlocks,
+        buildServerPlanDayOptions({ date: body.date, timeZone, now: clock() }),
+      );
       await repo.upsertHardBlocks(scope, body.date, freeBlocks);
       try {
         return await repo.proposePlan(scope, {
@@ -290,11 +352,12 @@ export function createOpeningPlanService(sql: Sql) {
       if (tasks.length === 0) {
         throw new OpeningPlanError("VALIDATION", "delta taskIds did not match any owned tasks");
       }
+      const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
+      const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];
       if (body.free !== undefined) {
         freeBlocks = body.free as TimeBlock[];
       } else {
-        const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
         if (!preference.saved || preference.invalidStoredSettings || preference.settings == null) {
           throw new OpeningPlanError(
             "VALIDATION",
@@ -310,10 +373,16 @@ export function createOpeningPlanService(sql: Sql) {
           throw new OpeningPlanError("VALIDATION", message);
         }
       }
-      const planned = planDay(tasks, freeBlocks, {
-        dayEnd: `${body.date}T23:59:59.999Z`,
-        preferredOrder: body.taskIds,
-      });
+      const planned = planDay(
+        tasks,
+        freeBlocks,
+        buildServerPlanDayOptions({
+          date: body.date,
+          timeZone,
+          now: clock(),
+          preferredOrder: body.taskIds,
+        }),
+      );
       await repo.upsertHardBlocks(scope, body.date, freeBlocks);
       try {
         return await repo.proposePlan(scope, {
