@@ -1,7 +1,7 @@
 {
-  "tipSha": "05217a5ceaec7dfe924e3c9783f39bd0db63da51",
+  "tipSha": "63a4737b6e0000c70733aa269ba02a5e692fbabf",
   "qualityUrl": "https://github.com/Xhhemoing/study-assistant-opening/actions/runs/37958795828",
-  "updatedAt": "2026-10-10T00:50:16+08:00",
+  "updatedAt": "2026-10-10T07:44:02+08:00",
   "checks": [
     {
       "commitSha": "05217a5ceaec7dfe924e3c9783f39bd0db63da51",
@@ -9,7 +9,7 @@
       "runId": "37958795828",
       "environment": "github-actions",
       "completedAt": "2026-10-09T16:44:33Z",
-      "result": "pass",
+      "result": "stale",
       "artifact": "docs/superpowers/evidence/2026-10-09-opening-release/rp5-gha-05217a5-quality-green.md"
     },
     {
@@ -18,8 +18,26 @@
       "runId": "37958795828",
       "environment": "github-actions",
       "completedAt": "2026-10-09T16:44:33Z",
-      "result": "pass",
+      "result": "stale",
       "artifact": "docs/superpowers/evidence/2026-10-09-opening-release/rp5-gha-05217a5-quality-green.md"
+    },
+    {
+      "commitSha": "63a4737b6e0000c70733aa269ba02a5e692fbabf",
+      "checkName": "tz01",
+      "runId": null,
+      "environment": "local",
+      "completedAt": "2026-10-10T01:11:23+08:00",
+      "result": "pass",
+      "artifact": "docs/superpowers/evidence/2026-10-10-opening-release/tz01-verified.md"
+    },
+    {
+      "commitSha": "1d5c69edad847e7747097487e51966b624b2714f",
+      "checkName": "dl11",
+      "runId": null,
+      "environment": "local",
+      "completedAt": "2026-10-10T01:01:54+08:00",
+      "result": "stale",
+      "artifact": "docs/superpowers/evidence/2026-10-10-opening-release/dl11-verified.md"
     },
     {
       "commitSha": "030662f71d7d0df85376e165efcaa31c33293e6d",

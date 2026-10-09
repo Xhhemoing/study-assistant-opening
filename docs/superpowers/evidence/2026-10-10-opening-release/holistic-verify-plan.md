@@ -221,3 +221,9 @@ Do not rewrite board markup unless refreshing JSON+MD together.
 ## READY_FOR_PM_REVIEW
 
 Holistic Understand+Plan 已就绪，供 Paula/PM 评审。本 agent **不** IMPLEMENT、**不**改 tasks.json、**不** redeploy hermes、**不** commit/push。
+
+---
+
+## Opt A/B/G implement (follow-up)
+
+**2026-10-10 ~07:44 CST:** Paula-authorized slices **A+B+G** docs landed — see [`holistic-opt-abg-implement.md`](./holistic-opt-abg-implement.md). Pending Data Accept; no commit/push this pass.
