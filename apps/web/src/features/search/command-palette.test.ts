@@ -26,8 +26,10 @@ describe("command palette accessibility", () => {
     expect(html).toContain('aria-controls="command-palette-options"');
     expect(html).toContain('role="listbox"');
     expect(html).toContain('id="command-option-new-note"');
-    expect(html).toContain('id="command-option-new-exploration"');
-    expect(html).toContain('id="command-option-new-goal"');
+    expect(html).toContain('id="command-option-today"');
+    expect(html).toContain('id="command-option-cards"');
+    expect(html).not.toContain('id="command-option-new-exploration"');
+    expect(html).not.toContain('id="command-option-new-goal"');
     expect(html.match(/role="option"/g)).toHaveLength(PALETTE_COMMANDS.length);
     expect(html).toContain('aria-label="关闭搜索"');
   });

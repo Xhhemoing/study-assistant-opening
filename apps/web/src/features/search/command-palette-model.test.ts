@@ -29,13 +29,34 @@ describe("command palette keyboard model", () => {
     expect(getNextPaletteIndex(1, "next", 0)).toBe(-1);
   });
 
-  it("keeps creation commands alongside searchable page navigation", () => {
+  it("keeps the Opening learning loop in the default palette and hides demoted entries", () => {
+    const ids = PALETTE_COMMANDS.map((command) => command.id);
+    expect(ids).toEqual(expect.arrayContaining([
+      "today",
+      "assistant",
+      "courses",
+      "cards",
+      "opening-review",
+      "connections",
+      "settings",
+    ]));
+    expect(ids).not.toContain("explore");
+    expect(ids).not.toContain("new-exploration");
+    expect(ids).not.toContain("marketplace");
+    expect(ids).not.toContain("exams");
+    expect(ids).not.toContain("new-goal");
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "command").map((command) => command.id)).toEqual([
       "new-note",
-      "new-exploration",
-      "new-goal",
     ]);
     expect(SEARCH_DEBOUNCE_MS).toBe(150);
-    expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining(["/opening/today", "/opening/assistant", "/learn", "/explore", "/library", "/opening/courses", "/opening/review", "/learn/goals", "/learn/exams", "/learn/marketplace", "/learn/review", "/search", "/settings", "/settings/export"]));
+    expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining([
+      "/opening/today",
+      "/opening/assistant",
+      "/opening/courses",
+      "/opening/cards",
+      "/opening/review",
+      "/opening/settings/connections",
+      "/settings",
+    ]));
   });
 });

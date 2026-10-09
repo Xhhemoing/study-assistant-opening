@@ -72,4 +72,15 @@ describe("Today learning context", () => {
     expect(html).not.toContain("上次学习");
     expect(html).not.toContain("可恢复 0 份材料");
   });
+
+  it("surfaces compact Opening loop links without inventing new product routes", () => {
+    const html = renderToStaticMarkup(createElement(TodayLearningContext));
+    expect(html).toContain('data-today-loop-links="true"');
+    expect(html).toContain('href="/opening/cards"');
+    expect(html).toContain('href="/opening/review"');
+    expect(html).toContain('href="/opening/settings/connections"');
+    expect(html).toContain('href="#action-digest"');
+    expect(html).toContain("课程知识 / 材料在课程页");
+    expect(html).toContain('href="/opening/courses"');
+  });
 });

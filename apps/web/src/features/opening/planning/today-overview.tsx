@@ -37,15 +37,25 @@ export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[
 
 export function TodayLearningContext({ item }: { item?: TodayResumeState["continueItem"] }) {
   const sourceCount = Object.keys(item?.sourceVersions ?? {}).length;
-  return <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-zinc-200 px-4 py-2 sm:px-5">
-    <div className="min-w-0 flex-1">
-      <p className="truncate text-xs text-zinc-700">{item ? `上次学习：${item.title}` : "从一个问题、一次练习或一篇笔记开始"}</p>
-      {item ? <p className="mt-1 text-[11px] text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}
-      {item?.manualSourceCount ? <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
+  const courseHref = item?.courseId ? `/opening/courses/${encodeURIComponent(item.courseId)}` : "/opening/courses";
+  return <div className="min-w-0 border-b border-zinc-200 px-4 py-2 sm:px-5">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs text-zinc-700">{item ? `上次学习：${item.title}` : "从一个问题、一次练习或一篇笔记开始"}</p>
+        {item ? <p className="mt-1 text-[11px] text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}
+        {item?.manualSourceCount ? <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
+      </div>
+      <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
+        <Link href={courseHref} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
+        <Link href="/library/new" className={ui.quiet}>写笔记</Link>
+      </nav>
     </div>
-    <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
-      <Link href={item?.courseId ? `/opening/courses/${encodeURIComponent(item.courseId)}` : "/opening/courses"} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
-      <Link href="/library/new" className={ui.quiet}>写笔记</Link>
+    <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">
+      <Link href="/opening/cards" className={ui.quiet}>卡片</Link>
+      <Link href="/opening/review" className={ui.quiet}>待确认</Link>
+      <Link href="/opening/settings/connections" className={ui.quiet}>连接</Link>
+      <a href="#action-digest" className={ui.quiet}>优先行动</a>
+      <Link href={courseHref} className={ui.quiet} title="课程知识 / 材料在课程页">课程知识 / 材料在课程页</Link>
     </nav>
   </div>;
 }

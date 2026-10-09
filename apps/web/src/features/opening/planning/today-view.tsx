@@ -149,7 +149,7 @@ export function TodayPlanView({
     {loadState === "ready" ? <RetestProposals api={api} onChanged={() => { void refresh(); }} /> : null}
     {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
     {loadState === "ready" && plan ? <TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /> : null}
-    {loadState === "ready" ? <ActionDigestCard api={api} onChanged={() => { void refresh(); }} onAdjust={() => setPlanning(true)} /> : null}
+    {loadState === "ready" ? <div id="action-digest"><ActionDigestCard api={api} onChanged={() => { void refresh(); }} onAdjust={() => setPlanning(true)} /></div> : null}
     {loadState === "ready" && plan ? <DailyDraftCard api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={() => { void refresh(); }} /> : null}
     {loadState === "ready" && plan ? <SuggestPlanCard api={api} date={date} acceptedVersion={plan.acceptedVersion} confirmedBlocks={plan.blocks} tasks={tasks} onChanged={() => { void refresh(); }} /> : null}
     {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4">

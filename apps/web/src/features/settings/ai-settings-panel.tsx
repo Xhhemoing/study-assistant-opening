@@ -47,28 +47,30 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
       {stale ? <p className="text-xs leading-6 text-amber-800" role="alert">{draft.mode === "manual" ? "手动锁定的模型已移除，请在上方重新选择手动模型，或恢复服务器默认设置。" : "自动路由中有模型已移除，请重新选择默认模型或对应规则，或恢复服务器默认设置。"}</p> : null}
       {selected.map(model => <p className="break-words text-xs leading-6 text-zinc-500" key={model.id}>{model.label}（{model.modelName}）：输入 {model.inputCentsPerMillion}、输出 {model.outputCentsPerMillion} 分 / 百万 token。</p>)}
     </div>
-    <div className="space-y-2 border-t border-zinc-100 pt-3">
-      <h3 className="text-xs font-medium text-zinc-800">每日 AI 额度</h3>
-      <p className="text-xs leading-6 text-zinc-500">有效额度 {data.dailyCapCents} 分。运维环境上限 {data.envCapCents} 分；个人开启时上限 {data.personalCeilingCents} 分。开启前会要求确认「每天最多约 ¥X」。</p>
-      <label className="block space-y-1.5"><span className={ui.label}>工作区日额度（分）</span>
-        <input className={ui.input} type="number" min={0} max={data.envCapCents > 0 ? data.envCapCents : data.personalCeilingCents} step={1} disabled={busy}
-          value={draft.dailyCapCents ?? ""}
-          placeholder={data.envCapCents > 0 ? `可调低运维上限（≤${data.envCapCents}）` : "留空表示未设置"}
-          onChange={event => {
-            const raw = event.target.value;
-            if (raw === "") onChange({ ...draft, dailyCapCents: null, budgetConfirmedAt: null });
-            else onChange({ ...draft, dailyCapCents: Number(raw) });
-          }} />
-      </label>
-      {data.envCapCents === 0 && (draft.dailyCapCents ?? 0) > 0 && !draft.budgetConfirmedAt ? (
-        <button type="button" className={ui.secondary} disabled={busy} onClick={() => {
-          const yuan = ((draft.dailyCapCents ?? 0) / 100).toFixed(2);
-          if (!window.confirm(`确认开启每日 AI 额度？每天最多约 ¥${yuan}。确认后才会生效。`)) return;
-          onChange({ ...draft, budgetConfirmedAt: new Date().toISOString() });
-        }}>确认开启每日额度</button>
-      ) : null}
-      {draft.budgetConfirmedAt ? <p className="text-xs text-emerald-700">已确认于 {draft.budgetConfirmedAt}</p> : null}
-    </div>
+    <details className="space-y-2 border-t border-zinc-100 pt-3" data-advanced-section="daily-budget">
+      <summary className="cursor-pointer text-xs font-medium text-zinc-800 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">更多 / 高级 · 每日 AI 额度</summary>
+      <div className="mt-2 space-y-2">
+        <p className="text-xs leading-6 text-zinc-500">有效额度 {data.dailyCapCents} 分。运维环境上限 {data.envCapCents} 分；个人开启时上限 {data.personalCeilingCents} 分。开启前会要求确认「每天最多约 ¥X」。</p>
+        <label className="block space-y-1.5"><span className={ui.label}>工作区日额度（分）</span>
+          <input className={ui.input} type="number" min={0} max={data.envCapCents > 0 ? data.envCapCents : data.personalCeilingCents} step={1} disabled={busy}
+            value={draft.dailyCapCents ?? ""}
+            placeholder={data.envCapCents > 0 ? `可调低运维上限（≤${data.envCapCents}）` : "留空表示未设置"}
+            onChange={event => {
+              const raw = event.target.value;
+              if (raw === "") onChange({ ...draft, dailyCapCents: null, budgetConfirmedAt: null });
+              else onChange({ ...draft, dailyCapCents: Number(raw) });
+            }} />
+        </label>
+        {data.envCapCents === 0 && (draft.dailyCapCents ?? 0) > 0 && !draft.budgetConfirmedAt ? (
+          <button type="button" className={ui.secondary} disabled={busy} onClick={() => {
+            const yuan = ((draft.dailyCapCents ?? 0) / 100).toFixed(2);
+            if (!window.confirm(`确认开启每日 AI 额度？每天最多约 ¥${yuan}。确认后才会生效。`)) return;
+            onChange({ ...draft, budgetConfirmedAt: new Date().toISOString() });
+          }}>确认开启每日额度</button>
+        ) : null}
+        {draft.budgetConfirmedAt ? <p className="text-xs text-emerald-700">已确认于 {draft.budgetConfirmedAt}</p> : null}
+      </div>
+    </details>
     <div className="space-y-1 text-xs leading-6 text-zinc-500"><p>支持文本模型；标记为“视觉”的模型可分析指定 PDF 页图像。价格由服务器或本工作区配置；所有供应商须换算为同一记账币种，不自动换汇。工作区共享日上限当前为 {data.dailyCapCents} 分（按用户本地日，默认 Asia/Shanghai），切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。任何所选模型不可用时都会停止，不会自动重试或改用其他供应商。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>服务器目录模型由管理员维护；本工作区自建的供应商与模型可在下方「自定义供应商与密钥」中配置，保存后立即生效，无需重启服务。</p><p>设置中的原生备份暂不包含模型选择、路由与自定义供应商配置，请在迁移服务器前另行记录。</p></div>
     <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || stale || routes.some(route => route.problem !== null) || (!dirty && data.saved && !data.invalidStoredSettings)} onClick={onSave}>{busy ? <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}保存模型设置</button><button type="button" className={ui.secondary} disabled={busy || (!data.saved && !dirty)} onClick={onReset}>恢复服务器默认设置</button></div>
   </div>;

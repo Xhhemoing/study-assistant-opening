@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { ArrowUpRight, BookOpen, Compass, FileText, RefreshCw, type LucideIcon } from "lucide-react";
+import { ArrowUpRight, BookOpen, ClipboardCheck, Layers2, Link2, Notebook, RefreshCw, Sun, type LucideIcon } from "lucide-react";
 
 const focus = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white";
 // Press feedback scales the control instead of shifting layout; reduced motion keeps colors only.
@@ -64,7 +64,11 @@ export function LoadingRows({ label = "正在读取你的学习内容" }: { labe
   </div>;
 }
 export function EntryLinks() {
-  return <nav aria-label="三种学习入口" className="flex flex-wrap gap-1">{[
-    { title: "目标学习", href: "/learn", icon: BookOpen }, { title: "自由探索", href: "/explore", icon: Compass }, { title: "知识库", href: "/library", icon: FileText },
+  return <nav aria-label="学习闭环入口" className="flex flex-wrap gap-1">{[
+    { title: "今日", href: "/opening/today", icon: Sun },
+    { title: "卡片", href: "/opening/cards", icon: Layers2 },
+    { title: "待确认", href: "/opening/review", icon: ClipboardCheck },
+    { title: "课程", href: "/opening/courses", icon: Notebook },
+    { title: "连接", href: "/opening/settings/connections", icon: Link2 },
   ].map(({ title, href, icon: Icon }) => <Link key={href} href={href} className={ui.quiet}><Icon size={14} aria-hidden="true" />{title}<ArrowUpRight size={12} aria-hidden="true" /></Link>)}</nav>;
 }
