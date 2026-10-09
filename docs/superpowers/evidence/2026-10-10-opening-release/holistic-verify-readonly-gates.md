@@ -10,7 +10,7 @@
 |---|---|---|
 | AI | **116 PASS** / 9 files | provider/errors/usage/effective-cap/catalog-merge/budget-local-day + budgeted-call/budget-contract-discovery/tutor-turn |
 | Data | **121 PASS** + domain/database tsc 0 | day-planner/local-day-bounds/retest + reminders/observations.retest-earliest (+ related) |
-| Experience | pending / TBD | plan-service / attempt-retest / optional browser subset |
+| Experience | **77 unit + 4 browser PASS** | plan-service/retest + guidance/today-plan e2e subset |
 
 ## Commands (AI, as reported)
 ```text
@@ -27,3 +27,16 @@ node node_modules/vitest/vitest.mjs run --project unit \
 ```
 
 Data reported GREEN without full command paste in Integrator chat; details sent to PM by Data.
+
+## Experience (reported)
+
+| Scope | Result |
+|---|---|
+| Unit 8 files | **77 PASSED** (plan-service, retest-proposals, retest-attempt, attempt-service retest-close/earliest, day-planner, retest-activity, local-day-bounds) |
+| Browser subset | **4 PASSED** (~2.2m) — `guidance-modes.spec.ts` + `today-plan.spec.ts` with `OPENING_RELEASE=0` + e2e DB |
+
+Claimed tip at run: `63a4737` (docs tip `0aa641b` later; product surface unchanged). No apps/web edits; no hermes redeploy.
+
+### Totals (agent read-only)
+- AI 116 + Data 121 + Experience unit 77 (suites may overlap across owners; not additive unique tests)
+- Experience browser subset **4 PASS**
