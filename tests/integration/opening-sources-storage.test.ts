@@ -64,7 +64,8 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
 
     const record = await svc.completeUpload(principal, ticket.source.id);
     expect(record.uploadState).toBe("uploaded");
-    expect(record.parseState).toBe("not_started");
+    // completeWithParseJob sets queued + opens one parse job (asserted below).
+    expect(record.parseState).toBe("queued");
 
     const jobs = await fixture.sql`
       SELECT count(*)::int AS count FROM opening_jobs
