@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   assertValidLocalDate,
+  DEFAULT_WORKSPACE_TIME_ZONE,
   isInstantOnLocalDay,
   resolveLocalDayBounds,
+  resolveWorkspaceTimeZone,
   zonedLocalInstant,
 } from "./local-day-bounds";
 import { planDay } from "./day-planner";
@@ -124,5 +126,50 @@ describe("planDay localDate+timeZone day boundary", () => {
     });
     expect(without.blocks).toEqual([]);
     expect(without.unscheduledTaskIds).toEqual([]);
+  });
+});
+
+
+describe("resolveWorkspaceTimeZone", () => {
+  it("defaults empty/missing to Asia/Shanghai", () => {
+    expect(resolveWorkspaceTimeZone(undefined)).toBe(DEFAULT_WORKSPACE_TIME_ZONE);
+    expect(resolveWorkspaceTimeZone(null)).toBe("Asia/Shanghai");
+    expect(resolveWorkspaceTimeZone("  ")).toBe("Asia/Shanghai");
+    expect(resolveWorkspaceTimeZone("America/New_York")).toBe("America/New_York");
+  });
+});
+
+describe("local-day-bounds nature (light, not full matrix)", () => {
+  it("overnight wall span: instant just before local midnight is previous day", () => {
+    const tz = SH;
+    // 2026-10-09 23:59 CST = 2026-10-09 15:59 UTC
+    const beforeMidnight = new Date("2026-10-09T15:59:00.000Z");
+    // 2026-10-10 00:00 CST = 2026-10-09 16:00 UTC
+    const atMidnight = new Date("2026-10-09T16:00:00.000Z");
+    expect(isInstantOnLocalDay(beforeMidnight, "2026-10-09", tz)).toBe(true);
+    expect(isInstantOnLocalDay(atMidnight, "2026-10-09", tz)).toBe(false);
+    expect(isInstantOnLocalDay(atMidnight, "2026-10-10", tz)).toBe(true);
+  });
+
+  it("US spring-forward day is shorter than 24h (DST gap)", () => {
+    // America/New_York 2026-03-08: clocks spring forward 02:00 → 03:00
+    const { dayStart, nextDayStart } = resolveLocalDayBounds("2026-03-08", "America/New_York");
+    const ms = nextDayStart.getTime() - dayStart.getTime();
+    expect(ms).toBe(23 * 3_600_000);
+    expect(isInstantOnLocalDay(dayStart, "2026-03-08", "America/New_York")).toBe(true);
+    expect(isInstantOnLocalDay(nextDayStart, "2026-03-08", "America/New_York")).toBe(false);
+  });
+
+  it("US fall-back day is longer than 24h (DST overlap)", () => {
+    // America/New_York 2026-11-01: clocks fall back 02:00 → 01:00
+    const { dayStart, nextDayStart } = resolveLocalDayBounds("2026-11-01", "America/New_York");
+    const ms = nextDayStart.getTime() - dayStart.getTime();
+    expect(ms).toBe(25 * 3_600_000);
+  });
+
+  it("adjacent local days share exclusive boundary (no overlap, no gap)", () => {
+    const a = resolveLocalDayBounds("2026-10-09", SH);
+    const b = resolveLocalDayBounds("2026-10-10", SH);
+    expect(a.nextDayStart.getTime()).toBe(b.dayStart.getTime());
   });
 });

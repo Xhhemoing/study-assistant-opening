@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { openingModelSnapshotSchema, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
+  resolveBudgetLocalDay,
+  resolveBudgetTimeZone,
   resolveEffectiveDailyCap,
 } from "@aistudy/ai";
 import type { Sql } from "postgres";
@@ -60,7 +62,10 @@ export type OpeningBudgetRepositoryOptions = {
   /** True when the default/catalog model has positive pricing configured. */
   pricingConfigured?: boolean;
   ceilingCents?: number;
-  /** IANA timezone for the local budget day (default Asia/Shanghai). */
+  /**
+   * Fallback IANA timezone when workspace planning_settings.timeZone is absent
+   * (default Asia/Shanghai / DL7). Prefer per-workspace planning TZ at reserve.
+   */
   timeZone?: string;
   /** Age after which reserved rows are pessimistically completed (default 30 min). */
   unknownAgeMs?: number;
@@ -78,6 +83,15 @@ function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
     state: row.state as string,
     modelSnapshot: row.model_snapshot == null ? null : openingModelSnapshotSchema.parse(row.model_snapshot),
   };
+}
+
+
+function readPlanningTimeZone(planningSettings: unknown): string | null {
+  if (planningSettings == null || typeof planningSettings !== "object" || Array.isArray(planningSettings)) {
+    return null;
+  }
+  const tz = (planningSettings as Record<string, unknown>).timeZone;
+  return typeof tz === "string" && tz.trim().length > 0 ? tz.trim() : null;
 }
 
 function readWorkspaceBudget(aiSettings: unknown): {
@@ -103,7 +117,7 @@ export function createOpeningBudgetRepository(
   if (!Number.isSafeInteger(options.envCapCents) || options.envCapCents < 0) {
     throw new Error("invalid daily budget cap");
   }
-  const timeZone = options.timeZone ?? "Asia/Shanghai";
+  const fallbackTimeZone = resolveBudgetTimeZone(options.timeZone);
   const unknownAgeMs = options.unknownAgeMs ?? DEFAULT_UNKNOWN_AGE_MS;
   if (!Number.isSafeInteger(unknownAgeMs) || unknownAgeMs <= 0) {
     throw new Error("invalid unknown reservation age");
@@ -160,7 +174,7 @@ export function createOpeningBudgetRepository(
         `;
 
         const prefs = await tx`
-          SELECT ai_settings FROM workspace_preferences WHERE workspace_id = ${scope.workspaceId}
+          SELECT ai_settings, planning_settings FROM workspace_preferences WHERE workspace_id = ${scope.workspaceId}
         `;
         const { workspaceCapCents, confirmed } = readWorkspaceBudget(prefs[0]?.ai_settings ?? null);
         const effective = resolveEffectiveDailyCap({
@@ -180,7 +194,13 @@ export function createOpeningBudgetRepository(
           return row;
         }
 
-        // Count all current reserved rows plus completed spend created on the local day.
+        // TZ01: local budget day from domain resolveLocalDayBounds via AI helper.
+        // Prefer workspace planning_settings.timeZone; else factory fallback / Asia/Shanghai.
+        const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
+        const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? fallbackTimeZone));
+
+        // Count all current reserved rows plus completed spend on the local day
+        // using half-open [dayStart, nextDayStart) absolute instants (not UTC date).
         const rows = await tx`
           INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, request_id, model_snapshot)
           SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}
@@ -188,8 +208,8 @@ export function createOpeningBudgetRepository(
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE workspace_id=${scope.workspaceId} AND (
               state='reserved' OR
-              (state='completed' AND (created_at AT TIME ZONE ${timeZone})::date
-                = (now() AT TIME ZONE ${timeZone})::date)
+              (state='completed' AND created_at >= ${budgetDay.dayStart}
+                AND created_at < ${budgetDay.nextDayStart})
             )
           ), 0) <= ${effective.capCents}
           RETURNING *

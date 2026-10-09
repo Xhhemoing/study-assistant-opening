@@ -2,10 +2,16 @@ import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   buildAiReadinessItems,
   mergeOpeningCatalog,
+  resolveBudgetLocalDay,
+  resolveBudgetTimeZone,
   resolveEffectiveDailyCap,
 } from "@aistudy/ai";
 import { loadOpeningModelCatalog } from "@aistudy/config";
-import { createOpeningAiSettingsRepository, createOpeningModelProvidersRepository } from "@aistudy/database";
+import {
+  createOpeningAiSettingsRepository,
+  createOpeningModelProvidersRepository,
+  createOpeningPlanningSettingsRepository,
+} from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 
@@ -16,9 +22,10 @@ async function buildItems(
   scope: Awaited<ReturnType<typeof requireOpeningScope>>["scope"],
 ) {
   const catalog = loadOpeningModelCatalog();
-  const [preference, custom] = await Promise.all([
+  const [preference, custom, planning] = await Promise.all([
     createOpeningAiSettingsRepository(sql).get(scope),
     createOpeningModelProvidersRepository(sql).listResolvableModels(scope),
+    createOpeningPlanningSettingsRepository(sql).get(scope),
   ]);
   const pricingConfigured = catalog.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)
     || custom.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0);
@@ -37,14 +44,19 @@ async function buildItems(
   const available = merged.models.filter(m => m.availability === "available");
   const vision = merged.models.some(m => m.supportsVision && m.availability === "available");
 
-  const timeZone = "Asia/Shanghai";
+  // TZ01: same local budget day as ledger reserve (planning TZ → domain bounds).
+  const budgetDay = resolveBudgetLocalDay(
+    new Date(),
+    resolveBudgetTimeZone(planning.settings?.timeZone),
+  );
   const spendRows = await sql`
     SELECT COALESCE(sum(amount_cents), 0)::int AS used
     FROM opening_budget_reservations
     WHERE workspace_id = ${scope.workspaceId}
       AND (
         state = 'reserved'
-        OR (state = 'completed' AND (created_at AT TIME ZONE ${timeZone})::date = (now() AT TIME ZONE ${timeZone})::date)
+        OR (state = 'completed' AND created_at >= ${budgetDay.dayStart}
+          AND created_at < ${budgetDay.nextDayStart})
       )
   `;
   const usedCents = Number(spendRows[0]?.used ?? 0);

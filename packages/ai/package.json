@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@aistudy/contracts": "0.0.0"
+    "@aistudy/contracts": "0.0.0",
+    "@aistudy/domain": "0.0.0"
   }
 }

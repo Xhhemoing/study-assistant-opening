@@ -120,3 +120,18 @@ export function isInstantOnLocalDay(
   if (!Number.isFinite(t)) throw new RangeError("invalid instant");
   return t >= dayStart.getTime() && t < nextDayStart.getTime();
 }
+
+/** Workspace default IANA zone (DL7 / planning-settings / TZ01). */
+export const DEFAULT_WORKSPACE_TIME_ZONE = "Asia/Shanghai";
+
+/**
+ * Normalize a candidate workspace IANA zone.
+ * Empty / missing → DEFAULT_WORKSPACE_TIME_ZONE. Does not validate IANA
+ * (call resolveLocalDayBounds / Intl when a hard error is required).
+ */
+export function resolveWorkspaceTimeZone(candidate: string | null | undefined): string {
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return candidate.trim();
+  }
+  return DEFAULT_WORKSPACE_TIME_ZONE;
+}

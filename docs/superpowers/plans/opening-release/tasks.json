@@ -855,7 +855,9 @@
       "status": "active",
       "evidence": [
         "../../evidence/2026-10-09-opening-release/tz01-day-boundary-plan.md",
-        "../../evidence/2026-10-09-opening-release/tz01-day-boundary-accept.md"
+        "../../evidence/2026-10-09-opening-release/tz01-day-boundary-accept.md",
+        "../../evidence/2026-10-09-opening-release/tz01-ai-budget-local-day.md",
+        "../../evidence/2026-10-10-opening-release/tz01-ai-budget-local-day-accept.md"
       ]
     }
   ]

@@ -56,6 +56,8 @@ export {
   isInstantOnLocalDay,
   zonedLocalInstant,
   assertValidLocalDate,
+  DEFAULT_WORKSPACE_TIME_ZONE,
+  resolveWorkspaceTimeZone,
   type LocalDayBounds,
 } from "./opening/local-day-bounds";
 export {

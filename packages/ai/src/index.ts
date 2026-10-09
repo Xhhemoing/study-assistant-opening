@@ -38,6 +38,14 @@ export { selectedOpeningModelId, resolveOpeningModel, openingModelSnapshot, Open
 export { mergeOpeningCatalog, type WorkspaceCatalogModel } from "./opening/catalog-merge";
 export { resolveEffectiveDailyCap, OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS, type ResolveEffectiveDailyCapInput, type EffectiveDailyCap } from "./opening/effective-cap";
 export {
+  DEFAULT_BUDGET_TIME_ZONE,
+  resolveBudgetTimeZone,
+  resolveBudgetLocalDay,
+  isInstantOnBudgetLocalDay,
+  type BudgetLocalDay,
+} from "./opening/budget-local-day";
+
+export {
   AI_READINESS_SOFT_KEYS,
   aiReadinessSeverityForKey,
   buildAiReadinessItems,
