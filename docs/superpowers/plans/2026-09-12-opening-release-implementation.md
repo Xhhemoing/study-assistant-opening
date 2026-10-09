@@ -89,6 +89,7 @@
 | RP4 | EXPERIENCE | 引用证据展示与按版本查看 | T03 | 12-review-hardening.md |
 | RP5 | INTEGRATOR | 开发分支push CI门禁 | B02 | 12-review-hardening.md |
 | RP6 | EXPERIENCE | 今天页真实恢复入口 | T03,U01 | 12-review-hardening.md |
+| RP7 | INTEGRATOR | 同SHA发布证据索引 | RP5 | 15-research-hardening.md |
 | DL1 | EXPERIENCE | opening可达页去Mock收口（复习/练习入口、目标与指导模式） | L03,U03 | 13-daily-loop-gaps.md |
 | DL2 | EXPERIENCE | 今天队列任务完成/跳过 | P02,RP6 | 13-daily-loop-gaps.md |
 | DL3 | DATA+EXPERIENCE | 重测闭环：观察事务内入队（题干提示）、今天页接受/忽略、建议时间不早于、补测绑定retestId | L02,P02,DL2,DL5 | 13-daily-loop-gaps.md |
@@ -100,6 +101,9 @@
 | DL9 | EXPERIENCE+DATA | 课表导入、默认空闲时间与一键安排（需迁移） | P01,P02,DL5 | 14-loop-closure.md |
 | P04a | EXPERIENCE+DATA | 每日自动草案：既有任务、到期补测、课表空闲与顺延 | DL2,DL3,DL9 | 14-loop-closure.md |
 | DL10 | INTEGRATOR+QA | Windows本地端到端运行手册与只读就绪自检 | I03,T01 | 14-loop-closure.md |
+| DL11 | DATA | day-planner earliest/notBefore | DL3 | 15-research-hardening.md |
+| BC1 | AI+DATA | 预算门禁费用回执重试契约 | DL7 | 15-research-hardening.md |
+| TZ01 | DATA+AI | 工作区时区日边界同一解释 | DL7 | 15-research-hardening.md |
 
 ## 2. 可并行的边界与交接
 
@@ -139,6 +143,8 @@
 2026-10-07每日学习闭环审查后新增：DL1–DL4（[每日闭环缺口](opening-release/13-daily-loop-gaps.md)）补齐正式入口去Mock、普通任务完成/跳过、重测自动提议与补测绑定`retestId`、记忆卡片接入真实API；均复用既有API/仓库，预计不新增迁移，不改变M0–M5范围定义。是否把DL1–DL3纳入M3“每天用得起来”与Q01依赖，需用户确认后另行调整（已于2026-10-08经用户确认调整，见下段）。
 
 2026-10-08闭环第二轮审查后新增：DL5–DL10与P04a（[闭环第二轮](opening-release/14-loop-closure.md)）补齐今天页手动加任务与分组、参考自对照的可信判定、AI就绪清单/设置内额度/未知预留对账、照片视觉输入、课表导入与默认空闲时间、每日自动草案、Windows本地端到端运行手册。DL5与DL9需迁移，编号由INTEGRATOR分配；其余不新增迁移。经用户确认调整依赖：DL3增加DL5、DL4排到DL3/DL6之后、K02增加DL3与DL6（判定部分拆入DL6，不再被K01阻塞）、P04增加P04a、Q01增加DL3/DL6/DL7/DL10；M3扩为上述闭环任务。C02/C03保持active与原依赖，只在推荐顺序上排在DL1–DL3之后；DL8补M1照片路径但不回改M1已有验收。执行顺序见该文件“闭环优先级与排期”。
+
+2026-10-09研究硬化新增：RP7/DL11/BC1/TZ01（[研究硬化](opening-release/15-research-hardening.md)）补齐同SHA发布证据索引、day-planner earliest/notBefore、预算门禁费用回执重试契约、工作区时区日边界同一解释；不改写既有 verified 状态（BC1≠B01）。
 
 复用原则：邮箱优先ImapFlow+MailParser；Docling/FFmpeg/faster-whisper承担解析；参考DeepTutor辅导流程，不复制另一套主后端。EmailEngine当前是商业备选，不默认购买。依据见`../../quality/opening-capability-reuse-research.md`。
 
