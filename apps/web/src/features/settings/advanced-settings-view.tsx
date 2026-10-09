@@ -105,7 +105,7 @@ export function AdvancedSettingsView() {
     <main className="min-w-0 bg-white">
       <PageHeading
         title="高级设置"
-        description="AI 模型、默认入口、指导模式、计划自主权、导出与诊断。学习闭环相关项在主设置页。"
+        description="每日额度与 AI 模型、默认入口、指导模式、计划自主权、导出与诊断。学习闭环相关项在主设置页。"
         action={<Link className={ui.quiet} href="/settings"><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
       />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">

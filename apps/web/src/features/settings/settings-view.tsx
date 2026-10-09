@@ -72,6 +72,8 @@ export function SettingsView() {
           <a className={navLinkClass} href="#preferences">学习偏好</a>
           <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href="/settings/advanced">高级</Link>
+          <span aria-hidden="true">·</span>
+          <Link className={navLinkClass} href="/settings/advanced#daily-budget">开启 AI 每日额度</Link>
         </nav>
 
         <section id="connections" className="scroll-mt-6 space-y-6 border-b border-zinc-200 pb-6" aria-labelledby="opening-connections-heading">
@@ -143,8 +145,11 @@ export function SettingsView() {
         </section>
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <p className="text-xs leading-6 text-zinc-500">AI 模型、默认入口、指导模式、计划自主权、导出与诊断等在高级设置。</p>
-          <Link className={ui.secondary} href="/settings/advanced">打开高级设置</Link>
+          <p className="text-xs leading-6 text-zinc-500">AI 模型与每日额度、默认入口、指导模式、计划自主权、导出与诊断等在高级设置。</p>
+          <div className="flex flex-wrap gap-2">
+            <Link className={ui.secondary} href="/settings/advanced#daily-budget">AI 模型与每日额度</Link>
+            <Link className={ui.secondary} href="/settings/advanced">打开高级设置</Link>
+          </div>
         </div>
 
         {notice ? <p className="text-sm text-emerald-700" role="status">{notice}</p> : null}

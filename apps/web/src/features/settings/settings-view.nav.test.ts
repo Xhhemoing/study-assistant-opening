@@ -41,6 +41,9 @@ describe("settings page split structure", () => {
     expect(html).toContain('id="planning"');
     expect(html).toContain('id="preferences"');
     expect(html).toContain('href="/settings/advanced"');
+    expect(html).toContain('href="/settings/advanced#daily-budget"');
+    expect(html).toContain("开启 AI 每日额度");
+    expect(html).toContain("AI 模型与每日额度");
     expect(html).not.toContain("data-advanced-section");
     expect(html).not.toContain("更多 / 高级");
   });
