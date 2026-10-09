@@ -1,775 +1,777 @@
 {
- "schemaVersion": 1,
- "baseCommit": "e7639c9930bf230185551c86ea825e2524c40a39",
- "branch": "feat/opening-release",
- "tasks": [
-  {
-   "id": "C01B",
-   "owner": "DATA+PIPELINE",
-   "dependsOn": [
-    "X01",
-    "F03",
-    "M02",
-    "P02",
-    "C01"
-   ],
-   "plan": "09-connections.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/c01b-imports-revocation.md"
-   ]
-  },
-  {
-   "id": "B00",
-   "owner": "INTEGRATOR",
-   "dependsOn": [],
-   "plan": "00-baseline.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-12-opening-release/baseline.md"
-   ]
-  },
-  {
-   "id": "B01",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "B00"
-   ],
-   "plan": "00-quality-baseline.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-12-opening-release/baseline.md"
-   ]
-  },
-  {
-   "id": "B02",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "B01"
-   ],
-   "plan": "00-browser-boundary.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-12-opening-release/baseline.md"
-   ]
-  },
-  {
-   "id": "F01",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "B02"
-   ],
-   "plan": "01-foundation.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-13-opening-release/f01-access.md",
-    "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
-   ]
-  },
-  {
-   "id": "F02",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "B02"
-   ],
-   "plan": "01-foundation.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-13-opening-release/f02-contracts.md"
-   ]
-  },
-  {
-   "id": "F03",
-   "owner": "DATA",
-   "dependsOn": [
-    "F01",
-    "F02"
-   ],
-   "plan": "01-foundation.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
-   ]
-  },
-  {
-   "id": "I01",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "F03"
-   ],
-   "plan": "02-ingestion.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/i01-signed-upload-verified.md"
-   ]
-  },
-  {
-   "id": "I02",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "I01"
-   ],
-   "plan": "02-ingestion.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-17-opening-release/i02-parser-verified.md"
-   ]
-  },
-  {
-   "id": "I03",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "F03"
-   ],
-   "plan": "02-ingestion.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/i03-worker-runtime-verified.md"
-   ]
-  },
-  {
-   "id": "T01",
-   "owner": "AI",
-   "dependsOn": [
-    "F03"
-   ],
-   "plan": "03-tutor.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
-   ]
-  },
-  {
-   "id": "T02",
-   "owner": "AI",
-   "dependsOn": [
-    "I02",
-    "T01"
-   ],
-   "plan": "03-tutor.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
-   ]
-  },
-  {
-   "id": "T03",
-   "owner": "AI+DATA",
-   "dependsOn": [
-    "T02",
-    "I03"
-   ],
-   "plan": "03-tutor.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-13-opening-release/t03-tutor-http-slice.md",
-    "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
-   ]
-  },
-  {
-   "id": "M01",
-   "owner": "AI+DATA",
-   "dependsOn": [
-    "T03"
-   ],
-   "plan": "04-memory.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/m01-memory-verified.md"
-   ]
-  },
-  {
-   "id": "M02",
-   "owner": "DATA",
-   "dependsOn": [
-    "M01"
-   ],
-   "plan": "04-memory.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
-   ]
-  },
-  {
-   "id": "M03",
-   "owner": "AI",
-   "dependsOn": [
-    "T03",
-    "M02"
-   ],
-   "plan": "04-memory.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
-   ]
-  },
-  {
-   "id": "L01",
-   "owner": "DATA",
-   "dependsOn": [
-    "T03",
-    "M01"
-   ],
-   "plan": "05-learning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/l01-learning-verified.md"
-   ]
-  },
-  {
-   "id": "L02",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "L01"
-   ],
-   "plan": "05-learning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/l02-learning-summary-retest-verified.md"
-   ]
-  },
-  {
-   "id": "L03",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "L02"
-   ],
-   "plan": "05-learning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
-   ]
-  },
-  {
-   "id": "P01",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "F02"
-   ],
-   "plan": "06-planning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/x01-p01-slice.md",
-    "../../evidence/2026-09-16-opening-release/p01-slice2-verified.md"
-   ]
-  },
-  {
-   "id": "P02",
-   "owner": "DATA+EXPERIENCE",
-   "dependsOn": [
-    "P01",
-    "F03",
-    "L01"
-   ],
-   "plan": "06-planning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
-   ]
-  },
-  {
-   "id": "P03",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "P02",
-    "I03"
-   ],
-   "plan": "06-planning.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
-   ]
-  },
-  {
-   "id": "U01",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "F02",
-    "F01"
-   ],
-   "plan": "07-experience.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
-   ]
-  },
-  {
-   "id": "U02",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "I01",
-    "I02",
-    "U01"
-   ],
-   "plan": "07-experience.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
-    "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
-   ]
-  },
-  {
-   "id": "U03",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "T03",
-    "M03",
-    "L03",
-    "P03",
-    "U02"
-   ],
-   "plan": "07-experience.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
-    "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
-   ]
-  },
-  {
-   "id": "Q01",
-   "owner": "QA",
-   "dependsOn": [
-    "U03",
-    "Q03",
-    "DL3",
-    "DL6",
-    "DL7",
-    "DL10"
-   ],
-   "plan": "08-delivery.md",
-   "status": "planned",
-   "evidence": []
-  },
-  {
-   "id": "Q02",
-   "owner": "QA",
-   "dependsOn": [
-    "Q01"
-   ],
-   "plan": "08-delivery.md",
-   "status": "planned",
-   "evidence": []
-  },
-  {
-   "id": "Q03",
-   "owner": "INTEGRATOR+QA",
-   "dependsOn": [
-    "P03",
-    "M02"
-   ],
-   "plan": "08-delivery.md",
-   "status": "active",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/q03-restore-apply-progress.md",
-    "../../evidence/2026-10-09-opening-release/q03-packaging-gaps.md",
-    "../../evidence/2026-10-09-opening-release/q03-continue-empty-namespace-readiness.md",
-    "../../evidence/2026-10-09-opening-release/q03-packaging-gates-run.md",
-    "../../evidence/2026-10-09-opening-release/q03-cheap-fixture-roundtrip.md",
-    "../../evidence/2026-10-09-opening-release/q03-restore-apply-executor.md",
-    "../../evidence/2026-10-09-opening-release/q03-restore-apply-accept.md",
-    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore.md",
-    "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore-accept.md"
-   ]
-  },
-  {
-   "id": "X01",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "F02"
-   ],
-   "plan": "09-connections.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-09-16-opening-release/x01-p01-slice.md"
-   ]
-  },
-  {
-   "id": "C01",
-   "owner": "DATA+PIPELINE",
-   "dependsOn": [
-    "X01",
-    "F03",
-    "M02",
-    "P02"
-   ],
-   "plan": "09-connections.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/c01-connections-verified.md"
-   ]
-  },
-  {
-   "id": "C02",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "C01",
-    "I01",
-    "I03"
-   ],
-   "plan": "09-connections.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/c02-imap-sync-verified.md",
-    "../../evidence/2026-10-06-opening-release/c02-imap-code-slice.md",
-    "../../evidence/2026-10-06-opening-release/c02-email-import-route.md",
-    "../../evidence/2026-10-09-opening-release/c02-imap-sync-check-accept.md"
-   ]
-  },
-  {
-   "id": "C03",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "C01",
-    "I01",
-    "I03"
-   ],
-   "plan": "09-connections.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/c03-dingtalk-verified.md",
-    "../../evidence/2026-10-09-opening-release/c03-dingtalk-check-accept.md",
-    "../../evidence/2026-10-06-opening-release/c03-dingtalk-callback-slice.md"
-   ]
-  },
-  {
-   "id": "V01",
-   "owner": "PIPELINE",
-   "dependsOn": [
-    "X01",
-    "I02",
-    "I03"
-   ],
-   "plan": "10-media-knowledge.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/v01-verified.md",
-    "../../evidence/2026-10-09-opening-release/v01-media-parse-accept.md",
-    "../../evidence/2026-10-09-opening-release/v01-media-parse-followup-accept.md",
-    "../../evidence/2026-10-09-opening-release/v01-media-parse-copy-jobid-accept.md",
-    "../../evidence/2026-10-09-opening-release/v01-k01-invalidate-accept.md"
-   ]
-  },
-  {
-   "id": "K01",
-   "owner": "AI+DATA",
-   "dependsOn": [
-    "X01",
-    "C01",
-    "I02",
-    "T02"
-   ],
-   "plan": "10-media-knowledge.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/k01-course-knowledge.md",
-    "../../evidence/2026-10-09-opening-release/k01-knowledge-accept.md"
-   ]
-  },
-  {
-   "id": "K02a",
-   "owner": "EXPERIENCE+AI",
-   "dependsOn": [
-    "L02",
-    "T03"
-   ],
-   "plan": "10-media-knowledge.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-05-opening-release/k02a-tutor-policy-verified.md"
-   ]
-  },
-  {
-   "id": "K02",
-   "owner": "EXPERIENCE+AI+DATA",
-   "dependsOn": [
-    "K01",
-    "K02a",
-    "L02",
-    "T03",
-    "DL3",
-    "DL6"
-   ],
-   "plan": "10-media-knowledge.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/k02-skill-evidence.md",
-    "../../evidence/2026-10-09-opening-release/k02-skill-evidence-accept.md"
-   ]
-  },
-  {
-   "id": "P04",
-   "owner": "AI+EXPERIENCE",
-   "dependsOn": [
-    "P04a",
-    "C02",
-    "C03",
-    "K02",
-    "P02",
-    "M01"
-   ],
-   "plan": "11-proactive-acceptance.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/p04-verified.md",
-    "../../evidence/2026-10-09-opening-release/p04-overlay-0052-accept.md",
-    "../../evidence/2026-10-09-opening-release/p04-ai-extract-study-actions-accept.md",
-    "../../evidence/2026-10-09-opening-release/p04-experience-action-digest-accept.md",
-    "../../evidence/2026-10-09-opening-release/p04-import-chunks-wiring-accept.md"
-   ]
-  },
-  {
-   "id": "U04",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "C02",
-    "C03",
-    "V01",
-    "K02",
-    "P04"
-   ],
-   "plan": "11-proactive-acceptance.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/u04-capabilities-ui-accept.md",
-    "../../evidence/2026-10-09-opening-release/u04-verified.md"
-   ]
-  },
-  {
-   "id": "Q04",
-   "owner": "QA+INTEGRATOR",
-   "dependsOn": [
-    "U04",
-    "Q02"
-   ],
-   "plan": "11-proactive-acceptance.md",
-   "status": "planned",
-   "evidence": []
-  },
-  {
-   "id": "RP1",
-   "owner": "DATA",
-   "dependsOn": [
-    "M02"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md"
-   ]
-  },
-  {
-   "id": "RP2",
-   "owner": "DATA",
-   "dependsOn": [
-    "M02"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md"
-   ]
-  },
-  {
-   "id": "RP3",
-   "owner": "DATA+EXPERIENCE",
-   "dependsOn": [
-    "T03"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/rp3-send-dedup-recovery.md"
-   ]
-  },
-  {
-   "id": "RP4",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "T03"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/rp4-citations-verified.md"
-   ]
-  },
-  {
-   "id": "RP5",
-   "owner": "INTEGRATOR",
-   "dependsOn": [
-    "B02"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "active",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md",
-    "../../evidence/2026-10-09-opening-release/rp5-gha-quality-attempt.md",
-    "../../evidence/2026-10-09-opening-release/rp5-lint-fix-accept.md",
-    "../../evidence/2026-10-09-opening-release/rp5-gha-after-lint-fix.md",
-    "../../evidence/2026-10-09-opening-release/rp5-gha-after-evidence-push.md"
-   ]
-  },
-  {
-   "id": "RP6",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "T03",
-    "U01"
-   ],
-   "plan": "12-review-hardening.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-06-opening-release/rp6-today-resume-verified.md"
-   ]
-  },
-  {
-   "id": "DL1",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "L03",
-    "U03"
-   ],
-   "plan": "13-daily-loop-gaps.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-08-opening-release/dl1-no-mock-closure.md"
-   ]
-  },
-  {
-   "id": "DL2",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "P02",
-    "RP6"
-   ],
-   "plan": "13-daily-loop-gaps.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl2-complete-skip.md"
-   ]
-  },
-  {
-   "id": "DL3",
-   "owner": "DATA+EXPERIENCE",
-   "dependsOn": [
-    "L02",
-    "P02",
-    "DL2",
-    "DL5"
-   ],
-   "plan": "13-daily-loop-gaps.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl3-retest-loop.md"
-   ]
-  },
-  {
-   "id": "DL4",
-   "owner": "EXPERIENCE",
-   "dependsOn": [
-    "DL1",
-    "U03",
-    "DL3",
-    "DL6"
-   ],
-   "plan": "13-daily-loop-gaps.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl4-memory-cards.md"
-   ]
-  },
-  {
-   "id": "DL5",
-   "owner": "DATA+EXPERIENCE",
-   "dependsOn": [
-    "DL2"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl5-quick-add-grouped-queue.md"
-   ]
-  },
-  {
-   "id": "DL6",
-   "owner": "EXPERIENCE+DATA",
-   "dependsOn": [
-    "L03",
-    "K02a"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl6-reference-self-check.md"
-   ]
-  },
-  {
-   "id": "DL7",
-   "owner": "AI+DATA",
-   "dependsOn": [
-    "T01",
-    "T03"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl7-ai-readiness.md"
-   ]
-  },
-  {
-   "id": "DL8",
-   "owner": "PIPELINE+AI",
-   "dependsOn": [
-    "I02",
-    "T03"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl8-image-vision.md"
-   ]
-  },
-  {
-   "id": "DL9",
-   "owner": "EXPERIENCE+DATA",
-   "dependsOn": [
-    "P01",
-    "P02",
-    "DL5"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl9-planning-timetable.md"
-   ]
-  },
-  {
-   "id": "P04a",
-   "owner": "EXPERIENCE+DATA",
-   "dependsOn": [
-    "DL2",
-    "DL3",
-    "DL9"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/p04a-daily-auto-draft.md"
-   ]
-  },
-  {
-   "id": "DL10",
-   "owner": "INTEGRATOR+QA",
-   "dependsOn": [
-    "I03",
-    "T01"
-   ],
-   "plan": "14-loop-closure.md",
-   "status": "verified",
-   "evidence": [
-    "../../evidence/2026-10-09-opening-release/dl10-local-check-accept.md",
-    "../../evidence/2026-10-09-opening-release/dl10-local-check-live.md"
-   ]
-  }
- ]
+  "schemaVersion": 1,
+  "baseCommit": "e7639c9930bf230185551c86ea825e2524c40a39",
+  "branch": "feat/opening-release",
+  "tasks": [
+    {
+      "id": "C01B",
+      "owner": "DATA+PIPELINE",
+      "dependsOn": [
+        "X01",
+        "F03",
+        "M02",
+        "P02",
+        "C01"
+      ],
+      "plan": "09-connections.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/c01b-imports-revocation.md"
+      ]
+    },
+    {
+      "id": "B00",
+      "owner": "INTEGRATOR",
+      "dependsOn": [],
+      "plan": "00-baseline.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "B01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B00"
+      ],
+      "plan": "00-quality-baseline.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "B02",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B01"
+      ],
+      "plan": "00-browser-boundary.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-12-opening-release/baseline.md"
+      ]
+    },
+    {
+      "id": "F01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-13-opening-release/f01-access.md",
+        "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
+      ]
+    },
+    {
+      "id": "F02",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-13-opening-release/f02-contracts.md"
+      ]
+    },
+    {
+      "id": "F03",
+      "owner": "DATA",
+      "dependsOn": [
+        "F01",
+        "F02"
+      ],
+      "plan": "01-foundation.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/f01-f03-verified.md"
+      ]
+    },
+    {
+      "id": "I01",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/i01-signed-upload-verified.md"
+      ]
+    },
+    {
+      "id": "I02",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "I01"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-17-opening-release/i02-parser-verified.md"
+      ]
+    },
+    {
+      "id": "I03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "02-ingestion.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/i03-worker-runtime-verified.md"
+      ]
+    },
+    {
+      "id": "T01",
+      "owner": "AI",
+      "dependsOn": [
+        "F03"
+      ],
+      "plan": "03-tutor.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
+      ]
+    },
+    {
+      "id": "T02",
+      "owner": "AI",
+      "dependsOn": [
+        "I02",
+        "T01"
+      ],
+      "plan": "03-tutor.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
+      ]
+    },
+    {
+      "id": "T03",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "T02",
+        "I03"
+      ],
+      "plan": "03-tutor.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-13-opening-release/t03-tutor-http-slice.md",
+        "../../evidence/2026-09-18-opening-release/t02-t03-tutor-verified.md"
+      ]
+    },
+    {
+      "id": "M01",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "04-memory.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m01-memory-verified.md"
+      ]
+    },
+    {
+      "id": "M02",
+      "owner": "DATA",
+      "dependsOn": [
+        "M01"
+      ],
+      "plan": "04-memory.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
+    },
+    {
+      "id": "M03",
+      "owner": "AI",
+      "dependsOn": [
+        "T03",
+        "M02"
+      ],
+      "plan": "04-memory.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
+    },
+    {
+      "id": "L01",
+      "owner": "DATA",
+      "dependsOn": [
+        "T03",
+        "M01"
+      ],
+      "plan": "05-learning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l01-learning-verified.md"
+      ]
+    },
+    {
+      "id": "L02",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "L01"
+      ],
+      "plan": "05-learning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l02-learning-summary-retest-verified.md"
+      ]
+    },
+    {
+      "id": "L03",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "L02"
+      ],
+      "plan": "05-learning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
+      ]
+    },
+    {
+      "id": "P01",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "F02"
+      ],
+      "plan": "06-planning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md",
+        "../../evidence/2026-09-16-opening-release/p01-slice2-verified.md"
+      ]
+    },
+    {
+      "id": "P02",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "P01",
+        "F03",
+        "L01"
+      ],
+      "plan": "06-planning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
+      ]
+    },
+    {
+      "id": "P03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "P02",
+        "I03"
+      ],
+      "plan": "06-planning.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/p02-p03-planning-reminders-verified.md"
+      ]
+    },
+    {
+      "id": "U01",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "F02",
+        "F01"
+      ],
+      "plan": "07-experience.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/t01-u01-verified.md"
+      ]
+    },
+    {
+      "id": "U02",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "I01",
+        "I02",
+        "U01"
+      ],
+      "plan": "07-experience.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
+        "../../evidence/2026-10-02-week-sprint/m02-m03-active.md"
+      ]
+    },
+    {
+      "id": "U03",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03",
+        "M03",
+        "L03",
+        "P03",
+        "U02"
+      ],
+      "plan": "07-experience.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md",
+        "../../evidence/2026-10-02-week-sprint/l03-learning-read-verified.md"
+      ]
+    },
+    {
+      "id": "Q01",
+      "owner": "QA",
+      "dependsOn": [
+        "U03",
+        "Q03",
+        "DL3",
+        "DL6",
+        "DL7",
+        "DL10"
+      ],
+      "plan": "08-delivery.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q02",
+      "owner": "QA",
+      "dependsOn": [
+        "Q01"
+      ],
+      "plan": "08-delivery.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "Q03",
+      "owner": "INTEGRATOR+QA",
+      "dependsOn": [
+        "P03",
+        "M02"
+      ],
+      "plan": "08-delivery.md",
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/q03-restore-apply-progress.md",
+        "../../evidence/2026-10-09-opening-release/q03-packaging-gaps.md",
+        "../../evidence/2026-10-09-opening-release/q03-continue-empty-namespace-readiness.md",
+        "../../evidence/2026-10-09-opening-release/q03-packaging-gates-run.md",
+        "../../evidence/2026-10-09-opening-release/q03-cheap-fixture-roundtrip.md",
+        "../../evidence/2026-10-09-opening-release/q03-restore-apply-executor.md",
+        "../../evidence/2026-10-09-opening-release/q03-restore-apply-accept.md",
+        "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore.md",
+        "../../evidence/2026-10-09-opening-release/q03-live-minio-object-restore-accept.md"
+      ]
+    },
+    {
+      "id": "X01",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "F02"
+      ],
+      "plan": "09-connections.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-09-16-opening-release/x01-p01-slice.md"
+      ]
+    },
+    {
+      "id": "C01",
+      "owner": "DATA+PIPELINE",
+      "dependsOn": [
+        "X01",
+        "F03",
+        "M02",
+        "P02"
+      ],
+      "plan": "09-connections.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/c01-connections-verified.md"
+      ]
+    },
+    {
+      "id": "C02",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "C01",
+        "I01",
+        "I03"
+      ],
+      "plan": "09-connections.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/c02-imap-sync-verified.md",
+        "../../evidence/2026-10-06-opening-release/c02-imap-code-slice.md",
+        "../../evidence/2026-10-06-opening-release/c02-email-import-route.md",
+        "../../evidence/2026-10-09-opening-release/c02-imap-sync-check-accept.md"
+      ]
+    },
+    {
+      "id": "C03",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "C01",
+        "I01",
+        "I03"
+      ],
+      "plan": "09-connections.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/c03-dingtalk-verified.md",
+        "../../evidence/2026-10-09-opening-release/c03-dingtalk-check-accept.md",
+        "../../evidence/2026-10-06-opening-release/c03-dingtalk-callback-slice.md"
+      ]
+    },
+    {
+      "id": "V01",
+      "owner": "PIPELINE",
+      "dependsOn": [
+        "X01",
+        "I02",
+        "I03"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/v01-verified.md",
+        "../../evidence/2026-10-09-opening-release/v01-media-parse-accept.md",
+        "../../evidence/2026-10-09-opening-release/v01-media-parse-followup-accept.md",
+        "../../evidence/2026-10-09-opening-release/v01-media-parse-copy-jobid-accept.md",
+        "../../evidence/2026-10-09-opening-release/v01-k01-invalidate-accept.md"
+      ]
+    },
+    {
+      "id": "K01",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "X01",
+        "C01",
+        "I02",
+        "T02"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/k01-course-knowledge.md",
+        "../../evidence/2026-10-09-opening-release/k01-knowledge-accept.md"
+      ]
+    },
+    {
+      "id": "K02a",
+      "owner": "EXPERIENCE+AI",
+      "dependsOn": [
+        "L02",
+        "T03"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-05-opening-release/k02a-tutor-policy-verified.md"
+      ]
+    },
+    {
+      "id": "K02",
+      "owner": "EXPERIENCE+AI+DATA",
+      "dependsOn": [
+        "K01",
+        "K02a",
+        "L02",
+        "T03",
+        "DL3",
+        "DL6"
+      ],
+      "plan": "10-media-knowledge.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/k02-skill-evidence.md",
+        "../../evidence/2026-10-09-opening-release/k02-skill-evidence-accept.md"
+      ]
+    },
+    {
+      "id": "P04",
+      "owner": "AI+EXPERIENCE",
+      "dependsOn": [
+        "P04a",
+        "C02",
+        "C03",
+        "K02",
+        "P02",
+        "M01"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/p04-verified.md",
+        "../../evidence/2026-10-09-opening-release/p04-overlay-0052-accept.md",
+        "../../evidence/2026-10-09-opening-release/p04-ai-extract-study-actions-accept.md",
+        "../../evidence/2026-10-09-opening-release/p04-experience-action-digest-accept.md",
+        "../../evidence/2026-10-09-opening-release/p04-import-chunks-wiring-accept.md"
+      ]
+    },
+    {
+      "id": "U04",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "C02",
+        "C03",
+        "V01",
+        "K02",
+        "P04"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/u04-capabilities-ui-accept.md",
+        "../../evidence/2026-10-09-opening-release/u04-verified.md"
+      ]
+    },
+    {
+      "id": "Q04",
+      "owner": "QA+INTEGRATOR",
+      "dependsOn": [
+        "U04",
+        "Q02"
+      ],
+      "plan": "11-proactive-acceptance.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "RP1",
+      "owner": "DATA",
+      "dependsOn": [
+        "M02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md"
+      ]
+    },
+    {
+      "id": "RP2",
+      "owner": "DATA",
+      "dependsOn": [
+        "M02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/lab-a01-b01-rp-evidence.md"
+      ]
+    },
+    {
+      "id": "RP3",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/rp3-send-dedup-recovery.md"
+      ]
+    },
+    {
+      "id": "RP4",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/rp4-citations-verified.md"
+      ]
+    },
+    {
+      "id": "RP5",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "B02"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "active",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/rp5-ci-gate.md",
+        "../../evidence/2026-10-09-opening-release/rp5-gha-quality-attempt.md",
+        "../../evidence/2026-10-09-opening-release/rp5-lint-fix-accept.md",
+        "../../evidence/2026-10-09-opening-release/rp5-gha-after-lint-fix.md",
+        "../../evidence/2026-10-09-opening-release/rp5-gha-after-evidence-push.md",
+        "../../evidence/2026-10-09-opening-release/rp5-unit-retest-null-accept.md",
+        "../../evidence/2026-10-09-opening-release/rp5-unit-ai-settings-409-accept.md"
+      ]
+    },
+    {
+      "id": "RP6",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "T03",
+        "U01"
+      ],
+      "plan": "12-review-hardening.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-06-opening-release/rp6-today-resume-verified.md"
+      ]
+    },
+    {
+      "id": "DL1",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "L03",
+        "U03"
+      ],
+      "plan": "13-daily-loop-gaps.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-08-opening-release/dl1-no-mock-closure.md"
+      ]
+    },
+    {
+      "id": "DL2",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "P02",
+        "RP6"
+      ],
+      "plan": "13-daily-loop-gaps.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl2-complete-skip.md"
+      ]
+    },
+    {
+      "id": "DL3",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "L02",
+        "P02",
+        "DL2",
+        "DL5"
+      ],
+      "plan": "13-daily-loop-gaps.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl3-retest-loop.md"
+      ]
+    },
+    {
+      "id": "DL4",
+      "owner": "EXPERIENCE",
+      "dependsOn": [
+        "DL1",
+        "U03",
+        "DL3",
+        "DL6"
+      ],
+      "plan": "13-daily-loop-gaps.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl4-memory-cards.md"
+      ]
+    },
+    {
+      "id": "DL5",
+      "owner": "DATA+EXPERIENCE",
+      "dependsOn": [
+        "DL2"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl5-quick-add-grouped-queue.md"
+      ]
+    },
+    {
+      "id": "DL6",
+      "owner": "EXPERIENCE+DATA",
+      "dependsOn": [
+        "L03",
+        "K02a"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl6-reference-self-check.md"
+      ]
+    },
+    {
+      "id": "DL7",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "T01",
+        "T03"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl7-ai-readiness.md"
+      ]
+    },
+    {
+      "id": "DL8",
+      "owner": "PIPELINE+AI",
+      "dependsOn": [
+        "I02",
+        "T03"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl8-image-vision.md"
+      ]
+    },
+    {
+      "id": "DL9",
+      "owner": "EXPERIENCE+DATA",
+      "dependsOn": [
+        "P01",
+        "P02",
+        "DL5"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl9-planning-timetable.md"
+      ]
+    },
+    {
+      "id": "P04a",
+      "owner": "EXPERIENCE+DATA",
+      "dependsOn": [
+        "DL2",
+        "DL3",
+        "DL9"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/p04a-daily-auto-draft.md"
+      ]
+    },
+    {
+      "id": "DL10",
+      "owner": "INTEGRATOR+QA",
+      "dependsOn": [
+        "I03",
+        "T01"
+      ],
+      "plan": "14-loop-closure.md",
+      "status": "verified",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl10-local-check-accept.md",
+        "../../evidence/2026-10-09-opening-release/dl10-local-check-live.md"
+      ]
+    }
+  ]
 }

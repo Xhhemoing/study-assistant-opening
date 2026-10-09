@@ -27,7 +27,7 @@ describe("retest task lock-time replay", () => {
     const payload = { kind: "task", accepted: true, taskId, acceptPayloadHash: retestPayloadHash(input) };
     const query = vi.fn().mockResolvedValueOnce([{ id: candidateId, payload }]).mockResolvedValueOnce([taskRow]);
     const result = await prepareRetestTask(query as unknown as TransactionSql, scope, input);
-    expect(result).toEqual({ id: taskId, title: "复习", minutes: 20, dueAt: null, priority: 1, status: "pending", version: 4 });
+    expect(result).toEqual({ id: taskId, title: "复习", minutes: 20, dueAt: null, priority: 1, status: "pending", version: 4, retest: null });
     expect(lockOpeningRetestReviewCandidate).toHaveBeenCalledWith(query, scope, candidateId);
     expect(vi.mocked(lockOpeningRetestReviewCandidate).mock.invocationCallOrder[0]).toBeLessThan(query.mock.invocationCallOrder[0]!);
   });

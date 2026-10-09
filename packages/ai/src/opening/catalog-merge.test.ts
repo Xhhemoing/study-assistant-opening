@@ -47,4 +47,10 @@ describe("mergeOpeningCatalog", () => {
     expect(mergeOpeningCatalog([disabled], [], { defaultModelId: "server", dailyCapCents: 0 }).models[0]!.availability).toBe("budget_disabled");
     expect(mergeOpeningCatalog([disabled], [], { defaultModelId: "server", dailyCapCents: 100 }).models[0]!.availability).toBe("available");
   });
+  it("keeps server missing_key and pricing_missing sticky across effective-cap recompute", () => {
+    const missing = { ...server, availability: "missing_key" as const };
+    const unpriced = { ...server, id: "unpriced", availability: "pricing_missing" as const };
+    expect(mergeOpeningCatalog([missing], [], { defaultModelId: "server", dailyCapCents: 100 }).models[0]!.availability).toBe("missing_key");
+    expect(mergeOpeningCatalog([unpriced], [], { defaultModelId: "unpriced", dailyCapCents: 100 }).models[0]!.availability).toBe("pricing_missing");
+  });
 });

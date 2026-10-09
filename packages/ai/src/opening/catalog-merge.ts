@@ -23,12 +23,29 @@ function availabilityFor(
   return "available";
 }
 
+/** Env catalog may mark missing_key / pricing_missing independently of the
+ *  effective workspace cap. Only budget_disabled is recomputed from that cap. */
+function serverAvailabilityWithEffectiveCap(
+  model: OpeningModelSummary & { apiKey: string; vaultConfigBroken?: boolean | undefined },
+  dailyCapCents: number,
+): OpeningModelSummary["availability"] {
+  if (
+    model.availability === "missing_key" ||
+    model.availability === "pricing_missing" ||
+    model.availability === "vault_disabled"
+  ) {
+    return model.availability;
+  }
+  return availabilityFor(model, dailyCapCents);
+}
+
 /**
  * Merge the deployment env catalog with web-managed workspace models into one
  * resolvable list. Server entries keep priority: custom models never override
  * an env id, and the merged list stays capped at the same 32-model budget.
  * Availability uses the effective daily cap (env and/or workspace), so enabling
- * a workspace budget can clear env-only budget_disabled.
+ * a workspace budget can clear env-only budget_disabled. Non-budget server
+ * unavailability (missing_key, pricing_missing, vault_disabled) stays sticky.
  */
 export function mergeOpeningCatalog(
   serverModels: Array<OpeningModelSummary & { baseUrl: string; apiKey: string }>,
@@ -39,7 +56,7 @@ export function mergeOpeningCatalog(
   const serverIds = new Set(serverModels.map(model => model.id));
   const servers = serverModels.map(model => ({
     ...model,
-    availability: availabilityFor(model, input.dailyCapCents),
+    availability: serverAvailabilityWithEffectiveCap(model, input.dailyCapCents),
     source: model.source ?? ("server" as const),
   }));
   const custom = workspaceModels

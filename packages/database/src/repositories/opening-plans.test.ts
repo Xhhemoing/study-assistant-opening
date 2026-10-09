@@ -9,7 +9,7 @@ describe("opening task response versions", () => {
   it("returns the stored task version from the owner list", async () => {
     const query = vi.fn().mockResolvedValue([task]);
     expect(await createOpeningPlansRepository(query as unknown as Sql).listTasks(scope))
-      .toEqual([{ id: "task", title: "Due task", minutes: 25, dueAt: null, priority: 1, status: "pending", version: 4 }]);
+      .toEqual([{ id: "task", title: "Due task", minutes: 25, dueAt: null, priority: 1, status: "pending", version: 4, retest: null }]);
   });
 
   it("returns the incremented task version after a status update", async () => {
