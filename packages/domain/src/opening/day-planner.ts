@@ -19,7 +19,14 @@ export type PlanDayOptions = {
    * deadline/priority sort after preferred ones). Used by daily auto-draft carry-over.
    */
   preferredOrder?: readonly string[];
+  /**
+   * Planning clock. Blocks must not start before this instant (in addition to
+   * slot start and any retest recommendedAt / not-before).
+   */
+  planningNow?: string;
 };
+
+type MutableSlot = { start: number; end: number };
 
 function deadline(task: TaskItem): number {
   return task.dueAt === null ? Infinity : Date.parse(task.dueAt);
@@ -47,6 +54,43 @@ function isRetestNotYetDue(task: TaskItem, dayEndMs: number): boolean {
   return Date.parse(recommendedAt) > dayEndMs;
 }
 
+/** Earliest allowable start: retest recommendedAt acts as not-before. */
+function taskNotBeforeMs(task: TaskItem): number {
+  const recommendedAt = task.retest?.recommendedAt;
+  return recommendedAt ? Date.parse(recommendedAt) : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Place `duration` inside `slot` no earlier than `earliest`, ending by `due`.
+ * Returns null when the window does not fit. On success, mutates `slots` so any
+ * empty prefix before the chosen start stays available for later tasks.
+ */
+function tryPlaceInSlot(
+  slots: MutableSlot[],
+  index: number,
+  duration: number,
+  earliest: number,
+  due: number,
+): { start: number; end: number } | null {
+  const slot = slots[index];
+  if (!slot) return null;
+  const start = Math.max(slot.start, earliest);
+  const end = start + duration;
+  if (end > Math.min(slot.end, due)) return null;
+
+  const originalEnd = slot.end;
+  if (start > slot.start) {
+    // Keep [slot.start, start) for other tasks; remainder after the block if any.
+    slot.end = start;
+    if (end < originalEnd) {
+      slots.splice(index + 1, 0, { start: end, end: originalEnd });
+    }
+  } else {
+    slot.start = end;
+  }
+  return { start, end };
+}
+
 /**
  * Proposes only; never changes task status or accepts a plan. Higher priority
  * numbers sort first after confirmed deadlines. Tasks remain indivisible;
@@ -54,6 +98,8 @@ function isRetestNotYetDue(task: TaskItem, dayEndMs: number): boolean {
  * Pass confirmed free blocks AND all applicable class/sleep/meal/locked blocks.
  * Retest tasks with recommendedAt after the planning day end are skipped (not
  * listed as unscheduled) so delayed retests stay out of today's proposal.
+ * Within a day, retest recommendedAt is a not-before: start is
+ * max(slot.start, recommendedAt, planningNow) and any empty slot prefix is kept.
  */
 export function planDay(
   tasks: readonly TaskItem[],
@@ -61,6 +107,9 @@ export function planDay(
   options: PlanDayOptions = {},
 ): DayPlanResult {
   const dayEndMs = resolveDayEndMs(free, options.dayEnd);
+  const planningNowMs = options.planningNow
+    ? Date.parse(options.planningNow)
+    : Number.NEGATIVE_INFINITY;
   const ids = new Set<string>();
   const pending = tasks.map((raw) => {
     const task = taskItemSchema.parse(raw);
@@ -82,28 +131,31 @@ export function planDay(
   } else {
     pending.sort(compareTasks);
   }
-  const slots = availableTimeSlots(free).map((slot) => ({
+  const slots: MutableSlot[] = availableTimeSlots(free).map((slot) => ({
     start: Date.parse(slot.start), end: Date.parse(slot.end),
   }));
   const result: DayPlanResult = { blocks: [], unscheduledTaskIds: [] };
   for (const task of pending) {
     const duration = task.minutes * 60_000;
     const due = deadline(task);
-    const slot = slots.find((candidate) => candidate.start + duration <= Math.min(candidate.end, due));
-    if (!slot) {
+    const earliest = Math.max(taskNotBeforeMs(task), planningNowMs);
+    let placed: { start: number; end: number } | null = null;
+    for (let i = 0; i < slots.length; i += 1) {
+      placed = tryPlaceInSlot(slots, i, duration, earliest, due);
+      if (placed) break;
+    }
+    if (!placed) {
       result.unscheduledTaskIds.push(task.id);
       continue;
     }
-    const end = slot.start + duration;
     result.blocks.push({
       taskId: task.id,
-      start: new Date(slot.start).toISOString(),
-      end: new Date(end).toISOString(),
+      start: new Date(placed.start).toISOString(),
+      end: new Date(placed.end).toISOString(),
       reason: task.dueAt !== null
         ? "按已确认截止时间优先安排，预计用时不侵占固定安排。"
         : "按任务优先级安排在已确认空闲时间内，用时为估计。",
     });
-    slot.start = end;
   }
   result.blocks.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   return result;

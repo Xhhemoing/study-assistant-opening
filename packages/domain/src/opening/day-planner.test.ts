@@ -10,6 +10,18 @@ const task = (n: number, overrides: Partial<TaskItem> = {}): TaskItem => ({
 const slot = (start: string, end: string, kind: TimeBlock["kind"] = "free"): TimeBlock => ({
   start: at(start), end: at(end), kind,
 });
+const retest = (n: number, recommendedAt: string, overrides: Partial<TaskItem> = {}): TaskItem =>
+  task(n, {
+    retest: {
+      candidateId: id(90 + n),
+      activityId: id(80 + n),
+      courseId: id(70),
+      skillLabel: "fractions",
+      prompt: `隔天重做原题：${n}`,
+      recommendedAt,
+    },
+    ...overrides,
+  });
 
 describe("planDay", () => {
   it("leaves tasks unscheduled instead of inventing free time", () => {
@@ -91,45 +103,22 @@ describe("planDay", () => {
   });
 
   it("skips retest tasks whose recommendedAt is after the planning day end", () => {
-    const future = task(1, {
-      retest: {
-        candidateId: id(9),
-        activityId: id(8),
-        courseId: id(7),
-        skillLabel: "fractions",
-        prompt: "隔天重做原题（先不看之前的答案）：1/2+1/3",
-        recommendedAt: "2026-09-16T10:00:00.000Z",
-      },
-    });
-    const dueToday = task(2, {
-      retest: {
-        candidateId: id(6),
-        activityId: id(5),
-        courseId: id(7),
-        skillLabel: "fractions",
-        prompt: "隔天重做原题（先不看之前的答案）：2/3",
-        recommendedAt: at("10:00"),
-      },
-    });
+    const future = retest(1, "2026-09-16T10:00:00.000Z");
+    const dueToday = retest(2, at("10:00"));
     const ordinary = task(3);
     const result = planDay([future, dueToday, ordinary], [slot("09:00", "12:00")], {
       dayEnd: "2026-09-14T23:59:59.999Z",
     });
-    expect(result.blocks.map((b) => b.taskId)).toEqual([id(2), id(3)]);
+    // Ordinary fills the morning prefix; retest starts at recommendedAt (10:00).
+    expect(result.blocks.map((b) => b.taskId)).toEqual([id(3), id(2)]);
+    expect(result.blocks.find((b) => b.taskId === id(2))).toMatchObject({
+      start: at("10:00"), end: at("10:30"),
+    });
     expect(result.unscheduledTaskIds).toEqual([]);
   });
 
   it("schedules a retest on the day its recommendedAt falls", () => {
-    const due = task(1, {
-      retest: {
-        candidateId: id(9),
-        activityId: id(8),
-        courseId: id(7),
-        skillLabel: "fractions",
-        prompt: "隔天重做",
-        recommendedAt: at("08:00"),
-      },
-    });
+    const due = retest(1, at("08:00"));
     const result = planDay([due], [slot("09:00", "10:00")], { dayEnd: "2026-09-14T23:59:59.999Z" });
     expect(result.blocks.map((b) => b.taskId)).toEqual([id(1)]);
   });
@@ -141,5 +130,61 @@ describe("planDay", () => {
     ], [slot("09:00", "11:00")], { dayEnd: "2026-09-14T23:59:59.999Z" });
     expect(result.unscheduledTaskIds).toEqual([id(1)]);
     expect(result.blocks.map((b) => b.taskId)).toEqual([id(2)]);
+  });
+
+  // research §5.2 for day-planner / retest earliest was not found in docs;
+  // cover the required earliest-clamp + prefix-preservation behavior below.
+
+  it("does not schedule an afternoon retest before recommendedAt when planningNow is earlier", () => {
+    const afternoon = retest(1, at("14:00"));
+    const result = planDay([afternoon], [slot("09:00", "17:00")], {
+      dayEnd: "2026-09-14T23:59:59.999Z",
+      planningNow: at("08:00"),
+    });
+    expect(result.unscheduledTaskIds).toEqual([]);
+    expect(result.blocks).toEqual([{
+      taskId: id(1), start: at("14:00"), end: at("14:30"), reason: expect.any(String),
+    }]);
+  });
+
+  it("keeps the empty slot prefix usable for other tasks after placing a future retest", () => {
+    // Prefer retest first so it would greedily take 09:00 without the earliest clamp.
+    const afternoon = retest(1, at("14:00"), { priority: 10 });
+    const ordinary = task(2, { priority: 1 });
+    const result = planDay([afternoon, ordinary], [slot("09:00", "17:00")], {
+      dayEnd: "2026-09-14T23:59:59.999Z",
+      planningNow: at("08:00"),
+      preferredOrder: [id(1), id(2)],
+    });
+    expect(result.unscheduledTaskIds).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => ({ taskId, start, end }))).toEqual([
+      { taskId: id(2), start: at("09:00"), end: at("09:30") },
+      { taskId: id(1), start: at("14:00"), end: at("14:30") },
+    ]);
+  });
+
+  it("clamps ordinary tasks to planningNow without changing confirmed-plan semantics", () => {
+    const result = planDay([task(1)], [slot("09:00", "12:00")], {
+      planningNow: at("10:00"),
+    });
+    expect(result.blocks).toEqual([{
+      taskId: id(1), start: at("10:00"), end: at("10:30"), reason: expect.any(String),
+    }]);
+    // planDay only proposes; inputs and task status are untouched (no accept side effects).
+    const input = task(1, { status: "pending" });
+    const before = structuredClone(input);
+    planDay([input], [slot("09:00", "12:00")], { planningNow: at("10:00") });
+    expect(input).toEqual(before);
+    expect(input.status).toBe("pending");
+  });
+
+  it("leaves a retest unscheduled when recommendedAt leaves no room before dueAt", () => {
+    const squeezed = retest(1, at("15:00"), { dueAt: at("15:20"), minutes: 30 });
+    const result = planDay([squeezed], [slot("09:00", "17:00")], {
+      dayEnd: "2026-09-14T23:59:59.999Z",
+      planningNow: at("08:00"),
+    });
+    expect(result.blocks).toEqual([]);
+    expect(result.unscheduledTaskIds).toEqual([id(1)]);
   });
 });
