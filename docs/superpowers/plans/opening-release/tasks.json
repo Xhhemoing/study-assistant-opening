@@ -784,6 +784,48 @@
         "../../evidence/2026-10-09-opening-release/dl10-local-check-accept.md",
         "../../evidence/2026-10-09-opening-release/dl10-local-check-live.md"
       ]
+    },
+    {
+      "id": "RP7",
+      "owner": "INTEGRATOR",
+      "dependsOn": [
+        "RP5"
+      ],
+      "plan": "15-research-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "DL11",
+      "owner": "DATA",
+      "dependsOn": [
+        "DL3"
+      ],
+      "plan": "15-research-hardening.md",
+      "status": "planned",
+      "evidence": [
+        "../../evidence/2026-10-09-opening-release/dl11-day-planner-earliest-accept.md"
+      ]
+    },
+    {
+      "id": "BC1",
+      "owner": "AI+DATA",
+      "dependsOn": [
+        "DL7"
+      ],
+      "plan": "15-research-hardening.md",
+      "status": "planned",
+      "evidence": []
+    },
+    {
+      "id": "TZ01",
+      "owner": "DATA+AI",
+      "dependsOn": [
+        "DL7"
+      ],
+      "plan": "15-research-hardening.md",
+      "status": "planned",
+      "evidence": []
     }
   ]
 }
