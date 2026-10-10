@@ -8,6 +8,7 @@ export const PALETTE_COMMANDS = [
   { id: "courses", label: "课程", description: "查看课程与长期学习上下文", href: "/opening/courses", kind: "page" },
   { id: "cards", label: "记忆卡片", description: "复习到期的记忆卡片", href: "/opening/cards", kind: "page" },
   { id: "opening-review", label: "待确认建议", description: "审核助手生成的学习建议", href: "/opening/review", kind: "page" },
+  { id: "materials", label: "材料", description: "上传与整理课程材料", href: "/opening/library?tab=materials", kind: "page" },
   { id: "connections", label: "数据连接", description: "邮箱与钉钉等数据连接设置", href: "/opening/settings/connections", kind: "page" },
   { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/search", kind: "page" },
   { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/settings", kind: "page" },

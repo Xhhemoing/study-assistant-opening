@@ -18,7 +18,7 @@ import { SourceCleanupPanel } from "./source-cleanup-panel";
 
 type Notice = { sourceId?: string; text: string };
 
-export function InboxPanel({ api, sources, onChanged, filter = "", visibleSources, selectedIds, onToggle, selectionDisabled = false, renderMetadata }: {
+export function InboxPanel({ api, sources, onChanged, filter = "", visibleSources, selectedIds, onToggle, selectionDisabled = false, renderMetadata, onAssign, renderBelow }: {
   api: OpeningApi;
   sources: SourceRecord[];
   onChanged: () => Promise<void>;
@@ -28,6 +28,8 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
   onToggle?: (id: string) => void;
   selectionDisabled?: boolean;
   renderMetadata?: (record: SourceRecord) => ReactNode;
+  onAssign?: (id: string) => void;
+  renderBelow?: (record: SourceRecord) => ReactNode;
 }) {
   const [managedId, setManagedId] = useState<string | null>(null);
   const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
@@ -138,11 +140,13 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
                 else openManage(record.id, null);
               }}
               onDelete={() => openManage(record.id, "delete")}
+              onAssign={onAssign}
             />{renderMetadata?.(record)}</div></div>
             {managedId === record.id ? <SourceActionsPanel record={record} initialAction={manageInitialAction} onClose={closeManage} onChanged={onChanged} onResult={result => {
               setNotice({ text: sourceActionNotice(result) });
               if (result.deleted) setView(value => value?.record.id === record.id ? null : value);
             }} /> : null}
+            {renderBelow?.(record)}
             <p className="sr-only">{sourceStatusLabel(record)}</p>
           </li>
         ))}

@@ -2,7 +2,7 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { sourceStatusLabel } from "./upload-state";
-import { ExternalLink, FileText, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { ExternalLink, FileText, FolderInput, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { ui, tone } from "../design/ui";
 
 const dangerQuiet = `${ui.secondary} border-red-200 text-red-700 hover:bg-red-50`;
@@ -22,6 +22,7 @@ export function SourceRow({
   onRetry,
   onManage,
   onDelete,
+  onAssign,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "error"> & Partial<Pick<SourceRecord, "mime" | "bytes" | "createdAt">>;
   bytePercent?: number | null;
@@ -30,6 +31,7 @@ export function SourceRow({
   onRetry?: (id: string) => void;
   onManage?: (id: string) => void;
   onDelete?: (id: string) => void;
+  onAssign?: (id: string) => void;
 }) {
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   const metadata = sourceMetadata(record);
@@ -50,6 +52,7 @@ export function SourceRow({
         {notice ? <p className="text-xs text-amber-800">{notice}</p> : null}
       </div>
       <div className="flex gap-2">
+        {onAssign ? <button className={ui.quiet} onClick={() => onAssign(record.id)} type="button"><FolderInput size={14} aria-hidden="true" />归入课程</button> : null}
         {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button"><Settings2 size={14} aria-hidden="true" />管理材料</button> : null}
         {onOpen ? (
           <button className={ui.quiet} onClick={() => onOpen(record.id)} type="button">

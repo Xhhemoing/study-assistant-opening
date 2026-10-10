@@ -37,6 +37,7 @@ describe("command palette keyboard model", () => {
       "courses",
       "cards",
       "opening-review",
+      "materials",
       "connections",
       "search",
       "settings",
@@ -61,10 +62,12 @@ describe("command palette keyboard model", () => {
       "/opening/courses",
       "/opening/cards",
       "/opening/review",
+      "/opening/library?tab=materials",
       "/opening/settings/connections",
       "/search",
       "/settings",
       "/settings/advanced",
     ]));
+    expect(PALETTE_COMMANDS.find((command) => command.id === "materials")?.label).toBe("材料");
   });
 });

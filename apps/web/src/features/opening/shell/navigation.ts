@@ -13,12 +13,15 @@ export function openingNavigation(): OpeningNavigationItem[] {
     { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
     { href: "/opening/cards", label: "卡片", icon: "cards", group: "more" },
     { href: "/opening/review", label: "待确认", icon: "review", group: "more" },
+    { href: "/opening/library?tab=materials", label: "材料", icon: "library", group: "more" },
     { href: "/opening/settings/connections", label: "连接", icon: "connections", group: "more" },
   ];
 }
 
 export function navigationIsActive(href: string, pathname: string): boolean {
-  if (href === "/learn" && pathname.startsWith("/learn/courses")) return false;
-  if (href === "/library" && pathname.startsWith("/opening/library")) return true;
-  return pathname === href || pathname.startsWith(`${href}/`);
+  const hrefPath = href.split("?")[0] ?? href;
+  if (hrefPath === "/learn" && pathname.startsWith("/learn/courses")) return false;
+  if (hrefPath === "/library" && pathname.startsWith("/opening/library")) return true;
+  if (hrefPath === "/opening/library" && pathname.startsWith("/opening/library")) return true;
+  return pathname === hrefPath || pathname.startsWith(`${hrefPath}/`);
 }

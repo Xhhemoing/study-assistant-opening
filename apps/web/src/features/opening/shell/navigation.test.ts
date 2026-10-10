@@ -3,7 +3,7 @@ import { legacyOpeningRedirectPath } from "../../../middleware";
 import { navigationIsActive, openingNavigation } from "./navigation";
 
 describe("workspace navigation", () => {
-  it("exposes Opening core loop entries plus cards, review, and connections", () => {
+  it("exposes Opening core loop entries plus cards, review, materials, and connections", () => {
     const links = openingNavigation().map(item => item.href);
     expect(links).toEqual([
       "/opening/today",
@@ -11,6 +11,7 @@ describe("workspace navigation", () => {
       "/opening/courses",
       "/opening/cards",
       "/opening/review",
+      "/opening/library?tab=materials",
       "/opening/settings/connections",
     ]);
     expect(openingNavigation().filter(item => item.group === "core").map(item => item.href)).toEqual([
@@ -21,8 +22,10 @@ describe("workspace navigation", () => {
     expect(openingNavigation().filter(item => item.group === "more").map(item => item.href)).toEqual([
       "/opening/cards",
       "/opening/review",
+      "/opening/library?tab=materials",
       "/opening/settings/connections",
     ]);
+    expect(openingNavigation().find(item => item.label === "材料")?.icon).toBe("library");
   });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);
@@ -33,6 +36,11 @@ describe("workspace navigation", () => {
     expect(navigationIsActive("/opening/cards", "/opening/cards")).toBe(true);
     expect(navigationIsActive("/opening/review", "/opening/review/x")).toBe(true);
     expect(navigationIsActive("/opening/settings/connections", "/opening/settings/connections")).toBe(true);
+  });
+  it("highlights materials entry for opening library paths", () => {
+    expect(navigationIsActive("/opening/library?tab=materials", "/opening/library")).toBe(true);
+    expect(navigationIsActive("/opening/library?tab=materials", "/opening/library/extra")).toBe(true);
+    expect(navigationIsActive("/opening/library?tab=materials", "/opening/courses")).toBe(false);
   });
   it("redirects nested preview pages during the Opening release", () => {
     expect(legacyOpeningRedirectPath("/preview/notion-import")).toBe("/opening/today");

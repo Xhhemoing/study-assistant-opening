@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { CourseLearningView } from "../opening/learning/course-view";
 import type { CourseAsset, CourseSummary } from "./course-model";
+import { CourseAddMaterials } from "./course-add-materials";
 import { CourseSettingsPanel } from "./course-settings-panel";
 import { createCourseStateClient } from "./course-state-client";
 import { CourseStudyActions } from "./course-study-actions";
@@ -71,7 +72,24 @@ export function CourseDetail({ id }: { id: string }) {
       <CourseStudyActions assetCount={assets.length} opening />
       <CourseKnowledge courseId={id} />
       <CourseLearningView courseId={id} />
-      <section id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" aria-labelledby="course-assets-heading"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-assets-heading">课程材料</h2><Link className={ui.quiet} href="/opening/library?tab=materials">管理知识库</Link></div>{assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref="/opening/library?tab=notes" onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有挂接课程材料" description="笔记和材料可以先独立保存在知识库中。" />}</section>
+      <section id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" aria-labelledby="course-assets-heading">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold" id="course-assets-heading">课程材料</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <CourseAddMaterials courseId={id} assets={assets} onAdded={reload} />
+            <Link className={ui.quiet} href="/opening/library?tab=materials">管理知识库</Link>
+          </div>
+        </div>
+        {assets.length ? (
+          <CourseAssets key={id} courseId={id} assets={assets} libraryHref="/opening/library?tab=notes" onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} />
+        ) : (
+          <EmptyState
+            title="还没有挂接材料"
+            description="点「添加材料」从知识库挂入，或去材料库整理。"
+            action={<Link className={ui.quiet} href="/opening/library?tab=materials">去材料库</Link>}
+          />
+        )}
+      </section>
       {assets.some((asset) => asset.source) ? (
         <section className="scroll-mt-6 space-y-4 border-t border-zinc-200 pt-5" aria-labelledby="course-media-heading">
           <h2 className="text-sm font-semibold" id="course-media-heading">媒体阅读</h2>

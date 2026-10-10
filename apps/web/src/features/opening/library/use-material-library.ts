@@ -67,6 +67,18 @@ export function useMaterialLibrary(api: OpeningApi) {
       try { await refresh(); } catch { setOrganizationError("课程已创建，但列表刷新失败；请重新读取。"); }
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
+  async function assignOne(sourceId: string, courseId: string, role: "core" | "reference" | "optional") {
+    if (locked.current || !organizationReady) return;
+    locked.current = true; setBusy(true); setResult(null);
+    try {
+      const next = await client.addToCourse(courseId, [sourceId], role);
+      if (!mounted.current) return;
+      setResult(next);
+      await refresh();
+    } catch (reason) {
+      if (mounted.current) setOrganizationError(reason instanceof Error ? reason.message : "整理结果尚未确认，请刷新后核对。");
+    } finally { locked.current = false; if (mounted.current) setBusy(false); }
+  }
   return { sources, organization, space, selection, loading, refreshing, busy, organizationReady, error, organizationError, result,
-    refresh, load, changeSpace, toggle, togglePage, batch, createCourse, clearSelection: () => { if (!locked.current) setSelected([]); } };
+    refresh, load, changeSpace, toggle, togglePage, batch, assignOne, createCourse, clearSelection: () => { if (!locked.current) setSelected([]); } };
 }

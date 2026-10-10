@@ -8,6 +8,7 @@ import { InboxPanel } from "../inbox/inbox-panel";
 import { collectMaterials, materialStatus, type MaterialKind, type MaterialSort, type MaterialStatus } from "./material-collection";
 import { MaterialSpaceNav } from "./material-space-nav";
 import { MaterialBatchActions } from "./material-batch-actions";
+import { MaterialAssignPanel } from "./material-assign-panel";
 import { materialsInSpace } from "./material-spaces";
 import { useMaterialLibrary } from "./use-material-library";
 import { MaterialCourseLabels } from "./material-course-labels";
@@ -35,12 +36,13 @@ export function MaterialLibrary({ api }: { api: OpeningApi }) {
   const [status, setStatus] = useState<MaterialStatus>("all");
   const [sort, setSort] = useState<MaterialSort>("newest");
   const [page, setPage] = useState(1);
+  const [assignId, setAssignId] = useState<string | null>(null);
   const scoped = useMemo(() => materialsInSpace(sources, organization, space), [sources, organization, space]);
   const collection = useMemo(() => collectMaterials(scoped, { query, kind, status, sort, page, pageSize: 20 }), [scoped, query, kind, status, sort, page]);
   const courseId = space.startsWith("course:") ? space.slice(7) : null;
   const titles = { all: "全部原件", inbox: "待整理", ready: "可用于提问", attention: "需处理" };
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
-  const changeSpace = (next: typeof space) => { library.changeSpace(next); setPage(1); setQuery(""); setKind("all"); setStatus("all"); };
+  const changeSpace = (next: typeof space) => { library.changeSpace(next); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
   const processing = sources.filter(record => materialStatus(record) === "processing").length;
   const failures = sources.filter(record => materialStatus(record) === "attention").length;
@@ -81,7 +83,11 @@ export function MaterialLibrary({ api }: { api: OpeningApi }) {
         <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label>
         <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady}
-          renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null} /></div>
+          renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
+          onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
+          renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}
+            onConfirm={async (courseId, role) => { await library.assignOne(record.id, courseId, role); setAssignId(null); }}
+            onCancel={() => setAssignId(null)} /> : null} /></div>
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-xs text-zinc-600">
           <p role="status">{collection.total === 0 ? "0 份材料" : `${(collection.page - 1) * 20 + 1}–${Math.min(collection.page * 20, collection.total)} / ${collection.total} 份材料`}</p>
           <nav aria-label="材料分页" className="flex items-center gap-2">

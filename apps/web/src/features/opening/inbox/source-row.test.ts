@@ -128,3 +128,21 @@ it("still shows re-parse for retryable parse failures", () => {
   }));
   expect(html).toContain("重新解析");
 });
+
+it("shows assign-to-course shortcut when onAssign is provided", () => {
+  const html = renderToStaticMarkup(createElement(SourceRow, {
+    record: {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "ready.pdf",
+      mime: "application/pdf",
+      bytes: 20,
+      createdAt: "2026-10-04T00:00:00.000Z",
+      uploadState: "uploaded",
+      parseState: "ready",
+    },
+    onAssign: () => {},
+    onManage: () => {},
+  }));
+  expect(html).toContain("归入课程");
+  expect(html).toContain("管理材料");
+});
