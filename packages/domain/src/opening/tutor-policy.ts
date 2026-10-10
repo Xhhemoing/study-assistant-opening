@@ -58,16 +58,19 @@ export function exposureLevelForMode(
 }
 
 /** hint/guided = next-step only; explain/worked_example = full + reveal. */
+const CITE_WHEN_MATERIALS =
+  " 若提供了材料片段且作答依据它们，请在 citedChunkIds 列出支持性 chunk id；纯一般说明可用空数组。";
+
 export function makeTutorInstruction(mode: DeepenTutorMode): string {
   switch (normalizeDeepenMode(mode)) {
     case "listen":
-      return "倾听并确认理解；不要自动创建任务，不要擅自规划。";
+      return "倾听并确认理解；不要自动创建任务，不要擅自规划。" + CITE_WHEN_MATERIALS;
     case "hint":
-      return "只提供下一步提示（next-step hint），禁止直接给出最终完整答案或完整解题过程。引导学习者自己完成；若需要完整解答，应改用 explain / worked_example。";
+      return "只提供下一步提示（next-step hint），禁止直接给出最终完整答案或完整解题过程。引导学习者自己完成；若需要完整解答，应改用 explain / worked_example。" + CITE_WHEN_MATERIALS;
     case "explain":
-      return "允许给出完整答案与完整解题过程（worked example），并标明材料依据。完成后按 reveal 意图记录帮助暴露（revealed），不可当作独立掌握。";
+      return "允许给出完整答案与完整解题过程（worked example），并标明材料依据。完成后按 reveal 意图记录帮助暴露（revealed），不可当作独立掌握。" + CITE_WHEN_MATERIALS;
     case "think_together":
-      return "与学习者共同思考，提出问题和候选路径，不直接改变计划。";
+      return "与学习者共同思考，提出问题和候选路径，不直接改变计划。" + CITE_WHEN_MATERIALS;
   }
 }
 
@@ -76,7 +79,7 @@ export function marksReveal(mode: DeepenTutorMode): boolean {
 }
 
 export function citationsMatchPhysicalPage(
-  citations: ReadonlyArray<{ page: number | null }>,
+  citations: ReadonlyArray<{ page: number | null | undefined }>,
   currentPage: number,
 ): boolean {
   return (
@@ -93,13 +96,34 @@ export class PageCitationError extends Error {
   }
 }
 
+/**
+ * Prefer citations on the sticky physical page when any match.
+ * Empty cites stay empty (general answer OK). Off-page-only cites are kept
+ * rather than failing the turn — hard throws for invented selection pages
+ * remain in page-selection validation.
+ */
+export function preferCitationsForPage<T extends { page?: number | null }>(
+  citations: readonly T[],
+  currentPage: number,
+): T[] {
+  if (citations.length === 0) return [];
+  const onPage = citations.filter((c) => c.page === currentPage);
+  return onPage.length > 0 ? onPage.slice() : citations.slice();
+}
+
+/**
+ * Soft page guard (cite Package D): empty cites with currentPage do not throw
+ * (general answers are allowed). Off-page cites are filtered via
+ * preferCitationsForPage at the call site. Kept for call-site compatibility;
+ * never fails the turn solely for empty or off-page cites.
+ */
 export function assertCitationsForPage(
-  citations: ReadonlyArray<{ page: number | null }>,
+  citations: ReadonlyArray<{ page: number | null | undefined }>,
   currentPage: number,
 ): void {
-  if (!citationsMatchPhysicalPage(citations, currentPage)) {
-    throw new PageCitationError();
-  }
+  // Soft: empty = general OK; off-page handled by preferCitationsForPage.
+  void citations;
+  void currentPage;
 }
 
 export function variantProblemRef(

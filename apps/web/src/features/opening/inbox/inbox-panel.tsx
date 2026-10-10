@@ -8,7 +8,7 @@ import { resolveUploadPutUrl } from "../client/api";
 import { CaptureDialog } from "./capture-dialog";
 import { putPrivateBytes } from "./put-private";
 import { SourceRow } from "./source-row";
-import { SourceViewer, buildSourceDownloadView, type SourceDownloadView } from "./source-viewer";
+import { SourceViewer, buildSourceDownloadView, type SourceDownloadView, type SourceViewerTarget } from "./source-viewer";
 import { createUploadClient } from "./upload-client";
 import { sourceStatusLabel } from "./upload-state";
 import { createUploadQueue, type UploadQueueItem } from "./upload-queue";
@@ -35,6 +35,7 @@ export function InboxPanel({
   renderBelow,
   courseId = null,
   courseRole = "reference",
+  initialOpen = null,
 }: {
   api: OpeningApi;
   sources: SourceRecord[];
@@ -50,16 +51,33 @@ export function InboxPanel({
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
   courseRole?: CourseRole;
+  /** Deep-link from citation chips: open in-app viewer at version/page. */
+  initialOpen?: SourceViewerTarget | null;
 }) {
   const [managedId, setManagedId] = useState<string | null>(null);
   const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [view, setView] = useState<{ record: SourceRecord; download: SourceDownloadView; requestedVersion: number } | null>(null);
+  const [view, setView] = useState<{ record: SourceRecord; download: SourceDownloadView; requestedVersion: number; page?: number } | null>(null);
   const [queueItems, setQueueItems] = useState<UploadQueueItem[]>([]);
   const [refreshError, setRefreshError] = useState(false);
+  const [openedInitialKey, setOpenedInitialKey] = useState<string | null>(null);
   const processing = shouldRefreshSources(sources);
   const displayed = visibleSources ?? sources.filter(record => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
   const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
+  useEffect(() => {
+    if (!initialOpen) return;
+    const key = `${initialOpen.sourceId}:${initialOpen.version}:${initialOpen.page ?? ""}`;
+    if (openedInitialKey === key) return;
+    const record = sources.find((item) => item.id === initialOpen.sourceId);
+    if (!record || record.uploadState !== "uploaded") return;
+    setView({
+      record,
+      download: buildSourceDownloadView(record.id, initialOpen.version, record.version, initialOpen.page),
+      requestedVersion: initialOpen.version,
+      ...(initialOpen.page != null ? { page: initialOpen.page } : {}),
+    });
+    setOpenedInitialKey(key);
+  }, [initialOpen, sources, openedInitialKey]);
   useEffect(() => {
     if (!processing) return;
     let mounted = true;
@@ -135,12 +153,13 @@ export function InboxPanel({
     setManageInitialAction(null);
   }
 
-  function openOriginal(record: SourceRecord, version = record.version) {
+  function openOriginal(record: SourceRecord, version = record.version, page?: number) {
     // Same-origin binary link — do not fetch JSON then open MinIO.
     setView({
       record,
-      download: buildSourceDownloadView(record.id, version, record.version),
+      download: buildSourceDownloadView(record.id, version, record.version, page),
       requestedVersion: version,
+      ...(page != null ? { page } : {}),
     });
   }
 
@@ -222,7 +241,8 @@ export function InboxPanel({
           record={view.record}
           latestRecord={currentViewRecord}
           requestedVersion={view.requestedVersion}
-        /><SourceContent key={`${view.record.id}:${view.requestedVersion}`} sourceId={view.record.id} version={view.requestedVersion} /></>
+          page={view.page}
+        /><SourceContent key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`} sourceId={view.record.id} version={view.requestedVersion} initialPage={view.page} /></>
       ) : null}
     </section>
   );

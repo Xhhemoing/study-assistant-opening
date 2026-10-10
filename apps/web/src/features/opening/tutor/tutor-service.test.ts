@@ -74,6 +74,23 @@ describe("tutor-service RU-04 / continuity hooks", () => {
       .rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE", status: 422 });
     expect(conversations.appendSavedTurn).not.toHaveBeenCalled();
   });
+  it("accepts image-only selected material (empty text + imageObjectKey) for cite path", async () => {
+    const { service, conversations, sourceChunks } = createService();
+    sourceChunks.listForSources.mockResolvedValueOnce([{
+      id: C, sourceId: S, sourceVersion: 1, page: 1, slideLabel: null, startMs: null, endMs: null,
+      text: "", imageObjectKey: "sources/photo.png",
+    }]);
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "what is on this photo",
+      sourceIds: [S],
+      mode: "explain",
+      clientKey: "image-only-material",
+      privacy: "saved",
+      currentPage: 1,
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    expect(conversations.appendSavedTurn).toHaveBeenCalled();
+  });
   it("replays a saved turn after its source version no longer has the selected page", async () => {
     const { service, conversations, sourceChunks } = createService();
     sourceChunks.listForSources.mockResolvedValueOnce([]);

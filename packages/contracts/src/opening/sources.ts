@@ -124,12 +124,16 @@ export const sourceChunkSchema = z
   })
   .strict();
 
+/** Optional locators for in-app source viewer deep-links (cite Package D). */
 export const citationSchema = z
   .object({
     chunkId: uuidSchema,
     sourceId: uuidSchema,
     sourceVersion: z.number().int().nonnegative(),
     label: z.string().min(1).max(240),
+    page: z.number().int().positive().optional(),
+    startMs: z.number().int().nonnegative().optional(),
+    slideLabel: z.string().min(1).max(120).optional(),
   })
   .strict();
 

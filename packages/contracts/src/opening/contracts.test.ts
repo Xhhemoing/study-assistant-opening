@@ -13,6 +13,7 @@ import {
   observationInputSchema,
   verdictSourceSchema,
   providerInputSchema,
+  citationSchema,
   sourceChunkSchema,
   sourceRecordSchema,
   turnInputSchema,
@@ -90,6 +91,19 @@ describe("F02 opening contracts", () => {
     });
     expect(chunk.page).toBe(3);
     expect(chunk.slideLabel).toBe("Slide 12");
+  });
+
+  it("citationSchema accepts optional page / startMs / slideLabel locators", () => {
+    const base = {
+      chunkId: U, sourceId: U2, sourceVersion: 1, label: "notes.pdf page 3",
+    };
+    expect(citationSchema.parse(base)).not.toHaveProperty("page");
+    const withLocators = citationSchema.parse({
+      ...base, page: 3, startMs: 1500, slideLabel: "A-1",
+    });
+    expect(withLocators.page).toBe(3);
+    expect(withLocators.startMs).toBe(1500);
+    expect(withLocators.slideLabel).toBe("A-1");
   });
 
   it("turn records preserve an unknown provider outcome as a distinct status", () => {
@@ -341,6 +355,15 @@ it("carries a temporary history epoch separately from Provider output", () => {
   expect(ephemeralTurnResponseSchema.parse({
     ...reply, privacyEpoch: 0, historyDiscarded: false, citations: [citation],
   }).citations).toEqual([citation]);
+  const citationWithLocators = {
+    ...citation,
+    page: 3,
+    startMs: 1500,
+    slideLabel: "A-1",
+  };
+  expect(ephemeralTurnResponseSchema.parse({
+    ...reply, privacyEpoch: 0, historyDiscarded: false, citations: [citationWithLocators],
+  }).citations).toEqual([citationWithLocators]);
   const sourceA = "10000000-0000-4000-8000-0000000000aa";
   const sourceB = "10000000-0000-4000-8000-0000000000bb";
   expect(ephemeralTurnResponseSchema.parse({

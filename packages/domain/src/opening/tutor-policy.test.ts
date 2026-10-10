@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveAssistance } from "./assistance";
 import {
   assertCitationsForPage,
+  preferCitationsForPage,
   assertNoMasteryPercentage,
   assistedItemBlocksIndependent,
   exposureLevelForMode,
@@ -10,7 +11,6 @@ import {
   marksReveal,
   recommendTutorAction,
   variantProblemRef,
-  PageCitationError,
 } from "./tutor-policy";
 
 describe("K02a tutor-policy", () => {
@@ -39,17 +39,22 @@ describe("K02a tutor-policy", () => {
     );
   });
 
-  it("page citation: currentPage=N must match; invented page throws", () => {
-    assertCitationsForPage([{ page: 3 }, { page: 3 }], 3);
-    expect(() => assertCitationsForPage([{ page: 1 }], 3)).toThrow(
-      PageCitationError,
-    );
-    try {
-      assertCitationsForPage([], 2);
-    } catch (error) {
-      expect(error).toBeInstanceOf(PageCitationError);
-      expect((error as PageCitationError).code).toBe("page_not_in_sources");
-    }
+  it("page citation soft: empty cites OK; prefer on-page when any match", () => {
+    // Soft guard never throws for empty or off-page cites.
+    expect(() => assertCitationsForPage([], 2)).not.toThrow();
+    expect(() => assertCitationsForPage([{ page: 1 }], 3)).not.toThrow();
+    expect(() => assertCitationsForPage([{ page: 3 }, { page: 3 }], 3)).not.toThrow();
+
+    expect(preferCitationsForPage([], 2)).toEqual([]);
+    expect(preferCitationsForPage([{ page: 3 }, { page: 1 }, { page: 3 }], 3)).toEqual([
+      { page: 3 },
+      { page: 3 },
+    ]);
+    // No on-page match → keep original (do not fail turn).
+    expect(preferCitationsForPage([{ page: 1 }, { page: 2 }], 3)).toEqual([
+      { page: 1 },
+      { page: 2 },
+    ]);
   });
 
   it("variant identity: assisted item A cannot become observed_independent", () => {

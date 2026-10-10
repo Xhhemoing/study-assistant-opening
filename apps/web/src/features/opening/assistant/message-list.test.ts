@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Composer, logicalSendFingerprint, nextClientKey } from "./composer";
 import { MessageList } from "./message-list";
-import { sourceDownloadHref } from "../inbox/source-viewer";
+import { citationChipLabel, sourceDownloadHref, sourceViewerHref } from "../inbox/source-viewer";
 
 describe("logical send clientKey", () => {
   let n = 0;
@@ -180,10 +180,44 @@ describe("MessageList", () => {
       currentVersions: { [sourceId]: 5 },
     }));
 
+    const viewerHref = sourceViewerHref(sourceId, 3).replaceAll("&", "&amp;");
+    expect(html).toContain(`href="${viewerHref}"`);
     expect(html).toContain(`href="${sourceDownloadHref(sourceId, 3)}"`);
     expect(html).toContain("v3");
     expect(html).toContain("p.2");
     expect(html).toContain("不是当前版本");
+  });
+
+  it("primary chip href includes page when citation.page is set and label is readable", () => {
+    const sourceId = "22222222-2222-4222-8222-222222222222";
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{
+        id: "turn-page",
+        role: "assistant",
+        text: "见第 3 页",
+        citationLabels: ["notes.pdf · 第 3 页"],
+        citations: [{
+          chunkId: "44444444-4444-4444-8444-444444444444",
+          sourceId,
+          sourceVersion: 1,
+          label: "source uuid v1 page 3",
+          page: 3,
+        }],
+        status: "complete",
+      }],
+      sourceNames: { [sourceId]: "notes.pdf" },
+    }));
+
+    const viewerHref = sourceViewerHref(sourceId, 1, { page: 3 }).replaceAll("&", "&amp;");
+    expect(html).toContain(`href="${viewerHref}"`);
+    expect(html).toContain("page=3");
+    expect(html).toContain(citationChipLabel({
+      label: "source uuid v1 page 3",
+      page: 3,
+      sourceName: "notes.pdf",
+    }));
+    expect(html).toContain("notes.pdf · 第 3 页");
+    expect(html).toContain(`href="${sourceDownloadHref(sourceId, 1, 3)}"`);
   });
 
   it("shows a general badge when materials were selected but citations are empty", () => {

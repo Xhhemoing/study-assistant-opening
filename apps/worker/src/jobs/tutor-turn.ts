@@ -13,6 +13,7 @@ import {
   assertCitationsForPage,
   instructionWithMemories,
   makeTutorInstruction,
+  preferCitationsForPage,
   resolveStrategyTemplate,
 } from "@aistudy/domain";
 import type {
@@ -185,16 +186,15 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           : undefined,
       });
       const validated: ProviderOutput = providerOutputSchema.parse(output);
-      const citations = resolveCitations(validated.citedChunkIds, context);
-      // Strategy guard: strict page anchoring happens after citation
-      // resolution and before any successful writeback or help exposure.
+      // Soft-filter unknown cited ids (Package D); never fabricate rows / never throw on unknowns.
+      let citations = resolveCitations(validated.citedChunkIds, context, { soft: true });
+      // Soft page guard: empty cites = general OK; prefer on-page cites when any match.
       if (turn.currentPage != null && turn.sourceIds.length > 0) {
         assertCitationsForPage(
-          citations.map((citation) => ({
-            page: context.find((chunk) => chunk.id === citation.chunkId)?.page ?? null,
-          })),
+          citations.map((citation) => ({ page: citation.page ?? null })),
           turn.currentPage,
         );
+        citations = preferCitationsForPage(citations, turn.currentPage);
       }
       const contextSourceIds = [...new Set(contextSourceRefs.map((ref) => ref.sourceId))].filter(
         (id) => !excluded.has(id),

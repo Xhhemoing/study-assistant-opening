@@ -1,19 +1,32 @@
 "use client";
 
-import { ArrowUpRight, BookOpen, PanelsTopLeft } from "lucide-react";
+import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
 import { useRef } from "react";
 import { snippetSaveAvailability } from "./save-snippet";
 import { showsGeneralMaterialBadge, type ChatMessageView } from "./message-model";
-import { sourceDownloadHref, sourceViewerCopy } from "../inbox/source-viewer";
+import {
+  citationChipLabel,
+  sourceDownloadHref,
+  sourceViewerCopy,
+  sourceViewerHref,
+} from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
 
-type Props = { messages: ChatMessageView[]; historyTruncated?: boolean; currentVersions?: Readonly<Record<string, number>>; onPrompt?: (text: string) => void; onSaveSnippet?: (message: ChatMessageView, selectedText?: string) => void; onCreateCard?: (message: ChatMessageView, selectedText?: string) => void };
+type Props = {
+  messages: ChatMessageView[];
+  historyTruncated?: boolean;
+  currentVersions?: Readonly<Record<string, number>>;
+  sourceNames?: Readonly<Record<string, string>>;
+  onPrompt?: (text: string) => void;
+  onSaveSnippet?: (message: ChatMessageView, selectedText?: string) => void;
+  onCreateCard?: (message: ChatMessageView, selectedText?: string) => void;
+};
 const prompts = [
   { title: "把一个概念讲明白", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。" },
   { title: "检验自己的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。" },
   { title: "从一个问题展开", text: "我有一个还没想清楚的问题，请和我一起拆解它，区分事实与假设。" },
 ];
-export function MessageList({ messages, historyTruncated, currentVersions = {}, onPrompt, onSaveSnippet, onCreateCard }: Props) {
+export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard }: Props) {
   const messageElements = useRef<Record<string, HTMLParagraphElement | null>>({});
   function selectedTextFor(message: ChatMessageView) {
     const selection = window.getSelection();
@@ -40,7 +53,32 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
       <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>
-      {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-zinc-500">出处：</span>{message.citations.map((citation) => <a key={`${citation.sourceId}-${citation.chunkId}-${citation.sourceVersion}`} className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-zinc-700 shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-zinc-300 hover:text-zinc-900 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 motion-reduce:transition-none" href={sourceDownloadHref(citation.sourceId, citation.sourceVersion)} title={sourceViewerCopy({ requestedVersion: citation.sourceVersion, currentVersion: currentVersions[citation.sourceId] ?? citation.sourceVersion, versionMismatch: (currentVersions[citation.sourceId] ?? citation.sourceVersion) !== citation.sourceVersion })}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{citation.label}</span><span className="shrink-0 text-zinc-400">{`v${citation.sourceVersion}`}</span></a>)}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-zinc-500" role="status">一般说明（未引用材料）</p> : null}
+      {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-zinc-500">出处：</span>{message.citations.map((citation) => {
+        const locators = {
+          page: citation.page,
+          startMs: citation.startMs,
+          slideLabel: citation.slideLabel,
+        };
+        const chipLabel = citationChipLabel({
+          label: citation.label,
+          page: citation.page,
+          startMs: citation.startMs,
+          slideLabel: citation.slideLabel,
+          sourceName: sourceNames[citation.sourceId],
+        });
+        const viewerHref = sourceViewerHref(citation.sourceId, citation.sourceVersion, locators);
+        const downloadHref = sourceDownloadHref(citation.sourceId, citation.sourceVersion, citation.page);
+        const title = sourceViewerCopy({
+          requestedVersion: citation.sourceVersion,
+          currentVersion: currentVersions[citation.sourceId] ?? citation.sourceVersion,
+          versionMismatch: (currentVersions[citation.sourceId] ?? citation.sourceVersion) !== citation.sourceVersion,
+          page: citation.page,
+        });
+        return <span key={`${citation.sourceId}-${citation.chunkId}-${citation.sourceVersion}`} className="inline-flex max-w-full items-center gap-1">
+          <a className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-zinc-700 shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-zinc-300 hover:text-zinc-900 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 motion-reduce:transition-none" href={viewerHref} title={title}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{chipLabel}</span><span className="shrink-0 text-zinc-400">{`v${citation.sourceVersion}`}</span></a>
+          <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-zinc-500 transition-colors hover:border-zinc-200 hover:bg-white hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
+        </span>;
+      })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-zinc-500" role="status">一般说明（未引用材料）</p> : null}
       {message.status === "pending" ? <p className="mt-2 text-xs text-zinc-500">生成中…</p> : null}
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">结果状态未知，请勿重复提交</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}

@@ -22,11 +22,12 @@ const baseResume = {
 };
 
 it("keeps resume citations and accepts legacy history without citations", () => {
+  const withLocators = { ...citation, page: 2, startMs: 0, slideLabel: "S1" };
   const withCitations = conversationResumeSchema.parse({
     ...baseResume,
-    boundedHistory: [{ role: "assistant", text: "a", citations: [citation] }],
+    boundedHistory: [{ role: "assistant", text: "a", citations: [withLocators] }],
   });
-  expect(withCitations.boundedHistory[0]?.citations).toEqual([citation]);
+  expect(withCitations.boundedHistory[0]?.citations).toEqual([withLocators]);
 
   const legacy = conversationResumeSchema.parse({
     ...baseResume,

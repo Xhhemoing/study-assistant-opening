@@ -187,6 +187,7 @@ export {
   exposureLevelForMode as exposureLevelForDeepenMode,
   normalizeDeepenMode,
   assertCitationsForPage,
+  preferCitationsForPage,
   assertNoMasteryPercentage,
   freshRetestExposure,
   variantProblemRef,

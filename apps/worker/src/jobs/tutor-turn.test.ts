@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
-import { DEFAULT_STRATEGY_TEMPLATE_ID, PageCitationError } from "@aistudy/domain";
+import { DEFAULT_STRATEGY_TEMPLATE_ID } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -580,21 +580,38 @@ describe("tutor turn handler", () => {
     expect(input.instruction).toContain("不得编造页码");
   });
 
-  it("rejects empty citations instead of completing a page-backed turn", async () => {
+  it("completes a page-backed turn with empty cites as general (soft page guard)", async () => {
     const { deps, tutorJobs, provider } = setup({ provider: async () => ({ text: "F = ma", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 }) });
 
-    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toBeInstanceOf(PageCitationError);
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).resolves.toEqual({ skipped: false });
     expect(provider.complete).toHaveBeenCalledTimes(1);
-    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "page_not_in_sources");
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      text: "F = ma",
+      citations: [],
+    }));
+    expect(tutorJobs.fail).not.toHaveBeenCalled();
   });
 
-  it("rejects citations outside the selected physical page before writeback", async () => {
-    const { deps, tutorJobs, provider } = setup({ chunks: [chunkA, chunkB], provider: async () => ({ text: "F = ma", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 }) });
+  it("soft-filters unknown citedChunkIds and prefers on-page cites", async () => {
+    const invented = "00000000-0000-4000-8000-00000000dead";
+    const { deps, tutorJobs } = setup({
+      chunks: [chunkA, chunkB],
+      provider: async () => ({
+        text: "F = ma",
+        citedChunkIds: [invented, chunkB.id, chunkA.id],
+        requestId: null,
+        candidates: [],
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    });
 
-    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toBeInstanceOf(PageCitationError);
-    expect(provider.complete).toHaveBeenCalledTimes(1);
-    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "page_not_in_sources");
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).resolves.toEqual({ skipped: false });
+    const completeArg = tutorJobs.completeTurn.mock.calls[0]![0] as {
+      citations: Array<{ chunkId: string; page?: number }>;
+    };
+    // Unknown invented id dropped; currentPage=1 → prefer chunkA only.
+    expect(completeArg.citations.map((c) => c.chunkId)).toEqual([chunkA.id]);
+    expect(completeArg.citations[0]).toMatchObject({ page: 1 });
   });
 });

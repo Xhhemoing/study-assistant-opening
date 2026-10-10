@@ -10,7 +10,8 @@ import { renderContext } from "./context";
 const answerSchema = providerOutputSchema.pick({ text: true, citedChunkIds: true, candidates: true });
 const outputInstruction = [
   'Return only a JSON object: {"text":string,"citedChunkIds":string[],"candidates":array}.',
-  'Cite only supplied chunk IDs that support the answer; general explanations use [].',
+  'Cite only supplied chunk IDs that support the answer; never invent ids.',
+  'When source chunks are provided and the answer relies on them, prefer a non-empty citedChunkIds listing those supporting chunk IDs; use [] only for pure general explanations that do not use the materials.',
   'Candidates are pending suggestions only: {kind:"memory",text:string,temporary:boolean}',
   'or {kind:"task",title:string,minutes:positive integer|null,dueText:string|null}.',
   'Use [] when no suggestion is needed. Never execute a candidate.',

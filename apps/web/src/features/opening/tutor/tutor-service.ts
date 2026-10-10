@@ -74,7 +74,10 @@ export function createTutorService(deps: {
   ): Promise<AuthorizedChunk[]> {
     if (sourceIds.length === 0) return [];
     const chunks = await deps.sourceChunks.listForSources(scope, [...sourceIds]);
-    return chunks.filter(chunk => chunk.text.trim()).map(({ id, sourceId, page }) => ({ id, sourceId, page }));
+    // Allow image-only chunks (photo sources) for cite/selection; worker enforces VISION_REQUIRED.
+    return chunks
+      .filter((chunk) => Boolean(chunk.text.trim()) || Boolean(chunk.imageObjectKey?.trim()))
+      .map(({ id, sourceId, page }) => ({ id, sourceId, page }));
   }
 
   return {

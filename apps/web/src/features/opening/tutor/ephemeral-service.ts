@@ -23,7 +23,11 @@ import {
 import { OpeningProviderError } from "@aistudy/ai";
 import { runBudgetedCall, type BudgetedRepository } from "../../../../../worker/src/runtime/budgeted-call";
 import { tutorActualCents, tutorReservationCents } from "../../../../../worker/src/jobs/tutor-cost";
-import { makeTutorInstruction } from "../../../../../worker/src/jobs/tutor-turn";
+import {
+  isImageOnlySourceChunks,
+  makeTutorInstruction,
+  VISION_REQUIRED_MESSAGE,
+} from "../../../../../worker/src/jobs/tutor-turn";
 import {
   validatePageSelection,
   type AuthorizedChunk,
@@ -128,7 +132,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const epochChanged = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
       let chunks = (allowedSourceIds.length
         ? await deps.chunks.listForSources(scope, allowedSourceIds)
-        : []).filter(chunk => chunk.text.trim());
+        : []).filter((chunk) => Boolean(chunk.text.trim()) || Boolean(chunk.imageObjectKey?.trim()));
       if (clientSourceIds.length === 0) {
         // Auto/course-pool path: drop unreadables instead of failing the whole pool.
         allowedSourceIds = allowedSourceIds.filter(id =>
@@ -154,12 +158,14 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (!selection.ok) {
         throw new EphemeralServiceError(selection.code, selection.code, 422);
       }
+      const imageOnlySources = isImageOnlySourceChunks(chunks);
+      const preferPage = input.currentPage ?? (imageOnlySources ? 1 : undefined);
       const context = selectContext({
         chunks,
         query: input.text,
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: input.chunkId ?? undefined,
-        preferPage: input.currentPage ?? undefined,
+        preferPage,
       });
       const historyToResolve = epochChanged ? [] : input.history;
       const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
@@ -169,8 +175,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [],
       );
       const selected = await deps.resolveModel?.(scope, input.mode);
-      const imageParts = selected?.supportsVision && input.currentPage != null && deps.pageImages
-        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: input.currentPage }) : [];
+      if (imageOnlySources && selected?.supportsVision !== true) {
+        throw new EphemeralServiceError("VISION_REQUIRED", VISION_REQUIRED_MESSAGE, 422);
+      }
+      const pageForImages = input.currentPage ?? (imageOnlySources ? 1 : null);
+      const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode),
         text: input.text,

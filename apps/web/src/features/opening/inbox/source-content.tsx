@@ -25,9 +25,10 @@ export function SourceContentBody({ content }: { content: Content }) {
     {content.truncated ? <p role="status" className="text-xs text-amber-800">本页显示内容已截断，请打开原件核对完整内容。</p> : null}
   </div>;
 }
-export function SourceContent({ sourceId, version }: { sourceId: string; version: number }) {
-  const [content, setContent] = useState<Content | null>(null), [page, setPage] = useState<number | undefined>();
+export function SourceContent({ sourceId, version, initialPage }: { sourceId: string; version: number; initialPage?: number }) {
+  const [content, setContent] = useState<Content | null>(null), [page, setPage] = useState<number | undefined>(initialPage);
   const [error, setError] = useState(""), [loading, setLoading] = useState(true), [revision, setRevision] = useState(0);
+  useEffect(() => { setPage(initialPage); }, [sourceId, version, initialPage]);
   useEffect(() => {
     let active = true;
     setLoading(true); setError(""); setContent(null);
