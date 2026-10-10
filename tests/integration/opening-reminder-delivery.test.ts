@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import IORedis from "ioredis";
 import { Queue, Worker } from "bullmq";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createOpeningJobRepository, createOpeningPlansRepository, createOpeningReminderRepository } from "@aistudy/database";
+import {
+  DEFAULT_OPENING_PLANNING_SETTINGS,
+  createOpeningJobRepository,
+  createOpeningPlansRepository,
+  createOpeningPlanningSettingsRepository,
+  createOpeningReminderRepository,
+} from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { createRemindHandler, type ReminderSendResult } from "../../apps/worker/src/jobs/remind";
 import { dispatchPending } from "../../apps/worker/src/runtime/dispatch";
@@ -38,6 +44,10 @@ describe("reminder database and Redis delivery", () => {
     await fixture.reset();
     await fixture.sql`DELETE FROM opening_tasks WHERE workspace_id=${fixture.scope.workspaceId}`;
     await queue.obliterate({ force: true });
+    await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, {
+      ...DEFAULT_OPENING_PLANNING_SETTINGS,
+      timeZone: "UTC",
+    });
     now = new Date();
     result = { receiptId: "test-receipt" };
     sent = [];
@@ -161,13 +171,7 @@ describe("reminder database and Redis delivery", () => {
 
   it("reschedules quiet work using only the remaining absolute delay and sends after quiet ends", async () => {
     const f = await enqueue();
-    // Enqueue resolves the workspace default timezone (Asia/Shanghai) when no
-    // planning settings exist, so build the quiet window in that same zone.
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-    }).formatToParts(now);
-    const minute = Number(parts.find(part => part.type === "hour")!.value) * 60
-      + Number(parts.find(part => part.type === "minute")!.value);
+    const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
     await reminders.saveExternalConfig(fixture.scope, {
       enabled: true, recipientId: fixture.scope.ownerUserId,
       quietHours: { startMinute: minute, endMinute: (minute + 3) % 1440 },
