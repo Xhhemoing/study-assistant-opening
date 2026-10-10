@@ -2,8 +2,10 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { sourceStatusLabel } from "./upload-state";
-import { ExternalLink, FileText, RefreshCw, Settings2 } from "lucide-react";
+import { ExternalLink, FileText, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { ui, tone } from "../design/ui";
+
+const dangerQuiet = `${ui.secondary} border-red-200 text-red-700 hover:bg-red-50`;
 
 function sourceMetadata(record: { mime?: string; bytes?: number; createdAt?: string }): string {
   const format = record.mime === "application/pdf" ? "PDF" : record.mime?.split("/").pop()?.replace("vnd.openxmlformats-officedocument.presentationml.presentation", "PPTX").replace("vnd.ms-powerpoint", "PPT").toUpperCase();
@@ -19,6 +21,7 @@ export function SourceRow({
   onOpen,
   onRetry,
   onManage,
+  onDelete,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "error"> & Partial<Pick<SourceRecord, "mime" | "bytes" | "createdAt">>;
   bytePercent?: number | null;
@@ -26,10 +29,12 @@ export function SourceRow({
   onOpen?: (id: string) => void;
   onRetry?: (id: string) => void;
   onManage?: (id: string) => void;
+  onDelete?: (id: string) => void;
 }) {
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   const metadata = sourceMetadata(record);
-  const stateTone = record.uploadState === "rejected" || record.parseState === "failed" ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
+  const failed = record.uploadState === "rejected" || record.parseState === "failed";
+  const stateTone = failed ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
   return (
     <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">
       <FileText size={15} aria-hidden="true" className="shrink-0 text-zinc-500" /><div className="min-w-0 flex-1">
@@ -50,9 +55,14 @@ export function SourceRow({
             <ExternalLink size={14} aria-hidden="true" />查看原件
           </button>
         ) : null}
-        {onRetry && record.error?.code !== "PRIVACY_EXCLUDED" ? (
+        {onRetry && record.error?.retryable !== false ? (
           <button className={ui.secondary} onClick={() => onRetry(record.id)} type="button">
             <RefreshCw size={14} aria-hidden="true" />{record.parseState === "failed" ? "重新解析" : "重试上传"}
+          </button>
+        ) : null}
+        {failed && onDelete ? (
+          <button className={dangerQuiet} onClick={() => onDelete(record.id)} type="button">
+            <Trash2 size={14} aria-hidden="true" />删除
           </button>
         ) : null}
       </div>

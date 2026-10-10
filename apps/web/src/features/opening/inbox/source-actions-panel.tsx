@@ -23,9 +23,10 @@ export function SourceImpactSummary({ impact }: { impact: SourceImpact }) {
   </div>;
 }
 
-export function SourceActionsPanel({ record, onClose, onChanged, onResult, api = client }: {
+export function SourceActionsPanel({ record, onClose, onChanged, onResult, api = client, initialAction = null }: {
   record: SourceRecord; onClose: () => void; onChanged: () => Promise<void>;
   onResult: (result: SourceActionResult) => void; api?: SourceActionsClient;
+  initialAction?: "exclude" | "delete" | null;
 }) {
   const [impact, setImpact] = useState<SourceImpact | null>(null);
   const [action, setAction] = useState<"exclude" | "delete" | null>(null);
@@ -35,11 +36,15 @@ export function SourceActionsPanel({ record, onClose, onChanged, onResult, api =
   useEffect(() => {
     let live = true;
     setImpact(null); setAction(null); setError(null);
-    void api.impact(record.id).then(value => { if (live) setImpact(value); }, reason => {
+    void api.impact(record.id).then(value => {
+      if (!live) return;
+      setImpact(value);
+      if (initialAction) setAction(initialAction);
+    }, reason => {
       if (live) setError(reason instanceof Error ? reason.message : "影响信息读取失败，请重试。");
     });
     return () => { live = false; };
-  }, [api, record.id, attempt]);
+  }, [api, record.id, attempt, initialAction]);
 
   async function confirm() {
     if (!impact || !action || busy) return;

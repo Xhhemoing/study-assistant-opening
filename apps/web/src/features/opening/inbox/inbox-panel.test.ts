@@ -43,4 +43,21 @@ describe("inbox material collection rendering", () => {
     expect(html).toContain("Hidden.pdf");
     expect(html).not.toContain("Visible.pdf");
   });
+
+  it("exposes a delete shortcut on failed source rows while keeping manage", () => {
+    const failed: SourceRecord = {
+      ...source("3", "Broken.pdf"),
+      parseState: "failed",
+      error: { code: "PARSE_FAILED", message: "解析失败", retryable: true },
+    };
+    const html = renderToStaticMarkup(createElement(InboxPanel, {
+      api, sources: [failed, sources[0]!], onChanged, visibleSources: [failed, sources[0]!],
+    }));
+    expect(html).toContain("Broken.pdf");
+    expect(html).toContain("删除");
+    expect(html).toContain("管理材料");
+    // ready row still has 管理材料 but the shortcut button text is only on failed
+    expect(html).toContain("Visible.pdf");
+  });
+
 });

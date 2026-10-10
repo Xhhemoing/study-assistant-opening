@@ -30,6 +30,7 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
   renderMetadata?: (record: SourceRecord) => ReactNode;
 }) {
   const [managedId, setManagedId] = useState<string | null>(null);
+  const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [view, setView] = useState<{ record: SourceRecord; download: SourceDownloadView; requestedVersion: number } | null>(null);
   const [queueItems, setQueueItems] = useState<UploadQueueItem[]>([]);
@@ -75,6 +76,20 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
     if (uploadQueue.snapshot().some((item) => item.id === id && item.state === "saved")) await onChanged();
   }
 
+  function dismissQueuedUpload(id: string) {
+    uploadQueue.dismiss(id, setQueueItems);
+  }
+
+  function openManage(id: string, initialAction: "exclude" | "delete" | null = null) {
+    setManagedId(id);
+    setManageInitialAction(initialAction);
+  }
+
+  function closeManage() {
+    setManagedId(null);
+    setManageInitialAction(null);
+  }
+
   async function openOriginal(record: SourceRecord, version = record.version) {
     const download = await api.getSourceDownload(record.id, version);
     setView({ record, download, requestedVersion: version });
@@ -93,7 +108,10 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
               <span className="text-zinc-500" role="status">
                 {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.state === "saved" ? "已保存，正在解析" : item.message ?? "上传失败"}
               </span>
-              {item.state === "failed" ? <button className={ui.secondary} onClick={() => void retryQueuedUpload(item.id)} type="button">重试</button> : null}
+              {item.state === "failed" ? <>
+                <button className={ui.secondary} onClick={() => void retryQueuedUpload(item.id)} type="button">重试</button>
+                <button className={ui.quiet} onClick={() => dismissQueuedUpload(item.id)} type="button">清除</button>
+              </> : null}
             </li>
           ))}
         </ul>
@@ -110,14 +128,18 @@ export function InboxPanel({ api, sources, onChanged, filter = "", visibleSource
               onRetry={record.uploadState === "pending" ? async () => {
                 await client.retryComplete(record.id);
                 await onChanged();
-              } : record.uploadState === "uploaded" && record.parseState === "failed" && record.error?.code !== "PRIVACY_EXCLUDED" ? async () => {
+              } : record.uploadState === "uploaded" && record.parseState === "failed" && record.error?.retryable !== false ? async () => {
                 await api.retryParse(record.id);
                 await onChanged();
               } : undefined}
               record={record}
-              onManage={() => setManagedId(value => value === record.id ? null : record.id)}
+              onManage={() => {
+                if (managedId === record.id) closeManage();
+                else openManage(record.id, null);
+              }}
+              onDelete={() => openManage(record.id, "delete")}
             />{renderMetadata?.(record)}</div></div>
-            {managedId === record.id ? <SourceActionsPanel record={record} onClose={() => setManagedId(null)} onChanged={onChanged} onResult={result => {
+            {managedId === record.id ? <SourceActionsPanel record={record} initialAction={manageInitialAction} onClose={closeManage} onChanged={onChanged} onResult={result => {
               setNotice({ text: sourceActionNotice(result) });
               if (result.deleted) setView(value => value?.record.id === record.id ? null : value);
             }} /> : null}

@@ -153,4 +153,38 @@ describe("createUploadQueue", () => {
     expect(updates).toContain(100);
     expect(updates.every((progress) => Number.isFinite(progress) && progress >= 0 && progress <= 100)).toBe(true);
   });
+
+  it("dismisses only failed items and no-ops otherwise", async () => {
+    const upload = vi.fn(async (input: LocalUploadFile) => {
+      if (input.name === "broken.pdf") {
+        return { phase: "interrupted", keptLocal: true, message: "网络中断" } as const;
+      }
+      return { ...source, name: input.name };
+    });
+    const queue = createUploadQueue(upload);
+    const [failed, saved] = queue.add([file("broken.pdf"), file("ok.pdf")]);
+    await queue.start();
+
+    const updates: number[] = [];
+    queue.dismiss(saved!.id, (items) => updates.push(items.length));
+    expect(queue.snapshot()).toHaveLength(2);
+    expect(updates).toEqual([]);
+
+    queue.dismiss(failed!.id, (items) => updates.push(items.length));
+    expect(queue.snapshot().map((item) => item.id)).toEqual([saved!.id]);
+    expect(updates).toEqual([1]);
+
+    queue.dismiss(failed!.id, (items) => updates.push(items.length));
+    expect(updates).toEqual([1]);
+  });
+
+  it("does not dismiss idle or uploading items", () => {
+    const upload = vi.fn(async () => source);
+    const queue = createUploadQueue(upload);
+    const [idle] = queue.add([file("waiting.pdf")]);
+    expect(queue.snapshot()[0]?.state).toBe("idle");
+    queue.dismiss(idle!.id);
+    expect(queue.snapshot()).toHaveLength(1);
+  });
+
 });

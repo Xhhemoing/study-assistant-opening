@@ -46,6 +46,10 @@ export function UploadStrip({ api, onUploaded, disabled }: Props) {
     await onUploaded();
   }
 
+  function dismiss(id: string) {
+    queue.dismiss(id, setItems);
+  }
+
   return (
     <div className="space-y-2 border-b border-zinc-200 px-3 py-3">
       <UploadDropzone disabled={busy} onFiles={(files) => void uploadFiles(files)} />
@@ -57,7 +61,10 @@ export function UploadStrip({ api, onUploaded, disabled }: Props) {
               <span className="text-zinc-500" role="status">
                 {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.state === "saved" ? "已保存，正在解析" : item.message ?? "上传失败"}
               </span>
-              {item.state === "failed" ? <button className={ui.secondary} onClick={() => void retry(item.id)} type="button">重试</button> : null}
+              {item.state === "failed" ? <>
+                <button className={ui.secondary} onClick={() => void retry(item.id)} type="button">重试</button>
+                <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">清除</button>
+              </> : null}
             </li>
           ))}
         </ul>

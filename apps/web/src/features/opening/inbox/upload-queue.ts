@@ -103,6 +103,15 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     await process(item, update);
   };
 
+  const dismiss = (id: string, update?: UploadQueueUpdate): void => {
+    const index = items.findIndex((candidate) => candidate.id === id);
+    if (index < 0) return;
+    const item = items[index];
+    if (!item || item.state !== "failed") return;
+    items.splice(index, 1);
+    update?.(snapshot());
+  };
+
   add(initialFiles);
-  return { items, add, start, retry, snapshot };
+  return { items, add, start, retry, dismiss, snapshot };
 }
