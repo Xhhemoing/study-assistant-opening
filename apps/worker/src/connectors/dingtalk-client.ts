@@ -173,7 +173,7 @@ export function buildDingTalkCallbackResponse(input: DingTalkCallbackConfig & {
   return {
     signature: sortedSignature(input.token, input.timestamp, input.nonce, encrypted),
     timestamp: input.timestamp,
-    nonce: input.timestamp,
+    nonce: input.nonce,
     encrypted,
   };
 }
