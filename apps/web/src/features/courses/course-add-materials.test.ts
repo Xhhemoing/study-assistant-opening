@@ -41,6 +41,18 @@ describe("course add materials", () => {
     expect(html).toContain("添加材料");
     expect(html).not.toContain("确认挂接");
   });
+
+  it("links upload-and-assign CTA to materials library with courseId", () => {
+    const courseId = "11111111-1111-4111-8111-111111111111";
+    const html = renderToStaticMarkup(createElement(CourseAddMaterials, {
+      courseId,
+      assets: [],
+      onAdded: () => {},
+    }));
+    expect(html).toContain("上传并归入本课");
+    expect(html).toContain(`/opening/library?tab=materials&amp;courseId=${encodeURIComponent(courseId)}#upload`);
+  });
+
 });
 
 describe("course add materials memberships", () => {

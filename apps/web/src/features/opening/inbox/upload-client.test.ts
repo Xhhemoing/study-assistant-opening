@@ -109,13 +109,19 @@ describe("createUploadClient", () => {
   it("does not begin again when retrying an interrupted upload", async () => {
     const bytes = pdfBytes();
     const begin = vi.fn(async () => ticket());
+    const refreshed = ticket();
+    refreshed.uploadUrl = "https://minio.local/new-presign?X-Amz-Signature=new";
+    const refreshTicket = vi.fn(async () => refreshed);
     const complete = vi.fn(async () => source({ uploadState: "uploaded" }));
     let puts = 0;
-    const put = vi.fn(async () => {
+    const putUrls: string[] = [];
+    const put = vi.fn(async (url: string) => {
+      putUrls.push(url);
       puts += 1;
       if (puts === 1) throw new Error("backgrounded");
     });
-    const client = createUploadClient({ begin, complete, put });
+    const resolvePutUrl = vi.fn((t) => `/api/opening/sources/${t.source.id}/staging`);
+    const client = createUploadClient({ begin, complete, put, refreshTicket, resolvePutUrl });
     const file = { name: "notes.pdf", type: "application/pdf", bytes };
     const first = await client.uploadFile(file);
     expect(first).toMatchObject({ phase: "interrupted", sourceId: ID });
@@ -123,7 +129,32 @@ describe("createUploadClient", () => {
     const second = await client.uploadFile(file, { resumeSourceId: ID, ticket: first.ticket });
     expect(second).toMatchObject({ id: ID, uploadState: "uploaded" });
     expect(begin).toHaveBeenCalledTimes(1);
+    expect(refreshTicket).toHaveBeenCalledTimes(1);
+    expect(refreshTicket).toHaveBeenCalledWith(ID);
     expect(complete).toHaveBeenCalledTimes(1);
+    expect(putUrls[1]).toBe(`/api/opening/sources/${ID}/staging`);
+    expect(putUrls[1]).not.toBe(first.ticket.uploadUrl);
+    expect(putUrls.join("\n")).not.toContain("127.0.0.1:9000");
+  });
+
+  it("refreshes ticket then PUT then complete on retry without reusing expired uploadUrl", async () => {
+    const bytes = pdfBytes();
+    const expired = ticket();
+    const fresh = ticket();
+    fresh.uploadUrl = "https://cdn.example/new-lease";
+    const refreshTicket = vi.fn(async () => fresh);
+    const begin = vi.fn(async () => expired);
+    const complete = vi.fn(async () => source({ uploadState: "uploaded" }));
+    const put = vi.fn(async () => undefined);
+    const resolvePutUrl = (t: Awaited<ReturnType<typeof ticket>>) => `/api/opening/sources/${t.source.id}/staging`;
+    const client = createUploadClient({ begin, complete, put, refreshTicket, resolvePutUrl });
+    const file = { name: "notes.pdf", type: "application/pdf", bytes };
+    const result = await client.uploadFile(file, { resumeSourceId: ID, ticket: expired });
+    expect(result).toMatchObject({ id: ID, uploadState: "uploaded" });
+    expect(begin).not.toHaveBeenCalled();
+    expect(refreshTicket).toHaveBeenCalledWith(ID);
+    expect(put).toHaveBeenCalledWith(`/api/opening/sources/${ID}/staging`, bytes, expect.any(Function), "application/pdf");
+    expect(complete).toHaveBeenCalledWith(ID);
   });
 
   it("retries completion on the same source id", async () => {

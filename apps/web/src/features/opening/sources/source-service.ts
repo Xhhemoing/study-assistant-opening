@@ -28,6 +28,16 @@ function stagingUploadUrl(sourceId: string): string {
   ).toString();
 }
 
+function contentDispositionAttachment(filename: string): string {
+  const fallback = Array.from(filename).map((ch) => {
+    const code = ch.charCodeAt(0);
+    return code === 34 || code === 13 || code === 10 ? "_" : ch;
+  }).join("") || "download";
+  const encoded = encodeURIComponent(filename);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+
 export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" }), options: { now?: () => Date } = {}) {
   const sources: OpeningSourceRepository = createOpeningSourceRepository(sql);
   const actions = createOpeningSourceActionsRepository(sql);
@@ -124,6 +134,10 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       return { sourceId: id, aiExcluded: true, deleted: true, cleanupPending: remaining.keys.length,
         retryAfter: remaining.keys.length && remaining.notBefore && new Date(remaining.notBefore) > now() ? remaining.notBefore : null };
     },
+    /**
+     * Server/worker-oriented download ticket. Still uses MinIO loopback presignGet.
+     * Browser must use getDownloadStream / GET .../download (same-origin bytes) instead.
+     */
     async getDownloadUrl(p: Principal, id: string, version?: number) {
       auth(p, "source.read");
       const source = await sources.get(scopeOf(p), id);
@@ -137,12 +151,46 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
       return {
-        url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: `attachment; filename="${source.name}"`, responseCacheControl: "private, no-store" }),
+        url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: contentDispositionAttachment(source.name), responseCacheControl: "private, no-store" }),
         expiresAt: new Date(Date.now() + 900000).toISOString(),
         version: requested,
         currentVersion: source.version,
         versionMismatch: requested !== source.version,
       };
+    },
+    /**
+     * Same-origin download: GetObject stream + disposition metadata (no MinIO URL to browser).
+     */
+    async getDownloadStream(p: Principal, id: string, version?: number) {
+      auth(p, "source.read");
+      const source = await sources.get(scopeOf(p), id);
+      if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
+      const requested = version ?? source.version;
+      if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
+        throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+      }
+      const key = storage.finalKey(id, requested);
+      const object = await storage.getObjectStream(key);
+      return {
+        body: object.body,
+        contentType: source.mime || object.contentType,
+        contentLength: object.contentLength ?? source.bytes,
+        contentDisposition: contentDispositionAttachment(source.name),
+        version: requested,
+        currentVersion: source.version,
+        versionMismatch: requested !== source.version,
+      };
+    },
+    /**
+     * Re-issue same-origin staging PUT lease for a pending source (same id; no new row).
+     */
+    async reissueUploadTicket(p: Principal, id: string): Promise<UploadTicket> {
+      auth(p, "source.create");
+      const scope = scopeOf(p);
+      return sources.issueUploadTicket(scope, id, async current => {
+        const uploadUrl = stagingUploadUrl(current.id);
+        return { uploadUrl, expiresAt: new Date(now().getTime() + STAGING_UPLOAD_LEASE_MS).toISOString() };
+      });
     },
   };
 }

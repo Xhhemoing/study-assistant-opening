@@ -172,6 +172,20 @@ function makeFakeStorage() {
     deleteObject: async (key) => {
       objects.delete(key);
     },
+    getObjectStream: async (key) => {
+      const object = objects.get(key);
+      if (!object) throw new Error("missing object");
+      return {
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(object.bytes);
+            controller.close();
+          },
+        }),
+        contentType: "application/octet-stream",
+        contentLength: object.bytes.byteLength,
+      };
+    },
     objectExists: async (key) => objects.has(key),
   };
   const put = (key: string, bytes: Uint8Array) => {
@@ -529,6 +543,89 @@ describe("opening signed upload service", () => {
         bytes: pdfBytes,
       }),
     ).rejects.toThrow(OpeningSourceError);
+  });
+
+  it("streams download bytes without embedding a MinIO endpoint", async () => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const download = await svc.getDownloadStream(principal, ticket.source.id);
+    expect(download.contentType).toBe("application/pdf");
+    expect(download.contentDisposition).toContain("attachment");
+    expect(download.contentDisposition).toContain("a.pdf");
+    expect(download.version).toBe(0);
+    expect(download.versionMismatch).toBe(false);
+    const reader = download.body.getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const bytes = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    expect(bytes.equals(pdfBytes)).toBe(true);
+    const asText = [
+      download.contentType,
+      download.contentDisposition,
+      String(download.contentLength),
+    ].join(" ");
+    expect(asText).not.toContain("127.0.0.1:9000");
+    expect(asText).not.toMatch(/https?:\/\/[^/]*:?9000/);
+  });
+
+  it("reissueUploadTicket refreshes the same-origin staging lease for pending only", async () => {
+    const prev = process.env.PUBLIC_BASE_URL;
+    process.env.PUBLIC_BASE_URL = "http://app.example:3000";
+    try {
+      const sql = makeFakeSql();
+      const { storage, put } = makeFakeStorage();
+      const svc = createOpeningSourceService(sql, storage, {
+        now: () => new Date("2026-10-10T12:00:00Z"),
+      });
+      const ticket = await svc.beginUpload(principal, {
+        name: "a.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.length,
+        sha256: pdfSha,
+      });
+      const reissued = await svc.reissueUploadTicket(principal, ticket.source.id);
+      expect(reissued.source.id).toBe(ticket.source.id);
+      expect(reissued.uploadUrl).toBe(
+        `http://app.example:3000/api/opening/sources/${ticket.source.id}/staging`,
+      );
+      expect(reissued.expiresAt).toBe("2026-10-10T12:15:00.000Z");
+      expect(sql.sources.get(ticket.source.id)?.upload_url_expires_at).toEqual(
+        new Date(reissued.expiresAt),
+      );
+
+      put(`staging/${ticket.source.id}`, pdfBytes);
+      await svc.completeUpload(principal, ticket.source.id);
+      await expect(svc.reissueUploadTicket(principal, ticket.source.id)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.PUBLIC_BASE_URL;
+      else process.env.PUBLIC_BASE_URL = prev;
+    }
+  });
+
+  it("reissueUploadTicket keeps another workspace invisible", async () => {
+    const { svc } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(svc.reissueUploadTicket(otherPrincipal, ticket.source.id)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
   });
 
   it("putStaging then completeUpload succeeds end-to-end", async () => {

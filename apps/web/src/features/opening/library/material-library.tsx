@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDownWideNarrow, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { OpeningApi } from "../client/api";
 import { LoadError, LoadingRows, ui } from "../design/ui";
 import { InboxPanel } from "../inbox/inbox-panel";
@@ -28,8 +28,8 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
   { value: "name", label: "名称排序" }, { value: "largest", label: "文件大小" },
 ];
 
-export function MaterialLibrary({ api }: { api: OpeningApi }) {
-  const library = useMaterialLibrary(api);
+export function MaterialLibrary({ api, courseId: uploadCourseId = null }: { api: OpeningApi; courseId?: string | null }) {
+  const library = useMaterialLibrary(api, { uploadCourseId });
   const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load } = library;
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<MaterialKind>("all");
@@ -37,6 +37,11 @@ export function MaterialLibrary({ api }: { api: OpeningApi }) {
   const [sort, setSort] = useState<MaterialSort>("newest");
   const [page, setPage] = useState(1);
   const [assignId, setAssignId] = useState<string | null>(null);
+  useEffect(() => {
+    if (uploadCourseId) library.changeSpace(`course:${uploadCourseId}`);
+    // Only react to inbound courseId query — not every library identity change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadCourseId]);
   const scoped = useMemo(() => materialsInSpace(sources, organization, space), [sources, organization, space]);
   const collection = useMemo(() => collectMaterials(scoped, { query, kind, status, sort, page, pageSize: 20 }), [scoped, query, kind, status, sort, page]);
   const courseId = space.startsWith("course:") ? space.slice(7) : null;
@@ -82,7 +87,7 @@ export function MaterialLibrary({ api }: { api: OpeningApi }) {
           onAdd={(target, role) => library.batch(target, role)} onRemove={() => courseId ? library.batch(courseId) : Promise.resolve()} onClear={library.clearSelection} /> : null}
         <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label>
-        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady}
+        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady} courseId={uploadCourseId}
           renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
           onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
           renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}

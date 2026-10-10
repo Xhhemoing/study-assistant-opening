@@ -61,3 +61,29 @@ describe("inbox material collection rendering", () => {
   });
 
 });
+
+describe("inbox pending retry without local bytes", () => {
+  it("keeps delete shortcut on pending rows and surfaces re-select copy helper", () => {
+    const pending: SourceRecord = {
+      ...source("9", "Stuck.pdf"),
+      uploadState: "pending",
+      parseState: "not_started",
+    };
+    const html = renderToStaticMarkup(createElement(InboxPanel, {
+      api, sources: [pending], onChanged, visibleSources: [pending],
+    }));
+    expect(html).toContain("Stuck.pdf");
+    expect(html).toContain("重试上传");
+    expect(html).toContain("删除");
+  });
+});
+
+describe("inbox upload course association helpers", () => {
+  it("accepts optional courseId without forcing membership UI chrome", () => {
+    const html = renderToStaticMarkup(createElement(InboxPanel, {
+      api, sources, onChanged, courseId: "11111111-1111-4111-8111-111111111111",
+    }));
+    expect(html).toContain("Visible.pdf");
+    expect(html).not.toContain("127.0.0.1:9000");
+  });
+});

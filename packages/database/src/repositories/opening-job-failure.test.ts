@@ -7,13 +7,17 @@ const SOURCE = "00000000-0000-4000-8000-000000000003";
 
 type Recorded = { query: string; values: unknown[] };
 
-function fakeSql(job: { payload: unknown; privacy_epoch: number }, workspaceEpoch = 7) {
+function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }, workspaceEpoch = 7) {
   const recorded: Recorded[] = [];
+  const kind = job.kind ?? "parse";
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     recorded.push({ query, values });
     if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: workspaceEpoch }]);
-    if (query.startsWith("UPDATE opening_jobs")) return Promise.resolve([{ kind: "parse", owner_user_id: "user-1", ...job }]);
+    if (query.startsWith("UPDATE opening_jobs")) {
+      const { kind: _ignored, ...rest } = job;
+      return Promise.resolve([{ kind, owner_user_id: "user-1", ...rest }]);
+    }
     if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
     throw new Error(`unexpected query: ${query}`);
   }) as unknown as Sql;
@@ -66,5 +70,19 @@ describe("opening parse job failure projection", () => {
     const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'"));
     expect(sourceUpdates.length).toBe(2);
     for (const update of sourceUpdates) expect(versionFenceValues(update)).toEqual([0, 0]);
+  });
+
+  it("projects parse-media failure onto the source like parse", async () => {
+    const { sql, recorded } = fakeSql({
+      kind: "parse-media",
+      payload: { sourceId: SOURCE, sourceVersion: 2 },
+      privacy_epoch: 7,
+    });
+
+    await expect(failOpeningJob(sql, "job-media", { error: "media boom" })).resolves.toBe(true);
+    const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'"));
+    expect(sourceUpdates.length).toBe(1);
+    expect(sourceUpdates[0]!.query).toContain("parse_state = 'failed'");
+    expect(versionFenceValues(sourceUpdates[0]!)).toEqual([2, 2]);
   });
 });

@@ -85,8 +85,8 @@ export function CourseDetail({ id }: { id: string }) {
         ) : (
           <EmptyState
             title="还没有挂接材料"
-            description="点「添加材料」从知识库挂入，或去材料库整理。"
-            action={<Link className={ui.quiet} href="/opening/library?tab=materials">去材料库</Link>}
+            description="点「添加材料」从知识库挂入，或「上传并归入本课」直接上传。"
+            action={<Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(id)}#upload`}>上传并归入本课</Link>}
           />
         )}
       </section>

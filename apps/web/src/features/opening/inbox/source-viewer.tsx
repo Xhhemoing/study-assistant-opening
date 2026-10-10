@@ -3,6 +3,7 @@ import { sourceStatusLabel } from "./upload-state";
 import { ui } from "../design/ui";
 
 export type SourceDownloadView = {
+  /** Same-origin download path preferred; MinIO hosts must never appear here for browser open. */
   url: string;
   expiresAt: string;
   version: number;
@@ -23,14 +24,28 @@ export function sourceViewerCopy(input: {
   return `正在查看 v${input.requestedVersion}，不是当前版本 v${input.currentVersion}`;
 }
 
+export function buildSourceDownloadView(
+  sourceId: string,
+  requestedVersion: number,
+  currentVersion: number,
+): SourceDownloadView {
+  return {
+    url: sourceDownloadHref(sourceId, requestedVersion),
+    expiresAt: "",
+    version: requestedVersion,
+    currentVersion,
+    versionMismatch: requestedVersion !== currentVersion,
+  };
+}
+
 export function SourceViewer({
   record,
   latestRecord = record,
   requestedVersion,
   download,
 }: {
-  record: Pick<SourceRecord, "name" | "uploadState" | "parseState" | "version">;
-  latestRecord?: Pick<SourceRecord, "name" | "uploadState" | "parseState" | "version">;
+  record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version">;
+  latestRecord?: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version">;
   requestedVersion: number;
   download: SourceDownloadView;
 }) {
@@ -41,6 +56,8 @@ export function SourceViewer({
     currentVersion,
     versionMismatch,
   });
+  // Always same-origin binary link with cookies — never trust a MinIO/presign URL in download.url.
+  const href = sourceDownloadHref(record.id, download.version);
   return (
     <section className="space-y-3 border-t border-zinc-200 bg-white py-4">
       <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2>
@@ -48,7 +65,7 @@ export function SourceViewer({
       <p className="text-sm text-amber-800">{copy}</p>
       <a
         className={ui.primary}
-        href={download.url}
+        href={href}
         rel="noreferrer"
       >
         打开原件 v{download.version}

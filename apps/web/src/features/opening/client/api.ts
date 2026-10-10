@@ -7,7 +7,6 @@ import {
   conversationResumeSchema,
   conversationSummarySchema,
   jobStatusResponseSchema,
-  sourceDownloadSchema,
   sourceRecordSchema,
   turnInputSchema,
   turnRecordSchema,
@@ -17,7 +16,6 @@ import {
   type ConversationResume,
   type ConversationSummary,
   type JobStatusResponse,
-  type SourceDownload,
   type SourceRecord,
   type TurnInput,
   type TurnRecord,
@@ -166,6 +164,12 @@ export function resolveUploadPutUrl(ticket: UploadTicket): string {
   return stagingPutUrl(ticket.source.id);
 }
 
+
+/** Same-origin binary download path (session cookies). Never fetch JSON then open MinIO. */
+export function sourceDownloadHref(sourceId: string, version: number): string {
+  return `/api/opening/sources/${sourceId}/download?version=${version}`;
+}
+
 export function createOpeningApi(fetchImpl: FetchLike = fetch) {
   return {
     async listConversations(): Promise<ConversationSummary[]> {
@@ -304,13 +308,13 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return sourceRecordSchema.parse(body);
     },
 
-    async getSourceDownload(sourceId: string, version: number): Promise<SourceDownload> {
+    async refreshUploadTicket(sourceId: string): Promise<UploadTicket> {
       const body = await request(
-        `/api/opening/sources/${sourceId}/download?version=${version}`,
-        { method: "GET" },
+        `/api/opening/sources/${sourceId}/upload-ticket`,
+        { method: "POST", body: JSON.stringify({}) },
         fetchImpl,
       );
-      return sourceDownloadSchema.parse(body);
+      return uploadTicketSchema.parse(body);
     },
 
     async listMemory(courseId: string | null = null): Promise<{ items: MemoryItem[]; context: MemoryItem[]; review: MemoryItem[] }> {

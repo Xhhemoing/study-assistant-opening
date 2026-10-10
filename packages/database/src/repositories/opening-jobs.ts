@@ -154,7 +154,25 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
           AND (state = 'queued' OR (state = 'running' AND updated_at < now() - interval '5 minutes'))
         RETURNING *
       `;
-      return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
+      if (!rows.length) return null;
+      const job = mapJob(rows[0] as Record<string, unknown>);
+      // Honest source status: parse / parse-media claim → source running (G7).
+      // Keep version fence; never overwrite ready/failed/unsupported.
+      if (job.kind === "parse" || job.kind === "parse-media") {
+        const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
+        const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
+        if (sourceId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
+          const rawVersion = payload && "sourceVersion" in payload ? payload.sourceVersion : null;
+          const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
+          await sql`
+            UPDATE opening_sources s SET parse_state = 'running', updated_at = now()
+            WHERE s.id = ${sourceId} AND s.workspace_id = ${job.workspaceId}
+              AND s.upload_state = 'uploaded'
+              AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
+              AND s.parse_state IN ('not_started', 'queued', 'running')`;
+        }
+      }
+      return job;
     },
     async finish(id, state, value) {
       if (state === "failed") return failOpeningJob(sql, id, value);

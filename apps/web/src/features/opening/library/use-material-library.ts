@@ -6,7 +6,8 @@ import { createMaterialOrganizationClient, type MaterialOrganization, type Organ
 import { selectedMaterials, type MaterialSpace } from "./material-spaces";
 
 const empty: MaterialOrganization = { courses: [], memberships: [] };
-export function useMaterialLibrary(api: OpeningApi) {
+export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: string | null } = {}) {
+  const uploadCourseId = options.uploadCourseId ?? null;
   const client = useMemo(() => createMaterialOrganizationClient(), []);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [organization, setOrganization] = useState(empty);
@@ -79,6 +80,6 @@ export function useMaterialLibrary(api: OpeningApi) {
       if (mounted.current) setOrganizationError(reason instanceof Error ? reason.message : "整理结果尚未确认，请刷新后核对。");
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
-  return { sources, organization, space, selection, loading, refreshing, busy, organizationReady, error, organizationError, result,
+  return { sources, organization, space, selection, loading, refreshing, busy, organizationReady, error, organizationError, result, uploadCourseId,
     refresh, load, changeSpace, toggle, togglePage, batch, assignOne, createCourse, clearSelection: () => { if (!locked.current) setSelected([]); } };
 }

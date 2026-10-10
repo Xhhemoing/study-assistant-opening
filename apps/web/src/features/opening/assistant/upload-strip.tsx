@@ -8,20 +8,27 @@ import { createUploadClient } from "../inbox/upload-client";
 import { createUploadQueue, type UploadQueueItem } from "../inbox/upload-queue";
 import { UploadDropzone } from "../inbox/upload-dropzone";
 import { ui } from "../design/ui";
+import { createMaterialOrganizationClient } from "../library/material-organization-client";
+
+type CourseRole = "core" | "optional" | "reference";
 
 type Props = {
   api: OpeningApi;
   onUploaded: () => void | Promise<void>;
   disabled?: boolean;
+  /** When set, successful uploads are attached to this course once (Package D). */
+  courseId?: string | null;
+  courseRole?: CourseRole;
 };
 
-export function UploadStrip({ api, onUploaded, disabled }: Props) {
+export function UploadStrip({ api, onUploaded, disabled, courseId = null, courseRole = "reference" }: Props) {
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const client = useMemo(() => createUploadClient({
     begin: (input) => api.beginUpload(input),
     complete: (id) => api.completeUpload(id),
     put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded)),
     resolvePutUrl: resolveUploadPutUrl,
+    refreshTicket: (id) => api.refreshUploadTicket(id),
   }), [api]);
   const queue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
     onBytes,
@@ -29,21 +36,37 @@ export function UploadStrip({ api, onUploaded, disabled }: Props) {
   })), [client]);
   const busy = disabled || items.some((item) => item.state === "idle" || item.state === "uploading");
 
+  async function attachSaved(rows: UploadQueueItem[]) {
+    if (!courseId) return;
+    const ids = rows.filter((item) => item.state === "saved" && item.source).map((item) => item.source!.id);
+    if (!ids.length) return;
+    await createMaterialOrganizationClient().addToCourse(courseId, ids, courseRole);
+  }
+
   async function uploadFiles(files: File[]) {
     const localFiles = await Promise.all(files.map(async (file) => ({
       name: file.name,
       type: file.type,
       bytes: new Uint8Array(await file.arrayBuffer()),
     })));
-    queue.add(localFiles);
+    const added = queue.add(localFiles);
+    const addedIds = new Set(added.map((item) => item.id));
     setItems(queue.snapshot());
     await queue.start(setItems);
+    const newlySaved = queue.snapshot().filter((item) => addedIds.has(item.id) && item.state === "saved");
     await onUploaded();
+    await attachSaved(newlySaved);
+    if (courseId && newlySaved.length) await onUploaded();
   }
 
   async function retry(id: string) {
     await queue.retry(id, setItems);
+    const item = queue.snapshot().find((row) => row.id === id);
     await onUploaded();
+    if (item?.state === "saved") {
+      await attachSaved([item]);
+      if (courseId) await onUploaded();
+    }
   }
 
   function dismiss(id: string) {

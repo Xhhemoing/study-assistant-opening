@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningApiError, createOpeningApi, resolveUploadPutUrl } from "./api";
+import { OpeningApiError, createOpeningApi, resolveUploadPutUrl, sourceDownloadHref } from "./api";
 
 const U = "11111111-1111-4111-8111-111111111111";
 const S = "22222222-2222-4222-8222-222222222222";
@@ -264,23 +264,29 @@ describe("openingApi integration helpers", () => {
     } satisfies Partial<OpeningApiError>);
   });
 
-  it("requests the cited source version download", async () => {
-    const fetchImpl = vi.fn(async (path: string) => {
-      expect(path).toBe(`/api/opening/sources/${S}/download?version=0`);
+  it("builds same-origin download href without MinIO hosts", () => {
+    const href = sourceDownloadHref(S, 0);
+    expect(href).toBe(`/api/opening/sources/${S}/download?version=0`);
+    expect(href).not.toContain("127.0.0.1:9000");
+    expect(href).not.toContain(":9000");
+    expect(href).not.toContain("minio");
+  });
+
+  it("refreshes an upload ticket on the same source id", async () => {
+    const fetchImpl = vi.fn(async (path: string, init?: RequestInit) => {
+      expect(path).toBe(`/api/opening/sources/${S}/upload-ticket`);
+      expect(init?.method).toBe("POST");
       return jsonResponse({
-        url: "https://minio.local/signed",
+        source: baseSource,
+        uploadUrl: `http://localhost:3000/api/opening/sources/${S}/staging`,
         expiresAt: ISO,
-        version: 0,
-        currentVersion: 2,
-        versionMismatch: true,
       });
     });
     const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
-    await expect(api.getSourceDownload(S, 0)).resolves.toMatchObject({
-      version: 0,
-      currentVersion: 2,
-      versionMismatch: true,
-    });
+    const ticket = await api.refreshUploadTicket(S);
+    expect(ticket.source.id).toBe(S);
+    expect(ticket.uploadUrl).toContain("/staging");
+    expect(ticket.uploadUrl).not.toContain("127.0.0.1:9000");
   });
 });
 

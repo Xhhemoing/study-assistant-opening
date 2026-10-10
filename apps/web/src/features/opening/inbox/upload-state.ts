@@ -41,7 +41,23 @@ export function resolveUploadMime(input: { name: string; type: string }): Upload
   return BY_EXTENSION[extension] ?? null;
 }
 
-export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "parseState"> & { error?: SourceRecord["error"] }): string {
+/** Queued longer than this (by createdAt) gets slower-queue copy — never marks failed. */
+const AGED_QUEUED_MS = 3 * 60 * 1000;
+
+function isAgedQueued(createdAt: string | undefined, nowMs: number): boolean {
+  if (!createdAt) return false;
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return false;
+  return nowMs - createdMs >= AGED_QUEUED_MS;
+}
+
+export function sourceStatusLabel(
+  record: Pick<SourceRecord, "uploadState" | "parseState"> & {
+    error?: SourceRecord["error"];
+    createdAt?: string;
+  },
+  nowMs: number = Date.now(),
+): string {
   if (record.uploadState !== "uploaded") return "上传未完成";
   if (record.error?.code === "PRIVACY_EXCLUDED") return "已从学习上下文中排除";
   if (record.parseState === "ready") return "可以用于提问";
@@ -50,8 +66,12 @@ export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "pa
     return message || "原件已保存，解析失败";
   }
   if (record.parseState === "unsupported") return "原件已保存，暂不能提取文字";
-  if (record.parseState === "not_started" || record.parseState === "queued" || record.parseState === "running") {
-    return "原件已保存，正在解析";
+  // Honest machine: running = worker claimed; queued/not_started = waiting (age → 较慢).
+  // Never invent a UI timeout that marks failed.
+  if (record.parseState === "running") return "原件已保存，正在解析";
+  if (record.parseState === "not_started" || record.parseState === "queued") {
+    if (isAgedQueued(record.createdAt, nowMs)) return "原件已保存，解析排队中，可能较慢";
+    return "原件已保存，解析排队中";
   }
   return "原件已保存，正在解析";
 }

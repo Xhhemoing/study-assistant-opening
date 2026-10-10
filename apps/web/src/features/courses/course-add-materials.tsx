@@ -1,7 +1,8 @@
 "use client";
 
 import type { SourceRecord } from "@aistudy/contracts";
-import { FolderInput, Plus, X } from "lucide-react";
+import { FolderInput, Plus, Upload, X } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi } from "../opening/client/api";
 import { LoadError, ui } from "../opening/design/ui";
@@ -87,9 +88,17 @@ export function CourseAddMaterials({
 
   return (
     <div className="space-y-3">
-      <button type="button" className={ui.secondary} onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-        <Plus size={14} aria-hidden="true" />添加材料
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className={ui.secondary} onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+          <Plus size={14} aria-hidden="true" />添加材料
+        </button>
+        <Link
+          className={ui.quiet}
+          href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}#upload`}
+        >
+          <Upload size={14} aria-hidden="true" />上传并归入本课
+        </Link>
+      </div>
       {open ? (
         <section aria-label="添加材料到课程" className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">

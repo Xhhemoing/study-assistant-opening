@@ -64,4 +64,53 @@ describe("opening S3 storage", () => {
     expect(input.Body).toBe(body);
   });
 
+
+  it("streams object bytes via getObjectStream", async () => {
+    const payload = new Uint8Array([9, 8, 7]);
+    const client: S3ClientLike = {
+      send: async () => ({
+        Body: {
+          async *[Symbol.asyncIterator]() {
+            yield payload;
+          },
+        },
+        ContentType: "application/pdf",
+        ContentLength: 3,
+      }),
+    };
+    const storage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      client,
+    );
+    const stream = await storage.getObjectStream("opening/sources/src/v0");
+    expect(stream.contentType).toBe("application/pdf");
+    expect(stream.contentLength).toBe(3);
+    const reader = stream.body.getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    expect(Buffer.concat(chunks.map((c) => Buffer.from(c))).equals(Buffer.from(payload))).toBe(true);
+  });
+
+  it("maps missing objects from getObjectStream to NOT_FOUND", async () => {
+    const client: S3ClientLike = {
+      send: async () => {
+        const e = new Error("missing");
+        Object.assign(e, { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } });
+        throw e;
+      },
+    };
+    const storage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      client,
+    );
+    await expect(storage.getObjectStream("missing")).rejects.toMatchObject({
+      name: "OpeningStorageError",
+      code: "NOT_FOUND",
+    });
+  });
+
 });

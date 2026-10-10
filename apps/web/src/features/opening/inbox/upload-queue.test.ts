@@ -72,14 +72,21 @@ describe("createUploadQueue", () => {
       expiresAt: "2026-10-04T00:00:00.000Z",
     };
     const begin = vi.fn(async () => ticket);
+    const refreshTicket = vi.fn(async () => ({
+      ...ticket,
+      uploadUrl: "https://minio.local/reissued",
+      expiresAt: "2026-10-04T00:20:00.000Z",
+    }));
     let completeAttempts = 0;
     const complete = vi.fn(async () => {
       completeAttempts += 1;
       if (completeAttempts === 1) throw new Error("complete unavailable");
       return { ...source, uploadState: "uploaded" as const };
     });
-    const put = vi.fn(async () => undefined);
-    const client = createUploadClient({ begin, complete, put });
+    const putUrls: string[] = [];
+    const put = vi.fn(async (url: string) => { putUrls.push(url); });
+    const resolvePutUrl = (t: typeof ticket) => `/api/opening/sources/${t.source.id}/staging`;
+    const client = createUploadClient({ begin, complete, put, refreshTicket, resolvePutUrl });
     const initial = file("complete-retry.pdf");
     const queue = createUploadQueue(client, [initial]);
 
@@ -87,14 +94,52 @@ describe("createUploadQueue", () => {
     const failed = queue.snapshot()[0];
     expect(failed?.state).toBe("failed");
     expect(failed?.file).toBe(initial);
-    expect(failed?.ticket).toBe(ticket);
+    expect(failed?.ticket?.source.id).toBe(ticket.source.id);
 
     await queue.retry(failed!.id);
 
     expect(queue.snapshot()[0]?.state).toBe("saved");
     expect(begin).toHaveBeenCalledTimes(1);
+    expect(refreshTicket).toHaveBeenCalledTimes(1);
+    expect(refreshTicket).toHaveBeenCalledWith(source.id);
     expect(put).toHaveBeenCalledTimes(2);
+    expect(putUrls.every((url) => url === `/api/opening/sources/${source.id}/staging`)).toBe(true);
+    expect(putUrls.join("\n")).not.toContain("127.0.0.1:9000");
     expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("on retry refreshes ticket then PUT then complete (never reuses expired uploadUrl)", async () => {
+    const ticket = {
+      source: { ...source, uploadState: "pending" as const },
+      uploadUrl: "https://minio.local/expired",
+      expiresAt: "2026-10-04T00:00:00.000Z",
+    };
+    const begin = vi.fn(async () => ticket);
+    const refreshTicket = vi.fn(async () => ({
+      source: ticket.source,
+      uploadUrl: "https://minio.local/fresh",
+      expiresAt: "2026-10-04T01:00:00.000Z",
+    }));
+    const complete = vi.fn(async () => ({ ...source, uploadState: "uploaded" as const }));
+    let putCount = 0;
+    const put = vi.fn(async (url: string) => {
+      putCount += 1;
+      if (putCount === 1) throw new Error("上传对象失败 (403)");
+      expect(url).toBe(`/api/opening/sources/${source.id}/staging`);
+    });
+    const client = createUploadClient({
+      begin, complete, put, refreshTicket,
+      resolvePutUrl: (t) => `/api/opening/sources/${t.source.id}/staging`,
+    });
+    const queue = createUploadQueue(client, [file("reissue.pdf")]);
+    await queue.start();
+    expect(queue.snapshot()[0]?.state).toBe("failed");
+    await queue.retry(queue.snapshot()[0]!.id);
+    expect(queue.snapshot()[0]?.state).toBe("saved");
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(refreshTicket).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
   it("emits uploading progress and saved snapshots to the update callback", async () => {

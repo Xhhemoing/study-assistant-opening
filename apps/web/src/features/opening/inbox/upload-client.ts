@@ -33,6 +33,8 @@ export type UploadClientDeps = {
   complete: (sourceId: string) => Promise<SourceRecord>;
   put: PutFn;
   resolvePutUrl?: (ticket: UploadTicket) => string;
+  /** Reissue lease for pending source; required for retry (never reuse expired uploadUrl). */
+  refreshTicket?: (sourceId: string) => Promise<UploadTicket>;
 };
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -57,19 +59,27 @@ export function createUploadClient(deps: UploadClientDeps) {
       }
       let ticket: UploadTicket | undefined;
       try {
-        ticket = progress.resumeSourceId
-          ? progress.ticket
-          : await deps.begin({
+        if (progress.resumeSourceId) {
+          // Retry: refresh ticket (same source id) — never reuse expired uploadUrl; never begin a new row.
+          ticket = deps.refreshTicket
+            ? await deps.refreshTicket(progress.resumeSourceId)
+            : progress.ticket;
+        } else {
+          ticket = await deps.begin({
             name: file.name.slice(0, 180),
             mime,
             bytes: file.bytes.byteLength,
             sha256: await sha256Hex(file.bytes),
           });
+        }
       } catch {
         return {
           phase: "interrupted",
+          sourceId: progress.resumeSourceId,
           keptLocal: true,
-          message: "上传准备失败，原件仍在本地。",
+          message: progress.resumeSourceId
+            ? "上传票据刷新失败，原件仍在本地。未创建第二份材料。"
+            : "上传准备失败，原件仍在本地。",
         };
       }
       if (!ticket || (progress.resumeSourceId && ticket.source.id !== progress.resumeSourceId)) {

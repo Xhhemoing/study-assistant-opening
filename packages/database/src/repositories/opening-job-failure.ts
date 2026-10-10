@@ -18,7 +18,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
     if (!job) return false;
-    if (job.kind !== "parse" || job.owner_user_id !== workspace.owner_user_id) return true;
+    if ((job.kind !== "parse" && job.kind !== "parse-media") || job.owner_user_id !== workspace.owner_user_id) return true;
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
       ? job.payload.sourceId : null;
     if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return true;
