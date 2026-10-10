@@ -14,8 +14,10 @@ import {
   assertEphemeralInput,
   canProposeTask,
   ConversationPolicyError,
+  pickSourceIds,
   resolveCitations,
   selectContext,
+  shouldAutoPickSources,
   stripEphemeralCandidates,
 } from "@aistudy/ai";
 import { OpeningProviderError } from "@aistudy/ai";
@@ -63,6 +65,8 @@ export type EphemeralTutorDeps = {
   modelSnapshot?: OpeningModelSnapshot;
   resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<{ provider: EphemeralProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
   pageImages?: (scope: EphemeralScope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
+  /** Package B/C: course membership ready pool when client sourceIds empty + courseId. */
+  listReadySourceIdsForCourse?(scope: EphemeralScope, courseId: string): Promise<string[]>;
   config: {
     maxContextCharacters: number;
     reservedCents: number;
@@ -98,28 +102,55 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (signal?.aborted) {
         throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       }
-      const owned = new Set(input.sourceIds.length
-        ? await deps.sources.listOwnedIds(scope, input.sourceIds)
+      const clientSourceIds = [...input.sourceIds];
+      // Explicit client sourceIds outrank course pool. Empty + courseId → membership fill.
+      let resolvedSourceIds = [...clientSourceIds];
+      if (
+        resolvedSourceIds.length === 0
+        && input.courseId
+        && deps.listReadySourceIdsForCourse
+      ) {
+        resolvedSourceIds = await deps.listReadySourceIdsForCourse(scope, input.courseId);
+      }
+      const owned = new Set(resolvedSourceIds.length
+        ? await deps.sources.listOwnedIds(scope, resolvedSourceIds)
         : []);
-      const missing = input.sourceIds.filter((id) => !owned.has(id));
+      const missing = resolvedSourceIds.filter((id) => !owned.has(id));
       if (missing.length) {
         throw new EphemeralServiceError("NOT_FOUND", "source is not in this workspace", 404);
       }
       const privacy = await deps.privacy.snapshot(scope);
       const excluded = new Set(privacy.excludedSourceIds.map(id => id.toLowerCase()));
-      const allowedSourceIds = input.sourceIds.filter(id => !excluded.has(id.toLowerCase()));
-      if (input.sourceIds.length && !allowedSourceIds.length) {
+      let allowedSourceIds = resolvedSourceIds.filter(id => !excluded.has(id.toLowerCase()));
+      if (resolvedSourceIds.length && !allowedSourceIds.length) {
         throw new EphemeralServiceError("SOURCE_EXCLUDED", "所选材料已停止供 AI 使用，请取消选择后重试。", 409);
       }
       const epochChanged = input.history.length > 0 && input.historyPrivacyEpoch !== privacy.epoch;
-      const chunks = (allowedSourceIds.length
+      let chunks = (allowedSourceIds.length
         ? await deps.chunks.listForSources(scope, allowedSourceIds)
         : []).filter(chunk => chunk.text.trim());
-      if (allowedSourceIds.some(id => !chunks.some(chunk => chunk.sourceId === id))) {
+      if (clientSourceIds.length === 0) {
+        // Auto/course-pool path: drop unreadables instead of failing the whole pool.
+        allowedSourceIds = allowedSourceIds.filter(id =>
+          chunks.some(chunk => chunk.sourceId === id),
+        );
+      } else if (allowedSourceIds.some(id => !chunks.some(chunk => chunk.sourceId === id))) {
         throw new EphemeralServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
       }
+      // Auto path only: narrow a large course pool by keyword before selectContext.
+      if (shouldAutoPickSources(clientSourceIds, allowedSourceIds)) {
+        allowedSourceIds = pickSourceIds({
+          chunks,
+          query: input.text,
+          sourceIds: allowedSourceIds,
+        });
+        chunks = chunks.filter(chunk => allowedSourceIds.includes(chunk.sourceId));
+      }
       const authorized: AuthorizedChunk[] = chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
-      const selection = validatePageSelection(input, authorized);
+      const selection = validatePageSelection(
+        { ...input, sourceIds: allowedSourceIds },
+        authorized,
+      );
       if (!selection.ok) {
         throw new EphemeralServiceError(selection.code, selection.code, 422);
       }
@@ -198,6 +229,9 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const citedChunkIds = validated.citedChunkIds.filter((id) => allowed.has(id));
       // Soft-filter unknown ids first; resolve only authorized context chunks (never fabricate).
       const citations = resolveCitations(citedChunkIds, context);
+      // Echo effectiveSourceIds only when server changed selection vs client input.
+      const selectionChanged =
+        clientSourceIds.length === 0 && allowedSourceIds.length > 0;
       return {
         ...stripEphemeralCandidates({
           ...validated,
@@ -207,6 +241,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         provenanceId,
         privacyEpoch: privacy.epoch,
         historyDiscarded,
+        ...(selectionChanged ? { effectiveSourceIds: allowedSourceIds } : {}),
       };
     },
   };

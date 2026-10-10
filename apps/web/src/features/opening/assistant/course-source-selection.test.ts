@@ -8,6 +8,7 @@ import {
   parseAssistantCourseIdParam,
   resolveAssistantCourseId,
   toggleSelectedSourceId,
+  uniqueCappedSourceIds,
 } from "./course-source-selection";
 
 const COURSE = "11111111-1111-4111-8111-111111111111";
@@ -93,5 +94,17 @@ describe("selection cap and upload auto-select", () => {
       `bbbbbbbb-bbbb-4bbb-8bbb-${String(i).padStart(12, "0")}`,
     );
     expect(toggleSelectedSourceId(filled, S1)).toEqual(filled);
+  });
+});
+
+describe("uniqueCappedSourceIds (Package C echo)", () => {
+  it("dedupes and caps at 32 without fabricating ids", () => {
+    expect(uniqueCappedSourceIds([S1, S1, S2])).toEqual([S1, S2]);
+    expect(uniqueCappedSourceIds([])).toEqual([]);
+    const many = Array.from({ length: MAX_ASSISTANT_SOURCE_IDS + 5 }, (_, i) =>
+      `cccccccc-cccc-4ccc-8ccc-${String(i).padStart(12, "0")}`,
+    );
+    expect(uniqueCappedSourceIds(many)).toHaveLength(MAX_ASSISTANT_SOURCE_IDS);
+    expect(uniqueCappedSourceIds(many)).toEqual(many.slice(0, MAX_ASSISTANT_SOURCE_IDS));
   });
 });

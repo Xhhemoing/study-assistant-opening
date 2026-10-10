@@ -8,6 +8,7 @@ import {
   type TurnInput,
   type TurnRecord,
 } from "@aistudy/contracts";
+import { pickSourceIds, shouldAutoPickSources } from "@aistudy/ai";
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
@@ -156,7 +157,8 @@ export function createTutorService(deps: {
       );
 
       // Explicit client sourceIds outrank course pool. Empty + courseId → Data ready membership fill.
-      let effectiveSourceIds = [...input.sourceIds];
+      const clientSourceIds = [...input.sourceIds];
+      let effectiveSourceIds = [...clientSourceIds];
       if (
         effectiveSourceIds.length === 0
         && owned.courseId
@@ -169,8 +171,24 @@ export function createTutorService(deps: {
       }
 
       if (!existing) {
-        const authorized = await authorizedChunksFor(scope, effectiveSourceIds);
-        if (effectiveSourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
+        let authorized = await authorizedChunksFor(scope, effectiveSourceIds);
+        if (clientSourceIds.length === 0) {
+          // Auto/course-pool: drop unreadables; then keyword top-K when pool is large.
+          effectiveSourceIds = effectiveSourceIds.filter(id =>
+            authorized.some(chunk => chunk.sourceId === id),
+          );
+          if (shouldAutoPickSources(clientSourceIds, effectiveSourceIds)) {
+            const poolChunks = await deps.sourceChunks.listForSources(scope, effectiveSourceIds);
+            effectiveSourceIds = pickSourceIds({
+              chunks: poolChunks,
+              query: input.text,
+              sourceIds: effectiveSourceIds,
+            });
+            authorized = authorized.filter(chunk =>
+              effectiveSourceIds.includes(chunk.sourceId),
+            );
+          }
+        } else if (effectiveSourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
           throw new TutorServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
         }
         const selection = validatePageSelection(

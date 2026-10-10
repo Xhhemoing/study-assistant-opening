@@ -299,3 +299,74 @@ describe("tutor-service Package B course pool fill", () => {
     );
   });
 });
+
+describe("tutor-service Package C thin pick", () => {
+  const poolIds = Array.from({ length: 8 }, (_, i) => `cccccccc-cccc-4ccc-8ccc-cccccccccc${i}${i}`);
+
+  it("auto-picks top-K when client sourceIds empty and course pool > K", async () => {
+    const listReady = vi.fn(async () => poolIds);
+    const { service, conversations, sourceChunks } = createService({
+      courseId: COURSE,
+      listReadySourceIdsForCourse: listReady,
+    });
+    sourceChunks.listForSources.mockImplementation(async (_scope: unknown, ids: string[]) =>
+      ids.map((sourceId, index) => ({
+        id: `dddddddd-dddd-4ddd-8ddd-dddddddddd${index}${index}`,
+        sourceId,
+        sourceVersion: 1,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: index === 2 ? "unique keyword zeta matching the question" : `filler material ${index}`,
+        imageObjectKey: null,
+      })),
+    );
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "zeta",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: "pkg-c-pick-1",
+      privacy: "saved",
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    const savedIds = conversations.appendSavedTurn.mock.calls[0][0].sourceIds as string[];
+    expect(savedIds.length).toBeLessThanOrEqual(6);
+    expect(savedIds.length).toBeGreaterThan(0);
+    expect(savedIds[0]).toBe(poolIds[2]);
+  });
+
+  it("does not narrow an explicit large client selection", async () => {
+    const listReady = vi.fn(async () => poolIds);
+    const explicit = poolIds.slice(0, 7);
+    const { service, conversations, sourceChunks, listReadySourceIdsForCourse } = createService({
+      courseId: COURSE,
+      listReadySourceIdsForCourse: listReady,
+    });
+    sourceChunks.listForSources.mockImplementation(async (_scope: unknown, ids: string[]) =>
+      ids.map((sourceId, index) => ({
+        id: `eeeeeeee-eeee-4eee-8eee-eeeeeeeeee${index}${index}`,
+        sourceId,
+        sourceVersion: 1,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: `readable ${index}`,
+        imageObjectKey: null,
+      })),
+    );
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "use all selected",
+      sourceIds: explicit,
+      mode: "explain",
+      clientKey: "pkg-c-explicit-large",
+      privacy: "saved",
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    expect(listReadySourceIdsForCourse).not.toHaveBeenCalled();
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceIds: explicit }),
+    );
+  });
+});

@@ -290,6 +290,81 @@ describe("tutor turn handler", () => {
     expect(provider.complete).toHaveBeenCalledTimes(1);
   });
 
+  it("Package C: explicit large sourceIds are not top-K narrowed on the worker", async () => {
+    // Seven sources all match the query. If pick ran, only 6 would reach selectContext.
+    const sources = Array.from({ length: 7 }, (_, i) => {
+      const sourceId = `00000000-0000-4000-8000-0000000001${i}0`;
+      const chunk: SourceChunk = {
+        id: `00000000-0000-4000-8000-0000000002${i}0`,
+        sourceId,
+        sourceVersion: 0,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: `shared keyword alpha for source ${i}`,
+        imageObjectKey: null,
+      };
+      return { sourceId, chunk };
+    });
+    const { deps, provider } = setup({
+      chunks: sources.map((row) => row.chunk),
+      sourceIds: sources.map((row) => row.sourceId),
+      sourceVersions: Object.fromEntries(sources.map((row) => [row.sourceId, 0])),
+      provider: async () => ({
+        text: "ok",
+        citedChunkIds: [],
+        requestId: null,
+        candidates: [],
+        inputTokens: 10,
+        outputTokens: 5,
+      }),
+    });
+    deps.config.maxContextCharacters = 50_000;
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      text: "alpha",
+      currentPage: null,
+      chunkId: null,
+      sourceIds: sources.map((row) => row.sourceId),
+      sourceVersions: Object.fromEntries(sources.map((row) => [row.sourceId, 0])),
+    }));
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const sent = provider.complete.mock.calls[0]![0]!;
+    const sourceIdsInContext = new Set(sent.chunks.map((row: { sourceId: string }) => row.sourceId));
+    expect(sourceIdsInContext.size).toBe(7);
+  });
+
+  it("Package C: vague query still passes non-empty context to the provider when chunks exist", async () => {
+    const vagueChunk: SourceChunk = {
+      ...chunkA,
+      text: "课程绪论：本周学习目标与练习安排",
+    };
+    const { deps, provider } = setup({
+      chunks: [vagueChunk],
+      provider: async () => ({
+        text: "一般说明",
+        citedChunkIds: [],
+        requestId: null,
+        candidates: [],
+        inputTokens: 10,
+        outputTokens: 5,
+      }),
+    });
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      text: "这道题怎么做？",
+      currentPage: null,
+      chunkId: null,
+      sourceIds: [vagueChunk.sourceId],
+      sourceVersions: { [vagueChunk.sourceId]: 0 },
+    }));
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const sent = provider.complete.mock.calls[0]![0]!;
+    expect(sent.chunks.length).toBeGreaterThan(0);
+    expect(sent.chunks[0]?.id).toBe(vagueChunk.id);
+  });
+
   it("reserves for actual input size and output limit, not only the fixed floor", async () => {
     const { deps, budget } = setup();
     deps.config.reservedCents = 1;

@@ -153,6 +153,12 @@ export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
   historyDiscarded: z.boolean(),
   /** Program-resolved cites for UI chips; unknown ids filtered, never fabricated. */
   citations: z.array(citationSchema).max(64).default([]),
+  /**
+   * Present only when the server changed source selection vs client input
+   * (empty client → course-pool fill and/or auto top-K pick). Omit when the
+   * client sent explicit non-empty sourceIds used as-is.
+   */
+  effectiveSourceIds: z.array(uuidSchema).max(32).optional(),
 }).strict();
 
 export const ephemeralTurnInputSchema = z
@@ -174,6 +180,8 @@ export const ephemeralTurnInputSchema = z
       .max(40),
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
+    /** Optional course scope for Package B/C pool fill when sourceIds are empty. */
+    courseId: uuidSchema.nullable().optional(),
   })
   .strict();
 

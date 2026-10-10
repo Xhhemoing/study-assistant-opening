@@ -57,6 +57,21 @@ export function addSelectedSourceIds(
   return next;
 }
 
+
+/** Replace selection with server-echoed ids: unique, order-preserving, capped (default 32). */
+export function uniqueCappedSourceIds(
+  ids: readonly string[],
+  cap = MAX_ASSISTANT_SOURCE_IDS,
+): string[] {
+  const next: string[] = [];
+  for (const id of ids) {
+    if (next.includes(id)) continue;
+    if (next.length >= cap) break;
+    next.push(id);
+  }
+  return next;
+}
+
 export function toggleSelectedSourceId(
   current: readonly string[],
   id: string,

@@ -2,7 +2,9 @@ import type { ConversationResume, LearningAttempt } from "@aistudy/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendEphemeralResponseIfActive,
+  applyEffectiveSourceIds,
   assistantContextHint,
+  autoSelectSourcesNotice,
   EMPTY_COURSE_SOURCES_CONFIRM,
   mergeChatMessages,
   createJobPoller,
@@ -362,5 +364,27 @@ describe("Package B courseId binding helpers", () => {
     const courseA = { id: "conversation-a", courseId: "course-a", title: "A", updatedAt: ISO, lastTurnPreview: null };
     const courseB = { id: "conversation-b", courseId: "course-b", title: "B", updatedAt: ISO, lastTurnPreview: null };
     expect(conversationForAssistant([courseB, courseA], null, "course-a")).toEqual(courseA);
+  });
+});
+
+describe("Package C effectiveSourceIds UI helpers", () => {
+  const S1 = "22222222-2222-4222-8222-222222222222";
+  const S2 = "33333333-3333-4333-8333-333333333333";
+
+  it("shows auto-select notice only when effectiveSourceIds is non-empty", () => {
+    expect(autoSelectSourcesNotice(undefined)).toBeNull();
+    expect(autoSelectSourcesNotice(null)).toBeNull();
+    expect(autoSelectSourcesNotice([])).toBeNull();
+    expect(autoSelectSourcesNotice([S1, S2])).toBe("已按问题自动选入 2 份课程材料");
+    expect(autoSelectSourcesNotice([S1])).toBe("已按问题自动选入 1 份课程材料");
+  });
+
+  it("applies unique capped sourceIds from server echo only", () => {
+    expect(applyEffectiveSourceIds(undefined)).toEqual({ sourceIds: null, notice: null });
+    expect(applyEffectiveSourceIds([])).toEqual({ sourceIds: null, notice: null });
+    expect(applyEffectiveSourceIds([S1, S1, S2])).toEqual({
+      sourceIds: [S1, S2],
+      notice: "已按问题自动选入 2 份课程材料",
+    });
   });
 });

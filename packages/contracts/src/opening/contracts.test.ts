@@ -341,4 +341,17 @@ it("carries a temporary history epoch separately from Provider output", () => {
   expect(ephemeralTurnResponseSchema.parse({
     ...reply, privacyEpoch: 0, historyDiscarded: false, citations: [citation],
   }).citations).toEqual([citation]);
+  const sourceA = "10000000-0000-4000-8000-0000000000aa";
+  const sourceB = "10000000-0000-4000-8000-0000000000bb";
+  expect(ephemeralTurnResponseSchema.parse({
+    ...reply, privacyEpoch: 0, historyDiscarded: false,
+    effectiveSourceIds: [sourceA, sourceB],
+  }).effectiveSourceIds).toEqual([sourceA, sourceB]);
+  expect(ephemeralTurnResponseSchema.parse({
+    ...reply, privacyEpoch: 0, historyDiscarded: false,
+  }).effectiveSourceIds).toBeUndefined();
+  expect(ephemeralTurnInputSchema.parse({
+    ...input, courseId: sourceA,
+  }).courseId).toBe(sourceA);
+  expect(ephemeralTurnInputSchema.parse(input).courseId).toBeUndefined();
 });

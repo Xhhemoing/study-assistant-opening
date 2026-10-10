@@ -23,7 +23,15 @@ export {
   type AIProviderRequest,
 } from "./providers/provider";
 
-export { renderContext, selectContext } from "./opening/context";
+export { renderContext, selectContext, keywordOverlapScore } from "./opening/context";
+export {
+  DEFAULT_PICK_SOURCES_K,
+  MIN_PICK_SOURCES_K,
+  MAX_PICK_SOURCES_K,
+  clampPickSourcesK,
+  pickSourceIds,
+  shouldAutoPickSources,
+} from "./opening/pick-sources";
 export { resolveCitations } from "./opening/citations";
 export {
   assertEphemeralInput,

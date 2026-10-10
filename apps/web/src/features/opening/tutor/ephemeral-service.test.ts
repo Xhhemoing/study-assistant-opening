@@ -39,6 +39,7 @@ function deps(overrides?: {
   sources?: string[];
   provenance?: EphemeralProvenanceRepository;
   resolveModel?: EphemeralTutorDeps["resolveModel"];
+  listReadySourceIdsForCourse?: EphemeralTutorDeps["listReadySourceIdsForCourse"];
 }) {
   const writes: string[] = [];
   const budget = {
@@ -55,16 +56,20 @@ function deps(overrides?: {
   );
   const service = createEphemeralTutorService({
     sources: {
-      listOwnedIds: async () => overrides?.sources ?? [sourceId],
+      listOwnedIds: async (_scope, ids) => overrides?.sources ?? ids,
     },
     chunks: {
-      listForSources: async () => overrides?.chunks ?? [chunk],
+      listForSources: async (_scope, ids) => {
+        const all = overrides?.chunks ?? [chunk];
+        return all.filter((row) => ids.includes(row.sourceId));
+      },
     },
     privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
     budget,
     provenance: overrides?.provenance,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
+    listReadySourceIdsForCourse: overrides?.listReadySourceIdsForCourse,
     config: {
       maxContextCharacters: 12_000,
       reservedCents: 10,
@@ -311,6 +316,68 @@ describe("ephemeral content-free provenance", () => {
     expect(provenance.record).toHaveBeenCalledWith(scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [] });
     expect(reply.historyDiscarded).toBe(true);
   });
+  it("Package C: vague query still sends non-empty context when selected chunks exist", async () => {
+    const f = deps({
+      chunks: [{ ...chunk, text: "课程绪论：本周学习目标" }],
+    });
+    await f.service.replyEphemeral(scope, {
+      text: "这道题怎么做？",
+      sourceIds: [sourceId],
+      mode: "explain",
+      history: [],
+    });
+    const sent = f.complete.mock.calls[0]![0]!;
+    expect(sent.chunks.length).toBeGreaterThan(0);
+    expect(sent.chunks[0]?.sourceId).toBe(sourceId);
+  });
+
+  it("Package C: empty client sourceIds + courseId fills, picks, and echoes effectiveSourceIds", async () => {
+    const courseId = "10000000-0000-4000-8000-0000000000c0";
+    const pool = Array.from({ length: 9 }, (_, i) => {
+      const id = "10000000-0000-4000-8000-00000000001" + String(i);
+      return {
+        sourceId: id,
+        chunk: {
+          ...chunk,
+          id: "10000000-0000-4000-8000-00000000002" + String(i),
+          sourceId: id,
+          text: i === 2 ? "贝叶斯模型用于知识追踪" : "无关材料 " + String(i),
+        } satisfies SourceChunk,
+      };
+    });
+    const listReady = vi.fn(async () => pool.map((row) => row.sourceId));
+    const f = deps({
+      chunks: pool.map((row) => row.chunk),
+      listReadySourceIdsForCourse: listReady,
+    });
+    const reply = await f.service.replyEphemeral(scope, {
+      text: "请解释贝叶斯模型",
+      sourceIds: [],
+      courseId,
+      mode: "explain",
+      history: [],
+    });
+    expect(listReady).toHaveBeenCalledWith(scope, courseId);
+    expect(reply.effectiveSourceIds).toBeDefined();
+    expect(reply.effectiveSourceIds!.length).toBeLessThanOrEqual(6);
+    expect(reply.effectiveSourceIds!.length).toBeGreaterThan(0);
+    expect(reply.effectiveSourceIds![0]).toBe(pool[2]!.sourceId);
+    const sent = f.complete.mock.calls[0]![0]!;
+    expect(sent.chunks.length).toBeGreaterThan(0);
+    expect(sent.chunks.every((row) => reply.effectiveSourceIds!.includes(row.sourceId))).toBe(true);
+  });
+
+  it("Package C: explicit non-empty sourceIds omit effectiveSourceIds", async () => {
+    const f = deps();
+    const reply = await f.service.replyEphemeral(scope, {
+      text: "explain",
+      sourceIds: [sourceId],
+      mode: "explain",
+      history: [],
+    });
+    expect(reply.effectiveSourceIds).toBeUndefined();
+  });
+
   it.each([false, true])("never includes private bodies in budget calls, provenance rows, or console logs (provider failure=%s)", async fail => {
     const marker = "EPHEMERAL-PRIVATE-BODY-MARKER";
     const spies = (["log", "info", "warn", "error", "debug", "trace"] as const).map(method => vi.spyOn(console, method).mockImplementation(() => undefined));

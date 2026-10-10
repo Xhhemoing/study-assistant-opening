@@ -25,6 +25,7 @@ import {
   hasReadyMembershipMaterials,
   membershipSourceIdsForCourse,
   resolveAssistantCourseId,
+  uniqueCappedSourceIds,
 } from "./course-source-selection";
 import { AiReadinessChecklist } from "./ai-readiness";
 import type { ThinTutorAction } from "@aistudy/domain";
@@ -176,6 +177,31 @@ export function shouldConfirmEmptyCourseSources(input: {
 export const EMPTY_COURSE_SOURCES_CONFIRM =
   "当前课程有材料，尚未选入本轮。仍要继续发送？\n\n确定：继续（一般说明）\n取消：打开参考资料再选材料";
 
+
+/** Notice when server auto-filled/narrowed sources (Package C). Empty/omitted → no hint. */
+export function autoSelectSourcesNotice(effectiveSourceIds: readonly string[] | undefined | null): string | null {
+  const n = effectiveSourceIds?.length ?? 0;
+  if (n <= 0) return null;
+  return `已按问题自动选入 ${n} 份课程材料`;
+}
+
+/**
+ * Apply server-echoed effectiveSourceIds: unique capped list + notice.
+ * Trust only the server field; do not fabricate ids.
+ */
+export function applyEffectiveSourceIds(
+  effectiveSourceIds: readonly string[] | undefined | null,
+): { sourceIds: string[] | null; notice: string | null } {
+  if (!effectiveSourceIds?.length) {
+    return { sourceIds: null, notice: null };
+  }
+  const sourceIds = uniqueCappedSourceIds(effectiveSourceIds);
+  return {
+    sourceIds,
+    notice: autoSelectSourcesNotice(sourceIds),
+  };
+}
+
 const TUTOR_ACTION_LABELS: Record<ThinTutorAction["kind"], string> = {
   clarify: "选择材料或页码",
   guided: "开始引导提示",
@@ -308,6 +334,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [contextOpen, setContextOpen] = useState(false);
   const [error, setError] = useState("");
   const [pendingHint, setPendingHint] = useState("");
+  /** Package C: dismissible / cleared on next submit when server echoes effectiveSourceIds. */
+  const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
@@ -539,6 +567,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
 
   async function handleSubmit(input: ComposerSubmit): Promise<{ accepted: boolean }> {
     setError("");
+    setAutoSelectNotice(null);
     let page: number | null | undefined;
     try {
       page = pageForSubmit(currentPage);
@@ -573,13 +602,23 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           history,
           ...(ephemeralPrivacyEpoch === undefined ? {} : { historyPrivacyEpoch: ephemeralPrivacyEpoch }),
           ...(page !== undefined ? { currentPage: page } : {}),
+          // Package B/C: course scope lets server fill/narrow when sourceIds empty.
+          ...(boundCourseId ? { courseId: boundCourseId } : {}),
         }, abortController.signal);
         if (abortController.signal.aborted) return { accepted: false };
         setEphemeralPrivacyEpoch(output.privacyEpoch);
+        const applied = applyEffectiveSourceIds(output.effectiveSourceIds);
+        const turnSourceIds = applied.sourceIds ?? selectedSourceIds;
+        if (applied.sourceIds) {
+          setSelectedSourceIds(applied.sourceIds);
+        }
+        if (applied.notice) {
+          setAutoSelectNotice(applied.notice);
+        }
         setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
           clientKey: input.clientKey,
           text: input.text,
-          sourceIds: selectedSourceIds,
+          sourceIds: turnSourceIds,
           output,
         }, abortController.signal));
         setPendingHint(output.historyDiscarded
@@ -700,6 +739,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
       {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} onCreateCard={(message, selectedText) => setCardDraft(prepareSnippetDraft(message, selectedText))} />}
       {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
+      {autoSelectNotice ? (
+        <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">
+          <p className="min-w-0 flex-1">{autoSelectNotice}</p>
+          <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-emerald-800 underline decoration-emerald-300 underline-offset-2 hover:text-emerald-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
+        </div>
+      ) : null}
       {error || recoveryRequired ? <div className="mx-5 mb-2 border border-red-200 bg-red-50 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-red-800">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (

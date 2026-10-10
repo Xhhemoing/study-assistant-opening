@@ -25,12 +25,13 @@ describe("opening context selection", () => {
     expect(result.map((item) => item.id)).toEqual(["b"]);
   });
 
-  it("returns no automatic context when the query has no lexical match", () => {
-    expect(selectContext({
+  it("falls back to deterministic budget-fill when the query has no lexical match", () => {
+    const result = selectContext({
       chunks: [chunk("a", "贝叶斯模型用于知识追踪。"), chunk("b", "Newton describes motion")],
       query: "它为什么成立？",
       maxCharacters: 1000,
-    })).toEqual([]);
+    });
+    expect(result.map((item) => item.id)).toEqual(["a", "b"]);
   });
 
   it("keeps a zero-score preferred chunk ahead of matching chunks", () => {
@@ -99,6 +100,45 @@ describe("opening context selection", () => {
     }
     expect(renderContext([])).toBe("");
   });
+
+  it("Package C: query miss + selected usable chunks stays non-empty under budget", () => {
+    const sA = "00000000-0000-4000-8000-0000000000aa";
+    const sB = "00000000-0000-4000-8000-0000000000bb";
+    const chunks = [
+      chunk("z", "课程材料甲：绪论", 2, sB),
+      chunk("y", "课程材料乙：第一章", 1, sA),
+    ];
+    const result = selectContext({
+      chunks,
+      query: "这道题怎么做呀？",
+      maxCharacters: 2000,
+    });
+    expect(result.length).toBeGreaterThan(0);
+    expect(result.map((item) => item.id)).toEqual(["y", "z"]);
+  });
+
+  it("Package C: query miss keeps preferPage ahead of other fallback chunks", () => {
+    const result = selectContext({
+      chunks: [chunk("a", "alpha", 1), chunk("b", "beta", 3), chunk("c", "gamma", 2)],
+      query: "完全不搭边的问法",
+      maxCharacters: 2000,
+      preferPage: 3,
+    });
+    expect(result.map((item) => item.id)[0]).toBe("b");
+  });
+
+  it("Package C: fallback respects budget and skips empty unusable text", () => {
+    const empty: SourceChunk = {
+      id: "empty", sourceId: "00000000-0000-0000-0000-000000000001", sourceVersion: 0,
+      page: 1, slideLabel: null, startMs: null, endMs: null, text: "   ", imageObjectKey: null,
+    };
+    const usable = chunk("ok", "readable course text", 1);
+    expect(selectContext({
+      chunks: [empty, usable],
+      query: "无关问题词",
+      maxCharacters: 2000,
+    }).map((item) => item.id)).toEqual(["ok"]);
+  });
 });
 
 it.each(["Newton?", "Newton!", "\"Newton\",", "“Newton？”", "牛顿？"])("matches a term surrounded by sentence punctuation: %s", (query) => {
@@ -109,11 +149,12 @@ it.each(["Newton?", "Newton!", "\"Newton\",", "“Newton？”", "牛顿？"])("
   expect(result.map(item => item.id)).toEqual(["b"]);
 });
 
-it.each(["Kepler?", "“开普勒？”", "?!，。"])("does not fill zero-match punctuation queries with unrelated material: %s", (query) => {
-  expect(selectContext({
+it.each(["Kepler?", "“开普勒？”", "?!，。"])("falls back on zero-match punctuation queries instead of emptying context: %s", (query) => {
+  const result = selectContext({
     chunks: [chunk("a", "Newton wrote the laws. 牛顿提出运动定律。"), chunk("b", "Unrelated gardening guide")],
     query, maxCharacters: 1000,
-  })).toEqual([]);
+  });
+  expect(result.map((item) => item.id)).toEqual(["a", "b"]);
 });
 
 it.each(["x+y?", "f(x)?", "C++?"])("preserves formula and identifier symbols while trimming a question mark: %s", (query) => {

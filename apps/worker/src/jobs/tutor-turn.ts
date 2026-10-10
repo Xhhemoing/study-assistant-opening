@@ -122,6 +122,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
+      // Package C thin pick runs only at submit (tutor-service / ephemeral) when
+      // client sourceIds were empty and pool > K. Worker turns already carry the
+      // effective persisted sourceIds — never re-narrow explicit large selections.
       const context = selectContext({
         chunks,
         query: turn.text,

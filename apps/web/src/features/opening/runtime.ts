@@ -143,6 +143,8 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
           settle: (reservationId, actualCents) => budgetRepo.settle(reservationId, actualCents),
           markUnknown: (reservationId) => budgetRepo.markUnknown(reservationId),
         },
+        listReadySourceIdsForCourse: (ownedScope, courseId) =>
+          createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(ownedScope, courseId),
         provider: override?.provider ?? null,
         resolveModel: override ? undefined : (ownedScope, mode) => resolveTutorModel(sql, ownedScope, mode),
         config: tutor,
