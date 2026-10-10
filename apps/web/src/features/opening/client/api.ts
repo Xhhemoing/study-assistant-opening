@@ -162,14 +162,8 @@ export function stagingPutUrl(sourceId: string): string {
 }
 
 export function resolveUploadPutUrl(ticket: UploadTicket): string {
-  // Materials beginUpload returns absolute .../sources/:id/staging (or stub placeholders).
-  if (
-    ticket.uploadUrl.includes("upload.local") ||
-    ticket.uploadUrl.includes("__SOURCE_ID__")
-  ) {
-    return stagingPutUrl(ticket.source.id);
-  }
-  return ticket.uploadUrl;
+  // Browser must never PUT to MinIO/presign hosts; always same-origin staging.
+  return stagingPutUrl(ticket.source.id);
 }
 
 export function createOpeningApi(fetchImpl: FetchLike = fetch) {

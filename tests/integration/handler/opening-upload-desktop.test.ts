@@ -5,6 +5,7 @@ import { createOpeningTestStorage, pdfBytes, pdfSha } from "../opening-storage-f
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { GET as listSources, POST as beginUpload } from "../../../apps/web/src/app/api/opening/sources/route";
 import { POST as completeUpload } from "../../../apps/web/src/app/api/opening/sources/[id]/complete/route";
+import { PUT as putStaging } from "../../../apps/web/src/app/api/opening/sources/[id]/staging/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 
@@ -95,12 +96,21 @@ describe("opening desktop upload handlers", () => {
     const beforePut = await completeUpload(request(`/api/opening/sources/${ticket.source.id}/complete`, "POST"), { params: Promise.resolve({ id: ticket.source.id }) });
     expect(beforePut.status).toBe(400);
 
-    const put = await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: pdfBytes,
-    });
-    expect(put.status).toBe(200);
+    expect(ticket.uploadUrl).toContain(`/api/opening/sources/${ticket.source.id}/staging`);
+
+    const put = await putStaging(
+      new Request(`http://localhost/api/opening/sources/${ticket.source.id}/staging`, {
+        method: "PUT",
+        headers: {
+          cookie,
+          "content-type": "application/pdf",
+          "content-length": String(pdfBytes.byteLength),
+        },
+        body: pdfBytes,
+      }),
+      { params: Promise.resolve({ id: ticket.source.id }) },
+    );
+    expect(put.status).toBe(204);
 
     const completed = await completeUpload(request(`/api/opening/sources/${ticket.source.id}/complete`, "POST"), { params: Promise.resolve({ id: ticket.source.id }) });
     expect(completed.status).toBe(200);

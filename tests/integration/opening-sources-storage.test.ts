@@ -55,12 +55,11 @@ afterAll(async () => {
 describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () => {
   it("completes a verified upload and round-trips the original bytes", async () => {
     const ticket = await beginPdf();
-    const put = await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: pdfBytes,
+    expect(ticket.uploadUrl).toContain(`/api/opening/sources/${ticket.source.id}/staging`);
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
     });
-    expect(put.status).toBe(200);
 
     const record = await svc.completeUpload(principal, ticket.source.id);
     expect(record.uploadState).toBe("uploaded");
@@ -80,10 +79,9 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
 
   it("returns the original state on duplicate completion without a second job", async () => {
     const ticket = await beginPdf();
-    await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: pdfBytes,
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
     });
     await svc.completeUpload(principal, ticket.source.id);
     const replay = await svc.completeUpload(principal, ticket.source.id);
@@ -97,10 +95,9 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
 
   it("keeps another workspace's source invisible", async () => {
     const ticket = await beginPdf();
-    await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: pdfBytes,
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
     });
     await expect(
       svc.completeUpload(otherPrincipal, ticket.source.id),
@@ -122,10 +119,9 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
       sha256: jpegSha,
     });
     trackedKeys.push(minio.stagingKey(ticket.source.id));
-    await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: jpegBytes,
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: jpegBytes,
     });
     await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
       /magic bytes/i,
@@ -144,10 +140,9 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
       sha256: "a".repeat(64),
     });
     trackedKeys.push(minio.stagingKey(ticket.source.id));
-    await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
-      body: pdfBytes,
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
     });
     await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
       /sha256/i,
@@ -178,12 +173,10 @@ describe("opening signed upload against real MinIO + PostgreSQL (guarded)", () =
       Buffer.alloc(200, 0x99),
     ]);
     for (const body of [pdfBytes, changed]) {
-      const put = await fetch(ticket.uploadUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "application/pdf" },
-        body,
+      await svc.putStaging(principal, ticket.source.id, {
+        contentType: "application/pdf",
+        bytes: body,
       });
-      expect(put.status).toBe(200);
     }
     await expect(svc.completeUpload(principal, ticket.source.id)).rejects.toThrow(
       /sha256/i,

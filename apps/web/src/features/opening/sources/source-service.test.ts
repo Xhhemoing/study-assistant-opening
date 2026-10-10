@@ -133,6 +133,10 @@ function makeFakeSql() {
 function makeFakeStorage() {
   const objects = new Map<string, { bytes: Uint8Array; etag: string }>();
   let etagCounter = 0;
+  const putObject = async (key: string, bytes: Uint8Array, _input?: { mime?: string }) => {
+    etagCounter += 1;
+    objects.set(key, { bytes, etag: `etag-${etagCounter}` });
+  };
   const storage: OpeningStorage = {
     stagingKey: (id) => `staging/${id}`,
     finalKey: (id, version) => `final/${id}/v${version}`,
@@ -159,6 +163,12 @@ function makeFakeStorage() {
       if (object.etag !== input.expectedEtag) throw new Error("etag precondition failed");
       objects.set(to, object);
     },
+    copyObject: async (from, to) => {
+      const object = objects.get(from);
+      if (!object) throw new Error("missing object");
+      objects.set(to, object);
+    },
+    putObject,
     deleteObject: async (key) => {
       objects.delete(key);
     },
@@ -168,7 +178,7 @@ function makeFakeStorage() {
     etagCounter += 1;
     objects.set(key, { bytes, etag: `etag-${etagCounter}` });
   };
-  return { storage, put, has: (key: string) => objects.has(key) };
+  return { storage, put, has: (key: string) => objects.has(key), objects };
 }
 
 function setup() {
@@ -179,34 +189,33 @@ function setup() {
 }
 
 describe("opening signed upload service", () => {
-  it("records the actual signed URL expiry when signing and return times differ", async () => {
+  it("records a 900s staging lease from the issue time", async () => {
     const sql = makeFakeSql(), { storage } = makeFakeStorage();
-    storage.presignPut = async () => "https://s3.invalid/object?X-Amz-Date=20260930T011000Z&X-Amz-Expires=900";
     const svc = createOpeningSourceService(sql, storage, { now: () => new Date("2026-09-30T01:12:00Z") });
     const ticket = await svc.beginUpload(principal, { name: "signed.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
-    expect(ticket.expiresAt).toBe("2026-09-30T01:25:00.000Z");
+    expect(ticket.expiresAt).toBe("2026-09-30T01:27:00.000Z");
     expect(sql.sources.get(ticket.source.id)?.upload_url_expires_at).toEqual(new Date(ticket.expiresAt));
   });
-  it("persists the signing lifetime after a delayed signature instead of using source creation", async () => {
-    const sql = makeFakeSql(), { storage } = makeFakeStorage();
-    let time = new Date("2026-09-30T01:00:00Z");
-    const sign = storage.presignPut;
-    storage.presignPut = async (...args) => { time = new Date("2026-09-30T01:10:00Z"); return sign(...args); };
-    const svc = createOpeningSourceService(sql, storage, { now: () => time });
-    const ticket = await svc.beginUpload(principal, { name: "slow.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
-    expect(ticket.expiresAt).toBe("2026-09-30T01:25:00.000Z");
-    expect(sql.sources.get(ticket.source.id)?.upload_url_expires_at).toEqual(new Date(ticket.expiresAt));
-  });
-  it("returns a presigned ticket against the staging key", async () => {
-    const { svc } = setup();
-    const ticket = await svc.beginUpload(principal, {
-      name: "a.pdf",
-      mime: "application/pdf",
-      bytes: pdfBytes.length,
-      sha256: pdfSha,
-    });
-    expect(ticket.uploadUrl).toMatch(/^fake:\/\/put\/staging\//);
-    expect(new Date(ticket.expiresAt).getTime()).toBeGreaterThan(Date.now());
+  it("returns a same-origin staging PUT URL instead of a MinIO presign", async () => {
+    const prev = process.env.PUBLIC_BASE_URL;
+    process.env.PUBLIC_BASE_URL = "http://127.0.0.1:3000";
+    try {
+      const { svc } = setup();
+      const ticket = await svc.beginUpload(principal, {
+        name: "a.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.length,
+        sha256: pdfSha,
+      });
+      expect(ticket.uploadUrl).toBe(
+        `http://127.0.0.1:3000/api/opening/sources/${ticket.source.id}/staging`,
+      );
+      expect(ticket.uploadUrl).toContain(`/api/opening/sources/${ticket.source.id}/staging`);
+      expect(new Date(ticket.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      if (prev === undefined) delete process.env.PUBLIC_BASE_URL;
+      else process.env.PUBLIC_BASE_URL = prev;
+    }
   });
 
   it("completes a matching upload with one job and one outbox insert", async () => {
@@ -422,4 +431,123 @@ describe("opening signed upload service", () => {
       svc.completeUpload(otherPrincipal, ticket.source.id),
     ).rejects.toThrow(OpeningSourceError);
   });
+  it("putStaging stores bytes at the staging key", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(
+      svc.putStaging(principal, ticket.source.id, {
+        contentType: "application/pdf",
+        bytes: pdfBytes,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(has(`staging/${ticket.source.id}`)).toBe(true);
+  });
+
+  it("putStaging accepts Content-Type with parameters when the base mime matches", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf; charset=binary",
+      bytes: pdfBytes,
+    });
+    expect(has(`staging/${ticket.source.id}`)).toBe(true);
+  });
+
+  it("putStaging rejects a mime mismatch", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(
+      svc.putStaging(principal, ticket.source.id, {
+        contentType: "image/jpeg",
+        bytes: pdfBytes,
+      }),
+    ).rejects.toThrow(/mime/i);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
+  it("putStaging rejects a bytes mismatch", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(
+      svc.putStaging(principal, ticket.source.id, {
+        contentType: "application/pdf",
+        bytes: pdfBytes.subarray(0, 10),
+      }),
+    ).rejects.toThrow(/bytes/i);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
+  it("putStaging rejects an already-uploaded source", async () => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    await expect(
+      svc.putStaging(principal, ticket.source.id, {
+        contentType: "application/pdf",
+        bytes: pdfBytes,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("putStaging keeps another workspace invisible", async () => {
+    const { svc } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await expect(
+      svc.putStaging(otherPrincipal, ticket.source.id, {
+        contentType: "application/pdf",
+        bytes: pdfBytes,
+      }),
+    ).rejects.toThrow(OpeningSourceError);
+  });
+
+  it("putStaging then completeUpload succeeds end-to-end", async () => {
+    const { svc, sql, has } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    await svc.putStaging(principal, ticket.source.id, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
+    });
+    const record = await svc.completeUpload(principal, ticket.source.id);
+    expect(record.uploadState).toBe("uploaded");
+    expect(sql.counts()).toEqual({ jobInserts: 1, outboxInserts: 1 });
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+    expect(has(`final/${ticket.source.id}/v0`)).toBe(true);
+  });
+
 });

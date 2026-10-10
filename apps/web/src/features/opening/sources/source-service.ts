@@ -15,15 +15,17 @@ import { validateStoredUpload, UploadPolicyError } from "./upload-policy";
 import type { Principal } from "../../../lib/authorization";
 import { assertAuthorized, boundWorkspaceId } from "../../../lib/authorization";
 
-function uploadLeaseEnd(url: string, returnedAt: Date): string {
-  const query = new URL(url).searchParams, signed = query.get("X-Amz-Date"), seconds = query.get("X-Amz-Expires");
-  if (signed && /^\d{8}T\d{6}Z$/.test(signed) && seconds && /^\d+$/.test(seconds)) {
-    const time = Date.UTC(Number(signed.slice(0, 4)), Number(signed.slice(4, 6)) - 1, Number(signed.slice(6, 8)),
-      Number(signed.slice(9, 11)), Number(signed.slice(11, 13)), Number(signed.slice(13, 15)));
-    return new Date(time + Number(seconds) * 1000).toISOString();
-  }
-  // Injected adapters may omit AWS metadata; completion time + requested lifetime is conservative.
-  return new Date(returnedAt.getTime() + 900_000).toISOString();
+const STAGING_UPLOAD_LEASE_MS = 900_000;
+
+function normalizeMime(value: string): string {
+  return value.split(";", 1)[0]!.trim().toLowerCase();
+}
+
+function stagingUploadUrl(sourceId: string): string {
+  return new URL(
+    `/api/opening/sources/${sourceId}/staging`,
+    process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:3000",
+  ).toString();
 }
 
 export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" }), options: { now?: () => Date } = {}) {
@@ -39,9 +41,50 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       auth(p, "source.create");
       const scope = scopeOf(p), source = await sources.create(scope, uploadInputSchema.parse(input));
       return sources.issueUploadTicket(scope, source.id, async current => {
-        const uploadUrl = await storage.presignPut(storage.stagingKey(current.id), { mime: current.mime, bytes: current.bytes, expiresInSeconds: 900 });
-        return { uploadUrl, expiresAt: uploadLeaseEnd(uploadUrl, now()) };
+        const uploadUrl = stagingUploadUrl(current.id);
+        return { uploadUrl, expiresAt: new Date(now().getTime() + STAGING_UPLOAD_LEASE_MS).toISOString() };
       });
+    },
+    /**
+     * Same-origin staging PUT target metadata (bytes/mime) for request size guards.
+     * Rejects missing / wrong-owner / non-pending sources as NOT_FOUND.
+     */
+    async getStagingPutTarget(p: Principal, id: string): Promise<{ bytes: number; mime: string }> {
+      auth(p, "source.create");
+      const source = await sources.get(scopeOf(p), id);
+      if (source.uploadState !== "pending") {
+        throw new OpeningSourceError("NOT_FOUND", "source is not pending");
+      }
+      return { bytes: source.bytes, mime: source.mime };
+    },
+    /**
+     * Buffer the browser/server body into staging object storage (same-origin PUT).
+     * Content-Type and byte length must match the beginUpload record exactly.
+     */
+    async putStaging(
+      p: Principal,
+      id: string,
+      input: { contentType: string; bytes: Uint8Array },
+    ): Promise<{ ok: true }> {
+      auth(p, "source.create");
+      const scope = scopeOf(p);
+      const source = await sources.get(scope, id);
+      if (source.uploadState !== "pending") {
+        throw new OpeningSourceError("NOT_FOUND", "source is not pending");
+      }
+      const requestMime = normalizeMime(input.contentType);
+      if (!requestMime || requestMime !== normalizeMime(source.mime)) {
+        throw new UploadPolicyError(
+          `request mime ${requestMime || "(missing)"} != expected ${source.mime}`,
+        );
+      }
+      if (input.bytes.byteLength !== source.bytes) {
+        throw new UploadPolicyError(
+          `request bytes ${input.bytes.byteLength} != expected ${source.bytes}`,
+        );
+      }
+      await storage.putObject(storage.stagingKey(id), input.bytes, { mime: source.mime });
+      return { ok: true };
     },
     async completeUpload(p: Principal, id: string): Promise<SourceRecord> {
       auth(p, "source.complete"); const scope = scopeOf(p); const source = await sources.get(scope, id); if (source.uploadState === "uploaded") return source;

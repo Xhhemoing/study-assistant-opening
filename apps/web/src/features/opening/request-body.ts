@@ -41,3 +41,46 @@ export async function readOpeningJsonBody(
   }
   return JSON.parse(new TextDecoder().decode(bytes));
 }
+
+/** Stream a raw request body into a buffer with a hard byte cap (413 if exceeded). */
+export async function readOpeningRawBody(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (Number.isInteger(declaredBytes) && declaredBytes > maxBytes) {
+      throw new ApiError("VALIDATION", "请求体过大", 413);
+    }
+  }
+
+  if (!request.body) {
+    return new Uint8Array();
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        throw new ApiError("VALIDATION", "请求体过大", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}

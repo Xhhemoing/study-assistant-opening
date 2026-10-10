@@ -210,22 +210,30 @@ describe("openingApi (RU-07 client)", () => {
 });
 
 describe("openingApi integration helpers", () => {
-  it("routes upload.local tickets to staging PUT", () => {
+  const baseSource = {
+    id: S,
+    workspaceId: U,
+    name: "lec.pdf",
+    mime: "application/pdf",
+    bytes: 12,
+    sha256: "a".repeat(64),
+    version: 0,
+    uploadState: "pending" as const,
+    parseState: "not_started" as const,
+    error: null,
+    createdAt: ISO,
+  };
+
+  it.each([
+    [`https://upload.local/opening/${U}/${S}`, "upload.local stub"],
+    [`https://host/s3/aistudy/staging/${S}?X-Amz-Signature=x`, "public /s3/ presign"],
+    [`http://127.0.0.1:9000/aistudy/staging/${S}?X-Amz-Signature=x`, "loopback MinIO"],
+    [`http://localhost:3000/api/opening/sources/${S}/staging`, "absolute staging"],
+    [`https://cdn.example/__SOURCE_ID__/put`, "placeholder stub"],
+  ])("always resolves %s to same-origin staging (%s)", (uploadUrl) => {
     const url = resolveUploadPutUrl({
-      source: {
-        id: S,
-        workspaceId: U,
-        name: "lec.pdf",
-        mime: "application/pdf",
-        bytes: 12,
-        sha256: "a".repeat(64),
-        version: 0,
-        uploadState: "pending",
-        parseState: "not_started",
-        error: null,
-        createdAt: ISO,
-      },
-      uploadUrl: `https://upload.local/opening/${U}/${S}`,
+      source: baseSource,
+      uploadUrl,
       expiresAt: ISO,
     });
     expect(url).toBe(`/api/opening/sources/${S}/staging`);
@@ -255,28 +263,6 @@ describe("openingApi integration helpers", () => {
       code: "page_not_in_sources",
     } satisfies Partial<OpeningApiError>);
   });
-});
-
-  it("passes through absolute staging uploadUrl", () => {
-    const url = resolveUploadPutUrl({
-      source: {
-        id: S,
-        workspaceId: U,
-        name: "lec.pdf",
-        mime: "application/pdf",
-        bytes: 12,
-        sha256: "a".repeat(64),
-        version: 0,
-        uploadState: "pending",
-        parseState: "not_started",
-        error: null,
-        createdAt: ISO,
-      },
-      uploadUrl: `http://localhost:3000/api/opening/sources/${S}/staging`,
-      expiresAt: ISO,
-    });
-    expect(url).toBe(`http://localhost:3000/api/opening/sources/${S}/staging`);
-  });
 
   it("requests the cited source version download", async () => {
     const fetchImpl = vi.fn(async (path: string) => {
@@ -296,56 +282,58 @@ describe("openingApi integration helpers", () => {
       versionMismatch: true,
     });
   });
-
-
-it("posts only the explicitly selected snippet and server provenance", async () => {
-  const requests: Array<{ url: string; method: string | undefined; payload: unknown }> = [];
-  const api = createOpeningApi((async (url, init) => {
-    requests.push({ url: String(url), method: init?.method, payload: JSON.parse(String(init?.body)) });
-    return jsonResponse({ documentId: U });
-  }) as typeof fetch);
-  await expect(api.createSnippet({ title: "我的笔记", text: "仅保存这一句", provenanceId: S })).resolves.toEqual({ documentId: U });
-  expect(requests).toEqual([{ url: "/api/opening/snippets", method: "POST", payload: {
-    title: "我的笔记", text: "仅保存这一句", provenanceId: S,
-  } }]);
 });
 
-it("rejects invalid snippet input before making a persistence request", async () => {
-  const fetchImpl = vi.fn();
-  const api = createOpeningApi(fetchImpl);
-  await expect(api.createSnippet({ title: "笔记", text: "x".repeat(20_001), provenanceId: S })).rejects.toThrow();
-  await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: "unknown" })).rejects.toThrow();
-  expect(fetchImpl).not.toHaveBeenCalled();
-});
-
-it("does not turn a malformed saved-note response into a successful save", async () => {
-  const api = createOpeningApi((async () => jsonResponse({ documentId: "bad-id" })) as typeof fetch);
-  await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: S })).rejects.toThrow();
-});
-
-it("preserves the separate provenance of each temporary history message", async () => {
-  let received: unknown;
-  const api = createOpeningApi((async (_url, init) => {
-    received = JSON.parse(String(init?.body));
-    return jsonResponse({ text: "next answer", citedChunkIds: [], requestId: "next-request", privacyEpoch: 2,
-      historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null, provenanceId: U });
-  }) as typeof fetch);
-  const result = await api.replyEphemeral({ text: "current question", sourceIds: [], mode: "listen", historyPrivacyEpoch: 2,
-    history: [{ role: "user", text: "old question", provenanceId: S }, { role: "assistant", text: "old answer", provenanceId: S }],
+describe("openingApi snippets and ephemeral provenance", () => {
+  it("posts only the explicitly selected snippet and server provenance", async () => {
+    const requests: Array<{ url: string; method: string | undefined; payload: unknown }> = [];
+    const api = createOpeningApi((async (url, init) => {
+      requests.push({ url: String(url), method: init?.method, payload: JSON.parse(String(init?.body)) });
+      return jsonResponse({ documentId: U });
+    }) as typeof fetch);
+    await expect(api.createSnippet({ title: "我的笔记", text: "仅保存这一句", provenanceId: S })).resolves.toEqual({ documentId: U });
+    expect(requests).toEqual([{ url: "/api/opening/snippets", method: "POST", payload: {
+      title: "我的笔记", text: "仅保存这一句", provenanceId: S,
+    } }]);
   });
-  expect(received).toMatchObject({ history: [
-    { role: "user", text: "old question", provenanceId: S },
-    { role: "assistant", text: "old answer", provenanceId: S },
-  ] });
-  expect(result.provenanceId).toBe(U);
-});
 
-it("leaves legacy temporary responses without provenance unavailable for saving", async () => {
-  const api = createOpeningApi((async () => jsonResponse({ text: "legacy answer", citedChunkIds: [], requestId: "old-request",
-    privacyEpoch: 2, historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null,
-  })) as typeof fetch);
-  const result = await api.replyEphemeral({ text: "question", sourceIds: [], mode: "listen", history: [] });
-  expect(result.provenanceId).toBeNull();
+  it("rejects invalid snippet input before making a persistence request", async () => {
+    const fetchImpl = vi.fn();
+    const api = createOpeningApi(fetchImpl);
+    await expect(api.createSnippet({ title: "笔记", text: "x".repeat(20_001), provenanceId: S })).rejects.toThrow();
+    await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: "unknown" })).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a malformed saved-note response into a successful save", async () => {
+    const api = createOpeningApi((async () => jsonResponse({ documentId: "bad-id" })) as typeof fetch);
+    await expect(api.createSnippet({ title: "笔记", text: "片段", provenanceId: S })).rejects.toThrow();
+  });
+
+  it("preserves the separate provenance of each temporary history message", async () => {
+    let received: unknown;
+    const api = createOpeningApi((async (_url, init) => {
+      received = JSON.parse(String(init?.body));
+      return jsonResponse({ text: "next answer", citedChunkIds: [], requestId: "next-request", privacyEpoch: 2,
+        historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null, provenanceId: U });
+    }) as typeof fetch);
+    const result = await api.replyEphemeral({ text: "current question", sourceIds: [], mode: "listen", historyPrivacyEpoch: 2,
+      history: [{ role: "user", text: "old question", provenanceId: S }, { role: "assistant", text: "old answer", provenanceId: S }],
+    });
+    expect(received).toMatchObject({ history: [
+      { role: "user", text: "old question", provenanceId: S },
+      { role: "assistant", text: "old answer", provenanceId: S },
+    ] });
+    expect(result.provenanceId).toBe(U);
+  });
+
+  it("leaves legacy temporary responses without provenance unavailable for saving", async () => {
+    const api = createOpeningApi((async () => jsonResponse({ text: "legacy answer", citedChunkIds: [], requestId: "old-request",
+      privacyEpoch: 2, historyDiscarded: false, candidates: [], inputTokens: null, outputTokens: null,
+    })) as typeof fetch);
+    const result = await api.replyEphemeral({ text: "question", sourceIds: [], mode: "listen", history: [] });
+    expect(result.provenanceId).toBeNull();
+  });
 });
 
 describe("single task reminders", () => {

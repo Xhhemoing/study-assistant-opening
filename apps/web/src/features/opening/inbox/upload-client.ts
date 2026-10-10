@@ -84,13 +84,17 @@ export function createUploadClient(deps: UploadClientDeps) {
         await deps.put(deps.resolvePutUrl?.(ticket) ?? ticket.uploadUrl, file.bytes, (loaded) => {
           progress.onBytes?.(loaded, file.bytes.byteLength);
         }, mime);
-      } catch {
+      } catch (error) {
+        const detail =
+          error instanceof Error && error.message.trim()
+            ? `（${error.message}）`
+            : "";
         return {
           phase: "interrupted",
           sourceId: ticket.source.id,
           ticket,
           keptLocal: true,
-          message: "上传中断，原件仍在本地。未标记为已上传。",
+          message: `上传中断，原件仍在本地。未标记为已上传。${detail}`,
         };
       }
       try {

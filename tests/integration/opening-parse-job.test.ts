@@ -29,9 +29,9 @@ afterAll(async () => { for (const key of [...new Set(trackedKeys)]) await storag
 async function upload(name: string, mime: (typeof documents)[number]["mime"] | "audio/mpeg", bytes: Buffer) {
   const ticket = await service.beginUpload({ userId: fixture.scope.ownerUserId, workspaceId: fixture.scope.workspaceId, sessionId: "integration" }, { name, mime, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
   trackedKeys.push(storage.stagingKey(ticket.source.id), storage.finalKey(ticket.source.id, ticket.source.version));
-  const put = await fetch(ticket.uploadUrl, { method: "PUT", headers: { "Content-Type": mime }, body: bytes });
-  expect(put.status).toBe(200);
-  await service.completeUpload({ userId: fixture.scope.ownerUserId, workspaceId: fixture.scope.workspaceId, sessionId: "integration" }, ticket.source.id);
+  const principal = { userId: fixture.scope.ownerUserId, workspaceId: fixture.scope.workspaceId, sessionId: "integration" };
+  await service.putStaging(principal, ticket.source.id, { contentType: mime, bytes });
+  await service.completeUpload(principal, ticket.source.id);
   return ticket.source;
 }
 

@@ -15,7 +15,7 @@ const EMAIL_MAX_BYTES = 25 * 1024 * 1024;
 
 type EmailImportSourceService = Pick<
   ReturnType<typeof createOpeningSourceService>,
-  "beginUpload" | "completeUpload"
+  "beginUpload" | "completeUpload" | "putStaging"
 >;
 type SourceServiceFactory = (sql: Sql) => EmailImportSourceService;
 const globalForEmailImport = globalThis as typeof globalThis & {
@@ -62,6 +62,7 @@ async function readEmailImportRequest(request: Request) {
 /**
  * Manual .eml fallback. It creates an ordinary immutable source; it never
  * claims an authorized mailbox was synchronized or writes a connection receipt.
+ * Staging uses putStaging (same-origin path) — not a browser MinIO presign.
  */
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -70,14 +71,10 @@ export async function POST(request: Request): Promise<Response> {
     const sources = sourceServiceFactory(sql);
     const ticket = await sources.beginUpload(principal, input);
 
-    const uploaded = await fetch(ticket.uploadUrl, {
-      method: "PUT",
-      body: bytes,
-      headers: { "content-type": "message/rfc822" },
+    await sources.putStaging(principal, ticket.source.id, {
+      contentType: "message/rfc822",
+      bytes,
     });
-    if (!uploaded.ok) {
-      throw new ApiError("VALIDATION", "staging upload failed", 502);
-    }
 
     const source = await sources.completeUpload(principal, ticket.source.id);
     return Response.json(
