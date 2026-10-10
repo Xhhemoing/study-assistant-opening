@@ -12,6 +12,7 @@ import { TodayResumeBody } from "./today-resume-view";
 import { resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { TodayLearningContext } from "./today-overview";
+import { focusPriorityActions } from "./today-task-selection";
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
   return Boolean(focusTaskId);
 }
@@ -22,6 +23,8 @@ export function shouldCloseTodayQueue(source?: "focus" | "user"): boolean {
 
 export function TodayDashboard({ state, api, focusTaskId }: { state: TodayResumeState; api?: OpeningApi; focusTaskId?: string }) {
   const [task, setTask] = useState<StudyTask | null>(null), [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
+  const [actionsRequested, setActionsRequested] = useState(false);
+  const showActions = useCallback(() => { setQueueOpen(true); setActionsRequested(true); }, []);
   const [reloadToken, setReloadToken] = useState(0);
   const [dueCardCount, setDueCardCount] = useState(0);
   const timeZone = useMemo(() => resolveTodayTimeZone(), []);
@@ -45,17 +48,21 @@ export function TodayDashboard({ state, api, focusTaskId }: { state: TodayResume
       });
     return () => controller.abort();
   }, [cards, reloadToken, state.kind]);
+  useEffect(() => {
+    if (actionsRequested && queueOpen && focusPriorityActions(document.getElementById("action-digest"))) setActionsRequested(false);
+  }, [actionsRequested, queueOpen, state.kind]);
+  const clearSelection = useCallback(() => setTask(null), []);
   const select = useCallback((next: StudyTask, source?: "focus" | "user") => { setTask(next); if (shouldCloseTodayQueue(source)) setQueueOpen(false); }, []);
   if (state.kind === "loggedOut" || state.kind === "error") return <TodayResumeBody state={state} />;
   return <TaskQueueRefreshContext.Provider value={rereadQueue}><div className="flex h-full min-h-0 flex-col">
     <h1 className="sr-only">今日学习工作台</h1>
-    <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 lg:hidden"><span className="text-xs font-medium text-zinc-800">今日学习</span><button className={secondaryButtonClass} type="button" aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(!queueOpen)}><ListTodo size={14} aria-hidden />任务队列<ChevronDown size={12} aria-hidden /></button></header>
-    <div className="shrink-0 group-data-[focus=true]/workspace:hidden"><TodayLearningContext item={state.continueItem} /></div>
+    <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 lg:hidden"><span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800" title={task?.title}>{task?.title ?? "今日学习 · 可直接开始自由学习"}</span><button className={secondaryButtonClass} type="button" aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(!queueOpen)}><ListTodo size={14} aria-hidden />任务队列<ChevronDown size={12} aria-hidden /></button></header>
+    <div className="shrink-0 group-data-[focus=true]/workspace:hidden"><TodayLearningContext item={state.continueItem} onShowActions={showActions} /></div>
     <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:grid-rows-1 group-data-[focus=true]/workspace:lg:grid-cols-1">
       <div id="today-queue" className={`${queueOpen ? "flex" : "hidden"} max-h-72 min-h-0 shrink-0 flex-col overflow-y-auto border-b border-zinc-200 bg-zinc-50 lg:flex lg:max-h-none lg:border-b-0 lg:border-r group-data-[focus=true]/workspace:hidden`}>
         {(state.pendingReviews?.count ?? 0) > 0 ? <Link href="/opening/review" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] leading-5 text-amber-900 focus-visible:ring-2 focus-visible:ring-emerald-700">{state.pendingReviews!.count} 项建议待审核 · 不影响继续学习</Link> : null}
         {dueCardCount > 0 ? <Link href="/opening/cards" className="shrink-0 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-[11px] leading-5 text-emerald-900 focus-visible:ring-2 focus-visible:ring-emerald-700">{dueCardCount} 张记忆卡片到期</Link> : null}
-        <TodayPlanView api={api} focusTaskId={focusTaskId} selectedId={task?.id} onSelect={select} reloadToken={reloadToken} timeZone={timeZone} />
+        <TodayPlanView api={api} focusTaskId={focusTaskId} selectedId={task?.id} onSelect={select} onClearSelection={clearSelection} reloadToken={reloadToken} timeZone={timeZone} />
       </div>
       <div className="min-h-0 min-w-0 flex-1"><AssistantView api={api} initialConversationId={state.continueItem?.conversationId ?? null} initialTitle={state.continueItem?.title} startFresh={!state.continueItem} task={task} embedded /></div>
     </div>

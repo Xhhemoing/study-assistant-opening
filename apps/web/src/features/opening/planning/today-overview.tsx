@@ -26,7 +26,7 @@ export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[
   return <section className="border-y border-zinc-200/80 bg-gradient-to-b from-white to-zinc-50/50 px-5 py-4" aria-labelledby="today-plan-overview-heading">
     <h3 id="today-plan-overview-heading" className="text-sm font-semibold text-zinc-900">今日已确认计划</h3>
     {!plan.acceptedVersion ? <><p className="mt-2 text-sm leading-6 text-zinc-500">还未确认今天的时间安排。可以直接选任务学习。</p><button type="button" onClick={onArrange} className={`${secondaryButtonClass} mt-3`}>安排可用时间</button></>
-      : !summary.total ? <p className="mt-2 text-sm leading-6 text-zinc-500">今天已确认的计划没有学习任务,可从下方队列继续。</p>
+      : !summary.total ? <p className="mt-2 text-sm leading-6 text-zinc-500">今天已确认的计划没有学习任务,可从学习队列继续。</p>
         : <><dl className="mt-4 grid grid-cols-3 gap-3">
           <div className="rounded-lg bg-white px-3 py-2.5 shadow-xs ring-1 ring-zinc-900/5"><dt className="text-xs text-zinc-500">计划内已完成</dt><dd className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-zinc-900"><span>{summary.done}/{summary.total} 项</span></dd></div>
           <div className="rounded-lg bg-white px-3 py-2.5 shadow-xs ring-1 ring-zinc-900/5"><dt className="text-xs text-zinc-500">待做</dt><dd className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-emerald-700">{summary.pending}<span className="ml-1 text-base font-normal text-zinc-400">项</span></dd></div>
@@ -35,7 +35,7 @@ export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[
   </section>;
 }
 
-export function TodayLearningContext({ item }: { item?: TodayResumeState["continueItem"] }) {
+export function TodayLearningContext({ item, onShowActions }: { item?: TodayResumeState["continueItem"]; onShowActions?: () => void }) {
   const sourceCount = Object.keys(item?.sourceVersions ?? {}).length;
   const courseHref = item?.courseId ? `/opening/courses/${encodeURIComponent(item.courseId)}` : "/opening/courses";
   return <div className="min-w-0 border-b border-zinc-200 px-4 py-2 sm:px-5">
@@ -54,7 +54,7 @@ export function TodayLearningContext({ item }: { item?: TodayResumeState["contin
       <Link href="/opening/cards" className={ui.quiet}>卡片</Link>
       <Link href="/opening/review" className={ui.quiet}>待确认</Link>
       <Link href="/opening/settings/connections" className={ui.quiet}>连接</Link>
-      <a href="#action-digest" className={ui.quiet}>优先行动</a>
+      {onShowActions ? <button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button> : <a href="#action-digest" className={ui.quiet}>优先行动</a>}
       <Link href={courseHref} className={ui.quiet} title="课程知识 / 材料在课程页">课程知识 / 材料在课程页</Link>
     </nav>
   </div>;
