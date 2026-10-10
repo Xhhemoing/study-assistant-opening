@@ -185,4 +185,58 @@ describe("MessageList", () => {
     expect(html).toContain("p.2");
     expect(html).toContain("不是当前版本");
   });
+
+  it("shows a general badge when materials were selected but citations are empty", () => {
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{
+        id: "turn-general",
+        role: "assistant",
+        text: "这是一般说明",
+        citationLabels: [],
+        citations: [],
+        status: "complete",
+        hadMaterialContext: true,
+      }],
+    }));
+    expect(html).toContain("一般说明（未引用材料）");
+    expect(html).not.toContain("出处：");
+  });
+
+  it("keeps 出处 chips when citations are present and does not show the general badge", () => {
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{
+        id: "turn-cited",
+        role: "assistant",
+        text: "见材料",
+        citationLabels: ["p.1"],
+        citations: [{
+          chunkId: "44444444-4444-4444-8444-444444444444",
+          sourceId: "22222222-2222-4222-8222-222222222222",
+          sourceVersion: 1,
+          label: "p.1",
+        }],
+        status: "complete",
+        hadMaterialContext: true,
+      }],
+    }));
+    expect(html).toContain("出处：");
+    expect(html).toContain("p.1");
+    expect(html).not.toContain("一般说明（未引用材料）");
+  });
+
+  it("does not show a general badge for free-chat answers with no material context", () => {
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{
+        id: "turn-free",
+        role: "assistant",
+        text: "自由交流回答",
+        citationLabels: [],
+        citations: [],
+        status: "complete",
+        hadMaterialContext: false,
+      }],
+    }));
+    expect(html).not.toContain("一般说明（未引用材料）");
+    expect(html).not.toContain("出处：");
+  });
 });

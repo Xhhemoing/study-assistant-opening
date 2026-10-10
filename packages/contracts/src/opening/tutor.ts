@@ -151,6 +151,8 @@ export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
   provenanceId: uuidSchema.nullable().default(null),
   privacyEpoch: z.number().int().nonnegative(),
   historyDiscarded: z.boolean(),
+  /** Program-resolved cites for UI chips; unknown ids filtered, never fabricated. */
+  citations: z.array(citationSchema).max(64).default([]),
 }).strict();
 
 export const ephemeralTurnInputSchema = z

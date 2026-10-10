@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { conversationResumeSchema } from "@aistudy/contracts";
-import { ephemeralHistoryFromMessages, messagesFromResume, messagesFromTurns, resolveChatMessages } from "./message-model";
+import { ephemeralHistoryFromMessages, messagesFromResume, messagesFromTurns, resolveChatMessages, showsGeneralMaterialBadge } from "./message-model";
 
 const U = "11111111-1111-4111-8111-111111111111";
 const S = "22222222-2222-4222-8222-222222222222";
@@ -156,4 +156,17 @@ it("carries only ephemeral text and known provenance into bounded history", () =
   expect(ephemeralHistoryFromMessages(ephemeral)).toHaveLength(16);
   expect(ephemeralHistoryFromMessages(ephemeral)[0]).toEqual({ role: "user", text: "message-2", provenanceId: S });
   expect(ephemeralHistoryFromMessages(ephemeral)[15]).toEqual({ role: "user", text: "message-17" });
+});
+
+describe("showsGeneralMaterialBadge", () => {
+  it("is true only for assistant turns with material context and zero citations", () => {
+    expect(showsGeneralMaterialBadge({ role: "assistant", citations: [], hadMaterialContext: true })).toBe(true);
+    expect(showsGeneralMaterialBadge({
+      role: "assistant",
+      citations: [{ chunkId: "44444444-4444-4444-8444-444444444444", sourceId: S, sourceVersion: 1, label: "p.1" }],
+      hadMaterialContext: true,
+    })).toBe(false);
+    expect(showsGeneralMaterialBadge({ role: "assistant", citations: [], hadMaterialContext: false })).toBe(false);
+    expect(showsGeneralMaterialBadge({ role: "user", citations: [], hadMaterialContext: true })).toBe(false);
+  });
 });

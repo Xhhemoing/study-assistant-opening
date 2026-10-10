@@ -9,7 +9,16 @@ export type ChatMessageView = {
   status?: TurnRecord["status"];
   origin?: "saved" | "ephemeral";
   provenanceId?: string | null;
+  /** True when this assistant turn had selected materials / context intent (T02 general label). */
+  hadMaterialContext?: boolean;
 };
+
+/** T02: label general answers when materials were in intent but no cite chips resolved. */
+export function showsGeneralMaterialBadge(message: Pick<ChatMessageView, "role" | "citations" | "hadMaterialContext">): boolean {
+  return message.role === "assistant"
+    && Boolean(message.hadMaterialContext)
+    && (message.citations?.length ?? 0) === 0;
+}
 
 export function messagesFromResume(
   resume: ConversationResume,

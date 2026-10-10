@@ -122,6 +122,9 @@ describe("ephemeral tutor service", () => {
     expect(heard.candidates).toEqual([]);
     expect(heard.text).toBe("I hear you");
     expect(heard.citedChunkIds).toEqual([chunkId]);
+    expect(heard.citations).toEqual([
+      expect.objectContaining({ chunkId, sourceId, sourceVersion: 1 }),
+    ]);
     expect(listen.complete).toHaveBeenCalledOnce();
     const sent = listen.complete.mock.calls[0]![0];
     expect(sent.mode).toBe("listen");
@@ -204,7 +207,26 @@ describe("ephemeral tutor service", () => {
       history: [],
     });
     expect(heard.citedChunkIds).toEqual([chunkId]);
+    expect(heard.citations).toEqual([
+      expect.objectContaining({ chunkId, sourceId, sourceVersion: 1 }),
+    ]);
+    expect(heard.citations[0]?.label).toContain("page 2");
     expect(JSON.stringify(heard)).not.toContain("PRIVATE-QUOTE");
+  });
+
+  it("returns empty citations when the model cites nothing (no fabricated chips)", async () => {
+    const { service } = deps({
+      complete: async () => ({ ...output, citedChunkIds: [] }),
+    });
+    const heard = await service.replyEphemeral(scope, {
+      text: "general",
+      sourceIds: [sourceId],
+      chunkId,
+      mode: "explain",
+      history: [],
+    });
+    expect(heard.citedChunkIds).toEqual([]);
+    expect(heard.citations).toEqual([]);
   });
 
   it("does not fall back to a saved conversation when the provider fails", async () => {

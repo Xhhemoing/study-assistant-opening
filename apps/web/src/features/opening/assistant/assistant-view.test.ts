@@ -3,12 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendEphemeralResponseIfActive,
   assistantContextHint,
+  EMPTY_COURSE_SOURCES_CONFIRM,
   mergeChatMessages,
   createJobPoller,
   jobStatusHint,
   pendingJobDiscoveryState,
   learningAttemptTurnContext,
   canReuseAssistantConversation,
+  shouldConfirmEmptyCourseSources,
   shouldRefreshCurrentConversation,
   shouldLoadConversationList,
   conversationForAssistant,
@@ -275,6 +277,69 @@ it("keeps server provenance on both messages from a temporary response", () => {
     { role: "user", origin: "ephemeral", provenanceId: JOB_ID },
     { role: "assistant", origin: "ephemeral", provenanceId: JOB_ID },
   ]);
+});
+
+it("maps ephemeral citations onto the assistant message and marks material context", () => {
+  const citation = {
+    chunkId: "44444444-4444-4444-8444-444444444444",
+    sourceId: "22222222-2222-4222-8222-222222222222",
+    sourceVersion: 1,
+    label: "p.2",
+  };
+  const messages = appendEphemeralResponseIfActive([], {
+    clientKey: "cite-q",
+    text: "用材料解释",
+    sourceIds: [citation.sourceId],
+    output: { requestId: "cite-a", text: "见第 2 页", provenanceId: JOB_ID, citations: [citation] },
+  }, new AbortController().signal);
+  expect(messages[1]).toMatchObject({
+    role: "assistant",
+    citations: [citation],
+    citationLabels: ["p.2"],
+    hadMaterialContext: true,
+  });
+});
+
+it("does not invent citations when the service returns none, but still flags material context", () => {
+  const sourceId = "22222222-2222-4222-8222-222222222222";
+  const messages = appendEphemeralResponseIfActive([], {
+    clientKey: "empty-cite",
+    text: "选了材料但模型未引用",
+    sourceIds: [sourceId],
+    output: { requestId: "general", text: "一般说明", citations: [] },
+  }, new AbortController().signal);
+  expect(messages[1]?.citations).toEqual([]);
+  expect(messages[1]?.hadMaterialContext).toBe(true);
+});
+
+describe("empty course source soft confirm", () => {
+  it("requires confirm when course-bound and no sourceIds", () => {
+    expect(shouldConfirmEmptyCourseSources({
+      sourceIds: [],
+      courseId: "11111111-1111-4111-8111-111111111111",
+    })).toBe(true);
+    expect(EMPTY_COURSE_SOURCES_CONFIRM).toContain("当前课程有材料，尚未选入本轮");
+  });
+
+  it("allows free chat with empty sourceIds", () => {
+    expect(shouldConfirmEmptyCourseSources({ sourceIds: [], courseId: null })).toBe(false);
+    expect(shouldConfirmEmptyCourseSources({ sourceIds: [], courseId: undefined })).toBe(false);
+  });
+
+  it("skips confirm when materials are already selected", () => {
+    expect(shouldConfirmEmptyCourseSources({
+      sourceIds: ["22222222-2222-4222-8222-222222222222"],
+      courseId: "11111111-1111-4111-8111-111111111111",
+    })).toBe(false);
+  });
+
+  it("also warns when ready membership materials exist without courseId on the conversation", () => {
+    expect(shouldConfirmEmptyCourseSources({
+      sourceIds: [],
+      courseId: null,
+      hasReadyCourseMaterials: true,
+    })).toBe(true);
+  });
 });
 
 describe("LAB-U01 chip prefill prompts", () => {

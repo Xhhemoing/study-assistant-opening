@@ -331,5 +331,14 @@ it("carries a temporary history epoch separately from Provider output", () => {
   const reply = { text: "reply", citedChunkIds: [], candidates: [], requestId: null, inputTokens: null, outputTokens: null };
   expect(ephemeralTurnResponseSchema.safeParse(reply).success).toBe(false);
   expect(ephemeralTurnResponseSchema.parse({ ...reply, privacyEpoch: 2, historyDiscarded: true }))
-    .toMatchObject({ privacyEpoch: 2, historyDiscarded: true });
+    .toMatchObject({ privacyEpoch: 2, historyDiscarded: true, citations: [] });
+  const citation = {
+    chunkId: "10000000-0000-4000-8000-000000000010",
+    sourceId: "10000000-0000-4000-8000-000000000011",
+    sourceVersion: 1,
+    label: "p.1",
+  };
+  expect(ephemeralTurnResponseSchema.parse({
+    ...reply, privacyEpoch: 0, historyDiscarded: false, citations: [citation],
+  }).citations).toEqual([citation]);
 });

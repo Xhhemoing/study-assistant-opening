@@ -154,6 +154,19 @@ export function assistantContextHint(selectedSourceIds: string[]): string {
     : `已选材料：${selectedSourceIds.length} 份`;
 }
 
+/** Soft honesty when course-bound (or ready membership materials) but none selected this turn. */
+export function shouldConfirmEmptyCourseSources(input: {
+  sourceIds: readonly string[];
+  courseId: string | null | undefined;
+  hasReadyCourseMaterials?: boolean;
+}): boolean {
+  if (input.sourceIds.length > 0) return false;
+  return Boolean(input.courseId) || Boolean(input.hasReadyCourseMaterials);
+}
+
+export const EMPTY_COURSE_SOURCES_CONFIRM =
+  "当前课程有材料，尚未选入本轮。仍要继续发送？\n\n确定：继续（一般说明）\n取消：打开参考资料再选材料";
+
 const TUTOR_ACTION_LABELS: Record<ThinTutorAction["kind"], string> = {
   clarify: "选择材料或页码",
   guided: "开始引导提示",
@@ -181,13 +194,37 @@ export function mergeChatMessages(
 
 export function appendEphemeralResponseIfActive(
   current: ChatMessageView[],
-  input: { clientKey: string; text: string; output: { requestId: string | null; text: string; historyDiscarded?: boolean; provenanceId?: string | null } },
+  input: {
+    clientKey: string;
+    text: string;
+    /** Selected materials for this turn — drives hadMaterialContext / general badge. */
+    sourceIds?: readonly string[];
+    output: {
+      requestId: string | null;
+      text: string;
+      historyDiscarded?: boolean;
+      provenanceId?: string | null;
+      citations?: ChatMessageView["citations"];
+    };
+  },
   signal: AbortSignal,
 ): ChatMessageView[] {
   if (signal.aborted) return current;
+  const citations = [...(input.output.citations ?? [])];
+  const hadMaterialContext = (input.sourceIds?.length ?? 0) > 0;
   return [...(input.output.historyDiscarded ? [] : current),
     { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
-    { id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`, role: "assistant", text: input.output.text, citations: [], citationLabels: [], status: "complete", origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
+    {
+      id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`,
+      role: "assistant",
+      text: input.output.text,
+      citations,
+      citationLabels: citations.map((citation) => citation.label),
+      status: "complete",
+      origin: "ephemeral",
+      provenanceId: input.output.provenanceId ?? null,
+      hadMaterialContext,
+    },
   ];
 }
 
@@ -455,6 +492,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
       return { accepted: false };
     }
 
+    const courseId = learningAttempt?.courseId ?? resume?.courseId ?? null;
+    // Package A: course-bound conversation soft-warns; free chat (courseId==null) stays open.
+    // hasReadyCourseMaterials reserved for membership-aware callers (Package B).
+    if (shouldConfirmEmptyCourseSources({ sourceIds: selectedSourceIds, courseId })) {
+      if (!window.confirm(EMPTY_COURSE_SOURCES_CONFIRM)) {
+        setContextOpen(true);
+        return { accepted: false };
+      }
+    }
+
     setPending(true);
     let jobSubmitted = false;
     const abortController = new AbortController();
@@ -475,6 +522,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
           clientKey: input.clientKey,
           text: input.text,
+          sourceIds: selectedSourceIds,
           output,
         }, abortController.signal));
         setPendingHint(output.historyDiscarded

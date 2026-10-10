@@ -14,6 +14,7 @@ import {
   assertEphemeralInput,
   canProposeTask,
   ConversationPolicyError,
+  resolveCitations,
   selectContext,
   stripEphemeralCandidates,
 } from "@aistudy/ai";
@@ -194,11 +195,15 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw error;
       }
       const allowed = new Set(context.map((chunk) => chunk.id));
+      const citedChunkIds = validated.citedChunkIds.filter((id) => allowed.has(id));
+      // Soft-filter unknown ids first; resolve only authorized context chunks (never fabricate).
+      const citations = resolveCitations(citedChunkIds, context);
       return {
         ...stripEphemeralCandidates({
           ...validated,
-          citedChunkIds: validated.citedChunkIds.filter((id) => allowed.has(id)),
+          citedChunkIds,
         }),
+        citations,
         provenanceId,
         privacyEpoch: privacy.epoch,
         historyDiscarded,
