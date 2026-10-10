@@ -19,10 +19,11 @@
 
 ---
 
-## Package A — Never silent-ungrounded (C2 + C16 + C19)
+## Package A — Never silent-ungrounded (C2 + C16 + C19) — ALREADY ACCEPT by Experience
 
 **Severity:** P0  
 **Owners:** Experience (UI) + light AI copy if needed  
+**Status:** **ALREADY ACCEPT** by Experience on tip `0031b85` (`holistic-cite-pkg-a-accept.md`). Do not re-implement A; remaining work is Packages B–D.  
 **Why batched:** Paula’s “won’t cite” often means **no chips + no honesty** — even when the model answered. Fix display and empty-selection honesty first so later retrieval work is visible.
 
 ### Files

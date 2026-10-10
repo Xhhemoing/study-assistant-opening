@@ -19,6 +19,13 @@ import { prepareSnippetDraft } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
 import { CreateCardDialog } from "../cards/create-card-dialog";
 import { UploadStrip } from "./upload-strip";
+import { createMaterialOrganizationClient, type MaterialOrganization } from "../library/material-organization-client";
+import {
+  addSelectedSourceIds,
+  hasReadyMembershipMaterials,
+  membershipSourceIdsForCourse,
+  resolveAssistantCourseId,
+} from "./course-source-selection";
 import { AiReadinessChecklist } from "./ai-readiness";
 import type { ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
@@ -27,6 +34,8 @@ import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 type Props = {
   api?: OpeningApi;
   initialConversationId?: string | null;
+  /** Course page / shell query binding (Package B) — not only learningAttempt. */
+  initialCourseId?: string | null;
   learningAttempt?: LearningAttempt;
   task?: StudyTask | null;
   initialTitle?: string;
@@ -240,8 +249,20 @@ export function shouldRefreshCurrentConversation(learningAttempt: LearningAttemp
   return Boolean(learningAttempt && conversationId);
 }
 
-export function canReuseAssistantConversation(conversationId: string | null, learningAttempt?: LearningAttempt, resume?: ConversationResume | null): boolean {
-  return Boolean(conversationId && (!learningAttempt || resume === null || resume === undefined || resume.courseId === learningAttempt.courseId));
+export function canReuseAssistantConversation(
+  conversationId: string | null,
+  learningAttempt?: LearningAttempt,
+  resume?: ConversationResume | null,
+  boundCourseId?: string | null,
+): boolean {
+  if (!conversationId) return false;
+  if (learningAttempt) {
+    return resume === null || resume === undefined || resume.courseId === learningAttempt.courseId;
+  }
+  if (boundCourseId && resume) {
+    return resume.courseId === boundCourseId;
+  }
+  return true;
 }
 
 export function conversationForAssistant(
@@ -267,7 +288,7 @@ export function AssistantView(props: Props) {
     initialDraft={session ? "" : props.initialDraft}
     onNew={() => setSession((value) => value + 1)} />;
 }
-function AssistantWorkspace({ api: apiProp, initialConversationId = null, learningAttempt, task, initialTitle,
+function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds = [], initialPage = null, initialDraft = "", embedded = false, onNew }: Props & { onNew: () => void }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [conversationId, setConversationId] = useState<string | null>(
@@ -275,6 +296,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
   );
   const [resume, setResume] = useState<ConversationResume | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
+  const [organization, setOrganization] = useState<MaterialOrganization | null>(null);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? initialSourceIds);
   const [currentPage, setCurrentPage] = useState(initialPage == null ? "" : String(initialPage));
   const [turns, setTurns] = useState<TurnRecord[]>([]);
@@ -300,6 +322,34 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
   const refreshSources = useCallback(async () => {
     setSources(await api.listSources());
   }, [api]);
+
+  const refreshOrganization = useCallback(async () => {
+    // Client-side membership until Data exposes listReadySourceIdsForCourse on the web API.
+    try {
+      setOrganization(await createMaterialOrganizationClient().read());
+    } catch {
+      setOrganization(null);
+    }
+  }, []);
+
+  const boundCourseId = resolveAssistantCourseId({
+    learningAttemptCourseId: learningAttempt?.courseId,
+    resumeCourseId: resume?.courseId,
+    initialCourseId,
+  });
+  const membershipIds = useMemo(
+    () => membershipSourceIdsForCourse(organization, boundCourseId),
+    [organization, boundCourseId],
+  );
+  const readyCourseMaterials = hasReadyMembershipMaterials(sources, membershipIds);
+
+  const handleUploaded = useCallback(async (savedSourceIds?: string[]) => {
+    await refreshSources();
+    await refreshOrganization();
+    if (savedSourceIds?.length) {
+      setSelectedSourceIds((current) => addSelectedSourceIds(current, savedSourceIds));
+    }
+  }, [refreshOrganization, refreshSources]);
 
   const refreshTutorActions = useCallback(async () => {
     if (!learningAttempt) {
@@ -332,6 +382,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     async (id: string) => {
       const nextResume = await api.resumeConversation(id);
       if (learningAttempt && nextResume.courseId !== learningAttempt.courseId) {
+        setConversationId(null); setResume(null); setTurns([]);
+        return false;
+      }
+      if (initialCourseId && !learningAttempt && nextResume.courseId !== initialCourseId) {
         setConversationId(null); setResume(null); setTurns([]);
         return false;
       }
@@ -372,7 +426,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         setPendingHint("");
       }
     },
-    [api, learningAttempt],
+    [api, initialCourseId, learningAttempt],
   );
 
 
@@ -382,6 +436,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     (async () => {
       try {
         await refreshSources();
+        await refreshOrganization();
         await refreshTutorActions();
         if (cancelled) return;
         if (initialConversationId && !learningAttempt) {
@@ -401,7 +456,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
         if (!shouldLoadConversationList(learningAttempt)) return;
         const listed = await api.listConversations();
         if (cancelled) return;
-        const selected = conversationForAssistant(listed, initialConversationId, learningAttempt?.courseId);
+        const selected = conversationForAssistant(listed, initialConversationId, learningAttempt?.courseId ?? initialCourseId ?? undefined);
         if (selected && await refreshConversation(selected.id) && !cancelled) {
           setConversationId(selected.id);
         }
@@ -415,7 +470,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     return () => {
       cancelled = true;
     };
-  }, [api, conversationId, initialConversationId, learningAttempt, refreshConversation, refreshSources, refreshTutorActions, reload, startFresh]);
+  }, [api, conversationId, initialConversationId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, startFresh]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -454,10 +509,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     : savedDisplay;
 
   async function ensureConversation(): Promise<string> {
-    if (conversationId && canReuseAssistantConversation(conversationId, learningAttempt, resume)) return conversationId;
+    if (conversationId && canReuseAssistantConversation(conversationId, learningAttempt, resume, initialCourseId)) return conversationId;
     const created = await api.createConversation({
       title: "学习对话",
-      courseId: learningAttempt?.courseId ?? null,
+      courseId: learningAttempt?.courseId ?? initialCourseId ?? null,
     });
     setConversationId(created.id);
     return created.id;
@@ -492,10 +547,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
       return { accepted: false };
     }
 
-    const courseId = learningAttempt?.courseId ?? resume?.courseId ?? null;
-    // Package A: course-bound conversation soft-warns; free chat (courseId==null) stays open.
-    // hasReadyCourseMaterials reserved for membership-aware callers (Package B).
-    if (shouldConfirmEmptyCourseSources({ sourceIds: selectedSourceIds, courseId })) {
+    // Package A soft confirm; Package B supplies membership-ready flag + query courseId.
+    if (shouldConfirmEmptyCourseSources({
+      sourceIds: selectedSourceIds,
+      courseId: boundCourseId,
+      hasReadyCourseMaterials: readyCourseMaterials,
+    })) {
       if (!window.confirm(EMPTY_COURSE_SOURCES_CONFIRM)) {
         setContextOpen(true);
         return { accepted: false };
@@ -661,8 +718,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, learni
     {cardDraft ? <CreateCardDialog draft={cardDraft} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
-      <UploadStrip api={api} onUploaded={refreshSources} disabled={pending || loading || recoveryRequired} courseId={learningAttempt?.courseId ?? resume?.courseId ?? null} />
-      <SourcePageControls sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources} selectedSourceIds={selectedSourceIds} currentPage={currentPage} onSelectedSourceIdsChange={setSelectedSourceIds} onCurrentPageChange={setCurrentPage} disabled={pending || loading} />
+      <UploadStrip api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
+      <SourcePageControls
+        sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources}
+        selectedSourceIds={selectedSourceIds}
+        currentPage={currentPage}
+        onSelectedSourceIdsChange={setSelectedSourceIds}
+        onCurrentPageChange={setCurrentPage}
+        disabled={pending || loading}
+        membershipSourceIds={learningAttempt || !boundCourseId ? null : membershipIds}
+      />
       <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/opening/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
       <details className="mt-5 border-t border-zinc-200 pt-2"><summary className="flex min-h-10 cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700"><ShieldCheck size={14} aria-hidden />AI 记忆与待确认建议</summary><MemoryPanel api={api} /></details>
       <p className="mt-6 text-[11px] leading-5 text-zinc-500">选择资料不会发送消息。AI 建议需由你确认后才进入后续上下文。</p>

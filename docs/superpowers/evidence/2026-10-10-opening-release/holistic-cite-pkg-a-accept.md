@@ -107,3 +107,18 @@ Durable `TurnRecord` / resume mapping still lacks per-turn `sourceIds` (or equiv
 - Integrator **ACCEPT** Package A recorded.
 - Per AGREE sequencing: next is Experience + Data + AI Package **B** (course membership pool + upload auto-select + courseId bind).
 - Coordinate hermes redeploy of tip `a837bb8` before any push of this client/contract delta; **do not push** until PM authorizes.
+
+---
+
+## Re-verify after stash restore
+
+**Timestamp:** 2026-10-10 ~22:54 CST (Asia/Shanghai)  
+**Tip:** `a837bb8` (working tree dirty with Package A; no commit/push)  
+**Verdict:** **ACCEPT still holds**
+
+| Gate | Result |
+|---|---|
+| `(cd apps/web && npx tsc -p tsconfig.json --noEmit)` | **Pass** (exit 0) |
+| Unit (10 files listed in claim gates) | **Pass** — Test Files 10 passed; Tests **160** passed (160) |
+
+**Spot-check (still in tree):** `hadMaterialContext` (`message-model.ts` / `assistant-view.tsx`), `一般说明（未引用材料）` (`message-list.tsx` + tests), `resolveCitations` (`ephemeral-service.ts`).

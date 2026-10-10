@@ -175,7 +175,7 @@ Found by generalizing “won’t cite / no smart cite” against the code:
 
 ## 7. Suggested P0 batch (preview — details in plan doc)
 
-**Package A — Never silent-ungrounded:** C2 warn/require when course or ready materials exist; C19 general vs sourced badge; C16 ephemeral resolve+show cites.  
+**Package A — Never silent-ungrounded (ALREADY ACCEPT by Experience @ `0031b85`):** C2 warn/require when course or ready materials exist; C19 general vs sourced badge; C16 ephemeral resolve+show cites.  
 **Package B — Course-scoped context pool:** C1 bind courseId; C5 membership→candidate sources; C4/C3 picker filter + auto-select after upload; selected outrank course pool (T02).  
 **Package C — Retrieval honesty + soft auto-pick:** C6 never drop all selected when query miss (preferPage/selected fallback); C8 thin auto-pick top materials in course for question (keyword first, no GraphRAG).  
 **Package D — Cite resolve + page UX:** C11/C12 stronger cite when context present; C14 soften page guard; C17 citation carries page + viewer deep-link; C7 allow image-only through gate when vision available.

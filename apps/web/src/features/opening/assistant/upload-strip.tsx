@@ -14,12 +14,17 @@ type CourseRole = "core" | "optional" | "reference";
 
 type Props = {
   api: OpeningApi;
-  onUploaded: () => void | Promise<void>;
+  /** Called after upload/retry; receives newly saved source ids for auto-select (Package B). */
+  onUploaded: (savedSourceIds?: string[]) => void | Promise<void>;
   disabled?: boolean;
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
   courseRole?: CourseRole;
 };
+
+function savedSourceIds(rows: UploadQueueItem[]): string[] {
+  return rows.filter((item) => item.state === "saved" && item.source).map((item) => item.source!.id);
+}
 
 export function UploadStrip({ api, onUploaded, disabled, courseId = null, courseRole = "reference" }: Props) {
   const [items, setItems] = useState<UploadQueueItem[]>([]);
@@ -38,7 +43,7 @@ export function UploadStrip({ api, onUploaded, disabled, courseId = null, course
 
   async function attachSaved(rows: UploadQueueItem[]) {
     if (!courseId) return;
-    const ids = rows.filter((item) => item.state === "saved" && item.source).map((item) => item.source!.id);
+    const ids = savedSourceIds(rows);
     if (!ids.length) return;
     await createMaterialOrganizationClient().addToCourse(courseId, ids, courseRole);
   }
@@ -54,18 +59,20 @@ export function UploadStrip({ api, onUploaded, disabled, courseId = null, course
     setItems(queue.snapshot());
     await queue.start(setItems);
     const newlySaved = queue.snapshot().filter((item) => addedIds.has(item.id) && item.state === "saved");
-    await onUploaded();
+    const ids = savedSourceIds(newlySaved);
+    await onUploaded(ids);
     await attachSaved(newlySaved);
-    if (courseId && newlySaved.length) await onUploaded();
+    if (courseId && newlySaved.length) await onUploaded(ids);
   }
 
   async function retry(id: string) {
     await queue.retry(id, setItems);
     const item = queue.snapshot().find((row) => row.id === id);
-    await onUploaded();
+    const ids = item?.state === "saved" && item.source ? [item.source.id] : [];
+    await onUploaded(ids);
     if (item?.state === "saved") {
       await attachSaved([item]);
-      if (courseId) await onUploaded();
+      if (courseId) await onUploaded(ids);
     }
   }
 

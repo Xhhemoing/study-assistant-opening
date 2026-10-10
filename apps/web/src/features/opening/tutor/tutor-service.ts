@@ -61,6 +61,11 @@ export function createTutorService(deps: {
   sourceChunks: OpeningSourceChunksRepository;
   attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
   readSelection(scope: OpeningConversationScope, conversationId: string): Promise<PageSelectionInput | null>;
+  /** Course membership ready pool (Data). Caps 32 + privacy exclusions inside Data. */
+  listReadySourceIdsForCourse?(
+    scope: OpeningConversationScope,
+    courseId: string,
+  ): Promise<string[]>;
 }) {
   async function authorizedChunksFor(
     scope: OpeningConversationScope,
@@ -143,21 +148,34 @@ export function createTutorService(deps: {
         );
       }
 
-      await deps.conversations.getOwned(scope, input.conversationId);
+      const owned = await deps.conversations.getOwned(scope, input.conversationId);
       const existing = await deps.conversations.findTurnByClientKey(
         scope,
         input.clientKey,
         input.conversationId,
       );
 
+      // Explicit client sourceIds outrank course pool. Empty + courseId → Data ready membership fill.
+      let effectiveSourceIds = [...input.sourceIds];
+      if (
+        effectiveSourceIds.length === 0
+        && owned.courseId
+        && deps.listReadySourceIdsForCourse
+      ) {
+        effectiveSourceIds = await deps.listReadySourceIdsForCourse(
+          scope,
+          owned.courseId,
+        );
+      }
+
       if (!existing) {
-        const authorized = await authorizedChunksFor(scope, input.sourceIds);
-        if (input.sourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
+        const authorized = await authorizedChunksFor(scope, effectiveSourceIds);
+        if (effectiveSourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
           throw new TutorServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
         }
         const selection = validatePageSelection(
           {
-            sourceIds: input.sourceIds,
+            sourceIds: effectiveSourceIds,
             currentPage: input.currentPage,
             chunkId: input.chunkId,
           },
@@ -183,7 +201,7 @@ export function createTutorService(deps: {
         mode: input.mode,
         clientKey: input.clientKey,
         privacy: input.privacy,
-        sourceIds: input.sourceIds,
+        sourceIds: effectiveSourceIds,
         learningSessionId,
         attemptId: input.attemptId ?? null,
         currentPage: input.currentPage ?? null,

@@ -348,3 +348,19 @@ describe("LAB-U01 chip prefill prompts", () => {
     expect(presetPromptForMode("explain")).toContain("完整例题");
   });
 });
+
+
+describe("Package B courseId binding helpers", () => {
+  it("reuses only when resume course matches bound query courseId", () => {
+    const resume = { courseId: "course-a" } as ConversationResume;
+    expect(canReuseAssistantConversation("c1", undefined, resume, "course-a")).toBe(true);
+    expect(canReuseAssistantConversation("c1", undefined, resume, "course-b")).toBe(false);
+    expect(canReuseAssistantConversation("c1", undefined, null, "course-a")).toBe(true);
+  });
+
+  it("filters listed conversations by initialCourseId like attempt course", () => {
+    const courseA = { id: "conversation-a", courseId: "course-a", title: "A", updatedAt: ISO, lastTurnPreview: null };
+    const courseB = { id: "conversation-b", courseId: "course-b", title: "B", updatedAt: ISO, lastTurnPreview: null };
+    expect(conversationForAssistant([courseB, courseA], null, "course-a")).toEqual(courseA);
+  });
+});

@@ -11,11 +11,20 @@ const S = "22222222-2222-4222-8222-222222222222";
 const OTHER_SOURCE = "33333333-3333-4333-8333-333333333333";
 const C = "44444444-4444-4444-8444-444444444444";
 const CONVERSATION = "11111111-1111-4111-8111-111111111111";
+const COURSE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const scope = { workspaceId: "55555555-5555-4555-8555-555555555555", ownerUserId: "66666666-6666-4666-8666-666666666666" };
 
-function createService() {
+function createService(opts?: {
+  courseId?: string | null;
+  listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
+}) {
   const conversations = {
-    getOwned: vi.fn(async () => ({ id: CONVERSATION, title: "t", courseId: null, updatedAt: "2026-09-20T00:00:00.000Z" })),
+    getOwned: vi.fn(async () => ({
+      id: CONVERSATION,
+      title: "t",
+      courseId: opts?.courseId === undefined ? null : opts.courseId,
+      updatedAt: "2026-09-20T00:00:00.000Z",
+    })),
     loadContinuityTurns: vi.fn(async () => []),
     appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
     findTurnByClientKey: vi.fn(async () => null),
@@ -27,7 +36,19 @@ function createService() {
     ]),
   };
   const readSelection = vi.fn(async () => ({ sourceIds: [S], currentPage: 4, chunkId: C }));
-  return { service: createTutorService({ conversations, sourceChunks, readSelection }), conversations, sourceChunks, readSelection };
+  const listReadySourceIdsForCourse = opts?.listReadySourceIdsForCourse;
+  return {
+    service: createTutorService({
+      conversations,
+      sourceChunks,
+      readSelection,
+      ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
+    }),
+    conversations,
+    sourceChunks,
+    readSelection,
+    listReadySourceIdsForCourse,
+  };
 }
 
 describe("tutor-service RU-04 / continuity hooks", () => {
@@ -187,5 +208,94 @@ describe("tutor-service RU-04 / continuity hooks", () => {
     expect(exposureLevelForMode("hint", true)).toBe("hinted");
     expect(exposureLevelForMode("explain", false)).toBeNull();
     expect(exposureLevelForMode("listen", true)).toBeNull();
+  });
+});
+
+describe("tutor-service Package B course pool fill", () => {
+  it("fills ready course sourceIds when client sends empty and conversation has courseId", async () => {
+    const listReady = vi.fn(async () => [S, OTHER_SOURCE]);
+    const { service, conversations, sourceChunks, listReadySourceIdsForCourse } = createService({
+      courseId: COURSE,
+      listReadySourceIdsForCourse: listReady,
+    });
+    sourceChunks.listForSources.mockResolvedValueOnce([
+      { id: C, sourceId: S, sourceVersion: 1, page: 4, slideLabel: null, startMs: null, endMs: null, text: "page four", imageObjectKey: null },
+      { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId: OTHER_SOURCE, sourceVersion: 1, page: 9, slideLabel: null, startMs: null, endMs: null, text: "other", imageObjectKey: null },
+    ]);
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "explain from course pool",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: "course-fill-1",
+      privacy: "saved",
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    expect(listReadySourceIdsForCourse).toHaveBeenCalledWith(scope, COURSE);
+    expect(sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S, OTHER_SOURCE]);
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceIds: [S, OTHER_SOURCE] }),
+    );
+  });
+
+  it("keeps explicit client sourceIds and does not call the course pool helper", async () => {
+    const listReady = vi.fn(async () => [OTHER_SOURCE]);
+    const { service, conversations, listReadySourceIdsForCourse } = createService({
+      courseId: COURSE,
+      listReadySourceIdsForCourse: listReady,
+    });
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "explain selected only",
+      sourceIds: [S],
+      mode: "explain",
+      clientKey: "course-fill-explicit",
+      privacy: "saved",
+      currentPage: 4,
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    expect(listReadySourceIdsForCourse).not.toHaveBeenCalled();
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceIds: [S] }),
+    );
+  });
+
+  it("skips pool helper when courseId is null and client sourceIds are empty", async () => {
+    const listReady = vi.fn(async () => [S]);
+    const { service, conversations, listReadySourceIdsForCourse } = createService({
+      courseId: null,
+      listReadySourceIdsForCourse: listReady,
+    });
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "free chat",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: "course-fill-null",
+      privacy: "saved",
+    })).resolves.toMatchObject({ learningSessionId: null });
+    expect(listReadySourceIdsForCourse).not.toHaveBeenCalled();
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceIds: [] }),
+    );
+  });
+
+  it("appends with empty sourceIds when course pool returns [] (no throw)", async () => {
+    const listReady = vi.fn(async () => []);
+    const { service, conversations, sourceChunks, listReadySourceIdsForCourse } = createService({
+      courseId: COURSE,
+      listReadySourceIdsForCourse: listReady,
+    });
+    await expect(service.submitTurn(scope, {
+      conversationId: CONVERSATION,
+      text: "course with empty pool",
+      sourceIds: [],
+      mode: "explain",
+      clientKey: "course-fill-empty-pool",
+      privacy: "saved",
+    })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
+    expect(listReadySourceIdsForCourse).toHaveBeenCalledWith(scope, COURSE);
+    expect(sourceChunks.listForSources).not.toHaveBeenCalled();
+    expect(conversations.appendSavedTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceIds: [] }),
+    );
   });
 });

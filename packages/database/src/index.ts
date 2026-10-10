@@ -29,6 +29,12 @@ export * from "./schema/opening-sources";
 export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
+export {
+  listReadySourceIdsForCourse,
+  createOpeningCourseReadySourcesRepository,
+  READY_COURSE_SOURCE_IDS_CAP,
+  type OpeningCourseReadySourcesRepository,
+} from "./repositories/opening-course-ready-sources";
 export { readOpeningSourceContent } from "./repositories/opening-source-content";
 export * from "./repositories/opening-source-actions";
 export { createOpeningEphemeralProvenanceRepository, EphemeralProvenanceError, type EphemeralProvenanceRepository } from "./repositories/opening-ephemeral-provenance";

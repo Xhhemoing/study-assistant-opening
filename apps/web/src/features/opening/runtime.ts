@@ -3,6 +3,7 @@ import {
   createOpeningConversationRepository, readOpeningConversationSelection,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
+  createOpeningCourseReadySourcesRepository,
   type OpeningConversationRepository,
   type OpeningSourceChunksRepository,
 } from "@aistudy/database";
@@ -51,6 +52,8 @@ export function getTutorService(sql: Sql): TutorService {
     createOpeningSourceChunksRepository(sql);
   return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
+    listReadySourceIdsForCourse: (scope, courseId) =>
+      createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, courseId),
   });
 }
 
