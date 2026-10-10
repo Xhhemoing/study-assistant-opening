@@ -12,6 +12,7 @@ import { TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { TodayLearningContext } from "./today-overview";
+import { focusPriorityActions } from "./today-task-selection";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import { TeachingActivityEmpty } from "../teaching/activity-panel";
 import {
@@ -71,6 +72,8 @@ export function TodayDashboard({
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
+  const [actionsRequested, setActionsRequested] = useState(false);
+  const showActions = useCallback(() => { setQueueOpen(true); setActionsRequested(true); }, []);
   const [reloadToken, setReloadToken] = useState(0);
   const [dueCardCount, setDueCardCount] = useState(0);
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
@@ -110,6 +113,11 @@ export function TodayDashboard({
       });
     return () => controller.abort();
   }, [cards, reloadToken, state.kind]);
+  useEffect(() => {
+    if (actionsRequested && queueOpen && focusPriorityActions(document.getElementById("action-digest"))) {
+      setActionsRequested(false);
+    }
+  }, [actionsRequested, queueOpen, state.kind]);
 
   useEffect(() => {
     if (state.kind !== "ready" && state.kind !== "empty") return;
@@ -197,6 +205,7 @@ export function TodayDashboard({
     return () => controller.abort();
   }, [api, currentActivity, teachingLoopTrialEnabled, reloadToken]);
 
+  const clearSelection = useCallback(() => setTask(null), []);
   const select = useCallback((next: StudyTask, source?: "focus" | "user") => {
     setTask(next);
     if (shouldCloseTodayQueue(source)) setQueueOpen(false);
@@ -241,7 +250,7 @@ export function TodayDashboard({
       <div className="flex h-full min-h-0 flex-col">
         <h1 className="sr-only">今日学习工作台</h1>
         <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 lg:hidden">
-          <span className="text-xs font-medium text-zinc-800">今日学习</span>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800" title={task?.title}>{task?.title ?? "今日学习 · 可直接开始自由学习"}</span>
           <button
             className={secondaryButtonClass}
             type="button"
@@ -257,6 +266,7 @@ export function TodayDashboard({
         <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
           <TodayLearningContext
             item={state.continueItem}
+            onShowActions={showActions}
             primaryAction={
               <button
                 type="button"
@@ -309,6 +319,7 @@ export function TodayDashboard({
               focusTaskId={focusTaskId}
               selectedId={task?.id}
               onSelect={select}
+              onClearSelection={clearSelection}
               reloadToken={reloadToken}
               timeZone={timeZone}
             />

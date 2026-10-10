@@ -10,6 +10,7 @@ import {
 describe("command palette keyboard model", () => {
   it("filters pages by label, description, or route without inventing content hits", () => {
     expect(filterPaletteCommands("高级").map((command) => command.id)).toEqual(["settings-advanced"]);
+    expect(filterPaletteCommands("备份").map((command) => command.id)).toEqual(["settings-advanced"]);
     expect(filterPaletteCommands("/OPENING/ASSISTANT").map((command) => command.id)).toEqual(["assistant"]);
     expect(filterPaletteCommands("不存在的内容关键词")).toEqual([]);
     expect(filterPaletteCommands("  ")).toHaveLength(PALETTE_COMMANDS.length);
