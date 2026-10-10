@@ -89,11 +89,12 @@ function validateBudgetFields(settings: OpeningAiSettings, envCapCents: number, 
 
 export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiSettingsResponse> {
   const catalog = loadOpeningModelCatalog();
-  const pricingConfigured = catalogPricingConfigured(catalog.models);
   const [preference, custom] = await Promise.all([
     createOpeningAiSettingsRepository(sql).get(scope),
     createOpeningModelProvidersRepository(sql).listResolvableModels(scope),
   ]);
+  // Include workspace BYOK pricing so Lant-only workspaces are not treated as unpriced.
+  const pricingConfigured = catalogPricingConfigured([...catalog.models, ...custom]);
   const effective = resolveCapFromSettings(catalog.dailyCapCents, preference.settings, pricingConfigured);
   const merged = mergeOpeningCatalog(catalog.models, custom, {
     defaultModelId: catalog.defaultModelId,
@@ -111,13 +112,17 @@ export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiS
 
 export async function saveAiSettings(sql: Sql, scope: Scope, input: unknown): Promise<OpeningAiSettingsResponse> {
   const catalog = loadOpeningModelCatalog();
-  const pricingConfigured = catalogPricingConfigured(catalog.models);
   const parsed = openingAiSettingsSchema.nullable().safeParse(input);
   if (!parsed.success) throw new ApiError("VALIDATION", "模型设置格式无效，请重新选择后保存。", 422);
   if (parsed.data) {
+    const custom = await createOpeningModelProvidersRepository(sql).listResolvableModels(scope);
+    const pricingConfigured = catalogPricingConfigured([...catalog.models, ...custom]);
     validateBudgetFields(parsed.data, catalog.dailyCapCents, pricingConfigured);
     const effective = resolveCapFromSettings(catalog.dailyCapCents, parsed.data, pricingConfigured);
-    const merged = await loadMergedCatalog(sql, scope, effective.capCents);
+    const merged = mergeOpeningCatalog(catalog.models, custom, {
+      defaultModelId: catalog.defaultModelId,
+      dailyCapCents: effective.capCents,
+    });
     const settings = parsed.data;
     const ids = (settings.mode === "manual" ? [settings.manualModelId] : [settings.defaultModelId, ...Object.values(settings.routes)]).filter(id => id !== null);
     if (ids.some(id => !merged.models.some(model => model.id === id))) throw new ApiError("VALIDATION", "有模型已从目录移除，请重新选择或恢复默认设置。", 422);

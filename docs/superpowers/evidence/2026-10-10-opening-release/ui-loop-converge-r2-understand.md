@@ -3,7 +3,7 @@
 **Date:** 2026-10-10 ~07:53 CST  
 **Branch tip (box):** `dcac730`  
 **Owner:** Experience  
-**Status:** LIST_ONLY — **禁止 IMPLEMENT**，待 Integrator 审 → PM 授权后再动手  
+**Status:** PM authorized IMPLEMENT — done; see [`ui-loop-converge-r2-implement.md`](./ui-loop-converge-r2-implement.md) (2026-10-10). Originally LIST_ONLY pending Integrator → PM auth.  
 **硬约束：**不得误伤 **Today / 计划 / Tutor / 练习 / 复测 / 卡片 / 连接材料**；后端不删；不碰 Q03/Docker；不自推；不标 verified；无 hermes 除非 Paula 要
 
 ## 标记说明
@@ -66,7 +66,7 @@
 
 ## D. 明确不做（本轮）
 
-- IMPLEMENT / commit / push / hermes / 标 verified  
+- commit / push / hermes / 标 verified（IMPLEMENT 已授权并完成，见 implement 证据）  
 - 删除 API、表、任务、练习/复测后端  
 - 动 Q03、Docker  
 - 从侧栏或 Today 去掉连接 / 卡片 / 课程 / 助理  

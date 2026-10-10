@@ -40,6 +40,11 @@ describe("settings page split structure", () => {
     expect(html).toContain('id="connections"');
     expect(html).toContain('id="planning"');
     expect(html).toContain('id="preferences"');
+    expect(html).toContain('href="/opening/settings/connections"');
+    expect(html).toContain("打开连接设置");
+    expect(html).not.toContain('data-testid="dingtalk"');
+    expect(html).toContain('data-testid="semester"');
+    expect(html).toContain('data-testid="timetable"');
     expect(html).toContain('href="/settings/advanced"');
     expect(html).toContain('href="/settings/advanced#daily-budget"');
     expect(html).toContain("开启 AI 每日额度");
@@ -48,12 +53,22 @@ describe("settings page split structure", () => {
     expect(html).not.toContain("更多 / 高级");
   });
 
-  it("renders advanced page with back link and heading", () => {
+  it("renders advanced page with back link, AI panels, and collapsed folds", () => {
     const html = renderToStaticMarkup(createElement(AdvancedSettingsView));
     expect(html).toContain("高级设置");
     expect(html).toContain('href="/settings"');
     expect(html).toContain("返回设置");
     expect(html).toContain('data-testid="ai"');
     expect(html).toContain('data-testid="provider"');
+    expect(html).toContain('data-advanced-fold="entry-explore"');
+    expect(html).toContain('data-advanced-fold="export"');
+    expect(html).toContain('data-advanced-fold="danger"');
+    expect(html).toContain('data-advanced-fold="developer"');
+    expect(html).toContain("默认入口与探索相关");
+    expect(html).toContain("导出与备份");
+    expect(html).toContain("危险操作");
+    expect(html).toContain("开发者");
+    // explore soft-demotion copy lives inside the loaded entry form (client fetch)
+    expect(html).toContain('href="/settings/export"');
   });
 });

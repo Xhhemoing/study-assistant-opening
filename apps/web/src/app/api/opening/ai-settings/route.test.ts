@@ -82,6 +82,56 @@ describe("AI settings HTTP boundary", () => {
     expect(mocks.get).not.toHaveBeenCalled();
     expect(mocks.set).not.toHaveBeenCalled();
   });
+
+  it("accepts env-scale dailyCapCents when env cap allows and keeps Lant model routes", async () => {
+    const lantId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const lant = {
+      ...model,
+      id: lantId,
+      providerId: "lant",
+      providerLabel: "Lant",
+      label: "Lant GLM 5.3",
+      modelName: "glm-5.3",
+      supportsVision: true,
+    };
+    mocks.catalog.mockReturnValue({ models: [lant], defaultModelId: lantId, dailyCapCents: 1_000_000 });
+    const settings = {
+      ...DEFAULT_OPENING_AI_SETTINGS,
+      defaultModelId: lantId,
+      routes: { listen: lantId, hint: lantId, explain: lantId, think_together: lantId },
+      dailyCapCents: 1_000_000,
+      budgetConfirmedAt: "2026-10-10T00:00:00.000Z",
+    };
+    mocks.set.mockImplementation(async (_scope, value) => {
+      mocks.get.mockResolvedValue({ settings: value, saved: true, invalidStoredSettings: false });
+    });
+    expect((await PUT(put(settings))).status).toBe(200);
+    expect(mocks.set).toHaveBeenCalledWith(scope, settings);
+    const loaded = await (await GET(new Request("http://localhost/api/opening/ai-settings"))).json();
+    expect(loaded.settings.dailyCapCents).toBe(1_000_000);
+    expect(loaded.settings.defaultModelId).toBe(lantId);
+    expect(loaded.invalidStoredSettings).toBe(false);
+    expect(loaded.defaultModelId).toBe(lantId);
+  });
+  it("accepts stored null dailyCapCents under a large env cap without wiping settings", async () => {
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, dailyCapCents: null, budgetConfirmedAt: null, defaultModelId: "one" };
+    mocks.catalog.mockReturnValue({ models: [model], defaultModelId: "one", dailyCapCents: 1_000_000 });
+    mocks.set.mockImplementation(async (_scope, value) => {
+      mocks.get.mockResolvedValue({ settings: value ?? DEFAULT_OPENING_AI_SETTINGS, saved: value != null, invalidStoredSettings: false });
+    });
+    expect((await PUT(put(settings))).status).toBe(200);
+    const loaded = await (await GET(new Request("http://localhost/api/opening/ai-settings"))).json();
+    expect(loaded.settings.dailyCapCents ?? null).toBeNull();
+    expect(loaded.settings.defaultModelId).toBe("one");
+    expect(loaded.dailyCapCents).toBe(1_000_000);
+    expect(loaded.invalidStoredSettings).toBe(false);
+  });
+  it("rejects workspace dailyCapCents above the env ceiling after schema parse", async () => {
+    mocks.catalog.mockReturnValue({ models: [model], defaultModelId: "one", dailyCapCents: 100 });
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: "one", dailyCapCents: 1_000_000 };
+    expect((await PUT(put(settings))).status).toBe(422);
+    expect(mocks.set).not.toHaveBeenCalled();
+  });
   it("bounds request bodies before processing configuration", async () => {
     expect((await PUT(put({ text: "x".repeat(17_000) }))).status).toBe(413);
     expect(mocks.set).not.toHaveBeenCalled();

@@ -35,7 +35,18 @@ function labelForItem(item: ReadinessItem): string {
   return LABELS[item.key] ?? item.key;
 }
 
-export function AiReadinessChecklist({ className = "" }: { className?: string }) {
+function isSoftVisionRow(item: ReadinessItem): boolean {
+  return item.key === "vision_model";
+}
+
+export function AiReadinessChecklist({
+  className = "",
+  showVisionHint = false,
+}: {
+  className?: string;
+  /** When true, soft vision tip may render. Default false so assistant readiness stays quiet. */
+  showVisionHint?: boolean;
+}) {
   const [items, setItems] = useState<ReadinessItem[] | null>(null);
   const [error, setError] = useState("");
 
@@ -59,9 +70,10 @@ export function AiReadinessChecklist({ className = "" }: { className?: string })
 
   const hardBlocked = items.some(isHardBlocker);
   const visionFail = items.find(item => item.key === "vision_model" && !item.ok);
+  const displayItems = showVisionHint ? items : items.filter(item => !isSoftVisionRow(item));
 
   if (!hardBlocked) {
-    if (!visionFail) return null;
+    if (!showVisionHint || !visionFail) return null;
     return (
       <section className={`space-y-1 rounded-lg border border-zinc-200 bg-zinc-50/80 p-3 ${className}`} aria-labelledby="ai-readiness-soft-heading">
         <h3 id="ai-readiness-soft-heading" className="text-sm font-medium text-zinc-800">提示（不挡文字辅导）</h3>
@@ -77,7 +89,7 @@ export function AiReadinessChecklist({ className = "" }: { className?: string })
     <section className={`space-y-2 rounded-lg border border-amber-200 bg-amber-50/80 p-3 ${className}`} aria-labelledby="ai-readiness-heading">
       <h3 id="ai-readiness-heading" className="text-sm font-medium text-amber-950">AI 为何还不可用</h3>
       <ul className="space-y-2 text-xs leading-6 text-amber-950">
-        {items.map(item => (
+        {displayItems.map(item => (
           <li key={item.key} className="flex flex-col gap-0.5">
             <span>{item.ok ? "✓" : "✗"} {labelForItem(item)}：{item.detail}</span>
             {!item.ok ? <span className="text-amber-800/90">去哪里修：{item.fixHint}</span> : null}

@@ -45,7 +45,7 @@ describe("Today learning context", () => {
     expect(html).toContain("第 7 页");
     expect(html).toContain("可恢复 2 份材料");
     expect(html).toContain('href="/opening/courses/course%2Fone"');
-    expect(html).toContain('href="/library/new"');
+    expect(html).not.toContain('href="/library/new"');
   });
 
   it("keeps manually readable materials separate from automatic resume and page recovery", () => {
@@ -63,12 +63,12 @@ describe("Today learning context", () => {
     expect(html).toContain("1 份材料仅供手工阅读");
     expect(html).not.toContain("可恢复 2 份材料");
     expect(html).toContain('href="/opening/courses/course"');
-    expect(html).toContain('href="/library/new"');
+    expect(html).not.toContain('href="/library/new"');
   });
   it("keeps course practice and notes reachable without a saved conversation", () => {
     const html = renderToStaticMarkup(createElement(TodayLearningContext));
     expect(html).toContain('href="/opening/courses"');
-    expect(html).toContain('href="/library/new"');
+    expect(html).not.toContain('href="/library/new"');
     expect(html).not.toContain("上次学习");
     expect(html).not.toContain("可恢复 0 份材料");
   });

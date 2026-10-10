@@ -1,6 +1,14 @@
 import { z } from "zod";
 
 const modelId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
+/**
+ * Schema upper bound for stored workspace dailyCapCents.
+ * Matches OPENING_MODEL_DAILY_CAP_CENTS env max so a large ops env cap (e.g. 1_000_000)
+ * can be mirrored in ai_settings without Zod wiping the whole preference blob.
+ * Write-time ceilings stay in validateBudgetFields: <= env cap when env > 0,
+ * else <= OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS (2000).
+ */
+export const OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS = 2_147_483_647;
 export const openingAiSettingsSchema = z.object({
   mode: z.enum(["manual", "automatic"]),
   defaultModelId: modelId.nullable(),
@@ -10,7 +18,7 @@ export const openingAiSettingsSchema = z.object({
     explain: modelId.nullable(), think_together: modelId.nullable(),
   }).strict(),
   /** Optional per-workspace daily budget in cents; absent/null means unset. */
-  dailyCapCents: z.number().int().nonnegative().max(2_000).nullable().optional(),
+  dailyCapCents: z.number().int().nonnegative().max(OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS).nullable().optional(),
   /** ISO timestamp when the owner confirmed enabling a personal daily cap. */
   budgetConfirmedAt: z.string().datetime({ offset: true }).nullable().optional(),
 }).strict().transform(settings => ({

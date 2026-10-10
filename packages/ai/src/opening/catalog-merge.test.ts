@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeOpeningCatalog, type WorkspaceCatalogModel } from "./catalog-merge";
+import { mergeOpeningCatalog, resolveMergedDefaultModelId, type WorkspaceCatalogModel } from "./catalog-merge";
 
 const server = {
   id: "server", providerId: "default", providerLabel: "默认供应商", label: "Server Model",
@@ -11,7 +11,7 @@ const custom = (over: Partial<WorkspaceCatalogModel> = {}): WorkspaceCatalogMode
   id: "11111111-1111-4111-8111-111111111111", providerId: "22222222-2222-4222-8222-222222222222",
   providerLabel: "我的供应商", label: "My Model", modelName: "my-model",
   baseUrl: "https://mine.example/v1", apiKey: "mine-key", supportsVision: true,
-  inputCentsPerMillion: 1, outputCentsPerMillion: 2, createdAt: "2026-01-01T00:00:00.000Z", ...over,
+  inputCentsPerMillion: 1, outputCentsPerMillion: 2, ...over,
 });
 
 describe("mergeOpeningCatalog", () => {
@@ -52,5 +52,46 @@ describe("mergeOpeningCatalog", () => {
     const unpriced = { ...server, id: "unpriced", availability: "pricing_missing" as const };
     expect(mergeOpeningCatalog([missing], [], { defaultModelId: "server", dailyCapCents: 100 }).models[0]!.availability).toBe("missing_key");
     expect(mergeOpeningCatalog([unpriced], [], { defaultModelId: "unpriced", dailyCapCents: 100 }).models[0]!.availability).toBe("pricing_missing");
+  });
+  it("prefers an available workspace model over a missing_key env stub default", () => {
+    const stub = {
+      ...server,
+      id: "default",
+      modelName: "gpt-4o-mini",
+      apiKey: "",
+      availability: "missing_key" as const,
+    };
+    const lant = custom({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      label: "Lant GLM 5.3",
+      modelName: "glm-5.3",
+      providerLabel: "Lant",
+      supportsVision: true,
+    });
+    const merged = mergeOpeningCatalog([stub], [lant], { defaultModelId: "default", dailyCapCents: 100 });
+    expect(merged.defaultModelId).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(merged.models.find(model => model.id === merged.defaultModelId)?.availability).toBe("available");
+  });
+  it("keeps an available server default even when workspace models exist", () => {
+    const merged = mergeOpeningCatalog([server], [custom()], { defaultModelId: "server", dailyCapCents: 100 });
+    expect(merged.defaultModelId).toBe("server");
+  });
+});
+
+describe("resolveMergedDefaultModelId", () => {
+  it("returns requested when available, else first available workspace, else requested stub", () => {
+    const models = [
+      { id: "default", availability: "missing_key" as const, source: "server" as const },
+      { id: "ws", availability: "available" as const, source: "workspace" as const },
+    ];
+    expect(resolveMergedDefaultModelId(models, "default")).toBe("ws");
+    expect(resolveMergedDefaultModelId(
+      [{ id: "default", availability: "available" as const, source: "server" as const }, models[1]!],
+      "default",
+    )).toBe("default");
+    expect(resolveMergedDefaultModelId(
+      [{ id: "default", availability: "missing_key" as const, source: "server" as const }],
+      "default",
+    )).toBe("default");
   });
 });

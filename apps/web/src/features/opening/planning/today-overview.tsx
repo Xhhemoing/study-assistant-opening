@@ -47,7 +47,6 @@ export function TodayLearningContext({ item }: { item?: TodayResumeState["contin
       </div>
       <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
         <Link href={courseHref} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
-        <Link href="/library/new" className={ui.quiet}>写笔记</Link>
       </nav>
     </div>
     <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">

@@ -29,6 +29,38 @@ SECONDARY_MODEL_API_KEY=
 - 密钥缺失、价格为零或日上限为零会显示不可用。配置仅表示具备调用条件，不代表完成真实供应商连通性和质量验证。
 - 将相同目录、密钥和日上限配置到 web 与 worker，重启两者。目录变化需要重启；工作区路由偏好保存后无需重启；工作区自定义供应商保存后立即生效，同样无需重启。
 
+## 工作区日额度 schema 上限
+
+`openingAiSettingsSchema.dailyCapCents` 的 Zod 上限与 `OPENING_MODEL_DAILY_CAP_CENTS` 一致（`OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS` = 2_147_483_647），**不再**硬编码 2000。否则当工作区把 `dailyCapCents` 写成与大额 env 上限相同的值（例如 1_000_000）时，整段 `ai_settings` 会 `safeParse` 失败 → `invalidStoredSettings` → 回退默认设置并落到缺密钥的 legacy `gpt-4o-mini`。
+
+写入时仍由 `validateBudgetFields` 约束：env > 0 时不得超过 env 上限；env = 0 时不得超过个人天花板 2000 分。`dailyCapCents: null` 表示跟随 env。
+
+## 合并默认模型（env stub vs 工作区可用模型）
+
+路由顺序不变：手动锁 → 模式映射 → 工作区 `defaultModelId` → **合并后的服务器默认**。
+
+合并后的 `defaultModelId` 规则（`mergeOpeningCatalog` / `resolveMergedDefaultModelId`）：
+
+1. 若 env/`OPENING_MODEL_DEFAULT_ID` 指向的模型 **availability=available**，继续用它。
+2. 否则若存在 **source=workspace 且 available** 的自定义模型（例如已配置密钥与定价的 Lant/`glm-5.3`），优先选第一个可用工作区模型，而不是继续指向缺密钥的 legacy stub（常见为 id `default` / `gpt-4o-mini` → `missing_key`）。
+3. 若没有可用工作区模型，仍保留请求的服务器默认 id；选型时按既有规则显式失败，不静默换供应商。
+
+Tutor worker 与设置页 / readiness 一样，用 **有效日额度**（env 与工作区确认额度）计算 availability：有效额度为 0 时模型为 `budget_disabled`（硬阻断）；视觉能力仍只影响图片材料（readiness 中 `vision_model` 为 soft）。
+
+## Hermes 运维清单（Lant + glm-5.3，勿由 agent 自行 redeploy）
+
+在 hermes `/opt/aistudy/.env.production`（web + worker 相同）由 PM 设置并重启。密钥只进密钥库/该文件，**永不进 git**：
+
+| 键 | 作用 |
+|---|---|
+| `OPENING_MODEL_CATALOG` | JSON 数组；推荐一项 `id=lant-glm-5-3`，`providerId=lant`，`providerLabel=Lant`，`modelName=glm-5.3`，`baseUrl`=OpenAI 兼容根路径，`apiKeyEnv=LANT_API_KEY`，正数 `inputCentsPerMillion` / `outputCentsPerMillion`，Tutor 看图时设 `supportsVision:true` |
+| `OPENING_MODEL_DEFAULT_ID` | `lant-glm-5-3`（须存在于目录） |
+| `LANT_API_KEY` | 由 `apiKeyEnv` 引用的真实密钥（勿写入目录 JSON） |
+| `OPENING_MODEL_DAILY_CAP_CENTS` | 正整数（分）；为 0 时全部模型 budget 硬阻断 |
+| 可选 legacy `OPENING_MODEL_*` | 未设 `OPENING_MODEL_CATALOG` 时退化为 id `default`；若密钥为空会 `missing_key`。有工作区 BYOK 可用时合并默认会偏向工作区模型 |
+
+也可不改服务器目录，仅在网页「自定义供应商与密钥」配置 Lant/`glm-5.3` 并开启确认工作区日额度；合并默认会优先该可用工作区模型。部署流程见 `docs/operations/hermes-deployment.md`（本任务不执行 redeploy）。
+
 ## 工作区自定义供应商（BYOK）
 
 工作区所有者可在 `/settings` 的「自定义供应商与密钥」面板中自行维护供应商、模型与密钥，无需修改服务器环境变量或重启服务：

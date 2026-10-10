@@ -55,3 +55,8 @@ bash infra/deploy/deploy-hermes.sh deploy
   清理 `~/swap-*`、旧备份或 `docker image prune`。
 - worker 积压：`systemctl status aistudy-worker`（若启用）；readiness 口径见
   `docs/operations/opening-release.md`。
+
+## Opening 模型（Lant / glm-5.3）
+
+Tutor / vision 默认模型统一到可用的 Lant + `glm-5.3` 时，由 PM 编辑 `.env.production`（勿提交密钥），键清单与示例 JSON 见 `docs/operations/opening-model-routing.md`「Hermes 运维清单」。改完后 `bash infra/deploy/deploy-hermes.sh restart`（或完整 `deploy`）；本仓库任务默认不自动 redeploy。
+

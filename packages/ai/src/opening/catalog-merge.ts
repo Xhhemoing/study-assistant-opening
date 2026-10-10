@@ -39,6 +39,36 @@ function serverAvailabilityWithEffectiveCap(
   return availabilityFor(model, dailyCapCents);
 }
 
+type MergedCatalogEntry = OpeningModelSummary & { baseUrl: string; apiKey: string };
+
+/**
+ * Pick the merged default when workspace settings leave defaultModelId null.
+ * Prefer an already-configured available workspace model over an env/catalog
+ * stub that lacks keys (e.g. legacy gpt-4o-mini → missing_key). Never invent
+ * a silent switch away from an available requested server default.
+ */
+export function resolveMergedDefaultModelId(
+  models: Array<Pick<MergedCatalogEntry, "id" | "availability" | "source">>,
+  requestedDefaultId: string | null,
+): string | null {
+  const requested = requestedDefaultId
+    ? models.find(model => model.id === requestedDefaultId)
+    : undefined;
+  if (requested?.availability === "available") return requested.id;
+
+  const workspaceAvailable = models.find(
+    model => model.source === "workspace" && model.availability === "available",
+  );
+  if (workspaceAvailable) return workspaceAvailable.id;
+
+  if (requested) return requested.id;
+
+  const anyAvailable = models.find(model => model.availability === "available");
+  if (anyAvailable) return anyAvailable.id;
+
+  return requestedDefaultId ?? models[0]?.id ?? null;
+}
+
 /**
  * Merge the deployment env catalog with web-managed workspace models into one
  * resolvable list. Server entries keep priority: custom models never override
@@ -72,11 +102,12 @@ export function mergeOpeningCatalog(
     inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
     source: "workspace" as const,
   }));
+  const models = [...servers, ...custom];
   return {
-    models: [...servers, ...custom],
-    // A removed custom default falls back to the server default; routing still
-    // fails explicitly when the fallback is not itself selectable.
-    defaultModelId: input.defaultModelId ?? serverModels[0]?.id ?? null,
+    models,
+    // A removed custom default falls back via resolveMergedDefaultModelId;
+    // routing still fails explicitly when the fallback is not itself selectable.
+    defaultModelId: resolveMergedDefaultModelId(models, input.defaultModelId),
     dailyCapCents: input.dailyCapCents,
   };
 }

@@ -5,7 +5,6 @@ import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { DingTalkConnectionsPanel } from "./dingtalk-connections-panel";
 import { SemesterSettingsForm } from "../opening/timetable/semester-settings-form";
 import { TimetableImport } from "../opening/timetable/timetable-import";
 import {
@@ -76,17 +75,16 @@ export function SettingsView() {
           <Link className={navLinkClass} href="/settings/advanced#daily-budget">开启 AI 每日额度</Link>
         </nav>
 
-        <section id="connections" className="scroll-mt-6 space-y-6 border-b border-zinc-200 pb-6" aria-labelledby="opening-connections-heading">
+        <section id="connections" className="scroll-mt-6 border-b border-zinc-200 pb-6" aria-labelledby="opening-connections-heading">
           <div className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]">
             <div>
               <h2 className="text-sm font-medium text-zinc-900" id="opening-connections-heading">数据连接</h2>
-              <p className="mt-1 text-xs leading-6 text-zinc-500">邮箱与钉钉授权、暂停、撤销与手工导入。</p>
+              <p className="mt-1 text-xs leading-6 text-zinc-500">邮箱与钉钉授权、暂停、撤销与手工导入请在连接页管理。</p>
             </div>
             <div>
               <Link className={ui.secondary} href="/opening/settings/connections">打开连接设置</Link>
             </div>
           </div>
-          <DingTalkConnectionsPanel />
         </section>
 
         <section id="planning" className="scroll-mt-6 grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-planning-heading">

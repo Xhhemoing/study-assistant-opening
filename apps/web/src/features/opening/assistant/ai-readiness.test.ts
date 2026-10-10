@@ -37,3 +37,13 @@ describe("AiReadinessChecklist hard-blocker filter", () => {
     expect(onlyVisionAndReconcile.some(isAiReadinessChecklistHardBlocker)).toBe(false);
   });
 });
+
+describe("AiReadinessChecklist vision tip policy", () => {
+  it("keeps vision soft so default UI can omit the tip without hard-blocking", () => {
+    // Hard-blocker filter is the gate; soft vision must never reopen the blocking banner.
+    expect(isAiReadinessChecklistHardBlocker({
+      key: "vision_model", ok: false, detail: "没有支持图片的可用模型", fixHint: "配置视觉模型", severity: "soft",
+    })).toBe(false);
+  });
+});
+

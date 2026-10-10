@@ -9,7 +9,7 @@ import {
 
 describe("command palette keyboard model", () => {
   it("filters pages by label, description, or route without inventing content hits", () => {
-    expect(filterPaletteCommands("备份").map((command) => command.id)).toEqual(["export"]);
+    expect(filterPaletteCommands("高级").map((command) => command.id)).toEqual(["settings-advanced"]);
     expect(filterPaletteCommands("/OPENING/ASSISTANT").map((command) => command.id)).toEqual(["assistant"]);
     expect(filterPaletteCommands("不存在的内容关键词")).toEqual([]);
     expect(filterPaletteCommands("  ")).toHaveLength(PALETTE_COMMANDS.length);
@@ -38,16 +38,22 @@ describe("command palette keyboard model", () => {
       "cards",
       "opening-review",
       "connections",
+      "search",
       "settings",
+      "settings-advanced",
     ]));
     expect(ids).not.toContain("explore");
     expect(ids).not.toContain("new-exploration");
     expect(ids).not.toContain("marketplace");
     expect(ids).not.toContain("exams");
     expect(ids).not.toContain("new-goal");
-    expect(PALETTE_COMMANDS.filter((command) => command.kind === "command").map((command) => command.id)).toEqual([
-      "new-note",
-    ]);
+    expect(ids).not.toContain("new-note");
+    expect(ids).not.toContain("learn");
+    expect(ids).not.toContain("library");
+    expect(ids).not.toContain("goals");
+    expect(ids).not.toContain("review");
+    expect(ids).not.toContain("export");
+    expect(PALETTE_COMMANDS.filter((command) => command.kind === "command")).toEqual([]);
     expect(SEARCH_DEBOUNCE_MS).toBe(150);
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining([
       "/opening/today",
@@ -56,7 +62,9 @@ describe("command palette keyboard model", () => {
       "/opening/cards",
       "/opening/review",
       "/opening/settings/connections",
+      "/search",
       "/settings",
+      "/settings/advanced",
     ]));
   });
 });
