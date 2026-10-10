@@ -161,7 +161,13 @@ describe("reminder database and Redis delivery", () => {
 
   it("reschedules quiet work using only the remaining absolute delay and sends after quiet ends", async () => {
     const f = await enqueue();
-    const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+    // Enqueue resolves the workspace default timezone (Asia/Shanghai) when no
+    // planning settings exist, so build the quiet window in that same zone.
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(now);
+    const minute = Number(parts.find(part => part.type === "hour")!.value) * 60
+      + Number(parts.find(part => part.type === "minute")!.value);
     await reminders.saveExternalConfig(fixture.scope, {
       enabled: true, recipientId: fixture.scope.ownerUserId,
       quietHours: { startMinute: minute, endMinute: (minute + 3) % 1440 },
