@@ -60,3 +60,18 @@ describe("media-reader state", () => {
     expect(mediaReaderStateCopy("unavailable")).toMatch(/不可用/);
   });
 });
+
+it("surfaces blocked_not_configured via sourceStatusLabel for failed media", async () => {
+  const { sourceStatusLabel } = await import("../inbox/upload-state");
+  expect(
+    sourceStatusLabel({
+      uploadState: "uploaded",
+      parseState: "failed",
+      error: {
+        code: "blocked_not_configured",
+        message: "转写服务未配置（需 faster-whisper），原件已保存；配置完成前重试无效。",
+        retryable: false,
+      },
+    }),
+  ).toContain("转写服务未配置");
+});

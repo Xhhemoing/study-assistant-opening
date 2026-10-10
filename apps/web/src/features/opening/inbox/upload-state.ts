@@ -45,7 +45,10 @@ export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "pa
   if (record.uploadState !== "uploaded") return "等待上传完成";
   if (record.error?.code === "PRIVACY_EXCLUDED") return "已从学习上下文中排除";
   if (record.parseState === "ready") return "可以用于提问";
-  if (record.parseState === "failed") return "原件已保存，解析失败";
+  if (record.parseState === "failed") {
+    const message = record.error?.message?.trim();
+    return message || "原件已保存，解析失败";
+  }
   if (record.parseState === "unsupported") return "原件已保存，暂不能提取文字";
   if (record.parseState === "not_started" || record.parseState === "queued" || record.parseState === "running") {
     return "原件已保存，正在解析";

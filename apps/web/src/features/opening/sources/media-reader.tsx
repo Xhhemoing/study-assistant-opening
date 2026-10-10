@@ -119,9 +119,15 @@ export function MediaReader({
           {source?.name ?? "媒体阅读"}
         </h3>
         <p className="mt-1 text-[11px] leading-5 text-zinc-500" role="status">
-          {source ? sourceStatusLabel(source) : null}
-          {source ? " · " : ""}
-          {mediaReaderStateCopy(kind)}
+          {kind === "parse_failed_original_saved" && source
+            ? sourceStatusLabel(source)
+            : (
+              <>
+                {source ? sourceStatusLabel(source) : null}
+                {source ? " · " : ""}
+                {mediaReaderStateCopy(kind)}
+              </>
+            )}
           {payload && !payload.claimsVisualUnderstanding ? " · 不宣称视觉理解" : ""}
         </p>
       </div>

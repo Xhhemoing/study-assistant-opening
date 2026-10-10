@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { UploadDropzone, isAcceptedUploadFile, supportedUploadTypesLabel } from "./upload-dropzone";
+import { UploadDropzone, isAcceptedUploadFile, openingUploadAccept, supportedUploadTypesLabel } from "./upload-dropzone";
 
 describe("UploadDropzone", () => {
   it("renders a keyboard-accessible multi-file drop target", () => {
@@ -41,4 +41,20 @@ describe("UploadDropzone", () => {
     expect(isAcceptedUploadFile({ name: "evil.pdf", type: "text/plain" } as File, ".pdf,.png")).toBe(false);
     expect(isAcceptedUploadFile({ name: "notes.pdf", type: "" } as File, ".pdf,.png")).toBe(true);
   });
+
+  it("rejects legacy ppt and eml from the default accept list while keeping pptx and pdf", () => {
+    expect(openingUploadAccept.split(",")).not.toContain(".ppt");
+    expect(openingUploadAccept.split(",")).not.toContain(".eml");
+    expect(openingUploadAccept.split(",")).toContain(".pptx");
+    expect(openingUploadAccept.split(",")).toContain(".pdf");
+    expect(supportedUploadTypesLabel(openingUploadAccept)).not.toMatch(/\bPPT\b/);
+    expect(supportedUploadTypesLabel(openingUploadAccept)).not.toContain("EML");
+    expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("PPTX");
+    expect(isAcceptedUploadFile({ name: "deck.ppt", type: "" } as File, openingUploadAccept)).toBe(false);
+    expect(isAcceptedUploadFile({ name: "mail.eml", type: "" } as File, openingUploadAccept)).toBe(false);
+    expect(isAcceptedUploadFile({ name: "deck.pptx", type: "" } as File, openingUploadAccept)).toBe(true);
+    expect(isAcceptedUploadFile({ name: "notes.pdf", type: "" } as File, openingUploadAccept)).toBe(true);
+    expect(isAcceptedUploadFile({ name: "lecture.mp3", type: "audio/mpeg" } as File, openingUploadAccept)).toBe(true);
+  });
+
 });

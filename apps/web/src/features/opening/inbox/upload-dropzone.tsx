@@ -5,11 +5,11 @@ import { useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent 
 import { ui } from "../design/ui";
 import { resolveUploadMime } from "./upload-state";
 
-export const openingUploadAccept = ".pdf,.ppt,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,.eml,.mp3,.m4a,.wav";
+export const openingUploadAccept = ".pdf,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav";
 
 const typeLabels: Record<string, string> = {
-  ".pdf": "PDF", ".ppt": "PPT", ".pptx": "PPTX", ".html": "HTML", ".htm": "HTML",
-  ".md": "Markdown", ".markdown": "Markdown", ".png": "PNG", ".jpg": "JPG", ".jpeg": "JPEG", ".eml": "EML",
+  ".pdf": "PDF", ".pptx": "PPTX", ".html": "HTML", ".htm": "HTML",
+  ".md": "Markdown", ".markdown": "Markdown", ".png": "PNG", ".jpg": "JPG", ".jpeg": "JPEG",
   ".webp": "WebP", ".mp3": "MP3", ".m4a": "M4A", ".wav": "WAV",
 };
 

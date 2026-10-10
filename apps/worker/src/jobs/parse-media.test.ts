@@ -101,11 +101,13 @@ describe("parse-media handler", () => {
     dirs.push(tempDir);
     const fileBytes = Buffer.alloc(64, 1);
     const states: string[] = [];
+    const parseErrors: unknown[] = [];
     const handler = createParseMediaHandler({
       sources: {
         get: async () => source({ bytes: fileBytes.byteLength }),
-        markParseState: async (_s, _id, state) => {
+        markParseState: async (_s, _id, state, error) => {
           states.push(state);
+          parseErrors.push(error);
           return source();
         },
       },
@@ -135,6 +137,11 @@ describe("parse-media handler", () => {
     });
     expect(result).not.toHaveProperty("claimsVisualUnderstanding");
     expect(states).toEqual(["failed"]);
+    expect(parseErrors[0]).toMatchObject({
+      code: "blocked_not_configured",
+      retryable: false,
+      message: expect.stringMatching(/转写|faster-whisper/),
+    });
     expect(await readdir(tempDir)).toEqual([]);
   });
 
@@ -299,10 +306,14 @@ describe("parse-media handler", () => {
     dirs.push(tempDir);
     const fileBytes = Buffer.alloc(16, 4);
     const { MediaConfigurationError } = await import("../parsers/media-process");
+    const parseErrors: unknown[] = [];
     const handler = createParseMediaHandler({
       sources: {
         get: async () => source({ bytes: fileBytes.byteLength, mime: "audio/mpeg" }),
-        markParseState: async (_s, _id, state) => source({ mime: "audio/mpeg", parseState: state as never }),
+        markParseState: async (_s, _id, state, error) => {
+          parseErrors.push(error);
+          return source({ mime: "audio/mpeg", parseState: state as never });
+        },
       },
       chunks: { replaceChunks: async () => undefined },
       storage: {
@@ -332,6 +343,11 @@ describe("parse-media handler", () => {
       hasVideo: false,
     });
     expect(result).not.toHaveProperty("claimsVisualUnderstanding");
+    expect(parseErrors[0]).toMatchObject({
+      code: "blocked_not_configured",
+      retryable: false,
+      message: expect.stringMatching(/转写|faster-whisper/),
+    });
     expect(await readdir(tempDir)).toEqual([]);
   });
 

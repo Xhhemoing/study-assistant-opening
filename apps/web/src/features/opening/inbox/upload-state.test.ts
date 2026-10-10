@@ -41,3 +41,25 @@ it("tells HEIC uploaders to export JPG instead of decoding", () => {
 it("resolves webp by extension when MIME is empty", () => {
   expect(resolveUploadMime({ name: "shot.webp", type: "" })).toBe("image/webp");
 });
+
+it("shows blocked_not_configured message on failed, keeps generic failed fallback, and prioritizes PRIVACY", () => {
+  expect(
+    sourceStatusLabel({
+      uploadState: "uploaded",
+      parseState: "failed",
+      error: {
+        code: "blocked_not_configured",
+        message: "转写服务未配置（需 faster-whisper），原件已保存；配置完成前重试无效。",
+        retryable: false,
+      },
+    }),
+  ).toContain("转写服务未配置");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" })).toBe("原件已保存，解析失败");
+  expect(
+    sourceStatusLabel({
+      uploadState: "uploaded",
+      parseState: "failed",
+      error: { code: "PRIVACY_EXCLUDED", message: "隐私排除", retryable: false },
+    }),
+  ).toBe("已从学习上下文中排除");
+});

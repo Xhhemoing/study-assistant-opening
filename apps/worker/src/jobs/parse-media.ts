@@ -25,6 +25,13 @@ const MEDIA_MIMES = new Set([
   "audio/wav",
 ]);
 
+/** Persist when faster-whisper / transcribe adapter is not configured (audio or video). */
+const BLOCKED_NOT_CONFIGURED_ERROR = {
+  code: "blocked_not_configured",
+  message: "转写服务未配置（需 faster-whisper），原件已保存；配置完成前重试无效。",
+  retryable: false,
+} as const;
+
 type Storage = {
   presignGet(
     key: string,
@@ -273,7 +280,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
           ],
         });
       } else if (transcription === "blocked_not_configured" && !probe.hasVideo) {
-        await deps.sources.markParseState(scope, source.id, "failed");
+        await deps.sources.markParseState(scope, source.id, "failed", BLOCKED_NOT_CONFIGURED_ERROR);
         return {
           ok: false,
           transcription,
@@ -284,7 +291,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
         };
       } else if (transcription === "blocked_not_configured") {
         // Video without wired transcription and without persisted frames.
-        await deps.sources.markParseState(scope, source.id, "failed");
+        await deps.sources.markParseState(scope, source.id, "failed", BLOCKED_NOT_CONFIGURED_ERROR);
         return {
           ok: false,
           transcription,
