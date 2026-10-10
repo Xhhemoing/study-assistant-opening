@@ -34,6 +34,7 @@ export function SourceRow({
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   const metadata = sourceMetadata(record);
   const failed = record.uploadState === "rejected" || record.parseState === "failed";
+  const canDeleteShortcut = failed || record.uploadState === "pending";
   const stateTone = failed ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
   return (
     <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">
@@ -60,7 +61,7 @@ export function SourceRow({
             <RefreshCw size={14} aria-hidden="true" />{record.parseState === "failed" ? "重新解析" : "重试上传"}
           </button>
         ) : null}
-        {failed && onDelete ? (
+        {canDeleteShortcut && onDelete ? (
           <button className={dangerQuiet} onClick={() => onDelete(record.id)} type="button">
             <Trash2 size={14} aria-hidden="true" />删除
           </button>

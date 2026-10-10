@@ -3,7 +3,7 @@ import { resolveUploadMime, sourceStatusLabel, unsupportedUploadMessage } from "
 
 it("distinguishes stored originals from parsed material", () => {
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" })).toBe("原件已保存，解析失败");
-  expect(sourceStatusLabel({ uploadState: "pending", parseState: "not_started" })).toBe("等待上传完成");
+  expect(sourceStatusLabel({ uploadState: "pending", parseState: "not_started" })).toBe("上传未完成");
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "ready" })).toBe("可以用于提问");
 });
 

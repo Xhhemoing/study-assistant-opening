@@ -71,6 +71,25 @@ it("does not show delete shortcut for ready rows even with onDelete", () => {
   expect(html).not.toContain("删除");
 });
 
+it("shows delete shortcut for pending upload rows when onDelete is provided", () => {
+  const html = renderToStaticMarkup(createElement(SourceRow, {
+    record: {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "stuck.pdf",
+      mime: "application/pdf",
+      bytes: 20,
+      createdAt: "2026-10-04T00:00:00.000Z",
+      uploadState: "pending",
+      parseState: "not_started",
+    },
+    onManage: () => {},
+    onDelete: () => {},
+  }));
+  expect(html).toContain("删除");
+  expect(html).toContain("管理材料");
+  expect(html).toContain("上传未完成");
+});
+
 it("hides re-parse when error.retryable is false and shows the stored message", () => {
   const html = renderToStaticMarkup(createElement(SourceRow, {
     record: {

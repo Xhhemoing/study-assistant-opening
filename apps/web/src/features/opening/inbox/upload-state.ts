@@ -42,7 +42,7 @@ export function resolveUploadMime(input: { name: string; type: string }): Upload
 }
 
 export function sourceStatusLabel(record: Pick<SourceRecord, "uploadState" | "parseState"> & { error?: SourceRecord["error"] }): string {
-  if (record.uploadState !== "uploaded") return "等待上传完成";
+  if (record.uploadState !== "uploaded") return "上传未完成";
   if (record.error?.code === "PRIVACY_EXCLUDED") return "已从学习上下文中排除";
   if (record.parseState === "ready") return "可以用于提问";
   if (record.parseState === "failed") {
