@@ -9,7 +9,7 @@ import {
 
 describe("command palette keyboard model", () => {
   it("filters pages by label, description, or route without inventing content hits", () => {
-    expect(filterPaletteCommands("备份").map((command) => command.id)).toEqual(["export"]);
+    expect(filterPaletteCommands("备份").map((command) => command.id)).toEqual(["settings-advanced"]);
     expect(filterPaletteCommands("/OPENING/ASSISTANT").map((command) => command.id)).toEqual(["assistant"]);
     expect(filterPaletteCommands("不存在的内容关键词")).toEqual([]);
     expect(filterPaletteCommands("  ")).toHaveLength(PALETTE_COMMANDS.length);
@@ -45,9 +45,10 @@ describe("command palette keyboard model", () => {
     expect(ids).not.toContain("marketplace");
     expect(ids).not.toContain("exams");
     expect(ids).not.toContain("new-goal");
-    expect(PALETTE_COMMANDS.filter((command) => command.kind === "command").map((command) => command.id)).toEqual([
-      "new-note",
-    ]);
+    expect(PALETTE_COMMANDS.filter((command) => command.kind === "command").map((command) => command.id)).toEqual([]);
+    for (const id of ["learn", "goals", "review", "library", "new-note", "export"]) expect(ids).not.toContain(id);
+    expect(ids).toContain("search");
+    expect(ids).toContain("settings-advanced");
     expect(SEARCH_DEBOUNCE_MS).toBe(150);
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining([
       "/opening/today",
