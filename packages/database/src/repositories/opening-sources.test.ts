@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningSourceRepository } from "./opening-sources";
+import {
+  PENDING_UPLOAD_TTL_FALLBACK_MS,
+  PENDING_UPLOAD_TTL_SWEEP_LIMIT,
+  UPLOAD_TTL_EXPIRED_ERROR,
+  createOpeningSourceRepository,
+  sweepExpiredPendingUploads,
+  sweepExpiredPendingUploadsAll,
+} from "./opening-sources";
 
 const W = "00000000-0000-4000-8000-000000000001";
 const S = "00000000-0000-4000-8000-000000000003";
@@ -113,5 +120,108 @@ describe("opening source upload completion boundary", () => {
       actual: { bytes: 12, sha256: SHA, mime: "application/pdf" },
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(revision()).toBe(0);
+  });
+});
+
+describe("G4 pending upload TTL sweeper", () => {
+  const NOW = new Date("2026-10-10T12:00:00.000Z");
+  const S2 = "00000000-0000-4000-8000-000000000004";
+  const W2 = "00000000-0000-4000-8000-000000000002";
+
+  function sweepSql(handler: (query: string, values: unknown[]) => unknown[]) {
+    const recorded: { query: string; values: unknown[] }[] = [];
+    const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+      if (!Object.hasOwn(parts, "raw")) return parts;
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      recorded.push({ query, values });
+      return Promise.resolve(handler(query, values));
+    }) as unknown as Sql;
+    sql.json = ((value: unknown) => value) as Sql["json"];
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+    return { sql, recorded };
+  }
+
+  it("rejects expired pending via upload_url_expires_at and returns swept ids", async () => {
+    const { sql, recorded } = sweepSql((q) => {
+      if (q.startsWith("UPDATE opening_sources AS s")) {
+        return [{ id: S, workspace_id: W }];
+      }
+      throw new Error("unexpected: " + q);
+    });
+    const swept = await sweepExpiredPendingUploads(sql, scope, { now: NOW });
+    expect(swept).toEqual([{ id: S, workspaceId: W }]);
+    const update = recorded[0]!;
+    expect(update.query).toMatch(/upload_state = 'rejected'/);
+    expect(update.query).toMatch(/upload_url_expires_at < \?/);
+    expect(update.query).toMatch(/upload_url_expires_at IS NULL/);
+    expect(update.query).toMatch(/created_at < \?/);
+    expect(update.query).toMatch(/upload_state = 'pending'/);
+    expect(update.values).toContainEqual(UPLOAD_TTL_EXPIRED_ERROR);
+    expect(update.values).toContainEqual(NOW);
+    expect(update.values).toContainEqual(
+      new Date(NOW.getTime() - PENDING_UPLOAD_TTL_FALLBACK_MS),
+    );
+    expect(update.values).toContainEqual(W);
+    expect(update.values).toContainEqual(PENDING_UPLOAD_TTL_SWEEP_LIMIT);
+  });
+
+  it("null-lease fallback uses created_at + PENDING_UPLOAD_TTL_FALLBACK_MS (15m lease)", () => {
+    expect(PENDING_UPLOAD_TTL_FALLBACK_MS).toBe(900_000);
+    expect(UPLOAD_TTL_EXPIRED_ERROR).toEqual({
+      code: "UPLOAD_TTL_EXPIRED",
+      message: "上传凭证已过期，文件未在有效期内完成上传。",
+      retryable: false,
+    });
+  });
+
+  it("global All passes null workspace scope and respects limit", async () => {
+    const { sql, recorded } = sweepSql((q) => {
+      if (q.startsWith("UPDATE opening_sources AS s")) {
+        return [
+          { id: S, workspace_id: W },
+          { id: S2, workspace_id: W2 },
+        ];
+      }
+      throw new Error("unexpected: " + q);
+    });
+    const swept = await sweepExpiredPendingUploadsAll(sql, { now: NOW, limit: 25 });
+    expect(swept).toEqual([
+      { id: S, workspaceId: W },
+      { id: S2, workspaceId: W2 },
+    ]);
+    const values = recorded[0]!.values;
+    expect(values).toContainEqual(null);
+    expect(values).toContainEqual(25);
+    expect(recorded[0]!.query).toMatch(/\?::uuid IS NULL OR workspace_id = \?/);
+  });
+
+  it("idempotent: already-rejected / non-pending yield empty (SQL filters pending only)", async () => {
+    const { sql, recorded } = sweepSql((q) => {
+      if (q.startsWith("UPDATE opening_sources AS s")) return [];
+      throw new Error("unexpected: " + q);
+    });
+    await expect(sweepExpiredPendingUploads(sql, scope, { now: NOW })).resolves.toEqual([]);
+    expect(recorded[0]!.query).toMatch(/WHERE upload_state = 'pending'/);
+    expect(recorded[0]!.query).toMatch(/AND s\.upload_state = 'pending'/);
+  });
+
+  it("repository method delegates to workspace-scoped sweep", async () => {
+    const { sql } = sweepSql((q) => {
+      if (q.startsWith("UPDATE opening_sources AS s")) {
+        return [{ id: S, workspace_id: W }];
+      }
+      throw new Error("unexpected: " + q);
+    });
+    const repo = createOpeningSourceRepository(sql);
+    await expect(repo.sweepExpiredPendingUploads(scope, { now: NOW })).resolves.toEqual([
+      { id: S, workspaceId: W },
+    ]);
+  });
+
+  it("does not invent Slack/email — return list is the optional notify hook", async () => {
+    const { sql } = sweepSql(() => [{ id: S, workspace_id: W }]);
+    const swept = await sweepExpiredPendingUploadsAll(sql, { now: NOW, limit: 1 });
+    // Callers (Pipeline worker) may iterate swept ids for notify; Data only returns them.
+    expect(swept.map((row) => row.id)).toEqual([S]);
   });
 });

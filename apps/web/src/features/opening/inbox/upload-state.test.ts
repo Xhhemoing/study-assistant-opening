@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { resolveUploadMime, sourceStatusLabel, unsupportedUploadMessage } from "./upload-state";
+import { canDeleteSourceShortcut, isAgedQueuedParse, resolveUploadMime, sourceStatusLabel, unsupportedUploadMessage } from "./upload-state";
 
 it("distinguishes stored originals from parsed material", () => {
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" })).toBe("原件已保存，解析失败");
@@ -82,4 +82,19 @@ it("differentiates running from queued and aged queued without fake-fail", () =>
       now,
     ),
   ).toBe("原件已保存，解析排队中");
+});
+
+it("accepts mp4/webm video by extension and declared MIME", () => {
+  expect(resolveUploadMime({ name: "clip.mp4", type: "" })).toBe("video/mp4");
+  expect(resolveUploadMime({ name: "clip.webm", type: "video/webm" })).toBe("video/webm");
+});
+
+it("exposes aged-queued and delete-shortcut helpers", () => {
+  const now = Date.parse("2026-10-10T14:00:00.000Z");
+  expect(isAgedQueuedParse({ uploadState: "uploaded", parseState: "queued", createdAt: "2026-10-10T13:56:00.000Z" }, now)).toBe(true);
+  expect(isAgedQueuedParse({ uploadState: "uploaded", parseState: "queued", createdAt: "2026-10-10T13:58:00.000Z" }, now)).toBe(false);
+  expect(isAgedQueuedParse({ uploadState: "uploaded", parseState: "running", createdAt: "2026-10-10T13:50:00.000Z" }, now)).toBe(false);
+  expect(canDeleteSourceShortcut({ uploadState: "uploaded", parseState: "unsupported" }, now)).toBe(true);
+  expect(canDeleteSourceShortcut({ uploadState: "uploaded", parseState: "queued", createdAt: "2026-10-10T13:56:00.000Z" }, now)).toBe(true);
+  expect(canDeleteSourceShortcut({ uploadState: "uploaded", parseState: "ready" }, now)).toBe(false);
 });

@@ -94,7 +94,9 @@ export function UploadStrip({ api, onUploaded, disabled, courseId = null, course
               {item.state === "failed" ? <>
                 <button className={ui.secondary} onClick={() => void retry(item.id)} type="button">重试</button>
                 <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">清除</button>
-              </> : null}
+              </> : item.state === "idle" || item.state === "uploading" ? (
+                <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">取消</button>
+              ) : null}
             </li>
           ))}
         </ul>

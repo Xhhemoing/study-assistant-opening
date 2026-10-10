@@ -47,7 +47,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       });
       return { pages: 1, imageOnly: true };
     }
-    if (source.mime === "application/vnd.ms-powerpoint") {
+    // Legacy .ppt and .eml: keep the object stored, but do not claim readable text for tutoring.
+    if (source.mime === "application/vnd.ms-powerpoint" || source.mime === "message/rfc822") {
       await deps.sources.markParseState(scope, source.id, "unsupported");
       return { unsupported: true, storedOnly: true };
     }

@@ -199,7 +199,7 @@ describe("createUploadQueue", () => {
     expect(updates.every((progress) => Number.isFinite(progress) && progress >= 0 && progress <= 100)).toBe(true);
   });
 
-  it("dismisses only failed items and no-ops otherwise", async () => {
+  it("dismisses failed items and no-ops for saved or missing ids", async () => {
     const upload = vi.fn(async (input: LocalUploadFile) => {
       if (input.name === "broken.pdf") {
         return { phase: "interrupted", keptLocal: true, message: "网络中断" } as const;
@@ -223,13 +223,41 @@ describe("createUploadQueue", () => {
     expect(updates).toEqual([1]);
   });
 
-  it("does not dismiss idle or uploading items", () => {
+  it("dismisses idle items from the session queue", () => {
     const upload = vi.fn(async () => source);
     const queue = createUploadQueue(upload);
-    const [idle] = queue.add([file("waiting.pdf")]);
+    const [idle, other] = queue.add([file("waiting.pdf"), file("later.pdf")]);
     expect(queue.snapshot()[0]?.state).toBe("idle");
-    queue.dismiss(idle!.id);
-    expect(queue.snapshot()).toHaveLength(1);
+    const updates: number[] = [];
+    queue.dismiss(idle!.id, (items) => updates.push(items.length));
+    expect(queue.snapshot().map((item) => item.id)).toEqual([other!.id]);
+    expect(updates).toEqual([1]);
+  });
+
+  it("dismisses uploading items and ignores late progress or completion", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const upload = vi.fn(async (_input: LocalUploadFile, onBytes?: (loaded: number, total: number) => void) => {
+      onBytes?.(1, 10);
+      await gate;
+      onBytes?.(10, 10);
+      return source;
+    });
+    const queue = createUploadQueue(upload);
+    const [item] = queue.add([file("inflight.pdf")]);
+    const progressLengths: number[] = [];
+    const startPromise = queue.start((items) => progressLengths.push(items.length));
+    // Allow process to enter uploading and emit first progress.
+    await vi.waitFor(() => {
+      expect(queue.snapshot()[0]?.state).toBe("uploading");
+    });
+    queue.dismiss(item!.id, (items) => progressLengths.push(items.length));
+    expect(queue.snapshot()).toHaveLength(0);
+    release();
+    await startPromise;
+    expect(queue.snapshot()).toHaveLength(0);
+    // Late completion must not resurrect the dismissed item.
+    expect(progressLengths.at(-1)).toBe(0);
   });
 
 });

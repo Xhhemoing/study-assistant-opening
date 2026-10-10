@@ -93,6 +93,8 @@ async function buildItems(
     workerDetail = "无法读取 worker 积压";
   }
 
+  const parserOcrReady = Boolean(process.env.PARSER_OCR_MODEL_DIR?.trim());
+
   return buildAiReadinessItems({
     keyedModelCount: keyed.length,
     pricingConfigured,
@@ -101,6 +103,7 @@ async function buildItems(
     remainingCents: remaining,
     reconciledUnknownCount: reconciledUnknown,
     visionAvailable: vision,
+    parserOcrReady,
     workerOk,
     workerDetail,
     availableModelCount: available.length,

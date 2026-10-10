@@ -21,6 +21,33 @@ export class OpeningSourceError extends Error {
 
 export type OpeningScope = { workspaceId: string; ownerUserId: string };
 
+/**
+ * Null-lease fallback for pending rows that never got `upload_url_expires_at`
+ * (create without ticket, or legacy pre-0034). Aligns with staging upload lease
+ * `STAGING_UPLOAD_LEASE_MS = 900_000` and delete cleanup fallback in
+ * opening-source-actions.
+ */
+export const PENDING_UPLOAD_TTL_FALLBACK_MS = 900_000;
+
+/** Default batch size for global worker sweeps. */
+export const PENDING_UPLOAD_TTL_SWEEP_LIMIT = 100;
+
+/** Stored on `opening_sources.error` jsonb when TTL sweeper rejects a pending upload. */
+export const UPLOAD_TTL_EXPIRED_ERROR = {
+  code: "UPLOAD_TTL_EXPIRED",
+  message: "上传凭证已过期，文件未在有效期内完成上传。",
+  retryable: false,
+} as const;
+
+export type SweptPendingUpload = { id: string; workspaceId: string };
+
+export type SweepExpiredPendingUploadsOptions = {
+  /** Clock injection for tests; defaults to `new Date()`. */
+  now?: Date;
+  /** Max rows to reject per call (global All path); default PENDING_UPLOAD_TTL_SWEEP_LIMIT. */
+  limit?: number;
+};
+
 export type OpeningSourceRepository = {
   create(scope: OpeningScope, input: UploadInput): Promise<SourceRecord>;
   get(scope: OpeningScope, id: string): Promise<SourceRecord>;
@@ -51,6 +78,15 @@ export type OpeningSourceRepository = {
       privacyEpoch: number;
     },
   ): Promise<{ source: SourceRecord; job: OpeningJobRecord }>;
+  /**
+   * G4: reject workspace-scoped pending uploads whose upload lease (or null-lease
+   * fallback) has expired. Idempotent — non-pending rows are skipped.
+   * Returns swept ids for optional notify (no Slack/email send here).
+   */
+  sweepExpiredPendingUploads(
+    scope: OpeningScope,
+    options?: SweepExpiredPendingUploadsOptions,
+  ): Promise<SweptPendingUpload[]>;
 };
 
 function mapSource(row: Record<string, unknown>): SourceRecord {
@@ -87,6 +123,77 @@ function assertMatch(
 
 function parseJobKindForMime(mime: string): "parse" | "parse-media" {
   return mime.startsWith("video/") || mime.startsWith("audio/") ? "parse-media" : "parse";
+}
+
+function mapSwept(row: Record<string, unknown>): SweptPendingUpload {
+  return {
+    id: row.id as string,
+    workspaceId: row.workspace_id as string,
+  };
+}
+
+/**
+ * G4 pending TTL: primary expiry is `upload_url_expires_at` (set by
+ * issueUploadTicket from ticket.expiresAt ≈ now+15m). When that column is NULL,
+ * fall back to created_at + PENDING_UPLOAD_TTL_FALLBACK_MS (same 15m lease).
+ * Leaves parse_state unchanged (typically not_started). Sets error jsonb.
+ */
+async function sweepExpiredPendingUploadsQuery(
+  sql: Sql,
+  filter: { workspaceId?: string },
+  options: SweepExpiredPendingUploadsOptions = {},
+): Promise<SweptPendingUpload[]> {
+  const now = options.now ?? new Date();
+  const limit = options.limit ?? PENDING_UPLOAD_TTL_SWEEP_LIMIT;
+  const fallbackCutoff = new Date(now.getTime() - PENDING_UPLOAD_TTL_FALLBACK_MS);
+  // null workspaceId → global (worker); uuid → workspace-scoped. Avoid nested sql`` fragments.
+  const workspaceId = filter.workspaceId ?? null;
+  const rows = await sql`
+    UPDATE opening_sources AS s
+    SET
+      upload_state = 'rejected',
+      error = ${sql.json(UPLOAD_TTL_EXPIRED_ERROR as never)},
+      updated_at = now()
+    FROM (
+      SELECT id
+      FROM opening_sources
+      WHERE upload_state = 'pending'
+        AND (
+          upload_url_expires_at < ${now}
+          OR (
+            upload_url_expires_at IS NULL
+            AND created_at < ${fallbackCutoff}
+          )
+        )
+        AND (${workspaceId}::uuid IS NULL OR workspace_id = ${workspaceId})
+      ORDER BY created_at ASC
+      LIMIT ${limit}
+    ) AS expired
+    WHERE s.id = expired.id
+      AND s.upload_state = 'pending'
+    RETURNING s.id, s.workspace_id
+  `;
+  return rows.map((row) => mapSwept(row as Record<string, unknown>));
+}
+
+/** Workspace-scoped pending upload TTL sweeper (G4). */
+export async function sweepExpiredPendingUploads(
+  sql: Sql,
+  scope: OpeningScope,
+  options: SweepExpiredPendingUploadsOptions = {},
+): Promise<SweptPendingUpload[]> {
+  return sweepExpiredPendingUploadsQuery(sql, { workspaceId: scope.workspaceId }, options);
+}
+
+/**
+ * Global pending upload TTL sweeper for a worker/cron hook (G4).
+ * Returns swept `{ id, workspaceId }` for optional notify — callers decide delivery.
+ */
+export async function sweepExpiredPendingUploadsAll(
+  sql: Sql,
+  options: SweepExpiredPendingUploadsOptions = {},
+): Promise<SweptPendingUpload[]> {
+  return sweepExpiredPendingUploadsQuery(sql, {}, options);
 }
 
 export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository {
@@ -277,6 +384,10 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
           } satisfies OpeningJobRecord,
         };
       });
+    },
+
+    sweepExpiredPendingUploads(scope, options) {
+      return sweepExpiredPendingUploadsQuery(sql, { workspaceId: scope.workspaceId }, options);
     },
   };
 }

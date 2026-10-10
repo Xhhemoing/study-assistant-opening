@@ -64,9 +64,23 @@ describe("parse source handler", () => {
   });
   it("marks audio unsupported without calling chunks", async () => {
     const d = await deps({ source: source({ mime: "audio/mpeg" }) });
-    await d.handler(job, { sourceId });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ unsupported: true });
     expect(d.states).toEqual(["unsupported"]);
     expect(d.replaceInput()).toBeUndefined();
+  });
+  it("marks legacy ppt unsupported as stored-only without calling chunks", async () => {
+    const d = await deps({ source: source({ mime: "application/vnd.ms-powerpoint", name: "deck.ppt" }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ unsupported: true, storedOnly: true });
+    expect(d.states).toEqual(["unsupported"]);
+    expect(d.replaceInput()).toBeUndefined();
+    expect(d.runs()).toBe(0);
+  });
+  it("marks eml unsupported as stored-only without implying readable text", async () => {
+    const d = await deps({ source: source({ mime: "message/rfc822", name: "lesson.eml" }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ unsupported: true, storedOnly: true });
+    expect(d.states).toEqual(["unsupported"]);
+    expect(d.replaceInput()).toBeUndefined();
+    expect(d.runs()).toBe(0);
   });
   it("rejects conversion failure and leaves parse state untouched", async () => {
     const d = await deps({ exitCode: 4 });

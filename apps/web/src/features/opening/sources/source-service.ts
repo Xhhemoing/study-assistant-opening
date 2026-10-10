@@ -22,10 +22,14 @@ function normalizeMime(value: string): string {
 }
 
 function stagingUploadUrl(sourceId: string): string {
-  return new URL(
-    `/api/opening/sources/${sourceId}/staging`,
-    process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:3000",
-  ).toString();
+  const configured = process.env.PUBLIC_BASE_URL?.trim();
+  if (!configured) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("PUBLIC_BASE_URL is required in production to mint staging upload URLs");
+    }
+    return new URL(`/api/opening/sources/${sourceId}/staging`, "http://127.0.0.1:3000").toString();
+  }
+  return new URL(`/api/opening/sources/${sourceId}/staging`, configured).toString();
 }
 
 function contentDispositionAttachment(filename: string): string {

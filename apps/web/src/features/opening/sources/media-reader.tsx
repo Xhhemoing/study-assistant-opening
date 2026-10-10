@@ -10,6 +10,7 @@ export type MediaReaderStateKind =
   | "loading"
   | "unavailable"
   | "parse_failed_original_saved"
+  | "parse_unsupported_original_saved"
   | "audio_only_transcript"
   | "insufficient_visual_coverage"
   | "ready"
@@ -22,9 +23,8 @@ export function classifyMediaReaderState(input: {
 }): MediaReaderStateKind {
   if (input.unavailable) return "unavailable";
   if (!input.source) return "loading";
-  if (input.source.parseState === "failed" || input.source.parseState === "unsupported") {
-    return "parse_failed_original_saved";
-  }
+  if (input.source.parseState === "failed") return "parse_failed_original_saved";
+  if (input.source.parseState === "unsupported") return "parse_unsupported_original_saved";
   if (input.segments == null) return "loading";
   if (input.segments.length === 0) return "empty";
   const mime = input.source.mime;
@@ -39,7 +39,9 @@ export function classifyMediaReaderState(input: {
 export function mediaReaderStateCopy(kind: MediaReaderStateKind): string {
   switch (kind) {
     case "parse_failed_original_saved":
-      return "原件已保存，解析失败";
+      return sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" });
+    case "parse_unsupported_original_saved":
+      return sourceStatusLabel({ uploadState: "uploaded", parseState: "unsupported" });
     case "audio_only_transcript":
       return "仅音频转写：未宣称理解板书或画面。";
     case "insufficient_visual_coverage":
@@ -119,8 +121,8 @@ export function MediaReader({
           {source?.name ?? "媒体阅读"}
         </h3>
         <p className="mt-1 text-[11px] leading-5 text-zinc-500" role="status">
-          {kind === "parse_failed_original_saved" && source
-            ? sourceStatusLabel(source)
+          {kind === "parse_failed_original_saved" || kind === "parse_unsupported_original_saved"
+            ? (source ? sourceStatusLabel(source) : mediaReaderStateCopy(kind))
             : (
               <>
                 {source ? sourceStatusLabel(source) : null}
@@ -131,7 +133,7 @@ export function MediaReader({
           {payload && !payload.claimsVisualUnderstanding ? " · 不宣称视觉理解" : ""}
         </p>
       </div>
-      {kind === "parse_failed_original_saved" || kind === "empty" ? null : (
+      {kind === "parse_failed_original_saved" || kind === "parse_unsupported_original_saved" || kind === "empty" ? null : (
         <ul className="max-h-64 space-y-2 overflow-y-auto text-xs leading-5 text-zinc-700" aria-label="媒体时间轴">
           {(payload?.segments ?? []).map((segment, index) => (
             <li key={`${segment.startMs}-${segment.endMs}-${index}`} className="rounded-md border border-zinc-200 bg-white px-3 py-2">

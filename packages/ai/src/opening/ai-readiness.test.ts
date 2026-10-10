@@ -13,6 +13,7 @@ const readyFacts = {
   remainingCents: 490,
   reconciledUnknownCount: 0,
   visionAvailable: true,
+  parserOcrReady: true,
   workerOk: true,
   workerDetail: "worker 积压正常",
   availableModelCount: 2,
@@ -76,5 +77,25 @@ describe("ai readiness classification", () => {
     expect(byKey.vision_model.fixHint).toMatch(/文字辅导/);
     expect(byKey.vision_model.fixHint).toContain("/settings/advanced");
     expect(byKey.available_model.fixHint).toContain("日额度 > 0");
+  });
+
+  it("marks parser_ocr as soft and does not hard-block when OCR is unset", () => {
+    const items = buildAiReadinessItems({ ...readyFacts, parserOcrReady: false });
+    const ocr = items.find(item => item.key === "parser_ocr");
+    expect(ocr).toMatchObject({
+      ok: false,
+      severity: "soft",
+      detail: "扫描件 OCR 未配置",
+    });
+    expect(ocr!.fixHint).toContain("PARSER_OCR_MODEL_DIR");
+    expect(ocr!.fixHint).toMatch(/文字辅导不要求/);
+    expect(isAiReadinessHardBlocker(ocr!)).toBe(false);
+    expect(hasAiReadinessHardBlockers(items)).toBe(false);
+  });
+
+  it("reports parser_ocr ok when configured", () => {
+    const items = buildAiReadinessItems({ ...readyFacts, parserOcrReady: true });
+    const ocr = items.find(item => item.key === "parser_ocr");
+    expect(ocr).toMatchObject({ ok: true, severity: "soft", detail: "扫描件 OCR 已配置" });
   });
 });

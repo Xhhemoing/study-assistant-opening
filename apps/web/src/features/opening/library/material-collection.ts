@@ -1,7 +1,7 @@
 import type { SourceRecord } from "@aistudy/contracts";
 
 export type MaterialKind = "all" | "pdf" | "image" | "text" | "audio" | "other";
-export type MaterialStatus = "all" | "processing" | "ready" | "attention" | "stored";
+export type MaterialStatus = "all" | "incomplete_upload" | "parsing" | "ready" | "attention" | "stored";
 export type MaterialSort = "newest" | "oldest" | "name" | "largest";
 export type MaterialCollectionOptions = { query: string; kind: MaterialKind; status: MaterialStatus; sort: MaterialSort; page: number; pageSize: number };
 export type MaterialCollection = { items: SourceRecord[]; total: number; pages: number; page: number };
@@ -15,9 +15,9 @@ function kindOf(record: SourceRecord): Exclude<MaterialKind, "all"> {
 }
 function statusOf(record: SourceRecord): Exclude<MaterialStatus, "all"> {
   if (record.uploadState === "rejected" || record.parseState === "failed") return "attention";
-  if (record.uploadState === "pending") return "processing";
+  if (record.uploadState !== "uploaded") return "incomplete_upload";
   if (record.parseState === "unsupported") return "stored";
-  if (["not_started", "queued", "running"].includes(record.parseState)) return "processing";
+  if (["not_started", "queued", "running"].includes(record.parseState)) return "parsing";
   if (record.parseState === "ready") return "ready";
   return "stored";
 }

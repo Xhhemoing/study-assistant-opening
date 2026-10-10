@@ -9,6 +9,8 @@ export type UploadMime =
   | "audio/mpeg"
   | "audio/mp4"
   | "audio/wav"
+  | "video/mp4"
+  | "video/webm"
   | "text/markdown"
   | "text/html"
   | "message/rfc822"
@@ -30,6 +32,8 @@ const BY_EXTENSION: Record<string, UploadMime> = {
   mp3: "audio/mpeg",
   m4a: "audio/mp4",
   wav: "audio/wav",
+  mp4: "video/mp4",
+  webm: "video/webm",
 };
 
 /** Declared MIME, else extension. Unknown files are rejected, never renamed to PDF. */
@@ -42,13 +46,33 @@ export function resolveUploadMime(input: { name: string; type: string }): Upload
 }
 
 /** Queued longer than this (by createdAt) gets slower-queue copy — never marks failed. */
-const AGED_QUEUED_MS = 3 * 60 * 1000;
+export const AGED_QUEUED_MS = 3 * 60 * 1000;
 
 function isAgedQueued(createdAt: string | undefined, nowMs: number): boolean {
   if (!createdAt) return false;
   const createdMs = Date.parse(createdAt);
   if (!Number.isFinite(createdMs)) return false;
   return nowMs - createdMs >= AGED_QUEUED_MS;
+}
+
+/** Uploaded + parse queued longer than AGED_QUEUED_MS — eligible for delete shortcut. */
+export function isAgedQueuedParse(
+  record: Pick<SourceRecord, "uploadState" | "parseState"> & { createdAt?: string },
+  nowMs: number = Date.now(),
+): boolean {
+  return record.uploadState === "uploaded"
+    && record.parseState === "queued"
+    && isAgedQueued(record.createdAt, nowMs);
+}
+
+/** Inbox row delete shortcut: failed/rejected/pending/unsupported/aged-queued. */
+export function canDeleteSourceShortcut(
+  record: Pick<SourceRecord, "uploadState" | "parseState"> & { createdAt?: string },
+  nowMs: number = Date.now(),
+): boolean {
+  if (record.uploadState === "rejected" || record.uploadState === "pending") return true;
+  if (record.parseState === "failed" || record.parseState === "unsupported") return true;
+  return isAgedQueuedParse(record, nowMs);
 }
 
 export function sourceStatusLabel(

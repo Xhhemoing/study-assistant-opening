@@ -18,6 +18,13 @@ describe("media-reader state", () => {
 
     expect(
       classifyMediaReaderState({
+        source: { ...baseSource, parseState: "unsupported" },
+        segments: [],
+      }),
+    ).toBe("parse_unsupported_original_saved");
+
+    expect(
+      classifyMediaReaderState({
         source: { ...baseSource, mime: "audio/mpeg" },
         segments: [
           {
@@ -50,7 +57,8 @@ describe("media-reader state", () => {
       }),
     ).toBe("insufficient_visual_coverage");
 
-    expect(mediaReaderStateCopy("parse_failed_original_saved")).toContain("原件已保存");
+    expect(mediaReaderStateCopy("parse_failed_original_saved")).toBe("原件已保存，解析失败");
+    expect(mediaReaderStateCopy("parse_unsupported_original_saved")).toBe("原件已保存，暂不能提取文字");
     expect(mediaReaderStateCopy("audio_only_transcript")).toContain("仅音频");
     expect(mediaReaderStateCopy("insufficient_visual_coverage")).toContain("视觉覆盖不足");
   });

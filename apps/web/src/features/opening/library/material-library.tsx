@@ -20,8 +20,11 @@ const kinds: Array<{ value: MaterialKind; label: string }> = [
   { value: "audio", label: "音视频" }, { value: "other", label: "演示文稿与其他" },
 ];
 const statuses: Array<{ value: MaterialStatus; label: string }> = [
-  { value: "all", label: "全部状态" }, { value: "processing", label: "处理中" },
-  { value: "ready", label: "可用于提问" }, { value: "attention", label: "上传或解析失败" },
+  { value: "all", label: "全部状态" },
+  { value: "incomplete_upload", label: "上传未完成" },
+  { value: "parsing", label: "正在解析" },
+  { value: "ready", label: "可用于提问" },
+  { value: "attention", label: "上传或解析失败" },
   { value: "stored", label: "仅保存原件" },
 ];
 const sorts: Array<{ value: MaterialSort; label: string }> = [
@@ -50,14 +53,16 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
   const changeSpace = (next: typeof space) => { library.changeSpace(next); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
-  const processing = sources.filter(record => materialStatus(record) === "processing").length;
+  const incompleteUpload = sources.filter(record => materialStatus(record) === "incomplete_upload").length;
+  const parsing = sources.filter(record => materialStatus(record) === "parsing").length;
   const failures = sources.filter(record => materialStatus(record) === "attention").length;
   return <div className="grid min-w-0 gap-6 lg:grid-cols-[180px_minmax(0,1fr)]">
     <MaterialSpaceNav sources={sources} organization={organization} space={space} onSpace={changeSpace} onCreate={library.createCourse} disabled={busy || loading || !library.organizationReady} />
     <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-600"><h2 className="text-sm font-semibold text-zinc-900">{title}</h2><span>{scoped.length} 份材料</span>
-          {processing > 0 ? <span role="status">{processing} 份处理中</span> : null}
+          {incompleteUpload > 0 ? <span role="status">{incompleteUpload} 份上传未完成</span> : null}
+          {parsing > 0 ? <span role="status">{parsing} 份正在解析</span> : null}
           {failures > 0 ? <span className="text-red-700">{failures} 份需处理</span> : null}
         </div>
         <button type="button" className={ui.secondary} disabled={refreshing || busy} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" className={refreshing ? "motion-safe:animate-spin" : ""} />刷新状态</button>
@@ -80,12 +85,18 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
       </div>
       {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
       {organizationError ? <LoadError message={organizationError} onRetry={() => void load()} /> : null}
+      {!loading && !library.organizationReady && !organizationError ? (
+        <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          课程关系尚未就绪，暂时无法归入课程或批量整理；仍可查看与上传原件。请稍后刷新。
+        </p>
+      ) : null}
       {library.result ? <div role="status" className="space-y-1 text-xs text-zinc-700"><p>{library.result.succeeded.length} 份整理成功{library.result.failed.length ? `，${library.result.failed.length} 份未完成` : ""}。</p>
         {library.result.failed.map(item => <p key={item.id} className="break-words text-red-700">{sources.find(source => source.id === item.id)?.name ?? item.id}：{item.message}</p>)}
       </div> : null}
       {loading ? <LoadingRows label="正在读取材料…" /> : <>
         {selection.size ? <MaterialBatchActions key={space} count={selection.size} courses={organization.courses} busy={busy || !library.organizationReady} courseId={courseId}
-          onAdd={(target, role) => library.batch(target, role)} onRemove={() => courseId ? library.batch(courseId) : Promise.resolve()} onClear={library.clearSelection} /> : null}
+          onAdd={(target, role) => library.batch(target, role)} onRemove={() => courseId ? library.batch(courseId) : Promise.resolve()}
+          onDelete={() => library.deleteSelected()} onClear={library.clearSelection} /> : null}
         <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label>
         <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady} courseId={uploadCourseId} initialOpen={initialOpen}

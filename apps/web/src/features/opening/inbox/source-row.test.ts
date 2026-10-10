@@ -146,3 +146,53 @@ it("shows assign-to-course shortcut when onAssign is provided", () => {
   expect(html).toContain("归入课程");
   expect(html).toContain("管理材料");
 });
+
+it("shows delete shortcut for unsupported parse rows when onDelete is provided", () => {
+  const html = renderToStaticMarkup(createElement(SourceRow, {
+    record: {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "legacy.ppt",
+      mime: "application/vnd.ms-powerpoint",
+      bytes: 20,
+      createdAt: "2026-10-04T00:00:00.000Z",
+      uploadState: "uploaded",
+      parseState: "unsupported",
+    },
+    onDelete: () => {},
+  }));
+  expect(html).toContain("删除");
+  expect(html).toContain("原件已保存，暂不能提取文字");
+});
+
+it("shows delete shortcut for aged queued parse rows when onDelete is provided", () => {
+  const html = renderToStaticMarkup(createElement(SourceRow, {
+    record: {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "slow.pdf",
+      mime: "application/pdf",
+      bytes: 20,
+      // Created well before AGED_QUEUED_MS (3 min) relative to "now" in sourceStatusLabel default Date.now().
+      createdAt: "2020-01-01T00:00:00.000Z",
+      uploadState: "uploaded",
+      parseState: "queued",
+    },
+    onDelete: () => {},
+  }));
+  expect(html).toContain("删除");
+});
+
+it("does not show delete shortcut for fresh queued rows", () => {
+  const html = renderToStaticMarkup(createElement(SourceRow, {
+    record: {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "fresh.pdf",
+      mime: "application/pdf",
+      bytes: 20,
+      createdAt: new Date().toISOString(),
+      uploadState: "uploaded",
+      parseState: "queued",
+    },
+    onDelete: () => {},
+  }));
+  expect(html).not.toContain("删除");
+});

@@ -5,12 +5,12 @@ import { useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent 
 import { ui } from "../design/ui";
 import { resolveUploadMime } from "./upload-state";
 
-export const openingUploadAccept = ".pdf,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav";
+export const openingUploadAccept = ".pdf,.pptx,.html,.htm,.md,.markdown,.png,.jpg,.jpeg,.webp,.mp3,.m4a,.wav,.mp4,.webm";
 
 const typeLabels: Record<string, string> = {
   ".pdf": "PDF", ".pptx": "PPTX", ".html": "HTML", ".htm": "HTML",
   ".md": "Markdown", ".markdown": "Markdown", ".png": "PNG", ".jpg": "JPG", ".jpeg": "JPEG",
-  ".webp": "WebP", ".mp3": "MP3", ".m4a": "M4A", ".wav": "WAV",
+  ".webp": "WebP", ".mp3": "MP3", ".m4a": "M4A", ".wav": "WAV", ".mp4": "MP4", ".webm": "WebM",
 };
 
 export function supportedUploadTypesLabel(accept: string): string {

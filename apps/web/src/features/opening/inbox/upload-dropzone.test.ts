@@ -57,4 +57,12 @@ describe("UploadDropzone", () => {
     expect(isAcceptedUploadFile({ name: "lecture.mp3", type: "audio/mpeg" } as File, openingUploadAccept)).toBe(true);
   });
 
+  it("accepts mp4/webm video on the default accept list", () => {
+    expect(openingUploadAccept.split(",")).toContain(".mp4");
+    expect(openingUploadAccept.split(",")).toContain(".webm");
+    expect(isAcceptedUploadFile({ name: "clip.mp4", type: "" } as File, openingUploadAccept)).toBe(true);
+    expect(isAcceptedUploadFile({ name: "clip.webm", type: "video/webm" } as File, openingUploadAccept)).toBe(true);
+    expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("MP4");
+    expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("WebM");
+  });
 });

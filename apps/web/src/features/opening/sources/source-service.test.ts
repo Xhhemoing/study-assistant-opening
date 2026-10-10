@@ -232,6 +232,78 @@ describe("opening signed upload service", () => {
     }
   });
 
+  it("fails closed when PUBLIC_BASE_URL is missing in production", async () => {
+    const prevUrl = process.env.PUBLIC_BASE_URL;
+    const prevEnv = process.env.NODE_ENV;
+    delete process.env.PUBLIC_BASE_URL;
+    process.env.NODE_ENV = "production";
+    try {
+      const { svc } = setup();
+      await expect(
+        svc.beginUpload(principal, {
+          name: "a.pdf",
+          mime: "application/pdf",
+          bytes: pdfBytes.length,
+          sha256: pdfSha,
+        }),
+      ).rejects.toThrow(/PUBLIC_BASE_URL is required in production/);
+    } finally {
+      if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+      else process.env.PUBLIC_BASE_URL = prevUrl;
+      if (prevEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it("uses configured PUBLIC_BASE_URL in production", async () => {
+    const prevUrl = process.env.PUBLIC_BASE_URL;
+    const prevEnv = process.env.NODE_ENV;
+    process.env.PUBLIC_BASE_URL = "https://study.example.com";
+    process.env.NODE_ENV = "production";
+    try {
+      const { svc } = setup();
+      const ticket = await svc.beginUpload(principal, {
+        name: "a.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.length,
+        sha256: pdfSha,
+      });
+      expect(ticket.uploadUrl).toBe(
+        `https://study.example.com/api/opening/sources/${ticket.source.id}/staging`,
+      );
+      expect(ticket.uploadUrl).not.toContain("127.0.0.1");
+    } finally {
+      if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+      else process.env.PUBLIC_BASE_URL = prevUrl;
+      if (prevEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it("falls back to loopback staging host when PUBLIC_BASE_URL is unset outside production", async () => {
+    const prevUrl = process.env.PUBLIC_BASE_URL;
+    const prevEnv = process.env.NODE_ENV;
+    delete process.env.PUBLIC_BASE_URL;
+    process.env.NODE_ENV = "test";
+    try {
+      const { svc } = setup();
+      const ticket = await svc.beginUpload(principal, {
+        name: "a.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.length,
+        sha256: pdfSha,
+      });
+      expect(ticket.uploadUrl).toBe(
+        `http://127.0.0.1:3000/api/opening/sources/${ticket.source.id}/staging`,
+      );
+    } finally {
+      if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+      else process.env.PUBLIC_BASE_URL = prevUrl;
+      if (prevEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevEnv;
+    }
+  });
+
   it("completes a matching upload with one job and one outbox insert", async () => {
     const { svc, sql, put, has } = setup();
     const ticket = await svc.beginUpload(principal, {

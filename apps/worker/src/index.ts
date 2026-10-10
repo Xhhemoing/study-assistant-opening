@@ -2,7 +2,7 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3 } from "@aistudy/database";
+  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
@@ -17,6 +17,7 @@ import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
 import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
+import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
@@ -148,9 +149,21 @@ export async function main(): Promise<void> {
     await runJob(repository, job.data.jobId ?? job.id, handlerForKind(kind, handlers));
   }, { connection: redis, concurrency: kind === "parse" ? 1 : 2 }));
   const tick = setInterval(() => { void dispatchPending({ repository, queues }).then(() => dispatchTutorTurns({ tutorJobs, queues })); }, 1000);
+  // G4: slower interval for pending-upload TTL sweep (Data sweepExpiredPendingUploadsAll).
+  // Returned swept ids are the notify hook — delivery skipped this wave.
+  const sweepPendingUploads = createSweepPendingUploadsJob({
+    sweepAll: (options) => sweepExpiredPendingUploadsAll(sql, options),
+  });
+  const sweepTick = setInterval(() => {
+    if (stopping) return;
+    void sweepPendingUploads().catch(() => {
+      /* sweep failure must not crash the worker */
+    });
+  }, PENDING_UPLOAD_SWEEP_INTERVAL_MS);
   const shutdown = async () => {
     stopping = true;
     clearInterval(tick);
+    clearInterval(sweepTick);
     await Promise.all(workers.map((worker) => worker.close()));
     await Promise.all(Object.values(queues).map((queue) => queue.close()));
     await redis.quit();

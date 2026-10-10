@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { createMaterialOrganizationClient, type MaterialOrganization, type OrganizationResult } from "./material-organization-client";
+import { deleteSelectedMaterials } from "./material-batch-delete";
 import { selectedMaterials, type MaterialSpace } from "./material-spaces";
 
 const empty: MaterialOrganization = { courses: [], memberships: [] };
@@ -80,6 +81,19 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       if (mounted.current) setOrganizationError(reason instanceof Error ? reason.message : "整理结果尚未确认，请刷新后核对。");
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
+  async function deleteSelected() {
+    if (locked.current || !selection.size) return;
+    locked.current = true; setBusy(true); setResult(null);
+    try {
+      const next = await deleteSelectedMaterials([...selection]);
+      if (!mounted.current) return;
+      setResult(next);
+      setSelected(next.failed.map(item => item.id));
+      await refresh();
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : "删除结果尚未确认，请刷新后核对。");
+    } finally { locked.current = false; if (mounted.current) setBusy(false); }
+  }
   return { sources, organization, space, selection, loading, refreshing, busy, organizationReady, error, organizationError, result, uploadCourseId,
-    refresh, load, changeSpace, toggle, togglePage, batch, assignOne, createCourse, clearSelection: () => { if (!locked.current) setSelected([]); } };
+    refresh, load, changeSpace, toggle, togglePage, batch, assignOne, deleteSelected, createCourse, clearSelection: () => { if (!locked.current) setSelected([]); } };
 }

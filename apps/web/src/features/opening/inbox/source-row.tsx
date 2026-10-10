@@ -1,7 +1,7 @@
 "use client";
 
 import type { SourceRecord } from "@aistudy/contracts";
-import { sourceStatusLabel } from "./upload-state";
+import { canDeleteSourceShortcut, sourceStatusLabel } from "./upload-state";
 import { ExternalLink, FileText, FolderInput, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { ui, tone } from "../design/ui";
 
@@ -36,7 +36,7 @@ export function SourceRow({
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   const metadata = sourceMetadata(record);
   const failed = record.uploadState === "rejected" || record.parseState === "failed";
-  const canDeleteShortcut = failed || record.uploadState === "pending";
+  const canDeleteShortcut = canDeleteSourceShortcut(record);
   const stateTone = failed ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
   return (
     <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">

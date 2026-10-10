@@ -15,7 +15,7 @@ export type AiReadinessItem = {
 };
 
 /** Soft keys never count as hard blockers for text-tutor readiness. */
-export const AI_READINESS_SOFT_KEYS = new Set(["vision_model", "reconciled_unknown"]);
+export const AI_READINESS_SOFT_KEYS = new Set(["vision_model", "reconciled_unknown", "parser_ocr"]);
 
 export function aiReadinessSeverityForKey(key: string): AiReadinessSeverity {
   return AI_READINESS_SOFT_KEYS.has(key) ? "soft" : "hard";
@@ -43,6 +43,8 @@ export type AiReadinessFacts = {
   remainingCents: number;
   reconciledUnknownCount: number;
   visionAvailable: boolean;
+  /** True when PARSER_OCR_MODEL_DIR (or equivalent) is configured for scanned-PDF OCR. Soft only. */
+  parserOcrReady: boolean;
   workerOk: boolean;
   workerDetail: string;
   availableModelCount: number;
@@ -60,7 +62,7 @@ function item(
 /**
  * Build readiness checklist items from counted/boolean facts (no secrets).
  * Budget 0 remains a hard fail (`daily_budget` + typically `available_model`).
- * Missing vision is soft only.
+ * Missing vision / OCR are soft only.
  */
 export function buildAiReadinessItems(facts: AiReadinessFacts): AiReadinessItem[] {
   return [
@@ -95,6 +97,12 @@ export function buildAiReadinessItems(facts: AiReadinessFacts): AiReadinessItem[
       facts.visionAvailable,
       facts.visionAvailable ? "有支持图片的可用模型" : "没有支持图片的可用模型",
       "可选：照片/PDF 图片材料才需要视觉模型；文字辅导不要求。在高级设置 /settings/advanced 中选择 supportsVision 的模型。",
+    ),
+    item(
+      "parser_ocr",
+      facts.parserOcrReady,
+      facts.parserOcrReady ? "扫描件 OCR 已配置" : "扫描件 OCR 未配置",
+      "可选：扫描 PDF / 纯图片页需 OCR 才能提取文字；普通文字 PDF 与文字辅导不要求。在 worker 环境设置 PARSER_OCR_MODEL_DIR 指向离线 RapidOCR 模型目录。",
     ),
     item(
       "worker_backlog",
