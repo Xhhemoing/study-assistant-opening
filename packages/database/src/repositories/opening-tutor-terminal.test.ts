@@ -218,10 +218,21 @@ describe("opening tutor jobs repository", () => {
         return [{ id: "assistant-turn-1" }];
       }
       if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
-      if (query.includes("SELECT l.* FROM opening_learning_sessions")) return [{ id: "session-1", course_id: "course-1", source_ids: [] }];
+      if (query.includes("SELECT l.* FROM opening_learning_sessions")) {
+        return [{ id: "session-1", course_id: "course-1", source_ids: [], activity_id: null }];
+      }
+      if (query.includes("SELECT c.id FROM courses")) return [{ id: "course-1" }];
       if (query.includes("SELECT t.id FROM opening_turns")) return [{ id: "assistant-turn-1" }];
       if (query.includes("RETURNING revision")) return [{ revision: 1 }];
-      if (query.includes("INSERT INTO opening_help_exposures")) return [{ created_at: "2026-09-28T00:00:00Z", delivered_at: "2026-09-28T00:00:01Z" }];
+      if (query.includes("INSERT INTO opening_help_exposures")) {
+        return [{
+          id: "exposure-1", workspace_id: scope.workspaceId, session_id: "session-1",
+          problem_id: null, turn_id: "assistant-turn-1", level: "hinted", kind: "hint",
+          delivered: true, attempt_id: null, activity_id: null, item_version_id: null,
+          created_at: "2026-09-28T00:00:00Z", delivered_at: "2026-09-28T00:00:01Z",
+          history_revision: 1,
+        }];
+      }
       return [];
     });
     const repository = createOpeningTutorJobsRepository(sql);
@@ -238,6 +249,7 @@ describe("opening tutor jobs repository", () => {
         sessionId: "session-1",
         problemId: null,
         turnId: "assistant-turn-1",
+        kind: "hint",
         level: "hinted",
         delivered: true,
       },
@@ -274,6 +286,7 @@ describe("opening tutor jobs repository", () => {
         sessionId: "session-1",
         problemId: null,
         turnId: "assistant-turn-1",
+        kind: "hint",
         level: "hinted",
         delivered: true,
       },

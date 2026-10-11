@@ -183,6 +183,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_help_exposures: [
     "id", "workspace_id", "session_id", "problem_id", "turn_id", "level", "delivered",
     "created_at", "attempt_id", "delivered_at", "history_revision",
+    "kind", "activity_id", "item_version_id",
   ],
   opening_learning_observations: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "source_ids",

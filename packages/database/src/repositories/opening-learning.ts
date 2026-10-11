@@ -94,7 +94,8 @@ export function createOpeningLearningRepository(sql: Sql) {
     },
     async listDeliveredExposures(scope: Scope, sessionId: string): Promise<Array<"hinted" | "revealed">> {
       if (!await getSession(scope, sessionId)) throw learningError("NOT_FOUND", "session not found");
-      const rows = await sql`SELECT level FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND session_id=${sessionId} AND delivered=TRUE`;
+      // V2-13: instruction kind does not elevate item assistance.
+      const rows = await sql`SELECT level FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND session_id=${sessionId} AND delivered=TRUE AND kind <> 'instruction'`;
       return rows.map((r) => r.level as "hinted" | "revealed");
     },
     async listObservationsForCourse(scope: Scope, courseId: string): Promise<LearningObservation[]> {

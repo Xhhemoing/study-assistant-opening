@@ -31,6 +31,8 @@ export interface EvidenceHelpExposure {
   attemptId?: string | null;
   problemId?: string | null;
   level: "hinted" | "revealed";
+  /** V2-13: instruction | hint | solution. Missing/legacy reads as hint. */
+  kind?: "instruction" | "hint" | "solution" | null;
   /** Persisted and retrievable by the client, not proof of reading. Null means unknown. */
   delivered: boolean | null;
   deliveredAt?: number | null;

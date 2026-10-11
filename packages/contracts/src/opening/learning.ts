@@ -77,14 +77,23 @@ export const problemRefSchema = z
   })
   .strict();
 
-/** Help counts only after server-confirmed delivery (RU-04). */
+/** Instruction vs item hint/solution — V2-13 teaching exposure kind. */
+export const helpExposureKindSchema = z.enum(["instruction", "hint", "solution"]);
+
+/**
+ * Help counts only after server-confirmed delivery (RU-04).
+ * `kind` required on write; legacy readers without column treat missing as hint.
+ */
 export const helpExposureSchema = z
   .object({
     id: uuidSchema,
     sessionId: uuidSchema,
     attemptId: uuidSchema.nullable().optional(),
     problemId: uuidSchema.nullable(),
+    itemVersionId: uuidSchema.nullable().optional(),
+    activityId: uuidSchema.nullable().optional(),
     turnId: uuidSchema,
+    kind: helpExposureKindSchema,
     level: z.enum(["hinted", "revealed"]),
     delivered: z.literal(true),
     deliveredAt: isoDateTimeSchema.nullable().optional(),
@@ -119,6 +128,14 @@ export const observationInputSchema = z
     dimension: z.enum(["recall", "explain", "procedure", "transfer", "timed"]).optional(),
   })
   .strict();
+
+/**
+ * v2 additive activity-scoped observation adapter sketch.
+ * Does not replace observationInputSchema; courseId still required for same-table insert until ADR nullable course lands.
+ */
+export const activityScopedObservationInputSchema = observationInputSchema.extend({
+  activityId: uuidSchema,
+});
 
 export const learningObservationSchema = observationInputSchema
   .omit({ nodeId: true, dimension: true })
@@ -216,4 +233,6 @@ export type LearningSessionCreateInput = z.infer<
   typeof learningSessionCreateInputSchema
 >;
 export type ProblemRef = z.infer<typeof problemRefSchema>;
+export type HelpExposureKind = z.infer<typeof helpExposureKindSchema>;
 export type HelpExposure = z.infer<typeof helpExposureSchema>;
+export type ActivityScopedObservationInput = z.infer<typeof activityScopedObservationInputSchema>;

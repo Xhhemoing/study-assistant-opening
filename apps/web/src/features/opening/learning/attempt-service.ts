@@ -89,11 +89,13 @@ export function createOpeningAttemptService(sql: Sql) {
       const earliestTimes = await loadRetestSubmitEarliestTimes(sql, scope, input.retestId);
       assertRetestSubmitEarliestAllowed(earliestTimes, new Date());
       const current = await knowledge.get(scope, attempt.courseId);
+      // V2-13: dimension must be explicit (domain no longer defaults transfer).
       const skillLink = prepareRetestSkillLink({
         retestId: input.retestId,
         assistance,
         outcome: input.outcome,
         skillLabel: attempt.skillLabel,
+        dimension: "transfer",
         snapshot: current?.snapshot ?? null,
       });
       return learning.insertObservation(

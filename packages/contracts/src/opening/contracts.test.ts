@@ -7,7 +7,9 @@ import {
   shouldCreateLearningSession,
   observationAllowsIndependent,
   problemRefSchema,
+  helpExposureKindSchema,
   helpExposureSchema,
+  activityScopedObservationInputSchema,
   memoryDecisionSchema,
   memoryItemSchema,
   observationInputSchema,
@@ -299,13 +301,40 @@ describe("F02 opening contracts", () => {
       stemSnapshot: "invert f(x)=2x", artifactKind: "reference_item",
     }).physicalPage).toBe(4);
     expect(helpExposureSchema.safeParse({
-      id: U, sessionId: U2, problemId: U, turnId: U, level: "hinted",
+      id: U, sessionId: U2, problemId: U, turnId: U, kind: "hint", level: "hinted",
       delivered: false, createdAt: ISO,
     }).success).toBe(false);
     expect(helpExposureSchema.parse({
-      id: U, sessionId: U2, problemId: U, turnId: U, level: "revealed",
+      id: U, sessionId: U2, problemId: U, turnId: U, kind: "solution", level: "revealed",
       delivered: true, createdAt: ISO,
     }).delivered).toBe(true);
+  });
+
+  it("helpExposure requires kind and rejects unknown kind (V2-13 T1)", () => {
+    expect(helpExposureKindSchema.parse("instruction")).toBe("instruction");
+    expect(helpExposureSchema.safeParse({
+      id: U, sessionId: U2, problemId: U, turnId: U, level: "hinted",
+      delivered: true, createdAt: ISO,
+    }).success).toBe(false);
+    expect(helpExposureSchema.safeParse({
+      id: U, sessionId: U2, problemId: U, turnId: U, kind: "mastered", level: "hinted",
+      delivered: true, createdAt: ISO,
+    }).success).toBe(false);
+    expect(helpExposureSchema.parse({
+      id: U, sessionId: U2, problemId: null, turnId: U, kind: "instruction", level: "revealed",
+      delivered: true, createdAt: ISO, activityId: null, itemVersionId: null,
+    }).kind).toBe("instruction");
+  });
+
+  it("activityScopedObservationInputSchema requires activityId and keeps courseId (V2-13)", () => {
+    expect(activityScopedObservationInputSchema.safeParse({
+      sessionId: U, courseId: U2, skillLabel: "chain rule", sourceIds: [],
+      answer: "1", outcome: "unverified", assistance: "unknown", clientKey: "obs-key-01",
+    }).success).toBe(false);
+    expect(activityScopedObservationInputSchema.parse({
+      sessionId: U, courseId: U2, activityId: U, skillLabel: "chain rule", sourceIds: [],
+      answer: "1", outcome: "unverified", assistance: "unknown", clientKey: "obs-key-01",
+    }).activityId).toBe(U);
   });
 
 it("timeConfigSupportsAbsoluteScheduling requires termStart + non-empty period map (RU-05)", () => {

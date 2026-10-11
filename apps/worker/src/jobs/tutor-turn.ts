@@ -11,6 +11,7 @@ import {
 import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
 import {
   assertCitationsForPage,
+  classifyTutorHelpKind,
   instructionWithMemories,
   makeTutorInstruction,
   preferCitationsForPage,
@@ -63,6 +64,7 @@ export type TutorTurnDeps = {
   learning?: {
     insertHelpExposure(scope: Scope, exposure: {
       id: string; sessionId: string; problemId: string | null; turnId: string;
+      kind: "instruction" | "hint" | "solution";
       level: "hinted" | "revealed"; delivered: true;
     }): Promise<unknown>;
   };
@@ -211,6 +213,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             problemId: null,
             attemptId: turn.attemptId ?? null,
             turnId: claimed.assistantTurnId,
+            kind: classifyTutorHelpKind({
+              mode,
+              attemptId: turn.attemptId ?? null,
+              problemId: null,
+            }),
             level: mode === "explain" ? "revealed" as const : "hinted" as const,
             delivered: true as const,
           }

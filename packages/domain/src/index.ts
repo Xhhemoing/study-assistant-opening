@@ -173,9 +173,11 @@ export {
 
 export {
   resolveAssistance,
+  resolveAssistanceFromExposures,
   qualifyObservationAssistance,
   type AssistanceLevel,
   type HelpExposureLevel,
+  type KindedHelpExposureLevel,
   type ObservationOutcome,
 } from "./opening/assistance";
 
@@ -200,7 +202,6 @@ export {
   type AdaptiveTutorActionKind,
 } from "./opening/tutor-policy";
 export {
-  RETEST_CLOSE_DEFAULT_DIMENSION,
   nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,
   prepareRetestSkillLink,
@@ -210,6 +211,21 @@ export {
   type RetestCloseOutcome,
   type RetestSkillLinkFields,
 } from "./opening/retest-close-evidence";
+export {
+  assertActivityCompleteDoesNotUpgradeMastery,
+  assertNoUnevidencedIndependence,
+  assertNoUnevidencedRead,
+  classifyTutorHelpKind,
+  exposureAffectsItemAssistance,
+  exposuresAffectingItemAssistance,
+  mapPmUnknownOutcome,
+  readHelpExposureKind,
+  type ActivityCompleteSideEffects,
+  type ClassifyTutorHelpKindInput,
+  type IndependenceEvidence,
+  type ReadEvidence,
+  type TutorHelpMode,
+} from "./opening/teaching-exposure";
 export {
   endOfLocalDayIso,
   extractStudyActionCandidates,

@@ -147,11 +147,17 @@ export async function linkOpeningSkillEvidenceInTx(
   });
 }
 
+/**
+ * SkillEvidence stays a course-scoped projection from eligible observations.
+ * V2-13: there is intentionally no activity-complete → link API; completing a
+ * teaching activity must not call link / linkOpeningSkillEvidenceInTx.
+ */
 export function createOpeningSkillEvidenceRepository(sql: Sql) {
   return {
     /**
      * Idempotent SkillEvidence link. Validates observation ownership and,
      * when a knowledge snapshot exists, that nodeId belongs to that course.
+     * Not callable from activity status=completed transitions (V2-13).
      */
     async link(scope: Scope, input: LinkSkillEvidenceInput): Promise<SkillEvidenceRecord> {
       skillEvidenceSchema.parse({

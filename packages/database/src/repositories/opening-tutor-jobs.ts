@@ -208,7 +208,10 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         sessionId: string;
         problemId: string | null;
         attemptId?: string | null;
+        activityId?: string | null;
+        itemVersionId?: string | null;
         turnId: string;
+        kind: "instruction" | "hint" | "solution";
         level: "hinted" | "revealed";
         delivered: true;
       };

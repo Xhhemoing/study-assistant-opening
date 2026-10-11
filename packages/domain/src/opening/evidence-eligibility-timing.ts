@@ -37,6 +37,8 @@ export function evaluateAssistance(
   };
   for (const help of history?.exposures ?? []) {
     if (help.delivered === false) continue;
+    // V2-13: concept instruction must not elevate item assistance / prior answer.
+    if ((help.kind ?? "hint") === "instruction") continue;
     const sameAttempt = help.attemptId === observation.attemptId;
     const otherProblem = Boolean(help.problemId && help.problemId !== observation.problemId);
     if (otherProblem && !sameAttempt) continue;

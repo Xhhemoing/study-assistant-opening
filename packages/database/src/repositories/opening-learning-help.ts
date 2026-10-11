@@ -4,12 +4,24 @@ import type { HelpExposure, Scope } from "@aistudy/contracts";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 function mapDeliveredHelp(row: Record<string, unknown>): HelpExposure {
+  const kindRaw = row.kind;
+  const kind =
+    kindRaw === "instruction" || kindRaw === "hint" || kindRaw === "solution"
+      ? kindRaw
+      : "hint";
   return {
-    id: String(row.id), sessionId: String(row.session_id),
+    id: String(row.id),
+    sessionId: String(row.session_id),
     attemptId: (row.attempt_id ?? null) as string | null,
-    problemId: row.problem_id as string | null, turnId: String(row.turn_id),
-    level: row.level as HelpExposure["level"], delivered: true,
-    createdAt: learningIso(row.created_at)!, deliveredAt: learningIso(row.delivered_at),
+    problemId: row.problem_id as string | null,
+    itemVersionId: (row.item_version_id ?? null) as string | null | undefined,
+    activityId: (row.activity_id ?? null) as string | null | undefined,
+    turnId: String(row.turn_id),
+    kind,
+    level: row.level as HelpExposure["level"],
+    delivered: true,
+    createdAt: learningIso(row.created_at)!,
+    deliveredAt: learningIso(row.delivered_at),
     historyRevision: Number(row.history_revision),
   };
 }
@@ -17,6 +29,7 @@ function mapDeliveredHelp(row: Record<string, unknown>): HelpExposure {
 /** Called after the completed assistant turn is persisted, in that same transaction. */
 export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scope, input: Omit<HelpExposure, "createdAt"> & { createdAt?: string }): Promise<HelpExposure> {
   if (input.delivered !== true) throw learningError("VALIDATION", "help must be persisted and retrievable");
+  if (!input.kind) throw learningError("VALIDATION", "help exposure requires kind");
   const session = await lockLearningSession(tx, scope, input.sessionId);
   await lockLearningHistory(tx, scope, String(session.course_id));
   await admitLearningSources(tx, scope, session.source_ids as string[]);
@@ -30,18 +43,21 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
   if (input.attemptId && !attempts[0]) throw learningError("VALIDATION", "help attempt does not belong to session");
   const problemId = attempts[0] ? attempts[0].problem_id as string | null : input.problemId;
   if (attempts[0] && input.problemId && input.problemId !== problemId) throw learningError("VALIDATION", "help problem does not match attempt");
+  const activityId = input.activityId ?? (session.activity_id as string | null | undefined) ?? null;
+  const itemVersionId = input.itemVersionId ?? null;
   const existing = await tx`SELECT * FROM opening_help_exposures WHERE id=${input.id} AND workspace_id=${scope.workspaceId}`;
   if (existing[0]) {
     const saved = mapDeliveredHelp(existing[0]);
     if (saved.sessionId !== input.sessionId || saved.turnId !== input.turnId || saved.level !== input.level
+      || saved.kind !== input.kind
       || saved.attemptId !== (input.attemptId ?? null) || saved.problemId !== problemId) {
       throw learningError("CONFLICT", "help exposure ID payload conflict");
     }
     return saved;
   }
   const revision = await nextLearningHistoryRevision(tx, scope, String(session.course_id));
-  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision)
-    VALUES (${input.id},${scope.workspaceId},${input.sessionId},${problemId},${input.turnId},${input.level},TRUE,${input.attemptId ?? null},clock_timestamp(),${revision}) RETURNING *`;
+  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision,kind,activity_id,item_version_id)
+    VALUES (${input.id},${scope.workspaceId},${input.sessionId},${problemId},${input.turnId},${input.level},TRUE,${input.attemptId ?? null},clock_timestamp(),${revision},${input.kind},${activityId},${itemVersionId}) RETURNING *`;
   await nextWorkspaceLearningHistoryRevision(tx, scope);
   const affected = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
     JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id

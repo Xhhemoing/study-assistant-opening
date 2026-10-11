@@ -31,6 +31,7 @@ describe("createRetestCloseHandler", () => {
       retestId: RETEST,
       assistance: "independent",
       outcome: "correct",
+      dimension: "transfer",
     });
 
     expect(ensureDueCleared).toHaveBeenCalledWith(scope, RETEST);
@@ -111,9 +112,32 @@ describe("createRetestCloseHandler", () => {
       retestId: RETEST,
       assistance: "independent",
       outcome: "correct",
+      dimension: "transfer",
     });
 
     expect(link).not.toHaveBeenCalled();
+    expect(result.skippedReason).toBe("no_node");
+  });
+
+  it("skips SkillEvidence link when dimension omitted (V2-13 no transfer default)", async () => {
+    const link = vi.fn();
+    const close = createRetestCloseHandler({
+      link,
+      ensureDueCleared: async () => ({ dueCleared: true }),
+      getSnapshot: async () => ({ nodes: [{ id: NODE, label: "chain rule" }] }),
+    });
+
+    const result = await close(scope, {
+      observationId: OBS,
+      courseId: COURSE,
+      skillLabel: "chain rule",
+      retestId: RETEST,
+      assistance: "independent",
+      outcome: "correct",
+    });
+
+    expect(link).not.toHaveBeenCalled();
+    expect(result.linked).toBeNull();
     expect(result.skippedReason).toBe("no_node");
   });
 });

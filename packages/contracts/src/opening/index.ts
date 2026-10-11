@@ -117,8 +117,10 @@ export {
   shouldCreateLearningSession,
   observationAllowsIndependent,
   problemRefSchema,
+  helpExposureKindSchema,
   helpExposureSchema,
   observationInputSchema,
+  activityScopedObservationInputSchema,
   learningObservationSchema,
   learningSummarySchema,
   retestCandidateSchema,
@@ -130,7 +132,9 @@ export {
   type LearningEvidenceVerdict,
   type LearningSessionCreateInput,
   type ProblemRef,
+  type HelpExposureKind,
   type HelpExposure,
+  type ActivityScopedObservationInput,
   verdictSourceSchema,
 } from "./learning";
 

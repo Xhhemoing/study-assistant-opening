@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  RETEST_CLOSE_DEFAULT_DIMENSION,
   nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,
   prepareRetestSkillLink,
@@ -56,7 +55,7 @@ describe("prepareRetestSkillLink", () => {
     ).toBeNull();
   });
 
-  it("resolves nodeId from snapshot by exact skillLabel and defaults dimension to transfer", () => {
+  it("returns null when dimension is omitted (no transfer default)", () => {
     expect(
       prepareRetestSkillLink({
         retestId: RETEST,
@@ -65,7 +64,20 @@ describe("prepareRetestSkillLink", () => {
         skillLabel: "chain rule",
         snapshot,
       }),
-    ).toEqual({ nodeId: NODE, dimension: RETEST_CLOSE_DEFAULT_DIMENSION });
+    ).toBeNull();
+  });
+
+  it("links when explicit dimension transfer is provided", () => {
+    expect(
+      prepareRetestSkillLink({
+        retestId: RETEST,
+        assistance: "independent",
+        outcome: "correct",
+        skillLabel: "chain rule",
+        dimension: "transfer",
+        snapshot,
+      }),
+    ).toEqual({ nodeId: NODE, dimension: "transfer" });
   });
 
   it("prefers explicit nodeId and dimension", () => {
@@ -108,5 +120,24 @@ describe("nodeIdForSkillLabel", () => {
 describe("nextTutorKindAfterRetestClose", () => {
   it("recommends independent_variant without mastery fields", () => {
     expect(nextTutorKindAfterRetestClose(NODE)).toBe("independent_variant");
+  });
+});
+
+describe("prepareRetestSkillLink honesty (V2-13 T9)", () => {
+  const snapshot = { nodes: [{ id: NODE, label: "chain rule" }] };
+
+  it.each([
+    ["hinted", "correct"],
+    ["independent", "incorrect"],
+    ["independent", "unverified"],
+  ] as const)("returns null for %s/%s even with explicit transfer", (assistance, outcome) => {
+    expect(prepareRetestSkillLink({
+      retestId: RETEST,
+      assistance,
+      outcome,
+      skillLabel: "chain rule",
+      dimension: "transfer",
+      snapshot,
+    })).toBeNull();
   });
 });

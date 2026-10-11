@@ -522,7 +522,32 @@ describe("tutor turn handler", () => {
       helpExposure: expect.objectContaining({
         sessionId,
         turnId: claimed.assistantTurnId,
+        kind: "hint",
         level: "hinted",
+        delivered: true,
+      }),
+    }));
+  });
+
+  it("sets kind instruction for explain without attempt/problem (V2-13 T16)", async () => {
+    const sessionId = "00000000-0000-4000-8000-0000000000aa";
+    const { deps, tutorJobs } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      mode: "explain",
+      learningSessionId: sessionId,
+      attemptId: null,
+      sourceVersions: { [chunkA.sourceId]: 0 },
+    }));
+    const claimed = { ...claimedJob, mode: "explain" };
+    deps.tutorJobs.claim = vi.fn(async () => claimed);
+    await createTutorTurnHandler(deps)(claimed.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      helpExposure: expect.objectContaining({
+        sessionId,
+        problemId: null,
+        kind: "instruction",
+        level: "revealed",
         delivered: true,
       }),
     }));

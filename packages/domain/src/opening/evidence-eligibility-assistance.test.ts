@@ -100,3 +100,41 @@ describe("evaluateEvidenceEligibility assistance", () => {
     expect(result.usableForDelayedCheck).toBe("unknown");
   });
 });
+
+  it("ignores instruction kind for a different problem (no item assistance elevation)", () => {
+    const result = evaluateEvidenceEligibility(observation, withHelp([
+      {
+        ...exposure,
+        attemptId: "other-attempt",
+        problemId: "other-problem",
+        kind: "instruction",
+        level: "revealed",
+      },
+    ]));
+    expect(result.independentAttempt).toBe("yes");
+    expect(result.reasonCodes).not.toContain("help_before_submission");
+    expect(result.reasonCodes).not.toContain("prior_answer_exposure");
+  });
+
+  it("ignores same-attempt instruction kind for item assistance", () => {
+    const result = evaluateEvidenceEligibility(observation, withHelp([
+      { ...exposure, kind: "instruction", level: "revealed" },
+    ]));
+    expect(result.independentAttempt).toBe("yes");
+    expect(result.reasonCodes).not.toContain("help_before_submission");
+  });
+
+  it("same-problem prior solution kind survives as prior_answer_exposure (V2-13 T4)", () => {
+    const result = evaluateEvidenceEligibility(observation, withHelp([
+      {
+        ...exposure,
+        attemptId: "attempt-1",
+        deliveredAt: 100,
+        level: "revealed",
+        kind: "solution",
+      },
+    ]));
+    expect(result.independentAttempt).toBe("yes");
+    expect(result.usableForDelayedCheck).toBe("no");
+    expect(result.reasonCodes).toContain("prior_answer_exposure");
+  });

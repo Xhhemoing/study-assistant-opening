@@ -5,9 +5,6 @@ export type RetestCloseAssistance = "independent" | "hinted" | "revealed" | "unk
 export type RetestCloseOutcome = "correct" | "incorrect" | "unverified";
 export type RetestCloseDimension = SkillEvidence["dimension"];
 
-/** Delayed retest default dimension — transfer (new context after delay). */
-export const RETEST_CLOSE_DEFAULT_DIMENSION: RetestCloseDimension = "transfer";
-
 /**
  * Exact label match only — same rule as Experience knowledge-node-lookup.
  * SkillEvidence stays node-keyed; no fuzzy merge.
@@ -43,7 +40,8 @@ export type RetestSkillLinkFields = {
 
 /**
  * Resolve SkillEvidence fields for a retest completion observation.
- * Returns null when not a linkable retest close (no retestId, assisted, or no node).
+ * Returns null when not a linkable retest close (no retestId, assisted, no node,
+ * or dimension omitted — V2-13: no default transfer).
  */
 export function prepareRetestSkillLink(input: {
   retestId?: string | null;
@@ -59,12 +57,13 @@ export function prepareRetestSkillLink(input: {
 }): RetestSkillLinkFields | null {
   if (!input.retestId) return null;
   if (!shouldAppendRetestEvidence(input)) return null;
+  if (!input.dimension) return null;
   const explicit = input.nodeId?.trim() || null;
   const nodeId = explicit ?? nodeIdForSkillLabel(input.snapshot, input.skillLabel);
   if (!nodeId) return null;
   return {
     nodeId,
-    dimension: input.dimension ?? RETEST_CLOSE_DEFAULT_DIMENSION,
+    dimension: input.dimension,
   };
 }
 

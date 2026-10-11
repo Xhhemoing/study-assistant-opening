@@ -54,7 +54,7 @@ export async function readOpeningLearningEvidenceContexts(
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id =ANY(${sessionIds}::uuid[])`;
   const origins = new Map(sessions.map(row => [String(row.id), String(row.course_id)]));
   const courseIds = [...new Set(origins.values())];
-  const help = courseIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.problem_id,h.level,h.delivered,h.delivered_at,h.history_revision,l.course_id
+  const help = courseIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,l.course_id
     FROM opening_help_exposures h JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
     WHERE h.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id =ANY(${courseIds}::uuid[])
       AND (${attemptIds.length ? db`h.attempt_id =ANY(${attemptIds}::uuid[])` : db`FALSE`}
@@ -155,7 +155,9 @@ export async function readOpeningLearningEvidenceContexts(
     const context: EvidenceEligibilityContext = {
       helpHistory: { complete: Boolean(record.attemptId), exposures: history.map(row => ({
         attemptId: row.attempt_id as string | null, problemId: row.problem_id as string | null,
-        level: row.level as "hinted" | "revealed", delivered: row.delivered as boolean | null,
+        level: row.level as "hinted" | "revealed",
+        kind: (row.kind as "instruction" | "hint" | "solution" | null | undefined) ?? "hint",
+        delivered: row.delivered as boolean | null,
         deliveredAt: row.delivered_at ? new Date(row.delivered_at as string | Date).getTime() : null,
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,
     };

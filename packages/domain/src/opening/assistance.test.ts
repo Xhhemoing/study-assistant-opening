@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   qualifyObservationAssistance,
   resolveAssistance,
+  resolveAssistanceFromExposures,
 } from "./assistance";
 
 describe("resolveAssistance", () => {
@@ -59,5 +60,16 @@ describe("qualifyObservationAssistance", () => {
     });
     expect(q.assistance).toBe("revealed");
     expect(q.allowsIndependent).toBe(false);
+  });
+});
+
+describe("resolveAssistanceFromExposures", () => {
+  it("ignores instruction kind when elevating assistance", () => {
+    expect(resolveAssistanceFromExposures("independent", [
+      { level: "revealed", kind: "instruction" },
+    ])).toBe("independent");
+    expect(resolveAssistanceFromExposures("independent", [
+      { level: "hinted", kind: "hint" },
+    ])).toBe("hinted");
   });
 });
