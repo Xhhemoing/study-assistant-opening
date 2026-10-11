@@ -304,3 +304,17 @@ export {
   validateKnowledgeSnapshot,
   KnowledgeGraphError,
 } from "./opening/knowledge-graph";
+
+export {
+  anchorKey,
+  buildCoverageTable,
+  lexicalOverlapScore,
+  markConflict,
+  mergeCoverageStatus,
+  type SourceAnchor,
+  type CoverageStatus,
+  type CoverageRow,
+  type ClaimEvidenceKind,
+  type CoverageCondition,
+  type BuildCoverageTableInput,
+} from "./opening/teaching-coverage";

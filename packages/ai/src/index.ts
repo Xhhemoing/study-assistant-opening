@@ -63,3 +63,13 @@ export {
   type AiReadinessItem,
   type AiReadinessSeverity,
 } from "./opening/ai-readiness";
+
+export {
+  assembleTeachingEvidencePack,
+  assertNoHeldOutLeak,
+  classifyClaimSupport,
+  formatProviderContext,
+  type TeachingEvidencePack,
+  type TeachingEvidenceDenylist,
+  type AssembleTeachingEvidencePackInput,
+} from "./opening/teaching-evidence";
