@@ -86,13 +86,17 @@ Default `npm run preview` builds and starts on port 3000. Browser interaction
 acceptance belongs to the user; successful HTTP shell responses are not acceptance.
 These are local preview commands, not replacements for release CI gates.
 
-## Connection credential foundation (C01, active)
+## Connection credential foundation (C01)
 
 Migrations `0041_opening_connections.sql` and `0042_opening_connection_lifecycle.sql`
-add owner-scoped connection metadata and encrypted credentials. This is not a
-working IMAP/DingTalk connector: check and sync return 503 without opening sockets;
-requested DingTalk scopes are not authorization grants. Import receipts, cursors,
-queue cancellation and connection-version/privacy-epoch writeback remain pending.
+add owner-scoped connection metadata and encrypted credentials. C01 itself is the
+credential/vault foundation, not a claim that school IMAP or enterprise DingTalk
+live connect is done. IMAP and DingTalk `check`/`sync` behavior is documented in
+`opening-mail.md` and `opening-dingtalk.md` (and C02/C03 evidence): IMAP adapters
+are wired when credentials and host allowlist are ready; DingTalk `check` returns
+local fail-closed JSON (not a blanket 503) and does not call remote DingTalk APIs.
+Requested DingTalk scopes are still not authorization grants. CAP01/CAP02 live
+acceptance remains blocked until real school/org authorization is collected.
 
 Web credential writes require `OPENING_CONNECTION_KEY` (canonical base64 of 32
 random bytes) and a stable `OPENING_CONNECTION_KEY_ID`. Keep keys in the deployment
