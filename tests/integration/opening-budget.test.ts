@@ -1,4 +1,4 @@
-﻿import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createOpeningBudgetRepository, OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
