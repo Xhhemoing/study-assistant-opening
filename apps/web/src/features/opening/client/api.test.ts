@@ -518,3 +518,84 @@ describe("openingApi intervention settings (V2-11)", () => {
     expect(body.effective.quietMode).toBe(true);
   });
 });
+
+describe("openingApi teaching commands (V2-12)", () => {
+  const AID = "11111111-1111-4111-8111-111111111111";
+  const BID = "44444444-4444-4444-8444-444444444444";
+
+  it("POSTs commands and parses success body", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`/api/opening/teaching/activities/${AID}/commands`);
+      expect(init?.method).toBe("POST");
+      const payload = JSON.parse(String(init?.body));
+      expect(payload.kind).toBe("why");
+      expect(payload.blockId).toBe(BID);
+      expect(payload.expectedVersion).toBe(1);
+      expect(payload.clientKey.length).toBeGreaterThanOrEqual(8);
+      return jsonResponse({
+        ok: true,
+        kind: "why",
+        activityId: AID,
+        contentVersion: 1,
+        pathVersion: 1,
+        checkpointJson: {},
+        replayed: false,
+        assist: { kind: "why", summary: "assist only" },
+      });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const body = await api.postTeachingCommand(AID, {
+      clientKey: "cmd-test-key-01",
+      kind: "why",
+      blockId: BID,
+      expectedVersion: 1,
+    });
+    expect(body.ok).toBe(true);
+    if (body.ok) {
+      expect(body.assist?.summary).toBe("assist only");
+      expect(body.contentVersion).toBe(1);
+    }
+  });
+
+  it("treats HTTP 409 structured conflict as ok:false (never LWW throw-as-success)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        {
+          ok: false,
+          conflict: "stale_content_version",
+          message: "content_version mismatch",
+          currentContentVersion: 4,
+          currentPathVersion: 2,
+        },
+        409,
+      ),
+    );
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const body = await api.postTeachingCommand(AID, {
+      clientKey: "cmd-test-key-02",
+      kind: "rephrase",
+      blockId: BID,
+      expectedVersion: 1,
+    });
+    expect(body.ok).toBe(false);
+    if (!body.ok) {
+      expect(body.conflict).toBe("stale_content_version");
+      expect(body.currentContentVersion).toBe(4);
+    }
+  });
+
+  it("throws OpeningApiError on non-409 failures", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: { message: "forbidden", code: "FORBIDDEN" } }, 403),
+    );
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(
+      api.postTeachingCommand(AID, {
+        clientKey: "cmd-test-key-03",
+        kind: "skip",
+        blockId: BID,
+        expectedVersion: 1,
+      }),
+    ).rejects.toMatchObject({ name: "OpeningApiError", status: 403 });
+  });
+});

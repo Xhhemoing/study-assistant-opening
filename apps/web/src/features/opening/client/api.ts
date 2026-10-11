@@ -64,6 +64,8 @@ import {
   interventionSettingsResponseSchema,
   interventionPrefsSchema,
   interventionPrefsPatchSchema,
+  teachingCommandRequestSchema,
+  teachingCommandResponseSchema,
   type TeachingActivity,
   type TeachingActivityCreateInput,
   type TeachingActivityAssociateCourseInput,
@@ -71,6 +73,8 @@ import {
   type InterventionSettingsResponse,
   type InterventionPrefs,
   type InterventionPrefsPatch,
+  type TeachingCommandRequest,
+  type TeachingCommandResponse,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -642,6 +646,36 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
      * Body: full prefs (global), patch (course/session), or null to reset/clear.
      * Session writes require activityId; optional expectedUpdatedAt for CAS.
      */
+    /**
+     * V2-12 — POST /api/opening/teaching/activities/{id}/commands
+     * Returns discriminated success|conflict. HTTP 409 with structured conflict
+     * body is a normal result (ok:false) — never silent LWW overwrite.
+     */
+    async postTeachingCommand(
+      activityId: string,
+      input: TeachingCommandRequest,
+    ): Promise<TeachingCommandResponse> {
+      const payload = teachingCommandRequestSchema.parse(input);
+      const res = await fetchImpl(
+        `/api/opening/teaching/activities/${activityId}/commands`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const body = await parseJson(res);
+      if (res.ok || res.status === 409) {
+        return teachingCommandResponseSchema.parse(body);
+      }
+      const { message, code } = readError(body);
+      throw new OpeningApiError(
+        res.status,
+        message === "request failed" ? `request failed (${res.status})` : message,
+        code,
+      );
+    },
+
     async putInterventionSettings(
       value: InterventionPrefs | InterventionPrefsPatch | null,
       options?: {

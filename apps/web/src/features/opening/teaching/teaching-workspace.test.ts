@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("./preference-controls", () => ({
   PreferenceControls: () => createElement("div", { "data-testid": "session-intervention-prefs" }),
 }));
+
+vi.mock("./block-commands", async () => {
+  const actual = await vi.importActual<typeof import("./block-commands")>("./block-commands");
+  return {
+    ...actual,
+    BlockCommands: (props: { blockId: string; returnDisabled: boolean }) =>
+      createElement("div", {
+        "data-testid": "block-commands-mock",
+        "data-block-id": props.blockId,
+        "data-return-disabled": String(props.returnDisabled),
+      }),
+  };
+});
+
 import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
 import {
   isTeachingWorkspaceContentUsable,
@@ -96,7 +110,7 @@ describe("isTeachingWorkspaceContentUsable", () => {
 });
 
 describe("TeachingWorkspace", () => {
-  it("renders ordered blocks, expandable cites, and keeps free chat secondary", () => {
+  it("renders ordered blocks, expandable cites, prefs, and block command chrome", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
         activity: activityReady,
@@ -113,8 +127,35 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("打开自由对话（次要）");
     expect(html).toContain("本课介入偏好（临时 · 按需展开）");
     expect(html).toContain('data-expand="intervention-prefs"');
+    expect(html).toContain('data-testid="block-commands-mock"');
+    expect(html).toContain(`data-block-id="${BID}"`);
+    expect(html).toContain('data-return-disabled="true"');
+    expect(html).toContain('data-content-version="1"');
+    expect(html).toContain('data-path-version="1"');
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
+  });
+
+  it("enables return when checkpoint branchStack non-empty", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: activityReady,
+        clientInit: clientInit({
+          checkpointJson: {
+            branchStack: [
+              {
+                frameId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                fromBlockId: BID,
+                contentVersion: 1,
+                pathVersion: 1,
+                createdAt: ISO,
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain('data-return-disabled="false"');
   });
 
   it("fail-soft banner on unknown schema version without crashing (C4)", () => {
