@@ -48,17 +48,25 @@ describe("opening budget ledger (guarded)", () => {
     expect(() => createOpeningBudgetRepository(fixture.sql, { dailyCapCents: NaN })).toThrow();
   });
 
-  it("counts today's completed spend and unresolved reservations from previous days", async () => {
+  it("counts today's completed spend and fresh reserved; aged reserved reconcile off prior days", async () => {
     const reserve = (requestId: string, amountCents: number) => budget.reserve(fixture.scope, { purpose: "tutor", amountCents, requestId });
-    const old = await reserve("old", 40_000);
-    await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days' WHERE id=${old.id}`;
+    // Fresh reserved still occupies cap alongside today's completed spend.
+    const fresh = await reserve("fresh", 40_000);
     const today = await reserve("today", 50_000);
     await budget.settle(today.id, 50_000);
     await expect(reserve("over", 10_001)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+
+    // Age a reserved row beyond TTL onto a prior local day; next reserve reconciles it
+    // to completed; prior-day completed does not count toward today's cap.
+    await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days' WHERE id=${fresh.id}`;
+    await expect(reserve("after-aged-reconcile", 50_000)).resolves.toBeDefined();
+    const agedRows = await fixture.sql`SELECT state FROM opening_budget_reservations WHERE id=${fresh.id}`;
+    expect(agedRows[0].state).toBe("completed");
+
+    // Move today's completed off the local day (created_at only) so full cap frees.
     await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days', updated_at=now()-interval '2 days' WHERE id=${today.id}`;
     await expect(reserve("next-day", 50_000)).resolves.toBeDefined();
-  });
-
+  })
   it("rejects changed or cross-workspace replay and cannot release completed spend", async () => {
     const input = { purpose: "tutor", amountCents: 10, requestId: "replay" };
     const first = await budget.reserve(fixture.scope, input);
