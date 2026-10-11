@@ -18,7 +18,11 @@ import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
 import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
-import { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";
+import {
+  createCompileTeachingUnitHandler,
+  createTeachingCompilerPublishInput,
+  isTeachingCompilerEnabled,
+} from "./jobs/compile-teaching-unit";
 import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -115,12 +119,18 @@ export async function main(): Promise<void> {
   const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-07: stub provider until V2-08; still exercises ledger + write-back fences via runJob.
+  // V2-08: teaching-compiler via buildPublishInput when OPENING_TEACHING_COMPILER_ENABLED;
+  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Budget/cancel/epoch fences unchanged.
+  const teachingCompilerOn = isTeachingCompilerEnabled();
   const compileTeachingUnit = createCompileTeachingUnitHandler({
     budget,
     provider: {
       complete: async () => ({
-        text: JSON.stringify({ stub: true }),
+        text: JSON.stringify(
+          teachingCompilerOn
+            ? { compiler: "teaching-compiler" }
+            : { stub: true },
+        ),
         citedChunkIds: [],
         requestId: null,
         candidates: [],
@@ -145,6 +155,14 @@ export async function main(): Promise<void> {
       });
       return unit.id;
     },
+    buildPublishInput: teachingCompilerOn
+      ? createTeachingCompilerPublishInput({
+          loadChunks: async (scope, sourceIds) => {
+            const s = scope as { workspaceId: string; ownerUserId: string };
+            return chunks.listForSources(s, sourceIds);
+          },
+        })
+      : undefined,
     privacy: {
       getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),
       listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningProviderError, createCompilerBuildPublishInput } from "@aistudy/ai";
 import { OpeningBudgetError } from "@aistudy/database";
 import type { OpeningJobRecord } from "@aistudy/database";
-import type { ProviderOutput } from "@aistudy/contracts";
+import type { ProviderOutput, SourceChunk } from "@aistudy/contracts";
 import { createCompileTeachingUnitHandler } from "./compile-teaching-unit";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 
@@ -211,5 +211,57 @@ describe("createCompileTeachingUnitHandler", () => {
     await expect(process(job, generatePayload)).rejects.toThrow(/privacy-excluded/);
     expect(deps.publishActivitySpec).not.toHaveBeenCalled();
     expect(deps._statuses).toContain("failed");
+  });
+
+  it("C10: compiler buildPublishInput → needs_check, non-empty blockOrder, no extras.stub", async () => {
+    let blockSeq = 0;
+    const chunk: SourceChunk = {
+      id: "c1",
+      sourceId: SOURCE,
+      sourceVersion: 1,
+      page: 1,
+      slideLabel: null,
+      startMs: null,
+      endMs: null,
+      text: "authorized nullspace material for compile",
+      imageObjectKey: null,
+    };
+    const buildPublishInput = createCompilerBuildPublishInput({
+      loadChunks: async (_scope, _ids) => [chunk],
+      intentSummary: "compile current teaching activity",
+      intentKind: "material",
+      newBlockId: () => {
+        blockSeq += 1;
+        return `00000000-0000-4000-8000-${String(blockSeq).padStart(12, "0")}`;
+      },
+    });
+    const deps = baseDeps({ buildPublishInput });
+    const process = createCompileTeachingUnitHandler(deps as never);
+    const result = await process(job, generatePayload);
+    expect(result).toMatchObject({
+      generateStatus: "needs_check",
+      operationId: `compile-teaching-unit:${job.id}`,
+      usedProvider: true,
+    });
+    expect(deps._statuses).toEqual(["generating", "needs_check"]);
+    expect(deps.publishActivitySpec).toHaveBeenCalled();
+    const publishArg = deps.publishActivitySpec.mock.calls[0][1];
+    expect(publishArg.blockOrder.length).toBeGreaterThan(0);
+    expect(publishArg.generationConfig?.extras?.stub).toBeUndefined();
+    expect(publishArg.verificationStatus).toBe("needs_check");
+    // budget fence still exercised
+    expect(deps._reserved[0]).toMatchObject({
+      purpose: "compile-teaching-unit",
+      requestId: `compile-teaching-unit:${job.id}`,
+    });
+  });
+
+  it("C10b: stub fallback when buildPublishInput absent keeps extras.stub", async () => {
+    const deps = baseDeps();
+    const process = createCompileTeachingUnitHandler(deps as never);
+    await process(job, generatePayload);
+    const publishArg = deps.publishActivitySpec.mock.calls[0][1];
+    expect(publishArg.blockOrder).toEqual([]);
+    expect(publishArg.generationConfig?.extras?.stub).toBe(true);
   });
 });

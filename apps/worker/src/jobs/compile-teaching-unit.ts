@@ -4,7 +4,12 @@ import type {
   ProviderOutput,
   Scope,
 } from "@aistudy/contracts";
-import { OpeningProviderError } from "@aistudy/ai";
+import {
+  OpeningProviderError,
+  createCompilerBuildPublishInput,
+  isTeachingCompilerEnabled,
+  type BuildCompilerPublishInputOptions,
+} from "@aistudy/ai";
 import {
   OpeningBudgetError,
   type OpeningBudgetRepository,
@@ -138,6 +143,16 @@ async function mapFailureStatus(
   return "failed";
 }
 
+
+/** Thin V2-08 wire: when enabled, buildPublishInput uses teaching-compiler. */
+export function createTeachingCompilerPublishInput(
+  options: BuildCompilerPublishInputOptions = {},
+) {
+  return createCompilerBuildPublishInput(options);
+}
+
+export { isTeachingCompilerEnabled };
+
 /**
  * V2-07 teaching generation job: budgeted provider call + ActivitySpec publish fences.
  * operationId = compile-teaching-unit:{job.id} — never attempt-suffixed.
@@ -178,7 +193,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       if (!skipProvider) {
         const input: ProviderInput = {
-          instruction: "Compile a teaching unit from authorized sources (stub until V2-08).",
+          instruction: deps.buildPublishInput
+            ? "Compile the current teaching activity from editable outline + authorized sources (V2-08)."
+            : "Compile a teaching unit from authorized sources (stub until V2-08).",
           text: JSON.stringify({
             mode: body.mode,
             activityId: body.activityId,

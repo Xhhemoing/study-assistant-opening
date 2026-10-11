@@ -318,3 +318,17 @@ export {
   type CoverageCondition,
   type BuildCoverageTableInput,
 } from "./opening/teaching-coverage";
+
+export {
+  ALLOWED_TEACHING_BLOCK_TYPES,
+  normalizeBlockTypes,
+  assertTeachingPathNotPlanDay,
+  suggestPrerequisites,
+  decideHistoryFreeze,
+  assertOutlineHonest,
+  type AllowedTeachingBlockType,
+  type TeachingOutlineItem,
+  type TeachingPrerequisiteSuggestion,
+  type TeachingOutline,
+  type HistoryFreezeDecision,
+} from "./opening/teaching-plan";

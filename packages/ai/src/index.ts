@@ -73,3 +73,17 @@ export {
   type TeachingEvidenceDenylist,
   type AssembleTeachingEvidencePackInput,
 } from "./opening/teaching-evidence";
+
+export {
+  proposeTeachingOutline,
+  compileCurrentActivity,
+  buildCompileProviderInput,
+  projectClientSafeLibraryBlocks,
+  createCompilerBuildPublishInput,
+  isTeachingCompilerEnabled,
+  type ProposeOutlineInput,
+  type CompileCurrentInput,
+  type CompileCurrentResult,
+  type CompileLibraryBlock,
+  type BuildCompilerPublishInputOptions,
+} from "./opening/teaching-compiler";
