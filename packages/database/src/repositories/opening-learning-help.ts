@@ -67,3 +67,22 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
   await invalidateOpeningLearningEligibility(tx, scope, { rootIds: affected.map(row => String(row.root_id)) });
   return mapDeliveredHelp(rows[0]!);
 }
+
+/** Activity-scoped delivered help for LearningResume (V2-14). Max 100 newest. */
+export async function listDeliveredHelpByActivity(
+  sql: import("postgres").Sql,
+  scope: Scope,
+  activityId: string,
+  limit = 100,
+): Promise<HelpExposure[]> {
+  const capped = Math.min(Math.max(1, limit), 100);
+  const rows = await sql`
+    SELECT h.* FROM opening_help_exposures h
+    JOIN workspaces w ON w.id = h.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+    WHERE h.workspace_id = ${scope.workspaceId}
+      AND h.activity_id = ${activityId}
+      AND h.delivered = TRUE
+    ORDER BY h.delivered_at DESC NULLS LAST, h.created_at DESC, h.id
+    LIMIT ${capped}`;
+  return rows.map((row) => mapDeliveredHelp(row as Record<string, unknown>));
+}

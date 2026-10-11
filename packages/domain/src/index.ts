@@ -409,3 +409,24 @@ export {
   type CommandLogReplayLookup,
   type LibraryBlockLike,
 } from "./opening/teaching-commands";
+
+export {
+  TEACHING_RESUME_CHECKPOINT_KEYS,
+  mergeCheckpointResumePatch,
+  resumePatchPreservesCommandAndPrefsKeys,
+  mapGenerateStatusToJobGate,
+  probeMaterialsAvailability,
+  deriveOpenProblems,
+  listContinuableActions,
+  resumeSummarySkipped,
+  assertResumeIndependentOfSummary,
+  readInteractionParams,
+  readOpenProblemIds,
+  readDraftsFromCheckpoint,
+  extractThoughtTrain,
+  mapAttemptRowsToSummaries,
+  type TeachingResumeCheckpointPatch,
+  type DeriveOpenProblemAttempt,
+  type DeriveOpenProblemObservationHead,
+} from "./opening/teaching-resume";
+

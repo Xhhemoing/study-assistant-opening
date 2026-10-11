@@ -66,6 +66,10 @@ import {
   interventionPrefsPatchSchema,
   teachingCommandRequestSchema,
   teachingCommandResponseSchema,
+  learningResumeSchema,
+  teachingCheckpointSaveInputSchema,
+  teachingCheckpointSaveResultSchema,
+  teachingActivityStatusUpdateInputSchema,
   type TeachingActivity,
   type TeachingActivityCreateInput,
   type TeachingActivityAssociateCourseInput,
@@ -75,6 +79,10 @@ import {
   type InterventionPrefsPatch,
   type TeachingCommandRequest,
   type TeachingCommandResponse,
+  type LearningResume,
+  type TeachingCheckpointSaveInput,
+  type TeachingCheckpointSaveResult,
+  type TeachingActivityStatusUpdateInput,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -651,6 +659,66 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
      * Returns discriminated success|conflict. HTTP 409 with structured conflict
      * body is a normal result (ok:false) — never silent LWW overwrite.
      */
+
+    /**
+     * V2-14 — GET /api/opening/teaching/activities/{id}/resume
+     * Full LearningResume package (not ConversationResume).
+     */
+    async getTeachingResume(activityId: string): Promise<LearningResume> {
+      const body = await request(
+        `/api/opening/teaching/activities/${activityId}/resume`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return learningResumeSchema.parse(body);
+    },
+
+    /**
+     * V2-14 — POST /api/opening/teaching/activities/{id}/checkpoint
+     * CAS expectedVersion; 409 with draft_anchor_lost is a structured result.
+     */
+    async postTeachingCheckpoint(
+      activityId: string,
+      input: TeachingCheckpointSaveInput,
+    ): Promise<TeachingCheckpointSaveResult> {
+      const payload = teachingCheckpointSaveInputSchema.parse(input);
+      const res = await fetchImpl(
+        `/api/opening/teaching/activities/${activityId}/checkpoint`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const body = await parseJson(res);
+      if (res.ok || res.status === 409) {
+        return teachingCheckpointSaveResultSchema.parse(body);
+      }
+      const { message, code } = readError(body);
+      throw new OpeningApiError(
+        res.status,
+        message === "request failed" ? `request failed (${res.status})` : message,
+        code,
+      );
+    },
+
+    /**
+     * V2-14 — PATCH /api/opening/teaching-activities/{id}/status
+     * active ↔ paused only.
+     */
+    async patchTeachingActivityStatus(
+      activityId: string,
+      input: TeachingActivityStatusUpdateInput,
+    ): Promise<TeachingActivity> {
+      const payload = teachingActivityStatusUpdateInputSchema.parse(input);
+      const body = await request(
+        `/api/opening/teaching-activities/${activityId}/status`,
+        { method: "PATCH", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return teachingActivitySchema.parse(body);
+    },
+
     async postTeachingCommand(
       activityId: string,
       input: TeachingCommandRequest,

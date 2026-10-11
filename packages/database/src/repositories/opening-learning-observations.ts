@@ -153,3 +153,53 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     return qualify(mapLearningObservation(rows[0]));
   });
 }
+
+
+/** Latest observation head per problemId for an activity (V2-14 open-problem derive). */
+export async function listObservationHeadsByActivity(
+  sql: import("postgres").Sql,
+  scope: import("@aistudy/contracts").Scope,
+  activityId: string,
+  limit = 100,
+): Promise<
+  Array<{
+    problemId: string;
+    itemVersionId: string | null;
+    outcome: "correct" | "incorrect" | "unverified";
+  }>
+> {
+  const capped = Math.min(Math.max(1, limit), 100);
+  const rows = await sql`
+    SELECT DISTINCT ON (o.problem_id)
+      o.problem_id,
+      o.item_version_id,
+      o.outcome
+    FROM opening_learning_observations o
+    JOIN workspaces w ON w.id = o.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+    WHERE o.workspace_id = ${scope.workspaceId}
+      AND o.owner_user_id = ${scope.ownerUserId}
+      AND o.activity_id = ${activityId}
+      AND o.problem_id IS NOT NULL
+      AND (
+        o.effective_head_id IS NOT DISTINCT FROM o.id
+        OR (o.effective_head_id IS NULL AND o.root_observation_id IS NULL)
+      )
+    ORDER BY o.problem_id, o.occurred_at DESC, o.id DESC
+    LIMIT ${capped}`;
+  const out: Array<{
+    problemId: string;
+    itemVersionId: string | null;
+    outcome: "correct" | "incorrect" | "unverified";
+  }> = [];
+  for (const row of rows) {
+    const r = row as Record<string, unknown>;
+    const outcome = r.outcome;
+    if (outcome !== "correct" && outcome !== "incorrect" && outcome !== "unverified") continue;
+    out.push({
+      problemId: String(r.problem_id),
+      itemVersionId: (r.item_version_id ?? null) as string | null,
+      outcome,
+    });
+  }
+  return out;
+}

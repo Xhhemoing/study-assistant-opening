@@ -66,6 +66,46 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
         return mapLearningAttempt(rows[0]);
       });
     },
+
+    /** Activity-scoped attempts with optional observation outcome for resume (V2-14). */
+    async listByActivity(
+      scope: Scope,
+      activityId: string,
+      limit = 100,
+    ): Promise<
+      Array<
+        LearningAttempt & {
+          outcome: string | null;
+          assistance: string | null;
+        }
+      >
+    > {
+      const capped = Math.min(Math.max(1, limit), 100);
+      const rows = await sql`
+        SELECT a.*,
+          o.outcome AS obs_outcome,
+          o.assistance AS obs_assistance
+        FROM opening_learning_attempts a
+        JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+        LEFT JOIN opening_learning_observations o
+          ON o.id = a.observation_id
+          AND o.workspace_id = a.workspace_id
+          AND o.owner_user_id = a.owner_user_id
+        WHERE a.workspace_id = ${scope.workspaceId}
+          AND a.owner_user_id = ${scope.ownerUserId}
+          AND a.activity_id = ${activityId}
+        ORDER BY a.started_at DESC, a.id
+        LIMIT ${capped}`;
+      return rows.map((row) => {
+        const r = row as Record<string, unknown>;
+        return {
+          ...mapLearningAttempt(r),
+          outcome: (r.obs_outcome ?? null) as string | null,
+          assistance: (r.obs_assistance ?? null) as string | null,
+        };
+      });
+    },
+
     async assertAccess(scope: Scope, id: string) {
       return sql.begin(async (tx) => {
         await lockLearningOwner(tx, scope);

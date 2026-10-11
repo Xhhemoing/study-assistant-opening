@@ -214,6 +214,45 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     },
 
     /**
+     * Thin active ↔ paused (V2-14). Column already exists — no DDL.
+     * Optional expectedUpdatedAt CAS. complete/skipped are out of this slice.
+     */
+    async setStatus(
+      scope: Scope,
+      activityId: string,
+      input: { status: "active" | "paused"; expectedUpdatedAt?: string },
+    ): Promise<TeachingActivity> {
+      return sql.begin(async (tx) => {
+        await lockLearningOwner(tx, scope);
+        const rows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+        const current = rows[0] as Record<string, unknown>;
+        if (input.expectedUpdatedAt) {
+          const currentUpdated = learningIso(current.updated_at);
+          if (currentUpdated !== input.expectedUpdatedAt) {
+            throw learningError("CONFLICT", "teaching activity updated_at mismatch");
+          }
+        }
+        if (input.status !== "active" && input.status !== "paused") {
+          throw learningError("VALIDATION", "status must be active|paused");
+        }
+        const updated = await tx`
+          UPDATE opening_teaching_activities
+          SET status = ${input.status}, updated_at = now()
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          RETURNING *`;
+        return mapTeachingActivity(updated[0] as Record<string, unknown>);
+      });
+    },
+
+    /**
      * Fence generate_status transitions (V2-07). Returns false when no row matched the from-set.
      */
     async setGenerateStatus(

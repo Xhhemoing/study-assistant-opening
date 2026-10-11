@@ -10,6 +10,8 @@ import type {
   TeachingDraftAnchor,
   TeachingDraftAnchorsSaveInput,
   TeachingDraftAnchorsSaveResult,
+  TeachingCheckpointSaveInput,
+  TeachingCheckpointSaveResult,
   TeachingGenerationConfig,
   TeachingGoal,
   TeachingSourceRef,
@@ -17,6 +19,7 @@ import type {
   TeachingUnitCreateInput,
   TeachingVerificationStatus,
 } from "@aistudy/contracts";
+import { mergeCheckpointResumePatch } from "@aistudy/domain";
 import {
   assertOwnedActivity,
 } from "./opening-teaching-activities";
@@ -497,6 +500,89 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
             AND content_version = ${input.expectedVersion}
           RETURNING content_version, checkpoint_json`;
         if (!updated.length) throw learningError("CONFLICT", "draft save raced");
+        return {
+          ok: true as const,
+          contentVersion: Number((updated[0] as Record<string, unknown>).content_version),
+          checkpointJson: (updated[0] as Record<string, unknown>).checkpoint_json as Record<
+            string,
+            unknown
+          >,
+        };
+      });
+    },
+
+
+    /**
+     * V2-14 checkpoint CAS write. Merges via mergeCheckpointResumePatch so
+     * interventionPrefs/Decisions and V2-12 command keys are preserved.
+     * Does not bump content_version (same as saveDraftAnchors).
+     */
+    async saveCheckpoint(
+      scope: Scope,
+      activityId: string,
+      input: TeachingCheckpointSaveInput,
+    ): Promise<TeachingCheckpointSaveResult> {
+      return sql.begin(async (tx) => {
+        await lockLearningOwner(tx, scope);
+        const activityRows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        if (!activityRows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+        const activity = activityRows[0] as Record<string, unknown>;
+        const contentVersion = Number(activity.content_version);
+        if (contentVersion !== input.expectedVersion) {
+          throw learningError("CONFLICT", "stale activity content version for checkpoint save");
+        }
+
+        if (input.drafts) {
+          const specRows = await tx`
+            SELECT block_order FROM opening_teaching_activity_specs
+            WHERE workspace_id = ${scope.workspaceId}
+              AND activity_id = ${activityId}
+            FOR SHARE`;
+          const blockOrder = specRows[0]
+            ? asBlockOrder((specRows[0] as Record<string, unknown>).block_order)
+            : [];
+          const present = new Set(blockOrder.map((b) => b.blockId));
+          const lostBlockIds = input.drafts
+            .map((d) => d.blockId)
+            .filter((id) => !present.has(id));
+          if (lostBlockIds.length) {
+            return {
+              ok: false as const,
+              mismatch: "draft_anchor_lost" as const,
+              lostBlockIds: [...new Set(lostBlockIds)],
+            };
+          }
+        }
+
+        const prev = (activity.checkpoint_json ?? {}) as Record<string, unknown>;
+        const patch: {
+          drafts?: TeachingDraftAnchor[];
+          currentBlockId?: string | null;
+          interactionParams?: Record<string, Record<string, unknown>>;
+          openProblemIds?: string[];
+        } = {};
+        if (input.drafts !== undefined) patch.drafts = input.drafts;
+        if (input.currentBlockId !== undefined) patch.currentBlockId = input.currentBlockId;
+        if (input.interactionParams !== undefined) {
+          patch.interactionParams = input.interactionParams;
+        }
+        if (input.openProblemIds !== undefined) patch.openProblemIds = input.openProblemIds;
+        const nextCheckpoint = mergeCheckpointResumePatch(prev, patch);
+
+        const updated = await tx`
+          UPDATE opening_teaching_activities
+          SET checkpoint_json = ${tx.json(nextCheckpoint as never)}, updated_at = now()
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND content_version = ${input.expectedVersion}
+          RETURNING content_version, checkpoint_json`;
+        if (!updated.length) throw learningError("CONFLICT", "checkpoint save raced");
         return {
           ok: true as const,
           contentVersion: Number((updated[0] as Record<string, unknown>).content_version),

@@ -84,7 +84,10 @@ export * from "./repositories/opening-retest-activities";
 export * from "./repositories/opening-learning-evidence-context";
 export * from "./repositories/opening-learning-attempts";
 export * from "./repositories/opening-learning-read";
-export { mapLearningObservation } from "./repositories/opening-learning-facts";
+export {
+  mapLearningObservation,
+  probeLearningSourcesAvailability,
+} from "./repositories/opening-learning-facts";
 export * from "./schema/opening-learning-attempts";
 export * from "./repositories/opening-observation-revisions";
 
@@ -141,6 +144,9 @@ export {
   classifySkipSideEffects,
   type OpeningTeachingCommandsRepository,
 } from "./repositories/opening-teaching-commands";
+
+export { listDeliveredHelpByActivity } from "./repositories/opening-learning-help";
+export { listObservationHeadsByActivity } from "./repositories/opening-learning-observations";
 
 export * from "./schema/opening-action-digest-decisions";
 export {

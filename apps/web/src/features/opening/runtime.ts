@@ -2,6 +2,7 @@ import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
 import { createOpeningTeachingContentService } from "./teaching/teaching-content-service";
 import { createOpeningTeachingCommandService } from "./teaching/command-service";
+import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
   createOpeningConversationRepository, readOpeningConversationSelection,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
@@ -168,4 +169,8 @@ export function getTeachingContentService(sql: Sql) {
 
 export function getTeachingCommandService(sql: Sql) {
   return createOpeningTeachingCommandService(sql);
+}
+
+export function getTeachingResumeService(sql: Sql) {
+  return createOpeningTeachingResumeService(sql);
 }

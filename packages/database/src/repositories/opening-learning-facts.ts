@@ -86,6 +86,29 @@ export async function admitLearningSources(tx: TransactionSql, scope: Scope, sou
     VALUES (${row.id},${row.version},${scope.workspaceId},${row.bytes},${row.sha256},'available') ON CONFLICT(source_id,version) DO NOTHING`;
   return rows;
 }
+/**
+ * Non-throwing materials probe for resume gates (V2-14).
+ * Returns ids that pass the same uploaded+chunks+not-privacy-excluded checks as admit,
+ * without throwing when some/all are missing. Does not write opening_source_versions.
+ */
+export async function probeLearningSourcesAvailability(
+  sql: Sql | TransactionSql,
+  scope: Scope,
+  sourceIds: readonly string[],
+): Promise<{ availableIds: string[]; unavailableIds: string[] }> {
+  const ids = [...new Set(sourceIds)].sort();
+  if (!ids.length) return { availableIds: [], unavailableIds: [] };
+  const rows = await sql`SELECT s.id FROM opening_sources s
+    WHERE s.workspace_id = ${scope.workspaceId} AND s.id IN ${sql(ids)} AND s.upload_state = 'uploaded'
+      AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version)
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)
+    ORDER BY s.id`;
+  const availableIds = rows.map((row) => String((row as { id: unknown }).id));
+  const available = new Set(availableIds);
+  const unavailableIds = ids.filter((id) => !available.has(id));
+  return { availableIds, unavailableIds };
+}
+
 export function mapLearningObservation(row: Record<string, unknown>): LearningObservation {
   return {
     rootObservationId: String(row.root_observation_id ?? row.id),

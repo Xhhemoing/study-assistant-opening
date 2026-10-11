@@ -304,3 +304,57 @@ describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
     expect(writes.some((w) => w.query.includes("generate_status"))).toBe(true);
   });
 });
+
+
+describe("V2-14 setStatus active↔paused (T15)", () => {
+  it("updates status to paused with optional CAS", async () => {
+    const { sql, writes } = db((query) => {
+      if (query.includes("FROM workspaces") && query.includes("FOR SHARE")) {
+        return [{ id: workspaceId }];
+      }
+      if (query.includes("FROM opening_teaching_activities") && query.includes("FOR UPDATE")) {
+        return [{
+          id: activityId,
+          workspace_id: workspaceId,
+          owner_user_id: ownerUserId,
+          course_id: null,
+          status: "active",
+          generate_status: "ready",
+          intent_kind: "question",
+          intent_summary: "Why?",
+          source_ids: [],
+          path_version: 1,
+          content_version: 0,
+          checkpoint_json: {},
+          client_key: "long-enough-key",
+          created_at: "2026-10-11T04:00:00.000Z",
+          updated_at: "2026-10-11T04:00:00.000Z",
+        }];
+      }
+      if (query.includes("UPDATE opening_teaching_activities") && query.includes("status")) {
+        return [{
+          id: activityId,
+          workspace_id: workspaceId,
+          owner_user_id: ownerUserId,
+          course_id: null,
+          status: "paused",
+          generate_status: "ready",
+          intent_kind: "question",
+          intent_summary: "Why?",
+          source_ids: [],
+          path_version: 1,
+          content_version: 0,
+          checkpoint_json: {},
+          client_key: "long-enough-key",
+          created_at: "2026-10-11T04:00:00.000Z",
+          updated_at: "2026-10-11T04:05:00.000Z",
+        }];
+      }
+      return [];
+    });
+    const repo = createOpeningTeachingActivitiesRepository(sql);
+    const updated = await repo.setStatus(scope, activityId, { status: "paused" });
+    expect(updated.status).toBe("paused");
+    expect(writes.some((w) => /UPDATE opening_teaching_activities/.test(w.query) && w.query.includes("status"))).toBe(true);
+  });
+});
