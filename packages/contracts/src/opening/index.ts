@@ -213,3 +213,4 @@ export * from "./teaching-activity";
 export * from "./teaching-content";
 export * from "./teaching-commands";
 export * from "./teaching-resume";
+export * from "./teaching-math-model";

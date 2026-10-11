@@ -430,3 +430,30 @@ export {
   type DeriveOpenProblemObservationHead,
 } from "./opening/teaching-resume";
 
+
+export {
+  MATRIX_TRANSFORM_DISPLAY_DECIMALS,
+  MATRIX_TRANSFORM_MAX_ABS,
+  MATRIX_TRANSFORM_MAX_DIM,
+  parseMatrixTransformParams,
+  parseMatrixTransformInteractionParams,
+  dimsCompatible,
+  applyMap,
+  applyLinearMap,
+  resolveOutputVector,
+  formatMatrixCells,
+  formatVectorCells,
+  stepPlan,
+  stepApply,
+  buildTextAlternative,
+  staticFallbackModel,
+  withinDimCaps,
+  withinAbsCap,
+  type Matrix,
+  type MatrixTransformParams,
+  type MatrixTransformInteractionParams,
+  type MatrixTransformStepMode,
+  type ParseMatrixTransformResult,
+  type MatrixTransformStep,
+  type StaticFallbackModel,
+} from "./opening/teaching-math-model";

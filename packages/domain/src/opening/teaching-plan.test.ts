@@ -38,13 +38,18 @@ function sampleOutline(overrides: Partial<TeachingOutline> = {}): TeachingOutlin
 }
 
 describe("teaching-plan", () => {
-  it("C8/allowlist: normalizeBlockTypes clamps unknown and maps matrix-viz", () => {
+  it("C8/allowlist: normalizeBlockTypes clamps unknown; matrix-viz* → matrix_transform (V2-15)", () => {
     expect(normalizeBlockTypes(["text", "matrix-viz", "evil-script", "formula", "text"])).toEqual([
       "text",
+      "matrix_transform",
       "formula",
+    ]);
+    expect(normalizeBlockTypes(["matrix_viz", "matrixviz", "matrix_transform"])).toEqual([
+      "matrix_transform",
     ]);
     expect(normalizeBlockTypes([])).toEqual(["text"]);
     expect(ALLOWED_TEACHING_BLOCK_TYPES).toContain("answer_key");
+    expect(ALLOWED_TEACHING_BLOCK_TYPES).toContain("matrix_transform");
     expect(ALLOWED_TEACHING_BLOCK_TYPES).not.toContain("matrix-viz");
   });
 
@@ -149,11 +154,11 @@ describe("teaching-plan", () => {
     expect(decision).toEqual({ action: "compile_current", targetItemId: "item-2" });
   });
 
-  it("assertOutlineHonest normalizes block types on items", () => {
+  it("assertOutlineHonest normalizes block types on items (matrix-viz → matrix_transform)", () => {
     const outline = sampleOutline();
     assertOutlineHonest(outline);
     const focus = outline.items.find((i) => i.itemId === "item-2")!;
-    expect(focus.intendedBlockTypes).toEqual(["text", "formula"]);
+    expect(focus.intendedBlockTypes).toEqual(["text", "formula", "matrix_transform"]);
     expect(focus.intendedBlockTypes).not.toContain("matrix-viz");
     expect(focus.intendedBlockTypes).not.toContain("unknown-html");
   });

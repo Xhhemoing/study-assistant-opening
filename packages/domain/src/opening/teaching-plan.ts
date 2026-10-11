@@ -13,17 +13,22 @@ export const ALLOWED_TEACHING_BLOCK_TYPES = [
   "steps",
   "answer_key",
   "meta",
+  "matrix_transform",
 ] as const;
 
 export type AllowedTeachingBlockType = (typeof ALLOWED_TEACHING_BLOCK_TYPES)[number];
 
 const ALLOWED_SET = new Set<string>(ALLOWED_TEACHING_BLOCK_TYPES);
 
-/** Unknown product types mapped onto the allowlist (e.g. fixture matrix-viz). */
+/**
+ * Legacy / fixture aliases → canonical allowlist ids.
+ * V2-15: matrix-viz* remaps to matrix_transform (not text). Old stored outlines
+ * already collapsed to text stay text until recompiled (no invented MathModel backfill).
+ */
 const BLOCK_TYPE_ALIASES: Record<string, AllowedTeachingBlockType> = {
-  "matrix-viz": "text",
-  matrix_viz: "text",
-  matrixviz: "text",
+  "matrix-viz": "matrix_transform",
+  matrix_viz: "matrix_transform",
+  matrixviz: "matrix_transform",
 };
 
 export type TeachingOutlineItem = {
