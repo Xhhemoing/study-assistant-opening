@@ -118,6 +118,15 @@ export {
 
 
 export * from "./schema/opening-teaching-activities";
+export * from "./schema/opening-teaching-content";
+export {
+  createOpeningTeachingContentRepository,
+  redactBlocksForClientInit,
+  sameActivitySpecGraph,
+  sanitizeCheckpointForRestore,
+  type OpeningTeachingContentRepository,
+} from "./repositories/opening-teaching-content";
+
 export {
   createOpeningTeachingActivitiesRepository,
   assertOwnedActivity,

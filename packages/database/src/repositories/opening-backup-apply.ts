@@ -137,6 +137,15 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "intent_kind", "intent_summary", "source_ids", "goal_json", "path_version", "content_version",
     "checkpoint_json", "client_key", "create_intent", "created_at", "updated_at",
   ],
+  opening_teaching_units: [
+    "id", "workspace_id", "owner_user_id", "title", "document_id", "current_revision_number",
+    "goals_json", "verification_status", "generation_config", "version", "created_at", "updated_at",
+  ],
+  opening_teaching_activity_specs: [
+    "id", "workspace_id", "owner_user_id", "activity_id", "teaching_unit_id", "document_id",
+    "revision_number", "block_order", "source_refs", "goals_json", "verification_status",
+    "generation_config", "version", "created_at", "updated_at",
+  ],
   opening_learning_sessions: [
     "id", "workspace_id", "owner_user_id", "course_id", "activity_id", "skill_label", "source_ids", "created_at",
   ],

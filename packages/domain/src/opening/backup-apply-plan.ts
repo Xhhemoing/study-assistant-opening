@@ -37,6 +37,8 @@ export const OPENING_RESTORE_APPLY_ORDER = [
   "opening_source_chunks",
   "opening_conversations",
   "opening_teaching_activities",
+  "opening_teaching_units",
+  "opening_teaching_activity_specs",
   "opening_learning_sessions",
   "opening_problem_refs",
   "opening_learning_history_revisions",

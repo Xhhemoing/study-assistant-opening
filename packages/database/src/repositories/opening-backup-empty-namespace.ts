@@ -83,6 +83,8 @@ export async function readOpeningRestoreNamespaceCounts(
     UNION ALL SELECT 'opening_conversations', count(*)::int FROM opening_conversations WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_turns', count(*)::int FROM opening_turns WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_teaching_activities', count(*)::int FROM opening_teaching_activities WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_teaching_units', count(*)::int FROM opening_teaching_units WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_teaching_activity_specs', count(*)::int FROM opening_teaching_activity_specs WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_sessions', count(*)::int FROM opening_learning_sessions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_problem_refs', count(*)::int FROM opening_problem_refs WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_help_exposures', count(*)::int FROM opening_help_exposures WHERE workspace_id = ${id}

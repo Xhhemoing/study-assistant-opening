@@ -50,6 +50,19 @@ export async function readOpeningBackupTableRows(
     FROM opening_teaching_activities a
     WHERE a.workspace_id = ${id} AND a.owner_user_id = ${userId}
     ORDER BY a.id`);
+  tables.opening_teaching_units = asRows(await tx`
+    SELECT u.id, u.workspace_id, u.owner_user_id, u.title, u.document_id, u.current_revision_number,
+      u.goals_json, u.verification_status, u.generation_config, u.version, u.created_at, u.updated_at
+    FROM opening_teaching_units u
+    WHERE u.workspace_id = ${id} AND u.owner_user_id = ${userId}
+    ORDER BY u.id`);
+  tables.opening_teaching_activity_specs = asRows(await tx`
+    SELECT s.id, s.workspace_id, s.owner_user_id, s.activity_id, s.teaching_unit_id, s.document_id,
+      s.revision_number, s.block_order, s.source_refs, s.goals_json, s.verification_status,
+      s.generation_config, s.version, s.created_at, s.updated_at
+    FROM opening_teaching_activity_specs s
+    WHERE s.workspace_id = ${id} AND s.owner_user_id = ${userId}
+    ORDER BY s.id`);
   tables.opening_learning_sessions = asRows(await tx`
     SELECT l.id, l.workspace_id, l.owner_user_id, l.course_id, l.activity_id, l.skill_label, l.source_ids, l.created_at
     FROM opening_learning_sessions l
@@ -236,6 +249,8 @@ export async function readOpeningBackupTableRows(
     && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
   const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+  tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row =>
+    activityIds.has(row.activity_id));
   tables.opening_skill_evidence = tables.opening_skill_evidence.filter(row =>
     completeObservationIds.has(row.observation_id));
   tables.opening_learning_activity_history_revisions = tables.opening_learning_activity_history_revisions.filter(row =>

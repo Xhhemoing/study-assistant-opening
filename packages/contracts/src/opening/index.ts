@@ -205,3 +205,4 @@ export * from "./model-providers";
 export * from "./learning-history";
 export * from "./learning-summary-page";
 export * from "./teaching-activity";
+export * from "./teaching-content";

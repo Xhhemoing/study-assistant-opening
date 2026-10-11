@@ -41,6 +41,8 @@ const TABLE_ALLOWLIST = [
   "opening_conversations",
   "opening_turns",
   "opening_teaching_activities",
+  "opening_teaching_units",
+  "opening_teaching_activity_specs",
   "opening_learning_sessions",
   "opening_problem_refs",
   "opening_help_exposures",

@@ -9,7 +9,7 @@ const sourceId = "11111111-1111-4111-8111-111111111111";
 const hash = "ab".repeat(32);
 const backupTables = [
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
-  "opening_teaching_activities", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
+  "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
   "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
