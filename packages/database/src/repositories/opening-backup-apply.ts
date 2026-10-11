@@ -106,13 +106,13 @@ const RESTORE_GUARANTEES: OpeningRestoreApplyGuarantees = {
 /** Allowlisted insert columns per APPLY_ORDER table (snake_case as exported). */
 export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_ORDER)[number], readonly string[]> = {
   workspace_preferences: [
-    "workspace_id", "default_entry", "ai_settings", "planning_settings",
+    "workspace_id", "default_entry", "ai_settings", "planning_settings", "intervention_settings",
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
   ],
   courses: [
     "id", "workspace_id", "title", "slug", "description", "schema_version", "archived_at",
-    "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled",
+    "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled", "intervention_settings",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
   ],
   opening_sources: [
@@ -237,6 +237,8 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 const JSONB_COLUMNS = new Set([
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",
+  "workspace_preferences.intervention_settings",
+  "courses.intervention_settings",
   "opening_sources.error",
   "opening_turns.citations",
   "opening_turns.source_versions",

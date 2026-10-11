@@ -1,5 +1,5 @@
 import { isRecord, isUuid } from "./backup-validation";
-import { openingAiSettingsSchema } from "@aistudy/contracts";
+import { interventionPrefsPatchSchema, interventionPrefsSchema, openingAiSettingsSchema } from "@aistudy/contracts";
 
 type Row = Record<string, unknown>;
 export type OpeningRestoreLearningState = {
@@ -35,6 +35,9 @@ export function validateBackupLearningState(tables: Record<string, Row[]>, error
     if (row.ai_settings != null && !openingAiSettingsSchema.safeParse(row.ai_settings).success) {
       errors.push("workspace AI settings are invalid");
     }
+    if (row.intervention_settings != null && !interventionPrefsSchema.safeParse(row.intervention_settings).success) {
+      errors.push("workspace intervention settings are invalid");
+    }
     if (!validState(row) || (row.default_entry != null && !["learn", "explore", "library"].includes(String(row.default_entry)))) {
       errors.push("workspace learning preferences are invalid or incomplete");
     }
@@ -45,6 +48,10 @@ export function validateBackupLearningState(tables: Record<string, Row[]>, error
       || typeof row.title !== "string" || typeof row.slug !== "string" || !row.slug
       || !Number.isSafeInteger(row.schema_version) || (row.schema_version as number) < 1) {
       errors.push("course state is invalid or incomplete");
+      continue;
+    }
+    if (row.intervention_settings != null && !interventionPrefsPatchSchema.safeParse(row.intervention_settings).success) {
+      errors.push("course intervention settings are invalid");
       continue;
     }
     if (courses.has(row.id.toLowerCase()) || slugs.has(row.slug)) errors.push("course identity or slug is duplicated");

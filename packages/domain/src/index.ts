@@ -352,3 +352,19 @@ export {
   type ValidationReport,
 } from "./opening/teaching-validation";
 
+export {
+  resolveInterventionPrefs,
+  decideIntervention,
+  countConsecutiveProactiveRejects,
+  mergeSessionInterventionPrefs,
+  appendInterventionDecision,
+  readSessionInterventionPrefs,
+  readInterventionDecisions,
+  mayAutoRespondProactive,
+  gateTutorRecommendAfterDecision,
+  CONSECUTIVE_PROACTIVE_REJECT_LIMIT,
+  INTERVENTION_DECISION_RING_MAX,
+  type DecideInterventionContext,
+  type DecideInterventionInput,
+  type DecideInterventionResult,
+} from "./opening/intervention-policy";

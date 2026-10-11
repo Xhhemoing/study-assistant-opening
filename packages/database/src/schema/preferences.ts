@@ -8,6 +8,12 @@ export const workspacePreferences = pgTable("workspace_preferences", {
   defaultEntry: text("default_entry"),
   aiSettings: jsonb("ai_settings"),
   planningSettings: jsonb("planning_settings"),
+  interventionSettings: jsonb("intervention_settings").notNull().default({
+    proactivity: "balanced",
+    nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
+    depth: "hint_then_offer",
+    quietMode: false,
+  }),
   assessmentEnabled: boolean("assessment_enabled"),
   retestSuggestionsEnabled: boolean("retest_suggestions_enabled"),
   automaticRemindersEnabled: boolean("automatic_reminders_enabled"),

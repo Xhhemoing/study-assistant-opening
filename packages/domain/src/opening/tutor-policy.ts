@@ -202,6 +202,9 @@ export function recommendTutorAction(
       reason: "Full explain already delivered; next step is a new item.",
     };
   }
+  // V2-11: escalate-after-hint is a *suggestion* only. Callers must run
+  // decideIntervention / gateTutorRecommendAfterDecision before surface or auto-act;
+  // decision forbids auto `respond` from hint alone (max offer unless user_help_ask).
   if (input.sessionExposures.includes("hinted")) {
     return {
       ...base,

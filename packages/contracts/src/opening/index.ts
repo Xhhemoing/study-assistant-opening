@@ -201,6 +201,7 @@ export {
 
 export * from "./ai-settings";
 export * from "./planning-settings";
+export * from "./intervention-prefs";
 export * from "./model-providers";
 export * from "./learning-history";
 export * from "./learning-summary-page";

@@ -1,6 +1,7 @@
 import {
   boolean,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -32,6 +33,7 @@ export const courses = pgTable(
     automaticRemindersEnabled: boolean("automatic_reminders_enabled"),
     retestSuggestionsEnabledAt: timestamp("retest_suggestions_enabled_at", { withTimezone: true }),
     automaticRemindersEnabledAt: timestamp("automatic_reminders_enabled_at", { withTimezone: true }),
+    interventionSettings: jsonb("intervention_settings"),
   },
   (table) => [
     uniqueIndex("courses_workspace_slug_uidx").on(table.workspaceId, table.slug),
