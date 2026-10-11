@@ -4,7 +4,7 @@
 **Agent:** AIstudy Pipeline (executor / Grok Bot) — Implement only  
 **Branch:** `feat/opening-release`  
 **Baseline tip (gate):** `1f9ff58` (`feat(opening): V2-06 teaching evidence pack + V2-07 plans`) — confirmed via `git log -1` before edits  
-**Post-implement tip:** `11f5ab09bb84548473753086893fb1f5eca72fbd`  
+**Post-implement tip:** `ffc4c72e1a5dbbd3d28b6eaf075ebbe7f00e2518`  
 **Gates:** `docs/superpowers/plans/opening-release/review-test-gates.md`  
 **Authority:** Plan `v2-07-teaching-generation-jobs-plan.md` + Understand + migration assignment `0055` + Plan ACCEPT  
 **Verdict:** Implement complete — **not** self-ACCEPT / not `tasks.json` → verified
