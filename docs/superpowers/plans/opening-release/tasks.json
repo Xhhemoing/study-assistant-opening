@@ -734,7 +734,10 @@
       "plan": "14-loop-closure.md",
       "status": "verified",
       "evidence": [
-        "../../evidence/2026-10-09-opening-release/dl7-ai-readiness.md"
+        "../../evidence/2026-10-09-opening-release/dl7-ai-readiness.md",
+        "../../evidence/2026-10-09-opening-release/dl7-ai-readiness-accept.md",
+        "../../evidence/2026-10-09-opening-release/ai-budget-readiness-ux.md",
+        "../../evidence/2026-10-10-opening-release/tz01-ai-budget-local-day-accept.md"
       ]
     },
     {
