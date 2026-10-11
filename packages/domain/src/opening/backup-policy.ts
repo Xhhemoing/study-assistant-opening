@@ -35,14 +35,17 @@ export type RestorePreview = {
 
 const TABLE_ALLOWLIST = [
   ...LEARNING_STATE_TABLES,
-  "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_workspace_history_revisions",
+  "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
+  "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
   "opening_source_chunks",
   "opening_conversations",
   "opening_turns",
+  "opening_teaching_activities",
   "opening_learning_sessions",
   "opening_problem_refs",
   "opening_help_exposures",
   "opening_learning_observations",
+  "opening_skill_evidence",
   "opening_assistant_candidates",
   "opening_memories",
   "opening_privacy_exclusions",

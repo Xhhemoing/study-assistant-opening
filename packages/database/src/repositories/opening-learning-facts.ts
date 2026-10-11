@@ -27,11 +27,24 @@ export async function lockLearningOwner(tx: TransactionSql, scope: Scope): Promi
 }
 export async function lockLearningSession(tx: TransactionSql, scope: Scope, sessionId: string) {
   await lockLearningOwner(tx, scope);
-  const rows = await tx`SELECT l.* FROM opening_learning_sessions l JOIN courses c ON c.id = l.course_id AND c.workspace_id = l.workspace_id
+  const rows = await tx`SELECT l.* FROM opening_learning_sessions l
     WHERE l.id = ${sessionId} AND l.workspace_id = ${scope.workspaceId} AND l.owner_user_id = ${scope.ownerUserId}
-      AND c.archived_at IS NULL FOR SHARE OF l, c`;
+    FOR SHARE OF l`;
   if (!rows.length) throw learningError("NOT_FOUND", "learning session or course not found");
-  return rows[0]!;
+  const session = rows[0]!;
+  // No-course / activity-scoped sessions must not depend on courses.archived_at JOIN (ADR D5 #3).
+  if (session.course_id == null) {
+    const acts = await tx`SELECT a.id FROM opening_teaching_activities a
+      WHERE a.id = ${session.activity_id as string} AND a.workspace_id = ${scope.workspaceId}
+        AND a.owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+    if (!acts.length) throw learningError("NOT_FOUND", "learning session or activity not found");
+    return session;
+  }
+  const courses = await tx`SELECT c.id FROM courses c
+    WHERE c.id = ${session.course_id as string} AND c.workspace_id = ${scope.workspaceId}
+      AND c.archived_at IS NULL FOR SHARE`;
+  if (!courses.length) throw learningError("NOT_FOUND", "learning session or course not found");
+  return session;
 }
 export async function lockLearningHistory(tx: TransactionSql, scope: Scope, courseId: string): Promise<void> {
   await tx`INSERT INTO opening_learning_history_revisions(workspace_id,owner_user_id,course_id,revision)
@@ -44,6 +57,20 @@ export async function nextLearningHistoryRevision(tx: TransactionSql, scope: Sco
   const rows = await tx`INSERT INTO opening_learning_history_revisions(workspace_id,owner_user_id,course_id,revision)
     VALUES (${scope.workspaceId},${scope.ownerUserId},${courseId},1)
     ON CONFLICT (workspace_id,owner_user_id,course_id) DO UPDATE SET revision = opening_learning_history_revisions.revision + 1 RETURNING revision`;
+  return Number(rows[0]!.revision);
+}
+
+export async function lockLearningActivityHistory(tx: TransactionSql, scope: Scope, activityId: string): Promise<void> {
+  await tx`INSERT INTO opening_learning_activity_history_revisions(workspace_id,owner_user_id,activity_id,revision)
+    VALUES (${scope.workspaceId},${scope.ownerUserId},${activityId},0) ON CONFLICT DO NOTHING`;
+  await tx`SELECT revision FROM opening_learning_activity_history_revisions WHERE workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} AND activity_id=${activityId} FOR UPDATE`;
+}
+/** Allocated only inside the fact transaction. Rollback does not advance the committed watermark. */
+export async function nextLearningActivityHistoryRevision(tx: TransactionSql, scope: Scope, activityId: string): Promise<number> {
+  const rows = await tx`INSERT INTO opening_learning_activity_history_revisions(workspace_id,owner_user_id,activity_id,revision)
+    VALUES (${scope.workspaceId},${scope.ownerUserId},${activityId},1)
+    ON CONFLICT (workspace_id,owner_user_id,activity_id) DO UPDATE SET revision = opening_learning_activity_history_revisions.revision + 1 RETURNING revision`;
   return Number(rows[0]!.revision);
 }
 export async function admitLearningSources(tx: TransactionSql, scope: Scope, sourceIds: readonly string[]) {

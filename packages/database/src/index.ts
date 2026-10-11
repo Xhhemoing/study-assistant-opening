@@ -116,6 +116,15 @@ export {
   type SkillEvidenceDimension,
 } from "./repositories/opening-skill-evidence";
 
+
+export * from "./schema/opening-teaching-activities";
+export {
+  createOpeningTeachingActivitiesRepository,
+  assertOwnedActivity,
+  ensureCourseContinueActivity,
+  type OpeningTeachingActivitiesRepository,
+} from "./repositories/opening-teaching-activities";
+
 export * from "./schema/opening-action-digest-decisions";
 export {
   createOpeningActionDigestDecisionsRepository,

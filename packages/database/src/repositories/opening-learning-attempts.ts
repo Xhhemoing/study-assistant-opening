@@ -55,12 +55,12 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
             AND stem_snapshot=${ref.stem_snapshot} AND artifact_kind=${ref.artifact_kind}
             AND chunk_id IS NOT DISTINCT FROM ${ref.chunk_id} AND physical_page IS NOT DISTINCT FROM ${ref.physical_page} ORDER BY created_at LIMIT 1`;
           itemVersionId = versions[0] ? String(versions[0].id) : randomUUID();
-          if (!versions.length) await tx`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,problem_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
-            VALUES (${itemVersionId},${scope.workspaceId},${scope.ownerUserId},${courseId},${problemId},${ref.source_id},${ref.source_version},${ref.physical_page},${ref.chunk_id},${ref.stem_snapshot},${ref.artifact_kind})`;
+          if (!versions.length) await tx`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
+            VALUES (${itemVersionId},${scope.workspaceId},${scope.ownerUserId},${courseId},${String(session.activity_id)},${problemId},${ref.source_id},${ref.source_version},${ref.physical_page},${ref.chunk_id},${ref.stem_snapshot},${ref.artifact_kind})`;
         }
         const revision = await nextLearningHistoryRevision(tx, scope, courseId);
-        const rows = await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,skill_label,requirement_key,problem_id,item_version_id,source_ids,source_versions,client_key,create_intent,history_revision)
-          VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${courseId},${session.skill_label},${input.requirementKey ?? null},${problemId},${itemVersionId},${session.source_ids},${tx.json(sourceVersions)},${input.clientKey},${tx.json(intent as never)},${revision})
+        const rows = await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,requirement_key,problem_id,item_version_id,source_ids,source_versions,client_key,create_intent,history_revision)
+          VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${courseId},${String(session.activity_id)},${session.skill_label},${input.requirementKey ?? null},${problemId},${itemVersionId},${session.source_ids},${tx.json(sourceVersions)},${input.clientKey},${tx.json(intent as never)},${revision})
           ON CONFLICT (workspace_id,owner_user_id,client_key) DO NOTHING RETURNING *`;
         if (!rows[0]) throw learningError("CONFLICT", "attempt clientKey already used");
         return mapLearningAttempt(rows[0]);

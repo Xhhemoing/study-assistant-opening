@@ -82,10 +82,12 @@ export async function readOpeningRestoreNamespaceCounts(
       JOIN opening_sources s ON s.id = c.source_id AND s.workspace_id = ${id}
     UNION ALL SELECT 'opening_conversations', count(*)::int FROM opening_conversations WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_turns', count(*)::int FROM opening_turns WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_teaching_activities', count(*)::int FROM opening_teaching_activities WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_sessions', count(*)::int FROM opening_learning_sessions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_problem_refs', count(*)::int FROM opening_problem_refs WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_help_exposures', count(*)::int FROM opening_help_exposures WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_observations', count(*)::int FROM opening_learning_observations WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_skill_evidence', count(*)::int FROM opening_skill_evidence WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_assistant_candidates', count(*)::int FROM opening_assistant_candidates WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_memories', count(*)::int FROM opening_memories WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_privacy_exclusions', count(*)::int FROM opening_privacy_exclusions WHERE workspace_id = ${id}
@@ -100,6 +102,7 @@ export async function readOpeningRestoreNamespaceCounts(
     UNION ALL SELECT 'opening_learning_item_versions', count(*)::int FROM opening_learning_item_versions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_attempts', count(*)::int FROM opening_learning_attempts WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_history_revisions', count(*)::int FROM opening_learning_history_revisions WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_learning_activity_history_revisions', count(*)::int FROM opening_learning_activity_history_revisions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_workspace_history_revisions', count(*)::int FROM opening_workspace_history_revisions WHERE workspace_id = ${id}
   `;
 

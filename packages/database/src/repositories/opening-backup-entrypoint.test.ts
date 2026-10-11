@@ -61,11 +61,11 @@ describe("opening-backup entrypoint (Q03 thin wiring)", () => {
     const tables = [
       "workspace_preferences", "courses", "course_asset_memberships",
       "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
-      "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
-      "opening_learning_observations", "opening_assistant_candidates", "opening_memories",
+      "opening_teaching_activities", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
+      "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
       "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
       "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
-      "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_workspace_history_revisions",
+      "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
     ] as const;
     const draft: OpeningBackup = {
       format: "opening-backup",

@@ -13,7 +13,8 @@ export const openingLearningSessions = pgTable("opening_learning_sessions", {
   id: uuid("id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull(),
   ownerUserId: uuid("owner_user_id").notNull(),
-  courseId: uuid("course_id").notNull(),
+  courseId: uuid("course_id"),
+  activityId: uuid("activity_id").notNull(),
   skillLabel: text("skill_label").notNull(),
   sourceIds: uuid("source_ids").array().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -61,7 +62,8 @@ export const openingLearningObservations = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => openingLearningSessions.id, { onDelete: "cascade" }),
-    courseId: uuid("course_id").notNull(),
+    courseId: uuid("course_id"),
+    activityId: uuid("activity_id").notNull(),
     skillLabel: text("skill_label").notNull(),
     sourceIds: uuid("source_ids").array().notNull().default([]),
     problemId: uuid("problem_id"),

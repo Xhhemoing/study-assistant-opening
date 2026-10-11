@@ -204,3 +204,4 @@ export * from "./planning-settings";
 export * from "./model-providers";
 export * from "./learning-history";
 export * from "./learning-summary-page";
+export * from "./teaching-activity";

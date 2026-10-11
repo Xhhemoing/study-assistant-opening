@@ -43,8 +43,15 @@ export async function readOpeningBackupTableRows(
     FROM opening_turns t
     WHERE ${includedTurn(tx, id, userId, "t")}
     ORDER BY t.id`);
+  tables.opening_teaching_activities = asRows(await tx`
+    SELECT a.id, a.workspace_id, a.owner_user_id, a.course_id, a.status, a.generate_status,
+      a.intent_kind, a.intent_summary, a.source_ids, a.goal_json, a.path_version, a.content_version,
+      a.checkpoint_json, a.client_key, a.create_intent, a.created_at, a.updated_at
+    FROM opening_teaching_activities a
+    WHERE a.workspace_id = ${id} AND a.owner_user_id = ${userId}
+    ORDER BY a.id`);
   tables.opening_learning_sessions = asRows(await tx`
-    SELECT l.id, l.workspace_id, l.owner_user_id, l.course_id, l.skill_label, l.source_ids, l.created_at
+    SELECT l.id, l.workspace_id, l.owner_user_id, l.course_id, l.activity_id, l.skill_label, l.source_ids, l.created_at
     FROM opening_learning_sessions l
     WHERE l.workspace_id = ${id} AND l.owner_user_id = ${userId} AND ${cleanUuidSources(tx, id, tx`l.source_ids`)}
     ORDER BY l.id`);
@@ -64,7 +71,7 @@ export async function readOpeningBackupTableRows(
       AND ${includedTurn(tx, id, userId, tx`h.turn_id`)}
     ORDER BY h.id`);
   tables.opening_learning_observations = asRows(await tx`
-    SELECT o.id, o.workspace_id, o.owner_user_id, o.session_id, o.course_id, o.skill_label, o.source_ids,
+    SELECT o.id, o.workspace_id, o.owner_user_id, o.session_id, o.course_id, o.activity_id, o.skill_label, o.source_ids,
       o.problem_id, a.id AS retest_id, o.answer, o.outcome, o.assistance, o.client_key, o.occurred_at,
       o.source_turn_ids, o.verdict_source, o.reference_source_id, o.evidence_verdict,
       o.attempt_id, o.item_version_id, o.requirement_key, o.started_at, o.submitted_at, o.recorded_at,
@@ -95,7 +102,12 @@ export async function readOpeningBackupTableRows(
       AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`o.problem_id`, tx`o.session_id`)})
     ORDER BY o.id`)
     .map(row => ({ ...row, workspace_history_revision: Number(row.workspace_history_revision) }));
-  tables.opening_assistant_candidates = asRows(await tx`
+  tables.opening_skill_evidence = asRows(await tx`
+    SELECT e.id, e.workspace_id, e.owner_user_id, e.course_id, e.node_id, e.observation_id, e.dimension, e.created_at
+    FROM opening_skill_evidence e
+    WHERE e.workspace_id = ${id} AND e.owner_user_id = ${userId}
+    ORDER BY e.id`);
+    tables.opening_assistant_candidates = asRows(await tx`
     SELECT a.id, a.workspace_id, a.conversation_id, a.source_turn_id, a.source_ids, a.payload, a.status, a.created_at, a.updated_at,
       a.task_accept_client_key, a.task_accept_intent, a.task_result_ref
     FROM opening_assistant_candidates a
@@ -167,13 +179,17 @@ export async function readOpeningBackupTableRows(
   tables.opening_learning_history_revisions = asRows(await tx`
     SELECT workspace_id, owner_user_id, course_id, revision FROM opening_learning_history_revisions
     WHERE workspace_id=${id} AND owner_user_id=${userId} ORDER BY course_id`);
+  tables.opening_learning_activity_history_revisions = asRows(await tx`
+    SELECT workspace_id, owner_user_id, activity_id, revision FROM opening_learning_activity_history_revisions
+    WHERE workspace_id=${id} AND owner_user_id=${userId} ORDER BY activity_id`)
+    .map(row => ({ ...row, revision: Number(row.revision) }));
   tables.opening_learning_item_versions = asRows(await tx`
-    SELECT v.id,v.workspace_id,v.owner_user_id,v.course_id,v.problem_id,v.source_id,v.source_version,
+    SELECT v.id,v.workspace_id,v.owner_user_id,v.course_id,v.activity_id,v.problem_id,v.source_id,v.source_version,
       v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.created_at
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
       AND ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)} ORDER BY v.id`);
   tables.opening_learning_attempts = asRows(await tx`
-    SELECT a.id,a.workspace_id,a.owner_user_id,a.session_id,a.course_id,a.skill_label,a.requirement_key,
+    SELECT a.id,a.workspace_id,a.owner_user_id,a.session_id,a.course_id,a.activity_id,a.skill_label,a.requirement_key,
       a.problem_id,a.item_version_id,a.source_ids,a.source_versions,a.started_at,a.submitted_at,a.observation_id,
       a.client_key,a.create_intent,a.history_revision
     FROM opening_learning_attempts a WHERE a.workspace_id=${id} AND a.owner_user_id=${userId}
@@ -218,5 +234,11 @@ export async function readOpeningBackupTableRows(
   }));
   tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
     && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
+  const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
+  const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+  tables.opening_skill_evidence = tables.opening_skill_evidence.filter(row =>
+    completeObservationIds.has(row.observation_id));
+  tables.opening_learning_activity_history_revisions = tables.opening_learning_activity_history_revisions.filter(row =>
+    activityIds.has(row.activity_id));
   return tables;
 }

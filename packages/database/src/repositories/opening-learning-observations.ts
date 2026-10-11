@@ -97,10 +97,11 @@ export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, i
     const sourceVersions = attempt?.source_versions ?? (input.problemId ? null : Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)])));
     const revision = await nextLearningHistoryRevision(tx, scope, input.courseId), id = randomUUID();
     const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
+    const activityId = String(session.activity_id);
     const rows = await tx`INSERT INTO opening_learning_observations
-      (id,workspace_id,owner_user_id,session_id,course_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
+      (id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
        source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
-       VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${input.outcome},${input.assistance},${input.clientKey},${submittedAt},
+       VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${activityId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${input.outcome},${input.assistance},${input.clientKey},${submittedAt},
        ${opts.sourceTurnIds ?? []},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
       ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
     if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
