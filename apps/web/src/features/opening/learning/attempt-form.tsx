@@ -16,6 +16,16 @@ import {
 } from "./reference-check";
 import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label-options";
 
+
+function readPracticeSkillPrefill(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return new URLSearchParams(window.location.search).get("skillLabel")?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
 const OUTCOME_LABEL = { correct: "我认为正确", incorrect: "我认为有错", unverified: "尚未核对" } as const;
 const ASSISTANCE_OPTIONS: Array<{ value: LearningObservation["assistance"]; label: string }> = [
   { value: "unknown", label: "尚未确认" },
@@ -38,7 +48,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
   const [skillOptions, setSkillOptions] = useState<string[]>(skillLabelsProp ?? []);
   const [sourceId, setSourceId] = useState("");
   const [referenceSourceId, setReferenceSourceId] = useState("");
-  const [skillLabel, setSkillLabel] = useState(() => retest?.skillLabel ?? "");
+  const [skillLabel, setSkillLabel] = useState(() => retest?.skillLabel ?? readPracticeSkillPrefill());
   const [stem, setStem] = useState(() => retest?.prompt ?? "");
   const [attempt, setAttempt] = useState<LearningAttempt | null>(null);
   const [answer, setAnswer] = useState("");
@@ -217,8 +227,10 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
   return (
     <div className="space-y-3 border-t border-zinc-200 pt-4">
       <h3 className="text-sm font-semibold text-zinc-800">记录一次练习</h3>
+      <p className="text-xs text-zinc-500">选主题 → 作答 → 保存</p>
       {!attempt ? (
         <form onSubmit={start} className="space-y-3">
+          <p className="text-xs leading-6 text-zinc-500" role="status">默认三步：选主题 → 作答 → 保存。辅导与材料选项按需展开。</p>
           {retest ? (
             <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900" role="status">
               补测作答：将携带补测编号提交；完成后由服务器把对应任务标为已完成。
@@ -236,7 +248,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
             </div>
           ) : null}
           <label className="block text-sm text-zinc-800">
-            技能或练习主题
+            1. 选主题（技能或练习主题）
             <input
               required
               maxLength={200}
@@ -264,52 +276,57 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
               </button>
             </p>
           ) : null}
-          <label className="block text-sm text-zinc-800">
-            题目来源（可选）
-            <select
-              value={sourceId}
-              disabled={pending}
-              onChange={(event) => setSourceId(event.target.value)}
-              className="mt-1 w-full rounded border border-zinc-200 bg-white px-3 py-2"
-            >
-              <option value="">不关联题目材料，保留为待核验记录</option>
-              {sources.map((source) => (
-                <option key={source.id} value={source.id}>{source.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm text-zinc-800">
-            答案/解析来源（可选）
-            <select
-              value={referenceSourceId}
-              disabled={pending}
-              onChange={(event) => setReferenceSourceId(event.target.value)}
-              className="mt-1 w-full rounded border border-zinc-200 bg-white px-3 py-2"
-            >
-              <option value="">暂不绑定参考；提交后无自对照步骤</option>
-              {sources.map((source) => (
-                <option key={source.id} value={source.id}>{source.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm text-zinc-800">
-            本次题干（可选）
-            <textarea
-              maxLength={2000}
-              value={stem}
-              disabled={pending || Boolean(retest?.prompt)}
-              onChange={(event) => setStem(event.target.value)}
-              className="mt-1 min-h-20 w-full rounded border border-zinc-200 bg-white px-3 py-2"
-            />
-          </label>
-          {!stem.trim() ? (
-            <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900" role="status">
-              题干为空时不会生成补测提议；隔天重做需要可复用的题干快照。
-            </p>
-          ) : null}
-          {sourceId && !stem.trim() ? (
-            <p className="text-xs text-zinc-500">已选题干来源但未填写题干时，不会创建可核验题目身份。</p>
-          ) : null}
+          <details className="rounded border border-zinc-200 bg-zinc-50/50 px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium text-zinc-700">更多选项（材料 / 题干）</summary>
+            <div className="mt-3 space-y-3">
+              <label className="block text-sm text-zinc-800">
+                题目来源（可选）
+                <select
+                  value={sourceId}
+                  disabled={pending}
+                  onChange={(event) => setSourceId(event.target.value)}
+                  className="mt-1 w-full rounded border border-zinc-200 bg-white px-3 py-2"
+                >
+                  <option value="">不关联题目材料，保留为待核验记录</option>
+                  {sources.map((source) => (
+                    <option key={source.id} value={source.id}>{source.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm text-zinc-800">
+                答案/解析来源（可选）
+                <select
+                  value={referenceSourceId}
+                  disabled={pending}
+                  onChange={(event) => setReferenceSourceId(event.target.value)}
+                  className="mt-1 w-full rounded border border-zinc-200 bg-white px-3 py-2"
+                >
+                  <option value="">暂不绑定参考；提交后无自对照步骤</option>
+                  {sources.map((source) => (
+                    <option key={source.id} value={source.id}>{source.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm text-zinc-800">
+                本次题干（可选）
+                <textarea
+                  maxLength={2000}
+                  value={stem}
+                  disabled={pending || Boolean(retest?.prompt)}
+                  onChange={(event) => setStem(event.target.value)}
+                  className="mt-1 min-h-20 w-full rounded border border-zinc-200 bg-white px-3 py-2"
+                />
+              </label>
+              {!stem.trim() ? (
+                <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900" role="status">
+                  题干为空时不会生成补测提议；隔天重做需要可复用的题干快照。
+                </p>
+              ) : null}
+              {sourceId && !stem.trim() ? (
+                <p className="text-xs text-zinc-500">已选题干来源但未填写题干时，不会创建可核验题目身份。</p>
+              ) : null}
+            </div>
+          </details>
           <p className="text-xs text-zinc-500">开始时由服务器记录题目、材料版本和时间；没有题目或版本的记录仍可保存，资格为待核验。</p>
           <button
             disabled={pending || !skillLabel.trim() || (!!sourceId && !stem.trim())}
@@ -371,6 +388,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
             {deliveredAssistance !== "none" ? ` 会话内已送达帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}，只能上调不能下调。` : null}
           </p>
           <form onSubmit={submit} className="space-y-3">
+            <p className="text-xs leading-6 text-zinc-500">2. 作答 · 3. 保存</p>
             <label className="block text-sm text-zinc-800">
               我的答案
               <textarea
@@ -394,53 +412,58 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
                 ))}
               </select>
             </label>
-            <label className="block text-sm text-zinc-800">
-              本次帮助
-              <select
-                value={assistance}
-                disabled={pending}
-                onChange={(event) => {
-                  const next = event.target.value as LearningObservation["assistance"];
-                  setAssistance(raiseAssistanceOnly(next, deliveredAssistance));
-                }}
-                className="ml-2 rounded border border-zinc-200 bg-white px-2 py-1"
-              >
-                {ASSISTANCE_OPTIONS.map((option) => (
-                  <option
-                    key={option.value}
-                    value={option.value}
-                    disabled={!isAssistanceAllowed(option.value, deliveredAssistance)}
-                  >
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <details className="rounded border border-zinc-200 bg-zinc-50/50 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-zinc-700">帮助等级（可选）</summary>
+              <label className="mt-2 block text-sm text-zinc-800">
+                本次帮助
+                <select
+                  value={assistance}
+                  disabled={pending}
+                  onChange={(event) => {
+                    const next = event.target.value as LearningObservation["assistance"];
+                    setAssistance(raiseAssistanceOnly(next, deliveredAssistance));
+                  }}
+                  className="ml-2 rounded border border-zinc-200 bg-white px-2 py-1"
+                >
+                  {ASSISTANCE_OPTIONS.map((option) => (
+                    <option
+                      key={option.value}
+                      value={option.value}
+                      disabled={!isAssistanceAllowed(option.value, deliveredAssistance)}
+                    >
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </details>
             <button disabled={pending} className="rounded bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50">
               {pending ? "正在保存…" : "先保存原答案"}
             </button>
           </form>
-          <button
-            type="button"
-            disabled={pending}
-            aria-expanded={helpOpen}
-            onClick={() => {
-              setHelpOpenedOnce(true);
-              setHelpOpen((open) => !open);
-              if (attempt) void refreshDeliveredAssistance(attempt.id);
-            }}
-            className="text-sm text-emerald-700 underline"
-          >
-            {helpOpen ? "收起本次练习辅导" : "打开本次练习辅导"}
-          </button>
-          {helpOpenedOnce ? (
-            <div className={helpOpen ? "" : "hidden"} aria-hidden={!helpOpen}>
-              <AssistantView learningAttempt={attempt} />
-            </div>
-          ) : null}
-          <p className="text-xs text-zinc-500">
-            本次辅导使用保存模式，记录可取回的提示或解析；这不证明你已阅读。已记录的帮助不会因收起辅导而消失。先交原答案，再对照参考。
-          </p>
+          <div className="border-t border-zinc-100 pt-3">
+            <button
+              type="button"
+              disabled={pending}
+              aria-expanded={helpOpen}
+              onClick={() => {
+                setHelpOpenedOnce(true);
+                setHelpOpen((open) => !open);
+                if (attempt) void refreshDeliveredAssistance(attempt.id);
+              }}
+              className="text-sm text-emerald-700 underline"
+            >
+              {helpOpen ? "收起本次练习辅导" : "需要时再打开辅导（默认收起）"}
+            </button>
+            {helpOpenedOnce ? (
+              <div className={helpOpen ? "mt-2" : "hidden"} aria-hidden={!helpOpen}>
+                <AssistantView learningAttempt={attempt} />
+              </div>
+            ) : null}
+            <p className="mt-2 text-xs text-zinc-500">
+              辅导嵌在底部且默认收起。使用保存模式记录可取回的提示或解析；不证明你已阅读。先交原答案，再对照参考。
+            </p>
+          </div>
         </div>
       )}
       {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}

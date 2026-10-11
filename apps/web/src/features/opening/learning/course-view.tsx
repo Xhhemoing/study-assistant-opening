@@ -85,7 +85,7 @@ export function CourseLearningView({ courseId, retest: retestProp = null }: { co
   return (
     <div className="space-y-6">
       <section id="course-practice" className="scroll-mt-6 space-y-3" aria-labelledby="course-practice-heading">
-        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-zinc-800">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-zinc-500">{retest ? "按补测提示完成作答；提交后由服务器关闭补测活动并标记任务完成，前端只重新读取。" : "选一个主题，用自己的话回忆或完成一道题；先保留自己的尝试，再对照参考核对，需要时再使用练习辅导。"}</p></div>
+        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-zinc-800">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-zinc-500">{retest ? "按补测提示完成作答；提交后由服务器关闭补测活动并标记任务完成，前端只重新读取。" : "默认三步：选主题 → 作答 → 保存。辅导默认收起在底部；先保留自己的尝试，再对照参考。"}</p></div>
         {retestNotice ? <p className="text-xs leading-6 text-amber-800" role="status">{retestNotice}</p> : null}
         <LearningAttemptForm key={`${courseId}:${retest?.retestId ?? "practice"}`} courseId={courseId} retest={retest} skillLabels={skillLabels} onRecorded={() => setRevision((value) => value + 1)} />
       </section>

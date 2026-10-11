@@ -3,7 +3,8 @@
 import type { KnowledgeNode, KnowledgeSnapshot, TutorAction } from "@aistudy/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../client/api";
-import { LoadError, secondaryButtonClass } from "../design/ui";
+import { LoadError, secondaryButtonClass, ui } from "../design/ui";
+import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence } from "./knowledge-evidence";
 
 const KIND_ORDER: Record<KnowledgeNode["kind"], number> = {
@@ -24,6 +25,19 @@ export function nextStepCopy(
   const first = actions[0];
   if (!first) return "先浏览章节材料，再展开知识关系核对依据。";
   return first.reason;
+}
+
+/** CT-05: first tutor action → clickable CTA; empty → honest empty (no fake buttons). */
+export function nextStepCta(
+  action: Pick<ThinTutorActionView, "kind" | "skillLabel" | "reason"> | null | undefined,
+): { href: string; label: string; reason: string } | null {
+  if (!action) return null;
+  const label = TUTOR_ACTION_KIND_LABEL[action.kind] ?? "继续下一步";
+  if (action.kind === "clarify") {
+    return { href: "#course-assets", label, reason: action.reason };
+  }
+  const params = new URLSearchParams({ skillLabel: action.skillLabel });
+  return { href: `?${params.toString()}#course-practice`, label, reason: action.reason };
 }
 
 export function CourseKnowledge({
@@ -79,6 +93,7 @@ export function CourseKnowledge({
     [snapshot],
   );
   const chapters = ordered.filter((n) => n.kind === "chapter");
+  const cta = nextStepCta(actions[0]);
 
   if (loading) {
     return <p className="text-xs text-zinc-500" role="status">正在读取课程知识…</p>;
@@ -119,10 +134,21 @@ export function CourseKnowledge({
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-xs leading-5 text-zinc-700" role="status">
-          <span className="font-medium text-zinc-900">下一步：</span>
-          {nextStepCopy(actions)}
-        </p>
+        <div className="mt-3 space-y-2" role="status">
+          <p className="text-xs leading-5 text-zinc-700">
+            <span className="font-medium text-zinc-900">下一步：</span>
+            {cta ? cta.reason : "暂无服务器推荐的下一步。可先独立练习，或打开材料核对依据。"}
+          </p>
+          {cta ? (
+            <a className={ui.primary} href={cta.href}>
+              {cta.label}
+            </a>
+          ) : (
+            <p className="text-[11px] leading-5 text-zinc-500">
+              没有可执行的推荐动作（可能尚未有 SkillEvidence）。不会展示假按钮。
+            </p>
+          )}
+        </div>
       </div>
       <div>
         <button
@@ -146,7 +172,7 @@ export function CourseKnowledge({
           </ul>
         ) : null}
       </div>
-      {selected ? <KnowledgeEvidence node={selected} onClose={() => setSelected(null)} /> : null}
+      {selected ? <KnowledgeEvidence node={selected} onClose={() => setSelected(null)} courseMediaAvailable /> : null}
     </section>
   );
 }
