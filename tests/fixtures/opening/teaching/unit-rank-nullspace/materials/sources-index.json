@@ -1,0 +1,141 @@
+[
+  {
+    "sourceId": "SRC-RN-01",
+    "path": "materials/SRC-RN-01-geometric-intro.md",
+    "titleZh": "几何引入：二维输入为何只剩一个输出方向",
+    "pages": [
+      1,
+      2,
+      3
+    ],
+    "authorizedForTeachingRetrieval": true,
+    "version": "v1",
+    "chunkHints": [
+      {
+        "chunkId": "SRC-RN-01-p1-hook",
+        "page": 1,
+        "topic": "geometric-hook-T"
+      },
+      {
+        "chunkId": "SRC-RN-01-p2-observe",
+        "page": 2,
+        "topic": "observe-io"
+      },
+      {
+        "chunkId": "SRC-RN-01-p3-intuition",
+        "page": 3,
+        "topic": "rank-nullity-preview"
+      }
+    ]
+  },
+  {
+    "sourceId": "SRC-RN-02",
+    "path": "materials/SRC-RN-02-definitions.md",
+    "titleZh": "正式定义：零空间与列空间",
+    "pages": [
+      1,
+      2,
+      3
+    ],
+    "authorizedForTeachingRetrieval": true,
+    "version": "v1",
+    "chunkHints": [
+      {
+        "chunkId": "SRC-RN-02-p1-nullspace",
+        "page": 1,
+        "topic": "define-N"
+      },
+      {
+        "chunkId": "SRC-RN-02-p2-colspace",
+        "page": 2,
+        "topic": "define-Col"
+      },
+      {
+        "chunkId": "SRC-RN-02-p3-align",
+        "page": 3,
+        "topic": "align-hook"
+      }
+    ]
+  },
+  {
+    "sourceId": "SRC-RN-03",
+    "path": "materials/SRC-RN-03-rank-nullity.md",
+    "titleZh": "秩—零度定理",
+    "pages": [
+      1,
+      2,
+      3
+    ],
+    "authorizedForTeachingRetrieval": true,
+    "version": "v1",
+    "chunkHints": [
+      {
+        "chunkId": "SRC-RN-03-p1-theorem",
+        "page": 1,
+        "topic": "rank-nullity-statement"
+      },
+      {
+        "chunkId": "SRC-RN-03-p2-check",
+        "page": 2,
+        "topic": "verify-examples"
+      },
+      {
+        "chunkId": "SRC-RN-03-p3-cautions",
+        "page": 3,
+        "topic": "cautions"
+      }
+    ]
+  },
+  {
+    "sourceId": "SRC-RN-04",
+    "path": "materials/SRC-RN-04-worked-compute.md",
+    "titleZh": "计算示范：求零空间、秩与零度",
+    "pages": [
+      1,
+      2,
+      3
+    ],
+    "authorizedForTeachingRetrieval": true,
+    "version": "v1",
+    "chunkHints": [
+      {
+        "chunkId": "SRC-RN-04-p1-ex1",
+        "page": 1,
+        "topic": "compute-hook-matrix"
+      },
+      {
+        "chunkId": "SRC-RN-04-p2-ex2",
+        "page": 2,
+        "topic": "compute-3x3-free"
+      },
+      {
+        "chunkId": "SRC-RN-04-p3-ex3",
+        "page": 3,
+        "topic": "compute-fullrank-2x2"
+      }
+    ]
+  },
+  {
+    "sourceId": "SRC-RN-05",
+    "path": "materials/SRC-RN-05-notation-conventions.md",
+    "titleZh": "记号约定摘要",
+    "pages": [
+      1,
+      2
+    ],
+    "authorizedForTeachingRetrieval": true,
+    "version": "v1",
+    "chunkHints": [
+      {
+        "chunkId": "SRC-RN-05-p1-symbols",
+        "page": 1,
+        "topic": "notation-summary"
+      },
+      {
+        "chunkId": "SRC-RN-05-p2-forbid",
+        "page": 2,
+        "topic": "teaching-forbids"
+      }
+    ]
+  }
+]

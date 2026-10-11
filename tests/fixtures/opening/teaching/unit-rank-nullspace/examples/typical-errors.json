@@ -1,0 +1,174 @@
+[
+  {
+    "errorId": "ERR-RN-01",
+    "goalIds": [
+      "G-RN-02"
+    ],
+    "wrongClaimZh": "N(A) 就是 Col(A)，都是 A 的「核心理解空间」。",
+    "whyWrongZh": "N(A)⊆R^n，Col(A)⊆R^m，定义与所在空间均不同。",
+    "correctRedirectZh": "分别用 {x:Ax=0} 与列张成定义，并指出输入/输出空间。",
+    "detectionHint": "同一句子里把零空间与列空间当作同一集合",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-02",
+        "page": 3,
+        "chunkId": "SRC-RN-02-p3-align"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-02",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "wrongClaimZh": "nullity 等于零特征值的个数（代数重数），所以不用解 Ax=0。",
+    "whyWrongZh": "一般矩阵未必可对角化；零特征值个数与 nullity 的关系不是本单元的一般定义/算法。",
+    "correctRedirectZh": "用 RREF 解 Ax=0，数自由变量得 nullity。",
+    "detectionHint": "未行化简却引用特征值报 nullity",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-03",
+        "page": 3,
+        "chunkId": "SRC-RN-03-p3-cautions"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-03",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "wrongClaimZh": "看对角线：[[1,2],[0,0]] 对角有一个非零，所以 rank=1；对未化简的 [[2,4],[1,2]] 对角两个非零就说 rank=2。",
+    "whyWrongZh": "第二例两行成比例，真实 rank=1；必须经 RREF（或等价）数主元。",
+    "correctRedirectZh": "先化简再数主元列。",
+    "detectionHint": "未化简数对角非零报 rank",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 1,
+        "chunkId": "SRC-RN-04-p1-ex1"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-04",
+    "goalIds": [
+      "G-RN-06",
+      "G-RN-05"
+    ],
+    "wrongClaimZh": "把讲解例 A=[[1,1],[0,0]] 改成 [[1,2],[0,0]] 答对，就算「迁移成功」。",
+    "whyWrongZh": "仅换一个数的近同构变体，不是新情境迁移；不得宣传为 transfer。",
+    "correctRedirectZh": "迁移题需新矩阵结构或新情境（见 held-out），且独立尝试。",
+    "detectionHint": "把 number-swap 标为 transfer",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-05",
+        "page": 2,
+        "chunkId": "SRC-RN-05-p2-forbid"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-05",
+    "goalIds": [
+      "G-RN-06"
+    ],
+    "wrongClaimZh": "引用 SRC-RN-01 第 2 页的观察表，却说内容来自 SRC-RN-04。",
+    "whyWrongZh": "同页号跨源不等于同一锚点；sourceId+page+chunk 必须一致。",
+    "correctRedirectZh": "核对 sourceId 与 chunkId；跨源同页视为错误引用。",
+    "detectionHint": "same_page_cross_source",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-01",
+        "page": 2,
+        "chunkId": "SRC-RN-01-p2-observe"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-06",
+    "goalIds": [
+      "G-RN-06"
+    ],
+    "wrongClaimZh": "界面上有 citationId=SRC-RN-02，所以这段话「已核验为真」。",
+    "whyWrongZh": "引用 ID 只表示声称的锚点，不等于事实核验通过。",
+    "correctRedirectZh": "打开锚点人工/程序核验；未核验须标记。",
+    "detectionHint": "citation_id_not_truth",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-05",
+        "page": 2,
+        "chunkId": "SRC-RN-05-p2-forbid"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-07",
+    "goalIds": [
+      "G-RN-04"
+    ],
+    "wrongClaimZh": "A∈R^{3×2} 时 rank+nullity=3（行数）。",
+    "whyWrongZh": "定理右边是列数 n=2。",
+    "correctRedirectZh": "写成 rank+nullity=n（列数）。",
+    "detectionHint": "用 m 代替 n",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-03",
+        "page": 3,
+        "chunkId": "SRC-RN-03-p3-cautions"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-08",
+    "goalIds": [
+      "G-RN-01",
+      "G-RN-02"
+    ],
+    "wrongClaimZh": "T(x,y)=(x+y,0) 把平面压成一点，所以 rank=0。",
+    "whyWrongZh": "输出是整条线 span{(1,0)}，不是仅原点；rank=1。",
+    "correctRedirectZh": "区分「压到一条线」与「压到原点」；原点只对应零空间。",
+    "detectionHint": "把非零像误判为 rank0",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-01",
+        "page": 2,
+        "chunkId": "SRC-RN-01-p2-observe"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-09",
+    "goalIds": [
+      "G-RN-06"
+    ],
+    "wrongClaimZh": "恢复学习时显示「你已掌握秩与零空间 90%」。",
+    "whyWrongZh": "伪造掌握率；应显示真实草稿、曾给帮助与未核验项。",
+    "correctRedirectZh": "禁止 fake mastery %；用过程状态代替。",
+    "detectionHint": "fake_mastery_percent",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-05",
+        "page": 2,
+        "chunkId": "SRC-RN-05-p2-forbid"
+      }
+    ]
+  },
+  {
+    "errorId": "ERR-RN-10",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "wrongClaimZh": "对 B=[[1,2,3],[2,4,6],[0,1,1]]，看见第三行有主元味道就说 nullity=0。",
+    "whyWrongZh": "化简后仍有一个自由变量，nullity=1。",
+    "correctRedirectZh": "完成 RREF：主元两列、自由变量 x3。",
+    "detectionHint": "未完成化简误判无自由变量",
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 2,
+        "chunkId": "SRC-RN-04-p2-ex2"
+      }
+    ]
+  }
+]

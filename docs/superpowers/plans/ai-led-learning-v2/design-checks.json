@@ -1,0 +1,22 @@
+{
+  "type": "isolated_design_model_checks",
+  "python": "3.13.5",
+  "repository_sha_observed": "1a4cf465c86da7f08b6fda3044f9b0f932b80824",
+  "tests_run": 20,
+  "failures": 0,
+  "errors": 0,
+  "passed": true,
+  "limits": [
+    "Not executed against the repository",
+    "No database/concurrency/browser/provider tests",
+    "No actual student study",
+    "Semantic-support input is stipulated in this model, not checked by AI"
+  ],
+  "illustrative_denominator": {
+    "all_records": 4,
+    "evaluable": 2,
+    "correct": 1,
+    "rate": 0.5,
+    "excluded_or_missing": 2
+  }
+}

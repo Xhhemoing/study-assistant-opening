@@ -1,0 +1,270 @@
+[
+  {
+    "problemId": "HO-RN-01",
+    "goalIds": [
+      "G-RN-02"
+    ],
+    "dimension": "concept",
+    "promptZh": "不引用课堂钩子矩阵。用自己的话定义 N(A) 与 Col(A)，并各给一个「所在空间」提示。",
+    "rubricZh": "两定义正确；N 在 R^n、Col 在 R^m；不把二者说成同一集合。",
+    "goldAnswerZh": "N(A)={x∈R^n:Ax=0}；Col(A)=span{列}⊆R^m。",
+    "acceptableVariants": [
+      "Im(A) 等同 Col(A)"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-03"
+    ]
+  },
+  {
+    "problemId": "HO-RN-02",
+    "goalIds": [
+      "G-RN-01",
+      "G-RN-05"
+    ],
+    "dimension": "explain",
+    "promptZh": "新变换 S(x,y)=(0, x-y)。解释：输出落在哪些方向？哪些输入被映到原点？维数关系如何？",
+    "rubricZh": "像为 span{(0,1)}（y 轴方向）；零空间 x-y=0 即 span{(1,1)}；rank=1,nullity=1,和为2。不得只套钩子原句。",
+    "goldAnswerZh": "S 对应矩阵 [[0,0],[1,-1]]；Col=span{(0,1)^T}；N=span{(1,1)^T}；rank=1,nullity=1。",
+    "acceptableVariants": [
+      "写出等价基"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-01",
+      "EX-RN-02"
+    ]
+  },
+  {
+    "problemId": "HO-RN-03",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "dimension": "compute",
+    "promptZh": "求 A=[[1,2,1],[2,4,2],[3,6,4]] 的 rank、nullity 与一组 N(A) 基。",
+    "rubricZh": "须行化简；rank=2；nullity=1；基形如 (-2,1,0) 与涉及第三列的关系需正确——实际：列1,2成比例，列3不完全依赖则 rank=2。验算 2+1=3。",
+    "goldAnswerZh": "行变换：R2←R2-2R1，R3←R3-3R1 得 [[1,2,1],[0,0,0],[0,0,1]]；再消元得主元在列1与列3：rank=2；自由变量 x2；x1+2x2=0，x3=0 ⇒ N(A)=span{(-2,1,0)^T}；nullity=1；2+1=3。",
+    "acceptableVariants": [
+      "基差非零倍数"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-06"
+    ]
+  },
+  {
+    "problemId": "HO-RN-04",
+    "goalIds": [
+      "G-RN-03",
+      "G-RN-04"
+    ],
+    "dimension": "compute",
+    "promptZh": "A=[[0,1,1],[0,0,0],[0,2,2]]。求 rank、nullity、N(A) 基，并验算 rank-nullity。",
+    "rubricZh": "列2与列3成比例；有效主元1；rank=1；n=3 → nullity=2；基应张成二维零空间。",
+    "goldAnswerZh": "RREF 后仅一主元（第2列或第3列其一）；rank=1；nullity=2；例如 N=span{(1,0,0)^T, (0,1,-1)^T}（在正确 RREF 参数化下等价即可）。1+2=3。",
+    "acceptableVariants": [
+      "任意正确二维基"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-06"
+    ]
+  },
+  {
+    "problemId": "HO-RN-05",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "dimension": "compute",
+    "promptZh": "满秩方阵 F=[[1,2],[3,5]]。求 N(F)、rank、nullity。",
+    "rubricZh": "det=-1≠0；N={0}；rank=2；nullity=0。",
+    "goldAnswerZh": "可逆；N(F)={0}；rank=2；nullity=0。",
+    "acceptableVariants": [
+      "RREF=I_2"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-07"
+    ]
+  },
+  {
+    "problemId": "HO-RN-06",
+    "goalIds": [
+      "G-RN-04"
+    ],
+    "dimension": "concept",
+    "promptZh": "判断正误并改错：对任意 A∈R^{4×3}，rank(A)+nullity(A)=4。",
+    "rubricZh": "错误；应 =3（列数）。",
+    "goldAnswerZh": "错误。正确：rank+nullity=3=n。",
+    "acceptableVariants": [
+      "指出误用了行数"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-08",
+      "EX-RN-10"
+    ]
+  },
+  {
+    "problemId": "HO-RN-07",
+    "goalIds": [
+      "G-RN-05"
+    ],
+    "dimension": "explain",
+    "promptZh": "某线性变换 R^3→R^2 的标准矩阵秩为 2。能否有非平凡零空间？用 rank-nullity 说明。",
+    "rubricZh": "n=3,rank=2 ⇒ nullity=1，故必有一维非平凡零空间。",
+    "goldAnswerZh": "能。nullity=3-2=1，存在非零 x 使 Ax=0。",
+    "acceptableVariants": [
+      "几何：三维输入压到二维像，至少压掉一维"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-09"
+    ]
+  },
+  {
+    "problemId": "HO-RN-08",
+    "goalIds": [
+      "G-RN-02",
+      "G-RN-03"
+    ],
+    "dimension": "compute",
+    "promptZh": "A=[[1,1,0],[0,0,1]]（2×3）。求 Col(A) 的一组基、N(A) 的一组基、rank、nullity。",
+    "rubricZh": "两行主元 → rank=2；nullity=1；Col 基为两列独立向量；N 满足 x1+x2=0,x3=0。",
+    "goldAnswerZh": "rank=2；nullity=1；Col 基 {(1,0)^T,(0,1)^T}（或前两列与第三列之适当选取）；N=span{(-1,1,0)^T}。",
+    "acceptableVariants": [
+      "列空间为 R^2"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-05",
+      "EX-RN-12"
+    ]
+  },
+  {
+    "problemId": "HO-RN-09",
+    "goalIds": [
+      "G-RN-01",
+      "G-RN-02"
+    ],
+    "dimension": "transfer",
+    "promptZh": "新情境：投影 P(x,y)=(x,0)（正交投影到 x 轴）。分别描述 N(P) 与 Im(P)，并与课堂钩子 T(x,y)=(x+y,0) 对比「同与不同」。",
+    "rubricZh": "N(P)=span{(0,1)}；Im=span{(1,0)}；rank=1,nullity=1。与 T 同维数结构，但零空间方向不同（T 为 y=-x）。须指出不同，不能只说「一样」。",
+    "goldAnswerZh": "矩阵 [[1,0],[0,0]]；N=span{(0,1)^T}；Im=span{(1,0)^T}。与 T 均 rank1/nullity1，但 N 不同。",
+    "acceptableVariants": [
+      "联系 EX-RN-12 的 D 但本题为新情境叙述"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-12",
+      "EX-RN-01"
+    ]
+  },
+  {
+    "problemId": "HO-RN-10",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "dimension": "compute",
+    "promptZh": "A=[[2,0,2],[0,3,0],[4,0,4]]。求 rank 与 N(A)。",
+    "rubricZh": "行3=2·行1；行2独立；列1与列3成比例。rank=2；nullity=1；N=span{(-1,0,1)^T}。",
+    "goldAnswerZh": "rank=2；N(A)=span{(-1,0,1)^T}；nullity=1。",
+    "acceptableVariants": [
+      "基差倍数"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-06"
+    ]
+  },
+  {
+    "problemId": "HO-RN-11",
+    "goalIds": [
+      "G-RN-06"
+    ],
+    "dimension": "concept",
+    "promptZh": "评测报告写：「学生在提示下做对 held-out 计算题，掌握率 100%」。指出至少两处不诚实之处。",
+    "rubricZh": "须指出：受助≠独立；掌握率伪造；held-out 被教学化使用也违规（若提及）。",
+    "goldAnswerZh": "(1) 帮助态不应计为独立正确；(2) 不得用百分比伪造掌握；(3) 分母/资格未按 §9.1。",
+    "acceptableVariants": [
+      "任意覆盖上述两点及以上"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-11"
+    ]
+  },
+  {
+    "problemId": "HO-RN-12",
+    "goalIds": [
+      "G-RN-04",
+      "G-RN-05"
+    ],
+    "dimension": "explain",
+    "promptZh": "若 rank(A)=0，关于 N(A) 与 Col(A) 能得出什么结论？（A 为 m×n）",
+    "rubricZh": "Col={0}；nullity=n；N=R^n。",
+    "goldAnswerZh": "零矩阵情形：像只有原点；零空间为整个 R^n。",
+    "acceptableVariants": [
+      "rank+nullity=n ⇒ nullity=n"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-08"
+    ]
+  },
+  {
+    "problemId": "HO-RN-13",
+    "goalIds": [
+      "G-RN-03",
+      "G-RN-02"
+    ],
+    "dimension": "transfer",
+    "promptZh": "数据情境：三台传感器读数满足线性模型 y=Ax，A=[[1,1,1],[2,2,2],[0,1,2]]。问：哪些「状态增量」δx 不改变读数（Aδx=0）？给出基并解释物理含义（不改变观测的状态方向）。",
+    "rubricZh": "需计算 N(A)；指出这是新情境叙述而非换 ID。rank 与基正确。",
+    "goldAnswerZh": "行化简后：主元两列（约列1与列2或列2与列3），nullity=1；N=span{(1,-2,1)^T}（验算 A v=0）。含义：沿该方向改状态，读数不变。",
+    "acceptableVariants": [
+      "等价基；正确 RREF 推导"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-06"
+    ]
+  },
+  {
+    "problemId": "HO-RN-14",
+    "goalIds": [
+      "G-RN-05",
+      "G-RN-04"
+    ],
+    "dimension": "delayed",
+    "promptZh": "（延迟测）隔一段时间后：只给「输入维 n=4，rank(A)=3」，问 nullity，并要求用一句话解释含义。勿依赖课堂原矩阵。",
+    "rubricZh": "nullity=1；解释为存在一维被压到零的输入方向。评分不先按「做对了」筛选分母（见 §9.1）。",
+    "goldAnswerZh": "nullity=1；有一维输入方向映到零。",
+    "acceptableVariants": [
+      "dim N=1"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-09",
+      "HO-RN-07"
+    ]
+  },
+  {
+    "problemId": "HO-RN-15",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "dimension": "compute",
+    "promptZh": "A=[[1,0,2,3],[0,1,4,5],[0,0,0,0]]。求 rank、nullity、N(A) 的参数通解。",
+    "rubricZh": "已近 RREF；rank=2；自由变量 x3,x4；nullity=2；通解含两参数。",
+    "goldAnswerZh": "rank=2；nullity=2；x1=-2s-3t，x2=-4s-5t，x3=s，x4=t；基 {(-2,-4,1,0)^T,(-3,-5,0,1)^T}。",
+    "acceptableVariants": [
+      "等价参数命名"
+    ],
+    "mustNotAppearInTeaching": true,
+    "relatedButNotIdenticalTo": [
+      "EX-RN-06",
+      "HO-RN-04"
+    ]
+  }
+]

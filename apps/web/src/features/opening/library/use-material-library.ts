@@ -39,7 +39,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
   }, [refresh]);
   useEffect(() => { mounted.current = true; void load(); return () => { mounted.current = false; requestSequence.current++; }; }, [load]);
   const selection = useMemo(() => new Set(selectedMaterials(selected, sources)), [selected, sources]);
-  function changeSpace(next: MaterialSpace) { if (locked.current) return; setSpace(next); setSelected([]); setResult(null); }
+  const changeSpace = useCallback((next: MaterialSpace) => { if (locked.current) return; setSpace(next); setSelected([]); setResult(null); }, []);
   function toggle(id: string) { if (!locked.current) setSelected(value => value.includes(id) ? value.filter(item => item !== id) : [...value, id]); }
   function togglePage(ids: string[]) {
     if (locked.current) return;

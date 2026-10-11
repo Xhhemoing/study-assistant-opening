@@ -1,0 +1,43 @@
+{
+  "policyId": "teaching-retrieval-allowlist-rank-nullspace-v1",
+  "statementZh": "仅下列 sourceId 与 exampleId 可进入教学检索 / 主讲材料包。eval-heldout 下任何 problemId 与路径一律排除；不得因「同页」或「相似题」而纳入。",
+  "authorizedSourceIds": [
+    "SRC-RN-01",
+    "SRC-RN-02",
+    "SRC-RN-03",
+    "SRC-RN-04",
+    "SRC-RN-05"
+  ],
+  "authorizedExampleIds": [
+    "EX-RN-01",
+    "EX-RN-02",
+    "EX-RN-03",
+    "EX-RN-04",
+    "EX-RN-05",
+    "EX-RN-06",
+    "EX-RN-07",
+    "EX-RN-08",
+    "EX-RN-09",
+    "EX-RN-10",
+    "EX-RN-11",
+    "EX-RN-12"
+  ],
+  "authorizedErrorIdsForTutorRedirect": [
+    "ERR-RN-01",
+    "ERR-RN-02",
+    "ERR-RN-03",
+    "ERR-RN-04",
+    "ERR-RN-05",
+    "ERR-RN-06",
+    "ERR-RN-07",
+    "ERR-RN-08",
+    "ERR-RN-09",
+    "ERR-RN-10"
+  ],
+  "explicitlyExcluded": {
+    "paths": [
+      "eval-heldout/"
+    ],
+    "reason": "held-out evaluation only; never teaching retrieval"
+  }
+}

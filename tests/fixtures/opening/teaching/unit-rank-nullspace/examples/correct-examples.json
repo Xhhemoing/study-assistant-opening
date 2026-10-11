@@ -1,0 +1,265 @@
+[
+  {
+    "exampleId": "EX-RN-01",
+    "goalIds": [
+      "G-RN-01"
+    ],
+    "kind": "concept",
+    "promptZh": "对 T(x,y)=(x+y,0)，用一句话说明为什么「二维输入只剩一个输出方向」。",
+    "solutionZh": "所有输出形如 (c,0)，落在 span{(1,0)} 这一条线上，故像的维数为 1（不是 2）。",
+    "acceptableVariants": [
+      "像是 x 轴（非负/整条直线均可接受若明确是 span{(1,0)}）",
+      "Col([T]) = span{(1,0)}，rank=1"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-01",
+        "page": 2,
+        "chunkId": "SRC-RN-01-p2-observe"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-02",
+    "goalIds": [
+      "G-RN-01",
+      "G-RN-02"
+    ],
+    "kind": "concept",
+    "promptZh": "写出使 T(x,y)=(0,0) 的所有 (x,y)，并说明这与 N(A) 的关系（A=[T]）。",
+    "solutionZh": "x+y=0，即 (x,y)=t(1,-1)。这正是 N(A)=span{(1,-1)}。",
+    "acceptableVariants": [
+      "span{(-1,1)}（差非零倍数）",
+      "直线 y=-x"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-01",
+        "page": 2,
+        "chunkId": "SRC-RN-01-p2-observe"
+      },
+      {
+        "sourceId": "SRC-RN-02",
+        "page": 1,
+        "chunkId": "SRC-RN-02-p1-nullspace"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-03",
+    "goalIds": [
+      "G-RN-02"
+    ],
+    "kind": "concept",
+    "promptZh": "给出 N(A) 与 Col(A) 的定义，并指出它们分别属于哪个空间。",
+    "solutionZh": "N(A)={x∈R^n: Ax=0} ⊆ R^n（输入空间）。Col(A)=span{A 的列} ⊆ R^m（输出空间）；对 T(x)=Ax 有 Im(T)=Col(A)。",
+    "acceptableVariants": [
+      "用 Im(A) 代替 Col(A) 且说明等同",
+      "用 Nul(A) 但同时写明即 N(A)"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-02",
+        "page": 1,
+        "chunkId": "SRC-RN-02-p1-nullspace"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-04",
+    "goalIds": [
+      "G-RN-02"
+    ],
+    "kind": "concept",
+    "promptZh": "对 A=[[1,1],[0,0]]，写出 Col(A) 与 rank(A)。",
+    "solutionZh": "Col(A)=span{(1,0)^T}，rank(A)=1。",
+    "acceptableVariants": [
+      "像为 x 轴方向；维数 1"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-02",
+        "page": 2,
+        "chunkId": "SRC-RN-02-p2-colspace"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-05",
+    "goalIds": [
+      "G-RN-03"
+    ],
+    "kind": "compute",
+    "promptZh": "对 A=[[1,1],[0,0]]，求一组 N(A) 的基、rank(A)、nullity(A)。",
+    "solutionZh": "基：{(1,-1)^T}（或 {(-1,1)^T}）；rank=1；nullity=1。",
+    "acceptableVariants": [
+      "基向量差非零倍数；通解 x=t(1,-1)"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 1,
+        "chunkId": "SRC-RN-04-p1-ex1"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-06",
+    "goalIds": [
+      "G-RN-03",
+      "G-RN-04"
+    ],
+    "kind": "compute",
+    "promptZh": "对 B=[[1,2,3],[2,4,6],[0,1,1]]，求 rank(B)、nullity(B) 与一组 N(B) 的基，并用 rank-nullity 验算。",
+    "solutionZh": "RREF 后主元两列：rank=2；自由变量 1 个：nullity=1；N(B)=span{(-1,-1,1)^T}。验算 2+1=3=n。",
+    "acceptableVariants": [
+      "基 { (1,1,-1)^T }（差符号）",
+      "参数通解 x1=-s, x2=-s, x3=s"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 2,
+        "chunkId": "SRC-RN-04-p2-ex2"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-07",
+    "goalIds": [
+      "G-RN-03",
+      "G-RN-04"
+    ],
+    "kind": "compute",
+    "promptZh": "对 C=[[2,1],[1,1]]，求 N(C)、rank(C)、nullity(C)。",
+    "solutionZh": "det=1≠0，可逆；N(C)={0}；rank=2；nullity=0。",
+    "acceptableVariants": [
+      "RREF=I_2；Col(C)=R^2"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 3,
+        "chunkId": "SRC-RN-04-p3-ex3"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-08",
+    "goalIds": [
+      "G-RN-04"
+    ],
+    "kind": "explain",
+    "promptZh": "陈述 rank-nullity 定理，并强调右边的 n 指什么。",
+    "solutionZh": "对 A∈R^{m×n}，rank(A)+nullity(A)=n，其中 n 是列数（输入维），不是行数 m。",
+    "acceptableVariants": [
+      "写成 dim Col(A)+dim N(A)=n"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-03",
+        "page": 1,
+        "chunkId": "SRC-RN-03-p1-theorem"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-09",
+    "goalIds": [
+      "G-RN-05"
+    ],
+    "kind": "explain",
+    "promptZh": "用「压扁」与「保留」解释：为何对 T(x,y)=(x+y,0) 有 dim N + dim Col = 2。",
+    "solutionZh": "输入平面有 2 个独立方向：其中 1 个方向（如 (1,-1)）被压到原点（计入 nullity），另 1 个独立方向映射到输出的唯一方向（计入 rank）；二者相加等于输入维 2。",
+    "acceptableVariants": [
+      "用像维 1 + 零空间维 1 = 输入维 2 的同义表述"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-01",
+        "page": 3,
+        "chunkId": "SRC-RN-01-p3-intuition"
+      },
+      {
+        "sourceId": "SRC-RN-03",
+        "page": 1,
+        "chunkId": "SRC-RN-03-p1-theorem"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-10",
+    "goalIds": [
+      "G-RN-04"
+    ],
+    "kind": "explain",
+    "promptZh": "若有人主张「rank+nullity 应等于行数 m」，如何反驳？举一个 m≠n 的示意。",
+    "solutionZh": "定理右边是列数 n。例如 A∈R^{3×2} 时右边仍为 2；若误用 m=3 会与自由变量/主元计数矛盾。",
+    "acceptableVariants": [
+      "指出 n=输入维=列数的定义依据"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-03",
+        "page": 3,
+        "chunkId": "SRC-RN-03-p3-cautions"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-11",
+    "goalIds": [
+      "G-RN-06"
+    ],
+    "kind": "explain",
+    "promptZh": "学生在提示下算出 rank=1。能否记为「已独立掌握」？应如何标记？",
+    "solutionZh": "不能。应记为受助尝试（helped），与独立尝试分开；完成活动≠已核验掌握；不得展示伪造掌握百分比。",
+    "acceptableVariants": [
+      "引用帮助态/独立态分离的过程证据约定"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-05",
+        "page": 2,
+        "chunkId": "SRC-RN-05-p2-forbid"
+      }
+    ],
+    "exposureClass": "lecture"
+  },
+  {
+    "exampleId": "EX-RN-12",
+    "goalIds": [
+      "G-RN-03",
+      "G-RN-02"
+    ],
+    "kind": "compute",
+    "promptZh": "矩阵 D=[[1,0],[0,0]]。求 N(D)、Col(D)、rank、nullity，并与 A=[[1,1],[0,0]] 对比异同。",
+    "solutionZh": "N(D)=span{(0,1)^T}；Col(D)=span{(1,0)^T}；rank=1；nullity=1。与 A 同 rank/nullity，但零空间方向不同（A 为 span{(1,-1)}）。",
+    "acceptableVariants": [
+      "强调同维数不同子空间"
+    ],
+    "sourceAnchors": [
+      {
+        "sourceId": "SRC-RN-04",
+        "page": 1,
+        "chunkId": "SRC-RN-04-p1-ex1"
+      },
+      {
+        "sourceId": "SRC-RN-02",
+        "page": 3,
+        "chunkId": "SRC-RN-02-p3-align"
+      }
+    ],
+    "exposureClass": "lecture"
+  }
+]

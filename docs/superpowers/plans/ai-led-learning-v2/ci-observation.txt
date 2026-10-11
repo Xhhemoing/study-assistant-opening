@@ -1,0 +1,13 @@
+Observed through GitHub connector; selected transcription, not a full downloaded log.
+SHA: 1a4cf465c86da7f08b6fda3044f9b0f932b80824
+Run: 38065241208
+Job: 114251440330
+Run URL: https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38065241208/job/114251440330
+
+Lint result:
+apps/web/src/features/opening/library/material-library.tsx
+47:5 error Definition for rule 'react-hooks/exhaustive-deps' was not found
+1 error; process exited with code 1
+
+Subsequent typecheck, major test suites and build were skipped in that run.
+No rerun or fix was executed as part of preparing this plan.

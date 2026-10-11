@@ -1,0 +1,28 @@
+{
+  "policyId": "teaching-retrieval-denylist-rank-nullspace-v1",
+  "statementZh": "下列 problemId 与路径禁止进入教学检索、主讲上下文装配与 lecture 暴露集。供后续 V2-06 机器读取。",
+  "deniedProblemIds": [
+    "HO-RN-01",
+    "HO-RN-02",
+    "HO-RN-03",
+    "HO-RN-04",
+    "HO-RN-05",
+    "HO-RN-06",
+    "HO-RN-07",
+    "HO-RN-08",
+    "HO-RN-09",
+    "HO-RN-10",
+    "HO-RN-11",
+    "HO-RN-12",
+    "HO-RN-13",
+    "HO-RN-14",
+    "HO-RN-15"
+  ],
+  "deniedPaths": [
+    "eval-heldout/",
+    "eval-heldout/heldout-problems.json",
+    "eval-heldout/ISOLATION.md",
+    "eval-heldout/retrieval-denylist.json"
+  ],
+  "mustNotAppearInTeaching": true
+}

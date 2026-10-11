@@ -1,0 +1,282 @@
+[
+  {
+    "id": "R01",
+    "title": "Bastani et al. (2025), Generative AI without guardrails can harm learning",
+    "url": "https://doi.org/10.1073/pnas.2422633122",
+    "kind": "peer_reviewed_RCT",
+    "access": "出版页与可检索正文",
+    "used_for": "区分辅助表现与无辅助结果，设计教学保护",
+    "limits": "单所高中数学与短期结局；不等于对所有模型、学科和教学方式的结论。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R02",
+    "title": "Kestin et al. (2025), AI tutoring outperforms in-class active learning",
+    "url": "https://pubmed.ncbi.nlm.nih.gov/40537565/",
+    "kind": "peer_reviewed_RCT",
+    "access": "PubMed作者摘要、出版元数据及可访问出版页片段；部分全文访问受限",
+    "used_for": "支持认真设计的AI教学值得验证",
+    "limits": "不能归因于单一介入频率，不能推导任意材料自动生成课程必然有效。DOI:10.1038/s41598-025-97652-6。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R03",
+    "title": "Koedinger & Aleven (2007), Exploring the Assistance Dilemma",
+    "url": "https://link.springer.com/article/10.1007/s10648-007-9049-0",
+    "kind": "research_review",
+    "access": "作者摘要与出版页",
+    "used_for": "条件化选择帮助，而非始终给答案或始终 withholding",
+    "limits": "不是统一最优介入频率。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R04",
+    "title": "Roediger & Karpicke (2006), Test-Enhanced Learning",
+    "url": "https://www.psychologicalscience.org/journals/psychological-science/j.1467-9280.2006.01693.x/",
+    "kind": "peer_reviewed_experiments",
+    "access": "原出版机构摘要",
+    "used_for": "在适当学习目标下安排可选的提取与延迟检验",
+    "limits": "实验材料与测量有限，不把所有探索强制变为测验。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R05",
+    "title": "Cepeda et al. (2008), Spacing Effects in Learning: A Temporal Ridgeline of Optimal Retention",
+    "url": "https://pubmed.ncbi.nlm.nih.gov/19076480/",
+    "kind": "peer_reviewed_experiment",
+    "access": "原论文摘要与出版索引",
+    "used_for": "复习间隔依学习目标与保持时段，默认值标为启发式",
+    "limits": "不提供本项目已经校准的个人遗忘模型。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R06",
+    "title": "Mayer & Fiorella (2021), Principles for Managing Essential Processing in Multimedia Learning",
+    "url": "https://www.cambridge.org/core/books/abs/cambridge-handbook-of-multimedia-learning/principles-for-managing-essential-processing-in-multimedia-learning/A9E77D0172F905AC957689D1771E2888",
+    "kind": "authored_research_synthesis",
+    "access": "Cambridge作者章节摘要",
+    "used_for": "学习者控制分段、必要前置与相关多媒体",
+    "limits": "不代表动画越多越好；表达偏好不当作已证实的固定学习风格。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "R07",
+    "title": "Teo et al. (2026), AI Assistants Overassist",
+    "url": "https://arxiv.org/abs/2607.21306",
+    "kind": "preprint_simulation_benchmark",
+    "access": "arXiv作者摘要",
+    "used_for": "将介入决策与内容生成分离，审查过早过强帮助",
+    "limits": "主要为模拟学习者与人类比较，不是本项目真实长期学习效果证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "E01",
+    "title": "HKUDS/DeepTutor official repository",
+    "url": "https://github.com/HKUDS/DeepTutor",
+    "kind": "official_implementation_docs",
+    "access": "README与项目说明",
+    "used_for": "提纲到类型化内容块、局部修改、内容与个人状态分离",
+    "limits": "只借鉴机制，不照搬平台、后端、掌握门槛或自主框架；未部署体验。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "E02",
+    "title": "THU-MAIC/OpenMAIC official repository",
+    "url": "https://github.com/THU-MAIC/OpenMAIC",
+    "kind": "official_implementation_docs",
+    "access": "README与项目说明",
+    "used_for": "教学提纲到场景的分阶段组织",
+    "limits": "不以课堂角色、TTS、多Agent或任意HTML作为首版依赖；未复现效果。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "E03",
+    "title": "A2UI official documentation",
+    "url": "https://a2ui.org/",
+    "kind": "official_protocol_docs",
+    "access": "协议概览与组件目录说明",
+    "used_for": "声明式界面与受控组件目录",
+    "limits": "格式约束不等于消除内容、链接和动作注入风险；不强制采用其全协议。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "E04",
+    "title": "json-render: Catalog",
+    "url": "https://json-render.dev/docs/catalog",
+    "kind": "official_library_docs",
+    "access": "组件、动作和Zod定义说明",
+    "used_for": "白名单组件/动作与schema分离",
+    "limits": "是否引入依赖由小型兼容性试验决定；内部教学语义不绑定外部协议版本。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C01",
+    "title": "Repository guidelines",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/AGENTS.md",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C02",
+    "title": "Tutor action policy",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/packages/domain/src/opening/tutor-policy.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C03",
+    "title": "Learning and exposure contracts",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/packages/contracts/src/opening/learning.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C04",
+    "title": "Tutor worker orchestration",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/apps/worker/src/jobs/tutor-turn.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C05",
+    "title": "Retest linkage defaults",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/packages/domain/src/opening/retest-close-evidence.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C06",
+    "title": "Adaptive tutor flags",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/packages/domain/src/opening/tutor-policy-adaptive.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C07",
+    "title": "Skill evidence projection",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/packages/database/src/repositories/opening-skill-evidence.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C08",
+    "title": "Shared learning read service",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/apps/web/src/features/opening/learning/read-service.ts",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C09",
+    "title": "Current material library",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/apps/web/src/features/opening/library/material-library.tsx",
+    "kind": "repository_source_or_plan",
+    "access": "本轮连接器核查",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C10",
+    "title": "Media / knowledge / tutor plan",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/docs/superpowers/plans/opening-release/10-media-knowledge.md",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C11",
+    "title": "Learning evidence plan",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/docs/superpowers/plans/opening-release/05-learning.md",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C12",
+    "title": "Current task ledger",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/docs/superpowers/plans/opening-release/tasks.json",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C13",
+    "title": "K02 engineering verification limitations",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/docs/superpowers/evidence/2026-10-09-opening-release/k02-skill-evidence.md",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C14",
+    "title": "Product and AI interaction policy",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/blob/1a4cf465c86da7f08b6fda3044f9b0f932b80824/docs/product/UX_AND_AI_POLICY.md",
+    "kind": "repository_source_or_plan",
+    "access": "本次连续讨论中连接器读取的同一SHA基线",
+    "used_for": "现有能力、调用链、兼容边界与改造落点",
+    "limits": "静态阅读不等于运行通过；计划文档不当作实现证据。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "C15",
+    "title": "CI run 38065241208 / job 114251440330",
+    "url": "https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38065241208/job/114251440330",
+    "kind": "actual_ci_log",
+    "access": "连接器读取当前SHA运行状态与作业原始日志",
+    "used_for": "Lint缺规则定义阻断后续检查；发布前必须收口",
+    "limits": "并非本轮重新执行CI；日志中的依赖告警尚未独立分级。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "P01",
+    "title": "study-assistant-opening-implementation-guide.md (2026-10-06)",
+    "url": "library-file:file_000000006ea081f88ce418516c38b322",
+    "kind": "prior_user_library_research",
+    "access": "Files检索相关完整片段",
+    "used_for": "预算/恢复、planDay边界、Episode投影、效果分母和变更授权",
+    "limits": "旧SHA为6a58787…；旧缺陷须重新复现，不原封不动当作现状。",
+    "checked_on": "2026-10-11"
+  },
+  {
+    "id": "U01",
+    "title": "本次用户与助手确认的产品共识",
+    "url": "conversation:study-assistant-opening-brainstorm",
+    "kind": "user_requirements",
+    "access": "当前完整对话",
+    "used_for": "G1–G8目标与优先级",
+    "limits": "新机制、默认参数、数据迁移与路线细节为本计划建议，不伪称用户已经逐项批准。",
+    "checked_on": "2026-10-11"
+  }
+]

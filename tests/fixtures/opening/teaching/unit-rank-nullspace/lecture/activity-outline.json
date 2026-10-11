@@ -1,0 +1,137 @@
+{
+  "unitId": "rank-nullspace-v1",
+  "arcRef": "plan §5.3",
+  "sequence": "hook → observe → relate → define → rank-nullity → work → optional try",
+  "activities": [
+    {
+      "activityId": "ACT-RN-01-hook",
+      "titleZh": "引入：T(x,y)=(x+y,0)",
+      "goalIds": [
+        "G-RN-01"
+      ],
+      "blockTypes": [
+        "text",
+        "formula",
+        "matrix-viz",
+        "prompt"
+      ],
+      "sourceIds": [
+        "SRC-RN-01",
+        "SRC-RN-05"
+      ],
+      "order": 1,
+      "notesZh": "开讲即问题驱动：二维输入为何只剩一个输出方向。"
+    },
+    {
+      "activityId": "ACT-RN-02-observe",
+      "titleZh": "观察输入与输出",
+      "goalIds": [
+        "G-RN-01"
+      ],
+      "blockTypes": [
+        "text",
+        "matrix-viz",
+        "example",
+        "prompt"
+      ],
+      "sourceIds": [
+        "SRC-RN-01"
+      ],
+      "order": 2,
+      "notesZh": "表格/互动观察；先于正式定义。"
+    },
+    {
+      "activityId": "ACT-RN-03-relate",
+      "titleZh": "联系零空间与像",
+      "goalIds": [
+        "G-RN-01",
+        "G-RN-05"
+      ],
+      "blockTypes": [
+        "text",
+        "formula",
+        "prompt"
+      ],
+      "sourceIds": [
+        "SRC-RN-01",
+        "SRC-RN-02"
+      ],
+      "order": 3,
+      "notesZh": "用观察结果直觉对应 N 与 Col，仍可非正式。"
+    },
+    {
+      "activityId": "ACT-RN-04-define",
+      "titleZh": "正式定义 N(A) 与 Col(A)",
+      "goalIds": [
+        "G-RN-02"
+      ],
+      "blockTypes": [
+        "text",
+        "formula",
+        "steps"
+      ],
+      "sourceIds": [
+        "SRC-RN-02",
+        "SRC-RN-05"
+      ],
+      "order": 4,
+      "notesZh": "对齐几何钩子。"
+    },
+    {
+      "activityId": "ACT-RN-05-rank-nullity",
+      "titleZh": "秩—零度定理",
+      "goalIds": [
+        "G-RN-04",
+        "G-RN-05"
+      ],
+      "blockTypes": [
+        "text",
+        "formula",
+        "example"
+      ],
+      "sourceIds": [
+        "SRC-RN-03"
+      ],
+      "order": 5,
+      "notesZh": "陈述 + 对钩子验算。"
+    },
+    {
+      "activityId": "ACT-RN-06-worked",
+      "titleZh": "计算示范",
+      "goalIds": [
+        "G-RN-03",
+        "G-RN-04"
+      ],
+      "blockTypes": [
+        "steps",
+        "formula",
+        "example",
+        "matrix-viz"
+      ],
+      "sourceIds": [
+        "SRC-RN-04"
+      ],
+      "order": 6,
+      "notesZh": "例1钩子矩阵、例2含自由变量、例3满秩。"
+    },
+    {
+      "activityId": "ACT-RN-07-try",
+      "titleZh": "可选：自己试试（讲解暴露例）",
+      "goalIds": [
+        "G-RN-03",
+        "G-RN-06"
+      ],
+      "blockTypes": [
+        "prompt",
+        "example",
+        "text"
+      ],
+      "sourceIds": [
+        "SRC-RN-04",
+        "SRC-RN-05"
+      ],
+      "order": 7,
+      "notesZh": "仅用 lecture 暴露例；帮助态与独立态分开。不得使用 eval-heldout。"
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+[
+  {
+    "goalId": "G-RN-01",
+    "statementZh": "能用 T(x,y)=(x+y,0) 说明「二维输入只剩一个输出方向」的几何含义，并指出被压到原点的输入方向。",
+    "bloomish": "concept",
+    "evidenceKinds": [
+      "verbal-explain",
+      "sketch-or-table",
+      "identify-direction"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-01",
+      "SRC-RN-02"
+    ],
+    "successCriteria": [
+      "指出像落在 span{(1,0)}（或等价表述）",
+      "指出使 T=0 的输入满足 x+y=0（或 span{(1,-1)}）",
+      "不把「输出方向少」说成「输入维变少」而不提零空间"
+    ],
+    "notSuccess": [
+      "仅复述公式而无几何对应",
+      "宣称掌握百分比",
+      "把 N 与 Col 说成同一集合"
+    ]
+  },
+  {
+    "goalId": "G-RN-02",
+    "statementZh": "能陈述 N(A) 与 Col(A)/Im(A) 的定义，并说明它们分别属于输入空间与输出空间。",
+    "bloomish": "concept",
+    "evidenceKinds": [
+      "definition-recall",
+      "contrast"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-02",
+      "SRC-RN-05"
+    ],
+    "successCriteria": [
+      "写出 N(A)={x: Ax=0}",
+      "说明 Col(A) 为列张成 / Im(T)=Col(A)",
+      "正确指出所属空间维数环境（R^n vs R^m）"
+    ],
+    "notSuccess": [
+      "用特征值定义零空间作为唯一定义",
+      "混淆行空间与列空间且不纠正"
+    ]
+  },
+  {
+    "goalId": "G-RN-03",
+    "statementZh": "给定具体矩阵 A，能经 RREF（或等价行变换）计算一组 N(A) 的基、rank(A) 与 nullity(A)。",
+    "bloomish": "compute",
+    "evidenceKinds": [
+      "worked-steps",
+      "basis-list",
+      "integer-rank-nullity"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-04",
+      "SRC-RN-03"
+    ],
+    "successCriteria": [
+      "主元个数 = rank",
+      "自由变量个数 = nullity",
+      "基向量可差非零倍数；通解参数化正确",
+      "rank + nullity = n 自洽"
+    ],
+    "notSuccess": [
+      "未化简只数对角非零报 rank",
+      "把零特征值个数当作一般 nullity 算法"
+    ]
+  },
+  {
+    "goalId": "G-RN-04",
+    "statementZh": "能陈述并在具体例子上应用 rank-nullity：rank(A)+nullity(A)=n（n 为列数）。",
+    "bloomish": "explain",
+    "evidenceKinds": [
+      "state-theorem",
+      "apply-check",
+      "spot-wrong-n"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-03",
+      "SRC-RN-01"
+    ],
+    "successCriteria": [
+      "正确写出等式且标明 n=列数",
+      "能在至少一例上验算",
+      "能识别「误用行数 m 代替 n」的错误"
+    ],
+    "notSuccess": [
+      "把定理说成 rank+nullity=m",
+      "用伪造掌握率代替维数核对"
+    ]
+  },
+  {
+    "goalId": "G-RN-05",
+    "statementZh": "能解释 dim N(A) 与 dim Col(A) 如何共同刻画「输入维被压扁与保留」的关系，而不只背公式。",
+    "bloomish": "explain",
+    "evidenceKinds": [
+      "causal-explain",
+      "link-geometry"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-01",
+      "SRC-RN-03"
+    ],
+    "successCriteria": [
+      "用「压到零的方向」与「独立输出方向」解释两项",
+      "联系几何钩子或等价例子",
+      "不声称解释本身等于已掌握迁移"
+    ],
+    "notSuccess": [
+      "仅默写公式无解释",
+      "把换数同构题称为迁移证据"
+    ]
+  },
+  {
+    "goalId": "G-RN-06",
+    "statementZh": "能区分「接受帮助后的作答」与「独立尝试」；不把受助正确或完成活动升为已核验掌握。",
+    "bloomish": "apply",
+    "evidenceKinds": [
+      "process-label",
+      "honest-status"
+    ],
+    "linkedSourceIds": [
+      "SRC-RN-05"
+    ],
+    "successCriteria": [
+      "能说明帮助态与独立态应分开记录",
+      "拒绝「你已掌握 xx%」类无核验声明",
+      "citation ID 不当作事实已核验"
+    ],
+    "notSuccess": [
+      "用完成度/点赞当掌握",
+      "把讲解例题答对直接记为 held-out 迁移成功"
+    ]
+  }
+]

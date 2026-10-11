@@ -1,0 +1,53 @@
+{
+  "unitId": "rank-nullspace-v1",
+  "titleZh": "秩与零空间",
+  "titleEn": "Rank and Nullspace",
+  "courseHint": "linear algebra",
+  "baselineTip": "1a4cf465c86da7f08b6fda3044f9b0f932b80824",
+  "taskId": "V2-02",
+  "owners": {
+    "contentAndEval": "AIstudy AI",
+    "uiAcceptanceClues": "AIstudy Experience"
+  },
+  "symbolConvention": "symbols.md",
+  "retrievalPolicy": {
+    "allowlistPath": "lecture/retrieval-allowlist.json",
+    "denylistPath": "eval-heldout/retrieval-denylist.json",
+    "lectureMaterialsExamples": "allowlisted",
+    "evalHeldout": "denylisted",
+    "statementZh": "lecture/materials/examples 可进入教学检索；eval-heldout 禁止进入教学检索。"
+  },
+  "charterGoals": [
+    "G1",
+    "G2",
+    "G5",
+    "G6"
+  ],
+  "planSources": [
+    "R01",
+    "R02",
+    "R04",
+    "R05",
+    "C11"
+  ],
+  "sampleArc": "hook T(x,y)=(x+y,0) → observe → relate nullspace & image → formal defs → worked compute → optional try",
+  "counts": {
+    "materialsSources": 5,
+    "chunks": 14,
+    "teachingGoals": 6,
+    "correctExamples": 12,
+    "typicalErrors": 10,
+    "heldoutProblems": 15,
+    "anomalyCases": 9,
+    "countableSamples": 60,
+    "countableDefinitionZh": "chunks + correctExamples + typicalErrors + heldoutProblems + anomalyCases（工程样本计数，非功效分析）"
+  },
+  "paths": {
+    "materials": "materials/",
+    "goals": "goals/teaching-goals.json",
+    "examples": "examples/",
+    "lecture": "lecture/",
+    "evalHeldout": "eval-heldout/",
+    "anomalies": "anomaly-cases/cases.json"
+  }
+}

@@ -1,0 +1,1591 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-10-11",
+  "repository": "Xhhemoing/study-assistant-opening",
+  "observed_sha": "1a4cf465c86da7f08b6fda3044f9b0f932b80824",
+  "observed_branch": "feat/opening-release",
+  "plan_state": "proposed_not_implemented",
+  "work_effort_note": "S/M/L是相对工作量，不是时间承诺；人力与运行环境待执行时确认。",
+  "scope_note": "只交付二次开发计划；不写回仓库、不创建Issue、不修改生产数据。",
+  "goals": {
+    "G1": "从首个可用版本起，由 AI 组织并呈现主要教学内容；原材料作为可追溯依据。",
+    "G2": "贯穿理解、思考、实践、反馈、选择性沉淀、复习和再次继续；完整陪伴不等于强制流程。",
+    "G3": "用户拥有路径与节奏选择权；可以自由开始、追问、跳过、看完整讲解、暂停和改道。",
+    "G4": "介入时机、频率与帮助深度可设置并依反馈调整；可靠性与学习结果约束自适应。",
+    "G5": "教学表达结构化、清晰且按需互动；文本、公式、图示和演示共享语义与状态。",
+    "G6": "关键主张可回查来源或核验依据；不将未知、满意度、完成量或受助表现包装成掌握。",
+    "G7": "跨活动、材料和时间保持连续；保留用户草稿、尝试、思路、帮助记录和版本。",
+    "G8": "增量改造现有项目，保留授权、隐私、预算、版本、幂等及原有质量与发布规则。"
+  },
+  "tasks": [
+    {
+      "id": "V2-00",
+      "title": "确认二次开发章程并修订冲突旧范围",
+      "milestone": "M0",
+      "owner_role": "负责人/产品",
+      "depends_on": [],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "G5",
+        "G6",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "S",
+      "scope": [
+        "把G1–G8写入一个主设计文档；明确AI主讲是首版主体验。",
+        "只修订旧K02a排除一键教学等与新方向冲突的范围；不删安全、权限和证据约束。",
+        "建立需求→任务→验收映射，后续范围变更留下理由。"
+      ],
+      "existing_paths": [
+        "README.md",
+        "docs/product/PRD.md",
+        "docs/product/UX_AND_AI_POLICY.md",
+        "docs/superpowers/plans/opening-release/10-media-knowledge.md"
+      ],
+      "proposed_paths": [
+        "docs/plans/2026-10-11-ai-led-learning-v2.md"
+      ],
+      "verification": [
+        "审查文档diff；核对任务依赖与目标映射；不因文档改动跑全套构建。"
+      ],
+      "acceptance": "没有“阅读器先行、主讲后补”“强制全流程”“AI自动授予掌握”条款。",
+      "rollback": "仅回退新计划修订，不更改既有数据。",
+      "source_refs": [
+        "U01",
+        "C01",
+        "C10"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "pass",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "README.md": "existing_area_or_plan_target_verify_before_edit",
+        "docs/product/PRD.md": "existing_area_or_plan_target_verify_before_edit",
+        "docs/product/UX_AND_AI_POLICY.md": "read_at_observed_sha",
+        "docs/superpowers/plans/opening-release/10-media-knowledge.md": "read_at_observed_sha"
+      },
+      "notes": "Charter landed docs/plans/2026-10-11-ai-led-learning-v2.md"
+    },
+    {
+      "id": "V2-01",
+      "title": "恢复当前质量基线并核对运行配置",
+      "milestone": "M0",
+      "owner_role": "集成/工程",
+      "depends_on": [
+        "V2-00"
+      ],
+      "goal_ids": [
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "S",
+      "scope": [
+        "以1a4cf46的真实Lint日志为起点处理缺失react-hooks/exhaustive-deps规则定义。",
+        "核对规则插件、配置及抑制注释的真实意图；不关闭整套lint或盲目audit fix --force。",
+        "记录当前锁文件、安全告警生产可达性、模型配置和测试库前提；不把旧MinIO故障当现状。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening/library/material-library.tsx",
+        ".github/workflows/ci.yml",
+        "package.json"
+      ],
+      "proposed_paths": [],
+      "verification": [
+        "修复后重跑失败命令与最近相关测试；按现有CI获得当前SHA结果。",
+        "依赖升级仅在必要范围内，兼容性单列。"
+      ],
+      "acceptance": "当前SHA没有被跳过的必需发布检查；无伪造通过。",
+      "rollback": "单独回退质量修复提交；不降低现有CI。",
+      "source_refs": [
+        "C01",
+        "C09",
+        "C15"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "pass_local",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening/library/material-library.tsx": "read_at_observed_sha",
+        ".github/workflows/ci.yml": "existing_area_or_plan_target_verify_before_edit",
+        "package.json": "existing_area_or_plan_target_verify_before_edit"
+      },
+      "notes": "Integrator ACCEPT 2026-10-11; local eslint + npm run lint exit 0; remote GHA pending push. See docs/superpowers/evidence/2026-10-11-opening-release/v2-01-ci-lint-accept.md"
+    },
+    {
+      "id": "V2-02",
+      "title": "建立真实教学单元与评测样本",
+      "milestone": "M0",
+      "owner_role": "教学设计/QA",
+      "depends_on": [
+        "V2-00"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G5",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "首选线性代数“秩与零空间”一个单元；准备可授权使用的原材料、目标、正确例题与典型错误。",
+        "将讲解素材和未曝光评测题隔离；准备概念、计算、解释与新情境题。",
+        "规划约30–60个来源/题目/异常检查案例作为初始工程样本，数量为工程建议，非功效分析样本量。"
+      ],
+      "existing_paths": [
+        "tests/fixtures"
+      ],
+      "proposed_paths": [
+        "tests/fixtures/opening/teaching/",
+        "docs/quality/teaching-v2-evaluation.md"
+      ],
+      "verification": [
+        "人工核查目标覆盖、符号约定、正确答案和可接受表达；记录未能核验项。",
+        "选入同页跨源、错公式、材料缺页、重命名知识点、仅音轨的视频例。"
+      ],
+      "acceptance": "首单元有可回查依据和独立于生成内容的评价标准；未曝光题不进入教学检索。",
+      "rollback": "移除试验样本，不删除用户材料。",
+      "source_refs": [
+        "R01",
+        "R02",
+        "R04",
+        "R05",
+        "C11"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "pass",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "tests/fixtures": "existing_area_or_plan_target_verify_before_edit"
+      },
+      "notes": "Experience+AI fixtures combined ACCEPT 2026-10-11"
+    },
+    {
+      "id": "V2-03",
+      "title": "决定活动/内容/证据兼容边界",
+      "milestone": "M0",
+      "owner_role": "架构/数据",
+      "depends_on": [
+        "V2-00"
+      ],
+      "goal_ids": [
+        "G3",
+        "G6",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "核对现有Document/Block/Revision可承载哪些教学内容；一份正文只保留一个权威存储。",
+        "学习活动允许courseId为空；正式观察沿单一事实写入路径扩展，不伪造默认课程、不建第二套评分。",
+        "设计workspace+owner+activity范围、v1接口兼容、v2可空课程事实、备份导出与迁移回退。"
+      ],
+      "existing_paths": [
+        "packages/contracts/src/opening/learning.ts",
+        "packages/database/src/repositories/opening-learning-observations.ts",
+        "apps/web/src/features/opening/learning/read-service.ts"
+      ],
+      "proposed_paths": [
+        "docs/decisions/ADR-teaching-activity-context.md"
+      ],
+      "verification": [
+        "接口消费者与SQL约束清单；旧有必填courseId请求保持原行为。",
+        "无课程的读取/授权/归档/后续关联设计反例检查。"
+      ],
+      "acceptance": "对新持久化和跨包契约有明确兼容决定；没有仅把字段改可空而漏掉授权的方案。",
+      "rollback": "旧接口保留；无默认回填正确、独立或迁移。",
+      "source_refs": [
+        "C01",
+        "C03",
+        "C08",
+        "P01"
+      ],
+      "approval_boundary": "数据迁移与跨包API设计须在执行前单独批准；本计划不执行",
+      "evidence_status": {
+        "engineering": "pass",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/contracts/src/opening/learning.ts": "read_at_observed_sha",
+        "packages/database/src/repositories/opening-learning-observations.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/web/src/features/opening/learning/read-service.ts": "read_at_observed_sha"
+      },
+      "notes": "ADR design ACCEPT + PM design approval (no ALTER) 2026-10-11"
+    },
+    {
+      "id": "V2-04",
+      "title": "实现可自由开始的学习活动上下文",
+      "milestone": "M1",
+      "owner_role": "数据/服务",
+      "depends_on": [
+        "V2-03"
+      ],
+      "goal_ids": [
+        "G2",
+        "G3",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "支持以材料、主题、问题或继续入口创建activity；必有owner/workspace，不要求先选课程/页码。",
+        "持久化当前活动、目标、路径版本和用户状态；正式任务与教学进度分开。",
+        "允许关联课程而不移动或复制原始学习事实；索引与备份从新增表上线时纳入。"
+      ],
+      "existing_paths": [
+        "packages/contracts/src/opening/learning.ts"
+      ],
+      "proposed_paths": [
+        "packages/contracts/src/opening/teaching-activity.ts",
+        "packages/database/src/repositories/opening-teaching-activities.ts",
+        "apps/web/src/features/opening/teaching/activity-service.ts"
+      ],
+      "verification": [
+        "无课程创建/恢复；跨owner拒绝；重复clientKey同意图重放；相同key异意图409。",
+        "测试关联课程与撤销关联不丢草稿/观察，服务端校验source可访问。"
+      ],
+      "acceptance": "问题入口可直接开始，旧课程入口仍正常；所有新数据可按用户范围导出恢复。",
+      "rollback": "关闭新入口、保留新增数据与读取兼容；不drop用户数据表。",
+      "source_refs": [
+        "C03",
+        "C01"
+      ],
+      "approval_boundary": "需批准V2-03迁移/契约方案",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/contracts/src/opening/learning.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-05",
+      "title": "保存版本化教学活动而非只有聊天文本",
+      "milestone": "M1",
+      "owner_role": "数据/内容",
+      "depends_on": [
+        "V2-03"
+      ],
+      "goal_ids": [
+        "G1",
+        "G5",
+        "G7"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "定义TeachingUnit与ActivitySpec的目标、块、来源引用、验证状态、生成配置和版本。",
+        "复用统一资产/Revision正文存储；教学表只存必要索引、活动顺序与元数据。",
+        "个人草稿、答案、反馈与可复用教学正文分离；未答题答案只在服务端保存引用。"
+      ],
+      "existing_paths": [
+        "packages/contracts/src/opening/learning.ts"
+      ],
+      "proposed_paths": [
+        "packages/contracts/src/opening/teaching-content.ts",
+        "packages/database/src/repositories/opening-teaching-content.ts"
+      ],
+      "verification": [
+        "读取旧版本；expectedVersion冲突；局部修订保留草稿锚点或显式报告失配。",
+        "未揭示答案不出现在客户端初始化JSON/DOM/恢复快照。"
+      ],
+      "acceptance": "一节课可以继续、引用和局部更新，既不是长聊天快照也不是两套正文存储。",
+      "rollback": "旧内容版本保持可读；停止新生成不影响已有笔记。",
+      "source_refs": [
+        "E01",
+        "E03",
+        "C01"
+      ],
+      "approval_boundary": "需批准V2-03迁移/契约方案",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/contracts/src/opening/learning.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-06",
+      "title": "建立来源包、覆盖关系与证据定位",
+      "milestone": "M1",
+      "owner_role": "AI/检索",
+      "depends_on": [
+        "V2-02",
+        "V2-03"
+      ],
+      "goal_ids": [
+        "G1",
+        "G6",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "复用当前授权chunks与版本检索；将材料章节/目标/关键条件形成覆盖表。",
+        "来源锚点固定sourceId+version+chunkId+页/时间，不能仅以页码跨材料匹配。",
+        "区分材料重组、生成例子、补充知识、推断与冲突；无材料时不伪造来源。"
+      ],
+      "existing_paths": [
+        "packages/ai/src/opening/context.ts",
+        "apps/worker/src/jobs/tutor-chunks.ts",
+        "apps/worker/src/jobs/tutor-turn.ts"
+      ],
+      "proposed_paths": [
+        "packages/ai/src/opening/teaching-evidence.ts",
+        "packages/domain/src/opening/teaching-coverage.ts"
+      ],
+      "verification": [
+        "跨源同页、超长锚点、中文转述、零相关材料、图片无文字、隐私排除。",
+        "检查实际发给provider的内容；外部搜索不可用时明确边界而非虚构来源。"
+      ],
+      "acceptance": "每个材料性关键主张有可回查依据，未覆盖条件可见；检索提升不填虚构百分比。",
+      "rollback": "停用新检索装配；保留用户选定材料和已授权读取。",
+      "source_refs": [
+        "C04",
+        "C10",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/ai/src/opening/context.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/worker/src/jobs/tutor-chunks.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/worker/src/jobs/tutor-turn.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-07",
+      "title": "把教学生成接入现有持久任务与预算",
+      "milestone": "M1",
+      "owner_role": "worker/数据",
+      "depends_on": [
+        "V2-01",
+        "V2-03"
+      ],
+      "goal_ids": [
+        "G1",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "在既有worker/runtime注册教学任务；复用operationId、预算和隐私epoch机制。",
+        "区分生成、修复、取消、unknown和失败；有限预算内重试，不重新消耗已释放/未知余额。",
+        "生成完成写回时检查owner、源状态、活动版本和epoch；刷新通过已持久任务恢复。"
+      ],
+      "existing_paths": [
+        "apps/worker/src/runtime/budgeted-call.ts",
+        "apps/worker/src/runtime/handlers.ts",
+        "apps/worker/src/jobs/tutor-turn.ts"
+      ],
+      "proposed_paths": [
+        "apps/worker/src/jobs/compile-teaching-unit.ts"
+      ],
+      "verification": [
+        "响应丢失、超时unknown、worker重启、取消后晚到结果、privacy变更和版本竞态。",
+        "隔离数据库检查唯一写回/预算账本；不假装外部请求可以在未知结果下exactly-once。"
+      ],
+      "acceptance": "用户不会因刷新产生重复内容/重复内部扣账；外部计费未知如实保留并可对账。",
+      "rollback": "关新job kind；保留预算/任务记录；已发出调用按现有核对机制处理。",
+      "source_refs": [
+        "C04",
+        "P01",
+        "C01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/worker/src/runtime/budgeted-call.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/worker/src/runtime/handlers.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/worker/src/jobs/tutor-turn.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-08",
+      "title": "实现提纲到当前教学活动的编排生成",
+      "milestone": "M1",
+      "owner_role": "AI/领域",
+      "depends_on": [
+        "V2-05",
+        "V2-06",
+        "V2-07"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "先生成可改提纲，再编译当前活动；下一活动按需要预取，避免等待整门课生成。",
+        "模型提出目标/讲解/例子/检查点，程序限制可用活动类型与来源。",
+        "教学路径与planDay日历不同；前置建议可解释、可跳过，不用掌握百分比锁章节。"
+      ],
+      "existing_paths": [
+        "packages/domain/src/opening/tutor-policy.ts"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/teaching-plan.ts",
+        "packages/ai/src/opening/teaching-compiler.ts"
+      ],
+      "verification": [
+        "无当前页也生成有依据的教学；目标冲突、无基础、已会请求速览、仅主题输入。",
+        "同一材料的当前目标调整只修订后续活动，不重写已学习历史。"
+      ],
+      "acceptance": "真实模型生成一个可呈现教学单元，不是静态写死的示例和空白聊天框。",
+      "rollback": "关闭新编排保持已生成活动可读，不自动切到其他provider。",
+      "source_refs": [
+        "R02",
+        "E01",
+        "E02",
+        "C02"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/domain/src/opening/tutor-policy.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-09",
+      "title": "对教学内容做分层核验与发布控制",
+      "milestone": "M1",
+      "owner_role": "AI/QA/安全",
+      "depends_on": [
+        "V2-08"
+      ],
+      "goal_ids": [
+        "G1",
+        "G6",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "HTTP/模型输出schema、来源身份、关键主张支持度、可用工具结果与动作权限分层检查。",
+        "核心结论缺依据或冲突未解时不作为已核验教学发布；可保留明确标注的讨论草稿。",
+        "每次读取/继续重新检查删除或隐私排除；流式未完成JSON不执行动作，完整已检查块才可交互。"
+      ],
+      "existing_paths": [
+        "apps/worker/src/jobs/tutor-turn.ts",
+        "packages/domain/src/opening/tutor-policy.ts"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/teaching-validation.ts",
+        "packages/ai/src/opening/teaching-verifiers.ts"
+      ],
+      "verification": [
+        "合法chunkId却不支持主张；材料注入指令；模型自称verified；latex/URL注入；关键公式错误。",
+        "模拟检查工具超时保持unknown，不能以另一模型点赞替代独立证明。"
+      ],
+      "acceptance": "结构通过与事实通过状态分开；未经核验内容不伪装成权威讲解/正式评分依据。",
+      "rollback": "关闭有风险内容类型，不删除合法历史；回到已核验文字解释或显式说明限制。",
+      "source_refs": [
+        "R01",
+        "E03",
+        "C04"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/worker/src/jobs/tutor-turn.ts": "read_at_observed_sha",
+        "packages/domain/src/opening/tutor-policy.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-10",
+      "title": "交付AI主讲教学工作区与受控基础渲染",
+      "milestone": "M1",
+      "owner_role": "前端/交互",
+      "depends_on": [
+        "V2-03",
+        "V2-05"
+      ],
+      "goal_ids": [
+        "G1",
+        "G3",
+        "G5"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "主区为当前AI教学；提纲、原材料、草稿按需展开，首页主操作为继续/开始学习。",
+        "组件目录含text/math/step/example/question/draft/evidence；布局用既有Tailwind约束。",
+        "模型仅选择组件与参数，客户端动作仍经服务端授权；禁止任意HTML/JS和预加载隐藏答案。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening",
+        "docs/product/UX_AND_AI_POLICY.md"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/teaching-workspace.tsx",
+        "apps/web/src/features/opening/teaching/block-renderer.tsx",
+        "apps/web/src/features/opening/teaching/component-catalog.ts"
+      ],
+      "verification": [
+        "无效组件、非法链接/动作、未知schema版本、局部渲染失败、键盘状态与文字替代。",
+        "响应式和真机提供人工步骤，依AGENTS由用户验收；不擅自截图。"
+      ],
+      "acceptance": "无需打开原阅读器也能开始学习；引用可查，追问不离开当前教学上下文。",
+      "rollback": "feature flag切回旧入口但保留新内容只读；不将静态示例伪装AI生成。",
+      "source_refs": [
+        "E03",
+        "E04",
+        "C01",
+        "C14"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening": "existing_area_or_plan_target_verify_before_edit",
+        "docs/product/UX_AND_AI_POLICY.md": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-11",
+      "title": "首版提供显式介入偏好与低打扰决策",
+      "milestone": "M1",
+      "owner_role": "领域/交互",
+      "depends_on": [
+        "V2-04"
+      ],
+      "goal_ids": [
+        "G3",
+        "G4"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "会话>课程>全局，主动程度、节点和深度分别设置；随时关闭主动建议。",
+        "主动求助与系统打断分开；安静模式仍回应用户请求。",
+        "记录none/defer/offer/respond与reason，不以停留时长推断卡住，不因hint已发便自动展开答案。"
+      ],
+      "existing_paths": [
+        "packages/domain/src/opening/tutor-policy.ts",
+        "docs/product/UX_AND_AI_POLICY.md"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/intervention-policy.ts",
+        "apps/web/src/features/opening/teaching/preference-controls.tsx"
+      ],
+      "verification": [
+        "临时偏好不覆盖永久偏好；安静时主动求助；连续拒绝；低依据；输入中不要抢焦点。"
+      ],
+      "acceptance": "用户设置立即生效并可查看/重置；没有普适“每N分钟必须提问”的硬编码教学规则。",
+      "rollback": "停用自动介入保留主动问答；不修改已存在学习证据。",
+      "source_refs": [
+        "R03",
+        "R07",
+        "C02",
+        "C14"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/domain/src/opening/tutor-policy.ts": "read_at_observed_sha",
+        "docs/product/UX_AND_AI_POLICY.md": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-12",
+      "title": "实现局部追问、改写、跳过和分支返回",
+      "milestone": "M1",
+      "owner_role": "服务/前端",
+      "depends_on": [
+        "V2-04",
+        "V2-05",
+        "V2-10",
+        "V2-11"
+      ],
+      "goal_ids": [
+        "G2",
+        "G3",
+        "G7"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "命令绑定activityId、blockId、contentVersion；支持why/rephrase/expand/example/skip/branch/return。",
+        "局部改写新建Revision而非改原文；保留用户草稿与答题状态。",
+        "服务端检查clientKey与expectedVersion，冲突要求合并/重读，不用最后写赢覆盖。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening/learning"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/command-service.ts",
+        "apps/web/src/app/api/opening/teaching/activities/[id]/commands/route.ts"
+      ],
+      "verification": [
+        "两端同时修改、生成时改道、跳过不写错题、返回原任务位置、对不同版本块追问。"
+      ],
+      "acceptance": "用户可以改变路线且不丢内容；支线是同一活动可恢复的路径，不是孤立聊天。",
+      "rollback": "禁用新命令写入，原版本与草稿保持可读。",
+      "source_refs": [
+        "C01",
+        "E01",
+        "U01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening/learning": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-13",
+      "title": "修正教学与作答证据语义",
+      "milestone": "M1",
+      "owner_role": "数据/领域",
+      "depends_on": [
+        "V2-03",
+        "V2-04"
+      ],
+      "goal_ids": [
+        "G2",
+        "G6",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "区分instruction与针对item/attempt的hint/solution；保留真实送达语义，不声称读过或完全无外部帮助。",
+        "同一事实路径保存correct/incorrect/unknown；v2支持活动范围，旧course接口不变。",
+        "移除延迟默认transfer，稳定node/item/version身份；不凭新ID或重命名推断新情境。"
+      ],
+      "existing_paths": [
+        "packages/contracts/src/opening/learning.ts",
+        "packages/domain/src/opening/retest-close-evidence.ts",
+        "packages/database/src/repositories/opening-skill-evidence.ts",
+        "apps/worker/src/jobs/tutor-turn.ts"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/teaching-exposure.ts"
+      ],
+      "verification": [
+        "概念讲解不污染后续不同题；同题答案暴露不能被新session擦掉；无题目身份保持未知。",
+        "延迟原题≠迁移；新ID同题≠新题；自对照与模型建议分别展示；错误作答不从统计分母消失。"
+      ],
+      "acceptance": "帮助归属有据；完成活动不升级掌握；正式证明无法核验时保留needs_check。",
+      "rollback": "保留新字段但旧读适配；历史缺失不回填为independent/correct/transfer。",
+      "source_refs": [
+        "R01",
+        "C03",
+        "C04",
+        "C05",
+        "P01"
+      ],
+      "approval_boundary": "需批准V2-03的契约与必要迁移",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/contracts/src/opening/learning.ts": "read_at_observed_sha",
+        "packages/domain/src/opening/retest-close-evidence.ts": "read_at_observed_sha",
+        "packages/database/src/repositories/opening-skill-evidence.ts": "read_at_observed_sha",
+        "apps/worker/src/jobs/tutor-turn.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-14",
+      "title": "保存学习断点并支持跨端恢复",
+      "milestone": "M1",
+      "owner_role": "数据/前端",
+      "depends_on": [
+        "V2-04",
+        "V2-05",
+        "V2-07",
+        "V2-12",
+        "V2-13"
+      ],
+      "goal_ids": [
+        "G2",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "断点包含内容版本、当前块/互动参数、草稿、实际尝试、已提供帮助和未解决问题。",
+        "生成摘要可失败，但结构化恢复与草稿保存不能依赖摘要成功。",
+        "服务端为正式状态权威，本地只存未发送草稿；恢复时检查权限、材料可用性和未知job。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening/learning/read-service.ts"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/resume-service.ts",
+        "apps/web/src/features/opening/teaching/resume-card.tsx"
+      ],
+      "verification": [
+        "生成中刷新、断网再连、服务重启、另一设备继续、引用被撤回、源版本变化。",
+        "草稿局部冲突并列保留，不静默覆盖。"
+      ],
+      "acceptance": "恢复的不只是聊天窗口，而是同一活动、思路、草稿和可立即继续的动作。",
+      "rollback": "保留只读恢复数据与草稿导出；关闭自动总结不影响继续。",
+      "source_refs": [
+        "C04",
+        "C08",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening/learning/read-service.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-15",
+      "title": "首单元加入同语义驱动的可操作图示",
+      "milestone": "M1",
+      "owner_role": "前端/数学校核",
+      "depends_on": [
+        "V2-02",
+        "V2-09",
+        "V2-10"
+      ],
+      "goal_ids": [
+        "G1",
+        "G5",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "实现matrix_transform一类受控互动：输入、输出、矩阵和文字读同一参数模型。",
+        "支持暂停、重置、步进、键盘操作、低动效和文字替代；只对适合的内容使用。",
+        "图示与公式不分别由模型独立编造；无可靠组件时返回清晰静态表达。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/blocks/matrix-transform.tsx",
+        "packages/domain/src/opening/teaching-math-model.ts"
+      ],
+      "verification": [
+        "零矩阵、恒等、秩1、负数/小数、维度不符和参数上限；表达与数值结果一致。",
+        "真机/视觉由用户验收；不把图示漂亮当知识正确。"
+      ],
+      "acceptance": "首版已体现按需互动教学，不把所有可视化延期，也不要求任意动画生成器。",
+      "rollback": "组件退回同数据生成的静态表/文字；保留参数。",
+      "source_refs": [
+        "R06",
+        "E03",
+        "E04"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-16",
+      "title": "首个AI主讲闭环集成与受控试用",
+      "milestone": "M1",
+      "owner_role": "集成/QA",
+      "depends_on": [
+        "V2-01",
+        "V2-08",
+        "V2-09",
+        "V2-10",
+        "V2-11",
+        "V2-12",
+        "V2-13",
+        "V2-14",
+        "V2-15"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "G5",
+        "G6",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "真实材料/真实模型：进入→AI开讲→局部追问→尝试反馈→暂停→恢复→可选独立题。",
+        "准备无课程、无模型配置、预算不足、解析不完整和源撤回的可理解状态。",
+        "用现有发布流程开启内部feature flag；用户体验验收与学习效果状态分别记录。"
+      ],
+      "existing_paths": [
+        "tests/integration",
+        "tests/e2e",
+        ".github/workflows/ci.yml"
+      ],
+      "proposed_paths": [
+        "tests/integration/opening-teaching-loop.test.ts",
+        "tests/e2e/opening-teaching.spec.ts"
+      ],
+      "verification": [
+        "Agent隔离库集成、handler与所属包类型检查；现有CI按原规则执行。",
+        "用户按操作脚本验收教学/引用/跳过/恢复；未反馈仍记pending。"
+      ],
+      "acceptance": "第一个可试用里程碑就是AI主讲，不以阅读器+聊天替代；不要求已证实长期提分才内部试用。",
+      "rollback": "关feature flag；用户内容保留、可恢复/导出；记录未通过项。",
+      "source_refs": [
+        "C01",
+        "R01",
+        "R02",
+        "U01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "tests/integration": "existing_area_or_plan_target_verify_before_edit",
+        "tests/e2e": "existing_area_or_plan_target_verify_before_edit",
+        ".github/workflows/ci.yml": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-17",
+      "title": "把布尔推荐升级为证据条件化教学选择",
+      "milestone": "M2",
+      "owner_role": "领域/AI",
+      "depends_on": [
+        "V2-13",
+        "V2-16"
+      ],
+      "goal_ids": [
+        "G2",
+        "G4",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "按目标/节点/能力维度/近期实际尝试/帮助/核验来源构造只读教学输入。",
+        "优先处理被核验错误与冲突；一次旧正确不能覆盖最近失败。",
+        "提供解释、示例、补步骤、独立尝试、探究、回顾等候选，规则先行而非训练黑箱。"
+      ],
+      "existing_paths": [
+        "packages/domain/src/opening/tutor-policy-adaptive.ts",
+        "packages/database/src/repositories/opening-skill-evidence.ts",
+        "apps/web/src/features/opening/learning/read-service.ts"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/teaching-action-policy.ts"
+      ],
+      "verification": [
+        "会背定义但不会操作、旧正确新失败、仅自报、少量偏样本、不同课程同名、检查来源不同。"
+      ],
+      "acceptance": "建议能说明当前依据和不确定性；不制造全课程掌握率。",
+      "rollback": "切回保守显式请求模式，保留全部观察。",
+      "source_refs": [
+        "C06",
+        "C07",
+        "C08",
+        "R03"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/domain/src/opening/tutor-policy-adaptive.ts": "read_at_observed_sha",
+        "packages/database/src/repositories/opening-skill-evidence.ts": "read_at_observed_sha",
+        "apps/web/src/features/opening/learning/read-service.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-18",
+      "title": "实现可解释反馈适应而非点击强化",
+      "milestone": "M2",
+      "owner_role": "领域/数据",
+      "depends_on": [
+        "V2-11",
+        "V2-17"
+      ],
+      "goal_ids": [
+        "G3",
+        "G4",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "区分时机/深度/表达/判断错误/帮助有效反馈；明确反馈立即调整相应偏好。",
+        "行为推测只作为候选，作用范围和重置入口清楚；偏好不会静默扩大权限。",
+        "教学策略改变依据可比较结果与失败案例，不用点赞当奖励在线自动晋升。"
+      ],
+      "existing_paths": [
+        "docs/product/UX_AND_AI_POLICY.md"
+      ],
+      "proposed_paths": [
+        "packages/contracts/src/opening/teaching-feedback.ts",
+        "packages/domain/src/opening/feedback-adaptation.ts"
+      ],
+      "verification": [
+        "关闭提示不认定不需要帮助；一次有用不改能力；课程偏好不污染其他课程；撤销反馈可恢复。"
+      ],
+      "acceptance": "用户能知道为什么更少/更多提示并纠正；尚无足够效果证据时维持保守策略。",
+      "rollback": "停用推测适应，保留用户明确选择与反馈原始记录。",
+      "source_refs": [
+        "R01",
+        "R03",
+        "R07",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "docs/product/UX_AND_AI_POLICY.md": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-19",
+      "title": "来源纠错后的定向重编译与隐私清理",
+      "milestone": "M2",
+      "owner_role": "数据/AI",
+      "depends_on": [
+        "V2-06",
+        "V2-09",
+        "V2-14"
+      ],
+      "goal_ids": [
+        "G6",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "材料更新只使依赖的讲解/题目/节点进入需复核状态，不全课程重生成。",
+        "原始用户答案和受允许历史保留；被撤回材料不从缓存、摘要、历史恢复或分享中回流。",
+        "资料错、AI错、解析错与学生错误分开记录；不因系统纠错降低学习者能力。"
+      ],
+      "existing_paths": [
+        "apps/worker/src/jobs/tutor-turn.ts",
+        "packages/database/src/repositories/opening-skill-evidence.ts"
+      ],
+      "proposed_paths": [
+        "packages/domain/src/opening/teaching-invalidation.ts"
+      ],
+      "verification": [
+        "删除/生成并发、旧源引用、隐私epoch、跨源派生内容、缓存回流、答案与引用失效。"
+      ],
+      "acceptance": "能定位受影响内容和原因；旧主张不继续被标为supported；删除语义与现有政策一致。",
+      "rollback": "停止自动重编译，受影响项保持需复核；不撤销删除意图。",
+      "source_refs": [
+        "C04",
+        "C10",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/worker/src/jobs/tutor-turn.ts": "read_at_observed_sha",
+        "packages/database/src/repositories/opening-skill-evidence.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-20",
+      "title": "将探索与笔记自然接入教学活动",
+      "milestone": "M2",
+      "owner_role": "交互/资产",
+      "depends_on": [
+        "V2-12",
+        "V2-16"
+      ],
+      "goal_ids": [
+        "G2",
+        "G3",
+        "G7"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "支线探究可保留问题、猜想与论证，不强制变成测验。",
+        "有价值的解释、用户改写与草稿选择性沉淀到既有资产层。",
+        "摘要可自动草拟，正式笔记/卡片按现有权限确认；回到活动可继续编辑。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/exploration",
+        "apps/web/src/features/editor"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/capture-service.ts"
+      ],
+      "verification": [
+        "重复接受只一份资产；用户修改不被重生成覆盖；删除来源后的笔记引用处理；无课程仍可保存。"
+      ],
+      "acceptance": "学习产出与教学过程连通，不形成另一个资料收集箱。",
+      "rollback": "停用自动候选保留手动保存，现有资产内容不动。",
+      "source_refs": [
+        "U01",
+        "P01",
+        "C14"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/exploration": "existing_area_or_plan_target_verify_before_edit",
+        "apps/web/src/features/editor": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-21",
+      "title": "重测与时间计划连接完整学习路径",
+      "milestone": "M2",
+      "owner_role": "领域/计划",
+      "depends_on": [
+        "V2-13",
+        "V2-17",
+        "V2-20"
+      ],
+      "goal_ids": [
+        "G2",
+        "G3",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "复用L02重测、P02候选任务与Opening planDay；教学顺序与日程时间不同。",
+        "提供可选回顾/独立题/应用任务；用户拒绝、改期、跳过和完成分别记录。",
+        "活动结束与复测结局分开；一次跳过不当能力失败，默认间隔标启发式可修改。"
+      ],
+      "existing_paths": [
+        "packages/domain/src/opening/retest-policy.ts",
+        "apps/web/src/features/opening/planning",
+        "apps/web/src/features/opening/learning/attempt-service.ts"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/review-bridge.ts"
+      ],
+      "verification": [
+        "候选拒绝无正式排程；受助复测不计独立；已完成但无观察保持unverified；日历冲突不重复加任务。"
+      ],
+      "acceptance": "从讲解到后续回顾可接续，但用户不会收到大批自动承诺的待办。",
+      "rollback": "停止新候选，不删除用户已确认计划；不改旧buildTodayPlan。",
+      "source_refs": [
+        "R04",
+        "R05",
+        "C11",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/domain/src/opening/retest-policy.ts": "existing_area_or_plan_target_verify_before_edit",
+        "apps/web/src/features/opening/planning": "existing_area_or_plan_target_verify_before_edit",
+        "apps/web/src/features/opening/learning/attempt-service.ts": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-22",
+      "title": "跨天闭环与个性化集成验收",
+      "milestone": "M2",
+      "owner_role": "QA/产品",
+      "depends_on": [
+        "V2-18",
+        "V2-19",
+        "V2-20",
+        "V2-21"
+      ],
+      "goal_ids": [
+        "G2",
+        "G3",
+        "G4",
+        "G6",
+        "G7"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "使用真实用户选择完成跨天继续、反馈纠正、来源修订和延迟回顾。",
+        "核对偏好从解释方式到介入时机的适应，保持用户可重置。",
+        "记录实际问题、样本与未知效果，不把工程关闭写成教学有效。"
+      ],
+      "existing_paths": [
+        "tests/integration",
+        "tests/e2e"
+      ],
+      "proposed_paths": [
+        "tests/integration/opening-teaching-continuity.test.ts"
+      ],
+      "verification": [
+        "固定时钟跨时区测试；不同设备与revision冲突；隐私排除；用户人工跨天体验。"
+      ],
+      "acceptance": "长期上下文不靠模型臆测，作答/帮助/版本关系可回查。",
+      "rollback": "关个性化与自动后续，M1稳定主讲仍可用。",
+      "source_refs": [
+        "C01",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "tests/integration": "existing_area_or_plan_target_verify_before_edit",
+        "tests/e2e": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-23",
+      "title": "扩展结构化图纸与演示组件目录",
+      "milestone": "M3",
+      "owner_role": "前端/教学设计",
+      "depends_on": [
+        "V2-15",
+        "V2-22"
+      ],
+      "goal_ids": [
+        "G1",
+        "G5",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "按真实理解障碍扩展关系图、分步证明、参数演示与对比表，不先做万能画布。",
+        "复杂图由声明式实体/关系/参数生成；渲染故障局部降级而非整节失败。",
+        "局部换表达保留同一语义对象；可暂停、回看、文字摘要与低动效。"
+      ],
+      "existing_paths": [
+        "apps/web/src/features/opening/teaching/component-catalog.ts"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/blocks/"
+      ],
+      "verification": [
+        "恶意链接/超大图/循环数据/非法表达式；跨组件一致性；屏幕阅读替代与键盘交互。"
+      ],
+      "acceptance": "新增每类组件都有真实教学案例和失败路径；不按动画数量验收。",
+      "rollback": "逐组件feature flag退回静态表达。",
+      "source_refs": [
+        "R06",
+        "E03",
+        "E04"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/web/src/features/opening/teaching/component-catalog.ts": "created_by_V2-10"
+      }
+    },
+    {
+      "id": "V2-24",
+      "title": "扩到第二类学科并支持开放任务",
+      "milestone": "M3",
+      "owner_role": "教学设计/AI",
+      "depends_on": [
+        "V2-22"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "增加一个非线代单元，例如程序调试或论证写作；检查模式是否过度数学/刷题化。",
+        "程序执行需独立隔离沙箱与资源限制；无可信runner时只提供显式未执行的代码分析。",
+        "开放证明/作品采用可解释rubric与人工复核，模型反馈保留建议性质。"
+      ],
+      "existing_paths": [
+        "packages/contracts/src/opening/learning.ts"
+      ],
+      "proposed_paths": [
+        "tests/fixtures/opening/teaching/second-domain/"
+      ],
+      "verification": [
+        "多个正确解法、部分正确、不可判定、题目本身错误；rubric版本不隐式改写历史评分。"
+      ],
+      "acceptance": "学习伙伴可支持探究与作品，不强迫一切压成correct/incorrect。",
+      "rollback": "限制到已验证学科和能力类型，保留原始作品。",
+      "source_refs": [
+        "R01",
+        "R02",
+        "U01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "packages/contracts/src/opening/learning.ts": "read_at_observed_sha"
+      }
+    },
+    {
+      "id": "V2-25",
+      "title": "测量首个内容可用性、成本和恢复质量",
+      "milestone": "M3",
+      "owner_role": "工程/QA",
+      "depends_on": [
+        "V2-16"
+      ],
+      "goal_ids": [
+        "G1",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "记录用户请求→首个已检查教学块、后续块、失败/取消/恢复的实际耗时；分冷解析与暖缓存。",
+        "成本细分提纲/编译/验证/局部改写与失败重试；设置用户预算而非论文最优阈值。",
+        "只记录必要元数据，默认不把原始材料/作答发到外部遥测；缓存不跨用户隐私。"
+      ],
+      "existing_paths": [
+        "apps/worker/src/runtime/budgeted-call.ts"
+      ],
+      "proposed_paths": [
+        "apps/web/src/features/opening/teaching/telemetry.ts"
+      ],
+      "verification": [
+        "固定模型/材料/并发测p50/p95及费用；重复请求不扩大内部账；取消预取减少浪费。"
+      ],
+      "acceptance": "报告包含分母、环境和样本量；首块延迟目标在实测后确定，不能用未校验token流充当可用教学。",
+      "rollback": "禁用预取/缓存优化，保留核心生成和预算；不以遥测故障阻断学习。",
+      "source_refs": [
+        "C04",
+        "P01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "apps/worker/src/runtime/budgeted-call.ts": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-26",
+      "title": "开展离线教学内容与策略评测",
+      "milestone": "M3",
+      "owner_role": "QA/研究",
+      "depends_on": [
+        "V2-02",
+        "V2-19",
+        "V2-23",
+        "V2-24",
+        "V2-25"
+      ],
+      "goal_ids": [
+        "G4",
+        "G5",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "固定材料、模型、提示/策略版本和评测题；比较整段直生成与提纲-活动编译的错误、遗漏和成本。",
+        "比较规则基线与反馈适应的回放建议，不把离线偏好预测当因果学习效果。",
+        "严重错误/虚假引用/答案泄露单列，不被总平均分掩盖；评测题对生产生成不可见。"
+      ],
+      "existing_paths": [
+        "tests/fixtures/opening/teaching"
+      ],
+      "proposed_paths": [
+        "scripts/evaluate-teaching-v2.mjs"
+      ],
+      "verification": [
+        "作者或教师盲评关键内容；按目标覆盖、条件遗漏、支持度、问题可答性和动作合规报告。",
+        "保留失败案例与样本分母，不只挑成功演示。"
+      ],
+      "acceptance": "可以复现质量与成本比较；没有“另一模型评高分即通过”的单一判据。",
+      "rollback": "保留规则基线与已核查内容类型，禁用不稳定策略。",
+      "source_refs": [
+        "R01",
+        "R02",
+        "R07",
+        "E01"
+      ],
+      "approval_boundary": "无生产变更；执行代码改动需后续开发指令",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "tests/fixtures/opening/teaching": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-27",
+      "title": "真实学习试用与效果研究",
+      "milestone": "M3",
+      "owner_role": "产品/研究/参与者",
+      "depends_on": [
+        "V2-22",
+        "V2-26"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "G6"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "先开展约5–8位同意参与者的探索性可用性试用（工程建议），修复学习流程障碍。",
+        "效果比较预先确定目标、独立新题/延迟题、主要结局、分组、缺失处理和最小重要差异；样本量做功效分析，不沿用可用性人数。",
+        "若开展随机比较，控制材料/时间/题目难度，隔离测试题与教学生成，识别重复参与和跨题干扰。",
+        "不能仅比较各组最终独立完成者子集；主要结局按预定分配人群和缺失处理协议分析，单独报告求助/退出。"
+      ],
+      "existing_paths": [
+        "docs/quality/teaching-v2-evaluation.md"
+      ],
+      "proposed_paths": [],
+      "verification": [
+        "独立合格观测的分母含错误；缺失/受助/过早/失效分列。",
+        "提供退出/删除和风险处理；看过答案仍可继续使用，不被强制留在实验组。"
+      ],
+      "acceptance": "可用性、工程可靠性、教学效果分别报告；小样本/无对照仅描述观察，不能宣称普遍提分。",
+      "rollback": "随时停止实验与新策略，恢复稳定教学；不阻断用户基本学习。",
+      "source_refs": [
+        "R01",
+        "R02",
+        "R04",
+        "R05",
+        "P01"
+      ],
+      "approval_boundary": "招募、真实材料使用与实验分配须获参与者同意；本轮只交付计划",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "docs/quality/teaching-v2-evaluation.md": "created_by_V2-02"
+      }
+    },
+    {
+      "id": "V2-28",
+      "title": "迁移、备份恢复与分批开放",
+      "milestone": "M3",
+      "owner_role": "数据/发布",
+      "depends_on": [
+        "V2-19",
+        "V2-22",
+        "V2-25"
+      ],
+      "goal_ids": [
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "L",
+      "scope": [
+        "新增schema采取先扩展后切换；旧接口和旧记录有明确适配，不全量重生成课程。",
+        "演练含教学版本/草稿/活动/反馈/来源索引的导出恢复与删除权限。",
+        "按用户/内容类型feature flag逐步开放；回退停止新写/新生成但保留用户产出。"
+      ],
+      "existing_paths": [
+        "docs/operations/cloud-deployment.md",
+        "docs/superpowers/plans/opening-release/08-delivery.md"
+      ],
+      "proposed_paths": [],
+      "verification": [
+        "空空间还原、跨owner拒绝、旧备份兼容、双端冲突、功能开关切回、缓存失效。"
+      ],
+      "acceptance": "新功能数据与旧学习记录都可恢复；迁移失败不靠drop数据修复。",
+      "rollback": "使用已演练的兼容代码/备份策略；数据迁移不可逆项单独批准。",
+      "source_refs": [
+        "C01",
+        "C04",
+        "P01"
+      ],
+      "approval_boundary": "正式迁移和发布需要明确授权；不从研究请求自动推定",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "docs/operations/cloud-deployment.md": "existing_area_or_plan_target_verify_before_edit",
+        "docs/superpowers/plans/opening-release/08-delivery.md": "existing_area_or_plan_target_verify_before_edit"
+      }
+    },
+    {
+      "id": "V2-29",
+      "title": "二次开发发布与目标复盘",
+      "milestone": "M3",
+      "owner_role": "负责人/集成/用户",
+      "depends_on": [
+        "V2-23",
+        "V2-24",
+        "V2-26",
+        "V2-27",
+        "V2-28"
+      ],
+      "goal_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "G5",
+        "G6",
+        "G7",
+        "G8"
+      ],
+      "status": "proposed",
+      "relative_size": "M",
+      "scope": [
+        "核对G1–G8逐项验收及真实CI结果，发布范围按实际可用能力说明。",
+        "学习效果不足以证明提升时仍可发布合格工具，但不得作未经支持的效果宣传。",
+        "复盘是否变回阅读器/聊天包装、自动控制用户、过量确认或无价值动画；据实调整后续范围。"
+      ],
+      "existing_paths": [
+        "README.md",
+        "docs/superpowers/plans/opening-release/tasks.json"
+      ],
+      "proposed_paths": [],
+      "verification": [
+        "源码/构建/配置/迁移/发布SHA一致；所有未运行与用户待验收明确。",
+        "审查发布文案、已知问题、回退与预算限制。"
+      ],
+      "acceptance": "发布的是可追溯AI主讲学习伙伴；没有使用通过率或完成百分比掩盖未验证能力。",
+      "rollback": "关闭对应开放批次；保留历史与支持用户继续/导出。",
+      "source_refs": [
+        "U01",
+        "C01",
+        "C15"
+      ],
+      "approval_boundary": "发布需后续明确授权",
+      "evidence_status": {
+        "engineering": "not_run",
+        "real_model": "not_run",
+        "user_browser": "pending_user",
+        "learning_effect": "unknown"
+      },
+      "path_basis": {
+        "README.md": "existing_area_or_plan_target_verify_before_edit",
+        "docs/superpowers/plans/opening-release/tasks.json": "read_at_observed_sha"
+      }
+    }
+  ]
+}

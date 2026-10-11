@@ -34,18 +34,17 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
 
 export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null }) {
   const library = useMaterialLibrary(api, { uploadCourseId });
-  const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load } = library;
+  const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load, changeSpace: setLibrarySpace } = library;
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<MaterialKind>("all");
   const [status, setStatus] = useState<MaterialStatus>("all");
   const [sort, setSort] = useState<MaterialSort>("newest");
   const [page, setPage] = useState(1);
   const [assignId, setAssignId] = useState<string | null>(null);
+  // Inbound courseId query only — setLibrarySpace is stable (useCallback); do not depend on whole library identity.
   useEffect(() => {
-    if (uploadCourseId) library.changeSpace(`course:${uploadCourseId}`);
-    // Only react to inbound courseId query — not every library identity change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uploadCourseId]);
+    if (uploadCourseId) setLibrarySpace(`course:${uploadCourseId}`);
+  }, [uploadCourseId, setLibrarySpace]);
   const scoped = useMemo(() => materialsInSpace(sources, organization, space), [sources, organization, space]);
   const collection = useMemo(() => collectMaterials(scoped, { query, kind, status, sort, page, pageSize: 20 }), [scoped, query, kind, status, sort, page]);
   const courseId = space.startsWith("course:") ? space.slice(7) : null;
