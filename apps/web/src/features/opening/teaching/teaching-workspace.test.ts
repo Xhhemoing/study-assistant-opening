@@ -19,9 +19,39 @@ vi.mock("./block-commands", async () => {
   };
 });
 
-import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
+vi.mock("./resume-card", async () => {
+  const actual = await vi.importActual<typeof import("./resume-card")>("./resume-card");
+  return {
+    ...actual,
+    ResumeCard: (props: {
+      activity: { id: string; intentSummary: string };
+      resume?: { activityId: string; clientInit: unknown } | null;
+      onContinue?: (resume: unknown) => void;
+    }) =>
+      createElement(
+        "div",
+        {
+          "data-testid": "resume-card-mock",
+          "data-activity-id": props.activity.id,
+          "data-has-resume": props.resume ? "true" : "false",
+        },
+        createElement(
+          "button",
+          {
+            type: "button",
+            "data-resume-continue-cta": "true",
+            onClick: () => props.onContinue?.(props.resume),
+          },
+          "继续学习",
+        ),
+      ),
+  };
+});
+
+import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
   isTeachingWorkspaceContentUsable,
+  TeachingContinueEntry,
   TeachingWorkspace,
 } from "./teaching-workspace";
 
@@ -171,3 +201,90 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("schema 版本不受支持");
   });
 });
+
+function learningResume(overrides?: Partial<LearningResume>): LearningResume {
+  return {
+    activityId: AID,
+    status: "active",
+    generateStatus: "ready",
+    contentVersion: 1,
+    pathVersion: 1,
+    clientInit: clientInit(),
+    thoughtTrain: {
+      currentBlockId: BID,
+      skippedBlockIds: [],
+      branchStack: [],
+      commandLog: [],
+    },
+    drafts: [],
+    interactionParams: {},
+    actualAttempts: [],
+    helpDelivered: [],
+    openProblems: [],
+    gates: {
+      permission: "owned",
+      materials: "available",
+      unavailableSourceIds: [],
+      job: "ready",
+    },
+    continuableActions: ["continue_block"],
+    summary: { status: "skipped" },
+    ...overrides,
+  };
+}
+
+describe("TeachingContinueEntry", () => {
+  it("starts on resume-card (not ConversationResume)", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: activityReady,
+        resume: learningResume({ clientInit: null }),
+      }),
+    );
+    expect(html).toContain('data-teaching-continue-entry="card"');
+    expect(html).toContain('data-testid="resume-card-mock"');
+    expect(html).not.toContain("ConversationResume");
+    expect(html).not.toContain("data-teaching-workspace");
+  });
+
+  it("can open workspace immediately when startInWorkspace + usable init", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: activityReady,
+        resume: learningResume(),
+        startInWorkspace: true,
+        initialClientInit: clientInit(),
+      }),
+    );
+    expect(html).toContain('data-teaching-continue-entry="workspace"');
+    expect(html).toContain('data-teaching-workspace="true"');
+    expect(html).toContain('data-testid="block-commands-mock"');
+    expect(html).toContain("本课介入偏好");
+  });
+
+  it("preserves V2-10/11/12 chrome when in workspace phase", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: activityReady,
+        startInWorkspace: true,
+        initialClientInit: clientInit({
+          checkpointJson: {
+            branchStack: [
+              {
+                frameId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                fromBlockId: BID,
+                contentVersion: 1,
+                pathVersion: 1,
+                createdAt: ISO,
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain('data-return-disabled="false"');
+    expect(html).toContain('data-expand="intervention-prefs"');
+    expect(html).toContain("打开自由对话（次要）");
+  });
+});
+

@@ -5,6 +5,7 @@ import { ChevronDown, BookOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   ActivitySpecClientInit,
+  LearningResume,
   TeachingActivity,
   TeachingCommandConflict,
   TeachingCommandSuccess,
@@ -26,6 +27,7 @@ import {
   teachingActivityStatusLabel,
 } from "./today-activity";
 import { PreferenceControls } from "./preference-controls";
+import { ResumeCard, type LocalUnsentDraft } from "./resume-card";
 
 export type TeachingWorkspaceProps = {
   activity: TeachingActivity;
@@ -331,3 +333,194 @@ export function TeachingWorkspace({
     </section>
   );
 }
+
+/**
+ * V2-14 continue entry: show LearningResume card, then mount TeachingWorkspace.
+ * Prefers resume.clientInit when present; null clientInit → re-fetch / wait (fail-soft).
+ * Does **not** route through ConversationResume.
+ */
+export type TeachingContinueEntryProps = {
+  activity: TeachingActivity;
+  /** Prefetched resume (optional; card fetches if omitted). */
+  resume?: LearningResume | null;
+  localUnsent?: LocalUnsentDraft[];
+  assistantHref?: string | null;
+  timeZone?: string;
+  api?: OpeningApi;
+  /** When true, skip card and open workspace immediately if usable clientInit given. */
+  startInWorkspace?: boolean;
+  initialClientInit?: ActivitySpecClientInit | null;
+  onActivityUpdated?: (activity: TeachingActivity) => void;
+};
+
+export function TeachingContinueEntry({
+  activity: activityProp,
+  resume: resumeProp = null,
+  localUnsent,
+  assistantHref,
+  timeZone = "Asia/Shanghai",
+  api: apiProp,
+  startInWorkspace = false,
+  initialClientInit = null,
+  onActivityUpdated,
+}: TeachingContinueEntryProps) {
+  const api = apiProp ?? createOpeningApi();
+  const [activity, setActivity] = useState(activityProp);
+  const [phase, setPhase] = useState<"card" | "workspace" | "wait_init">(
+    startInWorkspace &&
+      initialClientInit &&
+      isTeachingWorkspaceContentUsable(activityProp, initialClientInit)
+      ? "workspace"
+      : "card",
+  );
+  const [workspaceInit, setWorkspaceInit] = useState<ActivitySpecClientInit | null>(
+    initialClientInit,
+  );
+  const [waitError, setWaitError] = useState<string | null>(null);
+  const [waitBusy, setWaitBusy] = useState(false);
+  const [liveResume, setLiveResume] = useState<LearningResume | null>(resumeProp);
+
+  useEffect(() => {
+    setActivity(activityProp);
+  }, [activityProp]);
+
+  useEffect(() => {
+    if (resumeProp) setLiveResume(resumeProp);
+  }, [resumeProp]);
+
+  const openWorkspaceFromResume = useCallback(
+    async (resume: LearningResume) => {
+      setLiveResume(resume);
+      setWaitError(null);
+
+      // Prefer resume.clientInit when present and usable.
+      if (
+        resume.clientInit &&
+        isTeachingWorkspaceContentUsable(
+          { generateStatus: resume.generateStatus },
+          resume.clientInit,
+        )
+      ) {
+        setWorkspaceInit(resume.clientInit);
+        setPhase("workspace");
+        return;
+      }
+
+      // clientInit null or not usable — fail-soft: try client-init fetch / show wait.
+      if (resume.gates.job === "in_flight" || resume.gates.job === "unknown") {
+        setPhase("wait_init");
+        return;
+      }
+
+      setWaitBusy(true);
+      setPhase("wait_init");
+      try {
+        const init = await api.getTeachingClientInit(activity.id);
+        if (
+          isTeachingWorkspaceContentUsable(
+            { generateStatus: resume.generateStatus },
+            init,
+          )
+        ) {
+          setWorkspaceInit(init);
+          setPhase("workspace");
+        } else {
+          setWaitError("主讲内容尚未可用；请稍后再继续。断点与草稿仍保留。");
+        }
+      } catch (err) {
+        setWaitError(
+          err instanceof Error
+            ? err.message
+            : "无法拉取 client-init；不会伪造讲义。",
+        );
+      } finally {
+        setWaitBusy(false);
+      }
+    },
+    [activity, api],
+  );
+
+  const backToCard = useCallback(() => {
+    setPhase("card");
+    setWaitError(null);
+  }, []);
+
+  if (phase === "workspace" && workspaceInit) {
+    return (
+      <div data-teaching-continue-entry="workspace">
+        <TeachingWorkspace
+          activity={activity}
+          clientInit={workspaceInit}
+          assistantHref={assistantHref}
+          timeZone={timeZone}
+          api={api}
+        />
+      </div>
+    );
+  }
+
+  if (phase === "wait_init") {
+    return (
+      <section
+        className="flex h-full min-h-0 flex-col px-5 py-5"
+        data-teaching-continue-entry="wait_init"
+        data-resume-client-init="null"
+      >
+        <h2 className="text-sm font-semibold text-zinc-900">等待主讲内容</h2>
+        <p className="mt-2 text-xs leading-5 text-zinc-600">
+          断点已恢复，但 clientInit 暂缺或不可用。不会伪造讲义；生成中/未知时请等待。
+        </p>
+        {liveResume ? (
+          <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
+            jobGate={liveResume.gates.job} · materials={liveResume.gates.materials} · cv{" "}
+            {liveResume.contentVersion}
+          </p>
+        ) : null}
+        {waitError ? (
+          <p className={`mt-3 text-xs ${tone.danger}`} role="alert">
+            {waitError}
+          </p>
+        ) : null}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={ui.secondary}
+            disabled={waitBusy}
+            data-resume-retry-client-init="true"
+            onClick={() => {
+              if (liveResume) void openWorkspaceFromResume(liveResume);
+            }}
+          >
+            {waitBusy ? "拉取中…" : "重试拉取 client-init"}
+          </button>
+          <button
+            type="button"
+            className={ui.quiet}
+            data-resume-back-to-card="true"
+            onClick={backToCard}
+          >
+            返回断点卡片
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div data-teaching-continue-entry="card">
+      <ResumeCard
+        activity={activity}
+        resume={liveResume}
+        localUnsent={localUnsent}
+        api={api}
+        onContinue={(resume) => void openWorkspaceFromResume(resume)}
+        onActivityUpdated={(next) => {
+          setActivity(next);
+          onActivityUpdated?.(next);
+        }}
+        onResumeUpdated={setLiveResume}
+      />
+    </div>
+  );
+}
+

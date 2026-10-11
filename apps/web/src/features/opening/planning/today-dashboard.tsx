@@ -12,17 +12,14 @@ import { TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { TodayLearningContext } from "./today-overview";
-import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
+import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import { TeachingActivityEmpty, TeachingActivityPanel } from "../teaching/activity-panel";
 import {
   buildStartLearningCreateInput,
   pickCurrentTeachingActivity,
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
-import {
-  isTeachingWorkspaceContentUsable,
-  TeachingWorkspace,
-} from "../teaching/teaching-workspace";
+import { TeachingContinueEntry } from "../teaching/teaching-workspace";
 import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
@@ -59,6 +56,8 @@ export function TodayDashboard({
   const [ctaError, setCtaError] = useState<string | null>(null);
   const [clientInit, setClientInit] = useState<ActivitySpecClientInit | null>(null);
   const [clientInitLoad, setClientInitLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [learningResume, setLearningResume] = useState<LearningResume | null>(null);
+  const [resumeLoad, setResumeLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const timeZone = useMemo(() => resolveTodayTimeZone(), []);
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
@@ -107,30 +106,69 @@ export function TodayDashboard({
     return () => controller.abort();
   }, [api, reloadToken, state.kind]);
 
+  // V2-14: prefer LearningResume package for continue; clientInit may be null (fail-soft).
   useEffect(() => {
     if (!teachingWorkspaceEnabled || !currentActivity) {
       setClientInit(null);
       setClientInitLoad("idle");
-      return;
-    }
-    if (currentActivity.generateStatus !== "ready") {
-      setClientInit(null);
-      setClientInitLoad("idle");
+      setLearningResume(null);
+      setResumeLoad("idle");
       return;
     }
     const controller = new AbortController();
-    setClientInitLoad("loading");
+    setResumeLoad("loading");
     api
-      .getTeachingClientInit(currentActivity.id)
-      .then((init) => {
+      .getTeachingResume(currentActivity.id)
+      .then((resume) => {
         if (controller.signal.aborted) return;
-        setClientInit(init);
-        setClientInitLoad("ready");
+        setLearningResume(resume);
+        setResumeLoad("ready");
+        if (resume.clientInit) {
+          setClientInit(resume.clientInit);
+          setClientInitLoad("ready");
+        } else if (currentActivity.generateStatus === "ready") {
+          // Prefer resume.clientInit; fall back to dedicated client-init when resume null.
+          setClientInitLoad("loading");
+          return api
+            .getTeachingClientInit(currentActivity.id)
+            .then((init) => {
+              if (controller.signal.aborted) return;
+              setClientInit(init);
+              setClientInitLoad("ready");
+            })
+            .catch(() => {
+              if (controller.signal.aborted) return;
+              setClientInit(null);
+              setClientInitLoad("error");
+            });
+        } else {
+          setClientInit(null);
+          setClientInitLoad("idle");
+        }
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        setClientInit(null);
-        setClientInitLoad("error");
+        setLearningResume(null);
+        setResumeLoad("error");
+        // Fail-soft: keep prior V2-10 path via client-init when generate ready.
+        if (currentActivity.generateStatus === "ready") {
+          setClientInitLoad("loading");
+          return api
+            .getTeachingClientInit(currentActivity.id)
+            .then((init) => {
+              if (controller.signal.aborted) return;
+              setClientInit(init);
+              setClientInitLoad("ready");
+            })
+            .catch(() => {
+              if (controller.signal.aborted) return;
+              setClientInit(null);
+              setClientInitLoad("error");
+            });
+        } else {
+          setClientInit(null);
+          setClientInitLoad("idle");
+        }
       });
     return () => controller.abort();
   }, [api, currentActivity, teachingWorkspaceEnabled, reloadToken]);
@@ -253,14 +291,20 @@ export function TodayDashboard({
           </div>
           <div className="min-h-0 min-w-0 flex-1 bg-white">
             {currentActivity ? (
-              teachingWorkspaceEnabled &&
-              isTeachingWorkspaceContentUsable(currentActivity, clientInit) &&
-              clientInit ? (
-                <TeachingWorkspace
+              teachingWorkspaceEnabled ? (
+                <TeachingContinueEntry
                   activity={currentActivity}
-                  clientInit={clientInit}
+                  resume={learningResume}
                   assistantHref={assistantHref}
                   timeZone={timeZone}
+                  api={api}
+                  initialClientInit={clientInit}
+                  onActivityUpdated={(next) => {
+                    setSelectedActivity(next);
+                    setActivities((rows) =>
+                      rows.map((row) => (row.id === next.id ? next : row)),
+                    );
+                  }}
                 />
               ) : (
                 <TeachingActivityPanel
@@ -278,10 +322,11 @@ export function TodayDashboard({
               />
             )}
             {teachingWorkspaceEnabled &&
-            currentActivity?.generateStatus === "ready" &&
+            currentActivity &&
+            resumeLoad === "error" &&
             clientInitLoad === "error" ? (
               <p className="px-5 pb-4 text-[11px] text-amber-800" role="status">
-                主讲内容暂时无法读取；已回退到活动摘要，不会伪造讲义。
+                学习断点与主讲内容暂时无法读取；已回退到活动摘要，不会伪造讲义。
               </p>
             ) : null}
           </div>
