@@ -29,6 +29,21 @@ export class OpeningConversationError extends Error {
   }
 }
 
+
+/**
+ * Contract `conversationSummarySchema.lastTurnPreview` max is 280 **JS code units**
+ * (`String.length` / Zod). Postgres `LEFT(text, 280)` counts characters, so emoji /
+ * surrogate pairs can still exceed Zod after SQL clip — always re-slice here.
+ */
+export const LAST_TURN_PREVIEW_MAX = 280;
+
+export function clipLastTurnPreview(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  if (value.length <= LAST_TURN_PREVIEW_MAX) return value;
+  return value.slice(0, LAST_TURN_PREVIEW_MAX);
+}
+
+
 type SavedTurnIntent = {
   conversationId: string;
   text: string;
@@ -126,7 +141,14 @@ export function createOpeningConversationRepository(sql: Sql) {
           c.course_id,
           c.updated_at,
           (
-            SELECT CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE LEFT(t.text, 280) END
+            SELECT LEFT(
+              CASE
+                WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)}
+                  THEN '关联材料已删除，此回答内容不再显示。'
+                ELSE coalesce(t.text, '')
+              END,
+              280
+            )
             FROM opening_turns t
             WHERE t.conversation_id = c.id
             ORDER BY t.created_at DESC
@@ -144,7 +166,7 @@ export function createOpeningConversationRepository(sql: Sql) {
           title: r.title as string,
           courseId: (r.course_id as string | null) ?? null,
           updatedAt: iso(r.updated_at as string | Date),
-          lastTurnPreview: (r.last_turn_preview as string | null) ?? null,
+          lastTurnPreview: clipLastTurnPreview((r.last_turn_preview as string | null) ?? null),
         };
       });
     },
