@@ -241,3 +241,66 @@ describe("opening teaching activities repository (unit)", () => {
     expect(queries.some((q) => q.includes("FROM opening_teaching_activities"))).toBe(true);
   });
 });
+
+
+describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
+  it("enqueues compile-teaching-unit with outbox and sets generate_status queued", async () => {
+    const { sql, writes } = db((query) => {
+      if (query.includes("FROM opening_teaching_activities") && query.includes("JOIN workspaces")) {
+        return [{
+          id: activityId,
+          workspace_id: workspaceId,
+          owner_user_id: ownerUserId,
+          course_id: null,
+          status: "active",
+          generate_status: "ready",
+          intent_kind: "question",
+          intent_summary: "Why?",
+          source_ids: [],
+          path_version: 1,
+          content_version: 0,
+          checkpoint_json: {},
+          client_key: "activity-key-01",
+          create_intent: { intentKind: "question" },
+          created_at: "2026-10-11T02:00:00.000Z",
+          updated_at: "2026-10-11T02:00:00.000Z",
+        }];
+      }
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) {
+        return [{ privacy_epoch: 2 }];
+      }
+      if (query.includes("INSERT INTO opening_jobs")) {
+        return [{ id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1" }];
+      }
+      return [];
+    });
+    const repo = createOpeningTeachingActivitiesRepository(sql);
+    const result = await repo.enqueueCompileTeachingUnit(scope, {
+      activityId,
+      mode: "generate",
+      clientKey: "compile-client-01",
+      expectedContentVersion: 0,
+    });
+    expect(result.created).toBe(true);
+    expect(result.kind).toBe("compile-teaching-unit");
+    expect(writes.some((w) => w.query.includes("INSERT INTO opening_outbox"))).toBe(true);
+    expect(writes.some((w) => w.query.includes("generate_status") && w.query.includes("UPDATE"))).toBe(true);
+  });
+
+  it("setGenerateStatus fences from-set", async () => {
+    const { sql, writes } = db((query) => {
+      if (query.includes("UPDATE opening_teaching_activities") && query.includes("generate_status")) {
+        return [{ id: activityId }];
+      }
+      return [];
+    });
+    const ok = await createOpeningTeachingActivitiesRepository(sql).setGenerateStatus(
+      scope,
+      activityId,
+      "generating",
+      { from: ["queued", "generating"] },
+    );
+    expect(ok).toBe(true);
+    expect(writes.some((w) => w.query.includes("generate_status"))).toBe(true);
+  });
+});

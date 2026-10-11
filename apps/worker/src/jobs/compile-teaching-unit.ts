@@ -1,0 +1,281 @@
+import type {
+  ActivitySpecPublishInput,
+  ProviderInput,
+  ProviderOutput,
+  Scope,
+} from "@aistudy/contracts";
+import { OpeningProviderError } from "@aistudy/ai";
+import {
+  OpeningBudgetError,
+  type OpeningBudgetRepository,
+  type OpeningJobRecord,
+} from "@aistudy/database";
+import { assertCurrentEpoch, PrivacyEpochError } from "../runtime/privacy-guard";
+import {
+  runBudgetedCall,
+  type BudgetedProvider,
+  type BudgetedRepository,
+} from "../runtime/budgeted-call";
+
+export type CompileTeachingUnitMode = "generate" | "repair";
+
+export type CompileTeachingUnitPayload = {
+  mode: CompileTeachingUnitMode;
+  activityId: string;
+  teachingUnitId?: string;
+  expectedContentVersion: number;
+  expectedUnitVersion?: number;
+  sourceIds?: string[];
+  clientKey: string;
+};
+
+export type TeachingGenerateStatus =
+  | "queued"
+  | "generating"
+  | "needs_check"
+  | "ready"
+  | "failed"
+  | "unknown"
+  | "cancelled"
+  | "stale";
+
+export type CompileTeachingUnitDeps = {
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
+  /** Stub provider OK until V2-08; null disables model path. */
+  provider: BudgetedProvider | null;
+  reservedCents?: number;
+  /**
+   * When true and mode=repair, skip provider and set generate_status=ready
+   * (deterministic index rewrite). Default false → repair still budgeted.
+   */
+  skipProviderForRepair?: boolean;
+  setGenerateStatus(
+    scope: Scope,
+    activityId: string,
+    status: TeachingGenerateStatus,
+    options?: { from?: readonly TeachingGenerateStatus[] },
+  ): Promise<boolean>;
+  publishActivitySpec(scope: Scope, input: ActivitySpecPublishInput): Promise<unknown>;
+  /** Re-read job state before write-back (cancel race). */
+  getJobState(jobId: string): Promise<string | null>;
+  /**
+   * Build publish input after (optional) provider call.
+   * Stub default uses payload.teachingUnitId + empty blockOrder.
+   */
+  buildPublishInput?(
+    scope: Scope,
+    payload: CompileTeachingUnitPayload,
+    providerOutput: ProviderOutput | null,
+  ): Promise<ActivitySpecPublishInput>;
+  /** Create-or-bind unit when generate omits teachingUnitId. */
+  ensureTeachingUnitId?(
+    scope: Scope,
+    payload: CompileTeachingUnitPayload,
+  ): Promise<string>;
+  privacy?: {
+    getWorkspaceEpoch(scope: Scope): Promise<number>;
+    listExcludedSourceIds(scope: Scope): Promise<string[]>;
+  };
+};
+
+function parsePayload(payload: unknown): CompileTeachingUnitPayload {
+  const body = payload as CompileTeachingUnitPayload | null;
+  if (!body || typeof body !== "object") {
+    throw new Error("compile-teaching-unit payload missing");
+  }
+  if (body.mode !== "generate" && body.mode !== "repair") {
+    throw new Error("compile-teaching-unit payload.mode must be generate|repair");
+  }
+  if (typeof body.activityId !== "string" || !body.activityId) {
+    throw new Error("compile-teaching-unit payload missing activityId");
+  }
+  if (
+    typeof body.expectedContentVersion !== "number" ||
+    !Number.isInteger(body.expectedContentVersion) ||
+    body.expectedContentVersion < 0
+  ) {
+    throw new Error("compile-teaching-unit payload missing expectedContentVersion");
+  }
+  if (typeof body.clientKey !== "string" || body.clientKey.length < 8) {
+    throw new Error("compile-teaching-unit payload clientKey is too short");
+  }
+  if (body.mode === "repair" && (typeof body.teachingUnitId !== "string" || !body.teachingUnitId)) {
+    throw new Error("compile-teaching-unit repair requires teachingUnitId");
+  }
+  return body;
+}
+
+function defaultStubPublish(
+  payload: CompileTeachingUnitPayload,
+  teachingUnitId: string,
+): ActivitySpecPublishInput {
+  const revisionNumber =
+    typeof payload.expectedUnitVersion === "number" && payload.expectedUnitVersion > 0
+      ? payload.expectedUnitVersion
+      : 1;
+  return {
+    activityId: payload.activityId,
+    teachingUnitId,
+    expectedVersion: payload.expectedContentVersion,
+    revisionNumber,
+    blockOrder: [],
+    sourceRefs: (payload.sourceIds ?? []).map((sourceId) => ({ sourceId })),
+    verificationStatus: "unchecked",
+    generationConfig: { extras: { stub: true, mode: payload.mode } },
+  };
+}
+
+async function mapFailureStatus(
+  error: unknown,
+): Promise<TeachingGenerateStatus> {
+  if (error instanceof PrivacyEpochError) return "stale";
+  if (
+    error instanceof OpeningProviderError &&
+    (error.code === "PROVIDER_TIMEOUT" || error.code === "PROVIDER_NETWORK")
+  ) {
+    return "unknown";
+  }
+  return "failed";
+}
+
+/**
+ * V2-07 teaching generation job: budgeted provider call + ActivitySpec publish fences.
+ * operationId = compile-teaching-unit:{job.id} — never attempt-suffixed.
+ * Runs under runJob (epoch pre/post check); not the tutor special-case path.
+ */
+export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) {
+  return async function processCompileTeachingUnit(
+    job: OpeningJobRecord,
+    payload: unknown,
+  ): Promise<unknown> {
+    const body = parsePayload(payload);
+    const scope: Scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const operationId = `compile-teaching-unit:${job.id}`;
+
+    const scopedBudget: BudgetedRepository = {
+      reserve: (input) => deps.budget.reserve(scope, input),
+      release: (requestId) => deps.budget.release(requestId),
+      settle: (reservationId, actualCents) => deps.budget.settle(reservationId, actualCents),
+      markUnknown: (reservationId) => deps.budget.markUnknown(reservationId),
+    };
+
+    try {
+      await deps.setGenerateStatus(scope, body.activityId, "generating", {
+        from: ["queued", "generating"],
+      });
+
+      const excluded = new Set(
+        deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
+      );
+      const requestedSources = body.sourceIds ?? [];
+      const allowedSources = requestedSources.filter((id) => !excluded.has(id));
+      if (requestedSources.length > 0 && allowedSources.length === 0) {
+        throw new Error("all requested source material is privacy-excluded");
+      }
+
+      const skipProvider = body.mode === "repair" && deps.skipProviderForRepair === true;
+      let providerOutput: ProviderOutput | null = null;
+
+      if (!skipProvider) {
+        const input: ProviderInput = {
+          instruction: "Compile a teaching unit from authorized sources (stub until V2-08).",
+          text: JSON.stringify({
+            mode: body.mode,
+            activityId: body.activityId,
+            teachingUnitId: body.teachingUnitId ?? null,
+            sourceIds: allowedSources,
+          }),
+          chunks: [],
+          mode: "explain",
+          maxOutputTokens: 256,
+          mediaCapability: "text_only",
+          imageParts: [],
+        };
+        try {
+          providerOutput = await runBudgetedCall({
+            provider: deps.provider,
+            budget: scopedBudget,
+            input,
+            requestId: operationId,
+            operationId,
+            purpose: "compile-teaching-unit",
+            reservedCents: deps.reservedCents ?? 100,
+            actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
+            beforeSend: deps.privacy
+              ? async () =>
+                  assertCurrentEpoch(
+                    job.privacyEpoch,
+                    await deps.privacy!.getWorkspaceEpoch(scope),
+                  )
+              : undefined,
+          });
+        } catch (error) {
+          // Released / completed ledger on same operationId → non-retryable for this job.
+          if (error instanceof OpeningBudgetError && error.code === "CONFLICT") {
+            await deps.setGenerateStatus(scope, body.activityId, "failed", {
+              from: ["queued", "generating"],
+            });
+            throw Object.assign(
+              new Error("compile-teaching-unit budget reservation conflict; not retrying with new operationId"),
+              { code: "BUDGET_CONFLICT", cause: error },
+            );
+          }
+          throw error;
+        }
+      }
+
+      const state = await deps.getJobState(job.id);
+      if (state === "cancelled") {
+        return { discarded: true, reason: "cancelled" };
+      }
+
+      if (deps.privacy) {
+        assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+      }
+
+      let teachingUnitId = body.teachingUnitId;
+      if (!teachingUnitId) {
+        if (!deps.ensureTeachingUnitId) {
+          throw new Error("compile-teaching-unit generate requires teachingUnitId or ensureTeachingUnitId");
+        }
+        teachingUnitId = await deps.ensureTeachingUnitId(scope, body);
+      }
+
+      const publishInput = deps.buildPublishInput
+        ? await deps.buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput)
+        : defaultStubPublish({ ...body, teachingUnitId, sourceIds: allowedSources }, teachingUnitId);
+
+      // Re-check cancel immediately before publish (late-result fence).
+      const stateBeforePublish = await deps.getJobState(job.id);
+      if (stateBeforePublish === "cancelled") {
+        return { discarded: true, reason: "cancelled" };
+      }
+
+      await deps.publishActivitySpec(scope, publishInput);
+
+      const nextStatus: TeachingGenerateStatus = skipProvider ? "ready" : "needs_check";
+      const updated = await deps.setGenerateStatus(scope, body.activityId, nextStatus, {
+        from: ["generating"],
+      });
+      if (!updated) {
+        // cancelled/stale won the race — discard is success for the handler
+        return { discarded: true, reason: "generate_status_fence" };
+      }
+
+      return {
+        activityId: body.activityId,
+        teachingUnitId,
+        mode: body.mode,
+        generateStatus: nextStatus,
+        operationId,
+        usedProvider: !skipProvider,
+      };
+    } catch (error) {
+      const status = await mapFailureStatus(error);
+      await deps.setGenerateStatus(scope, body.activityId, status, {
+        from: ["queued", "generating"],
+      });
+      throw error;
+    }
+  };
+}

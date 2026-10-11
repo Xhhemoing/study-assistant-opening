@@ -57,6 +57,11 @@ export type OpeningJobRepository = {
   /** Workspace privacy epoch (M02); defaults to 0 if column absent / row missing. */
   workspacePrivacyEpoch(workspaceId: string): Promise<number>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
+  /**
+   * Cancel a queued/running opening job (V2-07). For compile-teaching-unit,
+   * also fences activity generate_status queued|generating → cancelled.
+   */
+  cancel(scope: OpeningScope, id: string): Promise<OpeningJobRecord | null>;
 };
 
 function mapJob(row: Record<string, unknown>): OpeningJobRecord {
@@ -186,6 +191,47 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         await sql`UPDATE opening_jobs SET state = ${state}, result = ${sql.json(value as never)}, updated_at = now() WHERE id = ${id} AND state = 'running'`;
       }
       return rows.length > 0;
+    },
+    async cancel(scope, id) {
+      return sql.begin(async (tx) => {
+        await tx`
+          SELECT id FROM workspaces
+          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE
+        `;
+        const rows = await tx`
+          UPDATE opening_jobs
+          SET state = 'cancelled',
+            result = ${tx.json({ message: "cancelled by user" } as never)},
+            updated_at = now()
+          WHERE id = ${id}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND state IN ('queued', 'running')
+          RETURNING *
+        `;
+        if (!rows.length) return null;
+        const job = mapJob(rows[0] as Record<string, unknown>);
+        if (job.kind === "compile-teaching-unit") {
+          const payload =
+            job.payload && typeof job.payload === "object"
+              ? (job.payload as Record<string, unknown>)
+              : null;
+          const activityId =
+            payload && typeof payload.activityId === "string" ? payload.activityId : null;
+          if (activityId) {
+            await tx`
+              UPDATE opening_teaching_activities
+              SET generate_status = 'cancelled', updated_at = now()
+              WHERE id = ${activityId}
+                AND workspace_id = ${scope.workspaceId}
+                AND owner_user_id = ${scope.ownerUserId}
+                AND generate_status IN ('queued', 'generating')
+            `;
+          }
+        }
+        return job;
+      });
     },
   };
 }

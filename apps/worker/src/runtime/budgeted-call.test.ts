@@ -17,7 +17,7 @@ const output: ProviderOutput = {
 };
 
 type FakeRepo = {
-  reserved: { requestId: string; amountCents: number }[];
+  reserved: { requestId: string; amountCents: number; purpose?: string }[];
   released: string[];
   settled: { reservationId: string; actualCents: number }[];
   unknowns: string[];
@@ -29,7 +29,7 @@ function fakeBudget() {
   return {
     repo,
     api: {
-      reserve: async (input: { requestId: string; amountCents: number }) => {
+      reserve: async (input: { requestId: string; amountCents: number; purpose: string }) => {
         const existing = repo.reserved.find((r) => r.requestId === input.requestId);
         if (existing) {
           return { id: `res-${repo.reserved.indexOf(existing) + 1}` };
@@ -204,6 +204,27 @@ describe("runBudgetedCall", () => {
     ).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
     expect(repo.unknowns).toEqual(["res-1"]);
     expect(repo.released).toHaveLength(0);
+  });
+
+  it("defaults purpose to tutor when omitted", async () => {
+    const { repo, api } = fakeBudget();
+    await runBudgetedCall({
+      ...options,
+      provider: { complete: async () => output },
+      budget: api,
+    });
+    expect(repo.reserved[0]?.purpose).toBe("tutor");
+  });
+
+  it("propagates compile-teaching-unit purpose to reserve", async () => {
+    const { repo, api } = fakeBudget();
+    await runBudgetedCall({
+      ...options,
+      purpose: "compile-teaching-unit",
+      provider: { complete: async () => output },
+      budget: api,
+    });
+    expect(repo.reserved[0]?.purpose).toBe("compile-teaching-unit");
   });
 
   it("reuses ledger reservation when operationId is shared across attempts", async () => {

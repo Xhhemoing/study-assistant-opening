@@ -10,6 +10,7 @@ export function createHandlers(
     "build-course-knowledge"?: JobHandler;
     "parse-media"?: JobHandler;
     "extract-study-actions"?: JobHandler;
+    "compile-teaching-unit"?: JobHandler;
   } = {},
 ): Record<string, JobHandler> {
   return {
@@ -20,6 +21,7 @@ export function createHandlers(
     "build-course-knowledge": extras["build-course-knowledge"] ?? notImplemented,
     "parse-media": extras["parse-media"] ?? notImplemented,
     "extract-study-actions": extras["extract-study-actions"] ?? notImplemented,
+    "compile-teaching-unit": extras["compile-teaching-unit"] ?? notImplemented,
   };
 }
 export const handlers = createHandlers(notImplemented);

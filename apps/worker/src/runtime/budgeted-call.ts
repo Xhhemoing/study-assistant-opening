@@ -45,6 +45,11 @@ export type BudgetedCallOptions = {
    * Additive; not yet in shared contracts — flag Integrator if promoting.
    */
   operationId?: string;
+  /**
+   * Ledger purpose string. Defaults to "tutor" for back-compat with tutor-turn.
+   * Teaching generation passes "compile-teaching-unit".
+   */
+  purpose?: string;
 };
 
 export class BudgetedCallError extends Error {
@@ -119,7 +124,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   // operationId (when present) is the ledger idempotency key; requestId stays caller-visible.
   const ledgerRequestId = options.operationId ?? options.requestId;
   const reservation = await options.budget.reserve({
-    purpose: "tutor",
+    purpose: options.purpose ?? "tutor",
     ...(options.modelSnapshot ? { modelSnapshot: options.modelSnapshot } : {}),
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,

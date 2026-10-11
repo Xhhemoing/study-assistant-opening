@@ -2,7 +2,8 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
+  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll,
+  createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
@@ -17,6 +18,7 @@ import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
 import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
+import { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";
 import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -107,11 +109,55 @@ export async function main(): Promise<void> {
     listAuthorizedImportChunks: (scope, courseId, receiptIds) =>
       importChunks.listAuthorizedImportChunks(scope, courseId, receiptIds),
   });
-  const handlers = createHandlers(parse, { retest, remind, "build-course-knowledge": buildCourseKnowledge, "parse-media": parseMedia, "extract-study-actions": extractStudyActions });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
   // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
   // and counts completed spend via resolveBudgetLocalDay half-open bounds.
   const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
+  const teachingContent = createOpeningTeachingContentRepository(sql);
+  // V2-07: stub provider until V2-08; still exercises ledger + write-back fences via runJob.
+  const compileTeachingUnit = createCompileTeachingUnitHandler({
+    budget,
+    provider: {
+      complete: async () => ({
+        text: JSON.stringify({ stub: true }),
+        citedChunkIds: [],
+        requestId: null,
+        candidates: [],
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    },
+    reservedCents: 100,
+    setGenerateStatus: (scope, activityId, status, options) =>
+      teachingActivities.setGenerateStatus(scope, activityId, status, options),
+    publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
+    getJobState: async (jobId) => {
+      const rows = await sql<{ state: string }[]>`
+        SELECT state FROM opening_jobs WHERE id = ${jobId} LIMIT 1`;
+      return rows[0]?.state ?? null;
+    },
+    ensureTeachingUnitId: async (scope, payload) => {
+      if (payload.teachingUnitId) return payload.teachingUnitId;
+      const unit = await teachingContent.createUnit(scope, {
+        title: `Teaching draft ${payload.activityId.slice(0, 8)}`,
+        blocks: [],
+      });
+      return unit.id;
+    },
+    privacy: {
+      getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),
+      listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
+    },
+  });
+  const handlers = createHandlers(parse, {
+    retest,
+    remind,
+    "build-course-knowledge": buildCourseKnowledge,
+    "parse-media": parseMedia,
+    "extract-study-actions": extractStudyActions,
+    "compile-teaching-unit": compileTeachingUnit,
+  });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
     tutorJobs,
@@ -180,3 +226,4 @@ if (entry.endsWith("index.ts") || entry.endsWith("index.js")) void main();
 export { createRetestCloseHandler } from "./jobs/retest-close";
 
 export { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
+export { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";

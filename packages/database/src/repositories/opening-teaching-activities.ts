@@ -212,6 +212,125 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         return mapTeachingActivity(updated[0] as Record<string, unknown>);
       });
     },
+
+    /**
+     * Fence generate_status transitions (V2-07). Returns false when no row matched the from-set.
+     */
+    async setGenerateStatus(
+      scope: Scope,
+      activityId: string,
+      status: TeachingActivity["generateStatus"],
+      options?: { from?: readonly TeachingActivity["generateStatus"][] },
+    ): Promise<boolean> {
+      const from = options?.from;
+      if (from && from.length) {
+        const fromList = [...from];
+        const rows = await sql`
+          UPDATE opening_teaching_activities
+          SET generate_status = ${status}, updated_at = now()
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND generate_status = ANY(${fromList}::text[])
+          RETURNING id`;
+        return rows.length > 0;
+      }
+      const rows = await sql`
+        UPDATE opening_teaching_activities
+        SET generate_status = ${status}, updated_at = now()
+        WHERE id = ${activityId}
+          AND workspace_id = ${scope.workspaceId}
+          AND owner_user_id = ${scope.ownerUserId}
+        RETURNING id`;
+      return rows.length > 0;
+    },
+
+    /**
+     * Enqueue compile-teaching-unit (V2-07). Key = compile-teaching-unit:{activityId}:{mode}:{clientKey}.
+     * On create: outbox + activity generate_status=queued.
+     */
+    async enqueueCompileTeachingUnit(
+      scope: Scope,
+      input: {
+        activityId: string;
+        mode: "generate" | "repair";
+        clientKey: string;
+        expectedContentVersion: number;
+        teachingUnitId?: string;
+        expectedUnitVersion?: number;
+        sourceIds?: string[];
+      },
+    ): Promise<{ jobId: string; kind: "compile-teaching-unit"; created: boolean }> {
+      if (input.clientKey.length < 8) {
+        throw learningError("VALIDATION", "clientKey is too short");
+      }
+      if (input.mode !== "generate" && input.mode !== "repair") {
+        throw learningError("VALIDATION", "mode must be generate|repair");
+      }
+      if (
+        typeof input.expectedContentVersion !== "number" ||
+        !Number.isInteger(input.expectedContentVersion) ||
+        input.expectedContentVersion < 0
+      ) {
+        throw learningError("VALIDATION", "expectedContentVersion must be a non-negative integer");
+      }
+      if (input.mode === "repair" && !input.teachingUnitId) {
+        throw learningError("VALIDATION", "repair requires teachingUnitId");
+      }
+      await assertOwnedActivity(sql, scope, input.activityId);
+      const key = `compile-teaching-unit:${input.activityId}:${input.mode}:${input.clientKey}`;
+      const payload = {
+        mode: input.mode,
+        activityId: input.activityId,
+        expectedContentVersion: input.expectedContentVersion,
+        clientKey: input.clientKey,
+        ...(input.teachingUnitId ? { teachingUnitId: input.teachingUnitId } : {}),
+        ...(input.expectedUnitVersion != null
+          ? { expectedUnitVersion: input.expectedUnitVersion }
+          : {}),
+        ...(input.sourceIds ? { sourceIds: [...input.sourceIds].sort() } : {}),
+      };
+      return sql.begin(async (tx) => {
+        const [workspace] = await tx`
+          SELECT privacy_epoch FROM workspaces
+          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+        if (!workspace) throw learningError("NOT_FOUND", "workspace not found");
+        const privacyEpoch = Number((workspace as { privacy_epoch?: number }).privacy_epoch ?? 0);
+        const jobId = randomUUID();
+        const inserted = await tx`
+          INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+          VALUES (
+            ${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${key},
+            ${"compile-teaching-unit"}, ${tx.json(payload as never)}, ${privacyEpoch}
+          )
+          ON CONFLICT (workspace_id, key) DO NOTHING
+          RETURNING id`;
+        if (inserted.length) {
+          await tx`
+            INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+            VALUES (
+              ${scope.workspaceId}, ${jobId}, ${"opening.job.enqueue"},
+              ${tx.json({ jobId, kind: "compile-teaching-unit", activityId: input.activityId } as never)}
+            )`;
+          await tx`
+            UPDATE opening_teaching_activities
+            SET generate_status = ${"queued"}, updated_at = now()
+            WHERE id = ${input.activityId}
+              AND workspace_id = ${scope.workspaceId}
+              AND owner_user_id = ${scope.ownerUserId}`;
+          return { jobId, kind: "compile-teaching-unit" as const, created: true };
+        }
+        const existing = await tx`
+          SELECT id, payload FROM opening_jobs
+          WHERE workspace_id = ${scope.workspaceId} AND key = ${key}`;
+        const row = existing[0] as Record<string, unknown> | undefined;
+        if (!row) throw learningError("NOT_FOUND", "compile job disappeared after conflict");
+        if (JSON.stringify(row.payload) !== JSON.stringify(payload)) {
+          throw learningError("CONFLICT", "idempotency payload differs for the same key");
+        }
+        return { jobId: String(row.id), kind: "compile-teaching-unit" as const, created: false };
+      });
+    },
   };
 }
 

@@ -16,6 +16,7 @@ describe("createQueues", () => {
     const queues = createQueues({} as never);
     expect(Object.keys(queues).sort()).toEqual([
       "build-course-knowledge",
+      "compile-teaching-unit",
       "extract-study-actions",
       "parse",
       "parse-media",
@@ -24,5 +25,10 @@ describe("createQueues", () => {
       "tutor",
     ]);
     expect(queues["extract-study-actions"].name).toBe("opening-extract-study-actions");
+  });
+
+  it("includes compile-teaching-unit for V2-07 teaching generation", () => {
+    const queues = createQueues({} as never);
+    expect(queues["compile-teaching-unit"].name).toBe("opening-compile-teaching-unit");
   });
 });

@@ -29,7 +29,7 @@ describe("opening worker runtime guards", () => {
   });
 
   it("exposes only supported handlers and rejects unknown kinds", async () => {
-    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "extract-study-actions", "parse", "parse-media", "remind", "retest", "tutor"]);
+    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "parse", "parse-media", "remind", "retest", "tutor"]);
     await expect(handlers.parse({} as never, {})).rejects.toThrow("not implemented until I02/T02");
     expect(() => handlerForKind("unknown")).toThrow("unknown opening job kind");
   });
@@ -127,5 +127,15 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     };
     expect(await runJob(repository, "job-1", async () => ({ parsed: true }))).toBe(true);
     expect(finished).toEqual(["succeeded"]);
+  });
+});
+
+
+describe("handlers map includes compile-teaching-unit", () => {
+  it("resolves compile-teaching-unit via handlerForKind when registered", async () => {
+    const { createHandlers, handlerForKind } = await import("./handlers");
+    const stub = async () => ({ ok: true });
+    const map = createHandlers(stub, { "compile-teaching-unit": stub });
+    await expect(handlerForKind("compile-teaching-unit", map)({} as never, {})).resolves.toEqual({ ok: true });
   });
 });
