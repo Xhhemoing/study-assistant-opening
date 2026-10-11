@@ -12,6 +12,7 @@ import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { DiagnosticsPanel } from "./diagnostics-panel";
 import { AiSettingsPanel } from "./ai-settings-panel";
+import { AiReadinessChecklist } from "../opening/assistant/ai-readiness";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
 import { DingTalkConnectionsPanel } from "./dingtalk-connections-panel";
 
@@ -150,6 +151,7 @@ export function SettingsView() {
       <PageHeading title="设置" description="调整 AI 模型路由、工作区入口、学习方式和数据管理。" />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
         <AiSettingsPanel />
+        <div className="mt-4"><AiReadinessChecklist /></div>
         <ProviderSettingsPanel />
         <DingTalkConnectionsPanel />
         {loading ? <LoadingRows label="正在读取设置" /> : null}
