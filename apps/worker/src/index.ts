@@ -1,3 +1,4 @@
+import { resolveWorkerEffectiveDailyCap } from "./runtime/effective-budget-cap";
 import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME } from "@aistudy/domain";
@@ -61,7 +62,10 @@ export async function main(): Promise<void> {
   });
   const handlers = createHandlers(parse, { retest, remind });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
-  const budget = createOpeningBudgetRepository(sql, { dailyCapCents: openingModel.dailyCapCents });
+  const budget = createOpeningBudgetRepository(sql, {
+    dailyCapCents: openingModel.dailyCapCents,
+    resolveDailyCapCents: (scope) => resolveWorkerEffectiveDailyCap(sql, scope),
+  });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
     tutorJobs,

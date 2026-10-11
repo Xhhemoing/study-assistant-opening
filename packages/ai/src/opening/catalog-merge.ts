@@ -7,18 +7,32 @@ export type WorkspaceCatalogModel = {
   vaultConfigBroken?: boolean | undefined;
 };
 
+type ResolvableModel = OpeningModelSummary & { baseUrl: string; apiKey: string };
+
+function availabilityFor(
+  model: { apiKey: string; inputCentsPerMillion: number; outputCentsPerMillion: number; vaultConfigBroken?: boolean | undefined },
+  dailyCapCents: number,
+): OpeningModelSummary["availability"] {
+  if (model.vaultConfigBroken) return "vault_disabled";
+  if (!model.apiKey) return "missing_key";
+  if (dailyCapCents <= 0) return "budget_disabled";
+  if (model.inputCentsPerMillion <= 0 || model.outputCentsPerMillion <= 0) return "pricing_missing";
+  return "available";
+}
+
 /**
  * Merge the deployment env catalog with web-managed workspace models into one
  * resolvable list. Server entries keep priority: custom models never override
  * an env id, and the merged list stays capped at the same 32-model budget.
- * Availability mirrors the env catalog semantics; a workspace model whose key
- * cannot be decrypted is `vault_disabled`, never silently skipped.
+ * Availability mirrors env semantics but uses the caller-supplied effective
+ * dailyCapCents (from resolveEffectiveDailyCap) so workspace overrides apply
+ * without restart.
  */
 export function mergeOpeningCatalog(
-  serverModels: Array<OpeningModelSummary & { baseUrl: string; apiKey: string }>,
+  serverModels: ResolvableModel[],
   workspaceModels: WorkspaceCatalogModel[],
   input: { defaultModelId: string | null; dailyCapCents: number },
-): { models: Array<OpeningModelSummary & { baseUrl: string; apiKey: string }>; defaultModelId: string | null; dailyCapCents: number } {
+): { models: ResolvableModel[]; defaultModelId: string | null; dailyCapCents: number } {
   const capacity = Math.max(0, 32 - serverModels.length);
   const serverIds = new Set(serverModels.map(model => model.id));
   const custom = workspaceModels
@@ -28,18 +42,19 @@ export function mergeOpeningCatalog(
     .map(model => ({
     id: model.id, providerId: model.providerId, providerLabel: model.providerLabel,
     label: model.label, modelName: model.modelName,
-    availability: model.vaultConfigBroken ? "vault_disabled" as const
-      : !model.apiKey ? "missing_key" as const
-      : input.dailyCapCents <= 0 ? "budget_disabled" as const
-      : model.inputCentsPerMillion <= 0 || model.outputCentsPerMillion <= 0 ? "pricing_missing" as const
-      : "available" as const,
+    availability: availabilityFor(model, input.dailyCapCents),
     supportsVision: model.supportsVision,
     baseUrl: model.baseUrl, apiKey: model.apiKey,
     inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
     source: "workspace" as const,
   }));
+  const servers = serverModels.map(model => ({
+    ...model,
+    availability: availabilityFor(model, input.dailyCapCents),
+    source: model.source ?? ("server" as const),
+  }));
   return {
-    models: [...serverModels, ...custom],
+    models: [...servers, ...custom],
     // A removed custom default falls back to the server default; routing still
     // fails explicitly when the fallback is not itself selectable.
     defaultModelId: input.defaultModelId ?? serverModels[0]?.id ?? null,

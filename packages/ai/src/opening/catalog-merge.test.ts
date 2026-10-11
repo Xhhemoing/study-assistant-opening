@@ -9,9 +9,9 @@ const server = {
 };
 const custom = (over: Partial<WorkspaceCatalogModel> = {}): WorkspaceCatalogModel => ({
   id: "11111111-1111-4111-8111-111111111111", providerId: "22222222-2222-4222-8222-222222222222",
-  providerLabel: "我的供应商", label: "My Model", modelName: "my-model",
+  providerLabel: "工作区供应商", label: "My Model", modelName: "my-model",
   baseUrl: "https://mine.example/v1", apiKey: "mine-key", supportsVision: true,
-  inputCentsPerMillion: 1, outputCentsPerMillion: 2, createdAt: "2026-01-01T00:00:00.000Z", ...over,
+  inputCentsPerMillion: 1, outputCentsPerMillion: 2, ...over,
 });
 
 describe("mergeOpeningCatalog", () => {
@@ -30,6 +30,11 @@ describe("mergeOpeningCatalog", () => {
     expect(mergeOpeningCatalog([], [custom({ apiKey: "" })], base).models[0]!.availability).toBe("missing_key");
     expect(mergeOpeningCatalog([], [custom()], { ...base, dailyCapCents: 0 }).models[0]!.availability).toBe("budget_disabled");
     expect(mergeOpeningCatalog([], [custom({ vaultConfigBroken: true })], base).models[0]!.availability).toBe("vault_disabled");
+  });
+  it("recomputes server budget_disabled when effective cap becomes positive", () => {
+    const disabledServer = { ...server, availability: "budget_disabled" as const };
+    const merged = mergeOpeningCatalog([disabledServer], [], { defaultModelId: "server", dailyCapCents: 500 });
+    expect(merged.models[0]!.availability).toBe("available");
   });
   it("server ids win and the merged list stays capped at 32", () => {
     const clash = custom({ id: "server" });

@@ -73,6 +73,11 @@ export type OpeningBudgetRepositoryOptions = {
    * Production uses OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS (~30 min).
    */
   unknownReconcileTtlMs?: number;
+  /**
+   * Per-reserve effective cap resolver (workspace prefs + env). When set,
+   * used instead of the baked dailyCapCents for the spend check.
+   */
+  resolveDailyCapCents?: (scope: OpeningScope) => Promise<number>;
 };
 
 function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
@@ -142,6 +147,13 @@ export function createOpeningBudgetRepository(
           return row;
         }
 
+        const dailyCapCents = options.resolveDailyCapCents
+          ? await options.resolveDailyCapCents(scope)
+          : options.dailyCapCents;
+        if (!Number.isSafeInteger(dailyCapCents) || dailyCapCents < 0) {
+          throw new OpeningBudgetError("CONFLICT", "invalid daily budget cap");
+        }
+
         // Lazy reconcile: aged reserved (incl. markUnknown retains) â†’ completed at reserved amount.
         // Pessimistic â€” never flip to released (under-billing risk). Fresh reserved untouched.
         await tx`
@@ -162,7 +174,7 @@ export function createOpeningBudgetRepository(
             WHERE workspace_id=${scope.workspaceId} AND (state='reserved' OR
               (state='completed' AND (created_at AT TIME ZONE ${timeZone})::date
                 = (now() AT TIME ZONE ${timeZone})::date))
-          ), 0) <= ${options.dailyCapCents}
+          ), 0) <= ${dailyCapCents}
           RETURNING *
         `;
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");

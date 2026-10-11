@@ -27,6 +27,7 @@ import {
   createOpeningSourceRepository,
 } from "@aistudy/database";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
+import { resolveWorkspaceEffectiveCap } from "../settings/ai-settings-service";
 import { resolveTutorModel } from "../../../../worker/src/runtime/tutor-model";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
@@ -96,6 +97,9 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
     dailyCapCents: catalog?.dailyCapCents ?? 100_000,
+    resolveDailyCapCents: override
+      ? undefined
+      : async (ownedScope) => (await resolveWorkspaceEffectiveCap(sql, ownedScope)).capCents,
   });
   const sources = createOpeningSourceRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);

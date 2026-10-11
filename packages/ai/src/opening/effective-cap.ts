@@ -57,22 +57,22 @@ export function resolveEffectiveDailyCap(input: EffectiveDailyCapInput): Effecti
     return { capCents: 0, source: "disabled" };
   }
 
-  const workspaceSet = isSetCap(input.workspaceCapCents);
+  const workspaceCap = isSetCap(input.workspaceCapCents) ? input.workspaceCapCents : null;
 
   if (envCapCents > 0) {
-    if (!workspaceSet) {
+    if (workspaceCap == null) {
       return { capCents: envCapCents, source: "env" };
     }
-    return { capCents: Math.min(envCapCents, input.workspaceCapCents), source: "min" };
+    return { capCents: Math.min(envCapCents, workspaceCap), source: "min" };
   }
 
   // env === 0: workspace override requires confirm; apply personal ceiling.
-  if (!workspaceSet || !input.confirmed) {
+  if (workspaceCap == null || !input.confirmed) {
     return { capCents: 0, source: "disabled" };
   }
 
   return {
-    capCents: Math.min(input.workspaceCapCents, ceilingCents),
+    capCents: Math.min(workspaceCap, ceilingCents),
     source: "workspace",
   };
 }
