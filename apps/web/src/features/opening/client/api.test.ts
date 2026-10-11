@@ -452,3 +452,69 @@ describe("openingApi teaching activities (CT-03)", () => {
     expect(body.blocks[0]?.content).toEqual({ text: "client init body" });
   });
 });
+
+describe("openingApi intervention settings (V2-11)", () => {
+  const prefs = {
+    proactivity: "balanced",
+    nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
+    depth: "hint_then_offer",
+    quietMode: false,
+  };
+  const response = {
+    settings: prefs,
+    courseOverride: null,
+    sessionOverride: null,
+    effective: prefs,
+    saved: true,
+    invalidStoredSettings: false,
+  };
+
+  it("GETs /api/opening/intervention-settings with optional course/activity query", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(
+        `/api/opening/intervention-settings?courseId=${U}&activityId=${S}`,
+      );
+      expect(init?.method).toBe("GET");
+      return jsonResponse(response);
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const body = await api.getInterventionSettings({ courseId: U, activityId: S });
+    expect(body.effective.proactivity).toBe("balanced");
+    expect(body.saved).toBe(true);
+  });
+
+  it("PUTs prefs globally and PUTs null to reset", async () => {
+    const calls: { url: string; body: string | null | undefined }[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: typeof init?.body === "string" ? init.body : null });
+      expect(init?.method).toBe("PUT");
+      return jsonResponse(response);
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await api.putInterventionSettings(prefs as never);
+    await api.putInterventionSettings(null);
+    expect(calls[0]?.url).toBe("/api/opening/intervention-settings");
+    expect(JSON.parse(calls[0]!.body!)).toEqual(prefs);
+    expect(calls[1]?.body).toBe("null");
+  });
+
+  it("PUTs session overlay with activityId and expectedUpdatedAt", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toContain(`activityId=${U}`);
+      expect(url).toContain(`expectedUpdatedAt=${encodeURIComponent(ISO)}`);
+      expect(init?.method).toBe("PUT");
+      return jsonResponse({
+        ...response,
+        sessionOverride: { quietMode: true },
+        effective: { ...prefs, quietMode: true },
+      });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const body = await api.putInterventionSettings(
+      { quietMode: true },
+      { activityId: U, expectedUpdatedAt: ISO },
+    );
+    expect(body.sessionOverride?.quietMode).toBe(true);
+    expect(body.effective.quietMode).toBe(true);
+  });
+});

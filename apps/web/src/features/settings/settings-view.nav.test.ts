@@ -15,6 +15,9 @@ vi.mock("../opening/timetable/semester-settings-form", () => ({
 vi.mock("../opening/timetable/timetable-import", () => ({
   TimetableImport: () => createElement("div", { "data-testid": "timetable" }),
 }));
+vi.mock("../opening/teaching/preference-controls", () => ({
+  PreferenceControls: () => createElement("div", { "data-testid": "intervention-prefs" }),
+}));
 vi.mock("./ai-settings-panel", () => ({
   AiSettingsPanel: () => createElement("div", { "data-testid": "ai" }),
 }));
@@ -37,9 +40,12 @@ describe("settings page split structure", () => {
     expect(html).toContain('href="#connections"');
     expect(html).toContain('href="#planning"');
     expect(html).toContain('href="#preferences"');
+    expect(html).toContain('href="#intervention"');
     expect(html).toContain('id="connections"');
     expect(html).toContain('id="planning"');
     expect(html).toContain('id="preferences"');
+    expect(html).toContain('id="intervention"');
+    expect(html).toContain('data-testid="intervention-prefs"');
     expect(html).toContain('href="/opening/settings/connections"');
     expect(html).toContain("打开连接设置");
     expect(html).not.toContain('data-testid="dingtalk"');

@@ -13,6 +13,7 @@ import {
   learningSwitches,
   putWorkspacePreferences,
 } from "./settings-shared";
+import { PreferenceControls } from "../opening/teaching/preference-controls";
 
 const navLinkClass = "text-sm text-zinc-600 underline-offset-2 hover:text-zinc-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 rounded-sm";
 
@@ -69,6 +70,8 @@ export function SettingsView() {
           <a className={navLinkClass} href="#planning">排程</a>
           <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#preferences">学习偏好</a>
+          <span aria-hidden="true">·</span>
+          <a className={navLinkClass} href="#intervention">介入偏好</a>
           <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href="/settings/advanced">高级</Link>
           <span aria-hidden="true">·</span>
@@ -139,6 +142,17 @@ export function SettingsView() {
                 </button>
               </>
             ) : null}
+          </div>
+        </section>
+
+
+        <section id="intervention" className="scroll-mt-6 grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="intervention-preferences-heading">
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900" id="intervention-preferences-heading">教学介入偏好</h2>
+            <p className="mt-1 text-xs leading-6 text-zinc-500">主动提示程度与安静模式。嵌在现有设置中，不是第二套设置产品。本课临时覆盖请在教学工作台调整。</p>
+          </div>
+          <div className="min-w-0">
+            <PreferenceControls scope="global" />
           </div>
         </section>
 

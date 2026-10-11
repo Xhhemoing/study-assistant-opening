@@ -61,10 +61,16 @@ import {
   teachingActivityCreateInputSchema,
   teachingActivityAssociateCourseInputSchema,
   activitySpecClientInitSchema,
+  interventionSettingsResponseSchema,
+  interventionPrefsSchema,
+  interventionPrefsPatchSchema,
   type TeachingActivity,
   type TeachingActivityCreateInput,
   type TeachingActivityAssociateCourseInput,
   type ActivitySpecClientInit,
+  type InterventionSettingsResponse,
+  type InterventionPrefs,
+  type InterventionPrefsPatch,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -610,6 +616,63 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return mediaSegmentsResponseSchema.parse(body);
+    },
+
+    /**
+     * V2-11 — GET /api/opening/intervention-settings
+     * Optional courseId / activityId query for course overlay + session temp layers.
+     */
+    async getInterventionSettings(options?: {
+      courseId?: string;
+      activityId?: string;
+    }): Promise<InterventionSettingsResponse> {
+      const params = new URLSearchParams();
+      if (options?.courseId) params.set("courseId", options.courseId);
+      if (options?.activityId) params.set("activityId", options.activityId);
+      const qs = params.toString();
+      const path = qs
+        ? `/api/opening/intervention-settings?${qs}`
+        : "/api/opening/intervention-settings";
+      const body = await request(path, { method: "GET" }, fetchImpl);
+      return interventionSettingsResponseSchema.parse(body);
+    },
+
+    /**
+     * V2-11 — PUT /api/opening/intervention-settings
+     * Body: full prefs (global), patch (course/session), or null to reset/clear.
+     * Session writes require activityId; optional expectedUpdatedAt for CAS.
+     */
+    async putInterventionSettings(
+      value: InterventionPrefs | InterventionPrefsPatch | null,
+      options?: {
+        courseId?: string;
+        activityId?: string;
+        expectedUpdatedAt?: string;
+      },
+    ): Promise<InterventionSettingsResponse> {
+      const params = new URLSearchParams();
+      if (options?.courseId) params.set("courseId", options.courseId);
+      if (options?.activityId) params.set("activityId", options.activityId);
+      if (options?.expectedUpdatedAt) {
+        params.set("expectedUpdatedAt", options.expectedUpdatedAt);
+      }
+      const qs = params.toString();
+      const path = qs
+        ? `/api/opening/intervention-settings?${qs}`
+        : "/api/opening/intervention-settings";
+      // Validate when non-null: prefer full prefs; patch allowed for overlays.
+      if (value !== null) {
+        const asFull = interventionPrefsSchema.safeParse(value);
+        if (!asFull.success) {
+          interventionPrefsPatchSchema.parse(value);
+        }
+      }
+      const body = await request(
+        path,
+        { method: "PUT", body: JSON.stringify(value) },
+        fetchImpl,
+      );
+      return interventionSettingsResponseSchema.parse(body);
     },
   };
 }

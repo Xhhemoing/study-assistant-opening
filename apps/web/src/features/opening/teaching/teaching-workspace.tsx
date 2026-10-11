@@ -15,6 +15,7 @@ import {
   teachingActivityGenerateStatusLabel,
   teachingActivityStatusLabel,
 } from "./today-activity";
+import { PreferenceControls } from "./preference-controls";
 
 export type TeachingWorkspaceProps = {
   activity: TeachingActivity;
@@ -196,6 +197,18 @@ export function TeachingWorkspace({
               ? ` 已有 checkpoint 字段 ${Object.keys(clientInit.checkpointJson).length} 个。`
               : " 当前无个人草稿。"}
           </p>
+        </ExpandSection>
+      </div>
+
+      <div className="mt-4">
+        <ExpandSection id="intervention-prefs" title="本课介入偏好（临时 · 按需展开）">
+          <PreferenceControls
+            scope="session"
+            activityId={activity.id}
+            courseId={activity.courseId}
+            expectedUpdatedAt={activity.updatedAt}
+            compact
+          />
         </ExpandSection>
       </div>
 

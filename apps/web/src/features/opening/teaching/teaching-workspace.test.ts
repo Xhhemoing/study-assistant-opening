@@ -1,6 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./preference-controls", () => ({
+  PreferenceControls: () => createElement("div", { "data-testid": "session-intervention-prefs" }),
+}));
 import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
 import {
   isTeachingWorkspaceContentUsable,
@@ -107,6 +111,8 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("提纲（按需展开）");
     expect(html).toContain("原材料 / 引用");
     expect(html).toContain("打开自由对话（次要）");
+    expect(html).toContain("本课介入偏好（临时 · 按需展开）");
+    expect(html).toContain('data-expand="intervention-prefs"');
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
   });
