@@ -135,6 +135,13 @@ export {
   type OpeningTeachingActivitiesRepository,
 } from "./repositories/opening-teaching-activities";
 
+export {
+  createOpeningTeachingCommandsRepository,
+  sameCommandIntent,
+  classifySkipSideEffects,
+  type OpeningTeachingCommandsRepository,
+} from "./repositories/opening-teaching-commands";
+
 export * from "./schema/opening-action-digest-decisions";
 export {
   createOpeningActionDigestDecisionsRepository,

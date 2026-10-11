@@ -368,3 +368,28 @@ export {
   type DecideInterventionInput,
   type DecideInterventionResult,
 } from "./opening/intervention-policy";
+
+export {
+  TEACHING_COMMAND_CHECKPOINT_KEYS,
+  mergeCheckpointPreservingPrefs,
+  readBranchStack,
+  readCommandLog,
+  readSkippedBlockIds,
+  pushBranch,
+  popBranch,
+  classifySkipSideEffects,
+  assertCommandAllowed,
+  fingerprintCommandIntent,
+  findCommandLogByClientKey,
+  appendCommandLog,
+  nextBlockIdAfter,
+  buildStructuredRewriteBlocks,
+  buildWhyAssist,
+  createBranchFrame,
+  draftsSurvivingBlockIds,
+  type TeachingCommandCheckpointPatch,
+  type AssertCommandAllowedActivity,
+  type AssertCommandAllowedResult,
+  type CommandLogReplayLookup,
+  type LibraryBlockLike,
+} from "./opening/teaching-commands";
