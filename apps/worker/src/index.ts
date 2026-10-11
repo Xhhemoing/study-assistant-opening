@@ -21,7 +21,9 @@ import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
 import {
   createCompileTeachingUnitHandler,
   createTeachingCompilerPublishInput,
+  createTeachingValidationAfterPublish,
   isTeachingCompilerEnabled,
+  isTeachingValidationEnabled,
 } from "./jobs/compile-teaching-unit";
 import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
@@ -121,7 +123,9 @@ export async function main(): Promise<void> {
   const teachingContent = createOpeningTeachingContentRepository(sql);
   // V2-08: teaching-compiler via buildPublishInput when OPENING_TEACHING_COMPILER_ENABLED;
   // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Budget/cancel/epoch fences unchanged.
+  // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
   const teachingCompilerOn = isTeachingCompilerEnabled();
+  const teachingValidationOn = isTeachingValidationEnabled();
   const compileTeachingUnit = createCompileTeachingUnitHandler({
     budget,
     provider: {
@@ -160,6 +164,13 @@ export async function main(): Promise<void> {
           loadChunks: async (scope, sourceIds) => {
             const s = scope as { workspaceId: string; ownerUserId: string };
             return chunks.listForSources(s, sourceIds);
+          },
+        })
+      : undefined,
+    verifyAfterPublish: teachingValidationOn
+      ? createTeachingValidationAfterPublish({
+          loadChunks: async (scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]) => {
+            return chunks.listForSources(scope, sourceIds);
           },
         })
       : undefined,

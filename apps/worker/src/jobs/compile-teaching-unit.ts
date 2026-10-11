@@ -7,9 +7,12 @@ import type {
 import {
   OpeningProviderError,
   createCompilerBuildPublishInput,
+  createTeachingValidationAfterPublish,
   isTeachingCompilerEnabled,
+  isTeachingValidationEnabled,
   type BuildCompilerPublishInputOptions,
 } from "@aistudy/ai";
+import type { NextVerificationStatus, ValidationReport } from "@aistudy/domain";
 import {
   OpeningBudgetError,
   type OpeningBudgetRepository,
@@ -81,6 +84,24 @@ export type CompileTeachingUnitDeps = {
     getWorkspaceEpoch(scope: Scope): Promise<number>;
     listExcludedSourceIds(scope: Scope): Promise<string[]>;
   };
+  /**
+   * V2-09 optional post-publish validation. Called only when
+   * OPENING_TEACHING_VALIDATION_ENABLED is on and generate path reached needs_check.
+   * Return null to leave needs_check; otherwise CAS-promote verificationStatus
+   * (and optional generate_status) without rewriting learned history bodies.
+   */
+  verifyAfterPublish?(
+    scope: Scope,
+    input: {
+      activityId: string;
+      publishInput: ActivitySpecPublishInput;
+      providerOutput: ProviderOutput | null;
+    },
+  ): Promise<{
+    nextVerificationStatus: NextVerificationStatus;
+    nextGenerateStatus?: TeachingGenerateStatus;
+    report?: ValidationReport;
+  } | null>;
 };
 
 function parsePayload(payload: unknown): CompileTeachingUnitPayload {
@@ -151,7 +172,10 @@ export function createTeachingCompilerPublishInput(
   return createCompilerBuildPublishInput(options);
 }
 
-export { isTeachingCompilerEnabled };
+/** Thin V2-09 wire: post-publish verifyAfterPublish factory. */
+export { createTeachingValidationAfterPublish };
+
+export { isTeachingCompilerEnabled, isTeachingValidationEnabled };
 
 /**
  * V2-07 teaching generation job: budgeted provider call + ActivitySpec publish fences.
@@ -270,13 +294,70 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       await deps.publishActivitySpec(scope, publishInput);
 
-      const nextStatus: TeachingGenerateStatus = skipProvider ? "ready" : "needs_check";
+      let nextStatus: TeachingGenerateStatus = skipProvider ? "ready" : "needs_check";
       const updated = await deps.setGenerateStatus(scope, body.activityId, nextStatus, {
         from: ["generating"],
       });
       if (!updated) {
         // cancelled/stale won the race — discard is success for the handler
         return { discarded: true, reason: "generate_status_fence" };
+      }
+
+      let verificationStatus: string | undefined = publishInput.verificationStatus;
+      let validationReport: ValidationReport | undefined;
+
+      // V2-09 thin post-compile validation (flag off → leave needs_check).
+      // Keep cancel / epoch fences; do not rewrite learned history bodies.
+      if (
+        !skipProvider &&
+        nextStatus === "needs_check" &&
+        isTeachingValidationEnabled() &&
+        deps.verifyAfterPublish
+      ) {
+        const stateBeforeValidate = await deps.getJobState(job.id);
+        if (stateBeforeValidate === "cancelled") {
+          return { discarded: true, reason: "cancelled" };
+        }
+        if (deps.privacy) {
+          assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+        }
+
+        const promotion = await deps.verifyAfterPublish(scope, {
+          activityId: body.activityId,
+          publishInput,
+          providerOutput,
+        });
+
+        if (promotion) {
+          const stateBeforePromote = await deps.getJobState(job.id);
+          if (stateBeforePromote === "cancelled") {
+            return { discarded: true, reason: "cancelled" };
+          }
+          if (deps.privacy) {
+            assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+          }
+
+          // CAS metadata republish: same graph + new verificationStatus (soft gap #1).
+          await deps.publishActivitySpec(scope, {
+            ...publishInput,
+            expectedVersion: publishInput.expectedVersion + 1,
+            verificationStatus: promotion.nextVerificationStatus,
+          });
+          verificationStatus = promotion.nextVerificationStatus;
+          validationReport = promotion.report;
+
+          if (promotion.nextGenerateStatus) {
+            const promoted = await deps.setGenerateStatus(
+              scope,
+              body.activityId,
+              promotion.nextGenerateStatus,
+              { from: ["needs_check"] },
+            );
+            if (promoted) {
+              nextStatus = promotion.nextGenerateStatus;
+            }
+          }
+        }
       }
 
       return {
@@ -286,6 +367,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         generateStatus: nextStatus,
         operationId,
         usedProvider: !skipProvider,
+        verificationStatus,
+        validationReport,
       };
     } catch (error) {
       const status = await mapFailureStatus(error);

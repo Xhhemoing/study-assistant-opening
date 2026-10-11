@@ -87,3 +87,18 @@ export {
   type CompileLibraryBlock,
   type BuildCompilerPublishInputOptions,
 } from "./opening/teaching-compiler";
+
+export {
+  verifyTeachingContent,
+  verifyTutorTurnOutput,
+  scanInjectionRisks,
+  detectAuthoritySpoof,
+  isTeachingValidationEnabled,
+  createTeachingValidationAfterPublish,
+  type VerifyTeachingInput,
+  type VerifyTeachingKeyClaim,
+  type VerifyTutorOutputInput,
+  type TeachingValidationPromotion,
+  type CreateTeachingValidationAfterPublishOptions,
+} from "./opening/teaching-verifiers";
+

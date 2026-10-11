@@ -3,7 +3,10 @@ import { OpeningProviderError, createCompilerBuildPublishInput } from "@aistudy/
 import { OpeningBudgetError } from "@aistudy/database";
 import type { OpeningJobRecord } from "@aistudy/database";
 import type { ProviderOutput, SourceChunk } from "@aistudy/contracts";
-import { createCompileTeachingUnitHandler } from "./compile-teaching-unit";
+import {
+  createCompileTeachingUnitHandler,
+  isTeachingValidationEnabled,
+} from "./compile-teaching-unit";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 
 const ACTIVITY = "00000000-0000-4000-8000-0000000000a1";
@@ -264,4 +267,103 @@ describe("createCompileTeachingUnitHandler", () => {
     expect(publishArg.blockOrder).toEqual([]);
     expect(publishArg.generationConfig?.extras?.stub).toBe(true);
   });
+
+  it("C10 validation: flag off leaves needs_check (no verifyAfterPublish call)", async () => {
+    const verifyAfterPublish = vi.fn(async () => ({
+      nextVerificationStatus: "verified" as const,
+      nextGenerateStatus: "ready" as const,
+    }));
+    const prev = process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+    delete process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+    try {
+      expect(isTeachingValidationEnabled()).toBe(false);
+      const deps = baseDeps({ verifyAfterPublish });
+      const processJob = createCompileTeachingUnitHandler(deps as never);
+      const result = await processJob(job, generatePayload);
+      expect(result).toMatchObject({ generateStatus: "needs_check" });
+      expect(verifyAfterPublish).not.toHaveBeenCalled();
+      expect(deps.publishActivitySpec).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prev === undefined) delete process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+      else process.env.OPENING_TEACHING_VALIDATION_ENABLED = prev;
+    }
+  });
+
+  it("C10 validation: flag on + fact pass → verified + optional ready; fences kept", async () => {
+    const verifyAfterPublish = vi.fn(async () => ({
+      nextVerificationStatus: "verified" as const,
+      nextGenerateStatus: "ready" as const,
+      report: {
+        activityId: ACTIVITY,
+        structurePassed: true,
+        factPassed: true,
+        layers: [],
+        nextVerificationStatus: "verified" as const,
+        presentation: { kind: "authoritative" as const, allowsFormalScoring: true as const },
+      },
+    }));
+    const prev = process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+    process.env.OPENING_TEACHING_VALIDATION_ENABLED = "1";
+    try {
+      expect(isTeachingValidationEnabled()).toBe(true);
+      const deps = baseDeps({ verifyAfterPublish });
+      const processJob = createCompileTeachingUnitHandler(deps as never);
+      const result = await processJob(job, generatePayload);
+      expect(result).toMatchObject({
+        generateStatus: "ready",
+        verificationStatus: "verified",
+        operationId: `compile-teaching-unit:${job.id}`,
+      });
+      expect(verifyAfterPublish).toHaveBeenCalledTimes(1);
+      // initial publish + CAS promote
+      expect(deps.publishActivitySpec).toHaveBeenCalledTimes(2);
+      const promoteArg = deps.publishActivitySpec.mock.calls[1][1];
+      expect(promoteArg.verificationStatus).toBe("verified");
+      expect(promoteArg.expectedVersion).toBe(1); // 0+1 after first publish
+      expect(deps._statuses).toEqual(["generating", "needs_check", "ready"]);
+      // budget fence still exercised once
+      expect(deps._reserved[0]).toMatchObject({
+        purpose: "compile-teaching-unit",
+        requestId: `compile-teaching-unit:${job.id}`,
+      });
+    } finally {
+      if (prev === undefined) delete process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+      else process.env.OPENING_TEACHING_VALIDATION_ENABLED = prev;
+    }
+  });
+
+  it("C10 validation: unknown/conflict promotion leaves generate needs_check", async () => {
+    const verifyAfterPublish = vi.fn(async () => ({
+      nextVerificationStatus: "needs_check" as const,
+      report: {
+        activityId: ACTIVITY,
+        structurePassed: true,
+        factPassed: false,
+        layers: [],
+        nextVerificationStatus: "needs_check" as const,
+        presentation: {
+          kind: "discussion_draft" as const,
+          allowsFormalScoring: false as const,
+          label: "draft",
+        },
+      },
+    }));
+    const prev = process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+    process.env.OPENING_TEACHING_VALIDATION_ENABLED = "true";
+    try {
+      const deps = baseDeps({ verifyAfterPublish });
+      const processJob = createCompileTeachingUnitHandler(deps as never);
+      const result = await processJob(job, generatePayload);
+      expect(result).toMatchObject({
+        generateStatus: "needs_check",
+        verificationStatus: "needs_check",
+      });
+      expect(deps._statuses).toEqual(["generating", "needs_check"]);
+      expect(deps.publishActivitySpec).toHaveBeenCalledTimes(2);
+    } finally {
+      if (prev === undefined) delete process.env.OPENING_TEACHING_VALIDATION_ENABLED;
+      else process.env.OPENING_TEACHING_VALIDATION_ENABLED = prev;
+    }
+  });
+
 });

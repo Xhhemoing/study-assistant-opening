@@ -332,3 +332,23 @@ export {
   type TeachingOutline,
   type HistoryFreezeDecision,
 } from "./opening/teaching-plan";
+
+export {
+  structurePassed,
+  factPassed,
+  mayPublishVerified,
+  presentationFor,
+  buildValidationReport,
+  assertNotAuthoritySpoof,
+  denyIncompleteStreamActions,
+  recheckPrivacyFreshness,
+  authoritySpoofPatterns,
+  isStructureLayer,
+  type LayerOutcome,
+  type ValidationLayerId,
+  type LayerResult,
+  type PresentationPolicy,
+  type NextVerificationStatus,
+  type ValidationReport,
+} from "./opening/teaching-validation";
+
