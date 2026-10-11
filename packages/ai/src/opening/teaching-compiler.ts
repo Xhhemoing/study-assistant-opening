@@ -3,7 +3,15 @@
  * Reuses V2-06 assembleTeachingEvidencePack / formatProviderContext (no forked chunk loader).
  * Sync structure helpers; worker keeps budgeted provider fences.
  */
-import { randomUUID } from "node:crypto";
+function newId(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+    const value = Math.floor(Math.random() * 16);
+    const nibble = character === "x" ? value : (value & 3) | 8;
+    return nibble.toString(16);
+  });
+}
+
 import type {
   ActivitySpecPublishInput,
   SourceChunk,
@@ -342,7 +350,7 @@ export function compileCurrentActivity(input: CompileCurrentInput): CompileCurre
     },
   });
 
-  const newBlockId = input.newBlockId ?? (() => randomUUID());
+  const newBlockId = input.newBlockId ?? (() => newId());
   const libraryBlocks = buildBlocksForItem(focus, input.pack, newBlockId);
   const blockOrder: TeachingBlockRef[] = libraryBlocks.map((b, position) => ({
     blockId: b.id,
