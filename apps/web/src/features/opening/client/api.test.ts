@@ -370,3 +370,45 @@ describe("single task reminders", () => {
     await expect(createOpeningApi(fetchImpl as unknown as typeof fetch).requestTaskReminder(input)).rejects.toMatchObject({ name: "ZodError" });
   });
 });
+
+
+describe("openingApi teaching activities (CT-03)", () => {
+  it("lists and creates teaching activities", async () => {
+    const row = {
+      id: U,
+      workspaceId: U,
+      ownerUserId: S,
+      courseId: null,
+      status: "active",
+      generateStatus: "queued",
+      intentKind: "topic",
+      intentSummary: "今日主题学习",
+      sourceIds: [],
+      pathVersion: 1,
+      contentVersion: 0,
+      clientKey: "today-topic:2026-10-11",
+      createdAt: ISO,
+      updatedAt: ISO,
+    };
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/opening/teaching-activities" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse([row]);
+      }
+      if (url === "/api/opening/teaching-activities" && init?.method === "POST") {
+        return jsonResponse(row, 201);
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    const listed = await api.listTeachingActivities();
+    expect(listed[0]?.intentSummary).toBe("今日主题学习");
+    const created = await api.createTeachingActivity({
+      clientKey: "today-topic:2026-10-11",
+      intentKind: "topic",
+      intentSummary: "今日主题学习",
+      createIntent: { intentKind: "topic", source: "today" },
+    });
+    expect(created.id).toBe(U);
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+});

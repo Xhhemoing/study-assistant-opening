@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import type { TaskItem } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { secondaryButtonClass, ui } from "../design/ui";
@@ -35,19 +36,31 @@ export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[
   </section>;
 }
 
-export function TodayLearningContext({ item }: { item?: TodayResumeState["continueItem"] }) {
+export function TodayLearningContext({
+  item,
+  primaryAction,
+  secondaryAction,
+}: {
+  item?: TodayResumeState["continueItem"];
+  primaryAction?: ReactNode;
+  secondaryAction?: ReactNode;
+}) {
   const sourceCount = Object.keys(item?.sourceVersions ?? {}).length;
   const courseHref = item?.courseId ? `/opening/courses/${encodeURIComponent(item.courseId)}` : "/opening/courses";
   return <div className="min-w-0 border-b border-zinc-200 px-4 py-2 sm:px-5">
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs text-zinc-700">{item ? `上次学习：${item.title}` : "从一个问题、一次练习或一篇笔记开始"}</p>
         {item ? <p className="mt-1 text-[11px] text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}
         {item?.manualSourceCount ? <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
       </div>
-      <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
-        <Link href={courseHref} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
-      </nav>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        {primaryAction}
+        {secondaryAction}
+        <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
+          <Link href={courseHref} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
+        </nav>
+      </div>
     </div>
     <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">
       <Link href="/opening/cards" className={ui.quiet}>卡片</Link>

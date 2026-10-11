@@ -20,7 +20,10 @@ describe("independent Today resume and review state", () => {
     expect(state.continueItem).toMatchObject({ conversationId: conversation.id, currentPage: 7 });
     expect(state.pendingReviews).toEqual({ count: 3, href: "/opening/review" });
     const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
+    expect(html).toContain('data-today-primary-cta="true"');
+    expect(html).toContain("开始学习");  // no activity yet → create; conversation is secondary
     expect(html).toContain(`/opening/assistant?conversation=${conversation.id}`);
+    expect(html).toContain("打开自由对话（次要）");
     expect(html).toContain('href="/opening/review"');
     expect(html).not.toContain("/api/");
     expect(html).not.toContain("请先处理");
@@ -53,7 +56,9 @@ it("keeps manual material separate from automatic resume and preserves the conve
     lastConversation: { ...conversation, sourceVersions: {}, currentPage: null, manualSourceCount: 1 } });
   expect(state.continueItem?.manualSourceCount).toBe(1);
   const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
+  expect(html).toContain("开始学习");
   expect(html).toContain(`/opening/assistant?conversation=${conversation.id}`);
+  expect(html).toContain("打开自由对话（次要）");
   expect(html).toContain(conversation.lastUserText);
   expect(html).toContain("1 份材料仅供手工阅读");
   expect(html).not.toContain("上次读到第");

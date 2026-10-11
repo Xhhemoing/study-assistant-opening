@@ -1,4 +1,5 @@
 import { createOpeningAttemptService } from "./learning/attempt-service";
+import { createOpeningTeachingActivityService } from "./teaching/activity-service";
 import {
   createOpeningConversationRepository, readOpeningConversationSelection,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
@@ -154,3 +155,7 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
 }
 
 export function getAttemptService(sql: Sql) { return createOpeningAttemptService(sql); }
+
+export function getTeachingActivityService(sql: Sql) {
+  return createOpeningTeachingActivityService(sql);
+}

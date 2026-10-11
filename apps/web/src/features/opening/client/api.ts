@@ -57,6 +57,12 @@ import {
   type ConnectionView,
   type ImapSetupInput,
   type MediaSegmentsResponse,
+  teachingActivitySchema,
+  teachingActivityCreateInputSchema,
+  teachingActivityAssociateCourseInputSchema,
+  type TeachingActivity,
+  type TeachingActivityCreateInput,
+  type TeachingActivityAssociateCourseInput,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -137,6 +143,7 @@ async function request(
   return body;
 }
 
+const teachingActivityListSchema = z.array(teachingActivitySchema);
 const summaryListSchema = z.array(conversationSummarySchema);
 const turnListSchema = z.array(turnRecordSchema);
 const sourceListSchema = z.array(sourceRecordSchema);
@@ -545,6 +552,43 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         );
       }
       return body;
+    },
+
+    async listTeachingActivities(): Promise<TeachingActivity[]> {
+      const body = await request("/api/opening/teaching-activities", { method: "GET" }, fetchImpl);
+      return teachingActivityListSchema.parse(body);
+    },
+
+    async createTeachingActivity(input: TeachingActivityCreateInput): Promise<TeachingActivity> {
+      const payload = teachingActivityCreateInputSchema.parse(input);
+      const body = await request(
+        "/api/opening/teaching-activities",
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return teachingActivitySchema.parse(body);
+    },
+
+    async getTeachingActivity(id: string): Promise<TeachingActivity> {
+      const body = await request(
+        `/api/opening/teaching-activities/${id}`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return teachingActivitySchema.parse(body);
+    },
+
+    async associateTeachingActivityCourse(
+      id: string,
+      input: TeachingActivityAssociateCourseInput,
+    ): Promise<TeachingActivity> {
+      const payload = teachingActivityAssociateCourseInputSchema.parse(input);
+      const body = await request(
+        `/api/opening/teaching-activities/${id}/associate-course`,
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return teachingActivitySchema.parse(body);
     },
 
     async getSourceSegments(sourceId: string): Promise<MediaSegmentsResponse> {
