@@ -13,14 +13,17 @@ import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view"
 import type { StudyTask } from "./study-task";
 import { TodayLearningContext } from "./today-overview";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
-import { TeachingActivityEmpty, TeachingActivityPanel } from "../teaching/activity-panel";
+import { TeachingActivityEmpty } from "../teaching/activity-panel";
 import {
   buildStartLearningCreateInput,
   pickCurrentTeachingActivity,
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
 import { TeachingContinueEntry } from "../teaching/teaching-workspace";
+import { isOpeningTeachingLoopEnabled } from "../teaching/teaching-loop-flag";
 import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
+import { isOpeningTeachingLoopTrialEnabled } from "../teaching/teaching-loop-trial";
+import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
   return Boolean(focusTaskId);
@@ -35,16 +38,33 @@ export function TodayDashboard({
   api: apiProp,
   focusTaskId,
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
+  teachingLoopEnabled: teachingLoopEnabledProp,
+  teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
 }: {
   state: TodayResumeState;
   api?: OpeningApi;
   focusTaskId?: string;
   /** Override for tests; default reads OPENING_TEACHING_WORKSPACE / NEXT_PUBLIC_*. */
   teachingWorkspaceEnabled?: boolean;
+  /** Override for tests; default reads OPENING_TEACHING_LOOP / NEXT_PUBLIC_*. */
+  teachingLoopEnabled?: boolean;
+  /**
+   * Override dual trial gate for tests.
+   * Default = loop && workspace (V2-16 UI trial; both flags required).
+   */
+  teachingLoopTrialEnabled?: boolean;
 }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const teachingWorkspaceEnabled =
     teachingWorkspaceEnabledProp ?? isOpeningTeachingWorkspaceEnabled();
+  const teachingLoopEnabled =
+    teachingLoopEnabledProp ?? isOpeningTeachingLoopEnabled();
+  const teachingLoopTrialEnabled =
+    teachingLoopTrialEnabledProp ??
+    (teachingLoopEnabledProp !== undefined ||
+    teachingWorkspaceEnabledProp !== undefined
+      ? teachingLoopEnabled && teachingWorkspaceEnabled
+      : isOpeningTeachingLoopTrialEnabled());
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
   const [reloadToken, setReloadToken] = useState(0);
@@ -108,7 +128,7 @@ export function TodayDashboard({
 
   // V2-14: prefer LearningResume package for continue; clientInit may be null (fail-soft).
   useEffect(() => {
-    if (!teachingWorkspaceEnabled || !currentActivity) {
+    if (!teachingLoopTrialEnabled || !currentActivity) {
       setClientInit(null);
       setClientInitLoad("idle");
       setLearningResume(null);
@@ -171,7 +191,7 @@ export function TodayDashboard({
         }
       });
     return () => controller.abort();
-  }, [api, currentActivity, teachingWorkspaceEnabled, reloadToken]);
+  }, [api, currentActivity, teachingLoopTrialEnabled, reloadToken]);
 
   const select = useCallback((next: StudyTask, source?: "focus" | "user") => {
     setTask(next);
@@ -291,7 +311,7 @@ export function TodayDashboard({
           </div>
           <div className="min-h-0 min-w-0 flex-1 bg-white">
             {currentActivity ? (
-              teachingWorkspaceEnabled ? (
+              teachingLoopTrialEnabled ? (
                 <TeachingContinueEntry
                   activity={currentActivity}
                   resume={learningResume}
@@ -307,10 +327,10 @@ export function TodayDashboard({
                   }}
                 />
               ) : (
-                <TeachingActivityPanel
-                  activity={currentActivity}
+                <TeachingLoopTrialEmpty
                   assistantHref={assistantHref}
-                  timeZone={timeZone}
+                  loopEnabled={teachingLoopEnabled}
+                  workspaceEnabled={teachingWorkspaceEnabled}
                 />
               )
             ) : (
@@ -321,7 +341,7 @@ export function TodayDashboard({
                 assistantHref={assistantHref}
               />
             )}
-            {teachingWorkspaceEnabled &&
+            {teachingLoopTrialEnabled &&
             currentActivity &&
             resumeLoad === "error" &&
             clientInitLoad === "error" ? (
