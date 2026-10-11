@@ -60,9 +60,11 @@ import {
   teachingActivitySchema,
   teachingActivityCreateInputSchema,
   teachingActivityAssociateCourseInputSchema,
+  activitySpecClientInitSchema,
   type TeachingActivity,
   type TeachingActivityCreateInput,
   type TeachingActivityAssociateCourseInput,
+  type ActivitySpecClientInit,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -589,6 +591,16 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return teachingActivitySchema.parse(body);
+    },
+
+
+    async getTeachingClientInit(activityId: string): Promise<ActivitySpecClientInit> {
+      const body = await request(
+        `/api/opening/teaching-activities/${activityId}/client-init`,
+        { method: "GET" },
+        fetchImpl,
+      );
+      return activitySpecClientInitSchema.parse(body);
     },
 
     async getSourceSegments(sourceId: string): Promise<MediaSegmentsResponse> {

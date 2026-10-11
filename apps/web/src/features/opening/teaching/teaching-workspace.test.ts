@@ -1,0 +1,126 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
+import {
+  isTeachingWorkspaceContentUsable,
+  TeachingWorkspace,
+} from "./teaching-workspace";
+
+const AID = "11111111-1111-4111-8111-111111111111";
+const WID = "22222222-2222-4222-8222-222222222222";
+const OID = "33333333-3333-4333-8333-333333333333";
+const BID = "44444444-4444-4444-8444-444444444444";
+const BID2 = "55555555-5555-4555-8555-555555555555";
+const DOC = "66666666-6666-4666-8666-666666666666";
+const UNIT = "77777777-7777-4777-8777-777777777777";
+const SPEC = "88888888-8888-4888-8888-888888888888";
+const ISO = "2026-10-11T04:00:00.000Z";
+
+const activityReady: TeachingActivity = {
+  id: AID,
+  workspaceId: WID,
+  ownerUserId: OID,
+  courseId: null,
+  status: "active",
+  generateStatus: "ready",
+  intentKind: "topic",
+  intentSummary: "今日主题学习",
+  sourceIds: [],
+  pathVersion: 1,
+  contentVersion: 1,
+  clientKey: "today-topic:2026-10-11",
+  createdAt: ISO,
+  updatedAt: ISO,
+};
+
+function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecClientInit {
+  return {
+    id: SPEC,
+    activityId: AID,
+    teachingUnitId: UNIT,
+    documentId: DOC,
+    revisionNumber: 1,
+    blockOrder: [
+      { blockId: BID, position: 0, blockType: "text", role: "teach" },
+      { blockId: BID2, position: 1, blockType: "answer_key", role: "answer_key" },
+    ],
+    sourceRefs: [],
+    goals: [{ goalId: "g1", statement: "理解矩阵秩" }],
+    verificationStatus: "structure_ok",
+    generationConfig: {},
+    version: 1,
+    createdAt: ISO,
+    updatedAt: ISO,
+    blocks: [
+      {
+        blockId: BID,
+        position: 0,
+        blockType: "text",
+        role: "teach",
+        content: { text: "矩阵的秩表示线性无关行的最大个数。" },
+      },
+      {
+        blockId: BID2,
+        position: 1,
+        blockType: "answer_key",
+        role: "answer_key",
+        content: null,
+        answerRef: { refId: BID2, revealState: "hidden" },
+      },
+    ],
+    contentVersion: 1,
+    checkpointJson: {},
+    ...overrides,
+  };
+}
+
+describe("isTeachingWorkspaceContentUsable", () => {
+  it("requires generateStatus ready and non-empty blocks", () => {
+    expect(isTeachingWorkspaceContentUsable(activityReady, clientInit())).toBe(true);
+    expect(
+      isTeachingWorkspaceContentUsable(
+        { ...activityReady, generateStatus: "queued" },
+        clientInit(),
+      ),
+    ).toBe(false);
+    expect(isTeachingWorkspaceContentUsable(activityReady, null)).toBe(false);
+    expect(
+      isTeachingWorkspaceContentUsable(activityReady, clientInit({ blocks: [] })),
+    ).toBe(false);
+  });
+});
+
+describe("TeachingWorkspace", () => {
+  it("renders ordered blocks, expandable cites, and keeps free chat secondary", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: activityReady,
+        clientInit: clientInit(),
+        assistantHref: "/opening/assistant?conversation=x",
+      }),
+    );
+    expect(html).toContain("data-teaching-workspace=\"true\"");
+    expect(html).toContain("当前 AI 教学");
+    expect(html).toContain("矩阵的秩");
+    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+    expect(html).toContain("提纲（按需展开）");
+    expect(html).toContain("原材料 / 引用");
+    expect(html).toContain("打开自由对话（次要）");
+    expect(html).not.toContain("AssistantView");
+    expect(html).not.toContain("MediaReader");
+  });
+
+  it("fail-soft banner on unknown schema version without crashing (C4)", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: activityReady,
+        clientInit: clientInit({
+          generationConfig: { extras: { schemaVersion: "999" } },
+        }),
+      }),
+    );
+    expect(html).toContain("data-workspace-schema-fail=\"true\"");
+    expect(html).toContain("schema 版本不受支持");
+  });
+});

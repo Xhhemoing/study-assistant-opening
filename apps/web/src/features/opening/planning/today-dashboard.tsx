@@ -12,13 +12,18 @@ import { TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { TodayLearningContext } from "./today-overview";
-import type { TeachingActivity } from "@aistudy/contracts";
+import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
 import { TeachingActivityEmpty, TeachingActivityPanel } from "../teaching/activity-panel";
 import {
   buildStartLearningCreateInput,
   pickCurrentTeachingActivity,
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
+import {
+  isTeachingWorkspaceContentUsable,
+  TeachingWorkspace,
+} from "../teaching/teaching-workspace";
+import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
   return Boolean(focusTaskId);
@@ -28,8 +33,21 @@ export function shouldCloseTodayQueue(source?: "focus" | "user"): boolean {
   return source !== "focus";
 }
 
-export function TodayDashboard({ state, api: apiProp, focusTaskId }: { state: TodayResumeState; api?: OpeningApi; focusTaskId?: string }) {
+export function TodayDashboard({
+  state,
+  api: apiProp,
+  focusTaskId,
+  teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
+}: {
+  state: TodayResumeState;
+  api?: OpeningApi;
+  focusTaskId?: string;
+  /** Override for tests; default reads OPENING_TEACHING_WORKSPACE / NEXT_PUBLIC_*. */
+  teachingWorkspaceEnabled?: boolean;
+}) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
+  const teachingWorkspaceEnabled =
+    teachingWorkspaceEnabledProp ?? isOpeningTeachingWorkspaceEnabled();
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
   const [reloadToken, setReloadToken] = useState(0);
@@ -39,6 +57,8 @@ export function TodayDashboard({ state, api: apiProp, focusTaskId }: { state: To
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
   const [ctaBusy, setCtaBusy] = useState(false);
   const [ctaError, setCtaError] = useState<string | null>(null);
+  const [clientInit, setClientInit] = useState<ActivitySpecClientInit | null>(null);
+  const [clientInitLoad, setClientInitLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const timeZone = useMemo(() => resolveTodayTimeZone(), []);
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
@@ -86,6 +106,34 @@ export function TodayDashboard({ state, api: apiProp, focusTaskId }: { state: To
       });
     return () => controller.abort();
   }, [api, reloadToken, state.kind]);
+
+  useEffect(() => {
+    if (!teachingWorkspaceEnabled || !currentActivity) {
+      setClientInit(null);
+      setClientInitLoad("idle");
+      return;
+    }
+    if (currentActivity.generateStatus !== "ready") {
+      setClientInit(null);
+      setClientInitLoad("idle");
+      return;
+    }
+    const controller = new AbortController();
+    setClientInitLoad("loading");
+    api
+      .getTeachingClientInit(currentActivity.id)
+      .then((init) => {
+        if (controller.signal.aborted) return;
+        setClientInit(init);
+        setClientInitLoad("ready");
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setClientInit(null);
+        setClientInitLoad("error");
+      });
+    return () => controller.abort();
+  }, [api, currentActivity, teachingWorkspaceEnabled, reloadToken]);
 
   const select = useCallback((next: StudyTask, source?: "focus" | "user") => {
     setTask(next);
@@ -205,11 +253,22 @@ export function TodayDashboard({ state, api: apiProp, focusTaskId }: { state: To
           </div>
           <div className="min-h-0 min-w-0 flex-1 bg-white">
             {currentActivity ? (
-              <TeachingActivityPanel
-                activity={currentActivity}
-                assistantHref={assistantHref}
-                timeZone={timeZone}
-              />
+              teachingWorkspaceEnabled &&
+              isTeachingWorkspaceContentUsable(currentActivity, clientInit) &&
+              clientInit ? (
+                <TeachingWorkspace
+                  activity={currentActivity}
+                  clientInit={clientInit}
+                  assistantHref={assistantHref}
+                  timeZone={timeZone}
+                />
+              ) : (
+                <TeachingActivityPanel
+                  activity={currentActivity}
+                  assistantHref={assistantHref}
+                  timeZone={timeZone}
+                />
+              )
             ) : (
               <TeachingActivityEmpty
                 onStart={() => void runPrimaryCta()}
@@ -218,6 +277,13 @@ export function TodayDashboard({ state, api: apiProp, focusTaskId }: { state: To
                 assistantHref={assistantHref}
               />
             )}
+            {teachingWorkspaceEnabled &&
+            currentActivity?.generateStatus === "ready" &&
+            clientInitLoad === "error" ? (
+              <p className="px-5 pb-4 text-[11px] text-amber-800" role="status">
+                主讲内容暂时无法读取；已回退到活动摘要，不会伪造讲义。
+              </p>
+            ) : null}
           </div>
         </div>
       </div>

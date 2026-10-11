@@ -3,8 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { TodayResumeBody } from "./today-resume-view";
 import { TeachingActivityEmpty, TeachingActivityPanel } from "../teaching/activity-panel";
-import type { TeachingActivity } from "@aistudy/contracts";
+import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
 import { pickCurrentTeachingActivity, todayActivityCtaLabel } from "../teaching/today-activity";
+import {
+  isTeachingWorkspaceContentUsable,
+  TeachingWorkspace,
+} from "../teaching/teaching-workspace";
+import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
 
 const activity: TeachingActivity = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -89,5 +94,66 @@ describe("Today teaching-activity CTA semantics (CT-03)", () => {
     expect(html).toContain('href="/opening/today"');
     expect(html).toContain("打开自由对话（次要）");
     expect(html).toContain("/opening/assistant?conversation=11111111-1111-4111-8111-111111111111");
+  });
+});
+
+describe("V2-10 teaching workspace gate (Today wire)", () => {
+  const readyInit: ActivitySpecClientInit = {
+    id: "88888888-8888-4888-8888-888888888888",
+    activityId: activity.id,
+    teachingUnitId: "77777777-7777-4777-8777-777777777777",
+    documentId: "66666666-6666-4666-8666-666666666666",
+    revisionNumber: 1,
+    blockOrder: [
+      {
+        blockId: "44444444-4444-4444-8444-444444444444",
+        position: 0,
+        blockType: "text",
+        role: "teach",
+      },
+    ],
+    sourceRefs: [],
+    goals: [],
+    verificationStatus: "unchecked",
+    generationConfig: {},
+    version: 1,
+    createdAt: activity.createdAt,
+    updatedAt: activity.updatedAt,
+    blocks: [
+      {
+        blockId: "44444444-4444-4444-8444-444444444444",
+        position: 0,
+        blockType: "text",
+        role: "teach",
+        content: { text: "主讲正文" },
+      },
+    ],
+    contentVersion: 1,
+  };
+
+  it("flag defaults off (C6)", () => {
+    expect(isOpeningTeachingWorkspaceEnabled({})).toBe(false);
+  });
+
+  it("usable only when generateStatus ready + blocks present", () => {
+    expect(
+      isTeachingWorkspaceContentUsable(
+        { ...activity, generateStatus: "ready" },
+        readyInit,
+      ),
+    ).toBe(true);
+    expect(isTeachingWorkspaceContentUsable(activity, readyInit)).toBe(false);
+  });
+
+  it("workspace does not add a competing primary CTA (C5)", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: { ...activity, generateStatus: "ready" },
+        clientInit: readyInit,
+      }),
+    );
+    expect(html).toContain("data-teaching-workspace=\"true\"");
+    expect(html).not.toContain("data-today-primary-cta");
+    expect(html).toContain("打开自由对话（次要）");
   });
 });
