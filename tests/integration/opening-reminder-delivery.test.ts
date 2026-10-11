@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import IORedis from "ioredis";
 import { Queue, Worker } from "bullmq";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_OPENING_PLANNING_SETTINGS } from "@aistudy/contracts";
 import {
-  DEFAULT_OPENING_PLANNING_SETTINGS,
   createOpeningJobRepository,
   createOpeningPlansRepository,
   createOpeningPlanningSettingsRepository,
@@ -45,7 +45,12 @@ describe("reminder database and Redis delivery", () => {
     await fixture.sql`DELETE FROM opening_tasks WHERE workspace_id=${fixture.scope.workspaceId}`;
     await queue.obliterate({ force: true });
     await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, {
-      ...DEFAULT_OPENING_PLANNING_SETTINGS,
+      weekOneMonday: DEFAULT_OPENING_PLANNING_SETTINGS.weekOneMonday,
+      periodTimes: DEFAULT_OPENING_PLANNING_SETTINGS.periodTimes,
+      dailyWindow: DEFAULT_OPENING_PLANNING_SETTINGS.dailyWindow,
+      lunch: DEFAULT_OPENING_PLANNING_SETTINGS.lunch,
+      dinner: DEFAULT_OPENING_PLANNING_SETTINGS.dinner,
+      sleep: DEFAULT_OPENING_PLANNING_SETTINGS.sleep,
       timeZone: "UTC",
     });
     now = new Date();

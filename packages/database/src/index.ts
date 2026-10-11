@@ -90,6 +90,7 @@ export * from "./repositories/opening-observation-revisions";
 
 export { createOpeningAiSettingsRepository } from "./repositories/opening-ai-settings";
 export { createOpeningPlanningSettingsRepository } from "./repositories/opening-planning-settings";
+export { DEFAULT_OPENING_PLANNING_SETTINGS } from "@aistudy/contracts";
 export { readOpeningCourseLearningHistory } from "./repositories/opening-learning-history-read";
 export * from "./repositories/opening-learning-eligibility";
 export { readOpeningCourseLearningSummary } from "./repositories/opening-learning-summary-read";
