@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOpeningBudgetRepository } from "@aistudy/database";
+﻿import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createOpeningBudgetRepository, OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let fixture: OpeningFixture;
@@ -141,7 +141,7 @@ describe("unknown reservation reconciliation (DL7)", () => {
   it("completes reserved rows older than the unknown age and leaves recent ones reserved", async () => {
     const local = createOpeningBudgetRepository(fixture.sql, {
       envCapCents: 100_000,
-      unknownAgeMs: 30 * 60 * 1000,
+      unknownAgeMs: OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS,
       timeZone: "Asia/Shanghai",
     });
     const stale = await local.reserve(fixture.scope, { purpose: "tutor", amountCents: 10_000, requestId: "stale-unknown" });
@@ -157,3 +157,4 @@ describe("unknown reservation reconciliation (DL7)", () => {
     expect(byId[fresh.id]).toBe("reserved");
   });
 });
+

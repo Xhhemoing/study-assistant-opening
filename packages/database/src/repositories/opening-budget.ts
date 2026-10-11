@@ -71,7 +71,12 @@ export type OpeningBudgetRepositoryOptions = {
   unknownAgeMs?: number;
 };
 
-const DEFAULT_UNKNOWN_AGE_MS = 30 * 60 * 1000;
+/**
+ * Conservative TTL for lazy unknown/abandoned reservation reconcile (DL7).
+ * Aged reserved rows older than this become completed at the reserved amount
+ * (pessimistic) inside the next reserve transaction. Default: 30 minutes.
+ */
+export const OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS = 30 * 60 * 1000;
 
 function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
   return {
@@ -118,7 +123,7 @@ export function createOpeningBudgetRepository(
     throw new Error("invalid daily budget cap");
   }
   const fallbackTimeZone = resolveBudgetTimeZone(options.timeZone);
-  const unknownAgeMs = options.unknownAgeMs ?? DEFAULT_UNKNOWN_AGE_MS;
+  const unknownAgeMs = options.unknownAgeMs ?? OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS;
   if (!Number.isSafeInteger(unknownAgeMs) || unknownAgeMs <= 0) {
     throw new Error("invalid unknown reservation age");
   }
