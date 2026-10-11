@@ -9,6 +9,10 @@ import {
   type ClientInitBlock,
   type FailSoftReason,
 } from "./component-catalog";
+import {
+  MatrixTransformBlock,
+  isMatrixTransformInteractiveEnabled,
+} from "./blocks/matrix-transform";
 
 function asText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -168,6 +172,22 @@ function CatalogBody({
             </li>
           ))}
         </ul>
+      );
+    }
+    case "matrix_transform": {
+      // Strip chrome keys that decideBlockRender injects; domain parse wants MathModel fields only.
+      const {
+        blockId: _blockId,
+        position: _position,
+        role: _role,
+        blockType: _blockType,
+        ...mathContent
+      } = params;
+      return (
+        <MatrixTransformBlock
+          content={mathContent}
+          interactive={isMatrixTransformInteractiveEnabled()}
+        />
       );
     }
     default:

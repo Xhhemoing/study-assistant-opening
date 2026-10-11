@@ -28,6 +28,34 @@ describe("normalizeToCatalogId", () => {
     expect(normalizeToCatalogId("answer_key", "answer_key")).toBe("unknown");
     expect(normalizeToCatalogId("text", "answer_key")).toBe("unknown");
   });
+
+  it("V2-15 maps matrix_transform and matrix-viz* aliases", () => {
+    expect(normalizeToCatalogId("matrix_transform", "teach")).toBe("matrix_transform");
+    expect(normalizeToCatalogId("matrix-viz", "teach")).toBe("matrix_transform");
+    expect(normalizeToCatalogId("matrix_viz", "teach")).toBe("matrix_transform");
+    expect(normalizeToCatalogId("matrixviz", "teach")).toBe("matrix_transform");
+  });
+
+  it("V2-15 decideBlockRender ok for matrix_transform params", () => {
+    const d = decideBlockRender({
+      blockId: BID,
+      position: 0,
+      blockType: "matrix_transform",
+      role: "teach",
+      content: {
+        matrixA: [[1, 0], [0, 1]],
+        vectorX: [2, 3],
+        expression: "y = Ax",
+      },
+    });
+    expect(d.ok).toBe(true);
+    if (d.ok) {
+      expect(d.catalogId).toBe("matrix_transform");
+      expect(d.params.matrixA).toEqual([[1, 0], [0, 1]]);
+      expect(d.params.expression).toBe("y = Ax");
+    }
+  });
+
 });
 
 describe("isIllegalLink / extractPlainParams", () => {
@@ -100,6 +128,22 @@ describe("decideBlockRender", () => {
     });
     expect(d).toEqual({ ok: false, reason: "illegal_link" });
   });
+
+  it("T13: illegal html/script in matrix content still fail-soft", () => {
+    const d = decideBlockRender({
+      blockId: BID,
+      position: 0,
+      blockType: "matrix_transform",
+      role: "teach",
+      content: {
+        matrixA: [[1]],
+        vectorX: [1],
+        html: "<script>alert(1)</script>",
+      },
+    });
+    expect(d).toEqual({ ok: false, reason: "illegal_link" });
+  });
+
 
   it("unknown schema version → unknown_schema_version", () => {
     const d = decideBlockRender(

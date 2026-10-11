@@ -131,4 +131,99 @@ describe("BlockRenderer", () => {
     expect(html).toContain("p.3");
     expect(html).not.toContain("MediaReader");
   });
+
+  it("T17: mounts matrix_transform interactive path; unknown still fail-soft", () => {
+    const matrixHtml = renderToStaticMarkup(
+      createElement(BlockRenderer, {
+        block: {
+          blockId: BID,
+          position: 0,
+          blockType: "matrix_transform",
+          role: "teach",
+          content: {
+            matrixA: [
+              [1, 1],
+              [0, 0],
+            ],
+            vectorX: [1, -1],
+            labelA: "A",
+            labelX: "x",
+            labelY: "Ax",
+            title: "核示例",
+            expression: "y = Ax",
+            prose: "核向量映到零。",
+          },
+        },
+      }),
+    );
+    expect(matrixHtml).toContain('data-catalog="matrix_transform"');
+    expect(matrixHtml).toContain("核示例");
+    expect(matrixHtml).toContain("y = Ax");
+    // Interactive default: controls present
+    expect(matrixHtml).toContain('data-matrix-controls="true"');
+    expect(matrixHtml).toContain('data-matrix-action="pause"');
+    expect(matrixHtml).toContain('data-matrix-action="reset"');
+    expect(matrixHtml).toContain('data-matrix-action="step-forward"');
+
+    const aliasHtml = renderToStaticMarkup(
+      createElement(BlockRenderer, {
+        block: {
+          blockId: BID2,
+          position: 1,
+          blockType: "matrix-viz",
+          role: "teach",
+          content: {
+            matrixA: [[2, 0], [0, 2]],
+            vectorX: [1, 1],
+            expression: "y = 2x",
+          },
+        },
+      }),
+    );
+    expect(aliasHtml).toContain('data-catalog="matrix_transform"');
+    expect(aliasHtml).toContain('data-catalog-id="matrix_transform"');
+
+    const unknownHtml = renderToStaticMarkup(
+      createElement(BlockRenderer, {
+        block: {
+          blockId: BID,
+          position: 0,
+          blockType: "OpenMAICWidget",
+          role: "teach",
+          content: { text: "nope" },
+        },
+      }),
+    );
+    expect(unknownHtml).toContain('data-block-fail-soft="unknown_component"');
+  });
+
+  it("T17b: matrix_transform with interactive env off → static tables", () => {
+    const prev = process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
+    process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = "0";
+    try {
+      const html = renderToStaticMarkup(
+        createElement(BlockRenderer, {
+          block: {
+            blockId: BID,
+            position: 0,
+            blockType: "matrix_transform",
+            role: "teach",
+            content: {
+              matrixA: [[1, 0], [0, 1]],
+              vectorX: [3, 4],
+              title: "单位阵",
+            },
+          },
+        }),
+      );
+      expect(html).toContain('data-matrix-mode="static"');
+      expect(html).toContain('data-text-alternative="true"');
+      expect(html).toContain("单位阵");
+      expect(html).not.toContain('data-matrix-controls="true"');
+    } finally {
+      if (prev === undefined) delete process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
+      else process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = prev;
+    }
+  });
+
 });
