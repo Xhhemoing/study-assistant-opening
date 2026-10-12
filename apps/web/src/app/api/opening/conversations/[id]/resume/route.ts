@@ -4,7 +4,7 @@ import {
   requireOpeningScope,
 } from "../../../../../../features/opening/runtime";
 import { TutorServiceError } from "../../../../../../features/opening/tutor/tutor-service";
-import { OpeningConversationError } from "@aistudy/database";
+import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
 
 function tutorError(error: unknown): Response {
   if (error instanceof TutorServiceError) {
@@ -13,7 +13,7 @@ function tutorError(error: unknown): Response {
       { status: error.status },
     );
   }
-  if (error instanceof OpeningConversationError) {
+  if (isOpeningDataError(error, "conversation")) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
       { status: error.code === "NOT_FOUND" ? 404 : 400 },

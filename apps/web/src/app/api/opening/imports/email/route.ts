@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { emailImportInputSchema } from "@aistudy/contracts";
-import { OpeningSourceError } from "@aistudy/database";
 import {
   ApiError,
   jsonError,
@@ -10,6 +9,7 @@ import {
 import { requireOpeningScope } from "../../../../../features/opening/runtime";
 import { createOpeningSourceService } from "../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../features/opening/sources/upload-policy";
+import { isOpeningDataError } from "../../../../../features/opening/server/data-services";
 
 const EMAIL_MAX_BYTES = 25 * 1024 * 1024;
 
@@ -82,7 +82,7 @@ export async function POST(request: Request): Promise<Response> {
       { status: 201 },
     );
   } catch (error) {
-    if (error instanceof OpeningSourceError) {
+    if (isOpeningDataError(error, "source")) {
       const status =
         error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
       return Response.json(

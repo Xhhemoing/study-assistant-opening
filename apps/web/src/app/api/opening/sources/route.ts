@@ -1,5 +1,4 @@
 import { uploadInputSchema } from "@aistudy/contracts";
-import { OpeningSourceError } from "@aistudy/database";
 import {
   jsonError,
   mapDomainError,
@@ -9,6 +8,7 @@ import { createOpeningSourceService } from "../../../../features/opening/sources
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { UploadPolicyError } from "../../../../features/opening/sources/upload-policy";
 import { getAuthRuntime } from "../../../../server/runtime";
+import { isOpeningDataError } from "../../../../features/opening/server/data-services";
 
 /** Delegate list/beginUpload to materials source-service (avoid dual write). */
 export async function GET(request: Request): Promise<Response> {
@@ -35,7 +35,7 @@ export async function POST(request: Request): Promise<Response> {
     );
     return Response.json(ticket, { status: 201 });
   } catch (error) {
-    if (error instanceof OpeningSourceError) {
+    if (isOpeningDataError(error, "source")) {
       const status =
         error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;
       return Response.json(

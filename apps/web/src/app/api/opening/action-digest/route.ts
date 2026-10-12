@@ -1,5 +1,4 @@
 import { actionDigestSchema } from "@aistudy/contracts";
-import { createOpeningActionDigestDecisionsRepository } from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { getPlanService, requireOpeningScope } from "../../../../features/opening/runtime";
@@ -8,6 +7,7 @@ import {
   createOpeningActionService,
 } from "../../../../features/opening/planning/action-service";
 import { getActionDigestOverrides } from "./deps";
+import { getActionDigestDecisionStore } from "../../../../features/opening/server/data-services";
 
 /**
  * P04 action-digest projection.
@@ -21,7 +21,7 @@ function getActionService(sql: import("postgres").Sql) {
   const overrides = getActionDigestOverrides();
   return createOpeningActionService({
     store:
-      overrides.store ?? createOpeningActionDigestDecisionsRepository(sql),
+      overrides.store ?? getActionDigestDecisionStore(sql),
     extracted: overrides.extracted ?? createExtractJobCandidateSource(sql),
     planAdapter: {
       async proposeDeltaDraft(input) {

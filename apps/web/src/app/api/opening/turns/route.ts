@@ -5,9 +5,9 @@ import {
 } from "../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { TutorServiceError } from "../../../../features/opening/tutor/tutor-service";
-import { OpeningConversationError } from "@aistudy/database";
 import { uuidSchema } from "@aistudy/contracts";
 import { randomUUID } from "node:crypto";
+import { isOpeningDataError } from "../../../../features/opening/server/data-services";
 
 function requestCorrelationId(request: Request): string {
   const value = request.headers.get("x-request-id");
@@ -25,7 +25,7 @@ function tutorError(error: unknown): Response {
       { status: error.status },
     );
   }
-  if (error instanceof OpeningConversationError) {
+  if (isOpeningDataError(error, "conversation")) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
       {

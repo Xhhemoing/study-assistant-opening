@@ -5,7 +5,7 @@ import {
 } from "../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { TutorServiceError } from "../../../../features/opening/tutor/tutor-service";
-import { OpeningConversationError } from "@aistudy/database";
+import { isOpeningDataError } from "../../../../features/opening/server/data-services";
 
 function tutorError(error: unknown): Response {
   if (error instanceof TutorServiceError) {
@@ -14,7 +14,7 @@ function tutorError(error: unknown): Response {
       { status: error.status },
     );
   }
-  if (error instanceof OpeningConversationError) {
+  if (isOpeningDataError(error, "conversation")) {
     const status =
       error.code === "NOT_FOUND" ? 404 : error.code === "VALIDATION" ? 400 : 409;
     return Response.json(
