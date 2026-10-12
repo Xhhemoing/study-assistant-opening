@@ -7,6 +7,9 @@ import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
 
+/** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
+export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
+
 export type OpeningTutorJobRecord = {
   id: string;
   workspaceId: string;
@@ -16,7 +19,7 @@ export type OpeningTutorJobRecord = {
   assistantTurnId: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
   mode: string;
-  error: { message: string } | null;
+  error: OpeningTutorJobError | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,7 +52,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     jobId: string;
     message: string;
     status: "failed" | "outcome_unknown";
+    detail?: { code: string; nextAction?: "clarify" };
   }): Promise<void> {
+    const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
     await sql.begin(async (tx) => {
       // Use the same workspace-first lock order as completeTurn/cancel.
       await tx`
@@ -59,7 +64,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       `;
       const rows = input.status === "failed"
         ? await tx`
-            UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json({ message: input.message } as never)},
+            UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
               updated_at = now()
             WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
               AND status IN ('running', 'queued')
@@ -118,7 +123,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     ): Promise<{
       id: string;
       status: OpeningTutorJobRecord["status"];
-      error: { message: string } | null;
+      error: OpeningTutorJobError | null;
       updatedAt: string;
     } | null> {
       const rows = await sql`
@@ -140,7 +145,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       return {
         id: row.id as string,
         status: row.status as OpeningTutorJobRecord["status"],
-        error: (row.error as { message: string } | null) ?? null,
+        error: (row.error as OpeningTutorJobError | null) ?? null,
         updatedAt: new Date(row.updated_at as string | Date).toISOString(),
       };
     },
@@ -298,8 +303,13 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       };
     },
 
-    async fail(scope: OpeningScope, jobId: string, message: string): Promise<void> {
-      await markTerminal({ scope, jobId, message, status: "failed" });
+    async fail(
+      scope: OpeningScope,
+      jobId: string,
+      message: string,
+      detail?: { code: string; nextAction?: "clarify" },
+    ): Promise<void> {
+      await markTerminal({ scope, jobId, message, status: "failed", detail });
     },
 
     async markUnknown(scope: OpeningScope, jobId: string, message: string): Promise<void> {

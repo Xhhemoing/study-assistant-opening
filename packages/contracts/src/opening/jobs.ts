@@ -24,11 +24,24 @@ export const jobRecordSchema = z
   })
   .strict();
 
+/**
+ * Terminal tutor job error. `nextAction: "clarify"` marks a fail-closed
+ * refusal that must route the learner to the Clarify path (pick the
+ * material/page) instead of a generic failure (LAB-A01 require_page).
+ */
+export const tutorJobErrorSchema = z
+  .object({
+    message: z.string().min(1),
+    code: z.string().min(1).max(64).optional(),
+    nextAction: z.enum(["clarify"]).optional(),
+  })
+  .strict();
+
 export const jobStatusResponseSchema = z
   .object({
     id: uuidSchema,
     status: jobStatusSchema,
-    error: z.object({ message: z.string().min(1) }).strict().nullable(),
+    error: tutorJobErrorSchema.nullable(),
     updatedAt: isoDateTimeSchema,
   })
   .strict();
@@ -37,3 +50,4 @@ export type JobKind = z.infer<typeof jobKindSchema>;
 export type JobStatus = z.infer<typeof jobStatusSchema>;
 export type JobRecord = z.infer<typeof jobRecordSchema>;
 export type JobStatusResponse = z.infer<typeof jobStatusResponseSchema>;
+export type TutorJobError = z.infer<typeof tutorJobErrorSchema>;

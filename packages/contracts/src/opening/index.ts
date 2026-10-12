@@ -45,10 +45,12 @@ export {
   jobStatusSchema,
   jobRecordSchema,
   jobStatusResponseSchema,
+  tutorJobErrorSchema,
   type JobKind,
   type JobStatus,
   type JobRecord,
   type JobStatusResponse,
+  type TutorJobError,
 } from "./jobs";
 
 export {

@@ -134,6 +134,16 @@ describe("F02 opening contracts", () => {
     }).success).toBe(false);
   });
 
+  it("job status error carries an optional clarify route and nothing else (LAB-A01)", () => {
+    const base = { id: U, status: "failed", updatedAt: ISO } as const;
+    expect(jobStatusResponseSchema.parse({ ...base, error: { message: "boom" } }).error).toEqual({ message: "boom" });
+    expect(jobStatusResponseSchema.parse({
+      ...base, error: { message: "pick a page", code: "page_not_in_sources", nextAction: "clarify" },
+    }).error).toEqual({ message: "pick a page", code: "page_not_in_sources", nextAction: "clarify" });
+    expect(jobStatusResponseSchema.safeParse({ ...base, error: { message: "x", nextAction: "retry" } }).success).toBe(false);
+    expect(jobStatusResponseSchema.safeParse({ ...base, error: { message: "x", extra: 1 } }).success).toBe(false);
+  });
+
   it("providerInput needs real imageParts for vision", () => {
     const base = {
       instruction: "i", text: "t", chunks: [], mode: "explain" as const,

@@ -1,10 +1,11 @@
+import type { TutorJobError } from "@aistudy/contracts";
 import { createOpeningTutorJobsRepository } from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../features/opening/runtime";
 
 type Params = { params: Promise<{ id: string }> };
 
-function response(job: { id: string; status: string; error: { message: string } | null; updatedAt: string }) {
+function response(job: { id: string; status: string; error: TutorJobError | null; updatedAt: string }) {
   return {
     id: job.id,
     status: job.status,
