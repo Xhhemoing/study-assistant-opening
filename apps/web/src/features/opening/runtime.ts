@@ -1,3 +1,4 @@
+import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
 import { createOpeningTeachingContentService } from "./teaching/teaching-content-service";

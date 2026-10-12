@@ -1,13 +1,12 @@
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
-import { createOpeningReminderRepository } from "@aistudy/database";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
-import { createOpeningReminderService } from "../../../../features/opening/planning/reminder-service";
+import { getReminderService } from "../../../../features/opening/server/data-services";
 
 export async function GET(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const body = await createOpeningReminderService(createOpeningReminderRepository(sql)).list(scope);
+    const body = await getReminderService(sql).list(scope);
     return Response.json(body);
   } catch (error) {
     return jsonError(mapDomainError(error));
@@ -17,7 +16,7 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const reminders = await createOpeningReminderService(createOpeningReminderRepository(sql))
+    const reminders = await getReminderService(sql)
       .enqueue(scope, await readOpeningJsonBody(request));
     const created = reminders.some((item) => item.created === true);
     return Response.json({

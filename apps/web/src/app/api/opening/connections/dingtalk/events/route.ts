@@ -1,6 +1,4 @@
 import { getAuthRuntime } from "../../../../../../server/runtime";
-import { OpeningS3 } from "@aistudy/database";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   createDingTalkCallbackHttpService,
   DingTalkClientError,
@@ -8,6 +6,7 @@ import {
   OpeningSourceError,
   MAX_DINGTALK_EVENT_BYTES,
 } from "../../../../../../features/opening/connections/dingtalk-callback-service";
+import { getOpeningObjectWriter } from "../../../../../../features/opening/server/data-services";
 
 export async function POST(request: Request): Promise<Response> {
   let response: Response;
@@ -24,14 +23,10 @@ export async function POST(request: Request): Promise<Response> {
     if (!encryptedBody || encryptedBody.length > MAX_DINGTALK_EVENT_BYTES) {
       throw new DingTalkClientError("FORMAT", "callback body is invalid");
     }
-    const storage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" });
+    const writeObject = getOpeningObjectWriter();
     const service = createDingTalkCallbackHttpService(runtime.sql, {
-      uploadStaging: async input => {
-        await storage.client.send(new PutObjectCommand({ Bucket: storage.bucket, Key: input.key, Body: input.bytes, ContentType: input.mime }));
-      },
-      uploadFinal: async input => {
-        await storage.client.send(new PutObjectCommand({ Bucket: storage.bucket, Key: input.key, Body: input.bytes, ContentType: input.mime }));
-      },
+      uploadStaging: writeObject,
+      uploadFinal: writeObject,
     });
     const result = await service.callback({ signature, timestamp, nonce, encryptedBody });
     void result;

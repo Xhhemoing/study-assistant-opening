@@ -18,6 +18,9 @@ const alias = {
   "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),
+  // Tests execute server modules in Node; resolve the marker like the
+  // react-server condition does (no-op) instead of the client-throwing entry.
+  "server-only": path.resolve(root, "node_modules/server-only/empty.js"),
 };
 
 const sharedExclude = [

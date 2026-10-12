@@ -3,7 +3,7 @@ import { requireOpeningScope } from "../../../../../../features/opening/runtime"
 import { readOpeningRawBody } from "../../../../../../features/opening/request-body";
 import { createOpeningSourceService } from "../../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../../features/opening/sources/upload-policy";
-import { OpeningStorageError } from "@aistudy/database";
+import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +14,7 @@ function storageError(error: unknown): Response | undefined {
       { status: 400 },
     );
   }
-  if (error instanceof OpeningStorageError) {
+  if (isOpeningDataError(error, "storage")) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
       { status: error.code === "NOT_FOUND" ? 404 : 503 },

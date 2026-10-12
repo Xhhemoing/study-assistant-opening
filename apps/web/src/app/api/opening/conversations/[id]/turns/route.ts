@@ -3,7 +3,7 @@ import {
   getTutorService,
   requireOpeningScope,
 } from "../../../../../../features/opening/runtime";
-import { OpeningConversationError } from "@aistudy/database";
+import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
 
 export async function GET(
   _request: Request,
@@ -15,7 +15,7 @@ export async function GET(
     const turns = await getTutorService(sql).listTurns(scope, id);
     return Response.json(turns);
   } catch (error) {
-    if (error instanceof OpeningConversationError) {
+    if (isOpeningDataError(error, "conversation")) {
       return Response.json(
         { error: { code: error.code, message: error.message } },
         { status: error.code === "NOT_FOUND" ? 404 : 400 },
