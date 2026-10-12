@@ -9,10 +9,14 @@ import {
   type ClientInitBlock,
   type FailSoftReason,
 } from "./component-catalog";
-import {
-  MatrixTransformBlock,
-  isMatrixTransformInteractiveEnabled,
-} from "./blocks/matrix-transform";
+import { MatrixTransformBlock } from "./blocks/matrix-transform";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+
+/** PR-H: interactivity is a server capability (UI-only switch), not a client env read. */
+function CapabilityMatrixTransformBlock({ content }: { content: Record<string, unknown> }) {
+  const { matrixTransformInteractive } = useOpeningCapabilities();
+  return <MatrixTransformBlock content={content} interactive={matrixTransformInteractive} />;
+}
 
 function asText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -184,10 +188,7 @@ function CatalogBody({
         ...mathContent
       } = params;
       return (
-        <MatrixTransformBlock
-          content={mathContent}
-          interactive={isMatrixTransformInteractiveEnabled()}
-        />
+        <CapabilityMatrixTransformBlock content={mathContent} />
       );
     }
     default:
