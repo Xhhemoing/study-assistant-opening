@@ -18,10 +18,11 @@ it("exports durable tables and version metadata with owner isolation and no obje
   await seedBackupPlanning(fixture.sql, wrongOwner);
   const snapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
   expect(Object.keys(snapshot.tables).sort()).toEqual([...OPENING_BACKUP_TABLES].sort());
-  // The seed graph creates one teaching activity (sessions require one since 0053) but no units/specs.
+  // The seed graph creates one teaching activity (sessions require one since 0053) but no units/specs
+  // and no K02 skill evidence (that needs a knowledge node).
   const empty = ["workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions",
     "opening_learning_history_revisions", "opening_retest_activities", "opening_teaching_units", "opening_teaching_activity_specs",
-    "opening_learning_activity_history_revisions"];
+    "opening_learning_activity_history_revisions", "opening_skill_evidence"];
   for (const [name, rows] of Object.entries(snapshot.tables)) expect(rows, name).toHaveLength(empty.includes(name) ? 0 : 1);
   expect(snapshot.privacyEpoch).toBe(1);
   expect(snapshot.deletionJournal).toHaveLength(1);
