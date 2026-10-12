@@ -44,7 +44,7 @@ export type TutorTurnDeps = {
     listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
     listChunksAtVersion(scope: { workspaceId: string; ownerUserId: string }, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
   };
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown"> & Partial<Pick<OpeningBudgetRepository, "claimExecution">>;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
   resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
   pageImages?: (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
@@ -102,9 +102,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
       release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
-      ...(deps.budget.claimExecution
-        ? { claimExecution: (reservationId: string) => deps.budget.claimExecution!(scope, reservationId) }
-        : {}),
+      claimExecution: (reservationId) => deps.budget.claimExecution(scope, reservationId),
       settle: (...args) => deps.budget.settle(scope, ...args),
       markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
@@ -186,6 +184,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         input,
         requestId: tutorOperationId,
         operationId: tutorOperationId,
+        // Persisted result reference: the assistant turn this call fills.
+        resultRef: `opening_turn:${claimed.assistantTurnId}`,
         reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
         actualCents: (settled) => tutorActualCents(settled, rates),
         beforeSend: deps.privacy && jobEpoch !== null

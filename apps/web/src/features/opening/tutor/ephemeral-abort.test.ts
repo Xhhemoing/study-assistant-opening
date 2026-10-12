@@ -28,7 +28,7 @@ describe("ephemeral abort", () => {
       }),
       release: vi.fn(async () => undefined),
       settle: vi.fn(async () => undefined),
-      markUnknown: vi.fn(async () => undefined),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
     };
     const service = createEphemeralTutorService({
       sources: { listOwnedIds: async () => [] },
@@ -67,7 +67,7 @@ describe("ephemeral abort", () => {
       reserve: vi.fn(async () => ({ id: "res-1" })),
       release: vi.fn(async () => undefined),
       settle: vi.fn(async () => undefined),
-      markUnknown: vi.fn(async () => undefined),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
     };
     const complete = vi.fn(async () => output);
     const service = createEphemeralTutorService({

@@ -64,7 +64,7 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
         return { id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId, state: "released", modelSnapshot: null };
       },
       settle: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 50, requestId: "x", state: "completed", modelSnapshot: null }),
-      markUnknown: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId: "x", state: "reserved", modelSnapshot: null }),
+      claimExecution: async () => true, markUnknown: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId: "x", state: "reserved", modelSnapshot: null }),
     },
     provider: { complete: async () => stubOutput },
     reservedCents: 100,
@@ -128,7 +128,7 @@ describe("createCompileTeachingUnitHandler", () => {
         },
         release: async () => ({}),
         settle: async () => ({}),
-        markUnknown: async () => ({}),
+        claimExecution: async () => true, markUnknown: async () => ({}),
       },
     });
     const process = createCompileTeachingUnitHandler(deps as never);

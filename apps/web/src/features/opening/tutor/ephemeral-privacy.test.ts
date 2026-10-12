@@ -18,7 +18,7 @@ function fixture() {
   const complete = vi.fn(async (_input: ProviderInput): Promise<ProviderOutput> => output);
   const budget = {
     reserve: vi.fn(async () => ({ id: "reservation" })), release: vi.fn(async () => undefined),
-    settle: vi.fn(async () => undefined), markUnknown: vi.fn(async () => undefined),
+    settle: vi.fn(async () => undefined), claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
   };
   const privacy = {
     snapshot: vi.fn(async () => ({ epoch: state.epoch, excludedSourceIds: [...state.excluded] })),

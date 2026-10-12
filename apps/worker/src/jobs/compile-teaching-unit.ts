@@ -49,7 +49,7 @@ export type TeachingGenerateStatus =
   | "stale";
 
 export type CompileTeachingUnitDeps = {
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown"> & Partial<Pick<OpeningBudgetRepository, "claimExecution">>;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   /** Stub provider OK until V2-08; null disables model path. */
   provider: BudgetedProvider | null;
   reservedCents?: number;
@@ -195,9 +195,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
       release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
-      ...(deps.budget.claimExecution
-        ? { claimExecution: (reservationId: string) => deps.budget.claimExecution!(scope, reservationId) }
-        : {}),
+      claimExecution: (reservationId) => deps.budget.claimExecution(scope, reservationId),
       settle: (...args) => deps.budget.settle(scope, ...args),
       markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
@@ -244,6 +242,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
             requestId: operationId,
             operationId,
             purpose: "compile-teaching-unit",
+            // Persisted result reference: the teaching activity this call compiles.
+            resultRef: `teaching_activity:${body.activityId}`,
             reservedCents: deps.reservedCents ?? 100,
             actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
             beforeSend: deps.privacy

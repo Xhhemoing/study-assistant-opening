@@ -35,7 +35,7 @@ describe("tutor turn handler", () => {
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
       fail: vi.fn(async () => undefined),
-      markUnknown: vi.fn(async () => undefined),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
     };
     const chunks = {
       listForSources: vi.fn(async () => overrides.chunks ?? [chunkA, chunkB]),
@@ -47,7 +47,7 @@ describe("tutor turn handler", () => {
       reserve: vi.fn(async () => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      markUnknown: vi.fn(async () => ({})),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
@@ -116,7 +116,7 @@ describe("tutor turn handler", () => {
     expect(selectedProvider.complete).toHaveBeenCalledOnce();
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requestId: `tutor:${claimedJob.id}`, modelSnapshot }));
-    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", 2);
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", 2, { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
   });
 
   it("BC1: same tutor job retries reuse one ledger reservation (operationId)", async () => {
@@ -132,7 +132,7 @@ describe("tutor turn handler", () => {
       }),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      markUnknown: vi.fn(async () => ({})),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const { deps, tutorJobs } = setup({
       provider: async () => {
@@ -154,7 +154,7 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler(deps)(claimedJob.id);
     expect(reservations).toHaveLength(1);
     expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
-    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
     expect(okProvider.complete).toHaveBeenCalledOnce();
   });
 
@@ -188,7 +188,7 @@ describe("tutor turn handler", () => {
     expect(input.chunks[0].id).toBe(chunkA.id);
     expect(input.history).toEqual([{ role: "user", text: "yesterday" }, { role: "assistant", text: "step two" }]);
     expect(input.instruction).toContain("完整答案");
-    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });

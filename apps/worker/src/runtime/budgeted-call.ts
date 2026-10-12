@@ -22,10 +22,9 @@ export type BudgetedRepository = {
   release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
   /**
    * Atomically claim the single right to call the provider for this
-   * reservation. Production wirings MUST provide it; when absent (legacy unit
-   * fakes) the call proceeds without the exclusivity guarantee.
+   * reservation. Exactly one concurrent caller gets true.
    */
-  claimExecution?(reservationId: string): Promise<boolean>;
+  claimExecution(reservationId: string): Promise<boolean>;
   settle(reservationId: string, actualCents: number, options?: { resultRef?: string }): Promise<unknown>;
   markUnknown(reservationId: string): Promise<unknown>;
   /** Optional audit hook when settle caps actual spend to the reservation. */
@@ -206,7 +205,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   if (disposition) throw new BudgetReplayError(disposition);
   // Execution eligibility is claimed independently and atomically: a replayed
   // reserved row (another worker in flight, or a crashed one) never re-sends.
-  if (options.budget.claimExecution && !(await options.budget.claimExecution(reservation.id))) {
+  if (!(await options.budget.claimExecution(reservation.id))) {
     throw new BudgetReplayError({ kind: "in_flight", reservationId: reservation.id });
   }
   try {
