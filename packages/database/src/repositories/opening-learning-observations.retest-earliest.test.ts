@@ -35,6 +35,9 @@ function sqlForRetest(recommendedAt: string, opts: { completeInsert?: boolean } 
         source_ids: [],
       }]);
     }
+    // lockLearningSession checks the course separately since 86cdf88 (ADR D5 #3);
+    // this mock predated that split and returned [] -> NOT_FOUND before the earliest guard ran.
+    if (query.includes("FROM courses")) return Promise.resolve([{ id: courseId }]);
     if (query.includes("opening_learning_history_revisions")) {
       if (query.includes("UPDATE") || query.includes("RETURNING revision")) {
         return Promise.resolve([{ revision: 1 }]);
