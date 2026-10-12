@@ -213,7 +213,7 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         if (!rows.length) return null;
         const job = mapJob(rows[0] as Record<string, unknown>);
         if (job.kind === "parse" || job.kind === "parse-media") {
-          await releaseOpeningParseClaim(tx, scope.workspaceId, job.payload);
+          await releaseOpeningParseClaim(tx, job.payload);
         }
         if (job.kind === "compile-teaching-unit") {
           const payload =

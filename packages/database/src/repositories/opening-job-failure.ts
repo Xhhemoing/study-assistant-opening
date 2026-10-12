@@ -3,18 +3,19 @@ import type { Sql } from "postgres";
 /**
  * claim() marks a parse source `running` (G7). When the job ends without
  * projecting a result (cancelled, or a failure the fences refuse), drop that
- * marker unless another parse job for the source is still running, so the
- * inbox never spins on a job that no longer exists.
+ * marker unless a parse job for the source is still running, so the inbox
+ * never spins on a job that no longer exists. Only `running` → `not_started`
+ * (no result, no error) is written, so it is keyed on the source alone: a job
+ * whose workspace changed after the claim still clears the original marker.
  */
-export async function releaseOpeningParseClaim(tx: Sql, workspaceId: string, payload: unknown): Promise<void> {
+export async function releaseOpeningParseClaim(tx: Sql, payload: unknown): Promise<void> {
   const sourceId = payload && typeof payload === "object" && "sourceId" in payload ? payload.sourceId : null;
   if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return;
   await tx`
     UPDATE opening_sources s SET parse_state = 'not_started', updated_at = now()
-    WHERE s.id = ${sourceId} AND s.workspace_id = ${workspaceId} AND s.parse_state = 'running'
+    WHERE s.id = ${sourceId} AND s.parse_state = 'running'
       AND NOT EXISTS (SELECT 1 FROM opening_jobs j
-        WHERE j.workspace_id = s.workspace_id AND j.state = 'running'
-          AND j.kind IN ('parse', 'parse-media') AND j.payload->>'sourceId' = ${sourceId})`;
+        WHERE j.state = 'running' AND j.kind IN ('parse', 'parse-media') AND j.payload->>'sourceId' = ${sourceId})`;
 }
 
 /** Commit the job failure and its source status together, under the privacy lock. */
@@ -34,10 +35,18 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
       WHERE id = ${id} AND workspace_id = ${workspace.id} AND state = 'running'
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
-    if (!job) return false;
+    if (!job) {
+      // Lost the CAS (e.g. cancelled mid-run): never project, but drop our claim marker.
+      const [ended] = await tx<{ kind: string; payload: unknown }[]>`
+        SELECT kind, payload FROM opening_jobs WHERE id = ${id} AND workspace_id = ${workspace.id}`;
+      if (ended && (ended.kind === "parse" || ended.kind === "parse-media")) {
+        await releaseOpeningParseClaim(tx, ended.payload);
+      }
+      return false;
+    }
     if (job.kind !== "parse" && job.kind !== "parse-media") return true;
     if (job.owner_user_id !== workspace.owner_user_id) {
-      await releaseOpeningParseClaim(tx, workspace.id, job.payload);
+      await releaseOpeningParseClaim(tx, job.payload);
       return true;
     }
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
@@ -84,7 +93,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     }
     // Fenced-out failures (new version, exclusion) leave the claim marker behind.
-    await releaseOpeningParseClaim(tx, workspace.id, job.payload);
+    await releaseOpeningParseClaim(tx, job.payload);
     return true;
   });
 }

@@ -103,6 +103,27 @@ describe("opening parse job failure projection", () => {
     expect(release.values).toContain(SOURCE);
   });
 
+  it("releases the claim without projecting when cancellation won the job CAS", async () => {
+    const recorded: Recorded[] = [];
+    const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      recorded.push({ query, values });
+      if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: 7 }]);
+      if (query.startsWith("UPDATE opening_jobs")) return Promise.resolve([]);
+      if (query.startsWith("SELECT kind, payload")) return Promise.resolve([{ kind: "parse", payload: { sourceId: SOURCE } }]);
+      if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as Sql;
+    sql.json = ((value: unknown) => value) as never;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+
+    await expect(failOpeningJob(sql, "job-1", { error: "late" })).resolves.toBe(false);
+    const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources"));
+    expect(sourceUpdates).toHaveLength(1);
+    expect(sourceUpdates[0]!.query).toContain("parse_state = 'not_started'");
+    expect(sourceUpdates[0]!.query).not.toContain("'failed'");
+  });
+
   it("does not touch sources for non-parse jobs", async () => {
     const { sql, recorded } = fakeSql({ kind: "compile-teaching-unit", payload: { sourceId: SOURCE }, privacy_epoch: 7 });
 

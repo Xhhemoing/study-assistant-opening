@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, it } from "vitest";
 import { validateOpeningRestore } from "@aistudy/domain";
 import { assembleOpeningBackupDraft } from "../../packages/database/src/repositories/opening-backup-compose";
+import { OPENING_BACKUP_TABLES } from "../../packages/database/src/repositories/opening-backup-records";
 import { readOpeningBackupSources } from "../../packages/database/src/repositories/opening-backup-sources";
 import { readOpeningBackupArchive, writeOpeningBackupArchive } from "../../packages/database/src/storage/opening-backup-archive";
 import { decryptOpeningArchive, encryptOpeningArchive } from "../../packages/database/src/storage/opening-backup-cipher";
@@ -54,7 +55,7 @@ it("round-trips the durable database tables and MinIO bytes through an encrypted
   const draft = await assembleOpeningBackupDraft(fixture.sql, fixture.scope, root, reader);
   expect(draft).toMatchObject({ ok: true });
   if (!draft.ok) throw new Error(JSON.stringify(draft));
-  expect(Object.keys(draft.backup.tables)).toHaveLength(26);
+  expect(Object.keys(draft.backup.tables).sort()).toEqual([...OPENING_BACKUP_TABLES].sort());
   expect(draft.backup.tables.opening_memories).toHaveLength(1);
   expect(draft.backup.tables.opening_turns).toEqual([expect.objectContaining({ id: graph.turn, context_source_refs: contextRefs })]);
   expect(draft.backup.tables.opening_source_versions).toContainEqual(expect.objectContaining({
