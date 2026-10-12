@@ -11,14 +11,16 @@ export type ClassifyTutorHelpKindInput = {
 
 /**
  * Map tutor delivery to ExposureKind (Plan open Q5 defaults).
- * explain ∧ ¬problem → instruction; hint → hint; solution intent → solution.
+ * explain ∧ ¬problem ∧ ¬attempt → instruction; hint → hint; solution intent → solution.
+ * An attempt is item-scoped even when the caller has not resolved its problem id,
+ * so explaining during an attempt must count against independence.
  */
 export function classifyTutorHelpKind(input: ClassifyTutorHelpKindInput): HelpExposureKind {
   if (input.intent === "solution") return "solution";
   if (input.intent === "instruction") return "instruction";
   if (input.intent === "item_help") return "hint";
   if (input.mode === "hint") return "hint";
-  if (input.mode === "explain" && !input.problemId) return "instruction";
+  if (input.mode === "explain" && !input.problemId && !input.attemptId) return "instruction";
   if (input.mode === "explain") return "hint";
   return "instruction";
 }

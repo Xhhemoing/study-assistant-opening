@@ -553,6 +553,25 @@ describe("tutor turn handler", () => {
     }));
   });
 
+  it("counts explain during an attempt as item help, not instruction", async () => {
+    const sessionId = "00000000-0000-4000-8000-0000000000aa";
+    const attemptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const { deps, tutorJobs } = setup();
+    deps.tutorJobs.getUserTurn = vi.fn(async () => ({
+      ...turn,
+      mode: "explain",
+      learningSessionId: sessionId,
+      attemptId,
+      sourceVersions: { [chunkA.sourceId]: 0 },
+    }));
+    const claimed = { ...claimedJob, mode: "explain" };
+    deps.tutorJobs.claim = vi.fn(async () => claimed);
+    await createTutorTurnHandler(deps)(claimed.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      helpExposure: expect.objectContaining({ attemptId, kind: "hint", level: "revealed" }),
+    }));
+  });
+
   it("does not expose help when completeTurn rejects before persistence", async () => {
     const sessionId = "00000000-0000-4000-8000-0000000000aa";
     const { deps, tutorJobs } = setup();
