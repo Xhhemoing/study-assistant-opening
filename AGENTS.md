@@ -37,9 +37,9 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 - 与当前改动无关的历史失败简述记录，不冒充通过，也不扩成无关修复。当前功能的数据丢失、越权、依赖不可用等问题必须处理；合并/发布仍遵守现有 CI，不降低门禁。
 - 交付说明保持简短：改了什么、实际检查结果、验收方式（PR/CI/手动验证）和必要的后续操作。涉及数据库 migration 或破坏性变更必须记录回滚方案。本地测试通过加口头完成不是交付证据。普通开发不新建 evidence/baseline/contract 文件；发布证据仅在合并/发布阶段按现有位置记录。
 
-## Codex 角色协作
+## 多工具协作
 
-负责人对接用户，独立对话分别承担方案定位、功能实现、代码审查和集成交付；角色配置、派单与权限见 [Codex 开发协作](docs/operations/codex-team.md)，优先于旧计划中的协作流程。按需调用角色，负责人按依赖与明确文件所有权安排并行实现，同一文件只允许一个写入者。角色初始化不授权自动开发整个 backlog 或发布。
+开工前读 [docs/STATUS.md](docs/STATUS.md)，收工时更新自己负责的行。Claude Code 负责难的部分（架构、migration、权限/并发、跨包、集成与合并）并写任务卡；Grok Bot 照任务卡实现边界清楚的切片；pi 用不同模型做只读第二审查。分工、任务卡模板和可用模型见 [多工具开发分工](docs/operations/agent-workflow.md)，它取代 `docs/operations/codex-team.md` 中的旧角色与模型路由。同一文件只允许一个写入者，最多 3 个活跃 worktree。分工本身不构成 commit、push、合并或发布授权。
 
 ## 防御逻辑的边界
 
