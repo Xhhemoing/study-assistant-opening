@@ -15,6 +15,7 @@ const alias = {
     "packages/database/src/migrate.ts",
   ),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
+  "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),
 };
