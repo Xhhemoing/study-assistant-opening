@@ -59,6 +59,8 @@ describe("ComparisonBarsView", () => {
     expect(html).toContain('width="62.5"');
     expect(html).toContain('width="100"');
     expect(html).not.toContain("按数值排序");
+    // Long labels wrap instead of being cut off.
+    expect(html).not.toContain("truncate");
   });
 
   it("offers a local sort only in interactive mode and labels missing units", () => {

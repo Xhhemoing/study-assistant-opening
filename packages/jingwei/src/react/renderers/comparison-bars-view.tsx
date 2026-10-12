@@ -36,9 +36,8 @@ export function ComparisonBarsView({ params, mode }: RendererProps<ComparisonBar
       <ul className="space-y-1.5">
         {bars.map((bar) => (
           <li key={bar.label} className="grid grid-cols-[minmax(4rem,8rem)_1fr_auto] items-center gap-2 text-xs">
-            <span className="truncate text-zinc-700" title={bar.label}>
-              {bar.label}
-            </span>
+            {/* Wrap, never truncate: a hidden label would leave a bar nobody can name. */}
+            <span className="break-words leading-4 text-zinc-700">{bar.label}</span>
             <svg viewBox="0 0 100 8" preserveAspectRatio="none" className="h-3 w-full" aria-hidden="true">
               <rect x="0" y="0" width="100" height="8" rx="2" className="fill-zinc-100" />
               <rect x="0" y="0" width={(bar.value / max) * 100} height="8" rx="2" className="fill-emerald-600" />
