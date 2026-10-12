@@ -130,6 +130,21 @@ describe("model attribution within the shared workspace ledger", () => {
     const settled = await budget.settle(fixture.scope, reservation.id, 7);
     expect(settled.modelSnapshot).toEqual(firstModel);
   });
+  it("replays when the model snapshot keys arrive in a different order", async () => {
+    const reordered = {
+      outputCentsPerMillion: firstModel.outputCentsPerMillion,
+      modelName: firstModel.modelName,
+      inputCentsPerMillion: firstModel.inputCentsPerMillion,
+      providerId: firstModel.providerId,
+      id: firstModel.id,
+    };
+    expect(Object.keys(reordered)).not.toEqual(Object.keys(firstModel));
+    const reservation = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "key-order", amountCents: 10, modelSnapshot: firstModel });
+    const replay = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "key-order", amountCents: 10, modelSnapshot: reordered });
+    expect(replay.id).toBe(reservation.id);
+    const rows = await fixture.sql`SELECT count(*)::int AS n FROM opening_budget_reservations WHERE request_id='key-order'`;
+    expect(rows[0].n).toBe(1);
+  });
   it("does not reset workspace usage when the chosen model or supplier changes", async () => {
     const first = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "first-provider", amountCents: 60_000, modelSnapshot: firstModel });
     await budget.settle(fixture.scope, first.id, 60_000);
