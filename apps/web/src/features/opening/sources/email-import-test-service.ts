@@ -35,6 +35,12 @@ export function createOpeningEmailImportTestSourceService(sql: Sql) {
         expiresAt: new Date(Date.now() + 900_000).toISOString(),
       };
     },
+    async putStaging(p: Principal, id: string, input: { contentType: string; bytes: Uint8Array }): Promise<{ ok: true }> {
+      await assertAuthorized(p, "source.create", { type: "workspace", workspaceId: boundWorkspaceId(p) });
+      if (id !== source.id) throw new Error("unexpected source id");
+      if (input.contentType !== "message/rfc822" || input.bytes.byteLength === 0) throw new Error("unexpected staging body");
+      return { ok: true };
+    },
     async completeUpload(p: Principal, id: string): Promise<SourceRecord> {
       await assertAuthorized(p, "source.complete", { type: "workspace", workspaceId: boundWorkspaceId(p) });
       if (id !== source.id) throw new Error("unexpected source id");
