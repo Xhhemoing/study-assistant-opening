@@ -326,7 +326,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       );
       await repo.upsertHardBlocks(scope, body.date, freeBlocks);
       try {
-        return await repo.proposePlan(scope, {
+        const draft = await repo.proposePlan(scope, {
           date: body.date,
           tasks,
           free: freeBlocks,
@@ -334,6 +334,8 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           unscheduledTaskIds: planned.unscheduledTaskIds,
           clientKey: body.clientKey ?? null,
         });
+        // PR-B additive: explicit reasons for unscheduled tasks (not persisted).
+        return { ...draft, unscheduled: planned.unscheduled };
       } catch (error) {
         throw mapRepoError(error);
       }
