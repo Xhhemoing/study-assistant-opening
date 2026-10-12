@@ -171,4 +171,50 @@ describe("QuickAddTask", () => {
     expect(html).toContain("快速添加任务");
     expect(html).not.toContain('aria-label="快速添加任务"');
   });
+
 });
+
+describe("createQuickAddAttempt retry (PR-E)", () => {
+  const draft = { title: "练习", minutes: 25 as const, dueDate: "", dueTime: "" };
+  const ok = {
+    id: "11111111-1111-4111-8111-111111111111",
+    title: "练习",
+    minutes: 25,
+    dueAt: null,
+    priority: 1,
+    status: "pending" as const,
+    version: 1,
+  };
+
+  it("retry() after an unknown outcome resends the identical request with the original key", async () => {
+    const create = vi.fn().mockRejectedValueOnce(new TypeError("network lost")).mockResolvedValueOnce(ok);
+    const attempt = createQuickAddAttempt(create, () => "quick-add-retry-key");
+    expect(await attempt.submit(draft)).toEqual({ kind: "unknown" });
+    expect(await attempt.retry()).toEqual({ kind: "created", task: expect.objectContaining({ id: ok.id }) });
+    expect(create.mock.calls[1]![0]).toEqual(create.mock.calls[0]![0]);
+    expect(create.mock.calls[1]![0].clientKey).toBe("quick-add-retry-key");
+    expect(await attempt.retry()).toBeNull();
+  });
+
+  it("a changed draft after an unknown outcome is a new intent with a new key", async () => {
+    let n = 0;
+    const create = vi.fn().mockRejectedValueOnce(new OpeningApiError(503, "upstream")).mockResolvedValueOnce(ok);
+    const attempt = createQuickAddAttempt(create, () => `quick-add-intent-${++n}`);
+    await attempt.submit(draft);
+    await attempt.submit({ ...draft, title: "练习二" });
+    expect(create.mock.calls[0]![0].clientKey).toBe("quick-add-intent-1");
+    expect(create.mock.calls[1]![0].clientKey).toBe("quick-add-intent-2");
+  });
+
+  it("a 409 on retry clears the key so the next action starts a fresh intent", async () => {
+    let n = 0;
+    const create = vi.fn()
+      .mockRejectedValueOnce(new OpeningApiError(503, "upstream"))
+      .mockRejectedValueOnce(new OpeningApiError(409, "clientKey payload differs"));
+    const attempt = createQuickAddAttempt(create, () => `quick-add-c-${++n}`);
+    await attempt.submit(draft);
+    expect(await attempt.retry()).toEqual({ kind: "failed", message: "clientKey payload differs" });
+    expect(attempt.clientKey()).toBeUndefined();
+  });
+});
+
