@@ -4,6 +4,7 @@
  */
 
 import type { ActivitySpecClientInit } from "@aistudy/contracts";
+import { findUnsafeContent, isMarkupKey, isUnsafeUrl } from "@aistudy/jingwei";
 
 export const CATALOG_IDS = [
   "text",
@@ -71,19 +72,8 @@ export function normalizeToCatalogId(
   return BLOCK_TYPE_ALIASES[type] ?? "unknown";
 }
 
-const ILLEGAL_URL =
-  /^(?:\s*)(?:javascript:|data:|vbscript:)/i;
-
-/** Reject javascript:/data:/vbscript: and strip unsafe href-like strings. */
-export function isIllegalLink(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (!trimmed) return false;
-  if (ILLEGAL_URL.test(trimmed)) return true;
-  // Bare protocol-relative or http(s) is allowed for cite quiet links; still reject embedded JS.
-  if (/javascript\s*:/i.test(trimmed)) return true;
-  return false;
-}
+/** Reject javascript:/data:/vbscript: — rule owned by jingwei; http(s) cite links stay allowed. */
+export const isIllegalLink = isUnsafeUrl;
 
 export function extractPlainParams(
   content: unknown,
@@ -102,23 +92,17 @@ export function extractPlainParams(
   const params: Record<string, unknown> = {};
   let illegalLink = false;
   for (const [key, value] of Object.entries(raw)) {
-    if (key === "html" || key === "script" || key === "dangerouslySetInnerHTML") {
-      illegalLink = true;
-      continue;
-    }
-    if (typeof value === "string" && isIllegalLink(value)) {
-      illegalLink = true;
-      continue;
-    }
-    if (
-      (key === "href" || key === "url" || key === "action" || key === "src") &&
-      typeof value === "string" &&
-      isIllegalLink(value)
-    ) {
+    // Teaching is stricter than the core at the top level: any unsafe-URL string is rejected.
+    if (isMarkupKey(key) || (typeof value === "string" && isIllegalLink(value))) {
       illegalLink = true;
       continue;
     }
     params[key] = value;
+  }
+  // Nested URL fields / markup (e.g. steps[i].href) are checked by the shared core rules.
+  const nested = findUnsafeContent(params);
+  if (nested && (nested.kind === "link" || nested.kind === "markup" || nested.kind === "depth")) {
+    illegalLink = true;
   }
   return { params, illegalLink };
 }
@@ -176,10 +160,8 @@ export function decideBlockRender(
   }
 
   // Action-like params that look like JS handlers
-  for (const key of Object.keys(params)) {
-    if (/^on[A-Z]/.test(key) || key === "actionHandler") {
-      return { ok: false, reason: "illegal_action" };
-    }
+  if (findUnsafeContent(params)?.kind === "handler") {
+    return { ok: false, reason: "illegal_action" };
   }
 
   return {

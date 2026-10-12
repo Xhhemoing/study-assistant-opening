@@ -1,0 +1,21 @@
+{
+  "name": "@aistudy/jingwei",
+  "private": true,
+  "version": "0.0.0",
+  "description": "经纬 Jingwei — host-agnostic adaptive presentation core: one artifact (warp), many views (weft).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.0.17"
+  }
+}

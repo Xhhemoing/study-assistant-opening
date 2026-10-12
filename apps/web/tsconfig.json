@@ -16,7 +16,8 @@
       "@aistudy/contracts": ["../../packages/contracts/src/index.ts"],
       "@aistudy/ai": ["../../packages/ai/src/index.ts"],
       "@aistudy/config": ["../../packages/config/src/index.ts"],
-      "@aistudy/database": ["../../packages/database/src/index.ts"]
+      "@aistudy/database": ["../../packages/database/src/index.ts"],
+      "@aistudy/jingwei": ["../../packages/jingwei/src/index.ts"]
     }
   },
   "include": [

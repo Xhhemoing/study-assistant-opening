@@ -16,7 +16,7 @@
     "preview:start": "node scripts/web-preview.mjs start",
     "preview": "npm run preview:build && npm run preview:start",
     "lint": "node scripts/run-heavy.mjs eslint .",
-    "typecheck": "node scripts/run-heavy.mjs tsc -p packages/domain/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/contracts/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/config/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/database/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ai/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ui/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web && node scripts/run-heavy.mjs tsc -p tsconfig.e2e.json --noEmit",
+    "typecheck": "node scripts/run-heavy.mjs tsc -p packages/domain/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/contracts/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/config/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/database/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ai/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ui/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/jingwei/tsconfig.json --noEmit &&node scripts/run-heavy.mjs tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web && node scripts/run-heavy.mjs tsc -p tsconfig.e2e.json --noEmit",
     "test": "node scripts/run-heavy.mjs vitest run",
     "test:integration": "node scripts/run-heavy.mjs vitest run --project integration",
     "test:handler": "node scripts/run-heavy.mjs vitest run --project handler",
