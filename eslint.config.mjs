@@ -47,16 +47,33 @@ export default tseslint.config(
   },
   {
     // Jingwei core stays host-agnostic so other apps and agents can reuse it.
-    files: ["packages/jingwei/src/**/*.ts"],
-    ignores: ["packages/jingwei/src/**/*.test.ts"],
+    files: ["packages/jingwei/src/**/*.{ts,tsx}"],
+    ignores: ["packages/jingwei/src/**/*.test.{ts,tsx}", "packages/jingwei/src/react/**"],
     rules: {
       "no-restricted-imports": [
         "error",
         {
           patterns: [
             { group: ["@aistudy/*"], message: "jingwei core must not depend on other AIstudy packages; adapt in the host." },
-            { group: ["react", "react-dom", "next", "next/*"], message: "jingwei core is framework-free." },
+            { group: ["react", "react-dom", "react/*", "next", "next/*"], message: "jingwei core is framework-free; React lives in src/react." },
             { group: ["node:*"], message: "jingwei core must run in browsers and workers." },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The React runtime may use React, but stays host-agnostic like the core.
+    files: ["packages/jingwei/src/react/**/*.{ts,tsx}"],
+    ignores: ["packages/jingwei/src/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            { group: ["@aistudy/*"], message: "jingwei must not depend on other AIstudy packages; adapt in the host." },
+            { group: ["next", "next/*"], message: "jingwei/react must work outside Next." },
+            { group: ["node:*"], message: "jingwei must run in browsers and workers." },
           ],
         },
       ],

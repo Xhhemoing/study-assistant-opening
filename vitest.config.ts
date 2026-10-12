@@ -17,6 +17,7 @@ const alias = {
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),
+  "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
   "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
 };
 

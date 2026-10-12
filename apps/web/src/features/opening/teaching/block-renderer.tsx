@@ -9,10 +9,17 @@ import {
   type ClientInitBlock,
   type FailSoftReason,
 } from "./component-catalog";
+import { BlockView } from "@aistudy/jingwei/react";
 import {
   MatrixTransformBlock,
   isMatrixTransformInteractiveEnabled,
 } from "./blocks/matrix-transform";
+import {
+  MATRIX_TRANSFORM_CAPABILITY_ID,
+  teachingArtifactBlock,
+  teachingCapabilities,
+  teachingRenderers,
+} from "./teaching-capabilities";
 
 function asText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -177,16 +184,20 @@ function CatalogBody({
     case "matrix_transform": {
       // Strip chrome keys that decideBlockRender injects; domain parse wants MathModel fields only.
       const {
-        blockId: _blockId,
+        blockId,
         position: _position,
         role: _role,
         blockType: _blockType,
         ...mathContent
       } = params;
       return (
-        <MatrixTransformBlock
-          content={mathContent}
-          interactive={isMatrixTransformInteractiveEnabled()}
+        <BlockView
+          block={teachingArtifactBlock(String(blockId), MATRIX_TRANSFORM_CAPABILITY_ID, mathContent)}
+          registry={teachingCapabilities}
+          renderers={teachingRenderers}
+          prefs={{ preferredMode: isMatrixTransformInteractiveEnabled() ? "interactive" : "static" }}
+          // Keep the block's own parse-fail card (lists the errors, never invents numbers).
+          renderSkipped={() => <MatrixTransformBlock content={mathContent} interactive={false} />}
         />
       );
     }
