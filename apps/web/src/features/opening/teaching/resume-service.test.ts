@@ -53,7 +53,9 @@ describe("resume-service surface (V2-14)", () => {
     const numbered = readdirSync(migrDir)
       .filter((f) => f.endsWith(".sql") && /^\d{4}_/.test(f))
       .sort();
-    expect(numbered.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql"]);
+    // PR-D: 0059_opening_budget_reconcile (budget ledger) is the only addition
+    // after PR-C's clarify migration; still no teaching/resume migration.
+    expect(numbered.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql"]);
     expect(numbered.some((f) => /resume/i.test(f))).toBe(false);
   });
 });

@@ -54,7 +54,9 @@ describe("V2-14 teaching resume database surfaces", () => {
     const files = readdirSync(resolve(__dirname, "../migrations"))
       .filter((f) => f.endsWith(".sql"))
       .sort();
-    expect(files.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql"]);
+    // PR-D: 0059_opening_budget_reconcile (budget ledger) is the only addition
+    // after PR-C's clarify migration; still no teaching/resume migration.
+    expect(files.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql"]);
     expect(files.some((f) => /resume/i.test(f))).toBe(false);
   });
 });
