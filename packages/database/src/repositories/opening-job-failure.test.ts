@@ -26,6 +26,11 @@ function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }
   return { sql, recorded };
 }
 
+/** The last failure projection (claim release may follow it). */
+function lastFailureProjection(recorded: Recorded[]): Recorded {
+  return recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'")).at(-1)!;
+}
+
 /** Values bound to the `(? IS NULL OR s.version = ?)` version fence of a source update. */
 function versionFenceValues(entry: Recorded): unknown[] {
   const parts = entry.query.split("?");
@@ -43,7 +48,7 @@ describe("opening parse job failure projection", () => {
     const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE }, privacy_epoch: 7 });
 
     await expect(failOpeningJob(sql, "job-1", { error: "failed" })).resolves.toBe(true);
-    const update = recorded.at(-1)!;
+    const update = lastFailureProjection(recorded);
     expect(update.query.startsWith("UPDATE opening_sources")).toBe(true);
     // Legacy payload without sourceVersion: the fence is disabled (null), never the epoch 7.
     expect(versionFenceValues(update)).toEqual([null, null]);
@@ -53,14 +58,14 @@ describe("opening parse job failure projection", () => {
     const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE, sourceVersion: 3 }, privacy_epoch: 7 });
 
     await expect(failOpeningJob(sql, "job-1", { error: "failed" })).resolves.toBe(true);
-    expect(versionFenceValues(recorded.at(-1)!)).toEqual([3, 3]);
+    expect(versionFenceValues(lastFailureProjection(recorded))).toEqual([3, 3]);
   });
 
   it("ignores a malformed sourceVersion instead of fencing on it", async () => {
     const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE, sourceVersion: "3" }, privacy_epoch: 7 });
 
     await expect(failOpeningJob(sql, "job-1", { error: "failed" })).resolves.toBe(true);
-    expect(versionFenceValues(recorded.at(-1)!)).toEqual([null, null]);
+    expect(versionFenceValues(lastFailureProjection(recorded))).toEqual([null, null]);
   });
 
   it("marks a stale parse source failed so it cannot remain pending forever", async () => {
@@ -84,5 +89,45 @@ describe("opening parse job failure projection", () => {
     expect(sourceUpdates.length).toBe(1);
     expect(sourceUpdates[0]!.query).toContain("parse_state = 'failed'");
     expect(versionFenceValues(sourceUpdates[0]!)).toEqual([2, 2]);
+  });
+
+  it("releases only its own running claim, after the failure projection", async () => {
+    const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE, sourceVersion: 0 }, privacy_epoch: 7 });
+
+    await expect(failOpeningJob(sql, "job-1", { error: "failed" })).resolves.toBe(true);
+    const release = recorded.at(-1)!;
+    expect(release.query).toContain("parse_state = 'not_started'");
+    expect(release.query).toContain("s.parse_state = 'running'");
+    // Another running parse job for the same source keeps the marker.
+    expect(release.query).toContain("NOT EXISTS (SELECT 1 FROM opening_jobs j");
+    expect(release.values).toContain(SOURCE);
+  });
+
+  it("releases the claim without projecting when cancellation won the job CAS", async () => {
+    const recorded: Recorded[] = [];
+    const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      recorded.push({ query, values });
+      if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: 7 }]);
+      if (query.startsWith("UPDATE opening_jobs")) return Promise.resolve([]);
+      if (query.startsWith("SELECT kind, payload")) return Promise.resolve([{ kind: "parse", payload: { sourceId: SOURCE } }]);
+      if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
+      throw new Error(`unexpected query: ${query}`);
+    }) as unknown as Sql;
+    sql.json = ((value: unknown) => value) as never;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+
+    await expect(failOpeningJob(sql, "job-1", { error: "late" })).resolves.toBe(false);
+    const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources"));
+    expect(sourceUpdates).toHaveLength(1);
+    expect(sourceUpdates[0]!.query).toContain("parse_state = 'not_started'");
+    expect(sourceUpdates[0]!.query).not.toContain("'failed'");
+  });
+
+  it("does not touch sources for non-parse jobs", async () => {
+    const { sql, recorded } = fakeSql({ kind: "compile-teaching-unit", payload: { sourceId: SOURCE }, privacy_epoch: 7 });
+
+    await expect(failOpeningJob(sql, "job-c", { error: "x" })).resolves.toBe(true);
+    expect(recorded.some(({ query }) => query.startsWith("UPDATE opening_sources"))).toBe(false);
   });
 });

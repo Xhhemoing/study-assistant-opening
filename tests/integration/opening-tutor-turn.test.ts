@@ -8,7 +8,7 @@ import {
   createOpeningSourceChunksRepository,
   createOpeningTutorJobsRepository,
 } from "@aistudy/database";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 
 /**
@@ -172,10 +172,11 @@ describe("opening tutor turn durable path (guarded)", () => {
     const seeded = await seedConversationAndSource();
     const sessionId = randomUUID(), courseId = randomUUID();
     await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Help course',${courseId})`;
+    const activityId = await insertTestTeachingActivity(fixture.sql, fixture.scope, courseId);
     await fixture.sql`
       INSERT INTO opening_learning_sessions
-        (id, workspace_id, owner_user_id, course_id, skill_label)
-      VALUES (${sessionId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${courseId}, 'motion')
+        (id, workspace_id, owner_user_id, course_id, activity_id, skill_label)
+      VALUES (${sessionId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${courseId}, ${activityId}, 'motion')
     `;
     await fixture.sql`
       UPDATE opening_turns
@@ -220,6 +221,7 @@ describe("opening tutor turn durable path (guarded)", () => {
         sessionId,
         problemId: null,
         turnId: seeded.assistantTurnId,
+        kind: "hint",
         level: "hinted",
         delivered: true,
       },

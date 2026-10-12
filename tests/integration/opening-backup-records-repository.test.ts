@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { OPENING_BACKUP_TABLES, readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
+import { insertTestTeachingActivity } from "./opening-fixture";
 import { backupRows, createBackupFixture, seedBackupGraph, seedBackupPlanning, sourceBytes, type BackupFixture } from "./opening-backup-records-fixture";
 
 let fixture: BackupFixture;
@@ -17,7 +18,12 @@ it("exports durable tables and version metadata with owner isolation and no obje
   await seedBackupPlanning(fixture.sql, wrongOwner);
   const snapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
   expect(Object.keys(snapshot.tables).sort()).toEqual([...OPENING_BACKUP_TABLES].sort());
-  for (const [name, rows] of Object.entries(snapshot.tables)) expect(rows).toHaveLength(["workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions", "opening_learning_history_revisions", "opening_retest_activities"].includes(name) ? 0 : 1);
+  // The seed graph creates one teaching activity (sessions require one since 0053) but no units/specs
+  // and no K02 skill evidence (that needs a knowledge node).
+  const empty = ["workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions",
+    "opening_learning_history_revisions", "opening_retest_activities", "opening_teaching_units", "opening_teaching_activity_specs",
+    "opening_learning_activity_history_revisions", "opening_skill_evidence"];
+  for (const [name, rows] of Object.entries(snapshot.tables)) expect(rows, name).toHaveLength(empty.includes(name) ? 0 : 1);
   expect(snapshot.privacyEpoch).toBe(1);
   expect(snapshot.deletionJournal).toHaveLength(1);
   expect(snapshot.tables.opening_sources[0]).toMatchObject({ id: own.source, bytes: sourceBytes.length });
@@ -121,13 +127,14 @@ it("exports retest business state without dangling transport candidate reference
   )`;
   const sessionId = randomUUID();
   const observationId = randomUUID();
-  await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, 'fractions', ARRAY[]::uuid[])`;
+  const teachingActivityId = await insertTestTeachingActivity(sql, scope, courseId);
+  await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, ${teachingActivityId}, 'fractions', ARRAY[]::uuid[])`;
   await sql`INSERT INTO opening_learning_observations (
-    id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, retest_id,
+    id, workspace_id, owner_user_id, session_id, course_id, activity_id, skill_label, source_ids, retest_id,
     answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision
   ) VALUES (
-    ${observationId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${sessionId}, ${courseId}, 'fractions',
+    ${observationId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${sessionId}, ${courseId}, ${teachingActivityId}, 'fractions',
     ARRAY[]::uuid[], ${candidateId}, 'answer', 'correct', 'independent', ${observationId}, ARRAY[]::uuid[], 'self_report', 0
   )`;
 

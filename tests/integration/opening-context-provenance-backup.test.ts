@@ -121,14 +121,14 @@ it("retains uppercase source version and reference check provenance through seco
   const { rows, sql, scope } = fixture;
   const source = await rows.source();
   const session = await rows.learning([source]), cleanSession = await rows.learning();
-  const [learning] = await sql`SELECT course_id FROM opening_learning_sessions WHERE id = ${session}`;
+  const [learning] = await sql`SELECT course_id, activity_id FROM opening_learning_sessions WHERE id = ${session}`;
   const attempt = randomUUID();
   const sourceVersions = { [source.toUpperCase()]: 1 };
   await sql`INSERT INTO opening_learning_attempts (
-    id, workspace_id, owner_user_id, session_id, course_id, skill_label,
+    id, workspace_id, owner_user_id, session_id, course_id, activity_id, skill_label,
     source_ids, source_versions, client_key, create_intent, history_revision
   ) VALUES (
-    ${attempt}, ${scope.workspaceId}, ${scope.ownerUserId}, ${session}, ${learning!.course_id}, 'Recall',
+    ${attempt}, ${scope.workspaceId}, ${scope.ownerUserId}, ${session}, ${learning!.course_id}, ${learning!.activity_id}, 'Recall',
     ${[source]}, ${sql.json(sourceVersions)}, ${attempt}, '{}'::jsonb, 0
   )`;
   const versionObservation = await rows.observation(session, [source]);

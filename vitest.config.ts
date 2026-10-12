@@ -42,6 +42,7 @@ export default defineConfig({
       }),
       defineProject({
         resolve: { alias },
+        oxc: { jsx: { runtime: "automatic" } },
         test: {
           name: "handler",
           include: ["tests/integration/handler/**/*.test.ts"],
@@ -53,6 +54,7 @@ export default defineConfig({
       }),
       defineProject({
         resolve: { alias },
+        oxc: { jsx: { runtime: "automatic" } },
         test: {
           name: "integration",
           include: ["tests/integration/**/*.test.ts"],
