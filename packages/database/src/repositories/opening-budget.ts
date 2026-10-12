@@ -72,6 +72,14 @@ export type OpeningBudgetRepositoryOptions = {
   unknownAgeMs?: number;
 };
 
+function isRequestIdUniqueViolation(error: unknown): boolean {
+  if (error == null || typeof error !== "object") return false;
+  const e = error as { code?: unknown; constraint_name?: unknown; table_name?: unknown };
+  return e.code === "23505"
+    && (e.constraint_name === "opening_budget_reservations_request_id_key"
+      || (e.constraint_name == null && e.table_name === "opening_budget_reservations"));
+}
+
 const DEFAULT_UNKNOWN_AGE_MS = 30 * 60 * 1000;
 
 function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
@@ -167,7 +175,8 @@ export function createOpeningBudgetRepository(
         throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "amount must be a positive integer");
       }
       const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
-      return sql.begin(async (tx) => {
+      try {
+      return await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
 
@@ -225,6 +234,14 @@ export function createOpeningBudgetRepository(
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
         return mapReservation(rows[0] as Record<string, unknown>);
       });
+      } catch (error) {
+        // A concurrent reserve in ANOTHER workspace (different FOR UPDATE lock)
+        // can win the global UNIQUE(request_id) race; map to a stable CONFLICT.
+        if (isRequestIdUniqueViolation(error)) {
+          throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
+        }
+        throw error;
+      }
     },
     release(scope, requestId) {
       return changeState(scope, { by: "requestId", value: requestId }, "released");
