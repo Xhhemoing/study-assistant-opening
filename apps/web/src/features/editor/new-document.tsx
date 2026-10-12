@@ -2,8 +2,9 @@
 
 import { FilePlus2, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { createEditorApi } from "./editor-api";
+import { useEffect, useRef, useState } from "react";
+import { createEditorApi, type EditorDocument } from "./editor-api";
+import { createSingleFlight } from "./single-flight";
 import { createEmptyLocalDraft } from "./local-draft";
 import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
 
@@ -12,16 +13,22 @@ export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
 
+  // StrictMode re-runs this effect with the same attempt; join the in-flight
+  // POST instead of creating a second empty note (G5). Retry bumps attempt.
+  const flight = useRef(createSingleFlight<EditorDocument>());
+
   useEffect(() => {
     let active = true;
-    const draft = createEmptyLocalDraft();
-    createEditorApi().createDocument({
+    flight.current.run(attempt, () => {
+      const draft = createEmptyLocalDraft();
+      return createEditorApi().createDocument({
       title: draft.title,
       blocks: draft.blocks.map(({ id, type, content }) => ({
         id,
         type,
         content: { blockNoteContent: content, props: null, children: [] },
       })),
+      });
     }).then((document) => {
       if (active) router.replace(libraryNotePath(basePath, document.id));
     }).catch(() => {
