@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { OPENING_BACKUP_TABLES, readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
+import { insertTestTeachingActivity } from "./opening-fixture";
 import { backupRows, createBackupFixture, seedBackupGraph, seedBackupPlanning, sourceBytes, type BackupFixture } from "./opening-backup-records-fixture";
 
 let fixture: BackupFixture;
@@ -121,13 +122,14 @@ it("exports retest business state without dangling transport candidate reference
   )`;
   const sessionId = randomUUID();
   const observationId = randomUUID();
-  await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, 'fractions', ARRAY[]::uuid[])`;
+  const teachingActivityId = await insertTestTeachingActivity(sql, scope, courseId);
+  await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, ${teachingActivityId}, 'fractions', ARRAY[]::uuid[])`;
   await sql`INSERT INTO opening_learning_observations (
-    id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, retest_id,
+    id, workspace_id, owner_user_id, session_id, course_id, activity_id, skill_label, source_ids, retest_id,
     answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision
   ) VALUES (
-    ${observationId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${sessionId}, ${courseId}, 'fractions',
+    ${observationId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${sessionId}, ${courseId}, ${teachingActivityId}, 'fractions',
     ARRAY[]::uuid[], ${candidateId}, 'answer', 'correct', 'independent', ${observationId}, ARRAY[]::uuid[], 'self_report', 0
   )`;
 

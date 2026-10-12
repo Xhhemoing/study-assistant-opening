@@ -4,7 +4,7 @@ import {
   createOpeningMemoryRepository,
   createOpeningSourceChunksRepository,
 } from "@aistudy/database";
-import type { OpeningFixture } from "./opening-fixture";
+import { insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 
 export const SECRET_ANSWER = "secret-model-answer-rp2";
 export const RATES = { inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000 };
@@ -36,10 +36,11 @@ export async function seedWorkerRace(fixture: OpeningFixture): Promise<RaceSeed>
     SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId} LIMIT 1`;
   const chunkId = chunk[0]?.id;
   if (!chunkId) throw new Error("race chunk missing");
+  const activityId = await insertTestTeachingActivity(fixture.sql, scope);
   await fixture.sql`
     INSERT INTO opening_learning_sessions
-      (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, 'race', ${[sourceId]}::uuid[])`;
+      (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, ${activityId}, 'race', ${[sourceId]}::uuid[])`;
   const conversations = createOpeningConversationRepository(fixture.sql);
   const conversation = await conversations.create(scope, { title: "rp2", courseId: null });
   const saved = await conversations.appendSavedTurn({

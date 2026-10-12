@@ -1,5 +1,22 @@
 import type { Sql } from "postgres";
 
+/**
+ * claim() marks a parse source `running` (G7). When the job ends without
+ * projecting a result (cancelled, or a failure the fences refuse), drop that
+ * marker unless another parse job for the source is still running, so the
+ * inbox never spins on a job that no longer exists.
+ */
+export async function releaseOpeningParseClaim(tx: Sql, workspaceId: string, payload: unknown): Promise<void> {
+  const sourceId = payload && typeof payload === "object" && "sourceId" in payload ? payload.sourceId : null;
+  if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return;
+  await tx`
+    UPDATE opening_sources s SET parse_state = 'not_started', updated_at = now()
+    WHERE s.id = ${sourceId} AND s.workspace_id = ${workspaceId} AND s.parse_state = 'running'
+      AND NOT EXISTS (SELECT 1 FROM opening_jobs j
+        WHERE j.workspace_id = s.workspace_id AND j.state = 'running'
+          AND j.kind IN ('parse', 'parse-media') AND j.payload->>'sourceId' = ${sourceId})`;
+}
+
 /** Commit the job failure and its source status together, under the privacy lock. */
 export async function failOpeningJob(sql: Sql, id: string, value: unknown): Promise<boolean> {
   return sql.begin(async (tx) => {
@@ -18,7 +35,11 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
     if (!job) return false;
-    if ((job.kind !== "parse" && job.kind !== "parse-media") || job.owner_user_id !== workspace.owner_user_id) return true;
+    if (job.kind !== "parse" && job.kind !== "parse-media") return true;
+    if (job.owner_user_id !== workspace.owner_user_id) {
+      await releaseOpeningParseClaim(tx, workspace.id, job.payload);
+      return true;
+    }
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
       ? job.payload.sourceId : null;
     if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return true;
@@ -62,6 +83,8 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     }
+    // Fenced-out failures (new version, exclusion) leave the claim marker behind.
+    await releaseOpeningParseClaim(tx, workspace.id, job.payload);
     return true;
   });
 }

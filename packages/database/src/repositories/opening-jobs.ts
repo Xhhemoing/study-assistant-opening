@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { failOpeningJob } from "./opening-job-failure";
+import { failOpeningJob, releaseOpeningParseClaim } from "./opening-job-failure";
 import type { OpeningScope } from "./opening-sources";
 
 export type OpeningJobErrorCode = "NOT_FOUND" | "CONFLICT";
@@ -212,6 +212,9 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         `;
         if (!rows.length) return null;
         const job = mapJob(rows[0] as Record<string, unknown>);
+        if (job.kind === "parse" || job.kind === "parse-media") {
+          await releaseOpeningParseClaim(tx, scope.workspaceId, job.payload);
+        }
         if (job.kind === "compile-teaching-unit") {
           const payload =
             job.payload && typeof job.payload === "object"

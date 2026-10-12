@@ -66,7 +66,7 @@ describe("opening learning observations (L01)", () => {
       VALUES (${turnId},${fixture.scope.workspaceId},${conversation.id},'assistant','hint','hint','complete',${sessionA.id})`;
     await learning.insertHelpExposure(fixture.scope, {
       id: randomUUID(), sessionId: sessionA.id, problemId: null,
-      turnId, level: "hinted", delivered: true,
+      turnId, kind: "hint", level: "hinted", delivered: true,
     });
 
     const spoofed = await learning.insertObservation(fixture.scope, {

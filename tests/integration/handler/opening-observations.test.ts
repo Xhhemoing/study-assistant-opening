@@ -123,8 +123,8 @@ describe("opening observation handlers", () => {
     expect(revisionBody.error?.code).toBe("CONFLICT");
 
     await sql`INSERT INTO opening_help_exposures
-      (id, workspace_id, session_id, problem_id, turn_id, level, delivered)
-      VALUES (${randomUUID()}, ${workspaceId}, ${session.id}, NULL, ${randomUUID()}, 'revealed', TRUE)`;
+      (id, workspace_id, session_id, problem_id, turn_id, kind, level, delivered)
+      VALUES (${randomUUID()}, ${workspaceId}, ${session.id}, NULL, ${randomUUID()}, 'solution', 'revealed', TRUE)`;
     const exposed = await submitObservation(req("/api/opening/observations", {
       sessionId: session.id, courseId: selfBody.courseId, skillLabel: "fractions",
       sourceIds: [sourceId], answer: "1/2", outcome: "correct", assistance: "independent",
