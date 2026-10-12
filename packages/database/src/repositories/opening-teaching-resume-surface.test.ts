@@ -46,10 +46,15 @@ describe("V2-14 teaching resume database surfaces", () => {
     expect(facts).toMatch(/probeLearningSourcesAvailability/);
   });
 
-  it("T18 no 0058 migration file", () => {
+  // T18 originally asserted "no 0058" to prove the teaching resume surface needs no
+  // migration. 0058 is now taken by LAB-U01 (0058_opening_turn_clarify.sql), so the
+  // invariant is restated: the only migration after 0057 is the clarify one, and no
+  // teaching/resume migration was invented.
+  it("T18 resume surface adds no migration (0058 is LAB-U01 clarify only)", () => {
     const files = readdirSync(resolve(__dirname, "../migrations"))
       .filter((f) => f.endsWith(".sql"))
       .sort();
-    expect(files.some((f) => f.startsWith("0058"))).toBe(false);
+    expect(files.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql"]);
+    expect(files.some((f) => /resume/i.test(f))).toBe(false);
   });
 });

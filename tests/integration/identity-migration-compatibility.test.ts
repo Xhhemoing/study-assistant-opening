@@ -221,6 +221,12 @@ describe("identity migration compatibility", () => {
       "0050_opening_parse_media_job.sql",
       "0051_opening_extract_study_actions_job.sql",
       "0052_opening_action_digest_decisions.sql",
+      "0053_opening_teaching_activities.sql",
+      "0054_opening_teaching_content.sql",
+      "0055_opening_compile_teaching_unit_job.sql",
+      "0056_opening_intervention_settings.sql",
+      "0057_opening_help_exposure_kind.sql",
+      "0058_opening_turn_clarify.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -311,6 +317,12 @@ describe("identity migration compatibility", () => {
       "0050_opening_parse_media_job.sql",
       "0051_opening_extract_study_actions_job.sql",
       "0052_opening_action_digest_decisions.sql",
+      "0053_opening_teaching_activities.sql",
+      "0054_opening_teaching_content.sql",
+      "0055_opening_compile_teaching_unit_job.sql",
+      "0056_opening_intervention_settings.sql",
+      "0057_opening_help_exposure_kind.sql",
+      "0058_opening_turn_clarify.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -656,6 +668,12 @@ describe("identity migration compatibility", () => {
       "0050_opening_parse_media_job.sql",
       "0051_opening_extract_study_actions_job.sql",
       "0052_opening_action_digest_decisions.sql",
+      "0053_opening_teaching_activities.sql",
+      "0054_opening_teaching_content.sql",
+      "0055_opening_compile_teaching_unit_job.sql",
+      "0056_opening_intervention_settings.sql",
+      "0057_opening_help_exposure_kind.sql",
+      "0058_opening_turn_clarify.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations
