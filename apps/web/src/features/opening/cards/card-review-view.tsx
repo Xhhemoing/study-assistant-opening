@@ -37,15 +37,20 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
   const [gradeError, setGradeError] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const gradeIdentity = useRef<CardGradeIdentity | null>(null);
+  // Guards against a late response from a superseded load overwriting newer state.
+  const requestId = useRef(0);
 
   const refresh = useCallback(async () => {
+    const request = ++requestId.current;
     setState({ kind: "loading" });
     setGradeError("");
     gradeIdentity.current = null;
     try {
       const items = await client.listDue("auto");
+      if (request !== requestId.current) return;
       setState({ kind: "ready", items, index: 0, flipped: false });
     } catch (error) {
+      if (request !== requestId.current) return;
       if (error instanceof OpeningApiError && error.status === 401) {
         setState({ kind: "loggedOut" });
         return;

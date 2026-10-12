@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "bash ../../scripts/run-heavy.sh tsc -p tsconfig.json --noEmit",
+    "build": "node ../../scripts/run-heavy.mjs tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts",
-    "typecheck": "bash ../../scripts/run-heavy.sh tsc -p tsconfig.json --noEmit",
-    "test": "bash ../../scripts/run-heavy.sh vitest run"
+    "typecheck": "node ../../scripts/run-heavy.mjs tsc -p tsconfig.json --noEmit",
+    "test": "node ../../scripts/run-heavy.mjs vitest run"
   },
   "dependencies": {
     "@aistudy/ai": "0.0.0",
