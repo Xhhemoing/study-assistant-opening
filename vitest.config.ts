@@ -21,6 +21,8 @@ const alias = {
   // Tests execute server modules in Node; resolve the marker like the
   // react-server condition does (no-op) instead of the client-throwing entry.
   "server-only": path.resolve(root, "node_modules/server-only/empty.js"),
+  "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
+  "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
 };
 
 const sharedExclude = [

@@ -121,6 +121,7 @@ export function collectEnvIssues(source: Source, role: ServerRole): string[] {
 export type FeatureSwitches = {
   teachingLoop: { api: boolean; ui: boolean; rolloutPercent: number };
   matrixTransformInteractive: boolean;
+  chatArtifacts: boolean;
   openingRelease: boolean;
 };
 
@@ -136,6 +137,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const api = read("OPENING_TEACHING_LOOP", false);
   const ui = read("OPENING_TEACHING_WORKSPACE", false);
   const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
+  const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const openingRelease = read("OPENING_RELEASE", false);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
   let rolloutPercent = 100;
@@ -145,7 +147,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
     } else rolloutPercent = Number(rolloutRaw);
   }
   if (issues.length) throw new EnvValidationError(issues);
-  return { teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, openingRelease };
+  return { teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, openingRelease };
 }
 
 /** Stable 0-99 bucket per user (FNV-1a 32). Same input → same bucket in every process. */
@@ -166,6 +168,7 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     ...CLOSED_CAPABILITIES,
     teachingLoop: { api, ui: api && switches.teachingLoop.ui },
     matrixTransformInteractive: switches.matrixTransformInteractive,
+    chatArtifacts: switches.chatArtifacts,
     registrationOpen: !switches.openingRelease,
   };
 }

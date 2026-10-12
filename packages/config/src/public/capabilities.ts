@@ -13,6 +13,8 @@ export const openingCapabilitiesSchema = z.object({
   teachingLoop: z.object({ api: z.boolean(), ui: z.boolean() }).strict(),
   /** UI-only behavior; no API behind it. */
   matrixTransformInteractive: z.boolean(),
+  /** UI-only: jingwei 图解 under chat answers (rules planner over the answer text). */
+  chatArtifacts: z.boolean(),
   /** Self-registration; /api/auth/register re-checks the same switch. */
   registrationOpen: z.boolean(),
 }).strict();
@@ -31,6 +33,7 @@ export type OpeningCapabilitiesResponse = z.infer<typeof openingCapabilitiesResp
 export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   teachingLoop: { api: false, ui: false },
   matrixTransformInteractive: false,
+  chatArtifacts: false,
   registrationOpen: false,
 };
 

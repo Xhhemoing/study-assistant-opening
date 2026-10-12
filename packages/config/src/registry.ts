@@ -134,6 +134,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "TEACHING_COMPILER_ENABLED", group: "teaching", doc: "Deprecated alias of OPENING_TEACHING_COMPILER_ENABLED (still read; validated).", consumers: ["worker"], kind: "bool", secret: false },
   { name: "TEACHING_VALIDATION_ENABLED", group: "teaching", doc: "Deprecated alias of OPENING_TEACHING_VALIDATION_ENABLED (still read; validated).", consumers: ["worker"], kind: "bool", secret: false },
   { name: "OPENING_MATRIX_TRANSFORM_INTERACTIVE", group: "teaching", doc: "UI-only: matrix transform interactivity (default 1). Delivered via capabilities.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "1", commented: true }, docker: { value: "1", commented: true } },
+  { name: "OPENING_CHAT_ARTIFACTS", group: "teaching", doc: "UI-only: jingwei 图解 under chat answers that already state a flow or numeric table (default 0). Delivered via capabilities.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "0", commented: true }, docker: { value: "0", commented: true } },
 
   { name: "E2E_DATABASE_URL", group: "e2e", doc: "Browser E2E resets only this isolated database; its name must end in _e2e.", consumers: ["tests"], kind: "string", secret: true, dev: { value: "postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e" } },
   { name: "OPENING_TEST_DB", group: "e2e", doc: "1 enables the integration DB guard.", consumers: ["tests"], kind: "bool", secret: false },
@@ -152,6 +153,7 @@ export const REMOVED_PUBLIC_VARS: Record<string, string> = {
   NEXT_PUBLIC_OPENING_TEACHING_LOOP: "OPENING_TEACHING_LOOP",
   NEXT_PUBLIC_OPENING_TEACHING_WORKSPACE: "OPENING_TEACHING_WORKSPACE",
   NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE: "OPENING_MATRIX_TRANSFORM_INTERACTIVE",
+  NEXT_PUBLIC_OPENING_CHAT_ARTIFACTS: "OPENING_CHAT_ARTIFACTS",
 };
 
 export function envSpec(name: string): EnvVarSpec | undefined {

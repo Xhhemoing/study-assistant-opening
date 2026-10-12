@@ -2,6 +2,7 @@
 @import "tailwindcss" source(none);
 
 @source "../../../../packages/ui/src";
+@source "../../../../packages/jingwei/src/react";
 @source "../";
 
 @theme {

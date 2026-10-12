@@ -147,6 +147,11 @@ describe("capabilities", () => {
     expect(on).toBeLessThan(750);
   });
 
+  it("chat 图解 is off by default and follows OPENING_CHAT_ARTIFACTS", () => {
+    expect(resolveCapabilities(sw({}), "u1").chatArtifacts).toBe(false);
+    expect(resolveCapabilities(sw({ OPENING_CHAT_ARTIFACTS: "1" }), "u1").chatArtifacts).toBe(true);
+  });
+
   it("capabilities contain only booleans (no secret names or values)", () => {
     const caps = resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1" }), "u1");
     const text = JSON.stringify(caps);

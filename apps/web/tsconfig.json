@@ -17,7 +17,9 @@
       "@aistudy/ai": ["../../packages/ai/src/index.ts"],
       "@aistudy/config/public": ["../../packages/config/src/public/index.ts"],
       "@aistudy/config": ["../../packages/config/src/index.ts"],
-      "@aistudy/database": ["../../packages/database/src/index.ts"]
+      "@aistudy/database": ["../../packages/database/src/index.ts"],
+      "@aistudy/jingwei": ["../../packages/jingwei/src/index.ts"],
+      "@aistudy/jingwei/react": ["../../packages/jingwei/src/react/index.ts"]
     }
   },
   "include": [

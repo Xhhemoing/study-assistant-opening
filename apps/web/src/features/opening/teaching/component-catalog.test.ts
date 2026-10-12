@@ -144,6 +144,18 @@ describe("decideBlockRender", () => {
     expect(d).toEqual({ ok: false, reason: "illegal_link" });
   });
 
+  it("rejects unsafe URLs and handlers nested inside block content", () => {
+    const base = { blockId: BID, position: 0, blockType: "step", role: "teach" as const };
+    expect(
+      decideBlockRender({ ...base, content: { steps: [{ text: "看这里", href: "javascript:alert(1)" }] } }),
+    ).toEqual({ ok: false, reason: "illegal_link" });
+    expect(decideBlockRender({ ...base, content: { steps: [{ text: "x", onClick: "go()" }] } })).toEqual({
+      ok: false,
+      reason: "illegal_action",
+    });
+    // Prose that merely mentions a scheme inside nested text is not a link.
+    expect(decideBlockRender({ ...base, content: { steps: [{ text: "别用 data: 链接" }] } }).ok).toBe(true);
+  });
 
   it("unknown schema version → unknown_schema_version", () => {
     const d = decideBlockRender(

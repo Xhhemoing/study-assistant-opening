@@ -30,6 +30,7 @@ const nextConfig = {
     "@aistudy/ui",
     "@aistudy/database",
     "@aistudy/ai",
+    "@aistudy/jingwei",
   ],
   output: useOpeningE2e || useLocalPreview ? undefined : "standalone",
 };

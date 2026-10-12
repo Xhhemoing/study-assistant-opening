@@ -9,13 +9,29 @@ import {
   type ClientInitBlock,
   type FailSoftReason,
 } from "./component-catalog";
+import { BlockView } from "@aistudy/jingwei/react";
 import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import {
+  MATRIX_TRANSFORM_CAPABILITY_ID,
+  teachingArtifactBlock,
+  teachingCapabilities,
+  teachingRenderers,
+} from "./teaching-capabilities";
 
 /** PR-H: interactivity is a server capability (UI-only switch), not a client env read. */
-function CapabilityMatrixTransformBlock({ content }: { content: Record<string, unknown> }) {
+function CapabilityMatrixTransformBlock({ blockId, content }: { blockId: string; content: Record<string, unknown> }) {
   const { matrixTransformInteractive } = useOpeningCapabilities();
-  return <MatrixTransformBlock content={content} interactive={matrixTransformInteractive} />;
+  return (
+    <BlockView
+      block={teachingArtifactBlock(blockId, MATRIX_TRANSFORM_CAPABILITY_ID, content)}
+      registry={teachingCapabilities}
+      renderers={teachingRenderers}
+      prefs={{ preferredMode: matrixTransformInteractive ? "interactive" : "static" }}
+      // Keep the block's own parse-fail card (lists the errors, never invents numbers).
+      renderSkipped={() => <MatrixTransformBlock content={content} interactive={false} />}
+    />
+  );
 }
 
 function asText(value: unknown): string {
@@ -181,14 +197,14 @@ function CatalogBody({
     case "matrix_transform": {
       // Strip chrome keys that decideBlockRender injects; domain parse wants MathModel fields only.
       const {
-        blockId: _blockId,
+        blockId,
         position: _position,
         role: _role,
         blockType: _blockType,
         ...mathContent
       } = params;
       return (
-        <CapabilityMatrixTransformBlock content={mathContent} />
+        <CapabilityMatrixTransformBlock blockId={String(blockId)} content={mathContent} />
       );
     }
     default:
