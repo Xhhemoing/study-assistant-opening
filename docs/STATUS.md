@@ -14,10 +14,11 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 合并队列（#21 集成 13 个 PR） | Claude | `integrate/opening-release-batch` / #21 | 已撤出 #20，CI 重跑中 |
-| #20 生产环境隔离 mock | Claude | `fix/production-mock-isolation` | 待决定：15 个旧页面 e2e 是迁移还是退役 |
-| #1 学习入口简化 | Grok | `fix/opening-learning-experience` | 基线过旧，需 rebase |
-| 协作流程与本看板 | Claude | `docs/agent-workflow` | 实现中 |
+| 合并队列（#21 集成 13 个 PR，含 0060） | Claude | `integrate/opening-release-batch` / #21 | 已撤出 #20，CI 重跑中 |
+| G1 #1 学习入口简化 rebase | Grok | `fix/opening-learning-experience` / #1 | 已派单 |
+| G2 #20 旧页面 e2e 退役 | Grok | `fix/production-mock-isolation` / #20 | 已派单 |
+| 协作流程与本看板 | Claude | `docs/agent-workflow` / #22 | 审查中 |
+| S1 正文 Markdown/KaTeX 渲染 | Claude | 待建 `feat/learning-prose` | #21 合入后开工 |
 
 ## 下一步（按顺序）
 
@@ -26,11 +27,15 @@
 3. AI 表达 S1 正文渲染 → S2 写作契约（`docs/plans/2026-10-12-ai-expression-plan.md`）。
 4. jingwei PR4 笔记成果块（= 表达计划 S5）。
 
+## 负责人已定（2026-10-13）
+
+- 0060 migration 随 #21 合入：有重复键时迁移报错并列出 job，不删数据；回滚 `DROP INDEX opening_jobs_retest_accept_key_uidx`。
+- #20：生产环境已重定向的旧页面，其 e2e 退役；仍可访问的页面照常修测试。
+- 5 个未推送的旧 worktree 已备份为远端 `backup/wt-*` 分支，可随时删除本地目录。
+
 ## 等用户决定
 
-- 0060 migration（`opening_retest_accept_key`）签字，回滚方案在 #18。
-- #20：旧 `/learn`、`/explore`、`/library` 页面在生产重定向后，对应 e2e 退役还是迁移到 `/opening/*`。
-- 删除失效 worktree（清单由 Claude 列出后确认）。
+- （暂无）
 
 ## 使用反馈
 
