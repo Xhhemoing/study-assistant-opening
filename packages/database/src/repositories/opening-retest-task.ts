@@ -243,7 +243,9 @@ export async function insertOpeningTaskWithOutcome(
   }
   // Candidate accepts keep their own receipts (assistant: task_accept_client_key,
   // retest: opening_jobs.payload.acceptClientKey). No-key quick-add is not idempotent.
-  // Candidate replays keep the pre-PR-E 201 contract here (replayed=false).
+  // `replayed` = this call created no task (same-key replay or an already-accepted candidate).
+  // A rolled-back insert's id is never returned, so id equality proves creation.
+  let createdId: string | null = null;
   const insert = async (tx: TransactionSql): Promise<TaskItem> => {
     const rows = await tx`
       INSERT INTO opening_tasks (
@@ -254,13 +256,17 @@ export async function insertOpeningTaskWithOutcome(
         ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
         ${input.candidateId}, ${null}
       ) RETURNING *`;
-    return mapTask(rows[0] as Record<string, unknown>);
+    const task = mapTask(rows[0] as Record<string, unknown>);
+    createdId = task.id;
+    return task;
   };
   if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
-    return { task: await acceptAssistantTask(sql, scope, input, insert), replayed: false };
+    const task = await acceptAssistantTask(sql, scope, input, insert);
+    return { task, replayed: task.id !== createdId };
   }
   try {
-    return { task: await insertRetestOrPlainTask(sql, scope, input, insert), replayed: false };
+    const task = await insertRetestOrPlainTask(sql, scope, input, insert);
+    return { task, replayed: task.id !== createdId };
   } catch (error) {
     if (!isRetestAcceptKeyViolation(error)) throw error;
     // The 0060 index rejected a racing writer that bypassed the workspace learning lock.

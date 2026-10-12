@@ -131,7 +131,7 @@ it.each(["failed", "excluded"] as const)("direct tasks route replays the origina
   expect(first.status).toBe(201);
   const task = await first.json();
   const replay = await createTask(request(body));
-  expect(replay.status).toBe(201);
+  expect(replay.status).toBe(200); // PR-E: retest same-key replay creates nothing.
   expect(await replay.json()).toMatchObject({ id: task.id });
   if (reason === "excluded") await backupRows(fixture.sql, fixture.scope).exclude(retest.sourceId);
   else await fixture.sql`UPDATE opening_jobs SET state = 'failed' WHERE id = ${retest.id}`;
