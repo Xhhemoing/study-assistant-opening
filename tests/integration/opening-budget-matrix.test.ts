@@ -43,8 +43,8 @@ function countingProvider(impl: () => Promise<ProviderOutput> = async () => OUTP
   return p;
 }
 
-function ledger(sql: Sql, scope: OpeningScope) {
-  const repo = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
+function ledger(sql: Sql, scope: OpeningScope, extra: Partial<Parameters<typeof createOpeningBudgetRepository>[1]> = {}) {
+  const repo = createOpeningBudgetRepository(sql, { envCapCents: 100_000, ...extra });
   const api: BudgetedRepository = {
     reserve: (input) => repo.reserve(scope, input),
     release: (requestId, reason) => repo.release(scope, requestId, reason),
@@ -106,6 +106,8 @@ describe("PR-D budget matrix (plan §5.3)", () => {
       code: "BUDGET_REPLAY_COMPLETED", disposition: { kind: "completed", resultRef: "turn:42" },
     });
     expect(p.calls).toBe(1);
+    const stored = await fixture.sql`SELECT result_ref FROM opening_budget_reservations WHERE request_id='k'`;
+    expect(stored[0]!.result_ref).toBe("turn:42");
     expect(await record("completed/replay", 2, p.calls, "BUDGET_REPLAY_COMPLETED(resultRef)")).toMatchObject({ used: ACTUAL, reserved: 0, pending: 0 });
   });
 
@@ -283,6 +285,79 @@ describe("PR-D budget matrix (plan §5.3)", () => {
     expect(r).toEqual({ state: "completed", rec: true });
     expect(p.calls).toBe(1);
     expect(await record("unknown cost retained", 4, p.calls, "OUTCOME_UNKNOWN; TTL completed+pending")).toMatchObject({ used: RESERVE, reserved: 0, pending: RESERVE });
+  });
+});
+
+
+describe("PR-D follow-ups", () => {
+  it("completed replay with a different amount or snapshot is CONFLICT (original reserve amount kept)", async () => {
+    const { api, repo } = ledger(fixture.sql, fixture.scope);
+    const p = countingProvider();
+    await call(api, p, "k", { modelSnapshot: model, resultRef: "r" });
+    const row = (await fixture.sql`SELECT amount_cents, reserved_amount_cents, state FROM opening_budget_reservations WHERE request_id='k'`)[0]!;
+    expect(row).toEqual({ amount_cents: ACTUAL, reserved_amount_cents: RESERVE, state: "completed" });
+    await expect(repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE + 1, requestId: "k", modelSnapshot: model })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.reserve(fixture.scope, { purpose: "tutor", amountCents: ACTUAL, requestId: "k", modelSnapshot: model })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "k", modelSnapshot: { ...model, inputCentsPerMillion: 9 } })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "k" })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "k", modelSnapshot: model })).resolves.toMatchObject({ state: "completed", replayed: true, resultRef: "r" });
+    expect(p.calls).toBe(1);
+    expect(await record("completed replay, different amount/snapshot", 6, p.calls, "CONFLICT x4; same params replays")).toMatchObject({ used: ACTUAL, reserved: 0 });
+  });
+
+  it("completed replay returns a non-null resultRef written at settle time", async () => {
+    const { api } = ledger(fixture.sql, fixture.scope);
+    const p = countingProvider();
+    await call(api, p, "k", { resultRef: "opening_turn:abc" });
+    const err = await call(api, p, "k", { resultRef: "opening_turn:abc" }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
+    expect((err as { disposition: { resultRef: string | null } }).disposition.resultRef).toBe("opening_turn:abc");
+    expect(await record("completed replay resultRef", 2, p.calls, "resultRef=opening_turn:abc")).toMatchObject({ used: ACTUAL });
+  });
+
+  it("pending-reconcile rows and events are queryable (scope-bound); unknown cost not released", async () => {
+    const { repo } = ledger(fixture.sql, fixture.scope);
+    const r = await repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "u" });
+    await repo.markUnknown(fixture.scope, r.id);
+    await ageAndReconcile("u");
+    const pending = await repo.listPendingReconcile(fixture.scope);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ id: r.id, state: "completed", amountCents: RESERVE, pendingReconcileCents: RESERVE });
+    expect(pending[0]!.reconciledAt).toBeInstanceOf(Date);
+    const events = await repo.listReconcileEvents(fixture.scope, { kind: "ttl_reconciled" });
+    expect(events).toMatchObject([{ reservationId: r.id, kind: "ttl_reconciled", amountBeforeCents: RESERVE, amountAfterCents: RESERVE, stateBefore: "reserved" }]);
+    expect(await repo.listPendingReconcile(fixture.otherScope)).toEqual([]);
+    expect(await repo.listReconcileEvents(fixture.otherScope)).toEqual([]);
+    expect(await repo.listPendingReconcile({ workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.otherScope.ownerUserId })).toEqual([]);
+    await repo.settle(fixture.scope, r.id, 30);
+    expect(await repo.listPendingReconcile(fixture.scope)).toEqual([]);
+    expect((await repo.listReconcileEvents(fixture.scope)).map((e) => e.kind)).toEqual(["ttl_reconciled", "late_receipt"]);
+    expect(await record("pending reconcile queryable", 4, 0, "listPendingReconcile/listReconcileEvents")).toMatchObject({ used: 30, pending: 0 });
+  });
+
+  it("late receipt after release that pushes usage over the cap writes cap_overrun and raises an alert", async () => {
+    const alerts: unknown[] = [];
+    const { api, repo } = ledger(fixture.sql, fixture.scope, { envCapCents: 150, onReconcileAlert: (e) => { alerts.push(e); } });
+    const p = countingProvider(async () => { throw new OpeningProviderError("PROVIDER_RATE_LIMIT", "429"); });
+    await expect(call(api, p, "k")).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMIT" });
+    await repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "other" });
+    const row = (await fixture.sql`SELECT id FROM opening_budget_reservations WHERE request_id='k'`)[0]!;
+    await repo.settle(fixture.scope, row.id as string, RESERVE);
+    const over = await repo.listReconcileEvents(fixture.scope, { kind: "cap_overrun" });
+    expect(over).toMatchObject([{ reservationId: row.id, stateBefore: "released", capCents: 150, usageAfterCents: 200, reportedActualCents: RESERVE }]);
+    expect(alerts).toMatchObject([{ kind: "cap_overrun", usageAfterCents: 200, capCents: 150 }]);
+    expect(await record("late receipt over cap", 3, p.calls, "cap_overrun event + alert (usage 200 > cap 150)")).toMatchObject({ used: RESERVE, reserved: RESERVE });
+  });
+
+  it("late receipt within cap writes no cap_overrun", async () => {
+    const alerts: unknown[] = [];
+    const { api, repo } = ledger(fixture.sql, fixture.scope, { envCapCents: 1_000, onReconcileAlert: (e) => { alerts.push(e); } });
+    const p = countingProvider(async () => { throw new OpeningProviderError("PROVIDER_RATE_LIMIT", "429"); });
+    await expect(call(api, p, "k")).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMIT" });
+    const row = (await fixture.sql`SELECT id FROM opening_budget_reservations WHERE request_id='k'`)[0]!;
+    await repo.settle(fixture.scope, row.id as string, 60);
+    expect(await repo.listReconcileEvents(fixture.scope, { kind: "cap_overrun" })).toEqual([]);
+    expect(alerts).toEqual([]);
   });
 });
 
