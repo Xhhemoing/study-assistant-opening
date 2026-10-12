@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const saveCheckpoint = vi.fn();
 const requireOpeningScope = vi.fn();
@@ -26,6 +26,8 @@ const activityId = "11111111-1111-4111-8111-111111111111";
 
 describe("POST /api/opening/teaching/activities/[id]/checkpoint (T17)", () => {
   beforeEach(() => {
+    // PR-H: the teaching-loop API is server-gated; these cases run with it enabled.
+    vi.stubEnv("OPENING_TEACHING_LOOP", "1");
     saveCheckpoint.mockReset();
     requireOpeningScope.mockReset();
     readOpeningJsonBody.mockReset();
@@ -67,5 +69,22 @@ describe("POST /api/opening/teaching/activities/[id]/checkpoint (T17)", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.mismatch).toBe("draft_anchor_lost");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["off", {}],
+    ["rollout 0", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }],
+  ])("PR-H: 404 and no service call when the loop API is %s (hidden UI is not the gate)", async (_label, env: Record<string, string>) => {
+    vi.stubEnv("OPENING_TEACHING_LOOP", env.OPENING_TEACHING_LOOP ?? "0");
+    if (env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT) vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT);
+    requireOpeningScope.mockResolvedValue({ scope: { workspaceId: "w", ownerUserId: "u" }, sql: {} });
+    const res = await POST(new Request("http://x", { method: "POST", body: "{}" }), { params: Promise.resolve({ id: activityId }) });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ error: { code: "NOT_FOUND", message: "Not found" } });
+    expect(saveCheckpoint).not.toHaveBeenCalled();
   });
 });
