@@ -1,5 +1,11 @@
 # Opening Mail Operations
 
+## 现状（2026-10-09，agent-owned）
+
+- 隔离 IMAP integration 门禁已通过（`tests/integration/opening-imap-sync.test.ts` **5/5**）；C02 账本为 verified，见 `docs/superpowers/evidence/2026-10-09-opening-release/c02-imap-sync-verified.md`。
+- 学校真实 IMAP / CAP01 live（授权主机、实接邮箱、读一封+附件、确认未改已读、撤销）**尚未运行**，不得标完成。
+- 浏览器实接验收未跑。
+
 ## 当前实现范围
 
 - IMAP 同步适配器位于 `apps/worker/src/connectors/imap-sync.ts`。
@@ -19,7 +25,7 @@
 - **sync（IMAP）**：调用既有 `createSyncMailHandler`；游标推进仍只在 `syncMailbox` 成功提交后发生。
 - **revoked**：check/sync 均返回 409。
 - **未授权主机**：创建时与 check/sync 适配器路径均映射为 VALIDATION（400）。
-- **DingTalk check**：仍为 503 fail-closed（本切片不发明远程钉钉检查）。
+- **DingTalk check**：本地 fail-closed JSON（无读能力 → `needs_authorization`；有读能力 → `ready` / `unsupported_history_read`；已撤销 → 409）；**不**调用远程钉钉 API，也**不**再对钉钉 check 一律 503。细节见 `opening-dingtalk.md` 与 `c03-dingtalk-verified.md`。
 
 ## 明确边界
 
@@ -39,6 +45,7 @@
 
 ## 未完成门禁
 
-- 隔离标准 IMAP 服务的 integration 尚未运行；该门禁当前 blocked。
-- 因此 CAP01 自动同步不能标记为完成。
+- 隔离标准 IMAP integration 门禁**已通过**（`opening-imap-sync` **5/5**，C02 verified）；见 `c02-imap-sync-verified.md`。
+- **学校真实 IMAP / CAP01 live 仍未运行**，不能把自动同步标为实接完成。
 - 学校实接仍需单独验收：核对 host/port/TLS/认证，读取授权测试邮件与附件，确认未改已读状态，再撤销连接。
+- 浏览器实接未跑。
