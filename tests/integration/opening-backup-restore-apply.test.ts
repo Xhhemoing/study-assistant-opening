@@ -489,7 +489,8 @@ describe.skipIf(!enabled)("opening-restore CLI spawn fail-closed without sql env
 
       expect(spawned.code).toBe(1);
       expect(spawned.stderr).toMatch(/LIVE_DEPS_MISSING/);
-      expect(spawned.stderr).toMatch(/OPENING_RESTORE_DATABASE_URL\|OPENING_TEST_DATABASE_URL\|DATABASE_URL/);
+      // Q03: only the explicit restore/test URLs are accepted; DATABASE_URL is never a fallback.
+      expect(spawned.stderr).toMatch(/OPENING_RESTORE_DATABASE_URL\|OPENING_TEST_DATABASE_URL(?!\|DATABASE_URL)/);
       expect(spawned.stderr).not.toMatch(/APPLY_OK/);
       expect(spawned.stderr).not.toMatch(/minioadmin|postgres:\/\//);
     } finally {
