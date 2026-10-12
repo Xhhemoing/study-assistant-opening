@@ -12,6 +12,9 @@ import {
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
 
+/** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
+export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
+
 type Props = {
   messages: ChatMessageView[];
   historyTruncated?: boolean;
@@ -82,6 +85,7 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       {message.status === "pending" ? <p className="mt-2 text-xs text-zinc-500">生成中…</p> : null}
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">结果状态未知，请勿重复提交</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}
+      {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-amber-800">{CLARIFY_FOLLOW_UP}</p> : null}
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
     </li>; })}</ul>}
   </div>;

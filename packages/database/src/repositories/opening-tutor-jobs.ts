@@ -2,7 +2,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import type { Citation } from "@aistudy/contracts";
+import { TERMINAL_TURN_STATUSES, type Citation } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
@@ -74,15 +74,22 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           `;
       if (!rows.length) return;
       const assistantTurnId = (rows[0] as Record<string, unknown>).assistant_turn_id as string;
+      // A terminal turn (complete/failed/clarify/outcome_unknown) is never
+      // rewritten, even if a stale job row is swept or re-terminated later.
+      const terminal = [...TERMINAL_TURN_STATUSES];
+      // Writing status 'clarify' needs the LAB-A01 page-refusal job error
+      // ({code, nextAction}), which is not on this base; see PR-C notes.
       if (input.status === "failed") {
         await tx`
           UPDATE opening_turns SET text = ${input.message}, status = 'failed'
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
         `;
       } else {
         await tx`
           UPDATE opening_turns SET text = ${input.message}, status = 'outcome_unknown'
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
         `;
       }
     });
@@ -164,7 +171,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           SET status = 'failed', text = '回答任务已取消'
           WHERE id = ${rows[0]!.assistant_turn_id}
             AND workspace_id = ${scope.workspaceId}
-            AND status = 'pending'
+            AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
         return mapJob(rows[0] as Record<string, unknown>);
       });

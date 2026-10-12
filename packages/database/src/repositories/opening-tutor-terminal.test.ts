@@ -332,3 +332,33 @@ describe("opening tutor jobs repository", () => {
     ]));
   });
 });
+
+describe("LAB-U01 clarify terminal turn", () => {
+  // Ported from 05ffeec. The "page refusal ends as clarify" case is not ported: it needs
+  // the LAB-A01 fail(..., detail) signature that is not on this base.
+  function capturingSql(handler: (query: string) => unknown[]) {
+    const calls: Array<{ query: string; values: unknown[] }> = [];
+    const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join(" ");
+      calls.push({ query, values });
+      return handler(query);
+    }) as unknown as Sql & { calls: typeof calls };
+    sql.calls = calls;
+    sql.json = ((value: unknown) => value) as Sql["json"];
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+    return sql;
+  }
+
+  it("guards every terminal turn rewrite with the shared terminal list, which includes clarify", async () => {
+    const sql = capturingSql((query) => query.includes("RETURNING assistant_turn_id") ? [{ assistant_turn_id: "assistant-turn-1" }] : []);
+    const repository = createOpeningTutorJobsRepository(sql);
+    await repository.fail(scope, "job-1", "provider rejected the request");
+    await repository.markUnknown(scope, "job-1", "provider outcome unknown");
+    const turnUpdates = sql.calls.filter((call) => call.query.includes("UPDATE opening_turns SET text"));
+    expect(turnUpdates).toHaveLength(2);
+    for (const update of turnUpdates) {
+      expect(update.query).toContain("NOT (status = ANY(");
+      expect(update.values).toContainEqual(["complete", "failed", "clarify", "outcome_unknown"]);
+    }
+  });
+});

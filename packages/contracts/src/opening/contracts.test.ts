@@ -20,6 +20,8 @@ import {
   sourceRecordSchema,
   turnInputSchema,
   turnRecordSchema,
+  TERMINAL_TURN_STATUSES,
+  terminalTurnStatusForJobError,
   uploadInputSchema,
   weekSessionSchema,
   sourceCourseLinkInputSchema,
@@ -406,4 +408,17 @@ it("carries a temporary history epoch separately from Provider output", () => {
     ...input, courseId: sourceA,
   }).courseId).toBe(sourceA);
   expect(ephemeralTurnInputSchema.parse(input).courseId).toBeUndefined();
+});
+// LAB-U01 (ported from 05ffeec): `clarify` is a first-class terminal turn status.
+it("accepts clarify as a terminal turn status and maps a Clarify job error to it", () => {
+  const turn = {
+    id: "33333333-3333-4333-8333-333333333333", conversationId: "22222222-2222-4222-8222-222222222222",
+    role: "assistant", text: "请重新选择材料和页码", citations: [], createdAt: "2026-10-07T00:00:00.000Z", mode: "explain",
+  };
+  expect(turnRecordSchema.parse({ ...turn, status: "clarify" }).status).toBe("clarify");
+  expect(turnRecordSchema.safeParse({ ...turn, status: "refused" }).success).toBe(false);
+  expect(TERMINAL_TURN_STATUSES).toEqual(["complete", "failed", "clarify", "outcome_unknown"]);
+  expect(terminalTurnStatusForJobError({ nextAction: "clarify" })).toBe("clarify");
+  expect(terminalTurnStatusForJobError({})).toBe("failed");
+  expect(terminalTurnStatusForJobError(null)).toBe("failed");
 });
