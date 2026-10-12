@@ -4,6 +4,7 @@ import {
   getTeachingResumeService,
   requireOpeningScope,
 } from "../../../../../../../features/opening/runtime";
+import { teachingLoopApiDenied } from "../../../../../../../server/opening-config";
 import { readOpeningJsonBody } from "../../../../../../../features/opening/request-body";
 
 /**
@@ -16,6 +17,9 @@ export async function POST(
 ): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
+    // PR-H: server re-authorizes; a hidden UI is not the gate.
+    const denied = teachingLoopApiDenied(scope.ownerUserId);
+    if (denied) return denied;
     const { id } = await context.params;
     const body = await readOpeningJsonBody(request);
     const result = await getTeachingResumeService(sql).saveCheckpoint(scope, id, body);

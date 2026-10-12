@@ -9,6 +9,13 @@ import {
   BlockRenderer,
   renderClientInitBlocks,
 } from "./block-renderer";
+import { CLOSED_CAPABILITIES } from "@aistudy/config/public";
+import { OpeningCapabilitiesContext } from "../capabilities/capabilities-provider";
+
+/** PR-H: interactivity comes from server capabilities via context, not client env. */
+function withCaps(matrixTransformInteractive: boolean, element: ReturnType<typeof createElement>) {
+  return createElement(OpeningCapabilitiesContext.Provider, { value: { ...CLOSED_CAPABILITIES, matrixTransformInteractive } }, element);
+}
 
 const BID = "11111111-1111-4111-8111-111111111111";
 const BID2 = "22222222-2222-4222-8222-222222222222";
@@ -133,7 +140,7 @@ describe("BlockRenderer", () => {
   });
 
   it("T17: mounts matrix_transform interactive path; unknown still fail-soft", () => {
-    const matrixHtml = renderToStaticMarkup(
+    const matrixHtml = renderToStaticMarkup(withCaps(true,
       createElement(BlockRenderer, {
         block: {
           blockId: BID,
@@ -155,7 +162,7 @@ describe("BlockRenderer", () => {
           },
         },
       }),
-    );
+    ));
     expect(matrixHtml).toContain('data-catalog="matrix_transform"');
     expect(matrixHtml).toContain("核示例");
     expect(matrixHtml).toContain("y = Ax");
@@ -197,32 +204,39 @@ describe("BlockRenderer", () => {
     expect(unknownHtml).toContain('data-block-fail-soft="unknown_component"');
   });
 
-  it("T17b: matrix_transform with interactive env off → static tables", () => {
-    const prev = process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
-    process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = "0";
+  it("T17b: matrix_transform with interactive capability off → static tables", () => {
+    const html = renderToStaticMarkup(withCaps(false,
+      createElement(BlockRenderer, {
+        block: {
+          blockId: BID,
+          position: 0,
+          blockType: "matrix_transform",
+          role: "teach",
+          content: {
+            matrixA: [[1, 0], [0, 1]],
+            vectorX: [3, 4],
+            title: "单位阵",
+          },
+        },
+      }),
+    ));
+    expect(html).toContain('data-matrix-mode="static"');
+    expect(html).toContain('data-text-alternative="true"');
+    expect(html).toContain("单位阵");
+    expect(html).not.toContain('data-matrix-controls="true"');
+  });
+
+  it("PR-H: without a capabilities response the block fails closed to static", () => {
+    process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = "1";
     try {
       const html = renderToStaticMarkup(
         createElement(BlockRenderer, {
-          block: {
-            blockId: BID,
-            position: 0,
-            blockType: "matrix_transform",
-            role: "teach",
-            content: {
-              matrixA: [[1, 0], [0, 1]],
-              vectorX: [3, 4],
-              title: "单位阵",
-            },
-          },
+          block: { blockId: BID, position: 0, blockType: "matrix_transform", role: "teach", content: { matrixA: [[1, 0], [0, 1]], vectorX: [1, 2] } },
         }),
       );
       expect(html).toContain('data-matrix-mode="static"');
-      expect(html).toContain('data-text-alternative="true"');
-      expect(html).toContain("单位阵");
-      expect(html).not.toContain('data-matrix-controls="true"');
     } finally {
-      if (prev === undefined) delete process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
-      else process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = prev;
+      delete process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
     }
   });
 

@@ -12,7 +12,8 @@ describe("isOpeningTeachingWorkspaceEnabled", () => {
     expect(isOpeningTeachingWorkspaceEnabled({ OPENING_TEACHING_WORKSPACE: "true" })).toBe(true);
     expect(isOpeningTeachingWorkspaceEnabled({ OPENING_TEACHING_WORKSPACE: "yes" })).toBe(true);
     expect(
+      // PR-H: NEXT_PUBLIC_* twin removed.
       isOpeningTeachingWorkspaceEnabled({ NEXT_PUBLIC_OPENING_TEACHING_WORKSPACE: "1" }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

@@ -35,12 +35,10 @@ import { backupRows } from "./opening-backup-records-fixture";
 
 let f: OpeningFixture;
 
-/** Dual flag injection for trial (Plan ACCEPT lock #3). */
+/** Dual flag injection for trial (Plan ACCEPT lock #3). PR-H: server switches only; no NEXT_PUBLIC_* twins. */
 function injectDualTeachingFlags() {
   process.env.OPENING_TEACHING_LOOP = "1";
-  process.env.NEXT_PUBLIC_OPENING_TEACHING_LOOP = "1";
   process.env.OPENING_TEACHING_WORKSPACE = "1";
-  process.env.NEXT_PUBLIC_OPENING_TEACHING_WORKSPACE = "1";
 }
 
 beforeAll(async () => {
