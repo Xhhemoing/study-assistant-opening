@@ -89,3 +89,20 @@ it("documents previously unchecked surfaces as real-API or static (no mock provi
     if (surface.mustMatch) expect(text, surface.file).toMatch(surface.mustMatch);
   }
 });
+
+it("production course and advanced settings error paths never fall back to demo study data", () => {
+  const course = readSrc("apps/web/src/features/courses/course-detail.tsx");
+  expect(course).toMatch(/课程内容加载失败，请重试。/);
+  expect(course).toMatch(/LoadError/);
+  expect(course).not.toMatch(/createMockProvider|createLegacyStudyProvider|buildSeedItems|SEED_GOAL_ID|resetDemoData/);
+
+  const advanced = readSrc("apps/web/src/features/settings/advanced-settings-view.tsx");
+  expect(advanced).toMatch(/设置暂时无法读取，请重试。/);
+  expect(advanced).toMatch(/demo-reset-unavailable/);
+  expect(advanced).toMatch(/mock-diagnostics-unavailable/);
+  expect(advanced).not.toMatch(/createMockProvider|createLegacyStudyProvider|buildSeedItems|resetDemoData/);
+
+  const providerGate = readSrc("apps/web/src/lib/data/react.ts");
+  expect(providerGate).toMatch(/Demo study provider is unavailable in production/);
+  expect(providerGate).toMatch(/allowsDemoStudyData/);
+});
