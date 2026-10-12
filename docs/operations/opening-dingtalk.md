@@ -81,4 +81,5 @@
 
 - 本地集成门禁 `tests/integration/opening-dingtalk.test.ts` 已实现并通过；真实组织授权与样本仍未验收。
 - 真实组织授权与真实通知/文件样本验收 blocked，不阻塞本地安全边界测试。
-- 在上述门禁通过前，C03 保持 `active`，CAP02 不能标记为实接完成。
+- 本地集成门禁已通过，C03 账本为 **verified**（见 `c03-dingtalk-verified.md`）。
+- **CAP02 实接（真实组织授权 / 真实回调推送 / 通知与文件样本）仍未验收**，不得标实接完成；历史群聊拉取按设计为 `unsupported_history_read`，不构成实接声称。

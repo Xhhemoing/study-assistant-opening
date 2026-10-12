@@ -66,13 +66,13 @@ describe("isOpeningTeachingLoopTrialEnabled / resolveTeachingLoopTrialGate", () 
     expect(isOpeningTeachingLoopTrialEnabled({})).toBe(false);
   });
 
-  it("composes existing helpers (NEXT_PUBLIC_* also works; no third parser)", () => {
+  it("composes existing helpers (PR-H: NEXT_PUBLIC_* twins ignored; no third parser)", () => {
     expect(
       isOpeningTeachingLoopTrialEnabled({
         NEXT_PUBLIC_OPENING_TEACHING_LOOP: "1",
         NEXT_PUBLIC_OPENING_TEACHING_WORKSPACE: "1",
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isOpeningTeachingLoopTrialEnabled({
         NEXT_PUBLIC_OPENING_TEACHING_LOOP: "1",

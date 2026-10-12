@@ -17,7 +17,7 @@ export const openingTurns = pgTable("opening_turns", {
   role: text("role").notNull(),
   text: text("text").notNull(),
   mode: text("mode").notNull(),
-  status: text("status").$type<"pending" | "complete" | "failed" | "outcome_unknown">().notNull(),
+  status: text("status").$type<"pending" | "complete" | "failed" | "clarify" | "outcome_unknown">().notNull(),
   clientKey: text("client_key"),
   learningSessionId: uuid("learning_session_id"),
   attemptId: uuid("attempt_id"),

@@ -15,8 +15,9 @@
     "preview:build": "node scripts/run-heavy.mjs node scripts/web-preview.mjs build",
     "preview:start": "node scripts/web-preview.mjs start",
     "preview": "npm run preview:build && npm run preview:start",
-    "lint": "node scripts/run-heavy.mjs eslint .",
-    "typecheck": "node scripts/run-heavy.mjs tsc -p packages/domain/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/contracts/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/config/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/database/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ai/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p packages/ui/tsconfig.json --noEmit && node scripts/run-heavy.mjs tsc -p apps/worker/tsconfig.json --noEmit && npm run typecheck -w @aistudy/web && node scripts/run-heavy.mjs tsc -p tsconfig.e2e.json --noEmit",
+    "lint": "node scripts/check-server-boundary.mjs && node scripts/run-heavy.mjs eslint .",
+    "lint:boundary": "node scripts/check-server-boundary.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
     "test": "node scripts/run-heavy.mjs vitest run",
     "test:integration": "node scripts/run-heavy.mjs vitest run --project integration",
     "test:handler": "node scripts/run-heavy.mjs vitest run --project handler",
@@ -26,7 +27,14 @@
     "compose:down": "docker compose -f infra/docker/compose.yml down",
     "compose:ps": "docker compose -f infra/docker/compose.yml ps",
     "db:migrate": "tsx ./scripts/db-migrate.ts",
-    "verify:ci": "node ./scripts/verify-ci.mjs"
+    "verify:ci": "node ./scripts/verify-ci.mjs",
+    "env:examples": "tsx ./scripts/env-examples.ts --write",
+    "env:check": "tsx ./scripts/env-examples.ts --check"
+  },
+  "aistudy": {
+    "typecheck": {
+      "extraProjects": ["tsconfig.e2e.json"]
+    }
   },
   "engines": {
     "node": ">=20"

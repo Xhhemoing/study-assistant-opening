@@ -14,9 +14,10 @@ describe("isOpeningTeachingLoopEnabled", () => {
     expect(isOpeningTeachingLoopEnabled({ OPENING_TEACHING_LOOP: "true" })).toBe(true);
     expect(isOpeningTeachingLoopEnabled({ OPENING_TEACHING_LOOP: "yes" })).toBe(true);
     expect(isOpeningTeachingLoopEnabled({ OPENING_TEACHING_LOOP: "YES" })).toBe(true);
+    // PR-H: the NEXT_PUBLIC_* twin is gone (inlined at build; startup rejects it).
     expect(
       isOpeningTeachingLoopEnabled({ NEXT_PUBLIC_OPENING_TEACHING_LOOP: "1" }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("prefers OPENING_TEACHING_LOOP over NEXT_PUBLIC_* when both set", () => {

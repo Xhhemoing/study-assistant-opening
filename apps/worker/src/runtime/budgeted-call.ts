@@ -18,13 +18,83 @@ export type BudgetedRepository = {
     modelSnapshot?: OpeningModelSnapshot;
     amountCents: number;
     requestId: string;
-  }): Promise<{ id: string }>;
-  release(requestId: string): Promise<unknown>;
-  settle(reservationId: string, actualCents: number): Promise<unknown>;
+  }): Promise<BudgetedReservation>;
+  release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
+  /**
+   * Atomically claim the single right to call the provider for this
+   * reservation. Exactly one concurrent caller gets true.
+   */
+  claimExecution(reservationId: string): Promise<boolean>;
+  settle(reservationId: string, actualCents: number, options?: { resultRef?: string }): Promise<unknown>;
   markUnknown(reservationId: string): Promise<unknown>;
   /** Optional audit hook when settle caps actual spend to the reservation. */
   noteOverage?(audit: OverageAudit): Promise<void>;
 };
+
+/** Minimal reservation view; extra fields come from the real ledger. */
+export type BudgetedReservation = {
+  id: string;
+  state?: string;
+  replayed?: boolean;
+  outcomeUnknownAt?: Date | null;
+  releaseReason?: string | null;
+  resultRef?: string | null;
+  reconciledAt?: Date | null;
+  pendingReconcileCents?: number;
+};
+
+export type BudgetReplayDisposition =
+  | { kind: "completed"; reservationId: string; resultRef: string | null }
+  | { kind: "released"; reservationId: string; reason: string | null }
+  | { kind: "unknown"; reservationId: string; pendingReconcileCents: number; reconciled: boolean }
+  | { kind: "in_flight"; reservationId: string };
+
+/**
+ * Decide from a reserve() result whether this caller may proceed. Returns
+ * null for a fresh/claimable reserved row. Never fabricates success.
+ */
+export function replayDisposition(reservation: BudgetedReservation): BudgetReplayDisposition | null {
+  const id = reservation.id;
+  if (reservation.state === undefined || reservation.state === "reserved") {
+    if (reservation.outcomeUnknownAt) {
+      return { kind: "unknown", reservationId: id, pendingReconcileCents: 0, reconciled: false };
+    }
+    return null;
+  }
+  if (reservation.state === "released") {
+    return { kind: "released", reservationId: id, reason: reservation.releaseReason ?? null };
+  }
+  if (reservation.reconciledAt && (reservation.pendingReconcileCents ?? 0) > 0) {
+    return { kind: "unknown", reservationId: id, pendingReconcileCents: reservation.pendingReconcileCents ?? 0, reconciled: true };
+  }
+  return { kind: "completed", reservationId: id, resultRef: reservation.resultRef ?? null };
+}
+
+const REPLAY_CODES = {
+  completed: "BUDGET_REPLAY_COMPLETED",
+  released: "BUDGET_REPLAY_RELEASED",
+  unknown: "BUDGET_OUTCOME_UNKNOWN",
+  in_flight: "BUDGET_EXECUTION_CLAIMED",
+} as const;
+
+export type BudgetCallOutcomeCode = (typeof REPLAY_CODES)[keyof typeof REPLAY_CODES];
+
+/** Replay of an existing ledger key: no provider call, no extra charge. */
+export class BudgetReplayError extends Error {
+  readonly code: BudgetCallOutcomeCode;
+  readonly disposition: BudgetReplayDisposition;
+
+  constructor(disposition: BudgetReplayDisposition) {
+    super(`budget replay: ${disposition.kind}`);
+    this.name = "BudgetReplayError";
+    this.code = REPLAY_CODES[disposition.kind];
+    this.disposition = disposition;
+  }
+}
+
+export function isBudgetReplayError(error: unknown): error is BudgetReplayError {
+  return error instanceof BudgetReplayError;
+}
 
 export type BudgetedCallOptions = {
   modelSnapshot?: OpeningModelSnapshot;
@@ -50,6 +120,8 @@ export type BudgetedCallOptions = {
    * Teaching generation passes "compile-teaching-unit".
    */
   purpose?: string;
+  /** Optional persisted result reference stored on settle and replayed later. */
+  resultRef?: string;
 };
 
 export class BudgetedCallError extends Error {
@@ -129,11 +201,18 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,
   });
+  const disposition = replayDisposition(reservation);
+  if (disposition) throw new BudgetReplayError(disposition);
+  // Execution eligibility is claimed independently and atomically: a replayed
+  // reserved row (another worker in flight, or a crashed one) never re-sends.
+  if (!(await options.budget.claimExecution(reservation.id))) {
+    throw new BudgetReplayError({ kind: "in_flight", reservationId: reservation.id });
+  }
   try {
     await options.beforeSend?.();
   } catch (error) {
     // No Provider call has started: this reservation cannot have incurred usage.
-    await options.budget.release(ledgerRequestId);
+    await options.budget.release(ledgerRequestId, "not_sent");
     throw error;
   }
   let output: ProviderOutput;
@@ -143,7 +222,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     if (error instanceof OpeningProviderError) {
       const action = ledgerActionForProviderError(error.code);
       if (action === "release") {
-        await options.budget.release(ledgerRequestId);
+        await options.budget.release(ledgerRequestId, "not_sent");
       } else {
         await options.budget.markUnknown(reservation.id);
       }
@@ -159,7 +238,11 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     const actual = options.actualCents(output);
     const { settledCents, overage } = settleCentsForActual(options.reservedCents, actual);
     // Settlement failures must leave the reservation intact, never release it.
-    await options.budget.settle(reservation.id, settledCents);
+    await options.budget.settle(
+      reservation.id,
+      settledCents,
+      ...(options.resultRef ? [{ resultRef: options.resultRef }] : []),
+    );
     if (overage) {
       await options.budget.noteOverage?.({
         reservationId: reservation.id,

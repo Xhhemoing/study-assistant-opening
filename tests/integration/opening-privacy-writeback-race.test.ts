@@ -4,7 +4,7 @@ import {
   createOpeningMemoryRepository,
   createOpeningTutorJobsRepository,
 } from "@aistudy/database";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import {
   awaitAllSettled,
   closeRace,
@@ -63,10 +63,11 @@ async function seedRace() {
   await fixture.sql`
     INSERT INTO opening_memories (id, workspace_id, kind, text, source_turn_ids, version, status)
     VALUES (${ids.memoryId}, ${scope.workspaceId}, 'candidate', 'secret memory', '[]'::jsonb, 0, 'active')`;
+  const activityId = await insertTestTeachingActivity(fixture.sql, scope, ids.courseId);
   await fixture.sql`
     INSERT INTO opening_learning_sessions
-      (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-    VALUES (${ids.sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${ids.courseId}, 'race', '{}'::uuid[])`;
+      (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+    VALUES (${ids.sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${ids.courseId}, ${activityId}, 'race', '{}'::uuid[])`;
   await fixture.sql`UPDATE opening_turns SET learning_session_id=${ids.sessionId}
     WHERE id IN (${ids.userTurnId},${ids.assistantTurnId})`;
   return ids;
@@ -90,7 +91,7 @@ function turnInput(ids: Awaited<ReturnType<typeof seedRace>>): Parameters<
     candidates: [{ payload: { kind: "memory", text: "candidate leak", temporary: false }, sourceIds: [] }],
     helpExposure: {
       id: ids.exposureId, sessionId: ids.sessionId, problemId: null,
-      turnId: ids.assistantTurnId, level: "hinted", delivered: true,
+      turnId: ids.assistantTurnId, kind: "hint", level: "hinted", delivered: true,
     },
   };
 }

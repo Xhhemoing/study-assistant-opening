@@ -126,12 +126,15 @@ export const DEFAULT_WORKSPACE_TIME_ZONE = "Asia/Shanghai";
 
 /**
  * Normalize a candidate workspace IANA zone.
- * Empty / missing → DEFAULT_WORKSPACE_TIME_ZONE. Does not validate IANA
- * (call resolveLocalDayBounds / Intl when a hard error is required).
+ * Empty / missing → DEFAULT_WORKSPACE_TIME_ZONE. A non-empty value must be a valid
+ * IANA zone, otherwise RangeError (explicit failure).
  */
 export function resolveWorkspaceTimeZone(candidate: string | null | undefined): string {
   if (typeof candidate === "string" && candidate.trim().length > 0) {
-    return candidate.trim();
+    const zone = candidate.trim();
+    // PR-B: configured-but-invalid zone fails loudly (RangeError), no silent pass-through.
+    assertValidTimeZone(zone);
+    return zone;
   }
   return DEFAULT_WORKSPACE_TIME_ZONE;
 }

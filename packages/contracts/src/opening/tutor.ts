@@ -125,6 +125,25 @@ export const providerOutputSchema = z
   })
   .strict();
 
+/**
+ * Assistant/user turn lifecycle. `clarify` (LAB-U01) is the terminal state of
+ * a page-citation refusal: a Clarify follow-up, not a failure.
+ */
+export const turnStatusSchema = z.enum(["pending", "complete", "failed", "clarify", "outcome_unknown"]);
+
+/** Turns in these states are final: sweepers and recovery writers never rewrite them. */
+export const TERMINAL_TURN_STATUSES = ["complete", "failed", "clarify", "outcome_unknown"] as const;
+
+/**
+ * Terminal assistant-turn status for a failed tutor job. A job error that
+ * routes to Clarify (`nextAction: "clarify"`) ends the turn as `clarify`.
+ */
+export function terminalTurnStatusForJobError(
+  error: { nextAction?: "clarify" } | null | undefined,
+): "failed" | "clarify" {
+  return error?.nextAction === "clarify" ? "clarify" : "failed";
+}
+
 export const turnRecordSchema = z
   .object({
     id: uuidSchema,
@@ -134,7 +153,7 @@ export const turnRecordSchema = z
     citations: z.array(citationSchema).max(64),
     createdAt: isoDateTimeSchema,
     mode: tutorModeSchema,
-    status: z.enum(["pending", "complete", "failed", "outcome_unknown"]),
+    status: turnStatusSchema,
   })
   .strict();
 
@@ -197,6 +216,7 @@ export type TurnInput = z.infer<typeof turnInputSchema>;
 export type ProviderInput = z.infer<typeof providerInputSchema>;
 export type ProviderOutput = z.infer<typeof providerOutputSchema>;
 export type TurnRecord = z.infer<typeof turnRecordSchema>;
+export type TurnStatus = z.infer<typeof turnStatusSchema>;
 export type BudgetReservation = z.infer<typeof budgetReservationSchema>;
 export type EphemeralTurnResponse = z.infer<typeof ephemeralTurnResponseSchema>;
 export type EphemeralTurnInput = z.infer<typeof ephemeralTurnInputSchema>;

@@ -82,7 +82,9 @@ export function validatePlanFiles(root) {
     }
   }
   errors.push(...validateMigrationReservations(
-    readdirSync(path.join(root, "packages/database/src/migrations")), [...plannedMigrations],
+    // Match migrate.ts: only .sql files are migrations; colocated tests are not.
+    readdirSync(path.join(root, "packages/database/src/migrations")).filter((name) => name.endsWith(".sql")),
+    [...plannedMigrations],
   ));
   const ready = manifest.tasks.filter(t => t.status === "planned" && t.dependsOn.every(
     id => manifest.tasks.find(p => p.id === id)?.status === "verified",

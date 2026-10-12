@@ -12,7 +12,7 @@ import type {
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
-import { insertOpeningTask } from "./opening-retest-task";
+import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
@@ -129,6 +129,14 @@ export function createOpeningPlansRepository(sql: Sql) {
       input: TaskCreateInput & { dueText?: string | null },
     ): Promise<TaskCreateResult> {
       return insertOpeningTask(sql, scope, input);
+    },
+
+    /** Same write as createTask; also reports whether a clientKey replay returned an existing task. */
+    async createTaskWithOutcome(
+      scope: OpeningScope,
+      input: TaskCreateInput & { dueText?: string | null },
+    ): Promise<TaskCreateOutcome> {
+      return insertOpeningTaskWithOutcome(sql, scope, input);
     },
 
     async updateTaskStatus(scope: OpeningScope, taskId: string, input: TaskStatusUpdateInput): Promise<TaskItem> {
@@ -462,6 +470,8 @@ export function createOpeningPlansRepository(sql: Sql) {
             AND propose_client_key = ${clientKey}
           ORDER BY created_at DESC, id DESC
           LIMIT 1`;
+        let supersede: string | null = null;
+        let prebuilt: Awaited<ReturnType<typeof build>> | null = null;
         if (existingRows.length) {
           const existing = mapDraft(existingRows[0] as Record<string, unknown>);
           if (existing.status === "rejected") {
@@ -480,14 +490,24 @@ export function createOpeningPlansRepository(sql: Sql) {
               unplannedPendingCount,
             };
           }
-          return {
-            draft: existing,
-            skippedBecauseAccepted: false,
-            dailyDraftSkippedReason: null,
-          };
+          // PR-B: an unconfirmed auto draft is recomputed when its inputs changed or it
+          // predates the local-day fix (no algo marker). Unchanged -> keep it (stable id); else the old row
+          // is superseded (status 'rejected' + input_snapshot.supersededBy, no schema
+          // change) and a fresh draft is inserted. The advisory lock above serializes
+          // concurrent callers, so at most one 'draft' row exists per day/clientKey.
+          // Accepted plans never reach here (acceptedVersion / status checks above).
+          const rebuilt = await build();
+          if (rebuilt.kind === "skip") {
+            return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
+          }
+          if (autoDraftInputsUnchanged((existingRows[0] as Record<string, unknown>).input_snapshot, rebuilt.input)) {
+            return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
+          }
+          supersede = existing.id;
+          prebuilt = rebuilt;
         }
 
-        const built = await build();
+        const built = prebuilt ?? await build();
         if (built.kind === "skip") {
           return {
             draft: null,
@@ -524,7 +544,17 @@ export function createOpeningPlansRepository(sql: Sql) {
           free: input.free,
           proposedAt: new Date().toISOString(),
           autoDraft: true,
+          algo: AUTO_DRAFT_ALGO,
         };
+        if (supersede) {
+          await tx`
+            UPDATE opening_plan_drafts
+            SET status = 'rejected',
+                input_snapshot = input_snapshot || ${tx.json({ supersededBy: id, supersededReason: "auto_recompute" } as never)},
+                updated_at = now()
+            WHERE id = ${supersede} AND workspace_id = ${scope.workspaceId}
+              AND owner_user_id = ${scope.ownerUserId} AND status = 'draft'`;
+        }
         const rows = await tx`
           INSERT INTO opening_plan_drafts (
             id, workspace_id, owner_user_id, day, version, base_version, status,
@@ -542,6 +572,32 @@ export function createOpeningPlansRepository(sql: Sql) {
       });
     },
   };
+}
+
+/** Marker stored in auto-draft input_snapshot; drafts without it predate the PR-B local-day fix. */
+const AUTO_DRAFT_ALGO = "local-day-v1";
+
+/**
+ * True when the stored unconfirmed auto draft was built by the current algorithm from
+ * the same inputs (tasks + free/hard blocks). Time passing alone never triggers a
+ * recompute, so a draft the user is looking at is not superseded under them.
+ */
+/** Key-order-insensitive JSON (jsonb does not preserve object key order). */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)));
+    }
+    return v;
+  });
+}
+
+function autoDraftInputsUnchanged(existingSnapshot: unknown, input: ProposePlanInput): boolean {
+  if (!existingSnapshot || typeof existingSnapshot !== "object") return false;
+  const snap = existingSnapshot as Record<string, unknown>;
+  return snap.algo === AUTO_DRAFT_ALGO
+    && canonicalJson(snap.tasks) === canonicalJson(JSON.parse(JSON.stringify(input.tasks)))
+    && canonicalJson(snap.free) === canonicalJson(JSON.parse(JSON.stringify(input.free)));
 }
 
 export type OpeningPlansRepository = ReturnType<typeof createOpeningPlansRepository>;

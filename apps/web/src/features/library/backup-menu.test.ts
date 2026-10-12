@@ -12,6 +12,8 @@ describe("native backup menu", () => {
     expect(html).toContain("跳过");
     expect(html).toContain("不会覆盖");
     expect(html).not.toMatch(/无损|lossless/i);
+    expect(html).not.toContain("完整恢复");
+    expect(html).toMatch(/不是完整工作区恢复|Opening 学习/);
     expect(html).not.toContain("style=");
   });
 });

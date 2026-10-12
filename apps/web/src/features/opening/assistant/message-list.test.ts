@@ -2,7 +2,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Composer, logicalSendFingerprint, nextClientKey } from "./composer";
-import { MessageList } from "./message-list";
+import { turnRecordSchema } from "@aistudy/contracts";
+import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
+import { createOpeningApi } from "../client/api";
+import { resolveChatMessages } from "./message-model";
 import { citationChipLabel, sourceDownloadHref, sourceViewerHref } from "../inbox/source-viewer";
 
 describe("logical send clientKey", () => {
@@ -144,6 +147,39 @@ describe("MessageList", () => {
 
     expect(html).toContain("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;");
     expect(html).not.toContain("<script>alert");
+  });
+
+  // LAB-U01 (ported from 05ffeec): an ordinary failure keeps the red failure line.
+  it("keeps the red failure line for an ordinary failed assistant turn", () => {
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{ id: "turn-f", role: "assistant", text: "provider rejected the request", citationLabels: [], status: "failed" }],
+    }));
+    expect(html).toContain("本轮失败，未得到有效回答。");
+    expect(html).not.toContain(CLARIFY_FOLLOW_UP);
+  });
+
+  // LAB-U01: after a reload a `clarify` turn comes back through the real client +
+  // contract parse and renders as a Clarify follow-up, without the red failure line.
+  it("renders a reloaded clarify turn as a Clarify follow-up, parsed through the real turn contract", async () => {
+    const conversationId = "22222222-2222-4222-8222-222222222222";
+    const refusal = "这一页不在所选材料里，请重新选择材料和页码。";
+    const body = [
+      { id: "11111111-1111-4111-8111-111111111111", conversationId, role: "user", text: "第 3 页的公式怎么来的",
+        citations: [], createdAt: "2026-10-06T00:00:00.000Z", mode: "explain", status: "complete" },
+      { id: "33333333-3333-4333-8333-333333333333", conversationId, role: "assistant", text: refusal,
+        citations: [], createdAt: "2026-10-06T00:00:01.000Z", mode: "explain", status: "clarify" },
+    ];
+    expect(turnRecordSchema.parse(body[1]).status).toBe("clarify");
+    const api = createOpeningApi((async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch);
+    const turns = await api.listTurns(conversationId);
+    const { messages } = resolveChatMessages({ resume: null, turns });
+    expect(messages[1]).toMatchObject({ role: "assistant", status: "clarify", text: refusal });
+
+    const html = renderToStaticMarkup(createElement(MessageList, { messages }));
+    expect(html).toContain(`>${refusal}<`);
+    expect(html).toContain(CLARIFY_FOLLOW_UP);
+    expect(html).not.toContain("本轮失败");
+    expect(html).not.toContain("text-red-700");
   });
 
   it("renders outcome_unknown as an explicit no-resubmit warning, not failed", () => {

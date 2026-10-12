@@ -18,6 +18,14 @@ export type LocalNoteDraft = {
   title: string;
   blocks: LocalDraftBlock[];
   updatedAt: string;
+  /**
+   * Server revision this draft was derived from. Saves send it as
+   * expectedRevisionNumber, so a draft based on an older revision gets a 409
+   * instead of overwriting newer revisions. Absent on legacy (pre-J1) drafts.
+   */
+  baseRevisionNumber?: number;
+  /** Optional idempotency key placeholder (J3, PR-E pattern); not sent yet. */
+  clientKey?: string;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -34,7 +42,7 @@ function createId(prefix: string): string {
 }
 
 /** Block ids are persisted server-side as UUIDs; randomUUID is absent outside secure contexts. */
-function createBlockId(): string {
+export function createBlockId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
@@ -85,6 +93,9 @@ export function deserializeLocalDraft(value: string | null): LocalNoteDraft | nu
     if (typeof parsed.draftId !== "string" || typeof parsed.title !== "string") return null;
     if (!Array.isArray(parsed.blocks) || !parsed.blocks.every(isDraftBlock)) return null;
     if (typeof parsed.updatedAt !== "string") return null;
+    if (parsed.baseRevisionNumber !== undefined
+      && !(Number.isInteger(parsed.baseRevisionNumber) && (parsed.baseRevisionNumber as number) > 0)) return null;
+    if (parsed.clientKey !== undefined && typeof parsed.clientKey !== "string") return null;
     return parsed as unknown as LocalNoteDraft;
   } catch {
     return null;

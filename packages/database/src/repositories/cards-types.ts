@@ -89,6 +89,8 @@ export type CardRepository = {
     mode: ReviewQueueMode;
     now?: Date;
     today?: string;
+    /** Workspace business IANA zone; see listCardQueue. */
+    timeZone?: string | null;
   }): Promise<CardQueueEntry[]>;
   listCards(input: {
     workspaceId: string;

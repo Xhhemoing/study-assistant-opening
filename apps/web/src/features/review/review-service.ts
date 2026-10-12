@@ -7,6 +7,8 @@ import {
   type GradeReviewResponse,
   type ListReviewQueueResponse,
 } from "@aistudy/contracts";
+import { createOpeningPlanningSettingsRepository } from "@aistudy/database";
+import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Principal } from "../../lib/authorization";
 import type { AuthRuntime } from "../auth/service";
 
@@ -28,16 +30,37 @@ export async function gradeReviewForPrincipal(
   return { state: result.state, event: result.event };
 }
 
+export type ListReviewQueueDeps = {
+  /** Request clock; read exactly once per request. */
+  now?: () => Date;
+  /** Workspace business IANA zone (planning_settings.timeZone; default Asia/Shanghai). */
+  resolveTimeZone?: (scope: { workspaceId: string; ownerUserId: string }) => Promise<string>;
+};
+
+/** planning_settings.timeZone for the workspace; missing/invalid stored settings → default zone. */
+export async function resolveWorkspaceTimeZoneForScope(
+  runtime: AuthRuntime,
+  scope: { workspaceId: string; ownerUserId: string },
+): Promise<string> {
+  const preference = await createOpeningPlanningSettingsRepository(runtime.sql).get(scope);
+  return resolveWorkspaceTimeZone(preference.settings?.timeZone);
+}
+
 export async function listReviewQueueForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
   query: unknown,
+  deps: ListReviewQueueDeps = {},
 ): Promise<ListReviewQueueResponse> {
   const parsed = listReviewQueueQuerySchema.parse(query);
+  const scope = { workspaceId: principal.workspaceId, ownerUserId: principal.userId };
+  const now = deps.now?.() ?? new Date();
+  const timeZone = await (deps.resolveTimeZone ?? ((s) => resolveWorkspaceTimeZoneForScope(runtime, s)))(scope);
   const items = await runtime.cards.listQueue({
-    workspaceId: principal.workspaceId,
-    ownerUserId: principal.userId,
+    ...scope,
     mode: parsed.mode,
+    now,
+    timeZone,
   });
   return {
     items: items.map((item) => ({

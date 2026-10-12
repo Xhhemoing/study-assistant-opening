@@ -16,6 +16,7 @@ import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
 import { RetestProposals } from "./retest-proposals";
 import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
+import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 
 type SelectionSource = "focus" | "user";
 type Props = {
@@ -37,17 +38,23 @@ const QUEUE_GROUP_LABELS = {
   other: "其他待办",
 } as const;
 
-export function localDateKey(date = new Date()): string {
+/**
+ * Local calendar date key. With `timeZone` (the workspace zone supplied by the
+ * server) the result is the business day in that zone, independent of the
+ * browser/process zone. Without it, legacy device-local behaviour is kept for
+ * callers that have not been migrated.
+ */
+export function localDateKey(date = new Date(), timeZone?: string): string {
+  if (timeZone) return localDateKeyInZone(date, timeZone);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-export function resolveTodayTimeZone(timeZone?: string): string {
-  if (timeZone && timeZone.trim()) return timeZone;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
-  } catch {
-    return "Asia/Shanghai";
-  }
+/**
+ * Workspace zone for Today. Uses the server-supplied workspace zone; when absent,
+ * falls back to the workspace default (Asia/Shanghai) — never the browser zone.
+ */
+export function resolveTodayTimeZone(timeZone?: string | null): string {
+  return resolveWorkspaceTimeZone(timeZone);
 }
 
 function timeLabel(value: string): string {
@@ -70,7 +77,7 @@ function upcomingRetestHint(tasks: TodayQueueTask[], now: Date, timeZone: string
 
 export function TodayPlanView({
   api: supplied,
-  date = localDateKey(),
+  date: dateProp,
   focusTaskId,
   selectedId,
   onSelect,
@@ -79,6 +86,7 @@ export function TodayPlanView({
 }: Props) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const timeZone = resolveTodayTimeZone(timeZoneProp);
+  const date = dateProp ?? localDateKey(new Date(), timeZone);
   const [tasks, setTasks] = useState<TodayTasks>([]);
   const [loadState, setLoadState] = useState<TaskLoadState>("loading");
   const [plan, setPlan] = useState<Awaited<ReturnType<OpeningApi["getToday"]>> | null>(null);

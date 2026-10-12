@@ -96,6 +96,23 @@ export class PageCitationError extends Error {
   }
 }
 
+/** Learner-facing Clarify prompt stored on a refused page-backed turn (LAB-A01). */
+export const PAGE_CITATION_CLARIFY_MESSAGE =
+  "无法把回答锚定到所选材料的当前页，本轮已拒答。请重新选择材料和页码（或确认页码是否正确）后再问。";
+
+/**
+ * require_page refusal that routes to Clarify (pick the material/page)
+ * instead of a generic failure. Still a PageCitationError, so it never
+ * completes a turn or writes help exposure (LAB-A01).
+ */
+export class PageCitationClarifyError extends PageCitationError {
+  readonly nextAction = "clarify" as const;
+  constructor() {
+    super(PAGE_CITATION_CLARIFY_MESSAGE);
+    this.name = "PageCitationClarifyError";
+  }
+}
+
 /**
  * Prefer citations on the sticky physical page when any match.
  * Empty cites stay empty (general answer OK). Off-page-only cites are kept

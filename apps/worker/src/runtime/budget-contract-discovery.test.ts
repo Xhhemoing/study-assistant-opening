@@ -51,7 +51,7 @@ function fakeBudget(reserveImpl?: (input: { amountCents: number; requestId: stri
       },
       release: async (requestId: string) => { repo.released.push(requestId); },
       settle: async (reservationId: string, actualCents: number) => { repo.settled.push({ reservationId, actualCents }); },
-      markUnknown: async (reservationId: string) => { repo.unknowns.push(reservationId); },
+      claimExecution: async () => true, markUnknown: async (reservationId: string) => { repo.unknowns.push(reservationId); },
       noteOverage: async (audit: { reservationId: string; reservedCents: number; actualCents: number; settledCents: number }) => {
         repo.overages.push(audit);
       },
@@ -274,7 +274,7 @@ describe("BC1 concurrency / cancel / late-result matrix", () => {
           row.amountCents = actualCents;
           row.state = "completed";
         },
-        markUnknown: async (reservationId: string) => {
+        claimExecution: async () => true, markUnknown: async (reservationId: string) => {
           const row = rows.find((r) => r.id === reservationId);
           if (!row) throw Object.assign(new Error("reservation not found"), { code: "NOT_FOUND" });
           // unknown retains reserved occupancy (opening-budget semantics)
@@ -500,7 +500,7 @@ describe("BC1 settings/discovery vs ledger semantic alignment", () => {
         },
         release: async () => undefined,
         settle: async () => undefined,
-        markUnknown: async () => undefined,
+        claimExecution: async () => true, markUnknown: async () => undefined,
       };
       return { api: ledger };
     })();

@@ -18,7 +18,7 @@ export async function learningAttemptFixture(fixture: OpeningFixture) {
     const conversation = await rows.conversation(), turnId = await rows.turn(conversation, [sourceId]);
     await fixture.sql`UPDATE opening_turns SET learning_session_id=${session.id},attempt_id=${attempt.id} WHERE id=${turnId}`;
     return learning.insertHelpExposure(fixture.scope, { id: randomUUID(), attemptId: attempt.id, sessionId: session.id,
-      problemId: attempt.problemId, turnId, level, delivered: true });
+      problemId: attempt.problemId, turnId, kind: level === "revealed" ? "solution" : "hint", level, delivered: true });
   };
   return { sourceId, chunkId, courseId, sessionId: session.id, learning, attempts, start, submit, help };
 }

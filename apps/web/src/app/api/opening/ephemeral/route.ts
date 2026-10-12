@@ -5,8 +5,8 @@ import {
   requireOpeningScope,
 } from "../../../../features/opening/runtime";
 import { EphemeralServiceError } from "../../../../features/opening/tutor/ephemeral-service";
-import { OpeningBudgetError } from "@aistudy/database";
 import { OpeningModelRoutingError, OpeningProviderError } from "@aistudy/ai";
+import { isOpeningDataError } from "../../../../features/opening/server/data-services";
 
 function ephemeralError(error: unknown): Response {
   if (error instanceof OpeningModelRoutingError) return Response.json({ error: { code: error.code, message: error.message } }, { status: 409 });
@@ -23,7 +23,7 @@ function ephemeralError(error: unknown): Response {
       { status },
     );
   }
-  if (error instanceof OpeningBudgetError) {
+  if (isOpeningDataError(error, "budget")) {
     const status = error.code === "BUDGET_EXCEEDED" ? 429 : error.code === "NOT_FOUND" ? 404 : 409;
     return Response.json(
       { error: { code: error.code, message: error.message } },

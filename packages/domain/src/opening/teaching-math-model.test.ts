@@ -188,7 +188,7 @@ describe("teaching-math-model domain", () => {
     expect(text).toContain("Linear map demo");
     expect(text).toContain("Rank-1 map");
     // Same params → y = 0
-    expect(text).toMatch(/Ax = \[ 0  0 \]/);
+    expect(text).toMatch(/Ax = \[ 0 {2}0 \]/);
 
     const fallback = staticFallbackModel(params);
     expect(fallback.labelA).toBe("A");

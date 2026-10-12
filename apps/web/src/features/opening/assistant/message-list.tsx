@@ -1,7 +1,10 @@
 "use client";
 
 import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
-import { useRef } from "react";
+import { ArtifactView } from "@aistudy/jingwei/react";
+import { useMemo, useRef } from "react";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { artifactsForMessages, openingCapabilities, openingRenderers } from "../jingwei-host";
 import { snippetSaveAvailability } from "./save-snippet";
 import { showsGeneralMaterialBadge, type ChatMessageView } from "./message-model";
 import {
@@ -12,6 +15,9 @@ import {
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
 
+/** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
+export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
+
 type Props = {
   messages: ChatMessageView[];
   historyTruncated?: boolean;
@@ -20,14 +26,19 @@ type Props = {
   onPrompt?: (text: string) => void;
   onSaveSnippet?: (message: ChatMessageView, selectedText?: string) => void;
   onCreateCard?: (message: ChatMessageView, selectedText?: string) => void;
+  /** 图解 under answers that already state a flow or numeric table (jingwei rules planner). Defaults to the server capability. */
+  artifactsEnabled?: boolean;
 };
 const prompts = [
   { title: "把一个概念讲明白", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。" },
   { title: "检验自己的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。" },
   { title: "从一个问题展开", text: "我有一个还没想清楚的问题，请和我一起拆解它，区分事实与假设。" },
 ];
-export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard }: Props) {
+export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, artifactsEnabled: artifactsEnabledProp }: Props) {
+  const { chatArtifacts } = useOpeningCapabilities();
+  const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const messageElements = useRef<Record<string, HTMLParagraphElement | null>>({});
+  const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
   function selectedTextFor(message: ChatMessageView) {
     const selection = window.getSelection();
     const element = messageElements.current[message.id];
@@ -53,6 +64,10 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
       <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>
+      {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
+        <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
+        <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />
+      </section> : null}
       {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-zinc-500">出处：</span>{message.citations.map((citation) => {
         const locators = {
           page: citation.page,
@@ -82,6 +97,7 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       {message.status === "pending" ? <p className="mt-2 text-xs text-zinc-500">生成中…</p> : null}
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">结果状态未知，请勿重复提交</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}
+      {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-amber-800">{CLARIFY_FOLLOW_UP}</p> : null}
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
     </li>; })}</ul>}
   </div>;

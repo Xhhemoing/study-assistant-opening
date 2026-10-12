@@ -45,7 +45,13 @@ export {
 } from "./planning/planner";
 export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
-export { planDay, type DayPlanResult, type PlanDayOptions } from "./opening/day-planner";
+export {
+  planDay,
+  type DayPlanResult,
+  type PlanDayOptions,
+  type UnscheduledReasonCode,
+  type UnscheduledTask,
+} from "./opening/day-planner";
 export {
   expandWeekSessions,
   normalizeWeekSessions,
@@ -194,6 +200,8 @@ export {
   freshRetestExposure,
   variantProblemRef,
   PageCitationError,
+  PageCitationClarifyError,
+  PAGE_CITATION_CLARIFY_MESSAGE,
   type DeepenTutorMode,
   type ThinTutorAction,
   type ThinTutorActionKind,

@@ -49,7 +49,7 @@ function deps(overrides?: {
     }),
     release: vi.fn(async () => writes.push("budget:release")),
     settle: vi.fn(async () => writes.push("budget:settle")),
-    markUnknown: vi.fn(async () => writes.push("budget:unknown")),
+    claimExecution: async () => true, markUnknown: vi.fn(async () => writes.push("budget:unknown")),
   };
   const complete = vi.fn(
     overrides?.complete ?? (async () => output),
@@ -94,7 +94,7 @@ describe("ephemeral tutor service", () => {
     expect(f.complete).not.toHaveBeenCalled();
     expect(selected.complete).toHaveBeenCalledOnce();
     expect(f.budget.reserve).toHaveBeenCalledWith(expect.objectContaining({ requestId: "eph-key", modelSnapshot }));
-    expect(f.budget.settle).toHaveBeenCalledWith("res-1", 16);
+    expect(f.budget.settle).toHaveBeenCalledWith("res-1", 16, { resultRef: "ephemeral:eph-key" });
   });
 
   it("does not silently ignore images on the temporary route", async () => {
@@ -102,7 +102,7 @@ describe("ephemeral tutor service", () => {
     const images = [{ mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId, physicalPage: 2 }];
     const service = createEphemeralTutorService({ sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
       privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
-      budget: { reserve: async () => ({ id: "r" }), settle: async () => {}, release: async () => {}, markUnknown: async () => {} },
+      budget: { reserve: async () => ({ id: "r" }), settle: async () => {}, release: async () => {}, claimExecution: async () => true, markUnknown: async () => {} },
       provider: { complete }, resolveModel: async () => ({ provider: { complete }, supportsVision: true, modelSnapshot: { id: "v", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
       pageImages: async () => images, config: { maxContextCharacters: 12000, maxOutputTokens: 256, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 } });
     await service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId], currentPage: 2, mode: "explain", history: [] });

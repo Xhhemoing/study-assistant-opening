@@ -9,6 +9,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./public": {
+      "types": "./src/public/index.ts",
+      "default": "./src/public/index.ts"
     }
   },
   "scripts": {

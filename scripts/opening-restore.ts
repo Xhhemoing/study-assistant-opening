@@ -16,7 +16,7 @@
  *     [--journal <deletion-journal.json>] [--staging <dir>]
  *
  * Live deps (fail-closed LIVE_DEPS_MISSING if incomplete on mutating path):
- *   DB URL preference: OPENING_RESTORE_DATABASE_URL → OPENING_TEST_DATABASE_URL → DATABASE_URL
+ *   DB URL preference: OPENING_RESTORE_DATABASE_URL → OPENING_TEST_DATABASE_URL (DATABASE_URL not accepted)
  *   S3: S3_* / OPENING_S3_* (endpoint, region, bucket, accessKeyId, secretAccessKey)
  *
  * When confirm + draft + live env are present, calls applyOpeningRestore with

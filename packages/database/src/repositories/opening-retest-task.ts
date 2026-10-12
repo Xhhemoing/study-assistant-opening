@@ -45,18 +45,24 @@ async function findRetestReplay(
   input: TaskCreateInput,
 ): Promise<TaskItem | null> {
   if (!input.clientKey) return null;
+  // Same expression as 0060's opening_jobs_retest_accept_key_uidx: the current spelling
+  // (payload.acceptClientKey) and the legacy JSON-only writer's result.clientKey.
   const sameKey = await tx`
     SELECT id, payload FROM opening_jobs
     WHERE workspace_id = ${scope.workspaceId}
       AND owner_user_id = ${scope.ownerUserId}
       AND kind = ${"retest"}
-      AND payload->>'acceptClientKey' = ${input.clientKey}
+      AND COALESCE(payload->>'acceptClientKey', result->>'clientKey') = ${input.clientKey}
     FOR UPDATE`;
   if (!sameKey.length) return null;
   const payload = (sameKey[0] as Record<string, unknown>).payload as {
     acceptPayloadHash?: string;
     taskId?: string;
   };
+  if (payload.acceptPayloadHash === undefined) {
+    // Legacy accept receipt (result.clientKey only, no task): nothing to replay.
+    throw new OpeningPlanError("CONFLICT", "clientKey already used by a legacy retest accept");
+  }
   if (payload.acceptPayloadHash !== retestPayloadHash(input)) {
     throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
   }
@@ -125,54 +131,121 @@ export async function consumeRetestCandidate(
   }
 }
 
-function sameQuickAddPayload(
-  row: Record<string, unknown>,
-  input: TaskCreateInput & { dueText?: string | null },
-): boolean {
-  const rowDue = row.due_at ? new Date(row.due_at as string | Date).toISOString() : null;
-  const inputDue = input.dueAt === null || input.dueAt === undefined ? null : new Date(input.dueAt).toISOString();
-  const rowDueText = (row.due_text as string | null | undefined) ?? null;
-  const inputDueText = input.dueText ?? null;
-  return (
-    row.title === input.title &&
-    Number(row.minutes) === input.minutes &&
-    Number(row.priority) === input.priority &&
-    rowDue === inputDue &&
-    rowDueText === inputDueText
-  );
+type QuickAddIntent = {
+  title: string;
+  minutes: number;
+  priority: number;
+  dueAt: string | null;
+  dueText: string | null;
+};
+
+/**
+ * Stable request fingerprint for the quick-add namespace (S5). Only the user-visible
+ * intent participates; status/version changes after creation never alter it.
+ */
+export function quickAddFingerprint(intent: QuickAddIntent): string {
+  return createHash("sha256")
+    .update(JSON.stringify([
+      "quick-add/v1",
+      intent.title,
+      intent.minutes,
+      intent.priority,
+      intent.dueAt === null ? null : new Date(intent.dueAt).toISOString(),
+      intent.dueText,
+    ]))
+    .digest("hex");
 }
 
-/** Idempotent quick-add when candidateId is null and clientKey is set. Not via opening_jobs. */
-async function findQuickAddReplay(
+function inputIntent(input: TaskCreateInput & { dueText?: string | null }): QuickAddIntent {
+  return {
+    title: input.title,
+    minutes: input.minutes,
+    priority: input.priority,
+    dueAt: input.dueAt ?? null,
+    dueText: input.dueText ?? null,
+  };
+}
+
+function rowIntent(row: Record<string, unknown>): QuickAddIntent {
+  return {
+    title: row.title as string,
+    minutes: Number(row.minutes),
+    priority: Number(row.priority),
+    dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
+    dueText: (row.due_text as string | null | undefined) ?? null,
+  };
+}
+
+export type TaskCreateOutcome = { task: TaskCreateResult; replayed: boolean };
+
+/**
+ * Quick-add with a clientKey (namespace: workspace + owner + quick-add + clientKey).
+ * One statement claims the key: INSERT … ON CONFLICT DO NOTHING RETURNING. A loser waits
+ * on the 0046 unique index for the winner, then re-reads the committed row in a fresh
+ * statement snapshot. The task row is placeholder, creation and result reference at once.
+ */
+async function insertQuickAddWithKey(
   tx: TransactionSql,
   scope: OpeningScope,
   input: TaskCreateInput & { dueText?: string | null },
-): Promise<TaskItem | null> {
-  if (input.candidateId !== null || !input.clientKey) return null;
-  const rows = await tx`
+  clientKey: string,
+): Promise<TaskCreateOutcome> {
+  const fingerprint = quickAddFingerprint(inputIntent(input));
+  const inserted = await tx`
+    INSERT INTO opening_tasks (
+      id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
+      priority, status, version, candidate_id, client_key
+    ) VALUES (
+      ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
+      ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
+      ${null}, ${clientKey}
+    )
+    ON CONFLICT (workspace_id, owner_user_id, client_key) WHERE client_key IS NOT NULL DO NOTHING
+    RETURNING *`;
+  if (inserted.length) return { task: mapTask(inserted[0] as Record<string, unknown>), replayed: false };
+  const existing = await tx`
     SELECT * FROM opening_tasks
     WHERE workspace_id = ${scope.workspaceId}
       AND owner_user_id = ${scope.ownerUserId}
-      AND client_key = ${input.clientKey}
-    FOR UPDATE`;
-  if (!rows.length) return null;
-  const row = rows[0] as Record<string, unknown>;
-  if (!sameQuickAddPayload(row, input)) {
+      AND client_key = ${clientKey}`;
+  const row = existing[0] as Record<string, unknown> | undefined;
+  // The key holder vanished between statements (e.g. a restore replaced the workspace).
+  if (!row) throw new OpeningPlanError("CONFLICT", "clientKey holder changed; retry");
+  if (row.candidate_id !== null && row.candidate_id !== undefined) {
+    throw new OpeningPlanError("CONFLICT", "clientKey belongs to another task kind");
+  }
+  if (quickAddFingerprint(rowIntent(row)) !== fingerprint) {
     throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
   }
-  return mapTask(row);
+  return { task: mapTask(row), replayed: true };
 }
 
+/** Legacy shape: returns only the task. Prefer insertOpeningTaskWithOutcome. */
 export async function insertOpeningTask(
   sql: Sql,
   scope: OpeningScope,
   input: TaskCreateInput & { dueText?: string | null },
 ): Promise<TaskCreateResult> {
+  return (await insertOpeningTaskWithOutcome(sql, scope, input)).task;
+}
+
+export async function insertOpeningTaskWithOutcome(
+  sql: Sql,
+  scope: OpeningScope,
+  input: TaskCreateInput & { dueText?: string | null },
+): Promise<TaskCreateOutcome> {
   if (input.dueText && input.dueAt) {
     throw new OpeningPlanError("VALIDATION", "ambiguous dueText cannot become a formal deadline");
   }
-  // Quick-add stores client_key on the task row; candidate accepts keep their own receipts.
-  const taskClientKey = input.candidateId === null ? (input.clientKey ?? null) : null;
+  if (input.candidateId === null && input.clientKey) {
+    const clientKey = input.clientKey;
+    return sql.begin((tx) => insertQuickAddWithKey(tx, scope, input, clientKey));
+  }
+  // Candidate accepts keep their own receipts (assistant: task_accept_client_key,
+  // retest: opening_jobs.payload.acceptClientKey). No-key quick-add is not idempotent.
+  // `replayed` = this call created no task (same-key replay or an already-accepted candidate).
+  // A rolled-back insert's id is never returned, so id equality proves creation.
+  let createdId: string | null = null;
   const insert = async (tx: TransactionSql): Promise<TaskItem> => {
     const rows = await tx`
       INSERT INTO opening_tasks (
@@ -181,28 +254,46 @@ export async function insertOpeningTask(
       ) VALUES (
         ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
         ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
-        ${input.candidateId}, ${taskClientKey}
+        ${input.candidateId}, ${null}
       ) RETURNING *`;
-    return mapTask(rows[0] as Record<string, unknown>);
+    const task = mapTask(rows[0] as Record<string, unknown>);
+    createdId = task.id;
+    return task;
   };
   if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
-    return acceptAssistantTask(sql, scope, input, insert);
+    const task = await acceptAssistantTask(sql, scope, input, insert);
+    return { task, replayed: task.id !== createdId };
   }
+  try {
+    const task = await insertRetestOrPlainTask(sql, scope, input, insert);
+    return { task, replayed: task.id !== createdId };
+  } catch (error) {
+    if (!isRetestAcceptKeyViolation(error)) throw error;
+    // The 0060 index rejected a racing writer that bypassed the workspace learning lock.
+    // PostgreSQL aborted this transaction; compare against the committed winner afresh.
+    const replay = await sql.begin((tx) => findRetestReplay(tx, scope, input));
+    if (!replay) throw error;
+    return { task: replay, replayed: true };
+  }
+}
+
+function isRetestAcceptKeyViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null
+    && (error as { code?: unknown }).code === "23505"
+    && (error as { constraint_name?: unknown }).constraint_name === "opening_jobs_retest_accept_key_uidx";
+}
+
+async function insertRetestOrPlainTask(
+  sql: Sql,
+  scope: OpeningScope,
+  input: TaskCreateInput & { dueText?: string | null },
+  insert: (tx: TransactionSql) => Promise<TaskItem>,
+): Promise<TaskItem> {
   return sql.begin(async (tx) => {
     if (input.inputSnapshot?.kind === "retest") await lockWorkspaceLearningHistory(tx, scope);
     const retestReplay = await prepareRetestTask(tx, scope, input);
     if (retestReplay) return retestReplay;
-    const quickReplay = await findQuickAddReplay(tx, scope, input);
-    if (quickReplay) return quickReplay;
-    let task: TaskItem;
-    try {
-      task = await insert(tx);
-    } catch (error) {
-      // Concurrent quick-add with the same clientKey: re-read under the unique index.
-      const raced = await findQuickAddReplay(tx, scope, input);
-      if (raced) return raced;
-      throw error;
-    }
+    const task = await insert(tx);
     await consumeRetestCandidate(tx, scope, input, task.id);
     const candidateRows = await tx`SELECT payload FROM opening_jobs
       WHERE id=${input.candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}

@@ -1,13 +1,13 @@
-import { readOpeningAssistantReviewCandidates } from "@aistudy/database";
 import { assistantCandidateSchema, type AssistantCandidateRecord } from "@aistudy/contracts";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
+import { openingQueries } from "../../../../features/opening/server/data-services";
 
 /** Pending assistant candidates for the current owner only (M01/P02 consume them later). */
 export async function GET(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const candidates = (await readOpeningAssistantReviewCandidates(sql, scope)).filter(
+    const candidates = (await openingQueries(sql).assistantReviewCandidates(scope)).filter(
       (candidate) => candidate.workspaceId === scope.workspaceId,
     );
     const response: AssistantCandidateRecord[] = [];

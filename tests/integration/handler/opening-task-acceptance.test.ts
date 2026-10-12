@@ -34,11 +34,11 @@ it("returns the same product after an HTTP response is lost and then reports ano
   const { id } = await taskCandidate(fixture), input = { ...acceptInput(id), expectedVersion: 0 };
   expect((await post(input)).status).toBe(201); // Deliberately discard the successful response body.
   const replay = await post(input);
-  expect(replay.status).toBe(201);
+  expect(replay.status).toBe(200); // PR-E: same-key replay creates nothing.
   const body = taskCreateResultSchema.parse(await replay.json());
   expect(body.reviewResult).toEqual({ disposition: "replayed", resultRef: { kind: "task", id: body.id } });
   const repeat = await post(acceptInput(id));
-  expect(repeat.status).toBe(201);
+  expect(repeat.status).toBe(200); // PR-E: already_processed creates nothing.
   expect(await repeat.json()).toMatchObject({ id: body.id, reviewResult: { disposition: "already_processed" } });
   expect(await fixture.sql`SELECT id FROM opening_tasks`).toHaveLength(1);
   expect(await fixture.sql`SELECT id FROM opening_plan_drafts WHERE workspace_id = ${fixture.scope.workspaceId}`).toHaveLength(0);

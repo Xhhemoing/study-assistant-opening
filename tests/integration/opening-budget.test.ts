@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOpeningBudgetRepository } from "@aistudy/database";
+import { createOpeningBudgetRepository, OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let fixture: OpeningFixture;
@@ -55,7 +55,7 @@ describe("opening budget ledger (guarded)", () => {
     // Next reserve reconciles the 2-day-old reserved row to completed on its created day,
     // so it no longer blocks today's cap.
     const today = await reserve("today", 50_000);
-    await budget.settle(today.id, 50_000);
+    await budget.settle(fixture.scope, today.id, 50_000);
     await expect(reserve("over", 50_001)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
     await fixture.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '2 days', updated_at=now()-interval '2 days' WHERE id=${today.id}`;
     await expect(reserve("next-day", 50_000)).resolves.toBeDefined();
@@ -69,9 +69,11 @@ describe("opening budget ledger (guarded)", () => {
     expect((await budget.reserve(fixture.scope, input)).id).toBe(first.id);
     await expect(budget.reserve(fixture.otherScope, input)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(budget.reserve(fixture.scope, { ...input, amountCents: 11 })).rejects.toMatchObject({ code: "CONFLICT" });
-    await budget.settle(first.id, 8);
-    await expect(budget.release(input.requestId)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(budget.reserve(fixture.scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+    await budget.settle(fixture.scope, first.id, 8);
+    await expect(budget.release(fixture.scope, input.requestId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    // PR-D: a completed key replays its terminal state (no new charge) instead of CONFLICT.
+    await expect(budget.reserve(fixture.scope, input)).resolves.toMatchObject({ id: first.id, state: "completed", amountCents: 8, replayed: true });
+    await expect(budget.reserve(fixture.otherScope, input)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("a failed pre-send call releases the reservation by requestId", async () => {
@@ -80,7 +82,7 @@ describe("opening budget ledger (guarded)", () => {
       amountCents: 5_000,
       requestId: "pre-send",
     });
-    const released = await budget.release("pre-send");
+    const released = await budget.release(fixture.scope, "pre-send");
     expect(released.state).toBe("released");
     const rows = await fixture.sql`
       SELECT COALESCE(sum(amount_cents), 0)::int AS total FROM opening_budget_reservations
@@ -95,7 +97,7 @@ describe("opening budget ledger (guarded)", () => {
       amountCents: 5_000,
       requestId: "post-send",
     });
-    await budget.markUnknown(reservation.id);
+    await budget.markUnknown(fixture.scope, reservation.id);
     const rows = await fixture.sql`
       SELECT state FROM opening_budget_reservations WHERE id = ${reservation.id}
     `;
@@ -108,10 +110,10 @@ describe("opening budget ledger (guarded)", () => {
       amountCents: 5_000,
       requestId: "settle",
     });
-    const settled = await budget.settle(reservation.id, 1_200);
+    const settled = await budget.settle(fixture.scope, reservation.id, 1_200);
     expect(settled.amountCents).toBe(1_200);
     expect(settled.state).toBe("completed");
-    await expect(budget.settle(reservation.id, 1_200)).rejects.toMatchObject({
+    await expect(budget.settle(fixture.scope, reservation.id, 1_200)).rejects.toMatchObject({
       code: "NOT_FOUND",
     });
   });
@@ -127,12 +129,27 @@ describe("model attribution within the shared workspace ledger", () => {
     expect((await budget.reserve(fixture.scope, input)).id).toBe(reservation.id);
     await expect(budget.reserve(fixture.scope, { ...input, modelSnapshot: secondModel })).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(budget.reserve(fixture.scope, { ...input, modelSnapshot: { ...firstModel, outputCentsPerMillion: 30 } })).rejects.toMatchObject({ code: "CONFLICT" });
-    const settled = await budget.settle(reservation.id, 7);
+    const settled = await budget.settle(fixture.scope, reservation.id, 7);
     expect(settled.modelSnapshot).toEqual(firstModel);
+  });
+  it("replays when the model snapshot keys arrive in a different order", async () => {
+    const reordered = {
+      outputCentsPerMillion: firstModel.outputCentsPerMillion,
+      modelName: firstModel.modelName,
+      inputCentsPerMillion: firstModel.inputCentsPerMillion,
+      providerId: firstModel.providerId,
+      id: firstModel.id,
+    };
+    expect(Object.keys(reordered)).not.toEqual(Object.keys(firstModel));
+    const reservation = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "key-order", amountCents: 10, modelSnapshot: firstModel });
+    const replay = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "key-order", amountCents: 10, modelSnapshot: reordered });
+    expect(replay.id).toBe(reservation.id);
+    const rows = await fixture.sql`SELECT count(*)::int AS n FROM opening_budget_reservations WHERE request_id='key-order'`;
+    expect(rows[0].n).toBe(1);
   });
   it("does not reset workspace usage when the chosen model or supplier changes", async () => {
     const first = await budget.reserve(fixture.scope, { purpose: "tutor", requestId: "first-provider", amountCents: 60_000, modelSnapshot: firstModel });
-    await budget.settle(first.id, 60_000);
+    await budget.settle(fixture.scope, first.id, 60_000);
     await expect(budget.reserve(fixture.scope, { purpose: "tutor", requestId: "second-provider", amountCents: 40_001, modelSnapshot: secondModel })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
   });
 });
@@ -141,7 +158,7 @@ describe("unknown reservation reconciliation (DL7)", () => {
   it("completes reserved rows older than the unknown age and leaves recent ones reserved", async () => {
     const local = createOpeningBudgetRepository(fixture.sql, {
       envCapCents: 100_000,
-      unknownAgeMs: 30 * 60 * 1000,
+      unknownAgeMs: OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS,
       timeZone: "Asia/Shanghai",
     });
     const stale = await local.reserve(fixture.scope, { purpose: "tutor", amountCents: 10_000, requestId: "stale-unknown" });
@@ -157,3 +174,4 @@ describe("unknown reservation reconciliation (DL7)", () => {
     expect(byId[fresh.id]).toBe("reserved");
   });
 });
+

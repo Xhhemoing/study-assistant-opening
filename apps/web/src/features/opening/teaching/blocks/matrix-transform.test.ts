@@ -118,7 +118,7 @@ describe("reduced-motion / autoplay (T15)", () => {
       isMatrixTransformInteractiveEnabled({
         NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE: "false",
       }),
-    ).toBe(false);
+    ).toBe(true); // PR-H: NEXT_PUBLIC_* twin ignored
   });
 });
 

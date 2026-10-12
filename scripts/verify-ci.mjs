@@ -59,6 +59,16 @@ if (!/minio/i.test(yaml)) {
   fail("workflow missing minio service");
 }
 
+// Plan §7.4 server data-access boundary (Client Component graph must not
+// reach DB drivers / server-only adapters, directly or transitively).
+const boundary = spawnSync(process.execPath, [path.join(root, "scripts/check-server-boundary.mjs")], {
+  cwd: root,
+  stdio: "inherit",
+});
+if (boundary.status !== 0) {
+  fail("server data-access boundary violated (scripts/check-server-boundary.mjs)");
+}
+
 const contractCommand = process.platform === "win32"
   ? {
       command: process.env.ComSpec ?? "cmd.exe",

@@ -15,8 +15,12 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
-    const task = await getPlanService(sql).createTask(scope, await readOpeningJsonBody(request));
-    return Response.json(task, { status: 201 });
+    const { task, replayed } = await getPlanService(sql).createTaskWithOutcome(
+      scope,
+      await readOpeningJsonBody(request),
+    );
+    // 201 = new task; 200 = same clientKey replayed the existing task.
+    return Response.json(task, { status: replayed ? 200 : 201 });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }
