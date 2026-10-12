@@ -50,3 +50,20 @@ describe("assertOpeningTestDatabase", () => {
     expect(url.pathname).toBe("/aistudy_opening_test");
   });
 });
+
+describe("PR-B scratch database override", () => {
+  it("default unchanged; scratch name must match the strict pattern", () => {
+    const saved = process.env.OPENING_TEST_DB_SCRATCH_NAME;
+    try {
+      delete process.env.OPENING_TEST_DB_SCRATCH_NAME;
+      expect(() => assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_prb_scratch_20261012", "1")).toThrow(/exactly aistudy_opening_test/);
+      process.env.OPENING_TEST_DB_SCRATCH_NAME = "aistudy_prb_scratch_20261012";
+      expect(assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_prb_scratch_20261012", "1").pathname).toBe("/aistudy_prb_scratch_20261012");
+      expect(() => assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_opening_test", "1")).toThrow(/exactly aistudy_prb_scratch_/);
+      process.env.OPENING_TEST_DB_SCRATCH_NAME = "aistudy_opening_test";
+      expect(() => assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_opening_test", "1")).toThrow(/Refusing OPENING_TEST_DB_SCRATCH_NAME/);
+    } finally {
+      if (saved === undefined) delete process.env.OPENING_TEST_DB_SCRATCH_NAME; else process.env.OPENING_TEST_DB_SCRATCH_NAME = saved;
+    }
+  });
+});
