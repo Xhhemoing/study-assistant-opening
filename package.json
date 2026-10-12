@@ -26,7 +26,9 @@
     "compose:down": "docker compose -f infra/docker/compose.yml down",
     "compose:ps": "docker compose -f infra/docker/compose.yml ps",
     "db:migrate": "tsx ./scripts/db-migrate.ts",
-    "verify:ci": "node ./scripts/verify-ci.mjs"
+    "verify:ci": "node ./scripts/verify-ci.mjs",
+    "env:examples": "tsx ./scripts/env-examples.ts --write",
+    "env:check": "tsx ./scripts/env-examples.ts --check"
   },
   "engines": {
     "node": ">=20"
