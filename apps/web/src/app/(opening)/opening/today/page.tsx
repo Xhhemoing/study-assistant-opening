@@ -1,11 +1,11 @@
 import { headers } from "next/headers";
-import { createOpeningPlanningSettingsRepository } from "@aistudy/database";
 import { DEFAULT_WORKSPACE_TIME_ZONE, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { ApiError } from "../../../../features/auth/service";
 import type { TodayResumeState } from "../../../../features/opening/planning/today-read";
 import { createTodayResumeReader, loadTodayResumeState } from "../../../../features/opening/planning/today-service";
 import { TodayDashboard } from "../../../../features/opening/planning/today-dashboard";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
+import { getPlanningSettingsService } from "../../../../features/opening/server/data-services";
 
 
 export default async function OpeningTodayPage({ searchParams }: { searchParams: Promise<{ task?: string }> }) {
@@ -19,7 +19,7 @@ async function loadPage(): Promise<{ state: TodayResumeState; timeZone: string }
     const state = await loadTodayResumeState({ scope, reader: createTodayResumeReader(sql) });
     // Workspace business zone (planning_settings.timeZone, default Asia/Shanghai);
     // the client must not derive "today" from the browser zone.
-    const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
+    const preference = await getPlanningSettingsService(sql).get(scope);
     return { state, timeZone: resolveWorkspaceTimeZone(preference.settings?.timeZone) };
   } catch (error) {
     return {
