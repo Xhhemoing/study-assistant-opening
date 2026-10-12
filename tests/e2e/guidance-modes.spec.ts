@@ -1,4 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function openEntryExploreFold(page: Page) {
+  const fold = page.locator('details[data-advanced-fold="entry-explore"]');
+  await fold.locator("summary").click();
+  await expect(fold).toHaveAttribute("open", "");
+}
 
 function userInput(label: string) {
   return {
@@ -17,8 +23,10 @@ test("switches guidance autonomy mode between free, advisory, and coach", async 
     expect(registered.status()).toBe(201);
 
     const page = await context.newPage();
-    // Settings split: 计划自主权 / GuidanceModePicker lives on advanced settings.
+    // Settings split: 计划自主权 / GuidanceModePicker lives on advanced settings,
+    // inside the collapsed 「默认入口与探索相关」 fold (R2 denoise).
     await page.goto("/settings/advanced");
+    await openEntryExploreFold(page);
 
     const coach = page.locator('input[name="guidance-mode"][value="coach"]');
     const free = page.locator('input[name="guidance-mode"][value="free"]');
@@ -46,6 +54,7 @@ test("reserves and removes protected exploration time", async ({ browser, baseUR
 
     const page = await context.newPage();
     await page.goto("/settings/advanced");
+    await openEntryExploreFold(page);
 
     // Scope to protected-exploration so 「开始」/「结束」 never collide with timetable labels.
     const exploration = page.locator('[aria-labelledby="protected-exploration-heading"]');
