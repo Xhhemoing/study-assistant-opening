@@ -579,7 +579,7 @@ export function ResumeCard({
       cancelled = true;
     };
     // Fetch only when activity identity changes and no prefetched resume.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: avoid fetchResume identity loops
+    // Intentionally omit fetchResume identity to avoid request loops.
   }, [activity.id, resumeProp, api]);
 
   const handleContinue = useCallback(async () => {
