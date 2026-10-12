@@ -45,18 +45,24 @@ async function findRetestReplay(
   input: TaskCreateInput,
 ): Promise<TaskItem | null> {
   if (!input.clientKey) return null;
+  // Same expression as 0060's opening_jobs_retest_accept_key_uidx: the current spelling
+  // (payload.acceptClientKey) and the legacy JSON-only writer's result.clientKey.
   const sameKey = await tx`
     SELECT id, payload FROM opening_jobs
     WHERE workspace_id = ${scope.workspaceId}
       AND owner_user_id = ${scope.ownerUserId}
       AND kind = ${"retest"}
-      AND payload->>'acceptClientKey' = ${input.clientKey}
+      AND COALESCE(payload->>'acceptClientKey', result->>'clientKey') = ${input.clientKey}
     FOR UPDATE`;
   if (!sameKey.length) return null;
   const payload = (sameKey[0] as Record<string, unknown>).payload as {
     acceptPayloadHash?: string;
     taskId?: string;
   };
+  if (payload.acceptPayloadHash === undefined) {
+    // Legacy accept receipt (result.clientKey only, no task): nothing to replay.
+    throw new OpeningPlanError("CONFLICT", "clientKey already used by a legacy retest accept");
+  }
   if (payload.acceptPayloadHash !== retestPayloadHash(input)) {
     throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
   }
@@ -237,7 +243,7 @@ export async function insertOpeningTaskWithOutcome(
   }
   // Candidate accepts keep their own receipts (assistant: task_accept_client_key,
   // retest: opening_jobs.payload.acceptClientKey). No-key quick-add is not idempotent.
-  // Their HTTP replays keep the pre-PR-E 201 contract, so `replayed` stays false here.
+  // Candidate replays keep the pre-PR-E 201 contract here (replayed=false).
   const insert = async (tx: TransactionSql): Promise<TaskItem> => {
     const rows = await tx`
       INSERT INTO opening_tasks (
@@ -253,7 +259,31 @@ export async function insertOpeningTaskWithOutcome(
   if (input.candidateId && input.inputSnapshot?.kind !== "retest") {
     return { task: await acceptAssistantTask(sql, scope, input, insert), replayed: false };
   }
-  const task = await sql.begin(async (tx) => {
+  try {
+    return { task: await insertRetestOrPlainTask(sql, scope, input, insert), replayed: false };
+  } catch (error) {
+    if (!isRetestAcceptKeyViolation(error)) throw error;
+    // The 0060 index rejected a racing writer that bypassed the workspace learning lock.
+    // PostgreSQL aborted this transaction; compare against the committed winner afresh.
+    const replay = await sql.begin((tx) => findRetestReplay(tx, scope, input));
+    if (!replay) throw error;
+    return { task: replay, replayed: true };
+  }
+}
+
+function isRetestAcceptKeyViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null
+    && (error as { code?: unknown }).code === "23505"
+    && (error as { constraint_name?: unknown }).constraint_name === "opening_jobs_retest_accept_key_uidx";
+}
+
+async function insertRetestOrPlainTask(
+  sql: Sql,
+  scope: OpeningScope,
+  input: TaskCreateInput & { dueText?: string | null },
+  insert: (tx: TransactionSql) => Promise<TaskItem>,
+): Promise<TaskItem> {
+  return sql.begin(async (tx) => {
     if (input.inputSnapshot?.kind === "retest") await lockWorkspaceLearningHistory(tx, scope);
     const retestReplay = await prepareRetestTask(tx, scope, input);
     if (retestReplay) return retestReplay;
@@ -281,5 +311,4 @@ export async function insertOpeningTaskWithOutcome(
     }
     return task;
   });
-  return { task, replayed: false };
 }
