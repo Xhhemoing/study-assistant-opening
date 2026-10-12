@@ -1,10 +1,5 @@
-import { notFound } from "next/navigation";
+import { ReviewSession } from "../../../../features/review/review-session";
 
-export default async function ReviewPage() {
-  if (process.env.NODE_ENV === "production") {
-    notFound();
-  } else {
-    const { ReviewSession } = await import("../../../../features/review/review-session");
-    return <ReviewSession />;
-  }
+export default function ReviewPage() {
+  return <ReviewSession />;
 }

@@ -1,8 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import {
-  isAllowedCookieAuthOrigin,
-  shouldRedirectLegacyMockPages,
-} from "./features/opening/access-policy";
+import { isAllowedCookieAuthOrigin, isOpeningRelease } from "./features/opening/access-policy";
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -39,9 +36,7 @@ export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string)
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const legacyRedirect = legacyOpeningRedirectPath(pathname);
-  // Production isolates mock pages without requiring OPENING_RELEASE=1.
-  // /learn/courses* stays reachable by product decision (see access-middleware.test.ts).
-  if (shouldRedirectLegacyMockPages() && legacyRedirect) {
+  if (isOpeningRelease() && legacyRedirect) {
     const target = request.nextUrl.clone();
     target.pathname = legacyRedirect;
     return NextResponse.redirect(target);

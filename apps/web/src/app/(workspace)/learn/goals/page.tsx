@@ -1,10 +1,5 @@
-import { notFound } from "next/navigation";
+import { GoalList } from "../../../../features/goals/goal-list";
 
-export default async function GoalsPage() {
-  if (process.env.NODE_ENV === "production") {
-    notFound();
-  } else {
-    const { GoalList } = await import("../../../../features/goals/goal-list");
-    return <GoalList />;
-  }
+export default function GoalsPage() {
+  return <GoalList />;
 }

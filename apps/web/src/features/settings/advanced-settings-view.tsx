@@ -1,22 +1,30 @@
 "use client";
 
 import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
-import { ArrowLeft, LoaderCircle, RefreshCw, Save } from "lucide-react";
+import { ArrowLeft, Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import type { GuidanceMode } from "../../lib/data/types";
+import { useStudyProvider } from "../../lib/data/react";
 import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings/guidance-mode-picker";
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
+import { DiagnosticsPanel } from "./diagnostics-panel";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
 import {
   fetchWorkspacePreferences,
+  guidanceModes,
   putWorkspacePreferences,
   workspaceEntries,
   type WorkspaceEntry,
 } from "./settings-shared";
 
 export function AdvancedSettingsView() {
+  const router = useRouter();
+  const provider = useStudyProvider();
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
+  const [guidanceMode, setGuidanceMode] = useState<GuidanceMode>("balanced");
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
     mode: defaultGuidanceMode(),
     protectedSlots: [],
@@ -27,17 +35,25 @@ export function AdvancedSettingsView() {
   const [notice, setNotice] = useState("");
 
   const loadSettings = useCallback(async () => {
+    if (!provider) {
+      setLoading(true);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
-      const body = await fetchWorkspacePreferences();
+      const [body, mode] = await Promise.all([
+        fetchWorkspacePreferences(),
+        provider.getGuidanceMode(),
+      ]);
       setDefaultEntry(body.defaultEntry ?? null);
+      setGuidanceMode(mode);
     } catch {
       setError("设置暂时无法读取，请重试。");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [provider]);
 
   useEffect(() => {
     void loadSettings();
@@ -58,11 +74,38 @@ export function AdvancedSettingsView() {
     }
   }
 
+  async function saveGuidanceMode(value: GuidanceMode) {
+    if (!provider) return;
+    setGuidanceMode(value);
+    setError("");
+    try {
+      await provider.setGuidanceMode(value);
+      setNotice("指导模式已保存。");
+    } catch {
+      setError("指导模式保存失败，请重试。");
+    }
+  }
+
+  async function resetDemoData() {
+    if (!provider || !window.confirm("确定要重置当前用户的演示数据吗？")) return;
+    setSaving(true);
+    setError("");
+    try {
+      await provider.resetDemoData();
+      router.refresh();
+      window.location.reload();
+    } catch {
+      setError("演示数据重置失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <main className="min-w-0 bg-white">
       <PageHeading
         title="高级设置"
-        description="每日额度与 AI 模型、默认入口、计划自主权、导出与备份。学习闭环相关项在主设置页。"
+        description="每日额度与 AI 模型、默认入口、指导模式、计划自主权、导出与诊断。学习闭环相关项在主设置页。"
         action={<Link className={ui.quiet} href="/settings"><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
       />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
@@ -104,6 +147,18 @@ export function AdvancedSettingsView() {
                     </button>
                   </div>
                 </section>
+                <section className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="guidance-heading">
+                  <div>
+                    <h2 className="text-sm font-medium text-zinc-900" id="guidance-heading">指导模式</h2>
+                    <p className="mt-1 text-xs leading-6 text-zinc-500">影响探索中的模拟回复风格。</p>
+                  </div>
+                  <label className="block">
+                    <span className="sr-only">指导模式</span>
+                    <select className={ui.input} onChange={(event) => void saveGuidanceMode(event.target.value as GuidanceMode)} value={guidanceMode}>
+                      {guidanceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+                    </select>
+                  </label>
+                </section>
                 <section className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="autonomy-heading">
                   <div>
                     <h2 className="text-sm font-medium text-zinc-900" id="autonomy-heading">计划自主权</h2>
@@ -137,11 +192,18 @@ export function AdvancedSettingsView() {
           <section className="mt-3 grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="demo-heading">
             <div>
               <h2 className="text-sm font-medium text-zinc-900" id="demo-heading">演示数据</h2>
-              <p className="mt-1 text-xs leading-6 text-zinc-500">生产构建不提供本地 mock 学习数据重置。</p>
+              <p className="mt-1 text-xs leading-6 text-zinc-500">只重置当前账号的本地 mock 学习数据。</p>
             </div>
-            <p className="text-sm leading-7 text-zinc-600" role="status" data-testid="demo-reset-unavailable">
-              演示数据重置仅保留在非生产预览入口；此页不会加载假学习数据。
-            </p>
+            <div>
+              <button
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-red-200 px-3 text-xs text-red-700 transition-colors duration-150 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50 motion-reduce:transition-none md:min-h-8"
+                disabled={saving}
+                onClick={() => void resetDemoData()}
+                type="button"
+              >
+                <Check aria-hidden="true" size={14} />重置演示数据
+              </button>
+            </div>
           </section>
         </details>
         <details className="group border-b border-zinc-200 pb-4" data-advanced-fold="developer">
@@ -149,9 +211,7 @@ export function AdvancedSettingsView() {
             <span className="inline-flex items-center gap-2">开发者<span className="text-xs font-normal text-zinc-500 group-open:hidden">（已折叠）</span></span>
           </summary>
           <div className="mt-3">
-            <p className="text-sm leading-7 text-zinc-600" role="status" data-testid="mock-diagnostics-unavailable">
-              基于 mock provider 的诊断面板已从发布路径移除。DB/provider 不可用时请查看真实错误或空态，不会回退到演示数据。
-            </p>
+            <DiagnosticsPanel provider={provider} />
           </div>
         </details>
         {notice ? <p className="text-sm text-emerald-700" role="status">{notice}</p> : null}

@@ -1,7 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { StudyDataProvider } from "./types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { searchableDocumentsResponseSchema } from "@aistudy/contracts";
+import { createMockProvider } from "./mock/provider";
+import { browserStorage } from "./mock/storage";
+import { withPersistedAttempts } from "./persist-attempt";
+import { withPersistedReviews } from "./persist-review";
+import type { SearchableDocument, StudyDataProvider } from "./types";
 
 const LOAD_ERROR = "加载失败，请重试。";
 
@@ -61,28 +66,19 @@ export function useCurrentUserId(): string | null {
   return result.data ?? null;
 }
 
-/**
- * Legacy demo study provider hook.
- * Production builds compare process.env.NODE_ENV directly so webpack can
- * eliminate the dynamic demo import (no seed bundles in .next/static).
- */
+async function fetchDocuments(): Promise<SearchableDocument[]> {
+  const response = await fetch("/api/documents", { cache: "no-store" });
+  if (!response.ok) throw new Error("笔记加载失败");
+  return searchableDocumentsResponseSchema.parse(await response.json()).documents;
+}
+
+export function createLegacyStudyProvider(userId: string): StudyDataProvider {
+  return withPersistedReviews(
+    withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
+  );
+}
 export function useStudyProvider(): StudyDataProvider | null {
   const userId = useCurrentUserId();
-  const [provider, setProvider] = useState<StudyDataProvider | null>(null);
-
-  useEffect(() => {
-    if (!userId || process.env.NODE_ENV === "production") {
-      setProvider(null);
-      return;
-    }
-    let cancelled = false;
-    void import("./demo-study-provider").then((mod) => {
-      if (!cancelled) setProvider(mod.createLegacyStudyProvider(userId));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [userId]);
-
-  return provider;
+  return useMemo(() => (userId ? createLegacyStudyProvider(userId) : null), [userId]);
 }
+

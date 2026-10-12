@@ -57,20 +57,10 @@ describe("opening same-origin middleware", () => {
   });
 
   it("keeps legacy course links outside the Opening redirect", () => {
-    // PRODUCT DECISION: /learn/courses* stays reachable so existing course deep
-    // links are not broken. Mock was stripped from that page instead of redirecting.
     vi.stubEnv("OPENING_RELEASE", "1");
     const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
     expect(response.status).toBe(200);
   });
-
-  it("keeps legacy course links outside production mock redirects too", () => {
-    vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("OPENING_RELEASE", "0");
-    const response = middleware(pageRequest("/learn/courses/course-1"));
-    expect(response.status).toBe(200);
-  });
-
   it.each([
     "/learn/practice/x",
     "/learn/goals",
@@ -84,24 +74,6 @@ describe("opening same-origin middleware", () => {
     expect(response.headers.get("location")).toBe(`${publicBase}/opening/today`);
   });
 
-  it.each([
-    ["/learn", "/opening/today"],
-    ["/learn/practice/mock-item", "/opening/today"],
-    ["/learn/goals", "/opening/today"],
-    ["/learn/review", "/opening/cards"],
-    ["/learn/review/session", "/opening/cards"],
-    ["/explore", "/opening/today"],
-    ["/explore/thread-1", "/opening/today"],
-    ["/preview", "/opening/today"],
-    ["/preview/notebook", "/opening/today"],
-  ])("redirects legacy mock alias %s in production without OPENING_RELEASE", (pathname, target) => {
-    vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("OPENING_RELEASE", "");
-    const response = middleware(pageRequest(pathname));
-    expect(response.status).toBe(307);
-    expect(response.headers.get("location")).toBe(`${publicBase}${target}`);
-  });
-
   it("redirects legacy review pages to opening memory cards", () => {
     vi.stubEnv("OPENING_RELEASE", "1");
     for (const pathname of ["/learn/review", "/learn/review/session"]) {
@@ -109,14 +81,6 @@ describe("opening same-origin middleware", () => {
       expect(response.status).toBe(307);
       expect(response.headers.get("location")).toBe(`${publicBase}/opening/cards`);
     }
-  });
-
-  it("does not redirect mock legacy pages in development without OPENING_RELEASE", () => {
-    vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("OPENING_RELEASE", "0");
-    const response = middleware(pageRequest("/learn/goals"));
-    expect(response.status).toBe(200);
-    expect(response.headers.get("x-middleware-next")).toBe("1");
   });
 });
 

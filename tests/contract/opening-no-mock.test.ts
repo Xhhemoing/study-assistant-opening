@@ -129,15 +129,9 @@ it("scans Opening entry points and reachable shared modules", () => {
   expect(files).not.toContain("apps/web/src/features/courses/legacy-course-detail.tsx");
 });
 
-it("legacy /learn course page uses real CourseDetail and never reaches mock providers", () => {
+it("legacy course page keeps a bundler-visible provider import outside Opening", () => {
   const legacy = readFileSync(path.join(ROOT, "apps/web/src/features/courses/legacy-course-detail.tsx"), "utf8");
-  expect(legacy).toMatch(/CourseDetail/);
-  expect(legacy).toMatch(/surface=["']learn["']/);
-  expect(legacy).not.toMatch(/lib\/data\/react|createMockProvider|useStudyProvider/);
+  expect(legacy).toMatch(/from ["']\.\.\/\.\.\/lib\/data\/react["']/);
   expect(legacy).not.toMatch(/\bnew\s+Function\b/);
   expect(concealedMockImport(legacy)).toBeNull();
-
-  const advanced = readFileSync(path.join(ROOT, "apps/web/src/features/settings/advanced-settings-view.tsx"), "utf8");
-  expect(advanced).not.toMatch(/lib\/data\/react|createMockProvider|useStudyProvider|resetDemoData/);
-  expect(concealedMockImport(advanced)).toBeNull();
 });

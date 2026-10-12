@@ -48,7 +48,7 @@ export function readCourseMediaDeepLink(search: string): { sourceId: string | nu
 }
 
 /** CT-01 / CT-08: list sources; mount at most one MediaReader after select. */
-export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/library?tab=materials" }: { assets: CourseAsset[]; libraryMaterialsHref?: string }) {
+export function CourseMediaSection({ assets }: { assets: CourseAsset[] }) {
   const sources = useMemo(
     () => assets.flatMap((asset) => (asset.source ? [{ id: asset.source.id, name: asset.source.name }] : [])),
     [assets],
@@ -108,7 +108,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
       ) : null}
       <p className="text-[11px] leading-5 text-zinc-500">
         若知识依据无法定位到片段，会写明「仅打开材料库，暂不能定位」，而不是假 seek。
-        <Link className="ml-1 text-emerald-800 underline" href={libraryMaterialsHref}>打开材料库</Link>
+        <Link className="ml-1 text-emerald-800 underline" href="/opening/library?tab=materials">打开材料库</Link>
       </p>
     </section>
   );
@@ -141,44 +141,15 @@ export function useCourseBundle(id: string) {
   return { course, assets, setCourse, setAssets, loading, error, reload: () => setReloadToken((value) => value + 1) };
 }
 
-export type CourseDetailSurface = "opening" | "learn";
-
-const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
-  coursesList: string;
-  libraryMaterials: string;
-  libraryNotes: string;
-  today: string;
-  upload: (courseId: string) => string;
-  openingActions: boolean;
-}> = {
-  opening: {
-    coursesList: "/opening/courses",
-    libraryMaterials: "/opening/library?tab=materials",
-    libraryNotes: "/opening/library?tab=notes",
-    today: "/opening/today",
-    upload: (courseId) => `/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}#upload`,
-    openingActions: true,
-  },
-  learn: {
-    coursesList: "/learn/courses",
-    libraryMaterials: "/library?tab=materials",
-    libraryNotes: "/library?tab=notes",
-    today: "/learn",
-    upload: (courseId) => `/library?tab=materials&courseId=${encodeURIComponent(courseId)}#upload`,
-    openingActions: false,
-  },
-};
-
-/** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
-export function CourseDetail({ id, surface = "opening" }: { id: string; surface?: CourseDetailSurface }) {
-  const paths = COURSE_DETAIL_PATHS[surface];
+/** Opening course page. Does not reference the legacy mock study provider. */
+export function CourseDetail({ id }: { id: string }) {
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   if (loading) return <LoadingRows label="正在读取课程…" />;
-  if (error || !course) return <main className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></main>;
+  if (error || !course) return <main className="p-5"><Link className={ui.quiet} href="/opening/courses"><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></main>;
   return <main className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
-    <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
+    <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href="/opening/courses"><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
-      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} />
+      <CourseStudyActions assetCount={assets.length} opening />
       <CourseLearningView courseId={id} />
       <CourseKnowledge courseId={id} />
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>
@@ -189,22 +160,22 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
         <div className="mt-3 space-y-3" aria-labelledby="course-assets-heading">
           <div className="flex flex-wrap items-center gap-2">
             <CourseAddMaterials courseId={id} assets={assets} onAdded={reload} />
-            <Link className={ui.quiet} href={paths.libraryMaterials}>管理知识库</Link>
+            <Link className={ui.quiet} href="/opening/library?tab=materials">管理知识库</Link>
           </div>
           {assets.length ? (
-            <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} />
+            <CourseAssets key={id} courseId={id} assets={assets} libraryHref="/opening/library?tab=notes" onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} />
           ) : (
             <EmptyState
               title="还没有挂接材料"
               description="点「添加材料」从知识库挂入，或「上传并归入本课」直接上传。"
-              action={<Link className={ui.quiet} href={paths.upload(id)}>上传并归入本课</Link>}
+              action={<Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(id)}#upload`}>上传并归入本课</Link>}
             />
           )}
         </div>
       </details>
-      <CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />
+      <CourseMediaSection assets={assets} />
       <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />
-      <Link className={ui.quiet} href={paths.today}><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
+      <Link className={ui.quiet} href="/opening/today"><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>
   </main>;
 }

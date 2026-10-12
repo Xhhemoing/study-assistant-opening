@@ -579,7 +579,6 @@ export function ResumeCard({
       cancelled = true;
     };
     // Fetch only when activity identity changes and no prefetched resume.
-    // Intentionally omit fetchResume identity to avoid request loops.
   }, [activity.id, resumeProp, api]);
 
   const handleContinue = useCallback(async () => {

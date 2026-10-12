@@ -1,10 +1,5 @@
-import { notFound } from "next/navigation";
+import { PracticeResult } from "../../../../../../features/practice/practice-result";
 
-export default async function PracticeResultPage() {
-  if (process.env.NODE_ENV === "production") {
-    notFound();
-  } else {
-    const { PracticeResult } = await import("../../../../../../features/practice/practice-result");
-    return <PracticeResult />;
-  }
+export default function PracticeResultPage() {
+  return <PracticeResult />;
 }

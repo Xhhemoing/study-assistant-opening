@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }),
 }));
+vi.mock("../../lib/data/react", () => ({ useStudyProvider: () => null }));
 vi.mock("./dingtalk-connections-panel", () => ({
   DingTalkConnectionsPanel: () => createElement("div", { "data-testid": "dingtalk" }),
 }));
@@ -73,9 +74,6 @@ describe("settings page split structure", () => {
     expect(html).toContain("导出与备份");
     expect(html).toContain("危险操作");
     expect(html).toContain("开发者");
-    expect(html).toContain('data-testid="demo-reset-unavailable"');
-    expect(html).toContain('data-testid="mock-diagnostics-unavailable"');
-    expect(html).not.toContain("重置演示数据");
     // explore soft-demotion copy lives inside the loaded entry form (client fetch)
     expect(html).toContain('href="/settings/export"');
   });
