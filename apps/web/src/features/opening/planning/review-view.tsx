@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { EmptyState, PageHeader, secondaryButtonClass } from "../design/ui";
@@ -13,12 +13,18 @@ export function ReviewView({ api: supplied }: { api?: ReviewApi }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const actions = useMemo(() => createReviewActions(api), [api]);
   const [state, setState] = useState<ReadState>({ kind: "loading", items: [] });
+  const requestId = useRef(0);
   const refresh = useCallback(async () => {
+    const request = ++requestId.current;
     try {
       const items = await loadReviewItems(api);
+      if (request !== requestId.current) return;
       setState((current) => ({ kind: "ready", items: retainUnconfirmedReviews(current.items, items, actions.pending) }));
     }
-    catch (error) { setState((current) => ({ ...current, kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error", message: error instanceof Error ? error.message : "暂时无法读取建议" })); }
+    catch (error) {
+      if (request !== requestId.current) return;
+      setState((current) => ({ ...current, kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error", message: error instanceof Error ? error.message : "暂时无法读取建议" }));
+    }
   }, [api, actions]);
   useEffect(() => { void refresh(); }, [refresh]);
   return <section className="flex h-full min-h-0 w-full flex-col bg-white">

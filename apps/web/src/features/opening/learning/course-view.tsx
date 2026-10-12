@@ -168,10 +168,11 @@ export function CourseLearningRecords({ courseId, state, error, summary, onReloa
   summary: LearningSummary[];
   onReload: () => void;
 }) {
+  const sectionId = `course-learning-records-${courseId}`, headingId = `opening-learning-heading-${courseId}`;
   return (
-    <section id="course-learning-records" className="scroll-mt-6 space-y-3 border-t border-zinc-200 pt-5" aria-labelledby="opening-learning-heading">
+    <section id={sectionId} className="scroll-mt-6 space-y-3 border-t border-zinc-200 pt-5" aria-labelledby={headingId}>
       <div>
-        <h2 id="opening-learning-heading" className="text-sm font-semibold text-zinc-800">学习记录与证据</h2>
+        <h2 id={headingId} className="text-sm font-semibold text-zinc-800">学习记录与证据</h2>
         <p className="mt-1 text-sm leading-6 text-zinc-500">这里展示服务器记录的观察，不把一次回答当作掌握证明。</p>
       </div>
       {state === "loading" ? <p className="text-sm text-zinc-500" role="status">正在读取学习证据…</p> : null}

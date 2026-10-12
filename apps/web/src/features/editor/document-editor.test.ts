@@ -122,7 +122,7 @@ describe("document editor recovery", () => {
     expect(panelSource).toContain('role="alert"');
     expect(panelSource).toContain("重试读取链接");
     expect(panelSource).toContain("链接目标已失效");
-    expect(panelSource).toContain("encodeURIComponent(source.documentId)");
+    expect(panelSource).toContain("libraryNotePath(basePath, source.documentId)");
     expect(html).not.toContain("/library/null");
   });
 });

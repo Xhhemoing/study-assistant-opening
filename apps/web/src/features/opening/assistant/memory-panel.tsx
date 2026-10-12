@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssistantCandidateRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import Link from "next/link";
@@ -27,14 +27,22 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const requestId = useRef(0);
+
   const refresh = useCallback(async () => {
+    const request = ++requestId.current;
     const [rows, memoryState] = await Promise.all([api.listCandidates(), api.listMemory()]);
+    if (request !== requestId.current) return;
     setCandidates(rows.filter((row) => row.candidate.kind === "memory" && row.status === "pending"));
     setMemories(memoryState.items.filter((item) => item.status === "active" && item.kind !== "candidate"));
   }, [api]);
 
   useEffect(() => {
-    void refresh().catch((error) => setMessage(error instanceof Error ? error.message : "候选记忆暂时无法读取")).finally(() => setLoading(false));
+    let active = true;
+    void refresh()
+      .catch((error) => { if (active) setMessage(error instanceof Error ? error.message : "候选记忆暂时无法读取"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [refresh]);
 
   async function decide(row: AssistantCandidateRecord, action: "confirm" | "reject") {

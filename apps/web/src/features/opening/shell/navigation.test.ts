@@ -3,44 +3,43 @@ import { legacyOpeningRedirectPath } from "../../../middleware";
 import { navigationIsActive, openingNavigation } from "./navigation";
 
 describe("workspace navigation", () => {
-  it("exposes Opening core loop entries plus cards, review, materials, and connections", () => {
+  it("exposes notes in the Opening core loop plus cards, review, and connections", () => {
     const links = openingNavigation().map(item => item.href);
     expect(links).toEqual([
       "/opening/today",
       "/opening/assistant",
+      "/opening/library",
       "/opening/courses",
       "/opening/cards",
       "/opening/review",
-      "/opening/library?tab=materials",
       "/opening/settings/connections",
     ]);
     expect(openingNavigation().filter(item => item.group === "core").map(item => item.href)).toEqual([
       "/opening/today",
       "/opening/assistant",
+      "/opening/library",
       "/opening/courses",
     ]);
     expect(openingNavigation().filter(item => item.group === "more").map(item => item.href)).toEqual([
       "/opening/cards",
       "/opening/review",
-      "/opening/library?tab=materials",
       "/opening/settings/connections",
     ]);
-    expect(openingNavigation().find(item => item.label === "材料")?.icon).toBe("library");
+    expect(openingNavigation().find(item => item.label === "笔记")?.icon).toBe("library");
   });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);
     expect(navigationIsActive("/opening/courses", "/learn/courses/123")).toBe(false);
-    expect(navigationIsActive("/learn", "/learn/courses/123")).toBe(false);
-    expect(navigationIsActive("/learn", "/learn/goals/123")).toBe(true);
-    expect(navigationIsActive("/explore", "/explorer")).toBe(false);
+    expect(navigationIsActive("/opening/cards", "/opening/cardsx")).toBe(false);
     expect(navigationIsActive("/opening/cards", "/opening/cards")).toBe(true);
     expect(navigationIsActive("/opening/review", "/opening/review/x")).toBe(true);
     expect(navigationIsActive("/opening/settings/connections", "/opening/settings/connections")).toBe(true);
   });
-  it("highlights materials entry for opening library paths", () => {
-    expect(navigationIsActive("/opening/library?tab=materials", "/opening/library")).toBe(true);
-    expect(navigationIsActive("/opening/library?tab=materials", "/opening/library/extra")).toBe(true);
-    expect(navigationIsActive("/opening/library?tab=materials", "/opening/courses")).toBe(false);
+  it("highlights notes entry for opening library and note editor paths", () => {
+    expect(navigationIsActive("/opening/library", "/opening/library")).toBe(true);
+    expect(navigationIsActive("/opening/library", "/opening/library/doc-1")).toBe(true);
+    expect(navigationIsActive("/opening/library", "/opening/library/new")).toBe(true);
+    expect(navigationIsActive("/opening/library", "/opening/courses")).toBe(false);
   });
   it("redirects nested preview pages during the Opening release", () => {
     expect(legacyOpeningRedirectPath("/preview/notion-import")).toBe("/opening/today");

@@ -34,6 +34,7 @@ describe("command palette keyboard model", () => {
     expect(ids).toEqual(expect.arrayContaining([
       "today",
       "assistant",
+      "notes",
       "courses",
       "cards",
       "opening-review",
@@ -59,6 +60,7 @@ describe("command palette keyboard model", () => {
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining([
       "/opening/today",
       "/opening/assistant",
+      "/opening/library",
       "/opening/courses",
       "/opening/cards",
       "/opening/review",

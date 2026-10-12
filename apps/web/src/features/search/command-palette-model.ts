@@ -5,6 +5,7 @@ export const SEARCH_DEBOUNCE_MS = 150;
 export const PALETTE_COMMANDS = [
   { id: "today", label: "今日学习", description: "继续今天的学习任务", href: "/opening/today", kind: "page" },
   { id: "assistant", label: "学习助手", description: "提问并查看学习对话", href: "/opening/assistant", kind: "page" },
+  { id: "notes", label: "笔记", description: "查看与新建学习笔记", href: "/opening/library", kind: "page" },
   { id: "courses", label: "课程", description: "查看课程与长期学习上下文", href: "/opening/courses", kind: "page" },
   { id: "cards", label: "记忆卡片", description: "复习到期的记忆卡片", href: "/opening/cards", kind: "page" },
   { id: "opening-review", label: "待确认建议", description: "审核助手生成的学习建议", href: "/opening/review", kind: "page" },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SearchHit } from "@aistudy/domain";
-import { groupSearchHits, searchHitHref } from "./search-results-model";
+import { groupSearchHits, openingSearchHitHref, searchHitHref } from "./search-results-model";
 
 function hit(type: SearchHit["type"], id: string): SearchHit {
   return { id, type, title: `${type}-${id}`, snippet: "摘要", score: 1 };
@@ -25,5 +25,13 @@ describe("search result model", () => {
     expect(searchHitHref(hit("card", "c1"))).toBe("/learn/review?cardId=c1");
     expect(searchHitHref(hit("course", "course 1"))).toBe("/learn/courses/course%201");
     expect(searchHitHref(hit("practice", "p1"))).toBe("/learn/practice/p1");
+  });
+
+  it("keeps Opening palette hits inside the Opening shell and drops hits without a surface", () => {
+    expect(openingSearchHitHref(hit("document", "d/1"))).toBe("/opening/library/d%2F1");
+    expect(openingSearchHitHref(hit("course", "course 1"))).toBe("/opening/courses/course%201");
+    expect(openingSearchHitHref(hit("card", "c1"))).toBe("/opening/cards");
+    expect(openingSearchHitHref(hit("exploration", "e1"))).toBeNull();
+    expect(openingSearchHitHref(hit("practice", "p1"))).toBeNull();
   });
 });

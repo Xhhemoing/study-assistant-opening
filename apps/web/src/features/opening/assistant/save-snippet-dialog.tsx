@@ -7,6 +7,7 @@ import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/cont
 import type { OpeningApi } from "../client/api";
 import { buttonClass, inputClass, secondaryButtonClass, textareaClass, ui } from "../design/ui";
 import { createSnippetSaveAttempt, type SnippetSaveResult } from "./save-snippet";
+import { libraryNotePath } from "../../editor/library-paths";
 
 type Props = { draft: SnippetCreateInput; api: Pick<OpeningApi, "createSnippet">; onClose: () => void };
 
@@ -57,7 +58,7 @@ export function SaveSnippetDialog({ draft, api, onClose }: Props) {
         </div>
         {result?.kind === "saved" ? <div role="status" className="space-y-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           <p className="flex items-center gap-2"><Check size={16} aria-hidden />已保存为关联笔记。</p>
-          <div className="flex flex-wrap gap-2"><Link className={secondaryButtonClass} href={`/library/${result.documentId}`}>打开笔记</Link><Link className={secondaryButtonClass} href="/opening/library?tab=notes">查看全部笔记</Link></div>
+          <div className="flex flex-wrap gap-2"><Link className={secondaryButtonClass} href={libraryNotePath("/opening/library", result.documentId)}>打开笔记</Link><Link className={secondaryButtonClass} href="/opening/library?tab=notes">查看全部笔记</Link></div>
         </div> : <>
           <div className="space-y-1.5"><label className={ui.label} htmlFor={titleId}>笔记标题</label>
             <input id={titleId} className={inputClass} value={title} maxLength={200} disabled={busy || locked} onChange={(event) => setTitle(event.target.value)} required />

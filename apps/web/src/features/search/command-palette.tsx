@@ -6,16 +6,19 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import type { SearchHit } from "@aistudy/domain";
 import { ui } from "../opening/design/ui";
 import { SEARCH_DEBOUNCE_MS, filterPaletteCommands, getNextPaletteIndex, getPaletteKeyAction } from "./command-palette-model";
-import { searchHitHref, searchHitTypeLabel } from "./search-results-model";
+import { openingSearchHitHref, searchHitTypeLabel } from "./search-results-model";
 import { createSearchApi } from "./search-api";
 
 interface PaletteOption { id: string; label: string; description: string; href: string; kind: "page" | "command" | "result" }
 function buildOptions(query: string, hits: SearchHit[]): PaletteOption[] {
   return [
     ...filterPaletteCommands(query),
-    ...hits.map((hit) => ({ id: `result-${hit.type}-${hit.id}`, label: hit.title,
-      description: `${searchHitTypeLabel(hit.type)} · ${hit.snippet || "暂无摘要"}${hit.lifecycle ? ` · ${hit.lifecycle}` : ""}${hit.courseMemberships?.length ? ` · ${hit.courseMemberships.map((course) => course.title).join("、")}` : ""}`,
-      href: searchHitHref(hit), kind: "result" as const })),
+    ...hits.flatMap((hit) => {
+      const href = openingSearchHitHref(hit);
+      return href ? [{ id: `result-${hit.type}-${hit.id}`, label: hit.title,
+        description: `${searchHitTypeLabel(hit.type)} · ${hit.snippet || "暂无摘要"}${hit.lifecycle ? ` · ${hit.lifecycle}` : ""}${hit.courseMemberships?.length ? ` · ${hit.courseMemberships.map((course) => course.title).join("、")}` : ""}`,
+        href, kind: "result" as const }] : [];
+    }),
   ];
 }
 

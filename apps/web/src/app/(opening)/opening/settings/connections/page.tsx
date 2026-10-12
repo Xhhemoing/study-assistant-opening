@@ -10,10 +10,10 @@ export default function OpeningConnectionsSettingsPage() {
         description="管理学校邮箱与钉钉授权：范围、同步时间、错误、暂停与撤销。邮箱密码不会回显；手工导入单独标记。"
         action={
           <Link
-            href="/settings"
+            href="/opening/today"
             className="text-xs text-zinc-600 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-900"
           >
-            返回设置
+            返回今日
           </Link>
         }
       />

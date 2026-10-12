@@ -122,6 +122,8 @@ it("scans Opening entry points and reachable shared modules", () => {
   expect(files).toContain("apps/web/src/app/(opening)/opening/cards/page.tsx");
   expect(files).toContain("apps/web/src/features/opening/cards/card-review-view.tsx");
   expect(files).toContain("apps/web/src/features/opening/cards/cards-client.ts");
+  expect(files).toContain("apps/web/src/features/editor/document-editor.tsx");
+  expect(files).toContain("apps/web/src/features/editor/new-document.tsx");
   expect(files).not.toContain("apps/web/src/lib/data/react.ts");
   expect(files).not.toContain("apps/web/src/lib/data/mock/provider.ts");
   expect(files).not.toContain("apps/web/src/features/courses/legacy-course-detail.tsx");
