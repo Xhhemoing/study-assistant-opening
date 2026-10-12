@@ -14,6 +14,14 @@ describe("classifyTutorHelpKind", () => {
     expect(classifyTutorHelpKind({ mode: "explain", problemId: null })).toBe("instruction");
   });
 
+  it("maps explain bound to an attempt to item help, never instruction", () => {
+    expect(classifyTutorHelpKind({
+      mode: "explain",
+      attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      problemId: null,
+    })).toBe("hint");
+  });
+
   it("maps hint with attempt to hint", () => {
     expect(classifyTutorHelpKind({
       mode: "hint",
