@@ -308,6 +308,49 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       };
     },
 
+    /**
+     * PR-D replay: resolve a budget ledger resultRef ("opening_turn:<id>") to the
+     * persisted assistant turn, scope-bound. Null when absent or foreign.
+     */
+    async loadReplayedTurn(scope: OpeningScope, resultRef: string): Promise<{
+      id: string;
+      status: string;
+      text: string;
+    } | null> {
+      const match = /^opening_turn:([0-9a-f-]{36})$/i.exec(resultRef);
+      if (!match) return null;
+      const rows = await sql`
+        SELECT t.id, t.status, t.text FROM opening_turns t
+        JOIN workspaces w ON w.id = t.workspace_id
+        WHERE t.id = ${match[1]!} AND t.workspace_id = ${scope.workspaceId}
+          AND w.owner_user_id = ${scope.ownerUserId}
+        LIMIT 1
+      `;
+      if (!rows.length) return null;
+      const row = rows[0] as Record<string, unknown>;
+      return { id: row.id as string, status: row.status as string, text: (row.text as string | null) ?? "" };
+    },
+
+    /**
+     * PR-D replay: the provider result is already persisted on the complete
+     * assistant turn; finish the running job without re-writing the turn.
+     * Returns false when the job is no longer running or the turn is not complete.
+     */
+    async completeFromReplay(scope: OpeningScope, jobId: string, assistantTurnId: string): Promise<boolean> {
+      const rows = await sql`
+        UPDATE opening_tutor_jobs j SET status = 'succeeded', error = NULL, updated_at = now()
+        WHERE j.id = ${jobId} AND j.workspace_id = ${scope.workspaceId}
+          AND j.assistant_turn_id = ${assistantTurnId}
+          AND j.status = 'running'
+          AND EXISTS (
+            SELECT 1 FROM opening_turns t
+            WHERE t.id = ${assistantTurnId} AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
+          )
+        RETURNING j.id
+      `;
+      return rows.length === 1;
+    },
+
     async fail(
       scope: OpeningScope,
       jobId: string,

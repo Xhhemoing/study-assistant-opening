@@ -146,6 +146,12 @@ export async function main(): Promise<void> {
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
     publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
+    loadReplayedResult: async (scope, resultRef) => {
+      const match = /^teaching_activity:(.+)$/.exec(resultRef);
+      if (!match) return null;
+      const activity = await teachingActivities.get(scope, match[1]!);
+      return activity ? { activityId: activity.id, generateStatus: activity.generateStatus } : null;
+    },
     getJobState: async (jobId) => {
       const rows = await sql<{ state: string }[]>`
         SELECT state FROM opening_jobs WHERE id = ${jobId} LIMIT 1`;

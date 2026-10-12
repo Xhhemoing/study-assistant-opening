@@ -65,6 +65,14 @@ export type CompileTeachingUnitDeps = {
     options?: { from?: readonly TeachingGenerateStatus[] },
   ): Promise<boolean>;
   publishActivitySpec(scope: Scope, input: ActivitySpecPublishInput): Promise<unknown>;
+  /**
+   * PR-D replay: resolve a ledger resultRef ("teaching_activity:<id>") to the
+   * persisted activity (scope-bound). Null when absent/foreign.
+   */
+  loadReplayedResult(
+    scope: Scope,
+    resultRef: string,
+  ): Promise<{ activityId: string; generateStatus: TeachingGenerateStatus } | null>;
   /** Re-read job state before write-back (cancel race). */
   getJobState(jobId: string): Promise<string | null>;
   /**
@@ -255,6 +263,25 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
               : undefined,
           });
         } catch (error) {
+          // PR-D: completed ledger key → load the persisted result via resultRef;
+          // no provider call, no new charge, no re-publish, never fake success.
+          if (isBudgetReplayError(error) && error.disposition.kind === "completed") {
+            const ref = error.disposition.resultRef;
+            const persisted = ref ? await deps.loadReplayedResult(scope, ref) : null;
+            if (
+              persisted && persisted.activityId === body.activityId
+              && (persisted.generateStatus === "needs_check" || persisted.generateStatus === "ready")
+            ) {
+              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus };
+            }
+            await deps.setGenerateStatus(scope, body.activityId, "unknown", {
+              from: ["queued", "generating"],
+            });
+            throw Object.assign(
+              new Error("compile-teaching-unit: provider call already settled but its result is not persisted; not re-sending"),
+              { code: "BUDGET_REPLAY_RESULT_MISSING", cause: error },
+            );
+          }
           // Released / completed ledger on same operationId → non-retryable for this job.
           // Replayed ledger key (completed / released / unknown / in-flight):
           // never re-send under the same operationId; surface as non-retryable.

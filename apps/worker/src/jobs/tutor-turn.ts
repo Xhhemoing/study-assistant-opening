@@ -92,7 +92,7 @@ export const VISION_REQUIRED_MESSAGE = "当前模型不能看图，请在设置�
  * provenance. The model never chooses citation targets or candidate ids.
  */
 export function createTutorTurnHandler(deps: TutorTurnDeps) {
-  return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean }> {
+  return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean; replayed?: boolean }> {
     const claimed = await deps.tutorJobs.claim(tutorJobId);
     if (!claimed) return { skipped: true };
     const scope = {
@@ -177,7 +177,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       // reservation. requestId stays the same string today (attempt-scoped ids are
       // a future option). Ephemeral (apps/web) wiring deferred — Experience out of scope.
       const tutorOperationId = `tutor:${claimed.id}`;
-      const output = await runBudgetedCall({
+      let output: ProviderOutput;
+      try {
+      output = await runBudgetedCall({
         provider: selected?.provider ?? deps.provider,
         modelSnapshot: selected?.modelSnapshot,
         budget: scopedBudget,
@@ -192,6 +194,27 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
           : undefined,
       });
+      } catch (error) {
+        // PR-D: completed ledger key → load the persisted result through its
+        // resultRef. Never call the provider or charge again; never fake success.
+        if (isBudgetReplayError(error) && error.disposition.kind === "completed") {
+          const ref = error.disposition.resultRef;
+          const persisted = ref ? await deps.tutorJobs.loadReplayedTurn(scope, ref) : null;
+          if (
+            persisted && persisted.id === claimed.assistantTurnId && persisted.status === "complete"
+            && await deps.tutorJobs.completeFromReplay(scope, claimed.id, persisted.id)
+          ) {
+            return { skipped: false, replayed: true };
+          }
+          await deps.tutorJobs.markUnknown(
+            scope,
+            claimed.id,
+            "budget replay: provider call already settled but its result is not persisted; not re-sending",
+          );
+          return { skipped: false, replayed: true };
+        }
+        throw error;
+      }
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       // Soft-filter unknown cited ids (Package D); never fabricate rows / never throw on unknowns.
       let citations = resolveCitations(validated.citedChunkIds, context, { soft: true });
