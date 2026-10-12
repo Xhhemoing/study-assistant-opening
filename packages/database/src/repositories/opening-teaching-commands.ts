@@ -148,7 +148,6 @@ function writeReplayStore(
 }
 
 export function createOpeningTeachingCommandsRepository(sql: Sql) {
-  const library = createLibraryRepository(sql);
   const contentRepo = createOpeningTeachingContentRepository(sql);
 
   return {

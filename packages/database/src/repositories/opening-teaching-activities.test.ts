@@ -13,7 +13,6 @@ const ownerUserId = "00000000-0000-4000-8000-000000000002";
 const otherOwner = "00000000-0000-4000-8000-000000000099";
 const courseId = "00000000-0000-4000-8000-000000000003";
 const activityId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
-const observationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const scope = { workspaceId, ownerUserId };
 
 function db(handler: (query: string, values: unknown[]) => unknown[]) {
