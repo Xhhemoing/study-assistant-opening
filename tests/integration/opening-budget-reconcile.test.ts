@@ -38,7 +38,7 @@ describe("opening budget reconcile (DL7)", () => {
       timeZone: "Asia/Shanghai",
     });
     const row = await budget.reserve(fixture.scope, { purpose: "tutor", amountCents: 8_000, requestId: "local-day" });
-    await budget.settle(row.id, 8_000);
+    await budget.settle(fixture.scope, row.id, 8_000);
     // Push created_at to yesterday but leave updated_at as now — must free today's cap.
     await fixture.sql`
       UPDATE opening_budget_reservations

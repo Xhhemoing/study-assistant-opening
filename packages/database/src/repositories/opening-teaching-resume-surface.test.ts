@@ -46,10 +46,17 @@ describe("V2-14 teaching resume database surfaces", () => {
     expect(facts).toMatch(/probeLearningSourcesAvailability/);
   });
 
-  it("T18 no 0058 migration file", () => {
+  // T18 originally asserted "no 0058" to prove the teaching resume surface needs no
+  // migration. 0058 is now taken by LAB-U01 (0058_opening_turn_clarify.sql), so the
+  // invariant is restated: the only migration after 0057 is the clarify one, and no
+  // teaching/resume migration was invented.
+  it("T18 resume surface adds no migration (0058 is LAB-U01 clarify only)", () => {
     const files = readdirSync(resolve(__dirname, "../migrations"))
       .filter((f) => f.endsWith(".sql"))
       .sort();
-    expect(files.some((f) => f.startsWith("0058"))).toBe(false);
+    // PR-D: 0059_opening_budget_reconcile (budget ledger); PR-E: 0060_opening_retest_accept_key (retest accept key). Only additions
+    // after PR-C's clarify migration; still no teaching/resume migration.
+    expect(files.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql"]);
+    expect(files.some((f) => /resume/i.test(f))).toBe(false);
   });
 });

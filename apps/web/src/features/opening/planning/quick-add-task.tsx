@@ -69,16 +69,39 @@ export function buildQuickAddInput(draft: QuickAddDraft, clientKey: string): Tas
 }
 
 /**
- * One add intent → one clientKey. Retries of the same intent reuse it.
+ * One add intent → one clientKey. Network retries of the same intent reuse it.
  * Validation failure clears the key so a corrected payload is a new intent.
- * Unknown outcomes keep the key but callers must not auto-retry.
+ * Unknown outcomes keep the key and pin the exact request; `retry()` resends it
+ * unchanged (the server replays the original task). A changed draft is a new intent.
  */
 export function createQuickAddAttempt(
   create: (input: TaskCreateInput) => Promise<TaskCreateResult>,
   mint: () => string = newQuickAddClientKey,
 ) {
   let clientKey: string | undefined;
+  let pending: TaskCreateInput | undefined;
   let inFlight = false;
+
+  async function send(input: TaskCreateInput): Promise<QuickAddResult> {
+    inFlight = true;
+    try {
+      const task = await create(input);
+      clientKey = undefined;
+      pending = undefined;
+      return { kind: "created", task };
+    } catch (error) {
+      if (error instanceof OpeningApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
+        clientKey = undefined;
+        pending = undefined;
+        return { kind: "failed", message: error.message || "任务未能添加，请核对后重试。" };
+      }
+      pending = input;
+      return { kind: "unknown" };
+    } finally {
+      inFlight = false;
+    }
+  }
+
   return {
     clientKey(): string | undefined {
       return clientKey;
@@ -91,26 +114,25 @@ export function createQuickAddAttempt(
         input = buildQuickAddInput(draft, clientKey);
       } catch (error) {
         clientKey = undefined;
+        pending = undefined;
         return { kind: "failed", message: error instanceof Error ? error.message : "请检查任务内容后重试。" };
       }
-      inFlight = true;
-      try {
-        const task = await create(input);
-        clientKey = undefined;
-        return { kind: "created", task };
-      } catch (error) {
-        if (error instanceof OpeningApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
-          clientKey = undefined;
-          return { kind: "failed", message: error.message || "任务未能添加，请核对后重试。" };
-        }
-        return { kind: "unknown" };
-      } finally {
-        inFlight = false;
+      if (pending && JSON.stringify({ ...pending, clientKey: "" }) !== JSON.stringify({ ...input, clientKey: "" })) {
+        // The user changed the request after an unknown outcome: that is a new intent.
+        clientKey = mint();
+        input = { ...input, clientKey };
       }
+      return send(input);
+    },
+    /** Resend the pinned request after an unknown outcome (same clientKey, same body). */
+    async retry(): Promise<QuickAddResult | null> {
+      if (inFlight || !pending) return null;
+      return send(pending);
     },
     /** After a successful add or an explicit fresh form, start a new intent. */
     reset() {
       clientKey = undefined;
+      pending = undefined;
     },
   };
 }
@@ -168,6 +190,26 @@ export function QuickAddTask({
     setUnknown(true);
     onAdded?.();
     reread?.();
+  }
+
+  async function onRetry() {
+    if (busy || disabled) return;
+    setBusy(true);
+    setError("");
+    const result = await attemptRef.current.retry();
+    setBusy(false);
+    if (!result) return;
+    if (result.kind === "created") {
+      resetForm();
+      setOpen(false);
+      onAdded?.();
+      reread?.();
+      return;
+    }
+    if (result.kind === "failed") {
+      setUnknown(false);
+      setError(result.message);
+    }
   }
 
   return (
@@ -267,6 +309,14 @@ export function QuickAddTask({
                 }}
               >
                 重新读取
+              </button>
+              <button
+                type="button"
+                className={secondaryButtonClass}
+                disabled={busy || disabled}
+                onClick={() => void onRetry()}
+              >
+                {busy ? "正在核对…" : "重试提交（不会重复添加）"}
               </button>
             </div>
           ) : (

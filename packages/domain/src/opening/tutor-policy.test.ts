@@ -11,6 +11,9 @@ import {
   marksReveal,
   recommendTutorAction,
   variantProblemRef,
+  PAGE_CITATION_CLARIFY_MESSAGE,
+  PageCitationClarifyError,
+  PageCitationError,
 } from "./tutor-policy";
 
 describe("K02a tutor-policy", () => {
@@ -55,6 +58,15 @@ describe("K02a tutor-policy", () => {
       { page: 1 },
       { page: 2 },
     ]);
+  });
+
+  it("page citation clarify refusal stays a page_not_in_sources error and asks for material/page", () => {
+    const error = new PageCitationClarifyError();
+    expect(error).toBeInstanceOf(PageCitationError);
+    expect(error.code).toBe("page_not_in_sources");
+    expect(error.nextAction).toBe("clarify");
+    expect(error.message).toBe(PAGE_CITATION_CLARIFY_MESSAGE);
+    expect(PAGE_CITATION_CLARIFY_MESSAGE).toMatch(/选择材料和页码/);
   });
 
   it("variant identity: assisted item A cannot become observed_independent", () => {

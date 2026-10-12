@@ -43,7 +43,7 @@ function fakeBudget() {
       settle: async (reservationId: string, actualCents: number) => {
         repo.settled.push({ reservationId, actualCents });
       },
-      markUnknown: async (reservationId: string) => {
+      claimExecution: async () => true, markUnknown: async (reservationId: string) => {
         repo.unknowns.push(reservationId);
       },
       noteOverage: async (audit: FakeRepo["overages"][number]) => {

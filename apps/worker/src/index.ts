@@ -2,8 +2,7 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll,
-  createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository } from "@aistudy/database";
+  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
@@ -18,19 +17,14 @@ import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
 import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
-import {
-  createCompileTeachingUnitHandler,
-  createTeachingCompilerPublishInput,
-  createTeachingValidationAfterPublish,
-  isTeachingCompilerEnabled,
-  isTeachingValidationEnabled,
-} from "./jobs/compile-teaching-unit";
+import { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";
 import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
 import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
 import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
+import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -120,66 +114,10 @@ export async function main(): Promise<void> {
   // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
   // and counts completed spend via resolveBudgetLocalDay half-open bounds.
   const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
-  const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
-  const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-08: teaching-compiler via buildPublishInput when OPENING_TEACHING_COMPILER_ENABLED;
-  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Budget/cancel/epoch fences unchanged.
-  // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
-  const teachingCompilerOn = isTeachingCompilerEnabled();
-  const teachingValidationOn = isTeachingValidationEnabled();
-  const compileTeachingUnit = createCompileTeachingUnitHandler({
-    budget,
-    provider: {
-      complete: async () => ({
-        text: JSON.stringify(
-          teachingCompilerOn
-            ? { compiler: "teaching-compiler" }
-            : { stub: true },
-        ),
-        citedChunkIds: [],
-        requestId: null,
-        candidates: [],
-        inputTokens: 1,
-        outputTokens: 1,
-      }),
-    },
-    reservedCents: 100,
-    setGenerateStatus: (scope, activityId, status, options) =>
-      teachingActivities.setGenerateStatus(scope, activityId, status, options),
-    publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
-    getJobState: async (jobId) => {
-      const rows = await sql<{ state: string }[]>`
-        SELECT state FROM opening_jobs WHERE id = ${jobId} LIMIT 1`;
-      return rows[0]?.state ?? null;
-    },
-    ensureTeachingUnitId: async (scope, payload) => {
-      if (payload.teachingUnitId) return payload.teachingUnitId;
-      const unit = await teachingContent.createUnit(scope, {
-        title: `Teaching draft ${payload.activityId.slice(0, 8)}`,
-        blocks: [],
-      });
-      return unit.id;
-    },
-    buildPublishInput: teachingCompilerOn
-      ? createTeachingCompilerPublishInput({
-          loadChunks: async (scope, sourceIds) => {
-            const s = scope as { workspaceId: string; ownerUserId: string };
-            return chunks.listForSources(s, sourceIds);
-          },
-        })
-      : undefined,
-    verifyAfterPublish: teachingValidationOn
-      ? createTeachingValidationAfterPublish({
-          loadChunks: async (scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]) => {
-            return chunks.listForSources(scope, sourceIds);
-          },
-        })
-      : undefined,
-    privacy: {
-      getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),
-      listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
-    },
-  });
+  // Production compile-teaching-unit dependency construction (shared with tests).
+  const compileTeachingUnit = createCompileTeachingUnitHandler(
+    createCompileTeachingUnitWorkerDeps(sql, { budget, chunks, privacy: privacyRepo }),
+  );
   const handlers = createHandlers(parse, {
     retest,
     remind,

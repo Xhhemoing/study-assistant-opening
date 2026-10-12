@@ -12,7 +12,7 @@ import type {
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
-import { insertOpeningTask } from "./opening-retest-task";
+import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
@@ -129,6 +129,14 @@ export function createOpeningPlansRepository(sql: Sql) {
       input: TaskCreateInput & { dueText?: string | null },
     ): Promise<TaskCreateResult> {
       return insertOpeningTask(sql, scope, input);
+    },
+
+    /** Same write as createTask; also reports whether a clientKey replay returned an existing task. */
+    async createTaskWithOutcome(
+      scope: OpeningScope,
+      input: TaskCreateInput & { dueText?: string | null },
+    ): Promise<TaskCreateOutcome> {
+      return insertOpeningTaskWithOutcome(sql, scope, input);
     },
 
     async updateTaskStatus(scope: OpeningScope, taskId: string, input: TaskStatusUpdateInput): Promise<TaskItem> {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
-import { DEFAULT_STRATEGY_TEMPLATE_ID } from "@aistudy/domain";
+import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -35,7 +35,7 @@ describe("tutor turn handler", () => {
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
       fail: vi.fn(async () => undefined),
-      markUnknown: vi.fn(async () => undefined),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
     };
     const chunks = {
       listForSources: vi.fn(async () => overrides.chunks ?? [chunkA, chunkB]),
@@ -47,7 +47,7 @@ describe("tutor turn handler", () => {
       reserve: vi.fn(async () => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      markUnknown: vi.fn(async () => ({})),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
@@ -116,7 +116,7 @@ describe("tutor turn handler", () => {
     expect(selectedProvider.complete).toHaveBeenCalledOnce();
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requestId: `tutor:${claimedJob.id}`, modelSnapshot }));
-    expect(budget.settle).toHaveBeenCalledWith("res-1", 2);
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", 2, { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
   });
 
   it("BC1: same tutor job retries reuse one ledger reservation (operationId)", async () => {
@@ -132,7 +132,7 @@ describe("tutor turn handler", () => {
       }),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      markUnknown: vi.fn(async () => ({})),
+      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const { deps, tutorJobs } = setup({
       provider: async () => {
@@ -141,7 +141,7 @@ describe("tutor turn handler", () => {
     });
     deps.budget = budget;
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
-    expect(budget.markUnknown).toHaveBeenCalledWith("res-1");
+    expect(budget.markUnknown).toHaveBeenCalledWith(expect.anything(), "res-1");
     expect(budget.reserve).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ requestId: `tutor:${claimedJob.id}` }),
@@ -154,8 +154,21 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler(deps)(claimedJob.id);
     expect(reservations).toHaveLength(1);
     expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
-    expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
     expect(okProvider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("routes a page-citation Clarify refusal to fail(..., {code, nextAction}) (LAB-A01/U01)", async () => {
+    const { deps, provider, budget, tutorJobs } = setup();
+    const resolveModel = vi.fn(async () => { throw new PageCitationClarifyError(); });
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toBeInstanceOf(PageCitationClarifyError);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, PAGE_CITATION_CLARIFY_MESSAGE, {
+      code: "page_not_in_sources",
+      nextAction: "clarify",
+    });
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
 
   it("does not dispatch or reserve when route resolution fails", async () => {
@@ -175,7 +188,7 @@ describe("tutor turn handler", () => {
     expect(input.chunks[0].id).toBe(chunkA.id);
     expect(input.history).toEqual([{ role: "user", text: "yesterday" }, { role: "assistant", text: "step two" }]);
     expect(input.instruction).toContain("完整答案");
-    expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
@@ -384,7 +397,7 @@ describe("tutor turn handler", () => {
   it("marks the job unknown and retains the reservation on provider timeouts", async () => {
     const { deps, tutorJobs, budget } = setup({ provider: async () => { throw new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", 0); } });
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow();
-    expect(budget.markUnknown).toHaveBeenCalledWith("res-1");
+    expect(budget.markUnknown).toHaveBeenCalledWith(expect.anything(), "res-1");
     expect(tutorJobs.markUnknown).toHaveBeenCalled();
     expect(tutorJobs.fail).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
@@ -393,7 +406,7 @@ describe("tutor turn handler", () => {
   it("fails definitively and releases on provider auth errors", async () => {
     const { deps, tutorJobs, budget } = setup({ provider: async () => { throw new OpeningProviderError("PROVIDER_AUTH", "bad key", 401); } });
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow();
-    expect(budget.release).toHaveBeenCalledWith(`tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
     expect(tutorJobs.fail).toHaveBeenCalled();
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
@@ -439,7 +452,7 @@ describe("tutor turn handler", () => {
     };
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toBeInstanceOf(PrivacyEpochError);
     expect(provider.complete).not.toHaveBeenCalled();
-    expect(budget.release).toHaveBeenCalledWith(`tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
     expect(budget.settle).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });

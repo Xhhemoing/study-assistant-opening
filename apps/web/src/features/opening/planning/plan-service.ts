@@ -254,6 +254,16 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       }
     },
 
+    /** Route entry: `replayed` distinguishes a clientKey replay (200) from a new task (201). */
+    async createTaskWithOutcome(scope: Scope, raw: unknown): Promise<{ task: TaskCreateResult; replayed: boolean }> {
+      const input = taskCreateInputSchema.parse(raw);
+      try {
+        return await repo.createTaskWithOutcome(scope, input);
+      } catch (error) {
+        throw mapRepoError(error);
+      }
+    },
+
     async updateTaskStatus(scope: Scope, taskId: string, raw: unknown) {
       const input = taskStatusUpdateInputSchema.parse(raw);
       try {
@@ -419,12 +429,18 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
   };
 }
 
-function mapRepoError(error: unknown): Error {
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
+}
+
+export function mapRepoError(error: unknown): Error {
   if (error instanceof OpeningPlanError) {
     if (error.code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
     if (error.code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
     return new ApiError("CONFLICT", error.message, 409);
   }
+  // A unique violation that escaped the idempotent write path is a conflict, never a 500.
+  if (isUniqueViolation(error)) return new ApiError("CONFLICT", "duplicate request conflicts with an existing record", 409);
   return error instanceof Error ? error : new Error(String(error));
 }
 

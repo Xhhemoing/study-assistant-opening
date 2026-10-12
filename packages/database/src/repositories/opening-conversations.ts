@@ -68,7 +68,7 @@ export type StoredTurn = {
   role: "user" | "assistant";
   text: string;
   mode: TutorMode;
-  status: "pending" | "complete" | "failed" | "outcome_unknown";
+  status: "pending" | "complete" | "failed" | "clarify" | "outcome_unknown";
   clientKey: string | null;
   learningSessionId: string | null;
   attemptId?: string | null;
