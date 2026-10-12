@@ -116,7 +116,7 @@ describe("tutor turn handler", () => {
     expect(selectedProvider.complete).toHaveBeenCalledOnce();
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requestId: `tutor:${claimedJob.id}`, modelSnapshot }));
-    expect(budget.settle).toHaveBeenCalledWith("res-1", 2);
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", 2);
   });
 
   it("BC1: same tutor job retries reuse one ledger reservation (operationId)", async () => {
@@ -141,7 +141,7 @@ describe("tutor turn handler", () => {
     });
     deps.budget = budget;
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
-    expect(budget.markUnknown).toHaveBeenCalledWith("res-1");
+    expect(budget.markUnknown).toHaveBeenCalledWith(expect.anything(), "res-1");
     expect(budget.reserve).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ requestId: `tutor:${claimedJob.id}` }),
@@ -154,7 +154,7 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler(deps)(claimedJob.id);
     expect(reservations).toHaveLength(1);
     expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
-    expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number));
     expect(okProvider.complete).toHaveBeenCalledOnce();
   });
 
@@ -188,7 +188,7 @@ describe("tutor turn handler", () => {
     expect(input.chunks[0].id).toBe(chunkA.id);
     expect(input.history).toEqual([{ role: "user", text: "yesterday" }, { role: "assistant", text: "step two" }]);
     expect(input.instruction).toContain("完整答案");
-    expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
+    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number));
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
@@ -397,7 +397,7 @@ describe("tutor turn handler", () => {
   it("marks the job unknown and retains the reservation on provider timeouts", async () => {
     const { deps, tutorJobs, budget } = setup({ provider: async () => { throw new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", 0); } });
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow();
-    expect(budget.markUnknown).toHaveBeenCalledWith("res-1");
+    expect(budget.markUnknown).toHaveBeenCalledWith(expect.anything(), "res-1");
     expect(tutorJobs.markUnknown).toHaveBeenCalled();
     expect(tutorJobs.fail).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
@@ -406,7 +406,7 @@ describe("tutor turn handler", () => {
   it("fails definitively and releases on provider auth errors", async () => {
     const { deps, tutorJobs, budget } = setup({ provider: async () => { throw new OpeningProviderError("PROVIDER_AUTH", "bad key", 401); } });
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow();
-    expect(budget.release).toHaveBeenCalledWith(`tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`);
     expect(tutorJobs.fail).toHaveBeenCalled();
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
@@ -452,7 +452,7 @@ describe("tutor turn handler", () => {
     };
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toBeInstanceOf(PrivacyEpochError);
     expect(provider.complete).not.toHaveBeenCalled();
-    expect(budget.release).toHaveBeenCalledWith(`tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`);
     expect(budget.settle).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });

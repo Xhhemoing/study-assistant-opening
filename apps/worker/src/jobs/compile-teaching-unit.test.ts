@@ -58,7 +58,8 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
         reserved.push(input);
         return { id: `res-${reserved.length}`, workspaceId: job.workspaceId, purpose: input.purpose, amountCents: input.amountCents, requestId: input.requestId, state: "reserved", modelSnapshot: null };
       },
-      release: async (requestId: string) => {
+      release: async (scope: unknown, requestId: string) => {
+        void scope;
         released.push(requestId);
         return { id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId, state: "released", modelSnapshot: null };
       },

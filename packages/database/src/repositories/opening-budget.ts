@@ -45,15 +45,16 @@ export type OpeningBudgetRepository = {
    * BUDGET_EXCEEDED and writes nothing.
    */
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
-  release(requestId: string): Promise<BudgetReservationRecord>;
-  complete(requestId: string): Promise<BudgetReservationRecord>;
-  /** Ledger flow: reconcile a completed call to its actual cost. */
-  settle(reservationId: string, actualCents: number): Promise<BudgetReservationRecord>;
+  /** Scope-bound: only rows of scope.workspaceId owned by scope.ownerUserId. */
+  release(scope: OpeningScope, requestId: string): Promise<BudgetReservationRecord>;
+  complete(scope: OpeningScope, requestId: string): Promise<BudgetReservationRecord>;
+  /** Ledger flow: reconcile a completed call to its actual cost (scope-bound). */
+  settle(scope: OpeningScope, reservationId: string, actualCents: number): Promise<BudgetReservationRecord>;
   /**
    * Unknown remote outcome: the reservation RETAINS its cap space (stays
    * 'reserved') until lazy reconciliation settles it as completed.
    */
-  markUnknown(reservationId: string): Promise<BudgetReservationRecord>;
+  markUnknown(scope: OpeningScope, reservationId: string): Promise<BudgetReservationRecord>;
 };
 
 export type OpeningBudgetRepositoryOptions = {
@@ -125,7 +126,14 @@ export function createOpeningBudgetRepository(
   const ceilingCents = options.ceilingCents ?? OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS;
   const pricingConfigured = options.pricingConfigured ?? true;
 
+  // Least privilege: every post-reserve mutation/read is bound to the caller's
+  // owned workspace. A foreign or unowned row is indistinguishable from absent.
+  const inScope = (scope: OpeningScope) => sql`
+    workspace_id = ${scope.workspaceId}
+    AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
+  `;
   const changeState = async (
+    scope: OpeningScope,
     where: { by: "requestId" | "id"; value: string },
     state: "released" | "completed",
   ) => {
@@ -135,7 +143,7 @@ export function createOpeningBudgetRepository(
     const rows = await sql`
       UPDATE opening_budget_reservations
       SET state = ${state}, updated_at = now()
-      WHERE ${predicate} AND state = 'reserved'
+      WHERE ${predicate} AND ${inScope(scope)} AND state = 'reserved'
       RETURNING *
     `;
     if (!rows.length) {
@@ -143,9 +151,9 @@ export function createOpeningBudgetRepository(
     }
     return mapReservation(rows[0] as Record<string, unknown>);
   };
-  const byId = async (reservationId: string): Promise<BudgetReservationRecord> => {
+  const byId = async (scope: OpeningScope, reservationId: string): Promise<BudgetReservationRecord> => {
     const rows = await sql`
-      SELECT * FROM opening_budget_reservations WHERE id = ${reservationId}
+      SELECT * FROM opening_budget_reservations WHERE id = ${reservationId} AND ${inScope(scope)}
     `;
     if (!rows.length) {
       throw new OpeningBudgetError("NOT_FOUND", "reservation not found");
@@ -218,20 +226,20 @@ export function createOpeningBudgetRepository(
         return mapReservation(rows[0] as Record<string, unknown>);
       });
     },
-    release(requestId) {
-      return changeState({ by: "requestId", value: requestId }, "released");
+    release(scope, requestId) {
+      return changeState(scope, { by: "requestId", value: requestId }, "released");
     },
-    complete(requestId) {
-      return changeState({ by: "requestId", value: requestId }, "completed");
+    complete(scope, requestId) {
+      return changeState(scope, { by: "requestId", value: requestId }, "completed");
     },
-    async settle(reservationId, actualCents) {
+    async settle(scope, reservationId, actualCents) {
       if (!Number.isSafeInteger(actualCents) || actualCents <= 0) {
         throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
       }
       const rows = await sql`
         UPDATE opening_budget_reservations
         SET amount_cents = ${actualCents}, state = 'completed', updated_at = now()
-        WHERE id = ${reservationId} AND state = 'reserved'
+        WHERE id = ${reservationId} AND ${inScope(scope)} AND state = 'reserved'
         RETURNING *
       `;
       if (!rows.length) {
@@ -239,10 +247,10 @@ export function createOpeningBudgetRepository(
       }
       return mapReservation(rows[0] as Record<string, unknown>);
     },
-    async markUnknown(reservationId) {
+    async markUnknown(scope, reservationId) {
       // Outcome unknown: keep the reservation counted against the workspace
       // cap ('reserved') until lazy reconciliation completes it.
-      return byId(reservationId);
+      return byId(scope, reservationId);
     },
   };
 }

@@ -193,9 +193,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
-      release: (requestId) => deps.budget.release(requestId),
-      settle: (reservationId, actualCents) => deps.budget.settle(reservationId, actualCents),
-      markUnknown: (reservationId) => deps.budget.markUnknown(reservationId),
+      release: (requestId) => deps.budget.release(scope, requestId),
+      settle: (reservationId, actualCents) => deps.budget.settle(scope, reservationId, actualCents),
+      markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
 
     try {
