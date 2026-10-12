@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOpeningBudgetRepository } from "@aistudy/database";
+import {
+  OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS,
+  createOpeningBudgetRepository,
+} from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let fixture: OpeningFixture;
@@ -15,10 +18,14 @@ afterAll(async () => {
 });
 
 describe("opening budget reconcile (DL7)", () => {
+  it("documents the ~30 min reconcile TTL constant", () => {
+    expect(OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS).toBe(30 * 60 * 1000);
+  });
+
   it("turns 35-minute-old reserved into completed on next reserve; 5-minute-old stays reserved", async () => {
     const budget = createOpeningBudgetRepository(fixture.sql, {
       envCapCents: 100_000,
-      unknownAgeMs: 30 * 60 * 1000,
+      unknownAgeMs: OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS,
       timeZone: "Asia/Shanghai",
     });
     const stale = await budget.reserve(fixture.scope, { purpose: "tutor", amountCents: 1_000, requestId: "age-35" });

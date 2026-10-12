@@ -156,7 +156,12 @@ function isRequestIdUniqueViolation(error: unknown): boolean {
       || (e.constraint_name == null && e.table_name === "opening_budget_reservations"));
 }
 
-const DEFAULT_UNKNOWN_AGE_MS = 30 * 60 * 1000;
+/**
+ * Conservative TTL for lazy unknown/abandoned reservation reconcile (DL7).
+ * Aged reserved rows older than this become completed at the reserved amount
+ * (pessimistic) inside the next reserve transaction. Default: 30 minutes.
+ */
+export const OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS = 30 * 60 * 1000;
 
 function toDate(value: unknown): Date | null {
   if (value == null) return null;
@@ -219,7 +224,7 @@ export function createOpeningBudgetRepository(
   }
   const fallbackTimeZone = resolveBudgetTimeZone(options.timeZone);
   const onReconcileAlert = options.onReconcileAlert;
-  const unknownAgeMs = options.unknownAgeMs ?? DEFAULT_UNKNOWN_AGE_MS;
+  const unknownAgeMs = options.unknownAgeMs ?? OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS;
   if (!Number.isSafeInteger(unknownAgeMs) || unknownAgeMs <= 0) {
     throw new Error("invalid unknown reservation age");
   }
