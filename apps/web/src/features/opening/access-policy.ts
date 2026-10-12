@@ -15,6 +15,25 @@ export function isOpeningRelease(
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
+
+/**
+ * Demo/mock study surfaces (createMockProvider seeds) are never available in
+ * production runtime. Isolation must not depend only on OPENING_RELEASE.
+ */
+export function allowsDemoStudyData(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.NODE_ENV !== "production";
+}
+
+/** Redirect mock-backed legacy pages in opening release *or* production. */
+export function shouldRedirectLegacyMockPages(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return isOpeningRelease(env) || !allowsDemoStudyData(env);
+}
+
+
 function normalizeOrigin(value: string): string | null {
   try {
     const url = new URL(value);
