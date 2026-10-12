@@ -29,7 +29,22 @@ export type BudgetReservationRecord = {
   requestId: string;
   state: string;
   modelSnapshot: OpeningModelSnapshot | null;
+  /** Set once a single caller atomically won the right to call the provider. */
+  executionClaimedAt: Date | null;
+  /** Post-send outcome/cost unknown (row still holds its cap as 'reserved'). */
+  outcomeUnknownAt: Date | null;
+  /** Explicit not-sent failure / cancel reason for 'released' rows. */
+  releaseReason: string | null;
+  /** Caller-persisted result reference for a completed call (replayed, never re-run). */
+  resultRef: string | null;
+  /** TTL reconcile time; with pendingReconcileCents>0 the charge is provisional. */
+  reconciledAt: Date | null;
+  pendingReconcileCents: number;
+  /** True when reserve() returned an existing row for the same request key. */
+  replayed: boolean;
 };
+
+export type ReleaseReason = "not_sent" | "cancelled";
 
 export type ReserveInput = {
   modelSnapshot?: OpeningModelSnapshot;
@@ -46,13 +61,29 @@ export type OpeningBudgetRepository = {
    */
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
   /** Scope-bound: only rows of scope.workspaceId owned by scope.ownerUserId. */
-  release(scope: OpeningScope, requestId: string): Promise<BudgetReservationRecord>;
-  complete(scope: OpeningScope, requestId: string): Promise<BudgetReservationRecord>;
-  /** Ledger flow: reconcile a completed call to its actual cost (scope-bound). */
-  settle(scope: OpeningScope, reservationId: string, actualCents: number): Promise<BudgetReservationRecord>;
+  release(scope: OpeningScope, requestId: string, reason?: ReleaseReason): Promise<BudgetReservationRecord>;
+  complete(scope: OpeningScope, requestId: string, options?: { resultRef?: string }): Promise<BudgetReservationRecord>;
+  /**
+   * Atomically claim the single right to call the provider for a reserved,
+   * not-yet-claimed, not-unknown reservation. Exactly one concurrent caller
+   * gets true.
+   */
+  claimExecution(scope: OpeningScope, reservationId: string): Promise<boolean>;
+  /**
+   * Ledger flow: reconcile a completed call to its actual cost (scope-bound).
+   * A late receipt for a TTL-reconciled (or released) row is applied through an
+   * audited reconcile event instead of being dropped; duplicates are NOT_FOUND.
+   */
+  settle(
+    scope: OpeningScope,
+    reservationId: string,
+    actualCents: number,
+    options?: { resultRef?: string },
+  ): Promise<BudgetReservationRecord>;
   /**
    * Unknown remote outcome: the reservation RETAINS its cap space (stays
-   * 'reserved') until lazy reconciliation settles it as completed.
+   * 'reserved', outcome_unknown_at set) until lazy reconciliation completes it
+   * at full amount with an observable pending-reconcile record.
    */
   markUnknown(scope: OpeningScope, reservationId: string): Promise<BudgetReservationRecord>;
 };
@@ -82,7 +113,12 @@ function isRequestIdUniqueViolation(error: unknown): boolean {
 
 const DEFAULT_UNKNOWN_AGE_MS = 30 * 60 * 1000;
 
-function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
+function toDate(value: unknown): Date | null {
+  if (value == null) return null;
+  return value instanceof Date ? value : new Date(String(value));
+}
+
+function mapReservation(row: Record<string, unknown>, replayed = false): BudgetReservationRecord {
   return {
     id: row.id as string,
     workspaceId: row.workspace_id as string,
@@ -91,6 +127,13 @@ function mapReservation(row: Record<string, unknown>): BudgetReservationRecord {
     requestId: row.request_id as string,
     state: row.state as string,
     modelSnapshot: row.model_snapshot == null ? null : openingModelSnapshotSchema.parse(row.model_snapshot),
+    executionClaimedAt: toDate(row.execution_claimed_at),
+    outcomeUnknownAt: toDate(row.outcome_unknown_at),
+    releaseReason: (row.release_reason as string | null | undefined) ?? null,
+    resultRef: (row.result_ref as string | null | undefined) ?? null,
+    reconciledAt: toDate(row.reconciled_at),
+    pendingReconcileCents: Number(row.pending_reconcile_cents ?? 0),
+    replayed,
   };
 }
 
@@ -144,14 +187,19 @@ export function createOpeningBudgetRepository(
     scope: OpeningScope,
     where: { by: "requestId" | "id"; value: string },
     state: "released" | "completed",
+    extra: { releaseReason?: ReleaseReason; resultRef?: string } = {},
   ) => {
     const predicate = where.by === "requestId"
       ? sql`request_id = ${where.value}`
       : sql`id = ${where.value}`;
+    // A post-send unknown outcome can never be released back to zero.
+    const releasable = state === "released" ? sql`AND outcome_unknown_at IS NULL` : sql``;
     const rows = await sql`
       UPDATE opening_budget_reservations
-      SET state = ${state}, updated_at = now()
-      WHERE ${predicate} AND ${inScope(scope)} AND state = 'reserved'
+      SET state = ${state}, updated_at = now(),
+          release_reason = ${state === "released" ? extra.releaseReason ?? "not_sent" : null},
+          result_ref = COALESCE(${extra.resultRef ?? null}, result_ref)
+      WHERE ${predicate} AND ${inScope(scope)} AND state = 'reserved' ${releasable}
       RETURNING *
     `;
     if (!rows.length) {
@@ -182,12 +230,23 @@ export function createOpeningBudgetRepository(
 
         // Lazy reconcile: stale reserved rows become completed (pessimistic billing).
         const cutoff = new Date(Date.now() - unknownAgeMs);
+        // Full amount stays charged, but the row is observably provisional
+        // (reconciled_at + pending_reconcile_cents) with an audit event; it is
+        // never released at zero and never re-sent.
         await tx`
-          UPDATE opening_budget_reservations
-          SET state = 'completed', updated_at = now()
-          WHERE workspace_id = ${scope.workspaceId}
-            AND state = 'reserved'
-            AND created_at < ${cutoff}
+          WITH reconciled AS (
+            UPDATE opening_budget_reservations
+            SET state = 'completed', updated_at = now(), reconciled_at = now(),
+                pending_reconcile_cents = amount_cents
+            WHERE workspace_id = ${scope.workspaceId}
+              AND state = 'reserved'
+              AND created_at < ${cutoff}
+            RETURNING id, workspace_id, amount_cents
+          )
+          INSERT INTO opening_budget_reconcile_events
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, state_before)
+          SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved' FROM reconciled
+          ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
 
         const prefs = await tx`
@@ -205,10 +264,16 @@ export function createOpeningBudgetRepository(
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
         if (existing.length) {
           const row = mapReservation(existing[0] as Record<string, unknown>);
-          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || row.amountCents !== input.amountCents || row.state !== 'reserved' || JSON.stringify(row.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
+          // Identity = workspace + purpose + original reserved amount + model.
+          // settle() may lower amount_cents, so compare the replayed amount only
+          // while the row is still reserved.
+          const amountChanged = row.state === "reserved" && row.amountCents !== input.amountCents;
+          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || amountChanged || JSON.stringify(row.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
-          return row;
+          // Terminal / in-flight states are replayed as-is (never re-charged);
+          // the caller decides from state + flags and must claimExecution().
+          return mapReservation(existing[0] as Record<string, unknown>, true);
         }
 
         // TZ01: local budget day from domain resolveLocalDayBounds via AI helper.
@@ -243,30 +308,89 @@ export function createOpeningBudgetRepository(
         throw error;
       }
     },
-    release(scope, requestId) {
-      return changeState(scope, { by: "requestId", value: requestId }, "released");
+    release(scope, requestId, reason = "not_sent") {
+      return changeState(scope, { by: "requestId", value: requestId }, "released", { releaseReason: reason });
     },
-    complete(scope, requestId) {
-      return changeState(scope, { by: "requestId", value: requestId }, "completed");
+    complete(scope, requestId, options = {}) {
+      return changeState(scope, { by: "requestId", value: requestId }, "completed", { resultRef: options.resultRef });
     },
-    async settle(scope, reservationId, actualCents) {
+    async claimExecution(scope, reservationId) {
+      const rows = await sql`
+        UPDATE opening_budget_reservations
+        SET execution_claimed_at = now(), updated_at = now()
+        WHERE id = ${reservationId} AND ${inScope(scope)}
+          AND state = 'reserved'
+          AND execution_claimed_at IS NULL
+          AND outcome_unknown_at IS NULL
+        RETURNING id
+      `;
+      return rows.length === 1;
+    },
+    async settle(scope, reservationId, actualCents, options = {}) {
       if (!Number.isSafeInteger(actualCents) || actualCents <= 0) {
         throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
       }
-      const rows = await sql`
-        UPDATE opening_budget_reservations
-        SET amount_cents = ${actualCents}, state = 'completed', updated_at = now()
-        WHERE id = ${reservationId} AND ${inScope(scope)} AND state = 'reserved'
-        RETURNING *
-      `;
-      if (!rows.length) {
-        throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
-      }
-      return mapReservation(rows[0] as Record<string, unknown>);
+      const resultRef = options.resultRef ?? null;
+      return sql.begin(async (tx) => {
+        const current = await tx`
+          SELECT * FROM opening_budget_reservations
+          WHERE id = ${reservationId} AND ${inScope(scope)}
+          FOR UPDATE
+        `;
+        if (!current.length) {
+          throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
+        }
+        const row = mapReservation(current[0] as Record<string, unknown>);
+        if (row.state === "reserved") {
+          const rows = await tx`
+            UPDATE opening_budget_reservations
+            SET amount_cents = ${actualCents}, state = 'completed', updated_at = now(),
+                result_ref = COALESCE(${resultRef}, result_ref)
+            WHERE id = ${reservationId}
+            RETURNING *
+          `;
+          return mapReservation(rows[0] as Record<string, unknown>);
+        }
+        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null && row.pendingReconcileCents > 0;
+        const lateAfterRelease = row.state === "released";
+        if (!lateAfterReconcile && !lateAfterRelease) {
+          // Normal completed row: duplicate receipt is rejected, never re-applied.
+          throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
+        }
+        // Late receipt: audited compensation. The provider DID run, so the real
+        // cost is recorded (no loss), pending reconcile cleared exactly once.
+        const events = await tx`
+          INSERT INTO opening_budget_reconcile_events
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before)
+          VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state})
+          ON CONFLICT (reservation_id, kind) DO NOTHING
+          RETURNING id
+        `;
+        if (!events.length) {
+          throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
+        }
+        const rows = await tx`
+          UPDATE opening_budget_reservations
+          SET amount_cents = ${actualCents}, state = 'completed', pending_reconcile_cents = 0,
+              reconciled_at = COALESCE(reconciled_at, now()), updated_at = now(),
+              result_ref = COALESCE(${resultRef}, result_ref)
+          WHERE id = ${reservationId}
+          RETURNING *
+        `;
+        return mapReservation(rows[0] as Record<string, unknown>);
+      });
     },
     async markUnknown(scope, reservationId) {
       // Outcome unknown: keep the reservation counted against the workspace
-      // cap ('reserved') until lazy reconciliation completes it.
+      // cap ('reserved') and flag it so it can never be released or re-sent;
+      // lazy reconciliation completes it at TTL with a pending-reconcile record.
+      const rows = await sql`
+        UPDATE opening_budget_reservations
+        SET outcome_unknown_at = COALESCE(outcome_unknown_at, now()), updated_at = now()
+        WHERE id = ${reservationId} AND ${inScope(scope)} AND state = 'reserved'
+        RETURNING *
+      `;
+      if (rows.length) return mapReservation(rows[0] as Record<string, unknown>);
       return byId(scope, reservationId);
     },
   };

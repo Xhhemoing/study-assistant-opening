@@ -143,8 +143,9 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
         },
         budget: {
           reserve: (entry) => budgetRepo.reserve(scope, entry),
-          release: (requestId) => budgetRepo.release(scope, requestId),
-          settle: (reservationId, actualCents) => budgetRepo.settle(scope, reservationId, actualCents),
+          release: (requestId, reason) => budgetRepo.release(scope, requestId, reason),
+          claimExecution: (reservationId) => budgetRepo.claimExecution(scope, reservationId),
+          settle: (...args) => budgetRepo.settle(scope, ...args),
           markUnknown: (reservationId) => budgetRepo.markUnknown(scope, reservationId),
         },
         listReadySourceIdsForCourse: (ownedScope, courseId) =>

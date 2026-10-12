@@ -406,7 +406,7 @@ describe("tutor turn handler", () => {
   it("fails definitively and releases on provider auth errors", async () => {
     const { deps, tutorJobs, budget } = setup({ provider: async () => { throw new OpeningProviderError("PROVIDER_AUTH", "bad key", 401); } });
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toThrow();
-    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
     expect(tutorJobs.fail).toHaveBeenCalled();
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
@@ -452,7 +452,7 @@ describe("tutor turn handler", () => {
     };
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toBeInstanceOf(PrivacyEpochError);
     expect(provider.complete).not.toHaveBeenCalled();
-    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
     expect(budget.settle).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });

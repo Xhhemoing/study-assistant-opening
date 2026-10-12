@@ -29,6 +29,7 @@ import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import { tutorActualCents, tutorReservationCents } from "./tutor-cost";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import {
+  isBudgetReplayError,
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
@@ -43,7 +44,7 @@ export type TutorTurnDeps = {
     listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
     listChunksAtVersion(scope: { workspaceId: string; ownerUserId: string }, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
   };
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown"> & Partial<Pick<OpeningBudgetRepository, "claimExecution">>;
   provider: BudgetedProvider | null;
   resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
   pageImages?: (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
@@ -100,8 +101,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     };
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
-      release: (requestId) => deps.budget.release(scope, requestId),
-      settle: (reservationId, actualCents) => deps.budget.settle(scope, reservationId, actualCents),
+      release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
+      ...(deps.budget.claimExecution
+        ? { claimExecution: (reservationId: string) => deps.budget.claimExecution!(scope, reservationId) }
+        : {}),
+      settle: (...args) => deps.budget.settle(scope, ...args),
       markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
     try {
@@ -241,8 +245,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "tutor turn failed";
       const unknownOutcome =
-        error instanceof OpeningProviderError &&
-        ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code);
+        (error instanceof OpeningProviderError &&
+          ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code)) ||
+        // Replay of an unknown / in-flight ledger key: never fake success or re-send.
+        (isBudgetReplayError(error) && (error.code === "BUDGET_OUTCOME_UNKNOWN" || error.code === "BUDGET_EXECUTION_CLAIMED"));
       if (unknownOutcome) {
         await deps.tutorJobs.markUnknown(scope, claimed.id, "provider outcome unknown; usage reconciliation pending");
       } else if (error instanceof PageCitationClarifyError) {

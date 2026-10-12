@@ -71,7 +71,9 @@ describe("opening budget ledger (guarded)", () => {
     await expect(budget.reserve(fixture.scope, { ...input, amountCents: 11 })).rejects.toMatchObject({ code: "CONFLICT" });
     await budget.settle(fixture.scope, first.id, 8);
     await expect(budget.release(fixture.scope, input.requestId)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(budget.reserve(fixture.scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+    // PR-D: a completed key replays its terminal state (no new charge) instead of CONFLICT.
+    await expect(budget.reserve(fixture.scope, input)).resolves.toMatchObject({ id: first.id, state: "completed", amountCents: 8, replayed: true });
+    await expect(budget.reserve(fixture.otherScope, input)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("a failed pre-send call releases the reservation by requestId", async () => {

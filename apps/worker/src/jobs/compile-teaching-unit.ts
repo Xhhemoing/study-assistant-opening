@@ -20,6 +20,7 @@ import {
 } from "@aistudy/database";
 import { assertCurrentEpoch, PrivacyEpochError } from "../runtime/privacy-guard";
 import {
+  isBudgetReplayError,
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
@@ -48,7 +49,7 @@ export type TeachingGenerateStatus =
   | "stale";
 
 export type CompileTeachingUnitDeps = {
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown"> & Partial<Pick<OpeningBudgetRepository, "claimExecution">>;
   /** Stub provider OK until V2-08; null disables model path. */
   provider: BudgetedProvider | null;
   reservedCents?: number;
@@ -193,8 +194,11 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
-      release: (requestId) => deps.budget.release(scope, requestId),
-      settle: (reservationId, actualCents) => deps.budget.settle(scope, reservationId, actualCents),
+      release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
+      ...(deps.budget.claimExecution
+        ? { claimExecution: (reservationId: string) => deps.budget.claimExecution!(scope, reservationId) }
+        : {}),
+      settle: (...args) => deps.budget.settle(scope, ...args),
       markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
 
@@ -252,7 +256,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
           });
         } catch (error) {
           // Released / completed ledger on same operationId → non-retryable for this job.
-          if (error instanceof OpeningBudgetError && error.code === "CONFLICT") {
+          // Replayed ledger key (completed / released / unknown / in-flight):
+          // never re-send under the same operationId; surface as non-retryable.
+          if ((error instanceof OpeningBudgetError && error.code === "CONFLICT") || isBudgetReplayError(error)) {
             await deps.setGenerateStatus(scope, body.activityId, "failed", {
               from: ["queued", "generating"],
             });
