@@ -40,8 +40,11 @@ export function TodayDashboard({
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
   teachingLoopEnabled: teachingLoopEnabledProp,
   teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
+  timeZone: workspaceTimeZone,
 }: {
   state: TodayResumeState;
+  /** Workspace business IANA zone resolved on the server (planning_settings.timeZone). */
+  timeZone?: string;
   api?: OpeningApi;
   focusTaskId?: string;
   /** Override for tests; default reads OPENING_TEACHING_WORKSPACE / NEXT_PUBLIC_*. */
@@ -78,7 +81,7 @@ export function TodayDashboard({
   const [clientInitLoad, setClientInitLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [learningResume, setLearningResume] = useState<LearningResume | null>(null);
   const [resumeLoad, setResumeLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const timeZone = useMemo(() => resolveTodayTimeZone(), []);
+  const timeZone = useMemo(() => resolveTodayTimeZone(workspaceTimeZone), [workspaceTimeZone]);
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
@@ -208,7 +211,7 @@ export function TodayDashboard({
     setCtaBusy(true);
     try {
       const input = buildStartLearningCreateInput({
-        localDate: localDateKey(new Date()),
+        localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
       });
