@@ -5,8 +5,9 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createEditorApi } from "./editor-api";
 import { createEmptyLocalDraft } from "./local-draft";
+import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
 
-export function NewDocument() {
+export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath?: LibraryBasePath }) {
   const router = useRouter();
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -22,12 +23,12 @@ export function NewDocument() {
         content: { blockNoteContent: content, props: null, children: [] },
       })),
     }).then((document) => {
-      if (active) router.replace(`/library/${document.id}`);
+      if (active) router.replace(libraryNotePath(basePath, document.id));
     }).catch(() => {
       if (active) setError("暂时无法创建笔记，请稍后重试。");
     });
     return () => { active = false; };
-  }, [attempt, router]);
+  }, [attempt, basePath, router]);
 
   return (
     <main className="flex min-h-[60vh] items-center justify-center px-6 py-12">

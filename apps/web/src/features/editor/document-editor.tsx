@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { BacklinksPanel } from "./backlinks-panel";
+import { DEFAULT_LIBRARY_BASE_PATH, type LibraryBasePath } from "./library-paths";
 import { createKnowledgeLinksApi } from "./knowledge-links-api";
 import { documentToDraft, draftToApiBlocks, resolveEditorSaveResult, revisionToApiBlocks } from "./document-editor-model";
 import {
@@ -31,7 +32,7 @@ import { LoadError, ui } from "../opening/design/ui";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
-export function DocumentEditor({ documentId }: { documentId: string }) {
+export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PATH }: { documentId: string; basePath?: LibraryBasePath }) {
   const api = useMemo(() => createEditorApi(), []);
   const knowledgeLinksApi = useMemo(() => createKnowledgeLinksApi(), []);
   const [document, setDocument] = useState<EditorDocument | null>(null);
@@ -219,7 +220,7 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
 
   return <div className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
     <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2">
-      <Link className={ui.quiet} href="/library" aria-label="返回知识库"><ArrowLeft aria-hidden="true" size={14} /><span className="hidden sm:inline">知识库</span></Link>
+      <Link className={ui.quiet} href={basePath} aria-label="返回知识库"><ArrowLeft aria-hidden="true" size={14} /><span className="hidden sm:inline">知识库</span></Link>
       <label className="min-w-28 flex-1"><span className="sr-only">笔记标题</span><input className={`${ui.input} border-transparent font-medium`} value={draft.title} onChange={(event) => updateSafetyCopy({ ...draft, title: event.target.value, updatedAt: new Date().toISOString() })} /></label>
       <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-emerald-700" /> : null}{notice || statusText}</span>
       <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-emerald-50 text-emerald-800" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
@@ -227,10 +228,10 @@ export function DocumentEditor({ documentId }: { documentId: string }) {
       <button className={ui.primary} type="button" onClick={saveDocument} disabled={saveState === "saving"}><Save aria-hidden="true" size={14} />保存</button>
     </header>
     <div className="flex min-h-0 flex-1">
-      <main className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-zinc-500">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-zinc-500">本地保留安全副本；保存会创建服务器版本。</p></div>
+      <main className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-zinc-500">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-zinc-500">本地保留安全副本；保存会创建服务器版本。</p></div>
         <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-white [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-white [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-zinc-800" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme="light" onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
       </div></main>
-      <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4"><PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} /><BacklinksPanel documentId={documentId} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
+      <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4"><PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
     </div>
   </div>;

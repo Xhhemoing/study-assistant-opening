@@ -1,7 +1,7 @@
 "use client";
 
 import { AppShell, getWorkspaceEntry, SIDEBAR_COLLAPSED_STORAGE_KEY } from "@aistudy/ui";
-import { BookOpen, ClipboardCheck, Compass, Focus, Layers2, Library, Link2, Maximize2, MessageCircle, Notebook, Sun } from "lucide-react";
+import { ClipboardCheck, Focus, Layers2, Library, Link2, Maximize2, MessageCircle, Notebook, Sun } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
@@ -13,8 +13,6 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 const icons = {
   today: Sun,
   assistant: MessageCircle,
-  learn: BookOpen,
-  explore: Compass,
   library: Library,
   courses: Notebook,
   cards: Layers2,

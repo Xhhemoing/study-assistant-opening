@@ -5,8 +5,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { KnowledgeLink } from "@aistudy/contracts";
 import { createKnowledgeLinksApi } from "./knowledge-links-api";
+import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
 
-type BacklinksPanelProps = { documentId: string };
+type BacklinksPanelProps = { documentId: string; basePath?: LibraryBasePath };
 
 type LinkState =
   | { status: "loading" }
@@ -19,7 +20,7 @@ function endpointLabel(endpoint: KnowledgeLink["from"]): string {
   return endpoint.title ?? "未命名笔记";
 }
 
-export function BacklinksPanel({ documentId }: BacklinksPanelProps) {
+export function BacklinksPanel({ documentId, basePath = DEFAULT_LIBRARY_BASE_PATH }: BacklinksPanelProps) {
   const api = useMemo(() => createKnowledgeLinksApi(), []);
   const [reloadToken, setReloadToken] = useState(0);
   const [state, setState] = useState<LinkState>({ status: "loading" });
@@ -55,7 +56,7 @@ export function BacklinksPanel({ documentId }: BacklinksPanelProps) {
         const label = endpointLabel(source);
         const sourceView = broken || !source.documentId
           ? label
-          : <Link className="truncate hover:text-emerald-700" href={`/library/${encodeURIComponent(source.documentId)}`}>{label}</Link>;
+          : <Link className="truncate hover:text-emerald-700" href={libraryNotePath(basePath, source.documentId)}>{label}</Link>;
         return <li key={link.id} className="border-b border-zinc-200 px-2 py-2 text-sm text-zinc-800"><div className="flex items-center justify-between gap-3"><span className="truncate">{sourceView}</span><span className="shrink-0 text-xs text-zinc-500">{link.relationType}</span></div></li>;
       })}</ul> : null}
     </section>

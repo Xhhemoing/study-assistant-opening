@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ManagedRelation, RelationType } from "@aistudy/contracts";
 import { createDocumentRelationsApi } from "./document-relations-api";
+import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
 
 const relationTypes: RelationType[] = ["references", "supports", "embeds", "derived_from", "related"];
 
@@ -21,7 +22,7 @@ function targetLabel(relation: ManagedRelation): string {
   return relation.to.title ?? "未命名笔记";
 }
 
-export function RelationAuthoringPanel({ documentId }: { documentId: string }) {
+export function RelationAuthoringPanel({ documentId, basePath = DEFAULT_LIBRARY_BASE_PATH }: { documentId: string; basePath?: LibraryBasePath }) {
   const api = useMemo(() => createDocumentRelationsApi(), []);
   const [state, setState] = useState<RelationState>({ status: "loading" });
   const [reloadToken, setReloadToken] = useState(0);
@@ -111,7 +112,7 @@ export function RelationAuthoringPanel({ documentId }: { documentId: string }) {
       {state.status === "ready" && state.relations.length > 0 ? <ul className="mb-3 grid gap-2">{state.relations.map((relation) => {
         const label = targetLabel(relation);
         const target = relation.to.status === "available" && relation.to.documentId
-          ? <Link className="truncate hover:text-emerald-700" href={`/library/${encodeURIComponent(relation.to.documentId)}`}>{label}</Link>
+          ? <Link className="truncate hover:text-emerald-700" href={libraryNotePath(basePath, relation.to.documentId)}>{label}</Link>
           : <span className="truncate">{label}</span>;
         return <li className="grid gap-2 rounded-md border border-zinc-200 p-2" key={relation.id}>
           <div className="min-w-0 text-sm text-zinc-800">{target}</div>
