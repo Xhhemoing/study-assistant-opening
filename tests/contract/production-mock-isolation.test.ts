@@ -103,6 +103,31 @@ it("production course and advanced settings error paths never fall back to demo 
   expect(advanced).not.toMatch(/createMockProvider|createLegacyStudyProvider|buildSeedItems|resetDemoData/);
 
   const providerGate = readSrc("apps/web/src/lib/data/react.ts");
-  expect(providerGate).toMatch(/Demo study provider is unavailable in production/);
-  expect(providerGate).toMatch(/allowsDemoStudyData/);
+  expect(providerGate).toMatch(/process\.env\.NODE_ENV === ["']production["']/);
+  expect(providerGate).toMatch(/import\(["']\.\/demo-study-provider["']\)/);
+  expect(providerGate).not.toMatch(/from ["']\.\/mock\/provider["']/);
+  expect(providerGate).not.toMatch(/createMockProvider/);
+
+  const demoProvider = readSrc("apps/web/src/lib/data/demo-study-provider.ts");
+  expect(demoProvider).toMatch(/createMockProvider/);
 });
+
+it("mock-backed learn pages are production-dead and only dynamic-import demo UI", () => {
+  const pages = [
+    "apps/web/src/app/(workspace)/learn/page.tsx",
+    "apps/web/src/app/(workspace)/learn/review/page.tsx",
+    "apps/web/src/app/(workspace)/learn/goals/page.tsx",
+    "apps/web/src/app/(workspace)/learn/goals/new/page.tsx",
+    "apps/web/src/app/(workspace)/learn/goals/[id]/page.tsx",
+    "apps/web/src/app/(workspace)/learn/practice/[itemId]/page.tsx",
+    "apps/web/src/app/(workspace)/learn/practice/[itemId]/result/page.tsx",
+  ];
+  for (const file of pages) {
+    const text = readSrc(file);
+    expect(text, file).toMatch(/process\.env\.NODE_ENV === ["']production["']/);
+    expect(text, file).toMatch(/notFound\(/);
+    expect(text, file).toMatch(/await import\(/);
+    expect(text, file).not.toMatch(/from ["'].*today-plan-view|from ["'].*practice-player|from ["'].*goal-list|from ["'].*review-session/);
+  }
+});
+

@@ -1,13 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { searchableDocumentsResponseSchema } from "@aistudy/contracts";
-import { allowsDemoStudyData } from "../../features/opening/access-policy";
-import { createMockProvider } from "./mock/provider";
-import { browserStorage } from "./mock/storage";
-import { withPersistedAttempts } from "./persist-attempt";
-import { withPersistedReviews } from "./persist-review";
-import type { SearchableDocument, StudyDataProvider } from "./types";
+import { useCallback, useEffect, useState } from "react";
+import type { StudyDataProvider } from "./types";
 
 const LOAD_ERROR = "加载失败，请重试。";
 
@@ -67,29 +61,28 @@ export function useCurrentUserId(): string | null {
   return result.data ?? null;
 }
 
-async function fetchDocuments(): Promise<SearchableDocument[]> {
-  const response = await fetch("/api/documents", { cache: "no-store" });
-  if (!response.ok) throw new Error("笔记加载失败");
-  return searchableDocumentsResponseSchema.parse(await response.json()).documents;
-}
-
 /**
- * Legacy demo study provider. Refuses in production so logged-in sessions never
- * fall back to seed bundles when OPENING_RELEASE is unset.
+ * Legacy demo study provider hook.
+ * Production builds compare process.env.NODE_ENV directly so webpack can
+ * eliminate the dynamic demo import (no seed bundles in .next/static).
  */
-export function createLegacyStudyProvider(userId: string): StudyDataProvider {
-  if (!allowsDemoStudyData()) {
-    throw new Error("Demo study provider is unavailable in production");
-  }
-  return withPersistedReviews(
-    withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
-  );
-}
-
 export function useStudyProvider(): StudyDataProvider | null {
   const userId = useCurrentUserId();
-  return useMemo(() => {
-    if (!userId || !allowsDemoStudyData()) return null;
-    return createLegacyStudyProvider(userId);
+  const [provider, setProvider] = useState<StudyDataProvider | null>(null);
+
+  useEffect(() => {
+    if (!userId || process.env.NODE_ENV === "production") {
+      setProvider(null);
+      return;
+    }
+    let cancelled = false;
+    void import("./demo-study-provider").then((mod) => {
+      if (!cancelled) setProvider(mod.createLegacyStudyProvider(userId));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [userId]);
+
+  return provider;
 }
