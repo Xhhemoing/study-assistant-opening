@@ -4,7 +4,6 @@ import { applyMigrations, createSqlClient } from "@aistudy/database";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
 import { GET as getToday } from "../../../apps/web/src/app/api/opening/today/route";
 import { POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
-import { POST as proposePlan } from "../../../apps/web/src/app/api/opening/plans/route";
 import { POST as acceptPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/accept/route";
 import { POST as rejectPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/reject/route";
 import { PUT as putPlanningSettings } from "../../../apps/web/src/app/api/opening/planning-settings/route";
