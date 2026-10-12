@@ -42,6 +42,9 @@ describe("backup menu model", () => {
     });
     const copy = backupCopy(2);
     expect(copy.headline).toContain("原生内容备份");
+    expect(copy.disclaimer).toMatch(/Opening 学习|不包含材料原件/);
+    expect(copy.disclaimer).toContain("不是完整工作区恢复");
+    expect(`${copy.headline}${copy.disclaimer}${copy.restoreHint}${copy.resultSummary}`).not.toContain("完整恢复");
     expect(copy.restoreHint).toContain("不会覆盖");
     expect(copy.restoreHint).toMatch(/拒绝|跳过/);
     expect(copy.resultSummary).toContain("2");
