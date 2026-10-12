@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchCurrentUserId } from "./react";
+import { allowsDemoStudyData } from "../../features/opening/access-policy";
+import { createLegacyStudyProvider, fetchCurrentUserId } from "./react";
 
 describe("react data identity loading", () => {
   afterEach(() => {
@@ -26,5 +27,24 @@ describe("react data identity loading", () => {
     await expect(fetchCurrentUserId()).resolves.toBeNull();
     await expect(fetchCurrentUserId()).resolves.toBe("recovered-user");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createLegacyStudyProvider production gate", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("refuses to construct mock provider in production", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    expect(allowsDemoStudyData()).toBe(false);
+    expect(() => createLegacyStudyProvider("user-1")).toThrow(/unavailable in production/);
+  });
+
+  it("still allows demo construction outside production", () => {
+    vi.stubEnv("NODE_ENV", "test");
+    expect(allowsDemoStudyData()).toBe(true);
+    // Construction touches browserStorage; in node it uses in-memory fallback via mock storage.
+    expect(() => createLegacyStudyProvider("user-demo")).not.toThrow();
   });
 });

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { searchableDocumentsResponseSchema } from "@aistudy/contracts";
+import { allowsDemoStudyData } from "../../features/opening/access-policy";
 import { createMockProvider } from "./mock/provider";
 import { browserStorage } from "./mock/storage";
 import { withPersistedAttempts } from "./persist-attempt";
@@ -72,13 +73,23 @@ async function fetchDocuments(): Promise<SearchableDocument[]> {
   return searchableDocumentsResponseSchema.parse(await response.json()).documents;
 }
 
+/**
+ * Legacy demo study provider. Refuses in production so logged-in sessions never
+ * fall back to seed bundles when OPENING_RELEASE is unset.
+ */
 export function createLegacyStudyProvider(userId: string): StudyDataProvider {
+  if (!allowsDemoStudyData()) {
+    throw new Error("Demo study provider is unavailable in production");
+  }
   return withPersistedReviews(
     withPersistedAttempts(createMockProvider({ userId, storage: browserStorage(), fetchDocuments })),
   );
 }
+
 export function useStudyProvider(): StudyDataProvider | null {
   const userId = useCurrentUserId();
-  return useMemo(() => (userId ? createLegacyStudyProvider(userId) : null), [userId]);
+  return useMemo(() => {
+    if (!userId || !allowsDemoStudyData()) return null;
+    return createLegacyStudyProvider(userId);
+  }, [userId]);
 }
-
