@@ -2,7 +2,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { TERMINAL_TURN_STATUSES, type Citation } from "@aistudy/contracts";
+import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, type Citation } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
@@ -82,9 +82,14 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       // A terminal turn (complete/failed/clarify/outcome_unknown) is never
       // rewritten, even if a stale job row is swept or re-terminated later.
       const terminal = [...TERMINAL_TURN_STATUSES];
-      // Writing status 'clarify' needs the LAB-A01 page-refusal job error
-      // ({code, nextAction}), which is not on this base; see PR-C notes.
-      if (input.status === "failed") {
+      if (input.status === "failed" && terminalTurnStatusForJobError(input.detail) === "clarify") {
+        // LAB-U01: a page-citation refusal is a Clarify follow-up, not a failure.
+        await tx`
+          UPDATE opening_turns SET text = ${input.message}, status = 'clarify'
+          WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
+        `;
+      } else if (input.status === "failed") {
         await tx`
           UPDATE opening_turns SET text = ${input.message}, status = 'failed'
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}

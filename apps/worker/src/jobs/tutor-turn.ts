@@ -14,6 +14,7 @@ import {
   classifyTutorHelpKind,
   instructionWithMemories,
   makeTutorInstruction,
+  PageCitationClarifyError,
   preferCitationsForPage,
   resolveStrategyTemplate,
 } from "@aistudy/domain";
@@ -244,6 +245,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code);
       if (unknownOutcome) {
         await deps.tutorJobs.markUnknown(scope, claimed.id, "provider outcome unknown; usage reconciliation pending");
+      } else if (error instanceof PageCitationClarifyError) {
+        // LAB-A01/U01: a page refusal fails the job with a Clarify route; the
+        // repository ends the assistant turn as 'clarify'.
+        await deps.tutorJobs.fail(scope, claimed.id, error.message, {
+          code: error.code,
+          nextAction: error.nextAction,
+        });
       } else {
         await deps.tutorJobs.fail(scope, claimed.id, message);
       }

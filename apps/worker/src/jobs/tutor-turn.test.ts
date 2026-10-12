@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
-import { DEFAULT_STRATEGY_TEMPLATE_ID } from "@aistudy/domain";
+import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -156,6 +156,19 @@ describe("tutor turn handler", () => {
     expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
     expect(budget.settle).toHaveBeenCalledWith("res-1", expect.any(Number));
     expect(okProvider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("routes a page-citation Clarify refusal to fail(..., {code, nextAction}) (LAB-A01/U01)", async () => {
+    const { deps, provider, budget, tutorJobs } = setup();
+    const resolveModel = vi.fn(async () => { throw new PageCitationClarifyError(); });
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toBeInstanceOf(PageCitationClarifyError);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, PAGE_CITATION_CLARIFY_MESSAGE, {
+      code: "page_not_in_sources",
+      nextAction: "clarify",
+    });
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
 
   it("does not dispatch or reserve when route resolution fails", async () => {

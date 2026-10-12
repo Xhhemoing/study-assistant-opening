@@ -334,8 +334,16 @@ describe("opening tutor jobs repository", () => {
 });
 
 describe("LAB-U01 clarify terminal turn", () => {
-  // Ported from 05ffeec. The "page refusal ends as clarify" case is not ported: it needs
-  // the LAB-A01 fail(..., detail) signature that is not on this base.
+  it("ends a page refusal's assistant turn as clarify while the job stays failed with nextAction clarify", async () => {
+    const sql = capturingSql((query) => query.includes("RETURNING assistant_turn_id") ? [{ assistant_turn_id: "assistant-turn-1" }] : []);
+    await createOpeningTutorJobsRepository(sql).fail(scope, "job-1", "请重新选择材料和页码", { code: "page_not_in_sources", nextAction: "clarify" });
+    const jobUpdate = sql.calls.find((call) => call.query.includes("UPDATE opening_tutor_jobs SET status = 'failed'"));
+    expect(jobUpdate?.values).toContainEqual({ message: "请重新选择材料和页码", code: "page_not_in_sources", nextAction: "clarify" });
+    const turnUpdate = sql.calls.find((call) => call.query.includes("UPDATE opening_turns SET text"));
+    expect(turnUpdate?.query).toContain("status = 'clarify'");
+    expect(turnUpdate?.query).not.toContain("status = 'failed'");
+  });
+
   function capturingSql(handler: (query: string) => unknown[]) {
     const calls: Array<{ query: string; values: unknown[] }> = [];
     const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {

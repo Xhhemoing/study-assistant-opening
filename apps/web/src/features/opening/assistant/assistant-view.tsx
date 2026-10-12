@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ConversationResume, ConversationSummary, LearningAttempt, SourceRecord, TutorMode, TurnRecord } from "@aistudy/contracts";
+import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
-import { MessageList } from "./message-list";
+import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
@@ -112,6 +112,8 @@ export function jobStatusHint(job: JobStatusResponse): string {
   if (job.status === "queued") return "回答任务已排队。";
   if (job.status === "running") return "回答任务生成中。";
   if (job.status === "failed") {
+    // LAB-U01: a page refusal (nextAction clarify) is a Clarify follow-up, not a failure.
+    if (terminalTurnStatusForJobError(job.error) === "clarify") return job.error?.message ?? CLARIFY_FOLLOW_UP;
     return `回答任务失败：${job.error?.message ?? "服务未提供失败原因"}`;
   }
   if (job.status === "cancelled") return "回答任务已取消。";

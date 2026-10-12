@@ -1,4 +1,5 @@
-import type { ConversationResume, LearningAttempt } from "@aistudy/contracts";
+import { PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
+import { jobStatusResponseSchema, type ConversationResume, type LearningAttempt } from "@aistudy/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendEphemeralResponseIfActive,
@@ -386,5 +387,24 @@ describe("Package C effectiveSourceIds UI helpers", () => {
       sourceIds: [S1, S2],
       notice: "已按问题自动选入 2 份课程材料",
     });
+  });
+});
+
+
+describe("LAB-U01 jobStatusHint clarify", () => {
+  // failed + nextAction clarify is the page refusal; shown as the Clarify message
+  // with no "回答任务失败：" prefix. The response is parsed through the real contract.
+  it("shows a page refusal (failed + nextAction clarify) as Clarify without the failure prefix", () => {
+    const hint = jobStatusHint(jobStatusResponseSchema.parse({
+      id: JOB_ID,
+      status: "failed",
+      error: { message: PAGE_CITATION_CLARIFY_MESSAGE, code: "page_not_in_sources", nextAction: "clarify" },
+      updatedAt: ISO,
+    }));
+    expect(hint).toBe(PAGE_CITATION_CLARIFY_MESSAGE);
+    expect(hint).not.toContain("回答任务失败");
+    expect(jobStatusHint({
+      id: JOB_ID, status: "failed", error: { message: "unknown strategy template: x", code: "unknown_strategy_template" }, updatedAt: ISO,
+    })).toBe("回答任务失败：unknown strategy template: x");
   });
 });
