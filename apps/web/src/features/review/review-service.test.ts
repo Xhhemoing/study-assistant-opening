@@ -109,15 +109,23 @@ describe("review service", () => {
     const listQueue = vi.fn().mockResolvedValue([
       { card, state: { ...state, workspaceId, ownerUserId }, goalPriority: 4 },
     ]);
+    const requestNow = new Date("2026-10-12T16:30:00.000Z");
+    const now = vi.fn(() => requestNow);
+    const resolveTimeZone = vi.fn().mockResolvedValue("Asia/Shanghai");
     const result = await listReviewQueueForPrincipal(
       runtime({ listQueue }),
       principal,
       { mode: "auto", workspaceId: "99999999-9999-4999-8999-999999999999" },
+      { now, resolveTimeZone },
     );
+    expect(resolveTimeZone).toHaveBeenCalledWith({ workspaceId, ownerUserId });
+    expect(now).toHaveBeenCalledTimes(1);
     expect(listQueue).toHaveBeenCalledWith({
       workspaceId,
       ownerUserId,
       mode: "auto",
+      now: requestNow,
+      timeZone: "Asia/Shanghai",
     });
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.goalPriority).toBe(4);

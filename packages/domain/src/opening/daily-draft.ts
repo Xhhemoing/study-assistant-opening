@@ -5,7 +5,9 @@ import { availableTimeSlots } from "./planning-time";
 export type DailyDraftReasonCode =
   | "carry_over_yesterday"
   | "prefer_tomorrow"
-  | "shorten_duration";
+  | "shorten_duration"
+  /** Confirmed dueAt already passed: needs a user-confirmed new time, not "tomorrow first". */
+  | "overdue_needs_reschedule";
 
 export type DailyDraftReason = {
   code: DailyDraftReasonCode;
@@ -35,6 +37,7 @@ const REASON_LABELS: Record<DailyDraftReasonCode, string> = {
   carry_over_yesterday: "顺延自昨天",
   prefer_tomorrow: "明天优先",
   shorten_duration: "缩短时长",
+  overdue_needs_reschedule: "已逾期，需重新确认时间",
 };
 
 function partsAt(date: Date, timeZone: string): string {
@@ -87,7 +90,15 @@ function maxFreeSlotMinutes(freeBlocks: readonly TimeBlock[]): number {
   return max;
 }
 
-function overflowReason(taskMinutes: number, maxSlotMinutes: number): DailyDraftReason {
+function overflowReason(
+  taskMinutes: number,
+  maxSlotMinutes: number,
+  dueMs: number,
+  nowMs: number | undefined,
+): DailyDraftReason {
+  if (nowMs !== undefined && Number.isFinite(dueMs) && dueMs <= nowMs) {
+    return { code: "overdue_needs_reschedule", label: REASON_LABELS.overdue_needs_reschedule };
+  }
   if (maxSlotMinutes > 0 && maxSlotMinutes < taskMinutes) {
     return { code: "shorten_duration", label: REASON_LABELS.shorten_duration };
   }
@@ -97,7 +108,8 @@ function overflowReason(taskMinutes: number, maxSlotMinutes: number): DailyDraft
 /**
  * Builds the preferred task order and explanation reasons for the daily auto draft.
  * Carry-over (yesterday accepted + still pending) comes first. Not-yet-due retests
- * are omitted. Overflow tasks get prefer_tomorrow / shorten_duration suggestions.
+ * are omitted. Overflow tasks get prefer_tomorrow / shorten_duration suggestions;
+ * overdue tasks (dueAt <= now) get overdue_needs_reschedule and stay in the order.
  * Does not invent free time — only freeBlocks capacity is considered (never sleep/meal).
  */
 export function buildDailyDraftInput(
@@ -147,6 +159,7 @@ export function buildDailyDraftInput(
     end: Date.parse(slot.end),
   }));
   const maxSlot = maxFreeSlotMinutes(freeBlocks);
+  const nowMs = now instanceof Date && Number.isFinite(now.getTime()) ? now.getTime() : undefined;
 
   for (const id of orderedTaskIds) {
     const task = byId.get(id);
@@ -162,7 +175,7 @@ export function buildDailyDraftInput(
     }
     // Carry-over keeps its primary reason even when unscheduled.
     if (reasons[id]?.code === "carry_over_yesterday") continue;
-    reasons[id] = overflowReason(task.minutes, maxSlot);
+    reasons[id] = overflowReason(task.minutes, maxSlot, due, nowMs);
   }
 
   return { orderedTaskIds, reasons };

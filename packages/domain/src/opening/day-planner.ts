@@ -7,9 +7,33 @@ import {
 import { availableTimeSlots } from "./planning-time";
 import { resolveLocalDayBounds } from "./local-day-bounds";
 
+/**
+ * Machine-readable reason why planDay left a pending task unscheduled.
+ * - `deadline_passed`: confirmed dueAt is at/before the earliest allowed start
+ *   (overdue); kept visible for a user-reviewed adjustment, never dropped.
+ * - `no_compliant_slot_after_not_before`: some free slot is long enough, but none
+ *   fits after the task's not-before (retest recommendedAt / planningNow).
+ * - `duration_exceeds_free_slots`: no free slot is long enough for the indivisible task.
+ * - `no_slot_before_deadline`: a slot is long enough, but none ends before the confirmed dueAt.
+ * - `free_time_exhausted`: slots would fit, but earlier tasks consumed the capacity.
+ */
+export type UnscheduledReasonCode =
+  | "deadline_passed"
+  | "no_compliant_slot_after_not_before"
+  | "duration_exceeds_free_slots"
+  | "no_slot_before_deadline"
+  | "free_time_exhausted";
+
+export type UnscheduledTask = { taskId: string; reason: UnscheduledReasonCode };
+
 export type DayPlanResult = {
   blocks: PlannedBlock[];
   unscheduledTaskIds: string[];
+  /**
+   * Additive (contract-compatible): one entry per unscheduledTaskIds item, same order,
+   * with an explicit reason code. Consumers that only read unscheduledTaskIds are unaffected.
+   */
+  unscheduled: UnscheduledTask[];
 };
 
 export type PlanDayOptions = {
@@ -116,6 +140,36 @@ function tryPlaceInSlot(
 }
 
 /**
+ * Explains a placement failure against the day's ORIGINAL free slots (before any
+ * task consumed capacity). Pure classification; never changes placement.
+ */
+function unscheduledReason(
+  originalSlots: readonly MutableSlot[],
+  duration: number,
+  earliest: number,
+  due: number,
+): UnscheduledReasonCode {
+  const firstStart = originalSlots.length
+    ? Math.min(...originalSlots.map((slot) => slot.start))
+    : Number.POSITIVE_INFINITY;
+  if (Number.isFinite(due) && (due <= earliest || due <= firstStart)) {
+    return "deadline_passed";
+  }
+  const longEnough = originalSlots.some((slot) => slot.end - slot.start >= duration);
+  if (!longEnough) return "duration_exceeds_free_slots";
+  const fitsAfterNotBefore = originalSlots.some(
+    (slot) => Math.max(slot.start, earliest) + duration <= Math.min(slot.end, due),
+  );
+  if (!fitsAfterNotBefore) {
+    const fitsIgnoringNotBefore = originalSlots.some(
+      (slot) => slot.start + duration <= Math.min(slot.end, due),
+    );
+    return fitsIgnoringNotBefore ? "no_compliant_slot_after_not_before" : "no_slot_before_deadline";
+  }
+  return "free_time_exhausted";
+}
+
+/**
  * Proposes only; never changes task status or accepts a plan. Higher priority
  * numbers sort first after confirmed deadlines. Tasks remain indivisible;
  * impossible/overdue tasks are surfaced for a user-reviewed adjustment.
@@ -158,7 +212,8 @@ export function planDay(
   const slots: MutableSlot[] = availableTimeSlots(free).map((slot) => ({
     start: Date.parse(slot.start), end: Date.parse(slot.end),
   }));
-  const result: DayPlanResult = { blocks: [], unscheduledTaskIds: [] };
+  const originalSlots = slots.map((slot) => ({ ...slot }));
+  const result: DayPlanResult = { blocks: [], unscheduledTaskIds: [], unscheduled: [] };
   for (const task of pending) {
     const duration = task.minutes * 60_000;
     const due = deadline(task);
@@ -170,6 +225,10 @@ export function planDay(
     }
     if (!placed) {
       result.unscheduledTaskIds.push(task.id);
+      result.unscheduled.push({
+        taskId: task.id,
+        reason: unscheduledReason(originalSlots, duration, earliest, due),
+      });
       continue;
     }
     result.blocks.push({

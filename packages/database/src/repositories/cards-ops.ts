@@ -1,6 +1,11 @@
 import type { ReviewQueueMode, ReviewState } from "@aistudy/contracts";
 import { reviewQueueModeSchema } from "@aistudy/contracts";
-import { buildReviewQueue, type ReviewQueueItem } from "@aistudy/domain";
+import {
+  buildReviewQueue,
+  localDateKeyInZone,
+  resolveWorkspaceTimeZone,
+  type ReviewQueueItem,
+} from "@aistudy/domain";
 import type { Sql } from "postgres";
 import {
   CardRepositoryError,
@@ -130,11 +135,18 @@ export async function listCardQueue(
     mode: ReviewQueueMode;
     now?: Date;
     today?: string;
+    /**
+     * Workspace business IANA zone (planning_settings.timeZone). Missing/blank →
+     * DEFAULT_WORKSPACE_TIME_ZONE (Asia/Shanghai). Invalid zone → RangeError
+     * (explicit failure, never a silent UTC fallback).
+     */
+    timeZone?: string | null;
   },
 ): Promise<CardQueueEntry[]> {
   const mode = reviewQueueModeSchema.parse(input.mode);
   const now = input.now ?? new Date();
-  const today = input.today ?? now.toISOString().slice(0, 10);
+  // Local business day of `now` in the workspace zone — NOT the UTC date (TZ01).
+  const today = input.today ?? localDateKeyInZone(now, resolveWorkspaceTimeZone(input.timeZone));
   const rows = await sql`
     SELECT c.*, s.ease, s.interval_days, s.due_at, s.reps, s.lapses, s.last_grade,
       s.updated_at AS state_updated_at, s.owner_user_id AS state_owner_user_id,

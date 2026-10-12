@@ -3,6 +3,20 @@
  * Destructive tests must opt in with OPENING_TEST_DB=1 and an exact loopback DB.
  */
 const REQUIRED_DB_NAME = "aistudy_opening_test";
+/**
+ * PR-B: optional one-off scratch database for cross-midnight e2e runs.
+ * OPENING_TEST_DB_SCRATCH_NAME must look like aistudy_prb_scratch_<8-14 digits>;
+ * when unset the required name stays exactly aistudy_opening_test (default unchanged).
+ */
+const SCRATCH_DB_NAME = /^aistudy_prb_scratch_[0-9]{8,14}$/;
+export function requiredOpeningTestDbName(env: Record<string, string | undefined> = process.env): string {
+  const scratch = env.OPENING_TEST_DB_SCRATCH_NAME?.trim();
+  if (!scratch) return REQUIRED_DB_NAME;
+  if (!SCRATCH_DB_NAME.test(scratch)) {
+    throw new Error(`Refusing OPENING_TEST_DB_SCRATCH_NAME ${scratch}: must match aistudy_prb_scratch_<digits>`);
+  }
+  return scratch;
+}
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 export function assertOpeningTestDatabase(
@@ -39,9 +53,10 @@ export function assertOpeningTestDatabase(
   }
 
   const dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-  if (dbName !== REQUIRED_DB_NAME) {
+  const requiredName = requiredOpeningTestDbName();
+  if (dbName !== requiredName) {
     throw new Error(
-      `Refusing destructive tests: database name must be exactly ${REQUIRED_DB_NAME}, got ${dbName || "(empty)"}`,
+      `Refusing destructive tests: database name must be exactly ${requiredName}, got ${dbName || "(empty)"}`,
     );
   }
 

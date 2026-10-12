@@ -53,6 +53,18 @@ export const plannedBlockSchema = z
   })
   .strict();
 
+/** PR-B: machine-readable reason a pending task was left unscheduled by planDay. */
+export const unscheduledReasonCodeSchema = z.enum([
+  "deadline_passed",
+  "no_compliant_slot_after_not_before",
+  "duration_exceeds_free_slots",
+  "no_slot_before_deadline",
+  "free_time_exhausted",
+]);
+export const unscheduledTaskSchema = z
+  .object({ taskId: uuidSchema, reason: unscheduledReasonCodeSchema })
+  .strict();
+
 export const planDraftSchema = z
   .object({
     id: uuidSchema,
@@ -62,6 +74,8 @@ export const planDraftSchema = z
     status: z.enum(["draft", "accepted", "rejected"]),
     blocks: z.array(plannedBlockSchema).max(200),
     unscheduledTaskIds: z.array(uuidSchema).max(200),
+    /** PR-B additive: per-task reason for unscheduledTaskIds (same order); optional for older payloads. */
+    unscheduled: z.array(unscheduledTaskSchema).max(200).optional(),
   })
   .strict();
 
