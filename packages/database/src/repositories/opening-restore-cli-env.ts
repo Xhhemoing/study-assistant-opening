@@ -6,10 +6,11 @@
  * callers must not silently fall through to APPLY_EXECUTOR_DEFERRED when a draft
  * is present but env is incomplete.
  *
- * Database URL preference (first non-empty wins):
+ * Database URL preference (first non-empty wins) — target DB must be explicit:
  *   1. OPENING_RESTORE_DATABASE_URL
  *   2. OPENING_TEST_DATABASE_URL
- *   3. DATABASE_URL
+ * DATABASE_URL is intentionally NOT accepted: restore must not default to the
+ * app runtime database.
  *
  * S3 / MinIO: OPENING_S3_* overrides S3_* when set (same fields as loadEnv().s3 /
  * integration OpeningS3 construction). Required: endpoint, region, bucket,
@@ -25,8 +26,7 @@ export type OpeningRestoreCliLiveDepsOk = {
   /** Which env key supplied databaseUrl (for diagnostics; never the URL itself). */
   databaseUrlSource:
     | "OPENING_RESTORE_DATABASE_URL"
-    | "OPENING_TEST_DATABASE_URL"
-    | "DATABASE_URL";
+    | "OPENING_TEST_DATABASE_URL";
   s3: OpeningS3Config;
 };
 
@@ -44,7 +44,6 @@ export type OpeningRestoreCliLiveDepsResult =
 const DB_URL_PREF = [
   "OPENING_RESTORE_DATABASE_URL",
   "OPENING_TEST_DATABASE_URL",
-  "DATABASE_URL",
 ] as const;
 
 type DbUrlSource = (typeof DB_URL_PREF)[number];
@@ -98,7 +97,7 @@ export function resolveOpeningRestoreCliLiveDeps(
     }
   }
   if (!databaseUrl || !databaseUrlSource) {
-    missingKeys.push("OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL|DATABASE_URL");
+    missingKeys.push("OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL");
   }
 
   const endpoint = pickS3(env, "OPENING_S3_ENDPOINT", "S3_ENDPOINT");

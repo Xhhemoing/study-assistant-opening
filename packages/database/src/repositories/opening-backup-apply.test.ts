@@ -86,6 +86,15 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
       expect(["sessions", "opening_jobs", "opening_outbox", "opening_budget_reservations"]).not.toContain(table);
     }
   });
+
+  it("preserves opening_tasks.client_key and retest accept keys on restore allowlist", () => {
+    expect(OPENING_RESTORE_ROW_COLUMNS.opening_tasks).toContain("client_key");
+    expect(OPENING_RESTORE_ROW_COLUMNS.opening_assistant_candidates).toEqual(
+      expect.arrayContaining(["task_accept_client_key", "task_accept_intent", "task_result_ref"]),
+    );
+    expect(OPENING_RESTORE_ROW_COLUMNS.opening_plan_acceptances).toContain("client_key");
+    expect(OPENING_RESTORE_ROW_COLUMNS.opening_plan_drafts).toContain("propose_client_key");
+  });
 });
 
 describe("createOpeningS3RestoreObjectPut / parseOpeningRestoreObjectVersion", () => {

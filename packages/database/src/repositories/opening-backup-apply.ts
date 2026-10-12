@@ -206,7 +206,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_tasks: [
     "id", "workspace_id", "owner_user_id", "title", "minutes", "due_at", "due_text", "priority",
-    "status", "version", "candidate_id", "created_at", "updated_at",
+    "status", "version", "candidate_id", "client_key", "created_at", "updated_at",
   ],
   opening_retest_activities: [
     "id", "workspace_id", "owner_user_id", "course_id", "skill_label", "requirement_key", "purpose",

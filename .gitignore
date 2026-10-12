@@ -70,3 +70,6 @@ undefined/
 
 # Box-local Linux dependency binaries/data (agent desktop preview stack)
 .local-linux/
+
+# Disposable local Postgres data for PR-K (do not commit)
+.pg-prk/
