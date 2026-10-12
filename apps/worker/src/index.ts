@@ -6,7 +6,7 @@ import { createOpeningBudgetRepository, createOpeningJobRepository, createOpenin
   createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository } from "@aistudy/database";
 import { resolveTutorModel } from "./runtime/tutor-model";
 import { createSourcePageImages } from "./runtime/source-page-images";
-import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadWorkerEnv } from "@aistudy/config";
+import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
@@ -47,7 +47,8 @@ export function processSmokeJob(input: unknown): {
 }
 
 export async function main(): Promise<void> {
-  const env = loadWorkerEnv();
+  // PR-H: full registry validation (strict booleans, dependencies, no NEXT_PUBLIC_*) before any connection.
+  const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
   const runner = await preflightParser();
   const openingModel = loadOpeningModelCatalog();
   const redis = createRedisConnection({ url: env.redisUrl });
