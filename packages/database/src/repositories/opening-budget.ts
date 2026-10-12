@@ -1,3 +1,4 @@
+import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { randomUUID } from "node:crypto";
 import { openingModelSnapshotSchema, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
@@ -91,7 +92,9 @@ function readPlanningTimeZone(planningSettings: unknown): string | null {
     return null;
   }
   const tz = (planningSettings as Record<string, unknown>).timeZone;
-  return typeof tz === "string" && tz.trim().length > 0 ? tz.trim() : null;
+  // PR-B: a stored-but-invalid zone fails loudly (RangeError "invalid timeZone: X"),
+  // consistent with remind / reminders / review queue; never a silent default.
+  return typeof tz === "string" && tz.trim().length > 0 ? resolveWorkspaceTimeZone(tz) : null;
 }
 
 function readWorkspaceBudget(aiSettings: unknown): {
