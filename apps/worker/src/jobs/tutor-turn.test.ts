@@ -193,6 +193,15 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
 
+  it("renumbers inline [n] markers to the citations that survive the page filter", async () => {
+    // Model cites page 2 first, then page 1; the current-page guard keeps only page 1.
+    const { deps, tutorJobs } = setup({ provider: async () => ({ text: "引力[1]，运动定律[2]。", citedChunkIds: [chunkB.id, chunkA.id], requestId: null, candidates: [], inputTokens: 10, outputTokens: 5 }) });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const saved = tutorJobs.completeTurn.mock.calls[0][0] as { text: string; citations: Array<{ chunkId: string }> };
+    expect(saved.citations.map((citation) => citation.chunkId)).toEqual([chunkA.id]);
+    expect(saved.text).toBe("引力，运动定律[1]。");
+  });
+
   it("retrieves chunks at each turn's saved source version instead of the current source version", async () => {
     const snapshotChunk = { ...chunkA, sourceVersion: 4, text: "Newton's laws from the saved source version" };
     const { deps, chunks, provider } = setup({
