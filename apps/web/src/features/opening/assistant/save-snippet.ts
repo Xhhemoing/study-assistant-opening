@@ -7,10 +7,20 @@ export function snippetSaveAvailability(message: ChatMessageView): "hidden" | "m
   return message.provenanceId ? "available" : "missing_provenance";
 }
 
-export function prepareSnippetDraft(message: ChatMessageView, selectedText?: string): SnippetCreateInput | null {
+/** What the user selected; `unmapped` means a selection existed but the whole answer is used instead. */
+export type SelectedExcerpt = { text: string } | { unmapped: true };
+
+export const UNMAPPED_SELECTION_NOTICE = "无法精确定位选区，已改为保存整段回答，可在下方修改。";
+
+/** API input plus a page-only notice; dialogs send `input`, never the whole draft. */
+export type SnippetDraft = { input: SnippetCreateInput; notice?: string };
+
+export function prepareSnippetDraft(message: ChatMessageView, selection?: SelectedExcerpt): SnippetDraft | null {
   if (snippetSaveAvailability(message) !== "available" || !message.provenanceId) return null;
-  const text = selectedText?.trim() ? selectedText : message.text;
-  return { title: text.trim().split(/\r?\n/, 1)[0]?.slice(0, 80) || "对话片段", text, provenanceId: message.provenanceId };
+  const selected = selection && "text" in selection && selection.text.trim() ? selection.text : undefined;
+  const text = selected ?? message.text;
+  const input = { title: text.trim().split(/\r?\n/, 1)[0]?.slice(0, 80) || "对话片段", text, provenanceId: message.provenanceId };
+  return selection && "unmapped" in selection ? { input, notice: UNMAPPED_SELECTION_NOTICE } : { input };
 }
 
 export type SnippetSaveResult =

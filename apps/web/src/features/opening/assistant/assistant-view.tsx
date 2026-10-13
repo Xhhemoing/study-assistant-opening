@@ -762,7 +762,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
-    {cardDraft ? <CreateCardDialog draft={cardDraft} api={api} onClose={() => setCardDraft(null)} /> : null}
+    {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
       <UploadStrip api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
