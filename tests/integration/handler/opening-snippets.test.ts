@@ -33,7 +33,7 @@ describe("explicit snippet save handler", () => {
     const { documentId } = await savedResponse.json();
     const document = await createLibraryRepository(sql).getDocument({ workspaceId, documentId });
     expect(document.blocks).toHaveLength(1);
-    expect(document.blocks[0]!.content).toMatchObject({ blockNoteContent: "selected excerpt" });
+    expect(document.blocks[0]!.content).toMatchObject({ blockNoteContent: [{ type: "text", text: "selected excerpt", styles: {} }] });
     expect(JSON.stringify(document)).not.toMatch(/FIRST-PRIVATE|SECOND-FULL|unselected|PRIVATE-SOURCE/);
     expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }]);
     const after = await ephemeralCounts();
