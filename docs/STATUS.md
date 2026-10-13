@@ -16,8 +16,8 @@
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
 | S5 选区按 Markdown 源码保存（原 G4 卡） | Claude | `feat/selection-source-map` / #29 | CI 中；待用户浏览器验收 |
-| S4a 行内引用：`[n]` 改写为 citations 序号 | Claude | `feat/inline-citations` | 进行中 |
-| S4b 行内引用：正文 `[n]` 渲染为来源 chip | Grok | `feat/inline-citation-chips` | 等 Grok 登录后按卡实现 |
+| S4a 行内引用：`[n]` 改写为 citations 序号 | Claude | `feat/inline-citations` / #31 | CI 中 |
+| S4b 行内引用：正文 `[n]` 渲染为来源链接 | Grok | `feat/inline-citation-chips` | 卡片 `E:/Project/grok-cards/S4b-inline-citation-chips.md`；#29、#31 合入后开工 |
 
 ## 下一步（按顺序）
 
