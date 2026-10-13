@@ -6,21 +6,21 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { buttonClass, inputClass, secondaryButtonClass, textareaClass, ui } from "../design/ui";
-import { createSnippetSaveAttempt, type SnippetSaveResult } from "./save-snippet";
+import { createSnippetSaveAttempt, type SnippetDraft, type SnippetSaveResult } from "./save-snippet";
 import { libraryNotePath } from "../../editor/library-paths";
 
-type Props = { draft: SnippetCreateInput; api: Pick<OpeningApi, "createSnippet">; onClose: () => void };
+type Props = { draft: SnippetDraft; api: Pick<OpeningApi, "createSnippet">; onClose: () => void };
 
 export function SaveSnippetDialog({ draft, api, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const headingId = useId(), descriptionId = useId(), titleId = useId(), textId = useId();
-  const [title, setTitle] = useState(draft.title);
-  const [text, setText] = useState(draft.text);
+  const [title, setTitle] = useState(draft.input.title);
+  const [text, setText] = useState(draft.input.text);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SnippetSaveResult | null>(null);
   const attempt = useMemo(() => createSnippetSaveAttempt((input) => api.createSnippet(input)), [api]);
   const locked = result?.kind === "saved" || result?.kind === "unknown";
-  const input = { title, text, provenanceId: draft.provenanceId };
+  const input: SnippetCreateInput = { title, text, provenanceId: draft.input.provenanceId };
   const valid = snippetCreateInputSchema.safeParse(input).success;
 
   useEffect(() => {
@@ -52,6 +52,7 @@ export function SaveSnippetDialog({ draft, api, onClose }: Props) {
         <button type="button" className={ui.icon} aria-label="关闭保存片段" disabled={busy} onClick={onClose}><X size={16} aria-hidden /></button>
       </header>
       <div className="space-y-4 px-5 py-4">
+        {draft.notice ? <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-900">{draft.notice}</p> : null}
         <div id={descriptionId} className="space-y-1 text-xs leading-6 text-zinc-600">
           <p>保存为关联笔记；原材料的隐私限制继续适用。</p>
           <p>仅保存下方确认的片段，不保存整段对话。修改片段不会解除来源关联；确认前的预览与编辑仅留在当前页面。</p>

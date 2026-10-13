@@ -9,10 +9,26 @@ const render = (text: string) => renderToStaticMarkup(createElement(LearningPros
 describe("LearningProse", () => {
   it("renders lists, tables and code from Markdown", () => {
     const html = render("要点：\n\n- 第一\n- 第二\n\n| 量 | 值 |\n|---|---|\n| a | 1 |\n\n```ts\nconst x = 1;\n```");
-    expect(html).toContain("<li>第一</li>");
+    expect(html).toMatch(/<li[^>]*>第一<\/li>/);
     expect(html).toContain("<table");
     expect(html).toContain("<td");
     expect(html).toMatch(/<pre[^>]*overflow-x-auto[^>]*><code class="language-ts">const x = 1;/);
+  });
+
+  it("stamps Markdown source offsets on top-level blocks and list items only", () => {
+    const text = "段落 **粗** [链](https://e.com)\n\n- a\n- b\n\n| x |\n|---|\n| 1 |\n\n---\n\n$$\nx\n$$";
+    const html = render(text);
+    const stamped = [...html.matchAll(/<(\w+)[^>]*?data-src-start="(\d+)" data-src-end="(\d+)"/g)]
+      .map(([, tag, start, end]) => [tag, text.slice(Number(start), Number(end))]);
+    expect(stamped).toEqual([
+      ["p", "段落 **粗** [链](https://e.com)"],
+      ["ul", "- a\n- b"], ["li", "- a"], ["li", "- b"],
+      ["div", "| x |\n|---|\n| 1 |"],
+      ["hr", "---"],
+      ["div", "$$\nx\n$$"],
+    ]);
+    expect(html).toContain("katex-display");
+    expect(html).not.toMatch(/<(strong|a|code|span|td|th)[^>]*data-src-/);
   });
 
   it("renders inline and display math with KaTeX", () => {
@@ -70,13 +86,13 @@ describe("MessageList prose switch", () => {
 
   it("renders assistant Markdown when prose is enabled", () => {
     const html = renderToStaticMarkup(createElement(MessageList, { messages: [message], proseEnabled: true }));
-    expect(html).toContain("<li>第一</li>");
+    expect(html).toMatch(/<li[^>]*>第一<\/li>/);
   });
 
   it("keeps plain text when prose is disabled and for user messages", () => {
     const plain = renderToStaticMarkup(createElement(MessageList, { messages: [message], proseEnabled: false }));
-    expect(plain).not.toContain("<li>");
+    expect(plain).not.toMatch(/<li[^>]*>第一/);
     const user = renderToStaticMarkup(createElement(MessageList, { messages: [{ ...message, role: "user" as const }], proseEnabled: true }));
-    expect(user).not.toContain("<li>");
+    expect(user).not.toMatch(/<li[^>]*>第一/);
   });
 });
