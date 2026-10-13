@@ -25,7 +25,8 @@ test("creates a knowledge-only course with no plan (Path D)", async ({ browser, 
     await page.getByRole("button", { name: "创建课程" }).click();
     await expect(page).toHaveURL(/\/learn\/courses\//);
 
-    await expect(page.getByText("还没有目标。")).toBeVisible();
+    // PR #20: /learn/courses/* renders the real course page; legacy goals are gone.
+    await expect(page.getByRole("heading", { name: "Knowledge Only" })).toBeVisible();
   } finally {
     await context.close();
   }
