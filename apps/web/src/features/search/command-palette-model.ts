@@ -2,7 +2,8 @@ export type PaletteKeyAction = "next" | "previous" | "select" | "close" | "none"
 export const SEARCH_DEBOUNCE_MS = 150;
 
 /** Default palette keeps the Opening learning loop; demoted surfaces stay out of the list. */
-export const PALETTE_COMMANDS = [
+export type PaletteCommand = { id: string; label: string; description: string; href: string; kind: "command" | "page" };
+export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: "today", label: "今日学习", description: "继续今天的学习任务", href: "/opening/today", kind: "page" },
   { id: "assistant", label: "学习助手", description: "提问并查看学习对话", href: "/opening/assistant", kind: "page" },
   { id: "notes", label: "笔记", description: "查看与新建学习笔记", href: "/opening/library", kind: "page" },
@@ -13,7 +14,7 @@ export const PALETTE_COMMANDS = [
   { id: "connections", label: "数据连接", description: "邮箱与钉钉等数据连接设置", href: "/opening/settings/connections", kind: "page" },
   { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/search", kind: "page" },
   { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/settings", kind: "page" },
-  { id: "settings-advanced", label: "高级设置", description: "AI 模型、默认入口与诊断", href: "/settings/advanced", kind: "page" },
+  { id: "settings-advanced", label: "高级设置", description: "AI 模型、每日额度、诊断与导出备份", href: "/settings/advanced", kind: "page" },
 ] as const;
 
 export function filterPaletteCommands(query: string) {

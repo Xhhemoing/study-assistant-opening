@@ -25,8 +25,11 @@ beforeEach(() => {
   process.env.TZ = "America/Los_Angeles";
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(INSTANT);
+  // Captured effects run under Node; the retest clock effect only needs inert window timers.
+  vi.stubGlobal("window", { setInterval: () => 0, clearInterval: () => {}, addEventListener: () => {}, removeEventListener: () => {} });
 });
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   if (originalTz === undefined) delete process.env.TZ; else process.env.TZ = originalTz;
 });
