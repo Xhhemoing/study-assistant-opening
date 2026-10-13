@@ -224,4 +224,11 @@ describe("ANSWER_STYLE_SAMPLES", () => {
       expect(modes.has("explain")).toBe(true);
     }
   });
+
+  it("does not count # comments inside code fences as headings", () => {
+    const text = "先想清楚循环不变量。\n\n```python\n# step 1\nx = 1\n```";
+    const score = scoreAnswerStyle(text, { category: "code", mode: "hint" });
+    expect(score.headingCount).toBe(0);
+    expect(score.hintViolation).toBe(false);
+  });
 });

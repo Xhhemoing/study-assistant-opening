@@ -129,7 +129,8 @@ export function scoreAnswerStyle(text: string, sample: AnswerStyleScoreInput): A
   const withoutFences = stripCodeFences(text);
   const rawHtml = HTML_TAG.test(withoutFences);
   const unbalancedMath = hasUnbalancedMath(withoutFences);
-  const headingCount = countHeadings(text);
+  // Code comments such as `# step` inside fences are not Markdown headings.
+  const headingCount = countHeadings(withoutFences);
   const hintViolation = hasHintViolation(sample.mode, text, headingCount);
 
   const pass =
