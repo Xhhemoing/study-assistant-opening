@@ -3,9 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MessageList } from "./message-list";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
 import { describe, expect, it, vi } from "vitest";
+import { snippetCreateInputSchema } from "@aistudy/contracts";
 import { OpeningApiError } from "../client/api";
 import type { ChatMessageView } from "./message-model";
-import { createSnippetSaveAttempt, prepareSnippetDraft, snippetSaveAvailability } from "./save-snippet";
+import { createSnippetSaveAttempt, prepareSnippetDraft, snippetSaveAvailability, UNMAPPED_SELECTION_NOTICE } from "./save-snippet";
 
 const PROVENANCE_ID = "33333333-3333-4333-8333-333333333333";
 const DOCUMENT_ID = "44444444-4444-4444-8444-444444444444";
@@ -27,20 +28,26 @@ describe("explicit snippet save", () => {
 
   it("blocks unknown provenance instead of inventing an unlinked note", () => {
     expect(snippetSaveAvailability({ ...message, provenanceId: null })).toBe("missing_provenance");
-    expect(prepareSnippetDraft({ ...message, provenanceId: undefined }, "选中内容")).toBeNull();
+    expect(prepareSnippetDraft({ ...message, provenanceId: undefined }, { text: "选中内容" })).toBeNull();
   });
 
   it("previews the selected excerpt with the original message provenance", () => {
-    const result = prepareSnippetDraft(message, "仅保存这一句。");
-    expect(result).toEqual({ title: "仅保存这一句。", text: "仅保存这一句。", provenanceId: PROVENANCE_ID });
-    expect(prepareSnippetDraft(message)?.text).toBe(message.text);
+    const result = prepareSnippetDraft(message, { text: "仅保存这一句。" });
+    expect(result).toEqual({ input: { title: "仅保存这一句。", text: "仅保存这一句。", provenanceId: PROVENANCE_ID } });
+    expect(prepareSnippetDraft(message)?.input.text).toBe(message.text);
+  });
+
+  it("falls back to the whole answer with a page-only notice when the selection cannot be mapped", () => {
+    const result = prepareSnippetDraft(message, { unmapped: true });
+    expect(result).toEqual({ input: { title: "第一句话。", text: message.text, provenanceId: PROVENANCE_ID }, notice: UNMAPPED_SELECTION_NOTICE });
+    expect(snippetCreateInputSchema.safeParse(result!.input).success).toBe(true);
   });
 
   it("does not persist a preview and blocks simultaneous or repeated successful confirmation", async () => {
     let finish!: (result: { documentId: string }) => void;
     const create = vi.fn(() => new Promise<{ documentId: string }>((resolve) => { finish = resolve; }));
     const attempt = createSnippetSaveAttempt(create);
-    prepareSnippetDraft(message, draft.text);
+    prepareSnippetDraft(message, { text: draft.text });
     expect(create).not.toHaveBeenCalled();
     const first = attempt.confirm(draft);
     await expect(attempt.confirm(draft)).resolves.toBeNull();
@@ -94,9 +101,16 @@ it("shows a blocked save entry and explains the missing source context", () => {
 
 it("opening the editable preview does not call the note API", () => {
   const createSnippet = vi.fn();
-  const html = renderToStaticMarkup(createElement(SaveSnippetDialog, { draft, api: { createSnippet }, onClose: () => undefined }));
+  const html = renderToStaticMarkup(createElement(SaveSnippetDialog, { draft: { input: draft }, api: { createSnippet }, onClose: () => undefined }));
   expect(html).toContain("<textarea");
   expect(html).toContain("仅保存这一句。");
   expect(html).toContain("确认保存为笔记");
+  expect(html).not.toContain(UNMAPPED_SELECTION_NOTICE);
   expect(createSnippet).not.toHaveBeenCalled();
+});
+
+it("shows the unmapped-selection notice at the top of the dialog", () => {
+  const html = renderToStaticMarkup(createElement(SaveSnippetDialog, { draft: { input: draft, notice: UNMAPPED_SELECTION_NOTICE }, api: { createSnippet: vi.fn() }, onClose: () => undefined }));
+  expect(html.indexOf(UNMAPPED_SELECTION_NOTICE)).toBeGreaterThan(-1);
+  expect(html.indexOf(UNMAPPED_SELECTION_NOTICE)).toBeLessThan(html.indexOf("<textarea"));
 });

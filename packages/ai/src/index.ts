@@ -32,7 +32,7 @@ export {
   pickSourceIds,
   shouldAutoPickSources,
 } from "./opening/pick-sources";
-export { resolveCitations } from "./opening/citations";
+export { renumberInlineCitations, resolveCitations } from "./opening/citations";
 export {
   assertEphemeralInput,
   canProposeTask,

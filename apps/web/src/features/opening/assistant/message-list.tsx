@@ -5,7 +5,7 @@ import { ArtifactView } from "@aistudy/jingwei/react";
 import { useMemo, useRef } from "react";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { artifactsForMessages, openingCapabilities, openingRenderers } from "../jingwei-host";
-import { snippetSaveAvailability } from "./save-snippet";
+import { snippetSaveAvailability, type SelectedExcerpt } from "./save-snippet";
 import { showsGeneralMaterialBadge, type ChatMessageView } from "./message-model";
 import {
   citationChipLabel,
@@ -15,6 +15,7 @@ import {
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
 import { LearningProse } from "./learning-prose";
+import { selectedSourceFor } from "./selection-source";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -25,8 +26,8 @@ type Props = {
   currentVersions?: Readonly<Record<string, number>>;
   sourceNames?: Readonly<Record<string, string>>;
   onPrompt?: (text: string) => void;
-  onSaveSnippet?: (message: ChatMessageView, selectedText?: string) => void;
-  onCreateCard?: (message: ChatMessageView, selectedText?: string) => void;
+  onSaveSnippet?: (message: ChatMessageView, selection?: SelectedExcerpt) => void;
+  onCreateCard?: (message: ChatMessageView, selection?: SelectedExcerpt) => void;
   /** 图解 under answers that already state a flow or numeric table (jingwei rules planner). Defaults to the server capability. */
   artifactsEnabled?: boolean;
   /** Markdown + math rendering for assistant answers. Defaults to the server capability. */
@@ -43,11 +44,14 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
   const proseEnabled = proseEnabledProp ?? chatProse;
   const messageElements = useRef<Record<string, HTMLElement | null>>({});
   const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
-  function selectedTextFor(message: ChatMessageView) {
+  function selectedTextFor(message: ChatMessageView): SelectedExcerpt | undefined {
     const selection = window.getSelection();
     const element = messageElements.current[message.id];
-    return selection && !selection.isCollapsed && element?.contains(selection.anchorNode) && element.contains(selection.focusNode)
-      ? selection.toString() : undefined;
+    if (!selection || selection.isCollapsed || !element?.contains(selection.anchorNode) || !element.contains(selection.focusNode)) return undefined;
+    // Rendered prose loses its Markdown; map the selection back to source blocks instead.
+    if (message.role !== "assistant" || !proseEnabled) return { text: selection.toString() };
+    const mapped = selectedSourceFor(message.text, element, selection);
+    return mapped.kind === "source" ? { text: mapped.text } : { unmapped: true };
   }
   function saveSnippet(message: ChatMessageView) {
     onSaveSnippet?.(message, selectedTextFor(message));

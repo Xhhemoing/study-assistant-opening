@@ -8,7 +8,7 @@ import {
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
-import { OpeningProviderError, resolveCitations, selectContext } from "@aistudy/ai";
+import { OpeningProviderError, renumberInlineCitations, resolveCitations, selectContext } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -226,6 +226,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         );
         citations = preferCitationsForPage(citations, turn.currentPage);
       }
+      const text = renumberInlineCitations(validated.text, validated.citedChunkIds, citations);
       const contextSourceIds = [...new Set(contextSourceRefs.map((ref) => ref.sourceId))].filter(
         (id) => !excluded.has(id),
       );
@@ -254,7 +255,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         scope,
         jobId: claimed.id,
         assistantTurnId: claimed.assistantTurnId,
-        text: validated.text,
+        text,
         citations,
         contextSourceRefs,
         candidates: validated.candidates.map((payload) => ({
