@@ -13,8 +13,16 @@
  * Shared gates: node scripts/validate-opening-plan.mjs;
  *   node --test tests/tooling/opening-plan.test.mjs;
  *   npx vitest run packages/contracts/src/opening/contracts.test.ts
+ *
+ * Converted (F02 verified 2026-09-13): AC03 — protocol assert here; fuller probe in
+ *   tests/contract/opening-real-use-ac.probes.test.ts
  */
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import {
+  sourceCourseLinkInputSchema,
+  sourceCourseUnlinkInputSchema,
+  sourceRecordSchema,
+} from "@aistudy/contracts";
 
 type AcPlaceholder = {
   id: string;
@@ -23,6 +31,11 @@ type AcPlaceholder = {
   commands: string;
   hang: string;
 };
+
+const U = "11111111-1111-4111-8111-111111111111";
+const U2 = "22222222-2222-4222-8222-222222222222";
+const SHA = "a".repeat(64);
+const ISO = "2026-09-13T12:00:00.000Z";
 
 const placeholders: AcPlaceholder[] = [
   {
@@ -39,14 +52,7 @@ const placeholders: AcPlaceholder[] = [
     commands: "npm test",
     hang: "none yet — extend ingestion/tutor when I02/T02 land",
   },
-  {
-    id: "AC03",
-    ru: "RU-01",
-    tasks: "F01,F02,I01,U01,U03",
-    commands:
-      "npm run test:integration -- course-asset-identity; npm run typecheck",
-    hang: "tests/integration/course-asset-identity.test.ts (document); source link/unlink awaits F02",
-  },
+  // AC03 converted below (F02 verified) — not in skip list
   {
     id: "AC04",
     ru: "RU-03",
@@ -113,6 +119,49 @@ const placeholders: AcPlaceholder[] = [
 ];
 
 describe("opening real-use AC placeholders", () => {
+  it("AC03 | RU-01 | tasks=F01,F02,I01,U01,U03 | source has no courseId; link/unlink via membership input", () => {
+    const record = sourceRecordSchema.parse({
+      id: U,
+      workspaceId: U2,
+      name: "week1.pdf",
+      mime: "application/pdf",
+      bytes: 10,
+      sha256: SHA,
+      version: 0,
+      uploadState: "uploaded",
+      parseState: "ready",
+      error: null,
+      createdAt: ISO,
+    });
+    expect(record).not.toHaveProperty("courseId");
+    expect(
+      sourceRecordSchema.safeParse({ ...record, courseId: U }).success,
+    ).toBe(false);
+
+    expect(
+      sourceCourseLinkInputSchema.parse({
+        sourceId: U,
+        courseId: U2,
+        clientKey: "link-key-ac03",
+      }),
+    ).toEqual({
+      sourceId: U,
+      courseId: U2,
+      clientKey: "link-key-ac03",
+    });
+    expect(
+      sourceCourseUnlinkInputSchema.parse({
+        sourceId: U,
+        courseId: U2,
+        clientKey: "unlink-key-ac03",
+      }),
+    ).toEqual({
+      sourceId: U,
+      courseId: U2,
+      clientKey: "unlink-key-ac03",
+    });
+  });
+
   for (const ac of placeholders) {
     const title = [
       ac.id,
