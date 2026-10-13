@@ -1,5 +1,7 @@
 # Grok Bot Opening Code-Execution Prompt
 
+> **历史文档（2026-10-13 起不再使用）。**它引用的 37 任务账本和 grok-execution 计划已过时。给 Grok 派活改用 [多工具开发分工](../operations/agent-workflow.md) 里的任务卡模板。
+
 Copy the block below as the task prompt for the coding subagent.
 
 ```text
