@@ -83,6 +83,27 @@ describe("Opening linked note persistence", () => {
     expect((await library.getDocument({ workspaceId: scope.workspaceId, documentId })).blocks[0]!.content).toMatchObject({ blockNoteContent: "USER-EDITED-EXCERPT" });
   });
 
+  it("stores structured blocks in order, in the projection and revision 1, with fresh nested ids", async () => {
+    const proof = await receipt([]);
+    const structured = [
+      { type: "heading", props: { level: 2 }, content: [{ type: "text", text: "结论", styles: {} }], children: [] },
+      { type: "numberedListItem", props: null, content: [{ type: "text", text: "一", styles: {} }], children: [
+        { type: "bulletListItem", props: null, content: [{ type: "text", text: "细节", styles: {} }], children: [] },
+      ] },
+      { type: "codeBlock", props: { language: "latex" }, content: "E=mc^2", children: [] },
+    ];
+    const { documentId } = await notes.saveSnippet(scope, { title: "Structured", text: "## 结论\n\n1. 一\n   - 细节\n\n$$\nE=mc^2\n$$", provenanceId: proof.id }, structured);
+    const document = await library.getDocument({ workspaceId: scope.workspaceId, documentId });
+    expect(document.blocks.map((block) => block.type)).toEqual(["heading", "numberedListItem", "codeBlock"]);
+    expect(document.blocks[0]!.content).toEqual({ blockNoteContent: [{ type: "text", text: "结论", styles: {} }], props: { level: 2 }, children: [] });
+    const nested = (document.blocks[1]!.content as { children: Array<{ id: string; type: string; props: unknown }> }).children;
+    expect(nested).toMatchObject([{ type: "bulletListItem", props: {} }]);
+    expect(nested[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+    const [revision] = await sql`SELECT blocks FROM library_revisions WHERE document_id=${documentId} AND revision_number=1`;
+    expect((revision!.blocks as Array<{ id: string; position: number }>).map((block) => [block.id, block.position]))
+      .toEqual(document.blocks.map((block, position) => [block.id, position]));
+  });
+
   it("allows personal reading after AI exclusion while blocking new saves, export and old-backup restore", async () => {
     const sourceId = await source();
     const { documentId, proof } = await save([{ sourceId, sourceVersion: 0 }]);
