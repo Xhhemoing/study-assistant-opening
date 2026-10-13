@@ -22,7 +22,7 @@ describe("shared tutor model selection", () => {
   it("joins one owner-scoped choice to provider options and the exact ledger prices", async () => {
     const selected = await resolveTutorModel({} as never, scope, "hint");
     expect(mocks.get).toHaveBeenCalledWith(scope);
-    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: true });
+    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: true, answerStyle: true });
     expect(selected.modelSnapshot).toEqual({ id: "chosen", providerId: "secondary", modelName: "actual-model", inputCentsPerMillion: 5, outputCentsPerMillion: 7 });
     expect(selected.inputCentsPerMillion).toBe(5);
     expect(selected.outputCentsPerMillion).toBe(7);
@@ -78,7 +78,7 @@ describe("shared tutor model selection", () => {
       outputCentsPerMillion: 20,
     });
     expect(mocks.provider).toHaveBeenCalledWith({
-      baseUrl: lant.baseUrl, apiKey: lant.apiKey, model: "glm-5.3", supportsVision: true,
+      baseUrl: lant.baseUrl, apiKey: lant.apiKey, model: "glm-5.3", supportsVision: true, answerStyle: true,
     });
   });
   it("keeps budget 0 as a hard block even when a workspace Lant key exists", async () => {

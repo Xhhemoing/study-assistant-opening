@@ -188,6 +188,29 @@ describe("opening provider", () => {
     expect(body.messages[3].content).toContain("hello");
   });
 
+  it("appends mode-specific writing rules only when answerStyle is on", async () => {
+    const ok = () => response({ choices: [{ message: { content: JSON.stringify({ text: "a", citedChunkIds: [], candidates: [] }) } }] });
+    const system = async (answerStyle: boolean | undefined, mode: typeof input.mode | "explain") => {
+      const fetchImpl = vi.fn().mockResolvedValue(ok());
+      await createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl, answerStyle }).complete({ ...input, mode });
+      return JSON.parse(fetchImpl.mock.calls[0][1].body as string).messages[0].content as string;
+    };
+    const off = await system(undefined, "hint");
+    expect(off).not.toContain("写作规则");
+    expect(off).toContain("Return only a JSON object");
+
+    const hint = await system(true, "hint");
+    expect(hint.startsWith("answer\n")).toBe(true);
+    expect(hint).toContain("写作规则");
+    expect(hint).toContain("不给完整答案");
+    expect(hint).not.toContain("讲解模式");
+    expect(hint.indexOf("Return only a JSON object")).toBeLessThan(hint.indexOf("写作规则"));
+
+    const explain = await system(true, "explain");
+    expect(explain).toContain("讲解模式");
+    expect(explain).not.toContain("提示模式");
+  });
+
   it("rejects insecure non-loopback endpoints", () => {
     expect(() => createOpeningProvider({
       baseUrl: "http://model.example",
