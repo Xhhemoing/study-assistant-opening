@@ -3,7 +3,7 @@
 **Date:** 2026-10-12
 **Baseline:** `c924faa`（`feat/jingwei-core`）
 **Inputs:** SenseWeave 终版报告与原型（`senseweave-final-report-and-prototype.zip`）、学习表达开发计划（`study-assistant-ai-expression-dev-plan-2026-10-11.zip`），以及对当前仓库的核查
-**Status:** proposed；S1–S6 均未实施
+**Status:** S1 #25、S2 #26、S5 #28 已合入；S5 选区 #29 审查中；S4 进行中；S3、S6 未开始
 
 ## Outcome
 
