@@ -224,6 +224,7 @@ export function TodayDashboard({
         localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
+        continueSourceIds: Object.keys(state.continueItem?.sourceVersions ?? {}),
       });
       const created = await api.createTeachingActivity(input);
       setActivities((rows) => {

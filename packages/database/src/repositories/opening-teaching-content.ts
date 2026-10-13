@@ -253,6 +253,31 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       return mapUnit(rows[0] as Record<string, unknown>);
     },
 
+    /**
+     * Write compiled blocks as the next revision of the unit's body document.
+     * Publish then pins the returned revision so client-init reads these bodies.
+     */
+    async writeUnitBlocks(
+      scope: Scope,
+      unitId: string,
+      blocks: Array<{ id: string; type: string; content: Record<string, unknown> }>,
+    ): Promise<{ documentId: string; revisionNumber: number }> {
+      const unit = await this.getUnit(scope, unitId);
+      if (!unit) throw learningError("NOT_FOUND", "teaching unit not found");
+      const current = await library.getDocument({
+        workspaceId: scope.workspaceId,
+        documentId: unit.documentId,
+      });
+      const updated = await library.updateDocument({
+        workspaceId: scope.workspaceId,
+        documentId: unit.documentId,
+        expectedRevisionNumber: current.currentRevisionNumber,
+        blocks: blocks.map((b) => ({ id: b.id, type: b.type, content: b.content })),
+        reason: "teaching-compile",
+      });
+      return { documentId: unit.documentId, revisionNumber: updated.currentRevisionNumber };
+    },
+
     async listUnits(scope: Scope): Promise<TeachingUnit[]> {
       const rows = await sql`
         SELECT u.* FROM opening_teaching_units u

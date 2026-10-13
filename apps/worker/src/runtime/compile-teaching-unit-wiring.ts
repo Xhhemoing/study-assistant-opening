@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
+import type { Scope } from "@aistudy/contracts";
 import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
@@ -68,26 +70,58 @@ export function createCompileTeachingUnitWorkerDeps(
     },
     ensureTeachingUnitId: async (scope, payload) => {
       if (payload.teachingUnitId) return payload.teachingUnitId;
+      // A library document needs at least one block; the compiled blocks
+      // replace this placeholder as the next revision before publish.
       const unit = await teachingContent.createUnit(scope, {
         title: `Teaching draft ${payload.activityId.slice(0, 8)}`,
-        blocks: [],
+        blocks: [{ id: randomUUID(), type: "meta", content: { text: "draft" } }],
       });
       return unit.id;
     },
     buildPublishInput: teachingCompilerOn
-      ? createTeachingCompilerPublishInput({
-          loadChunks: async (scope, sourceIds) => {
-            const s = scope as { workspaceId: string; ownerUserId: string };
-            return chunks.listForSources(s, sourceIds);
-          },
-        })
+      ? async (scope, payload, providerOutput) => {
+          const activity = await teachingActivities.get(scope, payload.activityId);
+          let revisionNumber: number | null = null;
+          const build = createTeachingCompilerPublishInput({
+            loadChunks: (ownedScope, sourceIds) => chunks.listForSources(ownedScope as Scope, sourceIds),
+            intentSummary: activity?.intentSummary,
+            intentKind: activity?.intentKind,
+            writeLibraryBlocks: async (blocks) => {
+              const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, blocks);
+              revisionNumber = written.revisionNumber;
+            },
+          });
+          const publishInput = await build(scope, payload, providerOutput);
+          if (revisionNumber == null) throw new Error("compiled blocks were not written to the unit document");
+          // Pin the revision holding the compiled bodies so client-init reads them.
+          return { ...publishInput, revisionNumber };
+        }
       : undefined,
     verifyAfterPublish: teachingValidationOn
-      ? createTeachingValidationAfterPublish({
-          loadChunks: async (scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]) => {
-            return chunks.listForSources(scope, sourceIds);
-          },
-        })
+      ? (scope, input) => {
+          // Check against the chunks the compiler pinned, not a fresh budget-filled
+          // selection that may leave them out and fail source identity.
+          const pinned = new Set(
+            (input.publishInput.sourceRefs ?? []).flatMap((ref) => (ref.chunkId ? [ref.chunkId] : [])),
+          );
+          return createTeachingValidationAfterPublish({
+            loadChunks: async (ownedScope, sourceIds) => {
+              const rows = await chunks.listForSources(ownedScope, sourceIds);
+              return pinned.size ? rows.filter((row) => pinned.has(row.id)) : rows;
+            },
+            // Without the published bodies the claim layer has nothing to check
+            // and can never pass, so the activity would stay needs_check forever.
+            loadBlocks: async (ownedScope, publishInput) => {
+              const unit = await teachingContent.getUnit(ownedScope, publishInput.teachingUnitId);
+              if (!unit) return [];
+              const revision = await teachingContent.readRevision(ownedScope, unit.documentId, publishInput.revisionNumber);
+              const roles = new Map(publishInput.blockOrder.map((ref) => [ref.blockId, ref.role]));
+              return revision.blocks
+                .filter((block) => roles.has(block.id))
+                .map((block) => ({ id: block.id, type: block.type, role: roles.get(block.id)!, content: block.content }));
+            },
+          })(scope, input);
+        }
       : undefined,
     privacy: {
       getWorkspaceEpoch: (scope) => privacyRepo.getWorkspaceEpoch(scope),

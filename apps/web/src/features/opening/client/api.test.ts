@@ -412,6 +412,22 @@ describe("openingApi teaching activities (CT-03)", () => {
     expect(fetchImpl).toHaveBeenCalled();
   });
 
+  it("requests teaching compile via POST .../compile and returns the queued activity", async () => {
+    const activity = {
+      id: U, workspaceId: S, ownerUserId: S, courseId: null, status: "active", generateStatus: "queued",
+      intentKind: "topic", intentSummary: "今日主题学习", sourceIds: [], pathVersion: 1, contentVersion: 0,
+      clientKey: "today-topic:2026-10-11", createdAt: ISO, updatedAt: ISO,
+    };
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`/api/opening/teaching-activities/${U}/compile`);
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({ clientKey: "compile:abc123" });
+      return jsonResponse({ activity, jobId: "job-1" }, 202);
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.requestTeachingCompile(U, "compile:abc123")).resolves.toMatchObject({ generateStatus: "queued" });
+  });
+
   it("fetches teaching clientInit via GET .../client-init", async () => {
     const BID = "44444444-4444-4444-8444-444444444444";
     const DOC = "66666666-6666-4666-8666-666666666666";

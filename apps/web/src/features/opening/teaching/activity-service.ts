@@ -4,9 +4,13 @@ import {
   uuidSchema,
   type Scope,
 } from "@aistudy/contracts";
+import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
+import { z } from "zod";
 import { ApiError } from "../../auth/service";
+
+const compileRequestSchema = z.object({ clientKey: z.string().min(8).max(160) }).strict();
 
 function mapError(error: unknown): never {
   if (error && typeof error === "object" && "code" in error) {
@@ -19,14 +23,21 @@ function mapError(error: unknown): never {
   throw error;
 }
 
-/** Minimal Data-owned teaching activity service (create/get/associate). Experience owns Today UI later. */
-export function createOpeningTeachingActivityService(sql: Sql) {
+/**
+ * Minimal Data-owned teaching activity service (create/get/associate/compile).
+ * When the teaching compiler is on, a new activity is created `queued` with its
+ * first compile job, so it is never `ready` without published content.
+ */
+export function createOpeningTeachingActivityService(
+  sql: Sql,
+  env: Record<string, string | undefined> = process.env,
+) {
   const repo = createOpeningTeachingActivitiesRepository(sql);
   return {
     async create(scope: Scope, raw: unknown) {
       const input = teachingActivityCreateInputSchema.parse(raw);
       try {
-        return await repo.create(scope, input);
+        return await repo.create(scope, input, { enqueueCompile: isTeachingCompilerEnabled(env) });
       } catch (error) {
         mapError(error);
       }
@@ -53,6 +64,19 @@ export function createOpeningTeachingActivityService(sql: Sql) {
       const input = teachingActivityAssociateCourseInputSchema.parse(raw);
       try {
         return await repo.associateCourse(scope, activityId, input);
+      } catch (error) {
+        mapError(error);
+      }
+    },
+    /** Queue generation for an activity without usable content (never compiled, failed, stale). */
+    async requestCompile(scope: Scope, activityIdRaw: string, raw: unknown) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      const input = compileRequestSchema.parse(raw);
+      if (!isTeachingCompilerEnabled(env)) {
+        throw new ApiError("CONFIGURATION", "主讲内容生成未开启", 503);
+      }
+      try {
+        return await repo.requestCompile(scope, activityId, input.clientKey);
       } catch (error) {
         mapError(error);
       }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type {
   Scope,
   TeachingActivity,
@@ -95,6 +95,61 @@ export async function ensureCourseContinueActivity(
   });
 }
 
+export type CompileTeachingUnitJobInput = {
+  activityId: string;
+  mode: "generate" | "repair";
+  clientKey: string;
+  expectedContentVersion: number;
+  teachingUnitId?: string;
+  expectedUnitVersion?: number;
+  sourceIds?: string[];
+};
+
+function compileJobPayload(input: CompileTeachingUnitJobInput) {
+  return {
+    mode: input.mode,
+    activityId: input.activityId,
+    expectedContentVersion: input.expectedContentVersion,
+    clientKey: input.clientKey,
+    ...(input.teachingUnitId ? { teachingUnitId: input.teachingUnitId } : {}),
+    ...(input.expectedUnitVersion != null
+      ? { expectedUnitVersion: input.expectedUnitVersion }
+      : {}),
+    ...(input.sourceIds ? { sourceIds: [...input.sourceIds].sort() } : {}),
+  };
+}
+
+/** Insert compile job + outbox row. Returns the new job id, or null when the key already exists. */
+async function insertCompileJob(
+  tx: TransactionSql,
+  scope: Scope,
+  input: CompileTeachingUnitJobInput,
+): Promise<string | null> {
+  const [workspace] = await tx`
+    SELECT privacy_epoch FROM workspaces
+    WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+  if (!workspace) throw learningError("NOT_FOUND", "workspace not found");
+  const privacyEpoch = Number((workspace as { privacy_epoch?: number }).privacy_epoch ?? 0);
+  const key = `compile-teaching-unit:${input.activityId}:${input.mode}:${input.clientKey}`;
+  const jobId = randomUUID();
+  const inserted = await tx`
+    INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+    VALUES (
+      ${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${key},
+      ${"compile-teaching-unit"}, ${tx.json(compileJobPayload(input) as never)}, ${privacyEpoch}
+    )
+    ON CONFLICT (workspace_id, key) DO NOTHING
+    RETURNING id`;
+  if (!inserted.length) return null;
+  await tx`
+    INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+    VALUES (
+      ${scope.workspaceId}, ${jobId}, ${"opening.job.enqueue"},
+      ${tx.json({ jobId, kind: "compile-teaching-unit", activityId: input.activityId } as never)}
+    )`;
+  return jobId;
+}
+
 export function createOpeningTeachingActivitiesRepository(sql: Sql) {
   return {
     assertOwnedActivity: (scope: Scope, activityId: string) =>
@@ -119,7 +174,16 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       return rows.map((row) => mapTeachingActivity(row as Record<string, unknown>));
     },
 
-    async create(scope: Scope, input: TeachingActivityCreateInput): Promise<TeachingActivity> {
+    /**
+     * With `enqueueCompile`, a new activity starts `queued` and its first
+     * compile-teaching-unit job is written in the same transaction, so an
+     * activity never sits at `ready` without content. Replays never re-enqueue.
+     */
+    async create(
+      scope: Scope,
+      input: TeachingActivityCreateInput,
+      options: { enqueueCompile?: boolean } = {},
+    ): Promise<TeachingActivity> {
       return sql.begin(async (tx) => {
         await lockLearningOwner(tx, scope);
         const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
@@ -147,6 +211,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         }
         const id = randomUUID();
         const goalJson = input.goalJson ?? {};
+        const generateStatus = options.enqueueCompile ? "queued" : "ready";
         const rows = await tx`
           INSERT INTO opening_teaching_activities (
             id, workspace_id, owner_user_id, course_id, status, generate_status,
@@ -154,13 +219,22 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             checkpoint_json, client_key, create_intent
           ) VALUES (
             ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.courseId ?? null},
-            'active', 'ready', ${input.intentKind}, ${input.intentSummary}, ${sourceIds},
+            'active', ${generateStatus}, ${input.intentKind}, ${input.intentSummary}, ${sourceIds},
             ${tx.json(goalJson as never)}, 1, 0, ${tx.json({})}, ${input.clientKey},
             ${tx.json(input.createIntent as never)}
           )
           ON CONFLICT (workspace_id, owner_user_id, client_key) DO NOTHING
           RETURNING *`;
         if (!rows[0]) throw learningError("CONFLICT", "activity clientKey already used");
+        if (options.enqueueCompile) {
+          await insertCompileJob(tx, scope, {
+            activityId: id,
+            mode: "generate",
+            clientKey: input.clientKey,
+            expectedContentVersion: 0,
+            sourceIds,
+          });
+        }
         return mapTeachingActivity(rows[0] as Record<string, unknown>);
       });
     },
@@ -285,20 +359,58 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     },
 
     /**
+     * User-triggered (re)generation for an activity that has no usable content:
+     * never compiled (content_version 0), or the last run failed / went stale.
+     * Locks the row so a double click cannot enqueue two generate jobs for one state.
+     */
+    async requestCompile(
+      scope: Scope,
+      activityId: string,
+      clientKey: string,
+    ): Promise<{ activity: TeachingActivity; jobId: string }> {
+      return sql.begin(async (tx) => {
+        await lockLearningOwner(tx, scope);
+        const rows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+        const current = mapTeachingActivity(rows[0] as Record<string, unknown>);
+        if (current.generateStatus === "queued" || current.generateStatus === "generating") {
+          throw learningError("CONFLICT", "teaching content is already being generated");
+        }
+        if (current.contentVersion > 0 && (current.generateStatus === "ready" || current.generateStatus === "needs_check")) {
+          throw learningError("CONFLICT", "teaching content already exists");
+        }
+        if (current.sourceIds.length) await admitLearningSources(tx, scope, current.sourceIds);
+        const jobId = await insertCompileJob(tx, scope, {
+          activityId,
+          mode: "generate",
+          clientKey,
+          expectedContentVersion: current.contentVersion,
+          sourceIds: current.sourceIds,
+        });
+        if (!jobId) throw learningError("CONFLICT", "compile request clientKey already used");
+        const updated = await tx`
+          UPDATE opening_teaching_activities
+          SET generate_status = ${"queued"}, updated_at = now()
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          RETURNING *`;
+        return { activity: mapTeachingActivity(updated[0] as Record<string, unknown>), jobId };
+      });
+    },
+
+    /**
      * Enqueue compile-teaching-unit (V2-07). Key = compile-teaching-unit:{activityId}:{mode}:{clientKey}.
      * On create: outbox + activity generate_status=queued.
      */
     async enqueueCompileTeachingUnit(
       scope: Scope,
-      input: {
-        activityId: string;
-        mode: "generate" | "repair";
-        clientKey: string;
-        expectedContentVersion: number;
-        teachingUnitId?: string;
-        expectedUnitVersion?: number;
-        sourceIds?: string[];
-      },
+      input: CompileTeachingUnitJobInput,
     ): Promise<{ jobId: string; kind: "compile-teaching-unit"; created: boolean }> {
       if (input.clientKey.length < 8) {
         throw learningError("VALIDATION", "clientKey is too short");
@@ -318,39 +430,10 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       }
       await assertOwnedActivity(sql, scope, input.activityId);
       const key = `compile-teaching-unit:${input.activityId}:${input.mode}:${input.clientKey}`;
-      const payload = {
-        mode: input.mode,
-        activityId: input.activityId,
-        expectedContentVersion: input.expectedContentVersion,
-        clientKey: input.clientKey,
-        ...(input.teachingUnitId ? { teachingUnitId: input.teachingUnitId } : {}),
-        ...(input.expectedUnitVersion != null
-          ? { expectedUnitVersion: input.expectedUnitVersion }
-          : {}),
-        ...(input.sourceIds ? { sourceIds: [...input.sourceIds].sort() } : {}),
-      };
+      const payload = compileJobPayload(input);
       return sql.begin(async (tx) => {
-        const [workspace] = await tx`
-          SELECT privacy_epoch FROM workspaces
-          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
-        if (!workspace) throw learningError("NOT_FOUND", "workspace not found");
-        const privacyEpoch = Number((workspace as { privacy_epoch?: number }).privacy_epoch ?? 0);
-        const jobId = randomUUID();
-        const inserted = await tx`
-          INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
-          VALUES (
-            ${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${key},
-            ${"compile-teaching-unit"}, ${tx.json(payload as never)}, ${privacyEpoch}
-          )
-          ON CONFLICT (workspace_id, key) DO NOTHING
-          RETURNING id`;
-        if (inserted.length) {
-          await tx`
-            INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
-            VALUES (
-              ${scope.workspaceId}, ${jobId}, ${"opening.job.enqueue"},
-              ${tx.json({ jobId, kind: "compile-teaching-unit", activityId: input.activityId } as never)}
-            )`;
+        const jobId = await insertCompileJob(tx, scope, input);
+        if (jobId) {
           await tx`
             UPDATE opening_teaching_activities
             SET generate_status = ${"queued"}, updated_at = now()

@@ -73,7 +73,22 @@ export type StartLearningContext = {
   localDate: string;
   continueTitle?: string | null;
   continueConversationId?: string | null;
+  /** Current-version, AI-eligible materials of the continued conversation. */
+  continueSourceIds?: readonly string[];
 };
+
+/**
+ * Whether the learner can ask for AI 主讲 generation: nothing is running and
+ * there is no usable content yet (never compiled, failed, cancelled, stale).
+ * Mirrors the server rule in requestCompile.
+ */
+export function canRequestTeachingCompile(
+  activity: Pick<TeachingActivity, "generateStatus" | "contentVersion">,
+): boolean {
+  if (activity.generateStatus === "queued" || activity.generateStatus === "generating") return false;
+  if (activity.contentVersion === 0) return true;
+  return activity.generateStatus !== "ready" && activity.generateStatus !== "needs_check";
+}
 
 /** Build create input for Today「开始学习」— honest summary + idempotent clientKey. */
 export function buildStartLearningCreateInput(
@@ -81,10 +96,13 @@ export function buildStartLearningCreateInput(
 ): TeachingActivityCreateInput {
   if (ctx.continueConversationId && ctx.continueTitle) {
     const summary = `继续：${ctx.continueTitle}`.slice(0, 2000);
+    const sourceIds = [...new Set(ctx.continueSourceIds ?? [])].sort().slice(0, 32);
     return {
       clientKey: `today-resume:${ctx.localDate}:${ctx.continueConversationId}`,
       intentKind: "resume",
       intentSummary: summary,
+      // Not in createIntent: a same-day replay returns the existing activity even if materials changed.
+      ...(sourceIds.length ? { sourceIds } : {}),
       createIntent: {
         intentKind: "resume",
         source: "today",

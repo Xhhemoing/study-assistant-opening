@@ -598,6 +598,16 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return teachingActivitySchema.parse(body);
     },
 
+    /** Queue AI 主讲 generation; returns the activity now `queued`. */
+    async requestTeachingCompile(id: string, clientKey: string): Promise<TeachingActivity> {
+      const body = await request(
+        `/api/opening/teaching-activities/${id}/compile`,
+        { method: "POST", body: JSON.stringify({ clientKey }) },
+        fetchImpl,
+      );
+      return z.object({ activity: teachingActivitySchema }).parse(body).activity;
+    },
+
     async associateTeachingActivityCourse(
       id: string,
       input: TeachingActivityAssociateCourseInput,

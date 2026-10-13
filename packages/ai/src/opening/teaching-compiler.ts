@@ -260,6 +260,8 @@ function buildBlocksForItem(
 ): CompileLibraryBlock[] {
   const types = normalizeBlockTypes(item.intendedBlockTypes);
   const evidenceSnippet = pack.chunks[0]?.text?.slice(0, 400) ?? "";
+  // Blocks that quote the evidence cite it, so post-publish validation can check them.
+  const evidenceCite = evidenceSnippet ? { citedChunkIds: [pack.chunks[0]!.id] } : {};
   const blocks: CompileLibraryBlock[] = [];
 
   for (const blockType of types) {
@@ -298,6 +300,7 @@ function buildBlocksForItem(
           text: evidenceSnippet
             ? `Example drawn from authorized material: ${evidenceSnippet}`
             : `Example for “${item.title}” (no materials — generated_example).`,
+          ...evidenceCite,
         },
       });
       continue;
@@ -313,6 +316,7 @@ function buildBlocksForItem(
             : evidenceSnippet
               ? `${item.title}: ${evidenceSnippet}`
               : `${item.title}: presentable teaching block from outline${item.notes ? ` — ${item.notes}` : ""}.`,
+        ...(blockType === "formula" ? {} : evidenceCite),
       },
     });
   }
