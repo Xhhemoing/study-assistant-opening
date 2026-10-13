@@ -67,3 +67,28 @@ export function resolveCitations(
   }
   return out;
 }
+
+/**
+ * Group 1: code fences, inline code and math, passed through untouched.
+ * Group 2: a single-number `[n]` marker that is not part of an identifier
+ * (`a[1]`), an inline link `[1](url)` or a reference definition `[1]: url`.
+ */
+const INLINE_MARKER = /(```[\s\S]*?(?:```|$)|`[^`\n]*`|\$\$[\s\S]*?\$\$|(?<!\\)\$[^$\n]+\$)|(?<!\w)\[(\d{1,2})\](?![(:])/g;
+
+/**
+ * S4: the model writes `[n]` with n indexing its own citedChunkIds (1-based).
+ * Citations are filtered and reordered after that, so rewrite each marker to
+ * index the final citations and drop markers whose chunk did not survive:
+ * a remaining `[k]` always points at citations[k-1]. Without cited ids the
+ * text is left alone; there is nothing to link and `[n]` may mean something else.
+ */
+export function renumberInlineCitations(text: string, citedChunkIds: readonly string[], citations: readonly Citation[]): string {
+  if (citedChunkIds.length === 0) return text;
+  const position = new Map(citations.map((citation, index) => [citation.chunkId, index + 1]));
+  return text.replace(INLINE_MARKER, (match, verbatim: string | undefined, number: string | undefined) => {
+    if (verbatim !== undefined || number === undefined) return match;
+    const id = citedChunkIds[Number(number) - 1];
+    const target = id === undefined ? undefined : position.get(id);
+    return target === undefined ? "" : `[${target}]`;
+  });
+}

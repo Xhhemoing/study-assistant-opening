@@ -15,6 +15,7 @@ import {
   canProposeTask,
   ConversationPolicyError,
   pickSourceIds,
+  renumberInlineCitations,
   resolveCitations,
   selectContext,
   shouldAutoPickSources,
@@ -247,6 +248,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       return {
         ...stripEphemeralCandidates({
           ...validated,
+          // Model markers index its own (unfiltered) list.
+          text: renumberInlineCitations(validated.text, validated.citedChunkIds, citations),
           citedChunkIds,
         }),
         citations,

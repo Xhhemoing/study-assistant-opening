@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import { resolveCitations } from "./citations";
+import { renumberInlineCitations, resolveCitations } from "./citations";
 
 const base = (id: string, values: Partial<SourceChunk> = {}): SourceChunk => ({
   id,
@@ -65,5 +65,24 @@ describe("opening citations", () => {
       { sourceNames: { "00000000-0000-0000-0000-000000000001": "牛顿力学讲义" } },
     );
     expect(cite.label).toBe("牛顿力学讲义 v2 page 2");
+  });
+});
+
+describe("renumberInlineCitations", () => {
+  const cited = ["a", "b", "c"];
+  const citations = resolveCitations(["c", "a"], [base("a"), base("c")]);
+
+  it("points each marker at its final citation and drops unresolved ones", () => {
+    expect(renumberInlineCitations("甲[1]。乙[2]。丙[3][1]。越界[9]。", cited, citations))
+      .toBe("甲[2]。乙。丙[1][2]。越界。");
+  });
+
+  it("leaves code, math, links, definitions and identifiers alone", () => {
+    const text = "数组 `a[1]` 与 x[1]，$v[1]$，$$M[2]$$，[1](https://x.test)\n\n```ts\nb[1]\n```\n[2]: https://y.test";
+    expect(renumberInlineCitations(text, cited, citations)).toBe(text);
+  });
+
+  it("keeps text unchanged when the model cited nothing", () => {
+    expect(renumberInlineCitations("见 [1]。", [], [])).toBe("见 [1]。");
   });
 });
