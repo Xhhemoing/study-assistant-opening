@@ -6,7 +6,7 @@ import {
   resolveOpeningModel,
   OpeningModelRoutingError,
 } from "@aistudy/ai";
-import { loadOpeningModelCatalog } from "@aistudy/config";
+import { loadOpeningModelCatalog, parseBooleanEnv } from "@aistudy/config";
 import { createOpeningAiSettingsRepository, createOpeningModelProvidersRepository } from "@aistudy/database";
 import type { Scope, TutorMode } from "@aistudy/contracts";
 import type { Sql } from "postgres";
@@ -36,7 +36,7 @@ export async function resolveTutorModel(sql: Sql, scope: Scope, mode: TutorMode)
   });
   const model = resolveOpeningModel(merged.models, preference.settings, mode, merged.defaultModelId);
   return {
-    provider: createOpeningProvider({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: model.supportsVision }),
+    provider: createOpeningProvider({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: model.supportsVision, answerStyle: parseBooleanEnv(process.env, "OPENING_ANSWER_STYLE", true) }),
     modelSnapshot: openingModelSnapshot(model),
     inputCentsPerMillion: model.inputCentsPerMillion,
     outputCentsPerMillion: model.outputCentsPerMillion,
