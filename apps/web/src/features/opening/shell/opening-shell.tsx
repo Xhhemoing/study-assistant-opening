@@ -37,7 +37,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   const [logoutError, setLogoutError] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
-  const [pendingCount, setPendingCount] = useState(0);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -95,7 +95,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   })}</nav>;
   const quickActions = <>
     <Link href="/opening/cards" className={ui.icon} aria-label="记忆卡片" title="复习到期的记忆卡片" aria-current={pathname.startsWith("/opening/cards") ? "page" : undefined}><Layers2 size={16} aria-hidden="true" /></Link>
-    <Link href="/opening/review" className={ui.icon} aria-label="待确认建议" title="审核 AI 生成的任务、记忆与补测建议" aria-current={pathname.startsWith("/opening/review") ? "page" : undefined}><ClipboardCheck size={16} aria-hidden="true" />{pendingCount > 0 ? <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white ring-2 ring-white motion-safe:animate-pop" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</Link>
+    <Link href="/opening/review" className={ui.icon} aria-label="待确认建议" title="审核 AI 生成的任务、记忆与补测建议" aria-current={pathname.startsWith("/opening/review") ? "page" : undefined}><ClipboardCheck size={16} aria-hidden="true" />{pendingCount != null && pendingCount > 0 ? <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white ring-2 ring-white motion-safe:animate-pop" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</Link>
   </>;
   return <>
     <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={activeItem?.label ?? "学习工作台"} navigation={navigation} focusMode={focusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} topbar={<>{focusMode ? null : quickActions}<FocusTimer /><button type="button" className={`${ui.icon} relative`} aria-pressed={focusMode} aria-label={focusMode ? "退出专注模式" : "进入专注模式"} title={focusMode ? "退出专注模式" : "进入专注模式"} onClick={() => setFocusMode(value => !value)}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}</button></>}>
