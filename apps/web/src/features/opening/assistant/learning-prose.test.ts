@@ -81,6 +81,38 @@ describe("LearningProse", () => {
   });
 });
 
+describe("LearningProse inline citations", () => {
+  const links = [{ href: "/opening?source=a", label: "讲义 p.1" }, { href: "/opening?source=b", label: "讲义 p.2" }];
+  const cite = (text: string) => renderToStaticMarkup(createElement(LearningProse, { text, citationLinks: links }));
+  const anchors = (html: string) => [...html.matchAll(/<a href="([^"]+)"[^>]*aria-label="([^"]+)"/g)].map(([, href, label]) => [href, label]);
+
+  it("links in-range markers to their citation and keeps block offsets", () => {
+    const text = "结论[1]，补充[2]。\n\n- 列表项[2]";
+    const html = cite(text);
+    expect(anchors(html)).toEqual([
+      ["/opening?source=a", "来源 [1]：讲义 p.1"],
+      ["/opening?source=b", "来源 [2]：讲义 p.2"],
+      ["/opening?source=b", "来源 [2]：讲义 p.2"],
+    ]);
+    const stamped = [...html.matchAll(/<(p|li)[^>]*?data-src-start="(\d+)" data-src-end="(\d+)"/g)]
+      .map(([, tag, start, end]) => [tag, text.slice(Number(start), Number(end))]);
+    expect(stamped).toEqual([["p", "结论[1]，补充[2]。"], ["li", "- 列表项[2]"]]);
+  });
+
+  it("leaves out-of-range markers, code, math, identifiers and links as they are", () => {
+    const html = cite("越界[3]，`a[1]`，$v[1]$，x[1]，[1](https://e.com)\n\n```\nb[1]\n```");
+    expect(anchors(html)).toEqual([]);
+    expect(html).toContain("越界[3]");
+    expect(html).toContain("x[1]");
+    expect(html).not.toContain("<sup");
+  });
+
+  it("renders unchanged without citation links", () => {
+    expect(render("结论[1]。")).toBe(renderToStaticMarkup(createElement(LearningProse, { text: "结论[1]。", citationLinks: [] })));
+    expect(render("结论[1]。")).not.toContain("<sup");
+  });
+});
+
 describe("MessageList prose switch", () => {
   const message = { id: "t1", role: "assistant" as const, text: "- 第一\n- 第二", citationLabels: [], citations: [], status: "complete" as const };
 

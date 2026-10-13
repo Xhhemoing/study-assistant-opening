@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
+import type { Citation } from "@aistudy/contracts";
 import { ArtifactView } from "@aistudy/jingwei/react";
 import { useMemo, useRef } from "react";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
@@ -14,7 +15,7 @@ import {
   sourceViewerHref,
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
-import { LearningProse } from "./learning-prose";
+import { LearningProse, type CitationLink } from "./learning-prose";
 import { selectedSourceFor } from "./selection-source";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
@@ -38,6 +39,15 @@ const prompts = [
   { title: "检验自己的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。" },
   { title: "从一个问题展开", text: "我有一个还没想清楚的问题，请和我一起拆解它，区分事实与假设。" },
 ];
+/** Shared by the 出处 chips and inline `[k]` links so both open the same place. */
+function citationLink(citation: Citation, sourceNames: Readonly<Record<string, string>>): CitationLink {
+  const locators = { page: citation.page, startMs: citation.startMs, slideLabel: citation.slideLabel };
+  return {
+    href: sourceViewerHref(citation.sourceId, citation.sourceVersion, locators),
+    label: citationChipLabel({ ...locators, label: citation.label, sourceName: sourceNames[citation.sourceId] }),
+  };
+}
+
 export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
@@ -72,26 +82,14 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
       {message.role === "assistant" && proseEnabled
-        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} /> : null}</div>
+        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} /> : null}</div>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
         <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
         <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />
       </section> : null}
       {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-zinc-500">出处：</span>{message.citations.map((citation) => {
-        const locators = {
-          page: citation.page,
-          startMs: citation.startMs,
-          slideLabel: citation.slideLabel,
-        };
-        const chipLabel = citationChipLabel({
-          label: citation.label,
-          page: citation.page,
-          startMs: citation.startMs,
-          slideLabel: citation.slideLabel,
-          sourceName: sourceNames[citation.sourceId],
-        });
-        const viewerHref = sourceViewerHref(citation.sourceId, citation.sourceVersion, locators);
+        const { href: viewerHref, label: chipLabel } = citationLink(citation, sourceNames);
         const downloadHref = sourceDownloadHref(citation.sourceId, citation.sourceVersion, citation.page);
         const title = sourceViewerCopy({
           requestedVersion: citation.sourceVersion,

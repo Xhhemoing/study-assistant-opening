@@ -224,6 +224,25 @@ describe("MessageList", () => {
     expect(html).toContain("不是当前版本");
   });
 
+  it("points inline [k] at the same place as the k-th 出处 chip", () => {
+    const sourceId = "22222222-2222-4222-8222-222222222222";
+    const citation = (chunk: string, page: number) => ({ chunkId: chunk, sourceId, sourceVersion: 3, label: `p.${page}`, page });
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      proseEnabled: true,
+      messages: [{
+        id: "turn-inline",
+        role: "assistant",
+        text: "定义见第 2 页[2]。",
+        citationLabels: [],
+        citations: [citation("44444444-4444-4444-8444-444444444441", 1), citation("44444444-4444-4444-8444-444444444442", 2)],
+        status: "complete",
+      }],
+    }));
+    const inline = html.match(/<sup[^>]*><a href="([^"]+)"/)?.[1];
+    expect(inline).toBe(sourceViewerHref(sourceId, 3, { page: 2 }).replaceAll("&", "&amp;"));
+    expect(html.split(`href="${inline}"`).length - 1).toBe(2);
+  });
+
   it("primary chip href includes page when citation.page is set and label is readable", () => {
     const sourceId = "22222222-2222-4222-8222-222222222222";
     const html = renderToStaticMarkup(createElement(MessageList, {

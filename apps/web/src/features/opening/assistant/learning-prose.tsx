@@ -2,7 +2,8 @@
 
 import "katex/dist/katex.min.css";
 import type { Element, ElementContent, Root } from "hast";
-import { Component, type ReactNode } from "react";
+import type { Parent as MdastParent, Root as MdastRoot, Text as MdastText } from "mdast";
+import { Component, useMemo, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex, { type Options as KatexOptions } from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -39,6 +40,40 @@ function stampItems(nodes: ElementContent[]) {
 
 const isDisplayMath = (node: Element) => node.tagName === "pre" && node.children.some((child) =>
   child.type === "element" && Array.isArray(child.properties.className) && child.properties.className.includes("math-display"));
+
+export type CitationLink = { href: string; label: string };
+
+/**
+ * S4: the server stores `[k]` so that it always means citations[k-1]. Only
+ * plain text nodes are scanned: code, math and links are other node types.
+ * In-range markers become `<sup data-cite>`; anything else stays text.
+ */
+export function remarkCitationMarkers(options: { count: number }) {
+  const split = (value: string): MdastText[] | undefined => {
+    const parts: MdastText[] = [];
+    let last = 0;
+    for (const match of value.matchAll(/(?<!\w)\[(\d{1,2})\]/g)) {
+      const n = Number(match[1]);
+      if (n < 1 || n > options.count) continue;
+      if (match.index > last) parts.push({ type: "text", value: value.slice(last, match.index) });
+      parts.push({ type: "text", value: match[0], data: { hName: "sup", hProperties: { dataCite: n } } });
+      last = match.index + match[0].length;
+    }
+    if (!parts.length) return undefined;
+    if (last < value.length) parts.push({ type: "text", value: value.slice(last) });
+    return parts;
+  };
+  const walk = (node: MdastParent) => {
+    const children: MdastParent["children"] = [];
+    for (const child of node.children) {
+      if (child.type === "text") { children.push(...(split(child.value) ?? [child])); continue; }
+      if ("children" in child && child.type !== "link" && child.type !== "linkReference") walk(child);
+      children.push(child);
+    }
+    node.children = children;
+  };
+  return (tree: MdastRoot) => { if (options.count > 0) walk(tree); };
+}
 
 /** Runs before KaTeX: top-level blocks and list items get offsets; display math gets a wrapper KaTeX leaves intact. */
 export function rehypeSourceOffsets() {
@@ -91,16 +126,30 @@ export class PlainTextFallback extends Component<{ text: string; children: React
   }
 }
 
-/** Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure. */
-export function LearningProse({ text }: { text: string }) {
+const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-emerald-700 no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50";
+
+/**
+ * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
+ * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
+ */
+export function LearningProse({ text, citationLinks = [] }: { text: string; citationLinks?: readonly CitationLink[] }) {
+  const withCitations = useMemo<Components>(() => citationLinks.length ? {
+    ...components,
+    sup: ({ children, ...props }) => {
+      const link = citationLinks[Number((props as { "data-cite"?: number })["data-cite"]) - 1];
+      return link
+        ? <sup className="text-[0.7em]"><a href={link.href} title={link.label} aria-label={`来源 ${String(children)}：${link.label}`} className={CITE_LINK_CLASS}>{children}</a></sup>
+        : <sup>{children}</sup>;
+    },
+  } : components, [citationLinks]);
   return <PlainTextFallback text={text}>
     <div className="break-words [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
         rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS]]}
         skipHtml
         urlTransform={proseUrlTransform}
-        components={components}
+        components={withCitations}
       >{text}</Markdown>
     </div>
   </PlainTextFallback>;
