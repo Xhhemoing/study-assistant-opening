@@ -14,6 +14,7 @@ import {
   sourceViewerHref,
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
+import { LearningProse } from "./learning-prose";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -28,16 +29,19 @@ type Props = {
   onCreateCard?: (message: ChatMessageView, selectedText?: string) => void;
   /** 图解 under answers that already state a flow or numeric table (jingwei rules planner). Defaults to the server capability. */
   artifactsEnabled?: boolean;
+  /** Markdown + math rendering for assistant answers. Defaults to the server capability. */
+  proseEnabled?: boolean;
 };
 const prompts = [
   { title: "把一个概念讲明白", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。" },
   { title: "检验自己的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。" },
   { title: "从一个问题展开", text: "我有一个还没想清楚的问题，请和我一起拆解它，区分事实与假设。" },
 ];
-export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, artifactsEnabled: artifactsEnabledProp }: Props) {
-  const { chatArtifacts } = useOpeningCapabilities();
+export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+  const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
-  const messageElements = useRef<Record<string, HTMLParagraphElement | null>>({});
+  const proseEnabled = proseEnabledProp ?? chatProse;
+  const messageElements = useRef<Record<string, HTMLElement | null>>({});
   const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
   function selectedTextFor(message: ChatMessageView) {
     const selection = window.getSelection();
@@ -63,7 +67,9 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
-      <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>
+      {message.role === "assistant" && proseEnabled
+        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} /> : null}</div>
+        : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
         <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
         <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />

@@ -152,6 +152,11 @@ describe("capabilities", () => {
     expect(resolveCapabilities(sw({ OPENING_CHAT_ARTIFACTS: "1" }), "u1").chatArtifacts).toBe(true);
   });
 
+  it("chat prose rendering is on by default and can be switched off", () => {
+    expect(resolveCapabilities(sw({}), "u1").chatProse).toBe(true);
+    expect(resolveCapabilities(sw({ OPENING_CHAT_PROSE: "0" }), "u1").chatProse).toBe(false);
+  });
+
   it("capabilities contain only booleans (no secret names or values)", () => {
     const caps = resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1" }), "u1");
     const text = JSON.stringify(caps);

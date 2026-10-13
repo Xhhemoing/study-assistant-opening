@@ -15,6 +15,8 @@ export const openingCapabilitiesSchema = z.object({
   matrixTransformInteractive: z.boolean(),
   /** UI-only: jingwei 图解 under chat answers (rules planner over the answer text). */
   chatArtifacts: z.boolean(),
+  /** UI-only: render answers as Markdown + math (LearningProse) instead of plain text. */
+  chatProse: z.boolean(),
   /** Self-registration; /api/auth/register re-checks the same switch. */
   registrationOpen: z.boolean(),
 }).strict();
@@ -34,6 +36,7 @@ export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   teachingLoop: { api: false, ui: false },
   matrixTransformInteractive: false,
   chatArtifacts: false,
+  chatProse: false,
   registrationOpen: false,
 };
 
