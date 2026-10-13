@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   OPENING_TEST_FIXTURE_ORIGIN,
   allowRegistration,
+  allowsDemoStudyData,
   assertAllowedCookieAuthOrigin,
   isAllowedCookieAuthOrigin,
   isOpeningRelease,
+  shouldRedirectLegacyMockPages,
 } from "./access-policy";
 
 describe("allowRegistration", () => {
@@ -55,3 +57,34 @@ describe("cookie-auth origin", () => {
     ).toThrow(/Missing Origin/);
   });
 });
+
+describe("allowsDemoStudyData", () => {
+  it("is false in production regardless of OPENING_RELEASE", () => {
+    expect(allowsDemoStudyData({ NODE_ENV: "production" })).toBe(false);
+    expect(allowsDemoStudyData({ NODE_ENV: "production", OPENING_RELEASE: "0" })).toBe(false);
+    expect(allowsDemoStudyData({ NODE_ENV: "production", OPENING_RELEASE: "1" })).toBe(false);
+  });
+
+  it("is true outside production so local demo surfaces can still run", () => {
+    expect(allowsDemoStudyData({ NODE_ENV: "development" })).toBe(true);
+    expect(allowsDemoStudyData({ NODE_ENV: "test" })).toBe(true);
+    expect(allowsDemoStudyData({})).toBe(true);
+  });
+});
+
+describe("shouldRedirectLegacyMockPages", () => {
+  it("redirects when opening release is on", () => {
+    expect(shouldRedirectLegacyMockPages({ OPENING_RELEASE: "1", NODE_ENV: "development" })).toBe(true);
+  });
+
+  it("redirects in production even when OPENING_RELEASE is unset", () => {
+    expect(shouldRedirectLegacyMockPages({ NODE_ENV: "production" })).toBe(true);
+    expect(shouldRedirectLegacyMockPages({ NODE_ENV: "production", OPENING_RELEASE: "0" })).toBe(true);
+  });
+
+  it("does not redirect in non-production without opening release", () => {
+    expect(shouldRedirectLegacyMockPages({ NODE_ENV: "development", OPENING_RELEASE: "0" })).toBe(false);
+    expect(shouldRedirectLegacyMockPages({ NODE_ENV: "test" })).toBe(false);
+  });
+});
+
