@@ -75,7 +75,8 @@ export async function readOpeningBackupTableRows(
     WHERE ${includedProblem(tx, id, userId, "p", tx`p.session_id`)}
     ORDER BY p.problem_id`);
   tables.opening_help_exposures = asRows(await tx`
-    SELECT h.id, h.workspace_id, h.session_id, h.problem_id, h.turn_id, h.level, h.delivered, h.created_at, h.attempt_id, h.delivered_at, h.history_revision
+    SELECT h.id, h.workspace_id, h.session_id, h.problem_id, h.turn_id, h.level, h.delivered, h.created_at, h.attempt_id, h.delivered_at, h.history_revision,
+      h.kind, h.activity_id, h.item_version_id
     FROM opening_help_exposures h
     JOIN opening_learning_sessions l ON l.id = h.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     WHERE h.workspace_id = ${id}
@@ -153,7 +154,7 @@ export async function readOpeningBackupTableRows(
     FROM opening_privacy_exclusions WHERE workspace_id = ${id} ORDER BY source_id`);
   tables.opening_tasks = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
-      candidate_id, created_at, updated_at
+      candidate_id, client_key, created_at, updated_at
     FROM opening_tasks WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,

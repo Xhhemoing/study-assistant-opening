@@ -15,8 +15,14 @@ const alias = {
     "packages/database/src/migrate.ts",
   ),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
+  "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
   "@aistudy/ui": path.resolve(root, "packages/ui/src/index.ts"),
+  // Tests execute server modules in Node; resolve the marker like the
+  // react-server condition does (no-op) instead of the client-throwing entry.
+  "server-only": path.resolve(root, "node_modules/server-only/empty.js"),
+  "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
+  "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
 };
 
 const sharedExclude = [
@@ -42,6 +48,7 @@ export default defineConfig({
       }),
       defineProject({
         resolve: { alias },
+        oxc: { jsx: { runtime: "automatic" } },
         test: {
           name: "handler",
           include: ["tests/integration/handler/**/*.test.ts"],
@@ -53,6 +60,7 @@ export default defineConfig({
       }),
       defineProject({
         resolve: { alias },
+        oxc: { jsx: { runtime: "automatic" } },
         test: {
           name: "integration",
           include: ["tests/integration/**/*.test.ts"],

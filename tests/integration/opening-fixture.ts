@@ -17,6 +17,21 @@ export type OpeningFixture = {
 };
 
 /**
+ * Raw-SQL seeds for opening_learning_sessions need an owning teaching activity
+ * (0053 made activity_id NOT NULL). Mirrors the legacy course_continue row
+ * createSession writes; course_id may point at a non-existent course.
+ */
+export async function insertTestTeachingActivity(sql: Sql, scope: OpeningScope, courseId: string | null = null): Promise<string> {
+  const id = randomUUID();
+  await sql`INSERT INTO opening_teaching_activities
+    (id, workspace_id, owner_user_id, course_id, status, intent_kind, intent_summary, client_key, create_intent)
+    SELECT ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, c.id, 'active', 'course_continue', 'Test activity',
+      ${`test-activity:${id}`}, '{}'::jsonb
+    FROM (SELECT (SELECT id FROM courses WHERE id = ${courseId}::uuid) AS id) c`;
+  return id;
+}
+
+/**
  * Connects ONLY through the F01 guard (OPENING_TEST_DB=1 + loopback
  * aistudy_opening_test) and provisions an independent user with two
  * workspaces plus a valid session cookie. `request` requires a running web

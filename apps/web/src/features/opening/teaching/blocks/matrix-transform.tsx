@@ -40,7 +40,6 @@ export function isMatrixTransformInteractiveEnabled(
 ): boolean {
   const raw = (
     env.OPENING_MATRIX_TRANSFORM_INTERACTIVE ??
-    env.NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE ??
     "1"
   )
     .trim()

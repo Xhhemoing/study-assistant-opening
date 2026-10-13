@@ -260,7 +260,8 @@ describe("opening task quick-add idempotency (DL5)", () => {
     const created = await first.json();
 
     const second = await createTask(req("/api/opening/tasks", "POST", body));
-    expect(second.status).toBe(201);
+    // PR-E: a replay of the same clientKey is 200, a new task is 201.
+    expect(second.status).toBe(200);
     const replayed = await second.json();
     expect(replayed.id).toBe(created.id);
 
@@ -268,6 +269,14 @@ describe("opening task quick-add idempotency (DL5)", () => {
     expect(listed.status).toBe(200);
     const { tasks } = await listed.json();
     expect(tasks.filter((task: { title: string }) => task.title === "快速添加")).toHaveLength(1);
+  });
+
+  it("no-key quick-add stays compatible: each submit is a new task (201)", async () => {
+    const body = { title: "无键任务", minutes: 25, dueAt: null, priority: 1, candidateId: null };
+    const a = await createTask(req("/api/opening/tasks", "POST", body));
+    const b = await createTask(req("/api/opening/tasks", "POST", body));
+    expect([a.status, b.status]).toEqual([201, 201]);
+    expect((await a.json()).id).not.toBe((await b.json()).id);
   });
 
   it("creates two rows for different clientKeys", async () => {

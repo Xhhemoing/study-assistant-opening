@@ -58,12 +58,13 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
         reserved.push(input);
         return { id: `res-${reserved.length}`, workspaceId: job.workspaceId, purpose: input.purpose, amountCents: input.amountCents, requestId: input.requestId, state: "reserved", modelSnapshot: null };
       },
-      release: async (requestId: string) => {
+      release: async (scope: unknown, requestId: string) => {
+        void scope;
         released.push(requestId);
         return { id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId, state: "released", modelSnapshot: null };
       },
       settle: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 50, requestId: "x", state: "completed", modelSnapshot: null }),
-      markUnknown: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId: "x", state: "reserved", modelSnapshot: null }),
+      claimExecution: async () => true, markUnknown: async () => ({ id: "res-1", workspaceId: job.workspaceId, purpose: "compile-teaching-unit", amountCents: 100, requestId: "x", state: "reserved", modelSnapshot: null }),
     },
     provider: { complete: async () => stubOutput },
     reservedCents: 100,
@@ -127,7 +128,7 @@ describe("createCompileTeachingUnitHandler", () => {
         },
         release: async () => ({}),
         settle: async () => ({}),
-        markUnknown: async () => ({}),
+        claimExecution: async () => true, markUnknown: async () => ({}),
       },
     });
     const process = createCompileTeachingUnitHandler(deps as never);

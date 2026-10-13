@@ -5,6 +5,7 @@ import { POST as register } from "../../../apps/web/src/app/api/auth/register/ro
 import { GET as getTutorActions } from "../../../apps/web/src/app/api/opening/courses/[id]/tutor-actions/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
+import { insertTestTeachingActivity } from "../opening-fixture";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
@@ -91,13 +92,14 @@ beforeAll(async () => {
     VALUES (${courseId}, ${workspaceId}, 'K02a tutor actions', ${`k02a-${courseId}`})`;
 
   sessionId = randomUUID();
+  const activityId = await insertTestTeachingActivity(sql, { workspaceId, ownerUserId }, courseId);
   await sql`INSERT INTO opening_learning_sessions
-    (id, workspace_id, owner_user_id, course_id, skill_label)
-    VALUES (${sessionId}, ${workspaceId}, ${ownerUserId}, ${courseId}, 'chain rule')`;
+    (id, workspace_id, owner_user_id, course_id, activity_id, skill_label)
+    VALUES (${sessionId}, ${workspaceId}, ${ownerUserId}, ${courseId}, ${activityId}, 'chain rule')`;
 
   await sql`INSERT INTO opening_help_exposures
-    (id, workspace_id, session_id, turn_id, level, delivered)
-    VALUES (${randomUUID()}, ${workspaceId}, ${sessionId}, ${randomUUID()}, 'revealed', TRUE)`;
+    (id, workspace_id, session_id, turn_id, kind, level, delivered)
+    VALUES (${randomUUID()}, ${workspaceId}, ${sessionId}, ${randomUUID()}, 'solution', 'revealed', TRUE)`;
 
   const taskId = randomUUID();
   await sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, status)
@@ -159,8 +161,8 @@ describe("K02a tutor-actions route", () => {
 
   it("derives worked_example from a hint without masking later reveals", async () => {
     await sql`INSERT INTO opening_help_exposures
-      (id, workspace_id, session_id, turn_id, level, delivered)
-      VALUES (${randomUUID()}, ${workspaceId}, ${sessionId}, ${randomUUID()}, 'hinted', TRUE)`;
+      (id, workspace_id, session_id, turn_id, kind, level, delivered)
+      VALUES (${randomUUID()}, ${workspaceId}, ${sessionId}, ${randomUUID()}, 'hint', 'hinted', TRUE)`;
     const response = await get(courseId, {
       skillLabel: "chain rule",
       sessionId,

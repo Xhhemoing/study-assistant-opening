@@ -17,3 +17,18 @@ export {
 
 export { loadOpeningModelCatalog, OpeningModelConfigurationError, type OpeningModelCatalog } from "./opening-model-catalog";
 export { loadWorkerEnv, type WorkerEnv } from "./worker-env";
+
+// PR-H typed configuration (server-only). Client code imports `@aistudy/config/public`.
+export { ENV_REGISTRY, ENV_GROUPS, REMOVED_PUBLIC_VARS, SECRET_ENV_NAMES, envSpec, type EnvVarSpec } from "./registry";
+export {
+  collectEnvIssues,
+  DEPENDENCY_RULES,
+  loadFeatureSwitches,
+  loadServerConfig,
+  parseBooleanEnv,
+  resolveCapabilities,
+  rolloutBucket,
+  type FeatureSwitches,
+  type ServerConfig,
+} from "./server-config";
+export { ENV_TEMPLATE_FILES, renderEnvTemplate, type EnvTemplateTarget } from "./env-template";

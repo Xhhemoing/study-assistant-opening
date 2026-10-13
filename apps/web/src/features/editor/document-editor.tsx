@@ -3,14 +3,25 @@
 import { zh } from "@blocknote/core/locales";
 import { promotionResponseSchema } from "@aistudy/contracts";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
-import { ArrowLeft, Check, Clock3, PanelRight, Redo2, RefreshCw, Save, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, Clock3, PanelRight, Redo2, Save, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { BacklinksPanel } from "./backlinks-panel";
-import { DEFAULT_LIBRARY_BASE_PATH, type LibraryBasePath } from "./library-paths";
+import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
+import { createDocumentRelationsApi } from "./document-relations-api";
+import { DraftConflictPanel } from "./draft-conflict-panel";
 import { createKnowledgeLinksApi } from "./knowledge-links-api";
-import { documentToDraft, draftToApiBlocks, resolveEditorSaveResult, revisionToApiBlocks } from "./document-editor-model";
+import {
+  buildSavePayload,
+  documentToDraft,
+  planDraftRestore,
+  planSaveAsNewNote,
+  resolveEditorSaveResult,
+  revisionToApiBlocks,
+  summarizeDraftDiff,
+  type DraftConflict,
+} from "./document-editor-model";
 import {
   createLocalDraftStorageKey,
   draftBlocksToEditorBlocks,
@@ -47,6 +58,24 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   const draftRef = useRef<LocalNoteDraft | null>(null);
   const editVersionRef = useRef(0);
   const linkIndexQueueRef = useRef(Promise.resolve());
+  const [conflict, setConflict] = useState<DraftConflict["reason"] | null>(null);
+  const conflictRef = useRef<DraftConflict["reason"] | null>(null);
+  const [diff, setDiff] = useState<ReturnType<typeof summarizeDraftDiff> | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const [savedAsNewHref, setSavedAsNewHref] = useState<string | null>(null);
+  const [relationNote, setRelationNote] = useState<string | null>(null);
+
+  function enterConflict(reason: DraftConflict["reason"] | null) {
+    conflictRef.current = reason;
+    setConflict(reason);
+    setDiff(null);
+    setConfirmingDiscard(false);
+    if (reason) {
+      setSavedAsNewHref(null);
+      setRelationNote(null);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -54,16 +83,14 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     api.fetchDocument(documentId)
       .then((nextDocument) => {
         if (!active) return;
-        const local = loadLocalDraft(documentId);
-        const serverTime = Date.parse(nextDocument.updatedAt ?? "");
-        const localTime = Date.parse(local?.updatedAt ?? "");
-        const usableLocal = local && (!serverTime || localTime > serverTime) ? local : null;
-        const nextDraft = usableLocal ?? documentToDraft(nextDocument);
-        draftRef.current = nextDraft;
+        // Chosen by base revision, never by clock (G1).
+        const plan = planDraftRestore(nextDocument, loadLocalDraft(documentId));
+        draftRef.current = plan.draft;
         editVersionRef.current += 1;
+        enterConflict(plan.conflict?.reason ?? null);
         setDocument(nextDocument);
-        setDraft(nextDraft);
-        setSaveState(usableLocal ? "unsaved" : "saved");
+        setDraft(plan.draft);
+        setSaveState(plan.state);
       })
       .catch(() => {
         if (active) setLoadError("暂时无法读取这篇笔记，请稍后重试。");
@@ -94,7 +121,8 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     editVersionRef.current += 1;
     setDraft(nextDraft);
     setNotice("");
-    setSaveState(saveLocalDraft(documentId, nextDraft) ? "unsaved" : "error");
+    // While in conflict the copy keeps its old base; edits are kept, saving stays blocked.
+    setSaveState(saveLocalDraft(documentId, nextDraft) ? (conflictRef.current ? "conflict" : "unsaved") : "error");
   }
 
   function updateBlocks(nextBlocks: unknown[]) {
@@ -107,17 +135,16 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   }
 
   async function saveDocument() {
-    if (!document || !draft || saveState === "saving") return;
+    if (!document || !draft || saveState === "saving" || conflictRef.current) return;
     const requestVersion = editVersionRef.current;
     setSaveState("saving");
     setNotice("");
     try {
-      const saved = await api.saveDocument(documentId, {
-        expectedRevisionNumber: document.currentRevisionNumber,
-        title: draft.title,
-        blocks: draftToApiBlocks(editorBlocksToDraftBlocks(editor.document)),
-        reason: "manual-save",
-      });
+      // expected = the draft's base revision, not the latest server revision (G1).
+      const saved = await api.saveDocument(documentId, buildSavePayload({
+        ...draft,
+        blocks: editorBlocksToDraftBlocks(editor.document),
+      }));
       const currentDraft = draftRef.current ?? draft;
       if (!currentDraft) return;
       const result = resolveEditorSaveResult(
@@ -136,12 +163,17 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
         queueLinkIndex(result.draft.blocks, editVersionRef.current);
       }
     } catch (error) {
-      setSaveState(error instanceof EditorApiError && error.code === "CONFLICT" ? "conflict" : "error");
+      if (error instanceof EditorApiError && error.code === "CONFLICT") {
+        enterConflict("server-conflict");
+        setSaveState("conflict");
+      } else {
+        setSaveState("error");
+      }
     }
   }
 
   async function restoreRevision(revision: EditorRevision) {
-    if (!document || saveState === "saving") return;
+    if (!document || saveState === "saving" || conflictRef.current) return;
     const requestVersion = editVersionRef.current;
     setSaveState("saving");
     setNotice("");
@@ -172,6 +204,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
       }
     } catch (error) {
       if (error instanceof EditorApiError && error.code === "CONFLICT") {
+        enterConflict("server-conflict");
         setSaveState("conflict");
       } else {
         setSaveState("error");
@@ -180,12 +213,63 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     }
   }
 
-  function reloadLatestDocument() {
+  async function viewDiff() {
+    const local = draftRef.current;
+    if (!local) return;
+    setConflictBusy(true);
+    try {
+      const latest = await api.fetchDocument(documentId);
+      setDiff(summarizeDraftDiff(local, documentToDraft(latest)));
+    } catch {
+      setNotice("暂时无法读取服务器最新版本");
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  async function saveAsNewNote() {
+    const local = draftRef.current;
+    if (!local) return;
+    setConflictBusy(true);
+    try {
+      const created = await api.createDocument(planSaveAsNewNote({ ...local, blocks: editorBlocksToDraftBlocks(editor.document) }));
+      setSavedAsNewHref(libraryNotePath(basePath, created.id));
+      try {
+        // Existing relations API supports document → document derived_from.
+        await createDocumentRelationsApi().create(created.id, { type: "document", id: documentId }, "derived_from");
+        setRelationNote("已记录来源：派生自原笔记");
+      } catch {
+        setRelationNote("副本已保存，但未能记录来源关系");
+      }
+      // The copy is on the server now, so the local draft may go; this note reloads the latest server version.
+      discardLocalAndReload(false);
+    } catch {
+      setNotice("另存失败，本地草稿仍保留");
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  function requestDiscard() {
+    if (!confirmingDiscard) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    discardLocalAndReload(true);
+  }
+
+  /** Only reachable from an explicit user choice (confirmed discard or after save-as-new). */
+  function discardLocalAndReload(resetCopyLink: boolean) {
     try {
       window.localStorage.removeItem(createLocalDraftStorageKey(documentId));
     } catch {
       // A reload still gives the user the latest server document if storage is unavailable.
     }
+    conflictRef.current = null;
+    setConflict(null);
+    setDiff(null);
+    setConfirmingDiscard(false);
+    if (resetCopyLink) setSavedAsNewHref(null);
     setDocument(null);
     setDraft(null);
     setNotice("");
@@ -215,7 +299,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     unsaved: "有未同步修改",
     saving: "正在保存...",
     error: "本地副本或服务器保存失败",
-    conflict: "服务器已有更新版本，当前修改尚未覆盖",
+    conflict: "保存冲突：本地修改已保留，请选择处理方式",
   }[saveState];
 
   return <div className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
@@ -224,11 +308,12 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
       <label className="min-w-28 flex-1"><span className="sr-only">笔记标题</span><input className={`${ui.input} border-transparent font-medium`} value={draft.title} onChange={(event) => updateSafetyCopy({ ...draft, title: event.target.value, updatedAt: new Date().toISOString() })} /></label>
       <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-emerald-700" /> : null}{notice || statusText}</span>
       <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-emerald-50 text-emerald-800" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
-      {saveState === "conflict" ? <button className={ui.secondary} type="button" onClick={reloadLatestDocument}><RefreshCw aria-hidden="true" size={14} />重新加载最新版本</button> : null}
-      <button className={ui.primary} type="button" onClick={saveDocument} disabled={saveState === "saving"}><Save aria-hidden="true" size={14} />保存</button>
+      <button className={ui.primary} type="button" onClick={saveDocument} disabled={saveState === "saving" || conflict !== null}><Save aria-hidden="true" size={14} />保存</button>
     </header>
     <div className="flex min-h-0 flex-1">
       <main className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-zinc-500">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-zinc-500">本地保留安全副本；保存会创建服务器版本。</p></div>
+        {conflict ? <DraftConflictPanel reason={conflict} diff={diff} busy={conflictBusy} confirmingDiscard={confirmingDiscard} savedAsNewHref={savedAsNewHref} relationNote={relationNote} onViewDiff={() => void viewDiff()} onSaveAsNew={() => void saveAsNewNote()} onDiscard={requestDiscard} onCancelDiscard={() => setConfirmingDiscard(false)} /> : null}
+        {!conflict && savedAsNewHref ? <p className="mb-4 text-xs text-zinc-600" role="status">本地修改已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
         <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-white [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-white [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-zinc-800" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme="light" onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
       </div></main>
       <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4"><PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>

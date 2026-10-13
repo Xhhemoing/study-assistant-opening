@@ -4,6 +4,7 @@ import {
   getTeachingResumeService,
   requireOpeningScope,
 } from "../../../../../../../features/opening/runtime";
+import { teachingLoopApiDenied } from "../../../../../../../server/opening-config";
 
 /**
  * GET teaching activity LearningResume (V2-14).
@@ -15,6 +16,9 @@ export async function GET(
 ): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
+    // PR-H: server re-authorizes; a hidden UI is not the gate.
+    const denied = teachingLoopApiDenied(scope.ownerUserId);
+    if (denied) return denied;
     const { id } = await context.params;
     const resume = await getTeachingResumeService(sql).getResume(scope, id);
     const body = learningResumeSchema.parse(resume);

@@ -7,13 +7,9 @@ import {
   resolveEffectiveDailyCap,
 } from "@aistudy/ai";
 import { loadOpeningModelCatalog } from "@aistudy/config";
-import {
-  createOpeningAiSettingsRepository,
-  createOpeningModelProvidersRepository,
-  createOpeningPlanningSettingsRepository,
-} from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
+import { readAiReadinessInputs } from "../../../../features/opening/server/data-services";
 
 export const runtime = "nodejs";
 
@@ -22,11 +18,7 @@ async function buildItems(
   scope: Awaited<ReturnType<typeof requireOpeningScope>>["scope"],
 ) {
   const catalog = loadOpeningModelCatalog();
-  const [preference, custom, planning] = await Promise.all([
-    createOpeningAiSettingsRepository(sql).get(scope),
-    createOpeningModelProvidersRepository(sql).listResolvableModels(scope),
-    createOpeningPlanningSettingsRepository(sql).get(scope),
-  ]);
+  const [preference, custom, planning] = await readAiReadinessInputs(sql, scope);
   const pricingConfigured = catalog.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)
     || custom.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0);
   const effective = resolveEffectiveDailyCap({

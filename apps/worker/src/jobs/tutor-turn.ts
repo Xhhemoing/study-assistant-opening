@@ -14,6 +14,7 @@ import {
   classifyTutorHelpKind,
   instructionWithMemories,
   makeTutorInstruction,
+  PageCitationClarifyError,
   preferCitationsForPage,
   resolveStrategyTemplate,
 } from "@aistudy/domain";
@@ -28,6 +29,7 @@ import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import { tutorActualCents, tutorReservationCents } from "./tutor-cost";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import {
+  isBudgetReplayError,
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
@@ -42,7 +44,7 @@ export type TutorTurnDeps = {
     listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
     listChunksAtVersion(scope: { workspaceId: string; ownerUserId: string }, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
   };
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
   resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
   pageImages?: (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
@@ -90,7 +92,7 @@ export const VISION_REQUIRED_MESSAGE = "当前模型不能看图，请在设置�
  * provenance. The model never chooses citation targets or candidate ids.
  */
 export function createTutorTurnHandler(deps: TutorTurnDeps) {
-  return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean }> {
+  return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean; replayed?: boolean }> {
     const claimed = await deps.tutorJobs.claim(tutorJobId);
     if (!claimed) return { skipped: true };
     const scope = {
@@ -99,9 +101,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     };
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
-      release: (requestId) => deps.budget.release(requestId),
-      settle: (reservationId, actualCents) => deps.budget.settle(reservationId, actualCents),
-      markUnknown: (reservationId) => deps.budget.markUnknown(reservationId),
+      release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
+      claimExecution: (reservationId) => deps.budget.claimExecution(scope, reservationId),
+      settle: (...args) => deps.budget.settle(scope, ...args),
+      markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
     try {
       const turn = await deps.tutorJobs.getUserTurn(claimed.userTurnId, claimed.workspaceId);
@@ -174,19 +177,44 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       // reservation. requestId stays the same string today (attempt-scoped ids are
       // a future option). Ephemeral (apps/web) wiring deferred — Experience out of scope.
       const tutorOperationId = `tutor:${claimed.id}`;
-      const output = await runBudgetedCall({
+      let output: ProviderOutput;
+      try {
+      output = await runBudgetedCall({
         provider: selected?.provider ?? deps.provider,
         modelSnapshot: selected?.modelSnapshot,
         budget: scopedBudget,
         input,
         requestId: tutorOperationId,
         operationId: tutorOperationId,
+        // Persisted result reference: the assistant turn this call fills.
+        resultRef: `opening_turn:${claimed.assistantTurnId}`,
         reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
         actualCents: (settled) => tutorActualCents(settled, rates),
         beforeSend: deps.privacy && jobEpoch !== null
           ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
           : undefined,
       });
+      } catch (error) {
+        // PR-D: completed ledger key → load the persisted result through its
+        // resultRef. Never call the provider or charge again; never fake success.
+        if (isBudgetReplayError(error) && error.disposition.kind === "completed") {
+          const ref = error.disposition.resultRef;
+          const persisted = ref ? await deps.tutorJobs.loadReplayedTurn(scope, ref) : null;
+          if (
+            persisted && persisted.id === claimed.assistantTurnId && persisted.status === "complete"
+            && await deps.tutorJobs.completeFromReplay(scope, claimed.id, persisted.id)
+          ) {
+            return { skipped: false, replayed: true };
+          }
+          await deps.tutorJobs.markUnknown(
+            scope,
+            claimed.id,
+            "budget replay: provider call already settled but its result is not persisted; not re-sending",
+          );
+          return { skipped: false, replayed: true };
+        }
+        throw error;
+      }
       const validated: ProviderOutput = providerOutputSchema.parse(output);
       // Soft-filter unknown cited ids (Package D); never fabricate rows / never throw on unknowns.
       let citations = resolveCitations(validated.citedChunkIds, context, { soft: true });
@@ -240,10 +268,19 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "tutor turn failed";
       const unknownOutcome =
-        error instanceof OpeningProviderError &&
-        ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code);
+        (error instanceof OpeningProviderError &&
+          ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code)) ||
+        // Replay of an unknown / in-flight ledger key: never fake success or re-send.
+        (isBudgetReplayError(error) && (error.code === "BUDGET_OUTCOME_UNKNOWN" || error.code === "BUDGET_EXECUTION_CLAIMED"));
       if (unknownOutcome) {
         await deps.tutorJobs.markUnknown(scope, claimed.id, "provider outcome unknown; usage reconciliation pending");
+      } else if (error instanceof PageCitationClarifyError) {
+        // LAB-A01/U01: a page refusal fails the job with a Clarify route; the
+        // repository ends the assistant turn as 'clarify'.
+        await deps.tutorJobs.fail(scope, claimed.id, error.message, {
+          code: error.code,
+          nextAction: error.nextAction,
+        });
       } else {
         await deps.tutorJobs.fail(scope, claimed.id, message);
       }

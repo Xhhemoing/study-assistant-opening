@@ -204,6 +204,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           budget: deps.budget,
           input: providerInput,
           requestId,
+          // Ephemeral turns persist provenance keyed by requestId.
+          resultRef: `ephemeral:${requestId}`,
           reservedCents: Math.max(
             deps.config.reservedCents,
             tutorReservationCents(JSON.stringify(providerInput), providerInput.maxOutputTokens, rates),

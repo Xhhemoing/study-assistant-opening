@@ -3,6 +3,7 @@ import {
   type OpeningPlanningSettings,
   type Scope,
 } from "@aistudy/contracts";
+import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { WorkspacePreferencesError } from "./preferences";
 
@@ -23,6 +24,15 @@ export function createOpeningPlanningSettingsRepository(sql: Sql) {
     },
     async set(scope: Scope, value: OpeningPlanningSettings | null) {
       const parsed = value === null ? null : openingPlanningSettingsSchema.parse(value);
+      // PR-B: reject an invalid IANA zone at write time so new bad values never reach storage.
+      // Read path (get) is unchanged: stored values are surfaced as-is and fail loudly where used.
+      if (parsed !== null) {
+        try {
+          resolveWorkspaceTimeZone(parsed.timeZone);
+        } catch {
+          throw new WorkspacePreferencesError("VALIDATION", `invalid timeZone: ${parsed.timeZone}`);
+        }
+      }
       await sql.begin(async tx => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;

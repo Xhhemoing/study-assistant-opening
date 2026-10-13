@@ -3,10 +3,10 @@ import {
   interventionPrefsSchema,
   uuidSchema,
 } from "@aistudy/contracts";
-import { createOpeningInterventionSettingsRepository } from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
+import { getInterventionSettingsService } from "../../../../features/opening/server/data-services";
 
 function queryId(url: URL, key: string): string | null {
   const raw = url.searchParams.get(key);
@@ -18,7 +18,7 @@ async function handle(request: Request, write: boolean): Promise<Response> {
   let response: Response;
   try {
     const { sql, scope } = await requireOpeningScope(request);
-    const repo = createOpeningInterventionSettingsRepository(sql);
+    const repo = getInterventionSettingsService(sql);
     const url = new URL(request.url);
     const courseId = queryId(url, "courseId");
     const activityId = queryId(url, "activityId");

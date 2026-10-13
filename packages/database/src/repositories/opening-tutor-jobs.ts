@@ -2,10 +2,13 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import type { Citation } from "@aistudy/contracts";
+import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, type Citation } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
+
+/** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
+export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
 
 export type OpeningTutorJobRecord = {
   id: string;
@@ -16,7 +19,7 @@ export type OpeningTutorJobRecord = {
   assistantTurnId: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
   mode: string;
-  error: { message: string } | null;
+  error: OpeningTutorJobError | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,7 +52,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     jobId: string;
     message: string;
     status: "failed" | "outcome_unknown";
+    detail?: { code: string; nextAction?: "clarify" };
   }): Promise<void> {
+    const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
     await sql.begin(async (tx) => {
       // Use the same workspace-first lock order as completeTurn/cancel.
       await tx`
@@ -59,7 +64,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       `;
       const rows = input.status === "failed"
         ? await tx`
-            UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json({ message: input.message } as never)},
+            UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
               updated_at = now()
             WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
               AND status IN ('running', 'queued')
@@ -74,15 +79,27 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           `;
       if (!rows.length) return;
       const assistantTurnId = (rows[0] as Record<string, unknown>).assistant_turn_id as string;
-      if (input.status === "failed") {
+      // A terminal turn (complete/failed/clarify/outcome_unknown) is never
+      // rewritten, even if a stale job row is swept or re-terminated later.
+      const terminal = [...TERMINAL_TURN_STATUSES];
+      if (input.status === "failed" && terminalTurnStatusForJobError(input.detail) === "clarify") {
+        // LAB-U01: a page-citation refusal is a Clarify follow-up, not a failure.
+        await tx`
+          UPDATE opening_turns SET text = ${input.message}, status = 'clarify'
+          WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
+        `;
+      } else if (input.status === "failed") {
         await tx`
           UPDATE opening_turns SET text = ${input.message}, status = 'failed'
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
         `;
       } else {
         await tx`
           UPDATE opening_turns SET text = ${input.message}, status = 'outcome_unknown'
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+            AND NOT (status = ANY(${terminal}::text[]))
         `;
       }
     });
@@ -111,7 +128,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     ): Promise<{
       id: string;
       status: OpeningTutorJobRecord["status"];
-      error: { message: string } | null;
+      error: OpeningTutorJobError | null;
       updatedAt: string;
     } | null> {
       const rows = await sql`
@@ -133,7 +150,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       return {
         id: row.id as string,
         status: row.status as OpeningTutorJobRecord["status"],
-        error: (row.error as { message: string } | null) ?? null,
+        error: (row.error as OpeningTutorJobError | null) ?? null,
         updatedAt: new Date(row.updated_at as string | Date).toISOString(),
       };
     },
@@ -164,7 +181,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           SET status = 'failed', text = '回答任务已取消'
           WHERE id = ${rows[0]!.assistant_turn_id}
             AND workspace_id = ${scope.workspaceId}
-            AND status = 'pending'
+            AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
         return mapJob(rows[0] as Record<string, unknown>);
       });
@@ -291,8 +308,56 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       };
     },
 
-    async fail(scope: OpeningScope, jobId: string, message: string): Promise<void> {
-      await markTerminal({ scope, jobId, message, status: "failed" });
+    /**
+     * PR-D replay: resolve a budget ledger resultRef ("opening_turn:<id>") to the
+     * persisted assistant turn, scope-bound. Null when absent or foreign.
+     */
+    async loadReplayedTurn(scope: OpeningScope, resultRef: string): Promise<{
+      id: string;
+      status: string;
+      text: string;
+    } | null> {
+      const match = /^opening_turn:([0-9a-f-]{36})$/i.exec(resultRef);
+      if (!match) return null;
+      const rows = await sql`
+        SELECT t.id, t.status, t.text FROM opening_turns t
+        JOIN workspaces w ON w.id = t.workspace_id
+        WHERE t.id = ${match[1]!} AND t.workspace_id = ${scope.workspaceId}
+          AND w.owner_user_id = ${scope.ownerUserId}
+        LIMIT 1
+      `;
+      if (!rows.length) return null;
+      const row = rows[0] as Record<string, unknown>;
+      return { id: row.id as string, status: row.status as string, text: (row.text as string | null) ?? "" };
+    },
+
+    /**
+     * PR-D replay: the provider result is already persisted on the complete
+     * assistant turn; finish the running job without re-writing the turn.
+     * Returns false when the job is no longer running or the turn is not complete.
+     */
+    async completeFromReplay(scope: OpeningScope, jobId: string, assistantTurnId: string): Promise<boolean> {
+      const rows = await sql`
+        UPDATE opening_tutor_jobs j SET status = 'succeeded', error = NULL, updated_at = now()
+        WHERE j.id = ${jobId} AND j.workspace_id = ${scope.workspaceId}
+          AND j.assistant_turn_id = ${assistantTurnId}
+          AND j.status = 'running'
+          AND EXISTS (
+            SELECT 1 FROM opening_turns t
+            WHERE t.id = ${assistantTurnId} AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
+          )
+        RETURNING j.id
+      `;
+      return rows.length === 1;
+    },
+
+    async fail(
+      scope: OpeningScope,
+      jobId: string,
+      message: string,
+      detail?: { code: string; nextAction?: "clarify" },
+    ): Promise<void> {
+      await markTerminal({ scope, jobId, message, status: "failed", detail });
     },
 
     async markUnknown(scope: OpeningScope, jobId: string, message: string): Promise<void> {

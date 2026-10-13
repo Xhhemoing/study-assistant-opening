@@ -1,6 +1,6 @@
-import { createOpeningTutorJobsRepository } from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../../features/opening/runtime";
+import { getTutorJobService } from "../../../../../../features/opening/server/data-services";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -9,7 +9,7 @@ export async function GET(request: Request, context: Params): Promise<Response> 
   try {
     const { scope, sql } = await requireOpeningScope(request);
     const { id } = await context.params;
-    const job = await createOpeningTutorJobsRepository(sql).findPendingForConversation(
+    const job = await getTutorJobService(sql).findPendingForConversation(
       scope,
       id,
     );

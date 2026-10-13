@@ -81,10 +81,10 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     const skillLabel = replacement?.skillLabel ?? previous.skillLabel;
     const requirementKey = replacement?.requirementKey !== undefined ? replacement.requirementKey : previous.requirementKey ?? null;
     const [record] = await tx`INSERT INTO opening_learning_observations
-      (id,workspace_id,owner_user_id,session_id,course_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
+      (id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
        source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,workspace_history_revision,
        root_observation_id,revises_observation_id,revision_kind,revision_reason,actor_id)
-      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${head.session_id},${courseId},${skillLabel},${head.source_ids},${head.problem_id},${head.retest_id},
+      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${head.session_id},${courseId},${head.activity_id},${skillLabel},${head.source_ids},${head.problem_id},${head.retest_id},
        ${replacement?.answer ?? previous.answer},${replacement?.outcome ?? previous.outcome},${replacement?.assistance ?? previous.assistance},${input.clientKey},${head.occurred_at},
        ${head.source_turn_ids},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${head.attempt_id},${head.item_version_id},${requirementKey},${head.started_at},${head.submitted_at},clock_timestamp(),
        ${head.source_versions ? tx.json(head.source_versions) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},

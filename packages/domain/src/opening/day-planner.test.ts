@@ -25,7 +25,11 @@ const retest = (n: number, recommendedAt: string, overrides: Partial<TaskItem> =
 
 describe("planDay", () => {
   it("leaves tasks unscheduled instead of inventing free time", () => {
-    expect(planDay([task(1)], [])).toEqual({ blocks: [], unscheduledTaskIds: [id(1)] });
+    expect(planDay([task(1)], [])).toEqual({
+      blocks: [],
+      unscheduledTaskIds: [id(1)],
+      unscheduled: [{ taskId: id(1), reason: "duration_exceeds_free_slots" }],
+    });
   });
 
   it("fits exact boundaries, producing a concrete task and reason", () => {
@@ -77,7 +81,7 @@ describe("planDay", () => {
 
   it("skips done and skipped tasks without treating them as unfinished", () => {
     expect(planDay([task(1, { status: "done" }), task(2, { status: "skipped" })], []))
-      .toEqual({ blocks: [], unscheduledTaskIds: [] });
+      .toEqual({ blocks: [], unscheduledTaskIds: [], unscheduled: [] });
   });
 
   it("tries a later slot for large tasks without wasting earlier small slots", () => {

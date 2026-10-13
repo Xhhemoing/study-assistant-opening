@@ -20,6 +20,7 @@ import {
 } from "@aistudy/database";
 import { assertCurrentEpoch, PrivacyEpochError } from "../runtime/privacy-guard";
 import {
+  isBudgetReplayError,
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
@@ -48,7 +49,7 @@ export type TeachingGenerateStatus =
   | "stale";
 
 export type CompileTeachingUnitDeps = {
-  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "settle" | "markUnknown">;
+  budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   /** Stub provider OK until V2-08; null disables model path. */
   provider: BudgetedProvider | null;
   reservedCents?: number;
@@ -64,6 +65,14 @@ export type CompileTeachingUnitDeps = {
     options?: { from?: readonly TeachingGenerateStatus[] },
   ): Promise<boolean>;
   publishActivitySpec(scope: Scope, input: ActivitySpecPublishInput): Promise<unknown>;
+  /**
+   * PR-D replay: resolve a ledger resultRef ("teaching_activity:<id>") to the
+   * persisted activity (scope-bound). Null when absent/foreign.
+   */
+  loadReplayedResult(
+    scope: Scope,
+    resultRef: string,
+  ): Promise<{ activityId: string; generateStatus: TeachingGenerateStatus } | null>;
   /** Re-read job state before write-back (cancel race). */
   getJobState(jobId: string): Promise<string | null>;
   /**
@@ -193,9 +202,10 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
-      release: (requestId) => deps.budget.release(requestId),
-      settle: (reservationId, actualCents) => deps.budget.settle(reservationId, actualCents),
-      markUnknown: (reservationId) => deps.budget.markUnknown(reservationId),
+      release: (requestId, reason) => deps.budget.release(scope, requestId, reason),
+      claimExecution: (reservationId) => deps.budget.claimExecution(scope, reservationId),
+      settle: (...args) => deps.budget.settle(scope, ...args),
+      markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
 
     try {
@@ -240,6 +250,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
             requestId: operationId,
             operationId,
             purpose: "compile-teaching-unit",
+            // Persisted result reference: the teaching activity this call compiles.
+            resultRef: `teaching_activity:${body.activityId}`,
             reservedCents: deps.reservedCents ?? 100,
             actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
             beforeSend: deps.privacy
@@ -251,8 +263,29 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
               : undefined,
           });
         } catch (error) {
+          // PR-D: completed ledger key → load the persisted result via resultRef;
+          // no provider call, no new charge, no re-publish, never fake success.
+          if (isBudgetReplayError(error) && error.disposition.kind === "completed") {
+            const ref = error.disposition.resultRef;
+            const persisted = ref ? await deps.loadReplayedResult(scope, ref) : null;
+            if (
+              persisted && persisted.activityId === body.activityId
+              && (persisted.generateStatus === "needs_check" || persisted.generateStatus === "ready")
+            ) {
+              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus };
+            }
+            await deps.setGenerateStatus(scope, body.activityId, "unknown", {
+              from: ["queued", "generating"],
+            });
+            throw Object.assign(
+              new Error("compile-teaching-unit: provider call already settled but its result is not persisted; not re-sending"),
+              { code: "BUDGET_REPLAY_RESULT_MISSING", cause: error },
+            );
+          }
           // Released / completed ledger on same operationId → non-retryable for this job.
-          if (error instanceof OpeningBudgetError && error.code === "CONFLICT") {
+          // Replayed ledger key (completed / released / unknown / in-flight):
+          // never re-send under the same operationId; surface as non-retryable.
+          if ((error instanceof OpeningBudgetError && error.code === "CONFLICT") || isBudgetReplayError(error)) {
             await deps.setGenerateStatus(scope, body.activityId, "failed", {
               from: ["queued", "generating"],
             });

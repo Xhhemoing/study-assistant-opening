@@ -20,9 +20,7 @@ import {
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
 import { TeachingContinueEntry } from "../teaching/teaching-workspace";
-import { isOpeningTeachingLoopEnabled } from "../teaching/teaching-loop-flag";
-import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
-import { isOpeningTeachingLoopTrialEnabled } from "../teaching/teaching-loop-trial";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
@@ -40,13 +38,16 @@ export function TodayDashboard({
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
   teachingLoopEnabled: teachingLoopEnabledProp,
   teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
+  timeZone: workspaceTimeZone,
 }: {
   state: TodayResumeState;
+  /** Workspace business IANA zone resolved on the server (planning_settings.timeZone). */
+  timeZone?: string;
   api?: OpeningApi;
   focusTaskId?: string;
-  /** Override for tests; default reads OPENING_TEACHING_WORKSPACE / NEXT_PUBLIC_*. */
+  /** Override for tests; default = server capabilities teachingLoop.ui. */
   teachingWorkspaceEnabled?: boolean;
-  /** Override for tests; default reads OPENING_TEACHING_LOOP / NEXT_PUBLIC_*. */
+  /** Override for tests; default = server capabilities teachingLoop.api. */
   teachingLoopEnabled?: boolean;
   /**
    * Override dual trial gate for tests.
@@ -55,16 +56,19 @@ export function TodayDashboard({
   teachingLoopTrialEnabled?: boolean;
 }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
+  // PR-H: UI visibility comes from GET /api/opening/capabilities (server switches),
+  // never from process.env in this client component. The API re-checks anyway.
+  const capabilities = useOpeningCapabilities();
   const teachingWorkspaceEnabled =
-    teachingWorkspaceEnabledProp ?? isOpeningTeachingWorkspaceEnabled();
+    teachingWorkspaceEnabledProp ?? capabilities.teachingLoop.ui;
   const teachingLoopEnabled =
-    teachingLoopEnabledProp ?? isOpeningTeachingLoopEnabled();
+    teachingLoopEnabledProp ?? capabilities.teachingLoop.api;
   const teachingLoopTrialEnabled =
     teachingLoopTrialEnabledProp ??
     (teachingLoopEnabledProp !== undefined ||
     teachingWorkspaceEnabledProp !== undefined
       ? teachingLoopEnabled && teachingWorkspaceEnabled
-      : isOpeningTeachingLoopTrialEnabled());
+      : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
   const [reloadToken, setReloadToken] = useState(0);
@@ -78,7 +82,7 @@ export function TodayDashboard({
   const [clientInitLoad, setClientInitLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [learningResume, setLearningResume] = useState<LearningResume | null>(null);
   const [resumeLoad, setResumeLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const timeZone = useMemo(() => resolveTodayTimeZone(), []);
+  const timeZone = useMemo(() => resolveTodayTimeZone(workspaceTimeZone), [workspaceTimeZone]);
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
@@ -208,7 +212,7 @@ export function TodayDashboard({
     setCtaBusy(true);
     try {
       const input = buildStartLearningCreateInput({
-        localDate: localDateKey(new Date()),
+        localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
       });

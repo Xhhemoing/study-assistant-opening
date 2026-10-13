@@ -71,3 +71,26 @@ for (const { name, url, enabled, message } of [
     }
   });
 }
+
+test("PR-B scratch override: default still requires aistudy_opening_test", () => {
+  const saved = process.env.OPENING_TEST_DB_SCRATCH_NAME;
+  delete process.env.OPENING_TEST_DB_SCRATCH_NAME;
+  try {
+    assert.throws(() => assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_prb_scratch_20261012", "1"), /exactly aistudy_opening_test/);
+  } finally { if (saved !== undefined) process.env.OPENING_TEST_DB_SCRATCH_NAME = saved; }
+});
+
+test("PR-B scratch override: accepts only the named scratch DB and rejects bad names", () => {
+  const saved = process.env.OPENING_TEST_DB_SCRATCH_NAME;
+  try {
+    process.env.OPENING_TEST_DB_SCRATCH_NAME = "aistudy_prb_scratch_20261012144500";
+    assert.equal(assertOpeningTestDatabase("postgres://u:p@127.0.0.1/aistudy_prb_scratch_20261012144500", "1").pathname, "/aistudy_prb_scratch_20261012144500");
+    assert.throws(() => assertOpeningTestDatabase(baseUrl, "1"), /exactly aistudy_prb_scratch_/);
+    process.env.OPENING_TEST_DB_SCRATCH_NAME = "aistudy_opening_test";
+    assert.throws(() => assertOpeningTestDatabase(baseUrl, "1"), /Refusing OPENING_TEST_DB_SCRATCH_NAME/);
+    process.env.OPENING_TEST_DB_SCRATCH_NAME = "production";
+    assert.throws(() => assertOpeningTestDatabase("postgres://u:p@127.0.0.1/production", "1"), /Refusing OPENING_TEST_DB_SCRATCH_NAME/);
+  } finally {
+    if (saved === undefined) delete process.env.OPENING_TEST_DB_SCRATCH_NAME; else process.env.OPENING_TEST_DB_SCRATCH_NAME = saved;
+  }
+});

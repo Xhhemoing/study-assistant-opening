@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "@aistudy/database";
-import { createOpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity } from "./opening-fixture";
 
 export const sourceBytes = Buffer.from("Q03 real backup source\n", "utf8");
 export const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
@@ -37,8 +37,9 @@ export function backupRows(sql: Sql, scope: OpeningScope) {
     },
     async learning(sources: string[] = []) {
       const id = randomUUID();
-      await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, skill_label, source_ids)
-        VALUES (${id}, ${w}, ${u}, ${courseId}, 'Recall', ${sources})`;
+      const activityId = await insertTestTeachingActivity(sql, scope, courseId);
+      await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+        VALUES (${id}, ${w}, ${u}, ${courseId}, ${activityId}, 'Recall', ${sources})`;
       return id;
     },
     async problem(session: string, source: string, chunk: string | null = null) {
@@ -49,8 +50,8 @@ export function backupRows(sql: Sql, scope: OpeningScope) {
     },
     async help(session: string, turn: string, problem: string | null = null) {
       const id = randomUUID();
-      await sql`INSERT INTO opening_help_exposures (id, workspace_id, session_id, problem_id, turn_id, level, delivered)
-        VALUES (${id}, ${w}, ${session}, ${problem}, ${turn}, 'hinted', true)`;
+      await sql`INSERT INTO opening_help_exposures (id, workspace_id, session_id, problem_id, turn_id, kind, level, delivered)
+        VALUES (${id}, ${w}, ${session}, ${problem}, ${turn}, 'hint', 'hinted', true)`;
       return id;
     },
     async observation(session: string, sources: string[] = [], turns: string[] = [], problem: string | null = null) {
@@ -58,8 +59,9 @@ export function backupRows(sql: Sql, scope: OpeningScope) {
       await sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
         VALUES (${w},${u},0) ON CONFLICT DO NOTHING`;
       await sql`INSERT INTO opening_learning_observations
-        (id, workspace_id, owner_user_id, session_id, course_id, skill_label, source_ids, problem_id, answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision)
-        VALUES (${id}, ${w}, ${u}, ${session}, ${courseId}, 'Recall', ${sources}, ${problem}, 'Answer', 'unverified', 'unknown', ${id}, ${turns}, 'unknown', 0)`;
+        (id, workspace_id, owner_user_id, session_id, course_id, activity_id, skill_label, source_ids, problem_id, answer, outcome, assistance, client_key, source_turn_ids, verdict_source, workspace_history_revision)
+        SELECT ${id}, ${w}, ${u}, ${session}, ${courseId}, s.activity_id, 'Recall', ${sources}, ${problem}, 'Answer', 'unverified', 'unknown', ${id}, ${turns}, 'unknown', 0
+        FROM opening_learning_sessions s WHERE s.id = ${session}`;
       return id;
     },
     async candidate(conversation: string, turn: string, sources: string[] = []) {

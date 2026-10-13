@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import type { TeachingOutline } from "@aistudy/domain";
+import { ALLOWED_TEACHING_BLOCK_TYPES, type TeachingOutline } from "@aistudy/domain";
 import { assembleTeachingEvidencePack } from "./teaching-evidence";
 import {
   buildCompileProviderInput,
@@ -239,9 +239,7 @@ describe("teaching-compiler", () => {
     for (const item of normalized.items) {
       expect(item.intendedBlockTypes).not.toContain("matrix-viz");
       for (const t of item.intendedBlockTypes) {
-        expect(["text", "formula", "prompt", "example", "steps", "answer_key", "meta"]).toContain(
-          t,
-        );
+        expect(ALLOWED_TEACHING_BLOCK_TYPES).toContain(t);
       }
     }
   });

@@ -4,6 +4,7 @@ import type { TaskItem, TimeBlock } from "@aistudy/contracts";
 import {
   buildServerPlanDayOptions,
   DEFAULT_PLANNING_TIME_ZONE,
+  mapRepoError,
   resolvePlanningNowForLocalDay,
 } from "./plan-service";
 
@@ -140,5 +141,17 @@ describe("plan-service → planDay earliest wire", () => {
     expect(opts.planningNow).toBeUndefined();
     const result = planDay([task(1)], [slot("09:00", "12:00")], opts);
     expect(result.blocks[0]?.start).toBe(at("09:00"));
+  });
+});
+
+describe("mapRepoError (PR-E)", () => {
+  it("maps a residual unique violation (23505) to 409 CONFLICT instead of 500", () => {
+    const pgError = Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+    expect(mapRepoError(pgError)).toMatchObject({ code: "CONFLICT", status: 409 });
+  });
+
+  it("leaves other database errors untouched", () => {
+    const pgError = Object.assign(new Error("deadlock"), { code: "40P01" });
+    expect(mapRepoError(pgError)).toBe(pgError);
   });
 });

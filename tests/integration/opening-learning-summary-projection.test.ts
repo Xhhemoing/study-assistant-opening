@@ -50,10 +50,10 @@ it("repairs exact source and policy dependencies without advancing the semantic 
 });
 it("automatically repairs bounded batches before exposing complete group statistics", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start({ requirementKey: "legacy" }));
-  await fixture.sql`INSERT INTO opening_learning_observations(id,workspace_id,owner_user_id,session_id,course_id,skill_label,source_ids,problem_id,retest_id,
+  await fixture.sql`INSERT INTO opening_learning_observations(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,
       answer,outcome,assistance,client_key,occurred_at,source_turn_ids,verdict_source,reference_source_id,evidence_verdict,
       requirement_key,recorded_at,source_versions,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
-    SELECT ids.id,o.workspace_id,o.owner_user_id,o.session_id,o.course_id,o.skill_label,o.source_ids,o.problem_id,NULL,
+    SELECT ids.id,o.workspace_id,o.owner_user_id,o.session_id,o.course_id,o.activity_id,o.skill_label,o.source_ids,o.problem_id,NULL,
       o.answer,o.outcome,o.assistance,ids.id::text,o.occurred_at,o.source_turn_ids,o.verdict_source,o.reference_source_id,o.evidence_verdict,
       o.requirement_key,o.recorded_at,o.source_versions,0,0,ids.id,ids.id,'original',o.owner_user_id
     FROM opening_learning_observations o CROSS JOIN (SELECT gen_random_uuid() AS id FROM generate_series(1,120)) ids WHERE o.id=${original.id}`;

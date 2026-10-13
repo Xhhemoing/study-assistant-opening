@@ -18,7 +18,7 @@ function fixture() {
   const complete = vi.fn(async (_input: ProviderInput): Promise<ProviderOutput> => output);
   const budget = {
     reserve: vi.fn(async () => ({ id: "reservation" })), release: vi.fn(async () => undefined),
-    settle: vi.fn(async () => undefined), markUnknown: vi.fn(async () => undefined),
+    settle: vi.fn(async () => undefined), claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
   };
   const privacy = {
     snapshot: vi.fn(async () => ({ epoch: state.epoch, excludedSourceIds: [...state.excluded] })),
@@ -84,7 +84,7 @@ describe("ephemeral privacy admission", () => {
     await expect(f.service.replyEphemeral(scope, input)).rejects.toMatchObject({ code: "PRIVACY_CHANGED", status: 409 });
     expect(f.complete).not.toHaveBeenCalled();
     expect(f.privacy.currentEpoch).toHaveBeenCalledWith(scope);
-    expect(f.budget.release).toHaveBeenCalledWith("ephemeral-request");
+    expect(f.budget.release).toHaveBeenCalledWith("ephemeral-request", "not_sent");
     expect(f.budget.markUnknown).not.toHaveBeenCalled();
   });
   it("releases when cancellation happens during reservation before sending", async () => {
@@ -93,7 +93,7 @@ describe("ephemeral privacy admission", () => {
     f.budget.reserve.mockImplementation(async () => { controller.abort(); return { id: "reservation" }; });
     await expect(f.service.replyEphemeral(scope, input, controller.signal)).rejects.toMatchObject({ code: "ABORTED" });
     expect(f.complete).not.toHaveBeenCalled();
-    expect(f.budget.release).toHaveBeenCalledWith("ephemeral-request");
+    expect(f.budget.release).toHaveBeenCalledWith("ephemeral-request", "not_sent");
     expect(f.budget.markUnknown).not.toHaveBeenCalled();
   });
   it.each(["PROVIDER_NETWORK", "PROVIDER_TIMEOUT", "PROVIDER_ABORTED"])("keeps already sent %s outcomes unknown after a concurrent privacy change", async code => {

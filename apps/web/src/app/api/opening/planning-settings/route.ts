@@ -1,14 +1,14 @@
 import { openingPlanningSettingsSchema } from "@aistudy/contracts";
-import { createOpeningPlanningSettingsRepository } from "@aistudy/database";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
+import { getPlanningSettingsService } from "../../../../features/opening/server/data-services";
 
 async function handle(request: Request, write: boolean): Promise<Response> {
   let response: Response;
   try {
     const { sql, scope } = await requireOpeningScope(request);
-    const repo = createOpeningPlanningSettingsRepository(sql);
+    const repo = getPlanningSettingsService(sql);
     if (write) {
       const body = await readOpeningJsonBody(request, 16_384);
       if (body === null) {

@@ -10,7 +10,7 @@ const completeS3 = {
 } as const;
 
 describe("resolveOpeningRestoreCliLiveDeps", () => {
-  it("prefers OPENING_RESTORE_DATABASE_URL over OPENING_TEST_DATABASE_URL and DATABASE_URL", () => {
+  it("prefers OPENING_RESTORE_DATABASE_URL over OPENING_TEST_DATABASE_URL", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
       ...completeS3,
       OPENING_RESTORE_DATABASE_URL: "postgres://restore/local",
@@ -23,7 +23,7 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
     expect(result.databaseUrlSource).toBe("OPENING_RESTORE_DATABASE_URL");
   });
 
-  it("prefers OPENING_TEST_DATABASE_URL over DATABASE_URL", () => {
+  it("accepts OPENING_TEST_DATABASE_URL when restore URL absent", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
       ...completeS3,
       OPENING_TEST_DATABASE_URL: "postgres://test/local",
@@ -35,21 +35,25 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
     expect(result.databaseUrlSource).toBe("OPENING_TEST_DATABASE_URL");
   });
 
-  it("falls back to DATABASE_URL when restore/test URLs absent", () => {
+  it("fail-closed when only DATABASE_URL is set (no implicit app DB target)", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
       ...completeS3,
       DATABASE_URL: "postgres://app/local",
     });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.databaseUrl).toBe("postgres://app/local");
-    expect(result.databaseUrlSource).toBe("DATABASE_URL");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("LIVE_DEPS_MISSING");
+    expect(result.missingKeys).toContain(
+      "OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL",
+    );
+    expect(result.missingKeys).not.toContain("DATABASE_URL");
+    expect(result.missingKeys.join(" ")).not.toMatch(/minioadmin|postgres:\/\//);
   });
 
   it("builds OpeningS3Config from S3_* with forcePathStyle default true", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
       ...completeS3,
-      DATABASE_URL: "postgres://app/local",
+      OPENING_TEST_DATABASE_URL: "postgres://test/local",
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -66,7 +70,7 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
   it("lets OPENING_S3_* override S3_* and honors forcePathStyle=false", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
       ...completeS3,
-      DATABASE_URL: "postgres://app/local",
+      OPENING_RESTORE_DATABASE_URL: "postgres://restore/local",
       OPENING_S3_ENDPOINT: "http://127.0.0.1:19000",
       OPENING_S3_BUCKET: "opening-only",
       OPENING_S3_FORCE_PATH_STYLE: "false",
@@ -85,14 +89,14 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
     if (result.ok) return;
     expect(result.code).toBe("LIVE_DEPS_MISSING");
     expect(result.missingKeys).toContain(
-      "OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL|DATABASE_URL",
+      "OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL",
     );
     expect(result.missingKeys.join(" ")).not.toMatch(/minioadmin|postgres:\/\//);
   });
 
   it("fail-closed listing each missing S3 key when incomplete", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
-      DATABASE_URL: "postgres://app/local",
+      OPENING_RESTORE_DATABASE_URL: "postgres://restore/local",
       S3_ENDPOINT: "http://127.0.0.1:9000",
       // region/bucket/keys absent
     });
@@ -112,7 +116,9 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
 
   it("treats blank-only values as missing", () => {
     const result = resolveOpeningRestoreCliLiveDeps({
-      DATABASE_URL: "   ",
+      OPENING_RESTORE_DATABASE_URL: "   ",
+      OPENING_TEST_DATABASE_URL: "",
+      DATABASE_URL: "postgres://app/local",
       S3_ENDPOINT: "http://127.0.0.1:9000",
       S3_REGION: "us-east-1",
       S3_BUCKET: "aistudy",
@@ -123,7 +129,7 @@ describe("resolveOpeningRestoreCliLiveDeps", () => {
     if (result.ok) return;
     expect(result.missingKeys).toEqual(
       expect.arrayContaining([
-        "OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL|DATABASE_URL",
+        "OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL",
         "S3_ACCESS_KEY_ID",
       ]),
     );

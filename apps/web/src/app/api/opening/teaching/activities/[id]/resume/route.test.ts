@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getResume = vi.fn();
 const requireOpeningScope = vi.fn();
@@ -52,6 +52,8 @@ function sampleResume() {
 
 describe("GET /api/opening/teaching/activities/[id]/resume (T17)", () => {
   beforeEach(() => {
+    // PR-H: the teaching-loop API is server-gated; these cases run with it enabled.
+    vi.stubEnv("OPENING_TEACHING_LOOP", "1");
     getResume.mockReset();
     requireOpeningScope.mockReset();
     jsonError.mockClear();
@@ -83,5 +85,22 @@ describe("GET /api/opening/teaching/activities/[id]/resume (T17)", () => {
       params: Promise.resolve({ id: activityId }),
     });
     expect(res.status).toBe(401);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["off", {}],
+    ["rollout 0", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }],
+  ])("PR-H: 404 and no service call when the loop API is %s (hidden UI is not the gate)", async (_label, env: Record<string, string>) => {
+    vi.stubEnv("OPENING_TEACHING_LOOP", env.OPENING_TEACHING_LOOP ?? "0");
+    if (env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT) vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT);
+    requireOpeningScope.mockResolvedValue({ scope: { workspaceId: "w", ownerUserId: "u" }, sql: {} });
+    const res = await GET(new Request("http://x"), { params: Promise.resolve({ id: activityId }) });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ error: { code: "NOT_FOUND", message: "Not found" } });
+    expect(getResume).not.toHaveBeenCalled();
   });
 });
