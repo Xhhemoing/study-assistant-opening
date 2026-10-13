@@ -38,7 +38,7 @@ export {
 export { readOpeningSourceContent } from "./repositories/opening-source-content";
 export * from "./repositories/opening-source-actions";
 export { createOpeningEphemeralProvenanceRepository, EphemeralProvenanceError, type EphemeralProvenanceRepository } from "./repositories/opening-ephemeral-provenance";
-export { createOpeningNoteRepository, OpeningNoteError } from "./repositories/opening-note-provenance";
+export { createOpeningNoteRepository, OpeningNoteError, type SnippetNoteBlock } from "./repositories/opening-note-provenance";
 export * from "./repositories/opening-source-chunks";
 export * from "./schema/opening-learning";
 export * from "./repositories/opening-learning";

@@ -21,9 +21,20 @@ export function openingNoteReadable(db: Db, workspaceId: string, documentId: Ret
           WHERE e.asset_deleted_at IS NOT NULL)))`;
 }
 
+/** A BlockNote block without ids; the caller derives it from `input.text`. */
+export type SnippetNoteBlock = { type: string; props: Record<string, unknown> | null; content: unknown; children: SnippetNoteBlock[] };
+
+function withIds(block: SnippetNoteBlock): { id: string; type: string; content: Record<string, unknown> } {
+  const child = (item: SnippetNoteBlock): Record<string, unknown> => ({
+    id: randomUUID(), type: item.type, props: item.props ?? {}, content: item.content, children: item.children.map(child),
+  });
+  return { id: randomUUID(), type: block.type, content: { blockNoteContent: block.content, props: block.props, children: block.children.map(child) } };
+}
+
 export function createOpeningNoteRepository(sql: Sql) {
   return {
-    async saveSnippet(scope: OpeningScope, raw: SnippetCreateInput): Promise<{ documentId: string }> {
+    /** `structured` is the note body as blocks; when absent the text is saved as one paragraph. */
+    async saveSnippet(scope: OpeningScope, raw: SnippetCreateInput, structured?: SnippetNoteBlock[]): Promise<{ documentId: string }> {
       const input = snippetCreateInputSchema.parse(raw);
       return sql.begin(async tx => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -35,15 +46,17 @@ export function createOpeningNoteRepository(sql: Sql) {
         if (refs === null) throw new OpeningNoteError("PROVENANCE_UNKNOWN", "临时历史来源不完整，无法保存为关联笔记。请开始新的临时对话。");
         const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)} AS included`;
         if (!admission[0]!.included) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联材料已删除、停止供 AI 使用或版本已变化，无法保存此片段。");
-        const documentId = randomUUID(), blockId = randomUUID();
-        const content = { blockNoteContent: input.text, props: null, children: [] };
-        const blocks = [{ id: blockId, type: "paragraph", position: 0, content }];
+        const documentId = randomUUID();
+        const blocks = (structured?.length ? structured : [{ type: "paragraph", props: null, content: input.text, children: [] }])
+          .map((block, position) => { const { id, type, content } = withIds(block); return { id, type, position, content }; });
         await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,schema_version,current_revision_number)
           VALUES(${documentId},${scope.workspaceId},${input.title},'scratch',1,1)`;
-        await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
-          VALUES(${blockId},${scope.workspaceId},${documentId},'paragraph',0,${tx.json(content)})`;
+        for (const block of blocks) {
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${block.id},${scope.workspaceId},${documentId},${block.type},${block.position},${tx.json(block.content as never)})`;
+        }
         await tx`INSERT INTO library_revisions(id,workspace_id,document_id,revision_number,parent_revision_number,title,lifecycle,reason,blocks)
-          VALUES(${randomUUID()},${scope.workspaceId},${documentId},1,NULL,${input.title},'scratch','save-opening-snippet',${tx.json(blocks)})`;
+          VALUES(${randomUUID()},${scope.workspaceId},${documentId},1,NULL,${input.title},'scratch','save-opening-snippet',${tx.json(blocks as never)})`;
         await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
           VALUES(${documentId},${scope.workspaceId},${tx.json(refs)})`;
         return { documentId };
