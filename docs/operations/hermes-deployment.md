@@ -47,9 +47,45 @@ bash infra/deploy/deploy-hermes.sh deploy
 迁移按项目约定 additive、不回退；需停外部调用时把
 `OPENING_MODEL_DAILY_CAP_CENTS=0` 写入 `.env.production` 并 `restart`。
 
+## 自用开关
+
+在 hermes `/opt/aistudy/.env.production`（web 与 worker 共用 EnvironmentFile）写入后重启。密钥勿提交 git。
+
+**日常自用**（对话散文 / 答题风格开，产物卡关）：
+
+```bash
+# 写入 .env.production
+OPENING_CHAT_PROSE=1
+OPENING_ANSWER_STYLE=1
+OPENING_CHAT_ARTIFACTS=0
+
+bash infra/deploy/deploy-hermes.sh restart
+```
+
+**AI 主讲试跑（V2-16）**在上述基础上再开：
+
+```bash
+# 追加写入 .env.production
+OPENING_TEACHING_LOOP=1
+OPENING_TEACHING_WORKSPACE=1
+OPENING_TEACHING_COMPILER_ENABLED=1
+OPENING_TEACHING_VALIDATION_ENABLED=1
+
+bash infra/deploy/deploy-hermes.sh restart
+# worker 首次部署默认 disabled；编译/校验任务需要启用：
+ssh root@23.251.32.22 'systemctl enable --now aistudy-worker'
+```
+
+关闭试跑：将上述 teaching 四开关改回 `0`（或不设）后 `restart`；需要停 worker 时 `systemctl disable --now aistudy-worker`。
+
 ## 排障
 
 - SSH 失败：`ssh-copy-id -i ~/.ssh/id_ed25519.pub root@23.251.32.22`。
+- `ssh -v` 卡在 `expecting SSH2_MSG_KEX_ECDH_REPLY` 后出现 Connection reset：部分网络上后量子（PQ）KEX 握手被截断。在 `~/.ssh/config` 的 `Host hermes` 下禁用有问题的 PQ KEX，例如：
+  ```
+  Host hermes
+    KexAlgorithms curve25519-sha256,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256
+  ```
 - 健康检查不过：`logs` 查看；常见为 `.env.production` 缺新变量（503 CONFIGURATION）。
 - 磁盘 89% 满：构建前脚本自动 `npm cache clean` 并删除 `node_modules`；若仍不足，
   清理 `~/swap-*`、旧备份或 `docker image prune`。
