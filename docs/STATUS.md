@@ -15,15 +15,15 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| S5 选区按 Markdown 源码保存（原 G4 卡） | Claude | `feat/selection-source-map` / #29 | CI 中；待用户浏览器验收 |
-| S4a 行内引用：`[n]` 改写为 citations 序号 | Claude | `feat/inline-citations` / #31 | CI 中 |
-| S4b 行内引用：正文 `[n]` 渲染为来源链接 | Grok | `feat/inline-citation-chips` | 卡片 `E:/Project/grok-cards/S4b-inline-citation-chips.md`；#29、#31 合入后开工 |
+| S4b 行内引用：正文 `[n]` 渲染为来源链接 | Claude（Grok 401，改为自做） | `feat/inline-citation-chips` / #32 | CI 中；待用户浏览器验收 |
+
+已合入（2026-10-13）：#29 选区按源码保存、#31 S4a 服务端引用编号。
 
 ## 下一步（按顺序）
 
 1. 部署到 Hermes 开始自用：打开 `OPENING_CHAT_PROSE`、`OPENING_ANSWER_STYLE`；`OPENING_CHAT_ARTIFACTS` 保持关。
 2. AI 主讲试跑（V2-16）：V2-04…16 代码已在主干、默认关。部署时打开 `OPENING_TEACHING_LOOP`、`OPENING_TEACHING_WORKSPACE`、`OPENING_TEACHING_COMPILER_ENABLED`、`OPENING_TEACHING_VALIDATION_ENABLED` 并启用 worker，用「秩与零空间」单元（`tests/fixtures/opening/teaching/unit-rank-nullspace`）真实模型走一遍，问题记到“使用反馈”。
-3. S4 行内引用合并后，按试跑反馈选：V2-20 探索与笔记接入教学（笔记 hub 方向，优先）或 V2-17 证据条件化教学选择。
+3. 按试跑反馈选：V2-20 探索与笔记接入教学（笔记 hub 方向，优先）或 V2-17 证据条件化教学选择。
 4. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
 
 ## 负责人已定（2026-10-13）
@@ -36,8 +36,9 @@
 ## 等用户决定
 
 - Hermes SSH：22 端口连接被重置（HTTPS 正常），部署脚本需要 SSH。请检查安全组/fail2ban 或本机出口 IP。
-- Grok CLI 401：在终端运行 `grok` 重新登录，或把卡片贴进桌面版。
-- 本地 24 个 worktree 超过上限 3 个：确认后由 Claude 清理已合并分支的目录。
+- Grok CLI 401：在终端运行 `grok` 重新登录后才能派卡。
+- 合并与删除 worktree 会被 Claude 的权限拦截：需用户合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
+- 本地 25 个 worktree：18 个干净且已在主干或远端，可删；`AIstudy`、`_wt-g1-learning-v2`、`sao-fix-migration-checksum-compat`、`sao-typecheck-int` 有未提交改动，先别删。
 
 ## 使用反馈
 
