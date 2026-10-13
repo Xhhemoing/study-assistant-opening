@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { TeachingActivity } from "@aistudy/contracts";
 import {
   buildStartLearningCreateInput,
+  canRequestTeachingCompile,
   pickCurrentTeachingActivity,
   teachingActivityContentHonesty,
   teachingActivityGenerateStatusLabel,
@@ -60,6 +61,36 @@ it("builds idempotent resume or topic create input with honest Chinese summary",
     intentKind: "topic",
     intentSummary: "今日主题学习",
   });
+});
+
+it("attaches the continued conversation's materials as sourceIds outside createIntent", () => {
+  const a = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const b = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const input = buildStartLearningCreateInput({
+    localDate: "2026-10-13",
+    continueTitle: "秩与零空间",
+    continueConversationId: "11111111-1111-4111-8111-111111111111",
+    continueSourceIds: [a, b, a],
+  });
+  expect(input.sourceIds).toEqual([b, a]);
+  expect(input.createIntent).not.toHaveProperty("sourceIds");
+  const bare = buildStartLearningCreateInput({
+    localDate: "2026-10-13",
+    continueTitle: "秩与零空间",
+    continueConversationId: "11111111-1111-4111-8111-111111111111",
+    continueSourceIds: [],
+  });
+  expect(bare).not.toHaveProperty("sourceIds");
+});
+
+it("offers generation only when nothing is running and no usable content exists", () => {
+  expect(canRequestTeachingCompile({ generateStatus: "ready", contentVersion: 0 })).toBe(true);
+  expect(canRequestTeachingCompile({ generateStatus: "failed", contentVersion: 2 })).toBe(true);
+  expect(canRequestTeachingCompile({ generateStatus: "stale", contentVersion: 1 })).toBe(true);
+  expect(canRequestTeachingCompile({ generateStatus: "queued", contentVersion: 0 })).toBe(false);
+  expect(canRequestTeachingCompile({ generateStatus: "generating", contentVersion: 0 })).toBe(false);
+  expect(canRequestTeachingCompile({ generateStatus: "ready", contentVersion: 1 })).toBe(false);
+  expect(canRequestTeachingCompile({ generateStatus: "needs_check", contentVersion: 1 })).toBe(false);
 });
 
 it("labels generateStatus honestly and does not claim fake ready teaching content", () => {

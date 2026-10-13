@@ -22,6 +22,7 @@ import {
   readSchemaVersion,
 } from "./component-catalog";
 import {
+  canRequestTeachingCompile,
   formatActivityUpdatedAt,
   teachingActivityGenerateStatusLabel,
   teachingActivityStatusLabel,
@@ -445,6 +446,34 @@ export function TeachingContinueEntry({
     setWaitError(null);
   }, []);
 
+  // Re-read the resume so a finished job is seen; the cached one still says in_flight.
+  const retryFromFreshResume = useCallback(async () => {
+    setWaitBusy(true);
+    try {
+      const fresh = await api.getTeachingResume(activity.id);
+      setWaitBusy(false);
+      await openWorkspaceFromResume(fresh);
+    } catch (err) {
+      setWaitBusy(false);
+      setWaitError(err instanceof Error ? err.message : "无法刷新断点；不会伪造讲义。");
+    }
+  }, [activity.id, api, openWorkspaceFromResume]);
+
+  const requestCompile = useCallback(async () => {
+    setWaitBusy(true);
+    setWaitError(null);
+    try {
+      const next = await api.requestTeachingCompile(activity.id, `compile:${Date.now().toString(36)}`);
+      setActivity(next);
+      onActivityUpdated?.(next);
+      setLiveResume(await api.getTeachingResume(activity.id));
+    } catch (err) {
+      setWaitError(err instanceof Error ? err.message : "无法开始生成主讲内容。");
+    } finally {
+      setWaitBusy(false);
+    }
+  }, [activity.id, api, onActivityUpdated]);
+
   if (phase === "workspace" && workspaceInit) {
     return (
       <div data-teaching-continue-entry="workspace">
@@ -482,14 +511,23 @@ export function TeachingContinueEntry({
           </p>
         ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
+          {canRequestTeachingCompile(liveResume ?? activity) ? (
+            <button
+              type="button"
+              className={ui.primary}
+              disabled={waitBusy}
+              data-teaching-request-compile="true"
+              onClick={() => void requestCompile()}
+            >
+              {waitBusy ? "正在提交…" : "生成主讲内容"}
+            </button>
+          ) : null}
           <button
             type="button"
             className={ui.secondary}
             disabled={waitBusy}
             data-resume-retry-client-init="true"
-            onClick={() => {
-              if (liveResume) void openWorkspaceFromResume(liveResume);
-            }}
+            onClick={() => void retryFromFreshResume()}
           >
             {waitBusy ? "拉取中…" : "重试拉取 client-init"}
           </button>

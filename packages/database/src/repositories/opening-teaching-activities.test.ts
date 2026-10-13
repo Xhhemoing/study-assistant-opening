@@ -304,6 +304,160 @@ describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
   });
 });
 
+/** Statement writes only; the harness also records SELECT … FOR UPDATE. */
+const mutations = (writes: Array<{ query: string }>) =>
+  writes.filter((w) => w.query.trimStart().startsWith("INSERT") || w.query.trimStart().startsWith("UPDATE"));
+
+function activityRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: activityId,
+    workspace_id: workspaceId,
+    owner_user_id: ownerUserId,
+    course_id: null,
+    status: "active",
+    generate_status: "ready",
+    intent_kind: "topic",
+    intent_summary: "今日主题学习",
+    source_ids: [],
+    path_version: 1,
+    content_version: 0,
+    checkpoint_json: {},
+    client_key: "today-topic:2026-10-13",
+    create_intent: { intentKind: "topic" },
+    created_at: "2026-10-13T02:00:00.000Z",
+    updated_at: "2026-10-13T02:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("create + compile enqueue", () => {
+  const input = {
+    clientKey: "today-topic:2026-10-13",
+    intentKind: "topic" as const,
+    intentSummary: "今日主题学习",
+    createIntent: { intentKind: "topic" },
+  };
+
+  it("enqueueCompile creates the activity queued with a generate job + outbox in one transaction", async () => {
+    let inserted: unknown[] = [];
+    const { sql, writes } = db((query, values) => {
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 3 }];
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("INSERT INTO opening_teaching_activities")) {
+        inserted = values;
+        return [activityRow({ generate_status: "queued" })];
+      }
+      if (query.includes("INSERT INTO opening_jobs")) return [{ id: "job-1" }];
+      return [];
+    });
+    const created = await createOpeningTeachingActivitiesRepository(sql).create(scope, input, {
+      enqueueCompile: true,
+    });
+    expect(created.generateStatus).toBe("queued");
+    expect(inserted).toContain("queued");
+    const job = writes.find((w) => w.query.includes("INSERT INTO opening_jobs"))!;
+    expect(job.values).toContain("compile-teaching-unit");
+    expect(job.values).toContain(3);
+    expect(job.values).toContainEqual({
+      mode: "generate",
+      activityId: inserted[0],
+      expectedContentVersion: 0,
+      clientKey: input.clientKey,
+      sourceIds: [],
+    });
+    expect(writes.some((w) => w.query.includes("INSERT INTO opening_outbox"))).toBe(true);
+  });
+
+  it("without enqueueCompile keeps the legacy ready shell and writes no job", async () => {
+    let inserted: unknown[] = [];
+    const { sql, writes } = db((query, values) => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("INSERT INTO opening_teaching_activities")) {
+        inserted = values;
+        return [activityRow()];
+      }
+      return [];
+    });
+    await createOpeningTeachingActivitiesRepository(sql).create(scope, input);
+    expect(inserted).toContain("ready");
+    expect(writes.some((w) => w.query.includes("opening_jobs"))).toBe(false);
+  });
+
+  it("a clientKey replay returns the existing activity and never enqueues again", async () => {
+    const { sql, writes } = db((query) => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities") && query.includes("client_key")) {
+        return [activityRow({ generate_status: "needs_check", content_version: 1 })];
+      }
+      return [];
+    });
+    const replay = await createOpeningTeachingActivitiesRepository(sql).create(scope, input, {
+      enqueueCompile: true,
+    });
+    expect(replay.generateStatus).toBe("needs_check");
+    expect(mutations(writes)).toEqual([]);
+  });
+});
+
+describe("requestCompile", () => {
+  function setup(row: Record<string, unknown>, jobInserted = true) {
+    return db((query) => {
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_sources")) {
+        return (row.source_ids as string[]).map((id) => ({ id, version: 1, bytes: 1, sha256: "x" }));
+      }
+      if (query.includes("SELECT * FROM opening_teaching_activities")) return [row];
+      if (query.includes("INSERT INTO opening_jobs")) return jobInserted ? [{ id: "job-2" }] : [];
+      if (query.includes("UPDATE opening_teaching_activities")) return [{ ...row, generate_status: "queued" }];
+      return [];
+    });
+  }
+
+  it("queues a generate job for the legacy ready shell with no content (Hermes cv 0)", async () => {
+    const sourceId = "00000000-0000-4000-8000-0000000000aa";
+    const { sql, writes } = setup(activityRow({ source_ids: [sourceId] }));
+    const result = await createOpeningTeachingActivitiesRepository(sql).requestCompile(
+      scope,
+      activityId,
+      "compile:abc123",
+    );
+    expect(result).toMatchObject({ jobId: expect.any(String), activity: { generateStatus: "queued" } });
+    const job = writes.find((w) => w.query.includes("INSERT INTO opening_jobs"))!;
+    expect(job.values).toContain(`compile-teaching-unit:${activityId}:generate:compile:abc123`);
+    expect(job.values).toContainEqual(expect.objectContaining({ sourceIds: [sourceId], expectedContentVersion: 0 }));
+    expect(writes.some((w) => w.query.includes("INSERT INTO opening_source_versions"))).toBe(true);
+  });
+
+  it("retries a failed compile from the current content version", async () => {
+    const { sql, writes } = setup(activityRow({ generate_status: "failed", content_version: 2 }));
+    await createOpeningTeachingActivitiesRepository(sql).requestCompile(scope, activityId, "compile:retry1");
+    const job = writes.find((w) => w.query.includes("INSERT INTO opening_jobs"))!;
+    expect(job.values).toContainEqual(expect.objectContaining({ expectedContentVersion: 2 }));
+  });
+
+  it.each([
+    ["queued", 0],
+    ["generating", 0],
+    ["ready", 1],
+    ["needs_check", 1],
+  ])("rejects %s (cv %i) without writing a job", async (status, contentVersion) => {
+    const { sql, writes } = setup(activityRow({ generate_status: status, content_version: contentVersion }));
+    await expect(
+      createOpeningTeachingActivitiesRepository(sql).requestCompile(scope, activityId, "compile:dup0001"),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("rejects a reused clientKey instead of silently returning", async () => {
+    const { sql, writes } = setup(activityRow(), false);
+    await expect(
+      createOpeningTeachingActivitiesRepository(sql).requestCompile(scope, activityId, "compile:dup0002"),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(writes.some((w) => w.query.includes("UPDATE opening_teaching_activities"))).toBe(false);
+  });
+});
+
 
 describe("V2-14 setStatus active↔paused (T15)", () => {
   it("updates status to paused with optional CAS", async () => {
