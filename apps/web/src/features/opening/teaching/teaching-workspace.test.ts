@@ -124,8 +124,19 @@ function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecCl
 }
 
 describe("isTeachingWorkspaceContentUsable", () => {
-  it("requires generateStatus ready and non-empty blocks", () => {
+  it("admits ready or needs_check with non-empty blocks", () => {
     expect(isTeachingWorkspaceContentUsable(activityReady, clientInit())).toBe(true);
+    const needsCheckActivity = { ...activityReady, generateStatus: "needs_check" as const };
+    expect(isTeachingWorkspaceContentUsable(needsCheckActivity, clientInit())).toBe(true);
+    expect(
+      isTeachingWorkspaceContentUsable(needsCheckActivity, clientInit({ blocks: [] })),
+    ).toBe(false);
+    expect(
+      isTeachingWorkspaceContentUsable(
+        { ...activityReady, generateStatus: "failed" },
+        clientInit(),
+      ),
+    ).toBe(false);
     expect(
       isTeachingWorkspaceContentUsable(
         { ...activityReady, generateStatus: "queued" },
@@ -164,6 +175,30 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain('data-path-version="1"');
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
+  });
+
+  it("shows 待核对 status when generateStatus is needs_check", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: { ...activityReady, generateStatus: "needs_check" },
+        clientInit: clientInit(),
+      }),
+    );
+    expect(html).toContain('data-teaching-needs-check="true"');
+    expect(html).toContain("主讲内容待核对");
+    expect(html).toContain('role="status"');
+  });
+
+  it("non-workspace continue entry without needs_check omits 待核对 marker", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: { ...activityReady, generateStatus: "queued", contentVersion: 0 },
+        resume: null,
+        startInWorkspace: false,
+      }),
+    );
+    expect(html).not.toContain('data-teaching-needs-check="true"');
+    expect(html).not.toContain("主讲内容待核对");
   });
 
   it("enables return when checkpoint branchStack non-empty", () => {
@@ -234,6 +269,20 @@ function learningResume(overrides?: Partial<LearningResume>): LearningResume {
 }
 
 describe("TeachingContinueEntry", () => {
+  it("workspace admits needs_check via continue entry and shows 待核对", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: { ...activityReady, generateStatus: "needs_check" },
+        resume: learningResume({ generateStatus: "needs_check" }),
+        startInWorkspace: true,
+        initialClientInit: clientInit(),
+      }),
+    );
+    expect(html).toContain('data-teaching-continue-entry="workspace"');
+    expect(html).toContain('data-teaching-needs-check="true"');
+    expect(html).toContain("主讲内容待核对");
+  });
+
   it("starts on resume-card (not ConversationResume)", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingContinueEntry, {

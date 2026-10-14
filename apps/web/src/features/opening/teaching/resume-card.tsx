@@ -219,6 +219,16 @@ export function ResumeCardView({
         </div>
       ) : null}
 
+      {resume.generateStatus === "needs_check" ? (
+        <div
+          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}
+          role="status"
+          data-teaching-needs-check="true"
+        >
+          主讲内容待核对：内容已发布，来源校验尚未完成。
+        </div>
+      ) : null}
+
       {showMaterialsBanner ? (
         <div
           className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}

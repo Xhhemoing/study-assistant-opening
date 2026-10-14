@@ -39,12 +39,18 @@ export type TeachingWorkspaceProps = {
   api?: OpeningApi;
 };
 
-/** Usable gate (PM frozen): only when generateStatus === "ready". */
+/**
+ * Usable gate: ready or needs_check with published (non-empty) blocks.
+ * needs_check is admitted for learning with an explicit 「待核对」 affordance;
+ * failed/cancelled/stale/empty still refuse.
+ */
 export function isTeachingWorkspaceContentUsable(
   activity: Pick<TeachingActivity, "generateStatus">,
   clientInit: ActivitySpecClientInit | null | undefined,
 ): boolean {
-  if (activity.generateStatus !== "ready") return false;
+  if (activity.generateStatus !== "ready" && activity.generateStatus !== "needs_check") {
+    return false;
+  }
   if (!clientInit) return false;
   if (!Array.isArray(clientInit.blocks) || clientInit.blocks.length === 0) return false;
   return true;
@@ -133,7 +139,9 @@ export function TeachingWorkspace({
       ? tone.danger
       : activity.generateStatus === "ready"
         ? tone.success
-        : tone.neutral;
+        : activity.generateStatus === "needs_check"
+          ? tone.warning
+          : tone.neutral;
 
   const applySuccess = useCallback((result: TeachingCommandSuccess) => {
     setWorkspaceConflict(null);
@@ -196,6 +204,16 @@ export function TeachingWorkspace({
           </span>
         </div>
       </header>
+
+      {activity.generateStatus === "needs_check" ? (
+        <div
+          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}
+          role="status"
+          data-teaching-needs-check="true"
+        >
+          主讲内容待核对：内容已发布，来源校验尚未完成，可先学习。
+        </div>
+      ) : null}
 
       <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
         最近更新 {formatActivityUpdatedAt(activity.updatedAt, timeZone)}
