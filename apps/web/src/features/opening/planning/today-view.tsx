@@ -17,6 +17,7 @@ import { focusTodayTask, selectTodayTask, visibleTodayTasks } from "./today-task
 import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
 import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
+import { isRetestOriginTask, TaskStatusControl } from "./task-status-control";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 
 type SelectionSource = "focus" | "user";
@@ -204,8 +205,8 @@ export function TodayPlanView({
     {doneView && loadState === "ready" ? <p className="mx-4 mb-2 text-xs text-zinc-500">已完成 {completedCount} 项 · 已跳过 {skippedCount} 项；跳过不计为完成。</p> : null}
     {!doneView && loadState === "ready" && upcomingHint ? <p className="mx-4 mb-2 text-[11px] leading-5 text-zinc-500" role="status">{upcomingHint}</p> : null}
     {doneView
-      ? <TodayTaskList tasks={done} state={loadState} focusTaskId={undefined} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll={all} doneView />
-      : <TodayGroupedQueue groups={groups} state={loadState} focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} />}
+      ? <TodayTaskList tasks={done} state={loadState} focusTaskId={undefined} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll={all} doneView api={api} />
+      : <TodayGroupedQueue groups={groups} state={loadState} focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} api={api} />}
     {doneView && done.length > 3 ? <button type="button" className={`${secondaryButtonClass} mx-3 mt-2`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${done.length} 项`}<ChevronDown size={12} aria-hidden /></button> : null}
     <div id="action-digest" tabIndex={-1} className="scroll-mt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">
       {hasLoadedTasks ? <RetestProposals api={api} onChanged={refresh} /> : null}
@@ -221,13 +222,14 @@ export function TodayPlanView({
   </section>;
 }
 
-export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSelect, plan }: {
+export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSelect, plan, api }: {
   groups: ReturnType<typeof groupTodayQueue>;
   state: TaskLoadState;
   focusTaskId?: string;
   selectedId?: string;
   onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null;
+  api?: Pick<OpeningApi, "updateTaskStatus">;
 }) {
   if (state === "loading") return <p className="px-4 py-5 text-xs text-zinc-500" role="status">正在加载任务…</p>;
   if (state === "error") return <p className="px-4 py-5 text-xs text-red-700">任务暂时无法读取，请重试。</p>;
@@ -244,15 +246,16 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
     {sections.map((section) => (
       <div key={section.key}>
         <h3 className="px-4 pb-1 text-[11px] font-semibold text-zinc-500">{QUEUE_GROUP_LABELS[section.key]} · {section.tasks.length}</h3>
-        <TodayTaskList tasks={section.tasks} state="ready" focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll doneView={false} />
+        <TodayTaskList tasks={section.tasks} state="ready" focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll doneView={false} api={api} />
       </div>
     ))}
   </div>;
 }
 
-export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect, plan, showAll = false, doneView = false }: {
+export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect, plan, showAll = false, doneView = false, api }: {
   tasks: TodayTasks; state: TaskLoadState; focusTaskId?: string; selectedId?: string; onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null; showAll?: boolean; doneView?: boolean;
+  api?: Pick<OpeningApi, "updateTaskStatus">;
 }) {
   const focusRef = useCallback((element: HTMLLIElement | null) => focusTodayTask(element, focusTaskId), [focusTaskId]);
   if (state === "loading") return <p className="px-4 py-5 text-xs text-zinc-500" role="status">正在加载任务…</p>;
@@ -261,12 +264,26 @@ export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect,
   if (!visibleTasks.length) return <div className="px-4 py-6"><p className="text-sm text-zinc-700">{doneView ? "尚无已结束任务。" : "暂无待完成任务。"}</p><p className="mt-2 text-xs leading-6 text-zinc-500">继续探索或整理笔记，无需先创建任务。</p></div>;
   return <ul className="border-y border-zinc-200/60" aria-label="学习任务列表">{visibleTasks.map((task) => {
     const block = plan?.blocks.find((entry) => entry.taskId === task.id), active = task.id === selectedId;
+    const showStatus = !doneView && task.status === "pending" && api;
     return <li key={task.id} id={`task-${task.id}`} ref={task.id === focusTaskId ? focusRef : undefined} tabIndex={task.id === focusTaskId ? -1 : undefined} className="scroll-mt-6 border-b border-zinc-200/50 last:border-0 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-emerald-600/50">
-      <button type="button" aria-pressed={active} onClick={() => onSelect?.({ ...task, reason: block?.reason }, "user")} className={`group flex min-h-[80px] w-full items-start gap-3 border-l-2 px-4 py-3.5 text-left transition-[color,background-color,border-color,transform] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600/50 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 ${active ? "border-emerald-600 bg-gradient-to-r from-emerald-50/80 to-transparent" : "border-transparent hover:border-zinc-200 hover:bg-zinc-50"}`}>
-        {task.status === "done" ? <CircleCheck size={16} className="mt-0.5 shrink-0 text-emerald-600" aria-hidden /> : <Circle size={16} className={`mt-0.5 shrink-0 transition-colors duration-200 ${active ? "text-emerald-600" : "text-zinc-400 group-hover:text-zinc-500"}`} aria-hidden />}
-        <span className="min-w-0 flex-1"><span className="line-clamp-2 break-words text-[13px] font-medium leading-6 text-zinc-900">{task.title}</span><span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-500"><Clock3 size={12} aria-hidden />{task.minutes} 分钟<span aria-hidden>/</span>{task.status === "done" ? "已完成" : task.status === "skipped" ? "已跳过" : block ? `${timeLabel(block.start)}–${timeLabel(block.end)}` : "待安排"}</span></span>
-        {active ? <ArrowRight size={14} className="mt-1 shrink-0 text-emerald-600 motion-safe:animate-enter" aria-hidden /> : null}
-      </button>
+      <div className="flex flex-col" data-today-task-row="true">
+        <button type="button" aria-pressed={active} onClick={() => onSelect?.({ ...task, reason: block?.reason }, "user")} className={`group flex min-h-[80px] w-full items-start gap-3 border-l-2 px-4 py-3.5 text-left transition-[color,background-color,border-color,transform] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600/50 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 ${active ? "border-emerald-600 bg-gradient-to-r from-emerald-50/80 to-transparent" : "border-transparent hover:border-zinc-200 hover:bg-zinc-50"}`}>
+          {task.status === "done" ? <CircleCheck size={16} className="mt-0.5 shrink-0 text-emerald-600" aria-hidden /> : <Circle size={16} className={`mt-0.5 shrink-0 transition-colors duration-200 ${active ? "text-emerald-600" : "text-zinc-400 group-hover:text-zinc-500"}`} aria-hidden />}
+          <span className="min-w-0 flex-1"><span className="line-clamp-2 break-words text-[13px] font-medium leading-6 text-zinc-900">{task.title}</span><span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-500"><Clock3 size={12} aria-hidden />{task.minutes} 分钟<span aria-hidden>/</span>{task.status === "done" ? "已完成" : task.status === "skipped" ? "已跳过" : block ? `${timeLabel(block.start)}–${timeLabel(block.end)}` : "待安排"}</span></span>
+          {active ? <ArrowRight size={14} className="mt-1 shrink-0 text-emerald-600 motion-safe:animate-enter" aria-hidden /> : null}
+        </button>
+        {showStatus ? (
+          <div className="border-l-2 border-transparent px-4 pb-3" data-today-task-status="true">
+            <TaskStatusControl
+              key={`${task.id}:${task.version ?? "unknown"}`}
+              task={task}
+              api={api}
+              disabled={false}
+              retestOrigin={isRetestOriginTask(task)}
+            />
+          </div>
+        ) : null}
+      </div>
     </li>;
   })}</ul>;
 }
