@@ -36,3 +36,13 @@ export {
   type CoachDenyReason,
 } from "./autonomy";
 export { MIN_FREED_MINUTES, shouldOfferReplan, type ReplanOffer } from "./replan-trigger";
+export {
+  CONVERSATION_LEARNING_VERSION,
+  extractConversationLearningIntent,
+  diagnoseConversationLearning,
+  buildConversationSession,
+  previewConversationLearningLoop,
+  replanAfterVerifiedObservation,
+  recommendConversationDelta,
+  type ConversationLoopPreviewInput,
+} from "./conversation-loop";
