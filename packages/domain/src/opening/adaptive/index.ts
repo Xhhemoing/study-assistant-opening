@@ -51,3 +51,5 @@ export {
   type LearningStepKind,
   type LearningSessionProposal,
 } from "./conversation-learning";
+
+export { buildConversationTaskDraft, type ConversationTaskDraft } from "./conversation-task-draft";
