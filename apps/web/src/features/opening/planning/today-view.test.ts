@@ -1,9 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import { TodayGroupedQueue, TodayPlanView, TodayTaskList, localDateKey } from "./today-view";
 import { shouldCloseTodayQueue, shouldOpenTodayQueue } from "./today-dashboard";
 import { focusTodayTask } from "./today-task-selection";
+import { TaskQueueRefreshContext } from "./task-status-control";
+import { createTaskStatusSession } from "./task-status-action";
 
 it("starts the asynchronous Today read as loading rather than empty", () => {
   const html = renderToStaticMarkup(createElement(TodayPlanView));
@@ -96,4 +100,104 @@ it("renders Chinese queue group headings from groupTodayQueue", () => {
   expect(html).toContain("确认中");
   expect(html).toContain("逾期项");
   expect(html).toContain("其他");
+});
+
+const PENDING = {
+  id: "11111111-1111-4111-8111-111111111111",
+  title: "高等数学",
+  status: "pending" as const,
+  minutes: 25,
+  dueAt: null,
+  priority: 1,
+  version: 1,
+};
+
+it("pending queue rows render 标记完成 via TaskStatusControl", () => {
+  const html = renderToStaticMarkup(
+    createElement(TodayTaskList, {
+      tasks: [PENDING],
+      state: "ready",
+      api: { updateTaskStatus: vi.fn() },
+    }),
+  );
+  expect(html).toContain("标记完成");
+  expect(html).toContain('data-today-task-status="true"');
+});
+
+it("doneView rows do not render 标记完成", () => {
+  const html = renderToStaticMarkup(
+    createElement(TodayTaskList, {
+      tasks: [{ ...PENDING, status: "done" as const, version: 2 }],
+      state: "ready",
+      doneView: true,
+      api: { updateTaskStatus: vi.fn() },
+    }),
+  );
+  expect(html).not.toContain("标记完成");
+  expect(html).not.toContain('data-today-task-status="true"');
+});
+
+it("does not nest interactive buttons inside the select button", () => {
+  const html = renderToStaticMarkup(
+    createElement(TodayTaskList, {
+      tasks: [PENDING],
+      state: "ready",
+      api: { updateTaskStatus: vi.fn() },
+    }),
+  );
+  // Select <button> must close before the status control region that hosts more <button>s.
+  const statusAt = html.indexOf('data-today-task-status="true"');
+  expect(statusAt).toBeGreaterThan(-1);
+  const selectClose = html.indexOf("</button>");
+  expect(selectClose).toBeGreaterThan(-1);
+  expect(selectClose).toBeLessThan(statusAt);
+  // Status control buttons are siblings after the select button closes — not descendants.
+  const openEnd = html.indexOf(">", html.indexOf("<button")) + 1;
+  const selectInner = html.slice(openEnd, selectClose);
+  expect(selectInner).not.toContain("<button");
+});
+
+it("successful updateTaskStatus triggers TaskQueueRefreshContext reread (control contract used by rows)", async () => {
+  const controlSrc = readFileSync(
+    fileURLToPath(new URL("./task-status-control.tsx", import.meta.url)),
+    "utf8",
+  );
+  expect(controlSrc).toContain("if (result.kind === \"updated\") reread?.()");
+  expect(controlSrc).toContain("TaskQueueRefreshContext");
+
+  const reread = vi.fn();
+  const updated = {
+    id: PENDING.id,
+    version: 2,
+    title: PENDING.title,
+    minutes: PENDING.minutes,
+    dueAt: null,
+    priority: 1,
+    status: "done" as const,
+  };
+  const updateTaskStatus = vi.fn(async () => updated);
+  const session = createTaskStatusSession(
+    (id, input) => updateTaskStatus(id, input),
+    { taskId: PENDING.id, expectedVersion: 1 },
+  );
+  const result = await session.confirm("done", new Date("2026-10-14T00:00:00.000Z"));
+  expect(result).toEqual({ kind: "updated", task: updated });
+  // Same branch TaskStatusControl takes after a successful write when mounted under the provider.
+  if (result?.kind === "updated") reread();
+  expect(updateTaskStatus).toHaveBeenCalledTimes(1);
+  expect(reread).toHaveBeenCalledTimes(1);
+
+  // Rows actually mount the control (so the contract applies in the queue).
+  const html = renderToStaticMarkup(
+    createElement(
+      TaskQueueRefreshContext.Provider,
+      { value: reread },
+      createElement(TodayTaskList, {
+        tasks: [PENDING],
+        state: "ready",
+        api: { updateTaskStatus },
+      }),
+    ),
+  );
+  expect(html).toContain("标记完成");
 });

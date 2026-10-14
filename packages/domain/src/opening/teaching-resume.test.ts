@@ -54,7 +54,10 @@ describe("teaching-resume domain (V2-14)", () => {
     expect(mapGenerateStatusToJobGate("unknown")).toBe("unknown");
     expect(mapGenerateStatusToJobGate("stale")).toBe("stale");
     expect(mapGenerateStatusToJobGate("ready")).toBe("ready");
-    expect(mapGenerateStatusToJobGate("failed")).toBe("ready");
+    expect(mapGenerateStatusToJobGate("failed")).not.toBe("ready");
+    expect(mapGenerateStatusToJobGate("cancelled")).not.toBe("ready");
+    expect(mapGenerateStatusToJobGate("failed")).toBe("unknown");
+    expect(mapGenerateStatusToJobGate("cancelled")).toBe("unknown");
   });
 
   it("T12 probeMaterialsAvailability fail-soft", () => {

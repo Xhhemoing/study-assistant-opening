@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import type { TeachingActivity } from "@aistudy/contracts";
+import { probeMaterialsAvailability } from "@aistudy/domain";
 import {
   buildStartLearningCreateInput,
   canRequestTeachingCompile,
@@ -95,6 +96,57 @@ it("offers generation only when nothing is running and no usable content exists"
 
 it("labels generateStatus honestly and does not claim fake ready teaching content", () => {
   expect(teachingActivityGenerateStatusLabel("queued")).toBe("生成排队中");
+  expect(teachingActivityGenerateStatusLabel("ready", { contentVersion: 0 })).toBe("主讲内容未生成");
+  expect(teachingActivityGenerateStatusLabel("ready", { contentVersion: 1 })).toBe("主讲内容已就绪");
   expect(teachingActivityContentHonesty("ready")).toContain("不会伪造讲义");
   expect(teachingActivityContentHonesty("queued")).toContain("不会假装");
+});
+
+it("refuses compile when compilerEnabled is false", () => {
+  expect(
+    canRequestTeachingCompile({ generateStatus: "ready", contentVersion: 0 }, { compilerEnabled: false }),
+  ).toBe(false);
+});
+
+it("uses courseTitle in topic summary instead of bare 今日主题学习", () => {
+  const input = buildStartLearningCreateInput({
+    localDate: "2026-10-14",
+    courseTitle: "高等数学",
+    courseId: "44444444-4444-4444-8444-444444444444",
+  });
+  expect(input.intentSummary).toContain("高等数学");
+  expect(input.intentSummary).not.toBe("今日主题学习");
+  expect(input.intentSummary.includes("今日主题学习")).toBe(false);
+  expect(input.courseId).toBe("44444444-4444-4444-8444-444444444444");
+  expect(input.clientKey).toBe("today-topic:2026-10-14");
+});
+
+it("writes deduped sorted sourceIds capped at 32 on topic create", () => {
+  const ids = Array.from({ length: 34 }, (_, i) => {
+    const n = (i + 1).toString(16).padStart(12, "0");
+    return `aaaaaaaa-aaaa-4aaa-8aaa-${n}`;
+  });
+  // duplicate first
+  const input = buildStartLearningCreateInput({
+    localDate: "2026-10-14",
+    courseTitle: "高等数学",
+    sourceIds: [ids[1]!, ids[0]!, ids[1]!, ...ids.slice(2)],
+  });
+  expect(input.sourceIds).toHaveLength(32);
+  expect(input.sourceIds).toEqual([...new Set([ids[1]!, ids[0]!, ...ids.slice(2)])].sort().slice(0, 32));
+  expect(input.createIntent).not.toHaveProperty("sourceIds");
+});
+
+it("materials gate is unavailable when activity requests one missing source", () => {
+  const sourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const input = buildStartLearningCreateInput({
+    localDate: "2026-10-14",
+    courseTitle: "高等数学",
+    sourceIds: [sourceId],
+  });
+  expect(input.sourceIds).toEqual([sourceId]);
+  const gate = probeMaterialsAvailability(input.sourceIds ?? [], []);
+  expect(gate.materials).toBe("unavailable");
+  expect(gate.materials).not.toBe("available");
+  expect(gate.unavailableSourceIds).toEqual([sourceId]);
 });

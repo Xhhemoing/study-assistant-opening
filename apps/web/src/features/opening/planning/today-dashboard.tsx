@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { ChevronDown, ListTodo } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TaskQueueRefreshContext } from "./task-status-control";
 import { buttonClass, secondaryButtonClass, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
@@ -20,9 +20,34 @@ import {
   pickCurrentTeachingActivity,
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
-import { TeachingContinueEntry } from "../teaching/teaching-workspace";
+import {
+  isTeachingWorkspaceContentUsable,
+  TeachingContinueEntry,
+} from "../teaching/teaching-workspace";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
+
+
+/** Visible outcome when the Today primary CTA runs with/without an existing activity. */
+export type TodayPrimaryCtaPlan =
+  | { kind: "create" }
+  | {
+      kind: "focus-existing";
+      activityId: string;
+      /** Open workspace immediately when clientInit is already usable. */
+      preferWorkspace: boolean;
+    };
+
+export function planTodayPrimaryCta(
+  existing: TeachingActivity | null,
+  clientInit: ActivitySpecClientInit | null | undefined,
+): TodayPrimaryCtaPlan {
+  if (!existing) return { kind: "create" };
+  const preferWorkspace = Boolean(
+    clientInit && isTeachingWorkspaceContentUsable(existing, clientInit),
+  );
+  return { kind: "focus-existing", activityId: existing.id, preferWorkspace };
+}
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
   return Boolean(focusTaskId);
@@ -39,6 +64,7 @@ export function TodayDashboard({
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
   teachingLoopEnabled: teachingLoopEnabledProp,
   teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
+  teachingCompileEnabled = true,
   timeZone: workspaceTimeZone,
 }: {
   state: TodayResumeState;
@@ -55,6 +81,8 @@ export function TodayDashboard({
    * Default = loop && workspace (V2-16 UI trial; both flags required).
    */
   teachingLoopTrialEnabled?: boolean;
+  /** Server-resolved OPENING_TEACHING_COMPILER_ENABLED — hide compile CTA when false. */
+  teachingCompileEnabled?: boolean;
 }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   // PR-H: UI visibility comes from GET /api/opening/capabilities (server switches),
@@ -81,6 +109,10 @@ export function TodayDashboard({
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
   const [ctaBusy, setCtaBusy] = useState(false);
   const [ctaError, setCtaError] = useState<string | null>(null);
+  /** Bumped on 「继续学习」 so an already-selected activity still produces a visible focus. */
+  const [ctaFocusNonce, setCtaFocusNonce] = useState(0);
+  const [ctaPreferWorkspace, setCtaPreferWorkspace] = useState(false);
+  const teachingPaneRef = useRef<HTMLDivElement | null>(null);
   const [clientInit, setClientInit] = useState<ActivitySpecClientInit | null>(null);
   const [clientInitLoad, setClientInitLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [learningResume, setLearningResume] = useState<LearningResume | null>(null);
@@ -214,17 +246,25 @@ export function TodayDashboard({
   const runPrimaryCta = useCallback(async () => {
     setCtaError(null);
     const existing = pickCurrentTeachingActivity(activities);
-    if (existing) {
+    const plan = planTodayPrimaryCta(existing, clientInit);
+    if (plan.kind === "focus-existing") {
       setSelectedActivity(existing);
+      setCtaPreferWorkspace(plan.preferWorkspace);
+      setCtaFocusNonce((n) => n + 1);
       return;
     }
     setCtaBusy(true);
     try {
+      const continueSources = Object.keys(state.continueItem?.sourceVersions ?? {});
       const input = buildStartLearningCreateInput({
         localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
-        continueSourceIds: Object.keys(state.continueItem?.sourceVersions ?? {}),
+        continueSourceIds: continueSources,
+        courseId: state.continueItem?.courseId,
+        // Conversation title is the best available label when starting from continue context.
+        courseTitle: state.continueItem?.title,
+        sourceIds: continueSources,
       });
       const created = await api.createTeachingActivity(input);
       setActivities((rows) => {
@@ -240,7 +280,13 @@ export function TodayDashboard({
     } finally {
       setCtaBusy(false);
     }
-  }, [activities, api, state.continueItem]);
+  }, [activities, api, clientInit, state.continueItem, timeZone]);
+
+
+  useEffect(() => {
+    if (ctaFocusNonce === 0) return;
+    teachingPaneRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [ctaFocusNonce]);
 
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
@@ -325,16 +371,24 @@ export function TodayDashboard({
               timeZone={timeZone}
             />
           </div>
-          <div className="min-h-0 min-w-0 flex-1 bg-white">
+          <div
+            ref={teachingPaneRef}
+            className="min-h-0 min-w-0 flex-1 bg-white"
+            data-today-teaching-pane="true"
+            data-today-cta-focus={ctaFocusNonce > 0 ? String(ctaFocusNonce) : undefined}
+          >
             {currentActivity ? (
               teachingLoopTrialEnabled ? (
                 <TeachingContinueEntry
+                  key={`${currentActivity.id}:${ctaFocusNonce}`}
                   activity={currentActivity}
                   resume={learningResume}
                   assistantHref={assistantHref}
                   timeZone={timeZone}
                   api={api}
                   initialClientInit={clientInit}
+                  teachingCompileEnabled={teachingCompileEnabled}
+                  startInWorkspace={ctaPreferWorkspace && ctaFocusNonce > 0}
                   onActivityUpdated={(next) => {
                     setSelectedActivity(next);
                     setActivities((rows) =>

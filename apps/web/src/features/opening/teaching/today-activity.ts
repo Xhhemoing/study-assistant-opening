@@ -47,7 +47,13 @@ export function teachingActivityStatusLabel(status: TeachingActivityStatus): str
 
 export function teachingActivityGenerateStatusLabel(
   generateStatus: TeachingActivityGenerateStatus,
+  options?: { contentVersion?: number },
 ): string {
+  // Shell activities created while the compiler is off sit at ready + cv0 with no blocks.
+  // Do not claim 「主讲内容已就绪」 until content exists.
+  if (generateStatus === "ready" && options?.contentVersion === 0) {
+    return "主讲内容未生成";
+  }
   return GENERATE_STATUS_LABEL[generateStatus];
 }
 
@@ -75,6 +81,12 @@ export type StartLearningContext = {
   continueConversationId?: string | null;
   /** Current-version, AI-eligible materials of the continued conversation. */
   continueSourceIds?: readonly string[];
+  /** Optional course binding when starting from a course or seeded task. */
+  courseId?: string | null;
+  /** Course/task display name — used in summary when not resuming a conversation. */
+  courseTitle?: string | null;
+  /** Materials to attach on topic create (deduped/sorted/capped in builder). */
+  sourceIds?: readonly string[];
 };
 
 /**
@@ -84,10 +96,16 @@ export type StartLearningContext = {
  */
 export function canRequestTeachingCompile(
   activity: Pick<TeachingActivity, "generateStatus" | "contentVersion">,
+  options?: { compilerEnabled?: boolean },
 ): boolean {
+  if (options?.compilerEnabled === false) return false;
   if (activity.generateStatus === "queued" || activity.generateStatus === "generating") return false;
   if (activity.contentVersion === 0) return true;
   return activity.generateStatus !== "ready" && activity.generateStatus !== "needs_check";
+}
+
+function normalizeSourceIds(ids: readonly string[] | undefined): string[] {
+  return [...new Set(ids ?? [])].sort().slice(0, 32);
 }
 
 /** Build create input for Today「开始学习」— honest summary + idempotent clientKey. */
@@ -96,13 +114,14 @@ export function buildStartLearningCreateInput(
 ): TeachingActivityCreateInput {
   if (ctx.continueConversationId && ctx.continueTitle) {
     const summary = `继续：${ctx.continueTitle}`.slice(0, 2000);
-    const sourceIds = [...new Set(ctx.continueSourceIds ?? [])].sort().slice(0, 32);
+    const sourceIds = normalizeSourceIds(ctx.continueSourceIds ?? ctx.sourceIds);
     return {
       clientKey: `today-resume:${ctx.localDate}:${ctx.continueConversationId}`,
       intentKind: "resume",
       intentSummary: summary,
       // Not in createIntent: a same-day replay returns the existing activity even if materials changed.
       ...(sourceIds.length ? { sourceIds } : {}),
+      ...(ctx.courseId !== undefined ? { courseId: ctx.courseId } : {}),
       createIntent: {
         intentKind: "resume",
         source: "today",
@@ -111,11 +130,15 @@ export function buildStartLearningCreateInput(
       },
     };
   }
-  const summary = "今日主题学习";
+  const courseTitle = ctx.courseTitle?.trim() || null;
+  const summary = (courseTitle ? `${courseTitle} · 今日学习` : "今日主题学习").slice(0, 2000);
+  const sourceIds = normalizeSourceIds(ctx.sourceIds);
   return {
     clientKey: `today-topic:${ctx.localDate}`,
     intentKind: "topic",
     intentSummary: summary,
+    ...(sourceIds.length ? { sourceIds } : {}),
+    ...(ctx.courseId !== undefined ? { courseId: ctx.courseId } : {}),
     createIntent: {
       intentKind: "topic",
       source: "today",

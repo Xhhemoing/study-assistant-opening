@@ -6,11 +6,12 @@ import { createTodayResumeReader, loadTodayResumeState } from "../../../../featu
 import { TodayDashboard } from "../../../../features/opening/planning/today-dashboard";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { getPlanningSettingsService } from "../../../../features/opening/server/data-services";
+import { isTeachingCompilerEnabled } from "@aistudy/ai";
 
 
 export default async function OpeningTodayPage({ searchParams }: { searchParams: Promise<{ task?: string }> }) {
   const { state, timeZone } = await loadPage(), { task } = await searchParams;
-  return <TodayDashboard state={state} focusTaskId={task} timeZone={timeZone} />;
+  return <TodayDashboard state={state} focusTaskId={task} timeZone={timeZone} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
 }
 async function loadPage(): Promise<{ state: TodayResumeState; timeZone: string }> {
   try {

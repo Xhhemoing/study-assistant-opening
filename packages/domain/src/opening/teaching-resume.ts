@@ -85,6 +85,11 @@ export function mapGenerateStatusToJobGate(
   }
   if (generateStatus === "unknown") return "unknown";
   if (generateStatus === "stale") return "stale";
+  // failed/cancelled must not look like jobGate=ready (would skip wait_init and 404-loop).
+  // Map to unknown within the existing gate enum (contracts: ready|in_flight|unknown|stale).
+  if (generateStatus === "failed" || generateStatus === "cancelled") {
+    return "unknown";
+  }
   return "ready";
 }
 

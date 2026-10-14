@@ -25,7 +25,7 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
       WHERE source_id=${id} AND source_version=${version} AND page IS NOT DISTINCT FROM ${page} ORDER BY created_at,id`;
     const text = bodies.map(row => String(row.text)).join("\n\n");
     return { sourceId: id, version, currentVersion: Number(source.version), page, pages,
-      pageKind: source.mime === "text/markdown" || source.mime === "text/html" ? "section" as const : "physical" as const,
+      pageKind: source.mime === "text/markdown" || source.mime === "text/plain" || source.mime === "text/html" ? "section" as const : "physical" as const,
       readablePages: stats.filter(row => row.readable).length,
       characters: stats.reduce((sum, row) => sum + Number(row.characters), 0),
       text: text.slice(0,20000), truncated: text.length > 20000 };

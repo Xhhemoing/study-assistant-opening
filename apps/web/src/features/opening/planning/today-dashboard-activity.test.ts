@@ -9,6 +9,7 @@ import {
   isTeachingWorkspaceContentUsable,
   TeachingWorkspace,
 } from "../teaching/teaching-workspace";
+import { planTodayPrimaryCta } from "./today-dashboard";
 import { isOpeningTeachingWorkspaceEnabled } from "../teaching/teaching-workspace-flag";
 import { isOpeningTeachingLoopEnabled } from "../teaching/teaching-loop-flag";
 import { isOpeningTeachingLoopTrialEnabled } from "../teaching/teaching-loop-trial";
@@ -209,5 +210,63 @@ describe("V2-16 teaching loop UI trial dual-gate (Today wire)", () => {
     expect(html).toContain("不会进入主讲工作台");
     expect(html).toContain("打开自由对话（次要）");
     expect(html).not.toContain("data-teaching-workspace");
+  });
+});
+
+describe("Today primary CTA visible continue (S7)", () => {
+  const readyInit: ActivitySpecClientInit = {
+    id: "88888888-8888-4888-8888-888888888888",
+    activityId: activity.id,
+    teachingUnitId: "77777777-7777-4777-8777-777777777777",
+    documentId: "66666666-6666-4666-8666-666666666666",
+    revisionNumber: 1,
+    blockOrder: [
+      {
+        blockId: "44444444-4444-4444-8444-444444444444",
+        position: 0,
+        blockType: "text",
+        role: "teach",
+      },
+    ],
+    sourceRefs: [],
+    goals: [],
+    verificationStatus: "unchecked",
+    generationConfig: {},
+    version: 1,
+    createdAt: activity.createdAt,
+    updatedAt: activity.updatedAt,
+    blocks: [
+      {
+        blockId: "44444444-4444-4444-8444-444444444444",
+        position: 0,
+        blockType: "text",
+        role: "teach",
+        content: { text: "主讲正文" },
+      },
+    ],
+    contentVersion: 1,
+  };
+
+  it("plans create when no activity exists", () => {
+    expect(planTodayPrimaryCta(null, null)).toEqual({ kind: "create" });
+  });
+
+  it("plans focus-existing with preferWorkspace when content is usable (non-card phase)", () => {
+    const ready = { ...activity, generateStatus: "ready" as const, contentVersion: 1 };
+    const plan = planTodayPrimaryCta(ready, readyInit);
+    expect(plan).toEqual({
+      kind: "focus-existing",
+      activityId: ready.id,
+      preferWorkspace: true,
+    });
+  });
+
+  it("plans focus-existing without preferWorkspace when content is not usable", () => {
+    const plan = planTodayPrimaryCta(activity, null);
+    expect(plan.kind).toBe("focus-existing");
+    if (plan.kind === "focus-existing") {
+      expect(plan.preferWorkspace).toBe(false);
+      expect(plan.activityId).toBe(activity.id);
+    }
   });
 });

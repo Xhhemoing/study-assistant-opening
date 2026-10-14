@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { OpeningApiError, type OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 import { canAcceptPlan } from "./plan-action";
+import { runSeedTodayPlan } from "./seed-today-plan";
 
 export type DailyDraftSkippedReason = "accepted" | "rejected" | "no_settings";
 
@@ -117,7 +118,10 @@ export function DailyDraftCard({
   tasks = [],
   onChanged,
 }: {
-  api: Pick<OpeningApi, "proposePlan" | "acceptPlan" | "rejectPlan">;
+  api: Pick<
+    OpeningApi,
+    "proposePlan" | "acceptPlan" | "rejectPlan" | "getPlanningSettings" | "putPlanningSettings" | "createTask"
+  >;
   date: string;
   acceptedVersion?: number;
   dailyDraft?: PlanDraft | null;
@@ -135,6 +139,7 @@ export function DailyDraftCard({
     error: "",
   }));
   const [pending, setPending] = useState(false);
+  const [seedError, setSeedError] = useState("");
 
   useEffect(() => {
     if (pending) return;
@@ -153,6 +158,20 @@ export function DailyDraftCard({
   const draft = model.draft;
   const stale = Boolean(draft && draft.baseVersion !== acceptedVersion);
 
+  async function onSeedDefaultPlan() {
+    if (pending) return;
+    setPending(true);
+    setSeedError("");
+    try {
+      await runSeedTodayPlan(api, { target: { kind: "default" } });
+      onChanged?.();
+    } catch (reason) {
+      setSeedError(reason instanceof Error ? reason.message : "用默认作息生成本日计划失败，请重试。");
+    } finally {
+      setPending(false);
+    }
+  }
+
   if (dailyDraftSkippedReason) {
     return (
       <section
@@ -165,6 +184,21 @@ export function DailyDraftCard({
         <p className="text-xs leading-5 text-zinc-700" role="status">
           {dailyDraftSkippedCopy(dailyDraftSkippedReason, unplannedPendingCount)}
         </p>
+        {dailyDraftSkippedReason === "no_settings" ? (
+          <div className="space-y-2">
+            <button
+              type="button"
+              className={secondaryButtonClass}
+              disabled={pending}
+              onClick={() => void onSeedDefaultPlan()}
+            >
+              {pending ? "正在生成…" : "用默认作息生成本日计划"}
+            </button>
+            {seedError ? (
+              <p className="text-xs leading-5 text-red-700" role="alert">{seedError}</p>
+            ) : null}
+          </div>
+        ) : null}
       </section>
     );
   }
