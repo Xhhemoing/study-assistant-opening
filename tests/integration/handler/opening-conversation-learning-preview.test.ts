@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
-import type { Scope } from "@aistudy/contracts";
+import type { ConversationLearningPreview, Scope } from "@aistudy/contracts";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { POST as preview } from "../../../apps/web/src/app/api/opening/learning-agent/preview/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -82,14 +82,14 @@ describe("read-only conversation learning preview", () => {
     const first = await preview(req(owned, owner.cookie));
     expect(first.status).toBe(200);
     expect(first.headers.get("Cache-Control")).toBe("no-store");
-    const data = await first.json() as Record<string, any>;
+    const data = await first.json() as ConversationLearningPreview;
     expect(data).toMatchObject({
       policyVersion: "conversation-learning-v1", readOnly: true,
       diagnosis: { action: "diagnostic", masteryUpdated: false },
       plan: { isCommitted: false, status: "no_planning_settings" },
     });
     expect(data.intent).toMatchObject({ examInDays: 10, dailyMinutes: 60 });
-    const second = await (await preview(req(owned, owner.cookie))).json() as Record<string, any>;
+    const second = await (await preview(req(owned, owner.cookie))).json() as ConversationLearningPreview;
     expect(second.plan.proposedTask.id).toBe(data.plan.proposedTask.id);
     const [tasks] = await sql`SELECT count(*)::int AS count FROM opening_tasks WHERE workspace_id=${owner.scope.workspaceId}`;
     const [drafts] = await sql`SELECT count(*)::int AS count FROM opening_plan_drafts WHERE workspace_id=${owner.scope.workspaceId}`;
