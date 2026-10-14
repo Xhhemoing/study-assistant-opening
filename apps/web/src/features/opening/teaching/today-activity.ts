@@ -47,7 +47,13 @@ export function teachingActivityStatusLabel(status: TeachingActivityStatus): str
 
 export function teachingActivityGenerateStatusLabel(
   generateStatus: TeachingActivityGenerateStatus,
+  options?: { contentVersion?: number },
 ): string {
+  // Shell activities created while the compiler is off sit at ready + cv0 with no blocks.
+  // Do not claim 「主讲内容已就绪」 until content exists.
+  if (generateStatus === "ready" && options?.contentVersion === 0) {
+    return "主讲内容未生成";
+  }
   return GENERATE_STATUS_LABEL[generateStatus];
 }
 
@@ -90,7 +96,9 @@ export type StartLearningContext = {
  */
 export function canRequestTeachingCompile(
   activity: Pick<TeachingActivity, "generateStatus" | "contentVersion">,
+  options?: { compilerEnabled?: boolean },
 ): boolean {
+  if (options?.compilerEnabled === false) return false;
   if (activity.generateStatus === "queued" || activity.generateStatus === "generating") return false;
   if (activity.contentVersion === 0) return true;
   return activity.generateStatus !== "ready" && activity.generateStatus !== "needs_check";

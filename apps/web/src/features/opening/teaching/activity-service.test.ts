@@ -8,7 +8,11 @@ vi.mock("@aistudy/database", () => ({
   createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, requestCompile })),
 }));
 
-import { createOpeningTeachingActivityService } from "./activity-service";
+import {
+  createOpeningTeachingActivityService,
+  teachingCreateGenerateStatusLabel,
+} from "./activity-service";
+import { canRequestTeachingCompile } from "./today-activity";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const activityId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
@@ -67,4 +71,32 @@ describe("teaching activity service: compile enqueue seam", () => {
     await expect(service.requestCompile(scope, activityId, { clientKey: "x" })).rejects.toThrow();
     expect(requestCompile).not.toHaveBeenCalled();
   });
+
+  it("does not claim 主讲内容已就绪 when the compiler is off (cv0 shell)", async () => {
+    create.mockResolvedValue({
+      id: activityId,
+      generateStatus: "ready",
+      contentVersion: 0,
+    });
+    const activity = await createOpeningTeachingActivityService(sql, {}).create(scope, input);
+    expect(create).toHaveBeenCalledWith(scope, input, { enqueueCompile: false });
+    expect(teachingCreateGenerateStatusLabel(activity)).toBe("主讲内容未生成");
+    expect(teachingCreateGenerateStatusLabel(activity)).not.toBe("主讲内容已就绪");
+  });
+
+  it("hides compile request when compilerEnabled is false", () => {
+    expect(
+      canRequestTeachingCompile(
+        { generateStatus: "ready", contentVersion: 0 },
+        { compilerEnabled: false },
+      ),
+    ).toBe(false);
+    expect(
+      canRequestTeachingCompile(
+        { generateStatus: "failed", contentVersion: 2 },
+        { compilerEnabled: false },
+      ),
+    ).toBe(false);
+  });
+
 });

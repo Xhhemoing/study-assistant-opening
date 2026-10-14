@@ -96,8 +96,16 @@ it("offers generation only when nothing is running and no usable content exists"
 
 it("labels generateStatus honestly and does not claim fake ready teaching content", () => {
   expect(teachingActivityGenerateStatusLabel("queued")).toBe("生成排队中");
+  expect(teachingActivityGenerateStatusLabel("ready", { contentVersion: 0 })).toBe("主讲内容未生成");
+  expect(teachingActivityGenerateStatusLabel("ready", { contentVersion: 1 })).toBe("主讲内容已就绪");
   expect(teachingActivityContentHonesty("ready")).toContain("不会伪造讲义");
   expect(teachingActivityContentHonesty("queued")).toContain("不会假装");
+});
+
+it("refuses compile when compilerEnabled is false", () => {
+  expect(
+    canRequestTeachingCompile({ generateStatus: "ready", contentVersion: 0 }, { compilerEnabled: false }),
+  ).toBe(false);
 });
 
 it("uses courseTitle in topic summary instead of bare 今日主题学习", () => {

@@ -200,7 +200,7 @@ export function TeachingWorkspace({
             {teachingActivityStatusLabel(activity.status)}
           </span>
           <span className={`${ui.badge} ${generateTone}`}>
-            {teachingActivityGenerateStatusLabel(activity.generateStatus)}
+            {teachingActivityGenerateStatusLabel(activity.generateStatus, { contentVersion: activity.contentVersion })}
           </span>
         </div>
       </header>
@@ -370,6 +370,11 @@ export type TeachingContinueEntryProps = {
   startInWorkspace?: boolean;
   initialClientInit?: ActivitySpecClientInit | null;
   onActivityUpdated?: (activity: TeachingActivity) => void;
+  /**
+   * When false, hide 「生成主讲内容」 (compiler off / capabilities).
+   * Default true preserves prior call sites; Today wires the real switch.
+   */
+  teachingCompileEnabled?: boolean;
 };
 
 export function TeachingContinueEntry({
@@ -382,6 +387,7 @@ export function TeachingContinueEntry({
   startInWorkspace = false,
   initialClientInit = null,
   onActivityUpdated,
+  teachingCompileEnabled = true,
 }: TeachingContinueEntryProps) {
   const api = apiProp ?? createOpeningApi();
   const [activity, setActivity] = useState(activityProp);
@@ -529,7 +535,9 @@ export function TeachingContinueEntry({
           </p>
         ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
-          {canRequestTeachingCompile(liveResume ?? activity) ? (
+          {canRequestTeachingCompile(liveResume ?? activity, {
+            compilerEnabled: teachingCompileEnabled,
+          }) ? (
             <button
               type="button"
               className={ui.primary}

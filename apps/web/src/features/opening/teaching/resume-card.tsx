@@ -726,7 +726,7 @@ export function ResumeCard({
     <ResumeCardView
       activityTitle={liveActivity.intentSummary}
       activityStatus={liveActivity.status}
-      generateStatusLabel={teachingActivityGenerateStatusLabel(liveActivity.generateStatus)}
+      generateStatusLabel={teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion: liveActivity.contentVersion })}
       resume={liveResume}
       localUnsent={localUnsent}
       conflict={conflict}

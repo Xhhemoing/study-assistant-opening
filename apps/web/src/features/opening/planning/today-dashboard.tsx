@@ -39,6 +39,7 @@ export function TodayDashboard({
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
   teachingLoopEnabled: teachingLoopEnabledProp,
   teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
+  teachingCompileEnabled = true,
   timeZone: workspaceTimeZone,
 }: {
   state: TodayResumeState;
@@ -55,6 +56,8 @@ export function TodayDashboard({
    * Default = loop && workspace (V2-16 UI trial; both flags required).
    */
   teachingLoopTrialEnabled?: boolean;
+  /** Server-resolved OPENING_TEACHING_COMPILER_ENABLED — hide compile CTA when false. */
+  teachingCompileEnabled?: boolean;
 }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   // PR-H: UI visibility comes from GET /api/opening/capabilities (server switches),
@@ -340,6 +343,7 @@ export function TodayDashboard({
                   timeZone={timeZone}
                   api={api}
                   initialClientInit={clientInit}
+                  teachingCompileEnabled={teachingCompileEnabled}
                   onActivityUpdated={(next) => {
                     setSelectedActivity(next);
                     setActivities((rows) =>

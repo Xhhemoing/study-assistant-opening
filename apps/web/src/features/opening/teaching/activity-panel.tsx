@@ -50,7 +50,7 @@ export function TeachingActivityPanel({
           <dt className="text-zinc-400">生成</dt>
           <dd className="mt-1">
             <span className={`${ui.badge} ${generateTone}`}>
-              {teachingActivityGenerateStatusLabel(activity.generateStatus)}
+              {teachingActivityGenerateStatusLabel(activity.generateStatus, { contentVersion: activity.contentVersion })}
             </span>
           </dd>
         </div>

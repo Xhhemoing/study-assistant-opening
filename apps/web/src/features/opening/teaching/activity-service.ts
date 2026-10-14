@@ -3,12 +3,23 @@ import {
   teachingActivityCreateInputSchema,
   uuidSchema,
   type Scope,
+  type TeachingActivity,
 } from "@aistudy/contracts";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
+import { teachingActivityGenerateStatusLabel } from "./today-activity";
+
+/** UI label for a freshly created activity — never claims 已就绪 when cv is 0. */
+export function teachingCreateGenerateStatusLabel(
+  activity: Pick<TeachingActivity, "generateStatus" | "contentVersion">,
+): string {
+  return teachingActivityGenerateStatusLabel(activity.generateStatus, {
+    contentVersion: activity.contentVersion,
+  });
+}
 
 const compileRequestSchema = z.object({ clientKey: z.string().min(8).max(160) }).strict();
 
