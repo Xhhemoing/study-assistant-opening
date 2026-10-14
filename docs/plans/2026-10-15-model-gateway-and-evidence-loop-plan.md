@@ -23,6 +23,9 @@
 | 3 | 需要 AI 判分；以后会加入 BKT 等评价体系 | E2 判分只作建议；E5 定义评价器接口和 BKT 所需字段 |
 | 4 | 卡片复习进入证据账本 | E4 |
 | 5 | 所有模型由供应商配置、支持一键配置、调度器统一 | M1–M6 |
+| 6 | 允许**用户明确指定**的备用模型（10-15） | §3 备用模型；只改 `call()` 一处 |
+| 7 | 可以使用 Google Gemini 免费 API（10-15） | §4 免费额度计费、§5 远程转写 |
+| 8 | AI 判分以后再做；先保证闭环能力和质量（10-15） | E2 延后；顺序见下 |
 
 ## 现状核查（649353f）
 
@@ -83,7 +86,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 - 读库装配只有一处：`apps/worker/src/runtime/model-gateway.ts` 的 `createDbModelGateway(sql)`，替代 `resolveTutorModel`，web 和 worker 共用。
 - `providerFactory` 按模型的 `protocol` 选择适配器；现在只有 `openai_chat`（`createOpeningProvider`）。以后加其他协议只改这个工厂。
 - **防绕过**：ESLint `no-restricted-imports` 禁止在 `packages/ai/src/opening/gateway.ts` 以外直接引用 `createOpeningProvider` 和 `runBudgetedCall`。这道检查直接防住「知识抽取绕过预算」这类问题重现，成本是一条 lint 规则。
-- **预留但不实现**：备用模型，例如「主模型 429 时用户指定的备用模型」。这要改变「不静默换供应商」的承诺，需要你单独决定后才做；做的话只改 `call()` 一处。
+- **备用模型（已定，M3 落地）**：每个用途可选一个**用户明确指定**的备用模型，`taskRoutes[task] = { primary, fallback? }`。只在两种情况下切换：请求**确认未发出**（连接失败、401/403、429、模型不可用、缺能力），或预算账本已释放该预留。发出后结果未知（超时、断网）**不切换**，避免重复计费，仍按 `markUnknown` 处理。切换时新开一次预留和模型快照，回合上标注「已改用备用模型 X」。没有指定备用模型时，行为与现在相同：明确失败。逻辑只在 `call()` 里实现。
 
 ### 4. 模型能力与一键配置
 
@@ -93,18 +96,23 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
   在**同一事务**内完成：建供应商、写入加密密钥、建模型、`ai_settings` 设为自动模式并以新模型为默认、清空用途映射（全部跟随默认）、确认日额度。返回每个用途是否可用及原因。
 - **连通性测试**：`POST /api/opening/model-providers/{id}/models/{modelId}/probe`，经调度器发一次极小的 JSON 请求，计入预算（purpose `probe`），结果只说「本次请求成功/失败（原因）」，不声称质量或能力已验证。
 - 供应商预设只给 baseUrl 和示例模型名，**价格由用户填写**，不内置报价（与现有文档「不代表实时报价」一致）。
+- **Google Gemini 免费额度（已定）**：预设 baseUrl `https://generativelanguage.googleapis.com/v1beta/openai/`（OpenAI 兼容，支持 JSON 输出、图片和音频输入）。免费额度按 token 计价是 0，而现在「价格必须为正数」会让它显示 `pricing_missing`。因此模型增加 `billing: "metered" | "free_tier"`：
+  - `free_tier` 允许价格为 0，改用**每日请求数上限**（用户填写，默认 200）约束。预算账本照常记录每次预留，金额为 0；日额度为 0 时不会把免费模型判成 `budget_disabled`。
+  - 选择 `free_tier` 时页面明确提示：**Google 免费额度的输入和输出可能被用于改进其产品，并可能经人工审阅**，不要用于隐私材料。工作区里标记为隐私排除的材料本来就不会发送（`listExcludedSourceIds`），这一点保持不变。
+  - 部署前确认 Hermes 能访问 `generativelanguage.googleapis.com`；访问不了时只能在本地或其他服务器使用。
+  - `billing` 与 `capabilities` 放进同一个 0062 迁移（`billing text NOT NULL DEFAULT 'metered'`，`daily_request_cap integer NULL`，`input/output_cents_per_million` 的 CHECK 放宽为 `metered` 时 >0、`free_tier` 时 ≥0）。
 - 现有约束不放宽：确认日额度、价格必须为正数、HTTPS、密钥只写入不回读、工作区最多 8 个供应商 / 16 个自定义模型。
 
 ### 5. 转写和 OCR 纳入同一页面
 
 - `media.transcribe` 的引擎分两种：本地 faster-whisper（默认，由服务器环境变量配置，页面只读显示可用性）和供应商模型（带 `audio_transcription` 能力的 OpenAI 兼容 `/audio/transcriptions`）。
-- 远程转写会把音频发给第三方，需要计价单位（按分钟）和隐私确认，**作为 M5 的单独决定项**；在你确认之前只做本地引擎的显示。
+- 远程转写（已定可用 Gemini）：带 `audio_transcription` 能力的模型通过 chat completions 的 `input_audio` 内容块发送音频，要求返回带时间段的 JSON 转写，复用 `parse-media` 现有的分段存储和「用户已修正的分段不覆盖」规则。按上面的 `free_tier` 规则计数；音频按 20 MB / 段切分；仍沿用隐私排除和隐私 epoch 检查。用户在供应商页选择引擎：本地 faster-whisper（默认）或某个具备该能力的供应商模型。
 - PDF OCR 目前关闭，只在页面显示「未启用」，不在本计划里打开。
 
 ### 6. 证据闭环（E 系列）
 
 - **E1 主讲内作答**：`question` 块改成内联作答，复用 learning-sessions / attempts / observations 接口（session 已经带 `activity_id`）。提交后展示 `answer_key`，接上现有核对步骤（`learning/reference-check.ts`），核对后记为 `verdictSource=reference_checked`。
-- **E2 AI 判分建议**：通过 `grading.suggest` 用途调用模型，输出 `{ verdict, rubricHits[], confidence, rationale }`，写成独立的 observation revision，`verdictSource=model_suggestion`。按现有资格规则，**这条记录不能单独让 `verifiedCorrect=yes`**；页面显示「AI 认为…（建议）」，用户可以采纳为核对结果，或者不采纳。判分快照和模型快照都入库，便于以后回放。
+- **E2 AI 判分建议（延后，10-15 决定）**：通过 `grading.suggest` 用途调用模型，输出 `{ verdict, rubricHits[], confidence, rationale }`，写成独立的 observation revision，`verdictSource=model_suggestion`。按现有资格规则，**这条记录不能单独让 `verifiedCorrect=yes`**；页面显示「AI 认为…（建议）」，用户可以采纳为核对结果，或者不采纳。判分快照和模型快照都入库，便于以后回放。
 - **E3 活动收尾**：状态接口开放 `completed`（数据库约束本来就允许）。学完后显示小结（用 `teaching-coverage` 汇总讲了什么、做了几题、还有哪些没解决），并询问「把『X』标记为完成？」，复用 `TaskStatusControl` 的 `expectedVersion`。`taskId` 放在 `create_intent`。提示框由 PR #43 L5 负责；本计划只提供接口和小结数据。
 - **E4 卡片进入账本**：迁移 `0062` 同时给 `cards` 加可空的 `course_id`、`skill_label`。有课程的卡片每次评分写一条 observation：`again → incorrect`、其他评分 → `correct`，`verdictSource=self_report`，维度 `recall`，clientKey 为 `card-review:<eventId>` 保证幂等。没有课程的卡片只保留 SRS，不写账本，因为 observation 的 `course_id NOT NULL`。从错题生成卡片（`cards.suggest`）时自动带上课程和技能。
 - **E5 评价器接口（BKT 预留）**：`packages/domain/src/opening/estimators/` 定义 `SkillStateEstimator { version, estimate(evidence[]) → { state, reasons[] } }`。现在的 `learning-summary` 包装成 `rules-1`。BKT 以后作为 `bkt-1` 以**影子方式**运行：只记录结果，不影响页面，等校准指标达标后再切换（ALGORITHM_MAP「复习调度」「能力评价」两行的门槛）。为此保证每条证据带有 BKT 需要的字段：知识点 id（`requirementKey`/节点）、题目 id（`item_version_id`）、是否首次作答、`assistance`、`verdictSource`、时间戳。**不输出掌握百分比**，与 V2 章程一致。
@@ -117,22 +125,24 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 | M2 | 知识抽取改用 `knowledge.extract` 并进入预算；主讲编译接真实模型（`teaching.compile`，沿用 `OPENING_TEACHING_COMPILER_ENABLED`） | Claude | M1 | 无 |
 | M3 | `taskRoutes` + 能力字段 + 设置页按分组显示用途映射 | Claude（契约、迁移）→ Grok（设置页） | M1 | 0062（能力） |
 | M4 | 一键配置接口 + 连通性测试 + 设置页一键表单 | Claude（接口）→ Grok（表单） | M3 | 无 |
-| M5 | 转写纳入供应商页：本地只读显示；远程转写等你决定 | Grok | M3 | 无 |
+| M5 | 转写纳入供应商页：本地 faster-whisper 或 Gemini 音频转写 | Claude（worker 适配）→ Grok（选择界面） | M3 | 无 |
 | M6 | lint 防绕过规则 + 更新 `docs/operations/opening-model-routing.md` | Claude | M2 | 无 |
 | E1 | 主讲内作答 + 对照答案核对 | Grok | PR #43 L5 先合并（`teaching/*` 归 L5） | 无 |
-| E2 | AI 判分建议 | Claude（用途、契约）→ Grok（界面） | M1、E1 | 无 |
+| E2 | AI 判分建议（**延后**） | — | M1、E1 | 无 |
 | E3 | 活动 `completed` + 学完小结数据 | Claude | — | 无 |
 | E4 | 卡片进入账本 + 错题生成卡片 | Claude | M1（`cards.suggest`） | 0062（cards 两列） |
 | E5 | 评价器接口；`rules-1` 包装；BKT 字段完整性测试 | Claude | E1、E4 | 无 |
 
-**0062 放什么：** 只有这两组新增可空列或带默认值的列，放在同一个迁移里。必须排在 PR #43 的 0061 之后，所以 **PR #43 合并后再开 0062 的分支**。回滚：`ALTER TABLE opening_model_provider_models DROP COLUMN capabilities; ALTER TABLE cards DROP COLUMN course_id, DROP COLUMN skill_label;`。
+**0062 放什么：** 模型表的 `capabilities`、`billing`、`daily_request_cap` 和放宽后的价格 CHECK，以及 cards 的 `course_id`、`skill_label`，都是新增列或带默认值的列，放在同一个迁移里。必须排在 PR #43 的 0061 之后，所以 **PR #43 合并后再开 0062 的分支**。回滚：先把 `billing='free_tier'` 的模型删除或改成正价格，再 `ALTER TABLE opening_model_provider_models DROP COLUMN capabilities, DROP COLUMN billing, DROP COLUMN daily_request_cap;` 并恢复原 CHECK（`> 0`）；`ALTER TABLE cards DROP COLUMN course_id, DROP COLUMN skill_label;`。
 
-**顺序：**
-1. 先做完 PR #43 剩下的 L2/L3。
-2. 然后做 M1 → M2，让主讲第一次拿到真实内容，这也是 V2-16 试跑的前提。
-3. E3 与 M1 并行（文件不重叠）。
-4. 接着 M3 → M4、E1 → E2、E4 → E5。
-5. PR #43 的 L7（规划 Agent）直接使用 `planning.agent` 用途。
+**顺序（10-15 调整：先闭环能力和质量）：**
+1. **M1 → M2**：统一调度器，知识抽取进入预算，主讲编译接真实模型。主讲有了真实内容，其他环节的质量才测得出来，这也是 V2-16 试跑的前提。与 PR #43 剩下的 L2/L3 并行，文件不重叠。
+2. **E3**：活动能结束，学完询问是否标记任务完成。
+3. **E1**：主讲内作答 + 对照答案核对（等 PR #43 L5 合并）。
+4. **M3 → M4**：用途映射、备用模型、免费额度计费、一键配置。Gemini 免费额度从这里开始可用。
+5. **E4 → E5**：卡片进入账本，评价器接口。
+6. **M5**：转写引擎选择。
+7. E2（AI 判分）和 PR #43 的 L7（规划 Agent，使用 `planning.agent` 用途）延后。
 
 **文件所有权：** `packages/contracts`、`packages/ai/src/opening/gateway.ts`、迁移由 Claude 写；`teaching/*` 在 PR #43 L5 合并前归 Grok L5；设置页面板（`apps/web/src/features/settings/*panel.tsx`）在 M3/M4 交给 Grok。
 
@@ -212,9 +222,9 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 
 ## 待你决定
 
-1. **备用模型**：是否允许「主模型失败时改用用户**明确指定**的备用模型」？这会改变现有「不静默换供应商」的承诺。默认不做。
-2. **远程转写**：是否允许把音频发给第三方转写？需要按分钟计价和隐私确认。默认只用本地。
-3. **AI 判分的采纳方式**：用户点「采纳」后是否等同于 `reference_checked`？建议**不等同**，另记为 `model_suggestion_accepted`，让以后的 BKT 能区分这两种来源。代价是 `verdict_source` 的 CHECK 约束要在 0062 里多加一个值；等同的话不用改约束。
+1. ~~备用模型~~：已定支持，见 §3。
+2. ~~远程转写~~：已定可用 Gemini，见 §5。
+3. **AI 判分的采纳方式**（E2 延后，届时再定）：用户点「采纳」后是否等同于 `reference_checked`？建议**不等同**，另记为 `model_suggestion_accepted`，让以后的 BKT 能区分这两种来源。代价是 `verdict_source` 的 CHECK 约束要在 0062 里多加一个值；等同的话不用改约束。
 
 ## 回滚
 
