@@ -50,8 +50,20 @@ export type TeachingGenerateStatus =
 
 export type CompileTeachingUnitDeps = {
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
-  /** Stub provider OK until V2-08; null disables model path. */
+  /** Stub provider OK until V2-08; null disables model path. Ignored when callModel is set. */
   provider: BudgetedProvider | null;
+  /**
+   * Real model path (teaching.compile via the model gateway): routing, reservation
+   * sizing, snapshot and settle all happen there. Budget replay errors propagate
+   * exactly as from runBudgetedCall.
+   */
+  callModel?(
+    scope: Scope,
+    input: ProviderInput,
+    options: { operationId: string; resultRef: string; beforeSend?: () => Promise<void> },
+  ): Promise<ProviderOutput>;
+  /** Prompt with outline + authorized evidence; defaults to the V2-07 stub prompt. */
+  buildProviderInput?(scope: Scope, payload: CompileTeachingUnitPayload): Promise<ProviderInput>;
   reservedCents?: number;
   /**
    * When true and mode=repair, skip provider and set generate_status=ready
@@ -226,42 +238,48 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
       let providerOutput: ProviderOutput | null = null;
 
       if (!skipProvider) {
-        const input: ProviderInput = {
-          instruction: deps.buildPublishInput
-            ? "Compile the current teaching activity from editable outline + authorized sources (V2-08)."
-            : "Compile a teaching unit from authorized sources (stub until V2-08).",
-          text: JSON.stringify({
-            mode: body.mode,
-            activityId: body.activityId,
-            teachingUnitId: body.teachingUnitId ?? null,
-            sourceIds: allowedSources,
-          }),
-          chunks: [],
-          mode: "explain",
-          maxOutputTokens: 256,
-          mediaCapability: "text_only",
-          imageParts: [],
-        };
+        const input: ProviderInput = deps.buildProviderInput
+          ? await deps.buildProviderInput(scope, { ...body, sourceIds: allowedSources })
+          : {
+              instruction: deps.buildPublishInput
+                ? "Compile the current teaching activity from editable outline + authorized sources (V2-08)."
+                : "Compile a teaching unit from authorized sources (stub until V2-08).",
+              text: JSON.stringify({
+                mode: body.mode,
+                activityId: body.activityId,
+                teachingUnitId: body.teachingUnitId ?? null,
+                sourceIds: allowedSources,
+              }),
+              chunks: [],
+              mode: "explain",
+              maxOutputTokens: 256,
+              mediaCapability: "text_only",
+              imageParts: [],
+            };
+        const beforeSend = deps.privacy
+          ? async () =>
+              assertCurrentEpoch(
+                job.privacyEpoch,
+                await deps.privacy!.getWorkspaceEpoch(scope),
+              )
+          : undefined;
+        // Persisted result reference: the teaching activity this call compiles.
+        const resultRef = `teaching_activity:${body.activityId}`;
         try {
-          providerOutput = await runBudgetedCall({
-            provider: deps.provider,
-            budget: scopedBudget,
-            input,
-            requestId: operationId,
-            operationId,
-            purpose: "compile-teaching-unit",
-            // Persisted result reference: the teaching activity this call compiles.
-            resultRef: `teaching_activity:${body.activityId}`,
-            reservedCents: deps.reservedCents ?? 100,
-            actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
-            beforeSend: deps.privacy
-              ? async () =>
-                  assertCurrentEpoch(
-                    job.privacyEpoch,
-                    await deps.privacy!.getWorkspaceEpoch(scope),
-                  )
-              : undefined,
-          });
+          providerOutput = deps.callModel
+            ? await deps.callModel(scope, input, { operationId, resultRef, ...(beforeSend ? { beforeSend } : {}) })
+            : await runBudgetedCall({
+                provider: deps.provider,
+                budget: scopedBudget,
+                input,
+                requestId: operationId,
+                operationId,
+                purpose: "compile-teaching-unit",
+                resultRef,
+                reservedCents: deps.reservedCents ?? 100,
+                actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
+                beforeSend,
+              });
         } catch (error) {
           // PR-D: completed ledger key → load the persisted result via resultRef;
           // no provider call, no new charge, no re-publish, never fake success.

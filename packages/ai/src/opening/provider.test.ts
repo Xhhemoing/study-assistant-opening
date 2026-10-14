@@ -91,6 +91,39 @@ describe("opening provider", () => {
     await expect(provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
   });
 
+  it("json output mode returns the task object in text and drops the tutor answer contract", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({
+      choices: [{ message: { content: "```json\n{\"nodes\":[],\"edges\":[]}\n```" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 4 },
+    }));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl, answerStyle: true });
+    const output = await provider.complete({ ...input, outputFormat: "json" });
+    expect(JSON.parse(output.text)).toEqual({ nodes: [], edges: [] });
+    expect(output).toMatchObject({ citedChunkIds: [], candidates: [], inputTokens: 3, outputTokens: 4 });
+    const system = JSON.parse(fetchImpl.mock.calls[0]![1].body).messages[0].content as string;
+    expect(system).not.toContain('{"text":string');
+    expect(system).not.toContain("写作规则");
+  });
+
+  it("json output mode rejects prose instead of wrapping it as an answer", async () => {
+    const provider = createOpeningProvider({
+      baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({ choices: [{ message: { content: "sorry, no json" } }] })),
+    });
+    await expect(provider.complete({ ...input, outputFormat: "json" })).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+  });
+
+  it("sends audio parts only to models configured for audio input", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({ choices: [{ message: { content: "{\"segments\":[]}" } }] }));
+    const audio = { ...input, outputFormat: "json" as const, audioParts: [{ data: "UklGRg==", format: "wav" as const }] };
+    await expect(createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl }).complete(audio))
+      .rejects.toMatchObject({ code: "PROVIDER_MEDIA_UNSUPPORTED" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl, supportsAudio: true }).complete(audio);
+    const content = JSON.parse(fetchImpl.mock.calls[0]![1].body).messages.at(-1).content;
+    expect(content).toContainEqual({ type: "input_audio", input_audio: { data: "UklGRg==", format: "wav" } });
+  });
+
   const strictAnswer = { text: "GLM answer", citedChunkIds: [], candidates: [] as unknown[] };
 
   it("parses strict JSON content unchanged", async () => {

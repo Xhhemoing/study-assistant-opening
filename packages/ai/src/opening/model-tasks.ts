@@ -22,6 +22,7 @@ export const MODEL_TASKS = {
   "tutor.explain": { label: "辅导 · 解释", group: "tutor", purpose: "tutor", tutorMode: "explain" },
   "tutor.think_together": { label: "辅导 · 共同思考", group: "tutor", purpose: "tutor", tutorMode: "think_together" },
   "knowledge.extract": { label: "课程知识图谱抽取", group: "materials", purpose: "build-course-knowledge" },
+  "teaching.compile": { label: "AI 主讲内容编译", group: "teaching", purpose: "compile-teaching-unit" },
 } as const satisfies Record<string, ModelTaskSpec>;
 
 export type ModelTaskKey = keyof typeof MODEL_TASKS;

@@ -9,6 +9,8 @@ import {
   buildCompileProviderInput,
   compileCurrentActivity,
   createCompilerBuildPublishInput,
+  parseCompileModelOutput,
+  TeachingCompileOutputError,
   projectClientSafeLibraryBlocks,
   proposeTeachingOutline,
 } from "./teaching-compiler";
@@ -320,6 +322,53 @@ describe("teaching-compiler", () => {
     expect(providerInput.instruction).toMatch(/authorized|UNTRUSTED|outline/i);
     expect(providerInput.text).toContain("OUTLINE JSON");
     expect(providerInput.text).toMatch(/UNTRUSTED/);
+  });
+
+  it("parseCompileModelOutput keeps allowed blocks, drops unknown types and invented chunk ids", () => {
+    const parsed = parseCompileModelOutput(JSON.stringify({
+      itemTitles: ["秩", " 零空间 ", 3],
+      blocks: [
+        { type: "text", text: "rank", citedChunkIds: ["c1", "invented"] },
+        { type: "html", text: "<script>" },
+        { type: "answer_key", text: "3" },
+      ],
+    }), new Set(["c1"]));
+    expect(parsed.itemTitles).toEqual(["秩", "零空间"]);
+    expect(parsed.blocks).toEqual([
+      { type: "text", text: "rank", citedChunkIds: ["c1"] },
+      { type: "answer_key", text: "3", citedChunkIds: [] },
+    ]);
+    expect(() => parseCompileModelOutput("not json", new Set())).toThrow(TeachingCompileOutputError);
+    expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "prompt", text: "q?" }] }), new Set())).toThrow(/no teaching block/);
+  });
+
+  it("model output replaces template blocks, keeps answer_key hidden and applies learner-facing titles", async () => {
+    const build = createCompilerBuildPublishInput({
+      loadChunks: async () => [chunk("c1", "authorized material on nullspace")],
+      intentSummary: "零空间",
+      intentKind: "material",
+      newBlockId: stableBlockId,
+      requireModelOutput: true,
+      writeLibraryBlocks: async (blocks) => { written = blocks; },
+    });
+    let written: Array<{ type: string; role: string; content: Record<string, unknown> }> = [];
+    blockSeq = 0;
+    const titles = ["零空间是什么", "观察", "定义", "例子", "检查", "练习"];
+    const publishInput = await build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, {
+      text: JSON.stringify({ itemTitles: titles, blocks: [
+        { type: "text", text: "零空间是 $Ax=0$ 的解集。", citedChunkIds: ["c1"] },
+        { type: "steps", text: "1. 写出方程\n2. 化简" },
+        { type: "prompt", text: "求零空间维数？" },
+        { type: "answer_key", text: "n − rank" },
+      ] }),
+    });
+    expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key"]);
+    expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
+    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true } });
+    expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
+    expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
+    await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))
+      .rejects.toBeInstanceOf(TeachingCompileOutputError);
   });
 
   it("C10 helper: createCompilerBuildPublishInput yields non-empty blockOrder without stub", async () => {

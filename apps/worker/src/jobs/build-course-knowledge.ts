@@ -163,6 +163,7 @@ async function defaultExtract(
     maxOutputTokens: 4096,
     mediaCapability: "text_only",
     imageParts: [],
+    outputFormat: "json",
   });
   return parseExtractedGraph(output.text);
 }

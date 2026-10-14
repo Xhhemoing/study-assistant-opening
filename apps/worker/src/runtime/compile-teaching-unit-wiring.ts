@@ -8,6 +8,8 @@ import {
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
 } from "@aistudy/database";
+import { createCompilerProviderInput } from "@aistudy/ai";
+import { createDbModelGateway, scopeBudget } from "./model-gateway";
 import {
   createTeachingCompilerPublishInput,
   createTeachingValidationAfterPublish,
@@ -32,13 +34,31 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-08: teaching-compiler via buildPublishInput when OPENING_TEACHING_COMPILER_ENABLED;
-  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Budget/cancel/epoch fences unchanged.
+  // V2-08 + M2b: when OPENING_TEACHING_COMPILER_ENABLED, the teaching.compile route's model
+  // writes the focus item through the model gateway (reservation, snapshot, settle there);
+  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Cancel/epoch fences unchanged.
   // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
+  const models = createDbModelGateway(sql);
+  const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
+  const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
+    ? {
+        callModel: (scope, input, options) =>
+          models.call(scope, "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options }),
+        buildProviderInput: async (scope, payload) => {
+          const activity = await teachingActivities.get(scope, payload.activityId);
+          return createCompilerProviderInput({
+            loadChunks,
+            intentSummary: activity?.intentSummary,
+            intentKind: activity?.intentKind,
+          })(scope, payload);
+        },
+      }
+    : {};
   return {
     budget,
+    ...modelPath,
     provider: {
       complete: async () => ({
         text: JSON.stringify(
@@ -83,9 +103,11 @@ export function createCompileTeachingUnitWorkerDeps(
           const activity = await teachingActivities.get(scope, payload.activityId);
           let revisionNumber: number | null = null;
           const build = createTeachingCompilerPublishInput({
-            loadChunks: (ownedScope, sourceIds) => chunks.listForSources(ownedScope as Scope, sourceIds),
+            loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
+            // A real model wrote this activity: never fall back to template filler.
+            requireModelOutput: true,
             writeLibraryBlocks: async (blocks) => {
               const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, blocks);
               revisionNumber = written.revisionNumber;

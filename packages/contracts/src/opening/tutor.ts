@@ -67,6 +67,13 @@ export const providerInputSchema = z
     maxOutputTokens: z.number().int().positive().max(16_384),
     mediaCapability: providerMediaCapabilitySchema,
     imageParts: z.array(providerImagePartSchema).max(32).default([]),
+    /** "answer" (default) = tutor answer shape; "json" = task-specific JSON object returned in `text`. */
+    outputFormat: z.enum(["answer", "json"]).optional(),
+    /** Raw base64 audio (no data: prefix) for models with audio input. */
+    audioParts: z.array(z.object({
+      data: z.string().min(1).max(30_000_000).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+      format: z.enum(["wav", "mp3"]),
+    }).strict()).max(8).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

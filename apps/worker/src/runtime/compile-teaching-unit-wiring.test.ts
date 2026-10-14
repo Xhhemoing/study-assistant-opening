@@ -14,6 +14,23 @@ const content = vi.hoisted(() => ({
   publishActivitySpec: vi.fn(),
 }));
 
+const model = vi.hoisted(() => ({ complete: vi.fn() }));
+vi.mock("./model-gateway", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./model-gateway")>();
+  const { createModelGateway } = await import("@aistudy/ai");
+  return {
+    ...actual,
+    createDbModelGateway: () => createModelGateway({
+      resolve: async () => ({
+        provider: model,
+        modelSnapshot: { id: "teach-model", providerId: "p", modelName: "real-model", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+        inputCentsPerMillion: 1,
+        outputCentsPerMillion: 1,
+      }),
+    }),
+  };
+});
+
 vi.mock("@aistudy/database", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@aistudy/database")>()),
   createOpeningTeachingActivitiesRepository: () => activities,
@@ -78,6 +95,7 @@ let published: ActivitySpecPublishInput[];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
   statuses = [];
   writtenBlocks = [];
   published = [];
@@ -105,6 +123,24 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** What a real model returns: grounded blocks when evidence was supplied, uncited otherwise. */
+function modelAnswer(input: { text: string }, options: { formula?: boolean } = {}) {
+  const grounded = input.text.includes(CHUNK);
+  const cite = grounded ? [CHUNK] : [];
+  return {
+    text: JSON.stringify({
+      itemTitles: ["秩与零空间：从例子看起", "观察", "定义", "例题", "检查"],
+      blocks: [
+        { type: "text", text: grounded ? "矩阵的秩与零空间维数之和等于列数，这就是秩—零化度定理。" : "秩与零空间的关系可以从线性方程组的解来理解。", citedChunkIds: cite },
+        ...(options.formula === false ? [] : [{ type: "formula", text: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: cite }]),
+        { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: [] },
+        { type: "answer_key", text: "5 − 2 = 3", citedChunkIds: [] },
+      ],
+    }),
+    citedChunkIds: [], requestId: "req-1", candidates: [], inputTokens: 100, outputTokens: 100,
+  };
+}
+
 const payload = {
   mode: "generate" as const,
   activityId: ACTIVITY,
@@ -129,8 +165,17 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(spec.revisionNumber).toBe(2);
     expect(spec.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((b) => b.id));
     expect(spec.generationConfig?.extras).not.toHaveProperty("stub");
-    // Learner's intent drives the outline, not the provider stub text.
-    expect(JSON.stringify(writtenBlocks)).toContain("秩与零空间");
+    // The routed model writes the blocks; the learner's intent and evidence reach the prompt.
+    expect(JSON.stringify(writtenBlocks)).toContain("秩—零化度定理");
+    expect(spec.generationConfig?.extras).toMatchObject({ contentSource: "model" });
+    const sent = model.complete.mock.calls[0]![0] as { text: string; outputFormat?: string };
+    expect(sent.outputFormat).toBe("json");
+    expect(sent.text).toContain("学习意图：秩与零空间");
+    expect(sent.text).toContain(CHUNK);
+    // Formulas cannot be text-matched against evidence, so they never carry a citation.
+    expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({ latex: "\\operatorname{rank}(A) + \\dim N(A) = n" });
+    const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
+    expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hidden: true });
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
   });
@@ -138,6 +183,8 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
   it("with validation on, blocks quoting cited evidence verify and the activity reaches ready", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
+    // An uncited formula is an unchecked claim (no formula tool), so the verified path has none.
+    model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input, { formula: false }));
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
     const result = await run(job, payload);
 
@@ -167,6 +214,28 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     content.writeUnitBlocks.mockRejectedValue(new Error("document revision conflict"));
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
     await expect(run(job, payload)).rejects.toThrow("document revision conflict");
+    expect(published).toEqual([]);
+    expect(statuses).toEqual(["generating", "failed"]);
+  });
+
+  it("records the call in the ledger under the teaching.compile route", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const deps = shared();
+    const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, deps));
+    await run(job, payload);
+    expect(deps.budget.reserve).toHaveBeenCalledWith(scope, expect.objectContaining({
+      purpose: "compile-teaching-unit",
+      requestId: `compile-teaching-unit:${job.id}`,
+      modelSnapshot: expect.objectContaining({ id: "teach-model" }),
+    }));
+    expect(deps.budget.settle).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unusable model answer fails the job instead of publishing template filler", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    model.complete.mockResolvedValue({ text: JSON.stringify({ blocks: [{ type: "html", text: "<b>x</b>" }] }), citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 });
+    const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
+    await expect(run(job, payload)).rejects.toThrow(/no teaching block/);
     expect(published).toEqual([]);
     expect(statuses).toEqual(["generating", "failed"]);
   });

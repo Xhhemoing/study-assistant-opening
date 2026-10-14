@@ -12,6 +12,7 @@ import {
 import { BlockView } from "@aistudy/jingwei/react";
 import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { LearningProse } from "../assistant/learning-prose";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
   teachingArtifactBlock,
@@ -90,9 +91,9 @@ function CatalogBody({
   switch (catalogId) {
     case "text":
       return (
-        <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-800" data-catalog="text">
-          {text || "（空文本块）"}
-        </p>
+        <div className="text-sm leading-6 text-zinc-800" data-catalog="text">
+          {text ? <LearningProse text={text} /> : "（空文本块）"}
+        </div>
       );
     case "math": {
       const math =
@@ -103,7 +104,7 @@ function CatalogBody({
           data-catalog="math"
         >
           <span className="sr-only">公式：</span>
-          <code className="whitespace-pre-wrap break-words">{math || "（空公式）"}</code>
+          {math ? <LearningProse text={/^\s*\$/.test(math) ? math : `$$\n${math}\n$$`} /> : <code>（空公式）</code>}
         </div>
       );
     }
@@ -122,7 +123,7 @@ function CatalogBody({
           data-catalog="step"
         >
           {steps.map((step, i) => (
-            <li key={i}>{step}</li>
+            <li key={i}><LearningProse text={step} /></li>
           ))}
         </ol>
       );
@@ -134,7 +135,7 @@ function CatalogBody({
           data-catalog="example"
         >
           <p className="mb-1 text-[11px] font-medium text-emerald-800">例题 / 示例</p>
-          <p className="whitespace-pre-wrap">{text || "（空示例）"}</p>
+          {text ? <LearningProse text={text} /> : <p>（空示例）</p>}
         </aside>
       );
     case "question":
@@ -144,7 +145,7 @@ function CatalogBody({
           data-catalog="question"
         >
           <p className="mb-1 text-[11px] font-medium text-amber-900">试一试</p>
-          <p className="whitespace-pre-wrap">{text || "（空提问）"}</p>
+          {text ? <LearningProse text={text} /> : <p>（空提问）</p>}
           <p className="mt-2 text-[11px] text-zinc-500">
             草稿提交需经服务端授权；本页不本地判分。
           </p>
