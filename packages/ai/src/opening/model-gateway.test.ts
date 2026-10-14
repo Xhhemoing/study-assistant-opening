@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import type { BudgetedRepository } from "./budgeted-call";
-import { createModelGateway, type ResolvedTaskModel } from "./model-gateway";
+import { createModelGateway, isNotSentFailure, reservationTerms, type ResolvedTaskModel } from "./model-gateway";
 import { OpeningModelRoutingError } from "./model-routing";
 
 const scope = { workspaceId: "w", ownerUserId: "u" };
@@ -62,5 +62,72 @@ describe("model gateway", () => {
     const gateway = createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("所选模型已移除"); } });
     await expect(gateway.call(scope, "knowledge.extract", { budget: repo, input, operationId: "op-2" })).rejects.toBeInstanceOf(OpeningModelRoutingError);
     expect(calls.reserve).toHaveLength(0);
+  });
+});
+
+describe("model gateway fallback and free tier", () => {
+  const fallbackModel = (complete = vi.fn(async () => output)): ResolvedTaskModel => ({
+    ...model(complete),
+    modelSnapshot: { id: "m2", providerId: "p2", modelName: "backup", inputCentsPerMillion: 0, outputCentsPerMillion: 0 },
+    inputCentsPerMillion: 0,
+    outputCentsPerMillion: 0,
+    billing: "free_tier",
+    dailyRequestCap: 200,
+  });
+
+  it("uses the explicit fallback under its own ledger key when the primary was rate limited (not sent)", async () => {
+    const { OpeningProviderError } = await import("./provider");
+    const primaryComplete = vi.fn(async () => { throw new OpeningProviderError("PROVIDER_RATE_LIMIT", "429", true); });
+    const backupComplete = vi.fn(async () => output);
+    const { calls, repo } = budget();
+    const used: boolean[] = [];
+    const gateway = createModelGateway({
+      resolve: async () => model(primaryComplete),
+      resolveFallback: async () => fallbackModel(backupComplete),
+    });
+    await gateway.call(scope, "teaching.compile", { budget: repo, input, operationId: "op", onModel: (_m, info) => used.push(info.fallback) });
+    expect(backupComplete).toHaveBeenCalledTimes(1);
+    expect(used).toEqual([false, true]);
+    expect(calls.reserve.map((entry) => entry.requestId)).toEqual(["op", "op:fallback"]);
+    // Free tier reserves zero under its request cap and settles at zero.
+    expect(calls.reserve[1]).toMatchObject({ amountCents: 0, requestCapPerDay: 200, modelSnapshot: expect.objectContaining({ id: "m2" }) });
+    expect(calls.settle).toEqual([0]);
+  });
+
+  it("never falls back after an unknown outcome (timeout) to avoid a double send", async () => {
+    const { OpeningProviderError } = await import("./provider");
+    const backupComplete = vi.fn(async () => output);
+    const { repo } = budget();
+    const gateway = createModelGateway({
+      resolve: async () => model(vi.fn(async () => { throw new OpeningProviderError("PROVIDER_TIMEOUT", "timeout", true); })),
+      resolveFallback: async () => fallbackModel(backupComplete),
+    });
+    await expect(gateway.call(scope, "teaching.compile", { budget: repo, input, operationId: "op" })).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+    expect(backupComplete).not.toHaveBeenCalled();
+  });
+
+  it("falls back when the primary route is unusable or the ledger refused the reservation", async () => {
+    const backupComplete = vi.fn(async () => output);
+    const { repo } = budget();
+    await createModelGateway({
+      resolve: async () => { throw new OpeningModelRoutingError("所选模型暂不可用"); },
+      resolveFallback: async () => fallbackModel(backupComplete),
+    }).call(scope, "teaching.compile", { budget: repo, input, operationId: "op" });
+    expect(backupComplete).toHaveBeenCalledTimes(1);
+    expect(isNotSentFailure(Object.assign(new Error("cap"), { code: "REQUEST_CAP_EXCEEDED" }))).toBe(true);
+    expect(isNotSentFailure(Object.assign(new Error("cap"), { code: "BUDGET_EXCEEDED" }))).toBe(true);
+    expect(isNotSentFailure(new Error("other"))).toBe(false);
+  });
+
+  it("without a fallback the primary error stands", async () => {
+    const { repo } = budget();
+    await expect(createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("x"); } })
+      .call(scope, "teaching.compile", { budget: repo, input, operationId: "op" })).rejects.toBeInstanceOf(OpeningModelRoutingError);
+  });
+
+  it("reservationTerms: paid models reserve at least the floor, free tier requires a cap", () => {
+    expect(reservationTerms(model(), input, 300).reservedCents).toBe(300);
+    expect(reservationTerms(fallbackModel(), input, 300)).toMatchObject({ reservedCents: 0, requestCapPerDay: 200 });
+    expect(() => reservationTerms({ ...fallbackModel(), dailyRequestCap: null }, input)).toThrow(OpeningModelRoutingError);
   });
 });

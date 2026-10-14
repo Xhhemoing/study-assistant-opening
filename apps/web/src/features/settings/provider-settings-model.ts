@@ -7,12 +7,14 @@ export type ProviderDraft = {
 export type ProviderModelDraft = {
   label: string; modelName: string;
   inputCentsPerMillion: string; outputCentsPerMillion: string;
-  supportsVision: boolean;
+  supportsVision: boolean; supportsAudio: boolean;
+  billing: "metered" | "free_tier"; dailyRequestCap: string;
 };
 
 export const emptyProviderDraft: ProviderDraft = { label: "", baseUrl: "", apiKey: "" };
 export const emptyModelDraft: ProviderModelDraft = {
   label: "", modelName: "", inputCentsPerMillion: "", outputCentsPerMillion: "", supportsVision: false,
+  supportsAudio: false, billing: "metered", dailyRequestCap: "",
 };
 
 /** Key fields are write-only: drafts start empty and stay empty after a save. */
@@ -24,7 +26,8 @@ export function modelDraftFromView(view: OpeningProviderModelView): ProviderMode
     label: view.label, modelName: view.modelName,
     inputCentsPerMillion: String(view.inputCentsPerMillion),
     outputCentsPerMillion: String(view.outputCentsPerMillion),
-    supportsVision: view.supportsVision,
+    supportsVision: view.supportsVision, supportsAudio: view.supportsAudio,
+    billing: view.billing, dailyRequestCap: view.dailyRequestCap === null ? "" : String(view.dailyRequestCap),
   };
 }
 
@@ -43,19 +46,24 @@ export function validateProviderDraft(draft: ProviderDraft): string | null {
   return "远程接口必须使用 https；仅本机开发地址可用 http。";
 }
 
-function positivePrice(value: string): number | null {
+function price(value: string, allowZero: boolean): number | null {
   if (!/^\d+(\.\d+)?$/.test(value.trim())) return null;
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return Number.isFinite(parsed) && (allowZero ? parsed >= 0 : parsed > 0) ? parsed : null;
 }
 
 export function validateModelDraft(draft: ProviderModelDraft): string | null {
   if (isBlank(draft.label) || draft.label.trim().length > 120) return "请填写不超过 120 字的模型显示名。";
   if (isBlank(draft.modelName) || draft.modelName.trim().length > 200) return "请填写不超过 200 字的模型名称（以供应商文档为准）。";
-  const input = positivePrice(draft.inputCentsPerMillion);
-  const output = positivePrice(draft.outputCentsPerMillion);
-  if (input === null) return "输入价格必须为大于 0 的数字（分 / 百万 token）。";
-  if (output === null) return "输出价格必须为大于 0 的数字（分 / 百万 token）。";
+  const free = draft.billing === "free_tier";
+  const input = price(draft.inputCentsPerMillion || (free ? "0" : ""), free);
+  const output = price(draft.outputCentsPerMillion || (free ? "0" : ""), free);
+  if (input === null) return free ? "输入价格必须为不小于 0 的数字。" : "输入价格必须为大于 0 的数字（分 / 百万 token）。";
+  if (output === null) return free ? "输出价格必须为不小于 0 的数字。" : "输出价格必须为大于 0 的数字（分 / 百万 token）。";
+  if (free) {
+    const cap = Number(draft.dailyRequestCap);
+    if (!/^\d+$/.test(draft.dailyRequestCap.trim()) || cap < 1 || cap > 100_000) return "免费额度模型请填写 1–100000 的每日请求上限。";
+  }
   return null;
 }
 
@@ -68,15 +76,22 @@ export function providerRequestBody(draft: ProviderDraft): { label: string; base
 }
 
 export function modelRequestBody(draft: ProviderModelDraft): {
-  label: string; modelName: string; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision: boolean;
+  label: string; modelName: string; inputCentsPerMillion: number; outputCentsPerMillion: number;
+  supportsVision: boolean; supportsAudio: boolean; billing: "metered" | "free_tier"; dailyRequestCap: number | null;
 } {
+  const free = draft.billing === "free_tier";
   return {
     label: draft.label.trim(), modelName: draft.modelName.trim(),
-    inputCentsPerMillion: Number(draft.inputCentsPerMillion),
-    outputCentsPerMillion: Number(draft.outputCentsPerMillion),
+    inputCentsPerMillion: Number(draft.inputCentsPerMillion || (free ? "0" : "")),
+    outputCentsPerMillion: Number(draft.outputCentsPerMillion || (free ? "0" : "")),
     supportsVision: draft.supportsVision,
+    supportsAudio: draft.supportsAudio,
+    billing: draft.billing,
+    dailyRequestCap: free ? Number(draft.dailyRequestCap) : null,
   };
 }
+
+export const FREE_TIER_NOTICE = "免费额度（如 Google Gemini API 免费额度）的输入和输出可能被供应商用于改进其产品，并可能经人工审阅；不要用于隐私材料。";
 
 /** Drafts keyed by entity id for edit forms. */
 export function indexDrafts(views: OpeningProviderView[], drafts: Record<string, ProviderDraft>): Record<string, ProviderDraft> {

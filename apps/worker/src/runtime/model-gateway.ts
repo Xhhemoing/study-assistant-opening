@@ -4,6 +4,7 @@ import {
   mergeOpeningCatalog,
   openingModelSnapshot,
   resolveEffectiveDailyCap,
+  resolveFallbackModelForTask,
   resolveModelForTask,
   tutorModelTask,
   OpeningModelRoutingError,
@@ -25,7 +26,7 @@ import type { Sql } from "postgres";
  * workspace BYOK models + effective cap + workspace routing. Resolve once per
  * call; the same selection supplies provider, prices and ledger attribution.
  */
-export async function resolveTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel> {
+async function loadRouting(sql: Sql, scope: Scope) {
   const catalog = loadOpeningModelCatalog();
   const [preference, custom] = await Promise.all([
     createOpeningAiSettingsRepository(sql).get(scope),
@@ -47,22 +48,53 @@ export async function resolveTaskModel(sql: Sql, scope: Scope, task: ModelTaskKe
     defaultModelId: catalog.defaultModelId,
     dailyCapCents: effective.capCents,
   });
-  const model = resolveModelForTask(merged.models, preference.settings, task, merged.defaultModelId);
+  return { settings: preference.settings, merged };
+}
+
+type MergedModel = ReturnType<typeof mergeOpeningCatalog>["models"][number];
+
+function toResolved(model: MergedModel): ResolvedTaskModel {
   return {
-    provider: createOpeningProvider({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: model.supportsVision, answerStyle: parseBooleanEnv(process.env, "OPENING_ANSWER_STYLE", true) }),
+    provider: createOpeningProvider({
+      baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName,
+      supportsVision: model.supportsVision, supportsAudio: model.supportsAudio,
+      answerStyle: parseBooleanEnv(process.env, "OPENING_ANSWER_STYLE", true),
+    }),
     modelSnapshot: openingModelSnapshot(model),
     inputCentsPerMillion: model.inputCentsPerMillion,
     outputCentsPerMillion: model.outputCentsPerMillion,
     supportsVision: model.supportsVision,
+    supportsAudio: model.supportsAudio ?? false,
+    billing: model.billing ?? "metered",
+    dailyRequestCap: model.dailyRequestCap ?? null,
   };
+}
+
+export async function resolveTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel> {
+  const { settings, merged } = await loadRouting(sql, scope);
+  return toResolved(resolveModelForTask(merged.models, settings, task, merged.defaultModelId));
+}
+
+/** The user's explicit fallback for a task, or null (unset, removed or unable to serve it). */
+export async function resolveFallbackTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel | null> {
+  const { settings, merged } = await loadRouting(sql, scope);
+  const model = resolveFallbackModelForTask(merged.models, settings, task);
+  return model ? toResolved(model) : null;
 }
 
 export function resolveTutorModel(sql: Sql, scope: Scope, mode: TutorMode): Promise<ResolvedTaskModel> {
   return resolveTaskModel(sql, scope, tutorModelTask(mode));
 }
 
+export function resolveTutorFallbackModel(sql: Sql, scope: Scope, mode: TutorMode): Promise<ResolvedTaskModel | null> {
+  return resolveFallbackTaskModel(sql, scope, tutorModelTask(mode));
+}
+
 export function createDbModelGateway(sql: Sql) {
-  return createModelGateway({ resolve: (scope, task) => resolveTaskModel(sql, scope, task) });
+  return createModelGateway({
+    resolve: (scope, task) => resolveTaskModel(sql, scope, task),
+    resolveFallback: (scope, task) => resolveFallbackTaskModel(sql, scope, task),
+  });
 }
 
 /** Bind the shared ledger repository to one owner scope for runBudgetedCall. */

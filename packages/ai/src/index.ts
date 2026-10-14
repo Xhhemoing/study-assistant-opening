@@ -44,10 +44,17 @@ export {
   stripEphemeralCandidates,
 } from "./opening/conversation-policy";
 
-export { selectedOpeningModelId, selectedModelIdForTask, resolveOpeningModel, resolveModelForTask, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";
-export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
+export {
+  selectedOpeningModelId, selectedModelIdForTask, selectedFallbackModelIdForTask, resolveOpeningModel,
+  resolveModelForTask, resolveFallbackModelForTask, openingModelSnapshot, OpeningModelRoutingError,
+} from "./opening/model-routing";
+export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
 export {
   createModelGateway,
+  isNotSentFailure,
+  reservationTerms,
+  withModelFallback,
+  type ReservationTerms,
   type GatewayScope,
   type ModelGateway,
   type ModelGatewayCallOptions,

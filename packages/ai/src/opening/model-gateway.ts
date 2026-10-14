@@ -1,6 +1,14 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
-import { runBudgetedCall, type BudgetedProvider, type BudgetedRepository } from "./budgeted-call";
+import {
+  isBudgetReplayError,
+  ledgerActionForProviderError,
+  runBudgetedCall,
+  type BudgetedProvider,
+  type BudgetedRepository,
+} from "./budgeted-call";
+import { OpeningModelRoutingError } from "./model-routing";
 import { modelTaskSpec, type ModelTaskKey } from "./model-tasks";
+import { OpeningProviderError } from "./provider";
 import { actualCentsForOutput, reservationCentsForInput } from "./usage";
 
 export type GatewayScope = { workspaceId: string; ownerUserId: string };
@@ -12,6 +20,9 @@ export type ResolvedTaskModel = {
   inputCentsPerMillion: number;
   outputCentsPerMillion: number;
   supportsVision?: boolean;
+  supportsAudio?: boolean;
+  billing?: "metered" | "free_tier";
+  dailyRequestCap?: number | null;
 };
 
 export type ModelGatewayCallOptions = {
@@ -20,42 +31,113 @@ export type ModelGatewayCallOptions = {
   /** Durable ledger key: retries of one logical operation reuse one reservation. */
   operationId: string;
   resultRef?: string;
-  /** Reservation floor, e.g. a configured per-call minimum. */
+  /** Reservation floor for paid models, e.g. a configured per-call minimum. */
   minReservedCents?: number;
   signal?: AbortSignal;
   beforeSend?: () => Promise<void>;
+  /** Told which model answered (e.g. to label a fallback answer). */
+  onModel?: (model: ResolvedTaskModel, info: { fallback: boolean }) => void;
 };
+
+export type ReservationTerms = {
+  reservedCents: number;
+  actualCents: (output: ProviderOutput) => number;
+  requestCapPerDay?: number;
+};
+
+/**
+ * How one call is reserved and settled. Paid models reserve the estimated token
+ * cost (at least the floor); free-tier models reserve zero under their request cap.
+ */
+export function reservationTerms(model: ResolvedTaskModel, input: ProviderInput, floorCents = 1): ReservationTerms {
+  if (model.billing === "free_tier") {
+    if (!model.dailyRequestCap) {
+      throw new OpeningModelRoutingError("免费额度模型缺少每日请求上限，请到设置补全。");
+    }
+    return { reservedCents: 0, actualCents: () => 0, requestCapPerDay: model.dailyRequestCap };
+  }
+  const rates = { inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
+  return {
+    reservedCents: Math.max(floorCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
+    actualCents: (output) => actualCentsForOutput(output, rates),
+  };
+}
+
+/**
+ * True only when the provider certainly did not receive the request, so trying the
+ * user's fallback model cannot double-send: the route was unusable, the ledger refused
+ * (cents cap, request cap) or released the reservation, or the provider rejected it
+ * before processing (auth, rate limit, unsupported media). Timeouts and network
+ * failures are unknown outcomes and never fall back.
+ */
+export function isNotSentFailure(error: unknown): boolean {
+  if (error instanceof OpeningModelRoutingError) return true;
+  if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code) === "release";
+  if (isBudgetReplayError(error)) return error.disposition.kind === "released";
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "BUDGET_EXCEEDED" || code === "REQUEST_CAP_EXCEEDED";
+}
+
+/**
+ * Run with the primary model; on a not-sent failure, run once more with the user's
+ * explicit fallback under its own ledger key. Without a fallback the primary error stands.
+ */
+export async function withModelFallback<T>(input: {
+  primary: () => Promise<ResolvedTaskModel>;
+  fallback: () => Promise<ResolvedTaskModel | null>;
+  operationId: string;
+  run: (model: ResolvedTaskModel, operationId: string, info: { fallback: boolean }) => Promise<T>;
+}): Promise<T> {
+  try {
+    const primary = await input.primary();
+    return await input.run(primary, input.operationId, { fallback: false });
+  } catch (error) {
+    if (!isNotSentFailure(error)) throw error;
+    const fallback = await input.fallback();
+    if (!fallback) throw error;
+    return input.run(fallback, `${input.operationId}:fallback`, { fallback: true });
+  }
+}
 
 export type ModelGateway = ReturnType<typeof createModelGateway>;
 
-/**
- * Single entry point for model calls: task → configured model → budgeted call.
- * Routing failures surface as OpeningModelRoutingError before any reservation.
- */
+/** Single entry point for model calls: task → configured model (or fallback) → budgeted call. */
 export function createModelGateway(deps: {
   resolve(scope: GatewayScope, task: ModelTaskKey): Promise<ResolvedTaskModel>;
+  resolveFallback?(scope: GatewayScope, task: ModelTaskKey): Promise<ResolvedTaskModel | null>;
 }) {
+  const resolveFallback = (scope: GatewayScope, task: ModelTaskKey) =>
+    deps.resolveFallback ? deps.resolveFallback(scope, task) : Promise.resolve(null);
+
   async function call(scope: GatewayScope, task: ModelTaskKey, options: ModelGatewayCallOptions): Promise<ProviderOutput> {
-    const model = await deps.resolve(scope, task);
-    const rates = { inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
-    const estimated = reservationCentsForInput(JSON.stringify(options.input), options.input.maxOutputTokens, rates);
-    return runBudgetedCall({
-      provider: model.provider,
-      modelSnapshot: model.modelSnapshot,
-      budget: options.budget,
-      input: options.input,
-      requestId: options.operationId,
+    return withModelFallback({
+      primary: () => deps.resolve(scope, task),
+      fallback: () => resolveFallback(scope, task),
       operationId: options.operationId,
-      purpose: modelTaskSpec(task).purpose,
-      ...(options.resultRef ? { resultRef: options.resultRef } : {}),
-      reservedCents: Math.max(options.minReservedCents ?? 1, estimated),
-      actualCents: (output) => actualCentsForOutput(output, rates),
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
+      run: (model, operationId, info) => {
+        options.onModel?.(model, info);
+        const terms = reservationTerms(model, options.input, options.minReservedCents ?? 1);
+        return runBudgetedCall({
+          provider: model.provider,
+          modelSnapshot: model.modelSnapshot,
+          budget: options.budget,
+          input: options.input,
+          requestId: operationId,
+          operationId,
+          purpose: modelTaskSpec(task).purpose,
+          ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+          reservedCents: terms.reservedCents,
+          actualCents: terms.actualCents,
+          ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
+        });
+      },
     });
   }
   return {
     resolve: deps.resolve,
+    resolveFallback,
     call,
     /** Adapter for handlers that take a `{ complete(input) }` provider. */
     budgetedProvider(

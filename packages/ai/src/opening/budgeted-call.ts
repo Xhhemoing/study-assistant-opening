@@ -18,6 +18,7 @@ export type BudgetedRepository = {
     modelSnapshot?: OpeningModelSnapshot;
     amountCents: number;
     requestId: string;
+    requestCapPerDay?: number;
   }): Promise<BudgetedReservation>;
   release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
   /**
@@ -122,6 +123,11 @@ export type BudgetedCallOptions = {
   purpose?: string;
   /** Optional persisted result reference stored on settle and replayed later. */
   resultRef?: string;
+  /**
+   * Free-tier model: reserve at zero cost under this per-day request cap
+   * (reservedCents must then be 0). Paid models leave it unset.
+   */
+  requestCapPerDay?: number;
 };
 
 export class BudgetedCallError extends Error {
@@ -187,7 +193,8 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     throw new BudgetedCallError("PROVIDER_DISABLED", "opening provider is disabled");
   }
   // Family 1: illegal per-call reserve never reaches provider or ledger reserve.
-  if (!Number.isSafeInteger(options.reservedCents) || options.reservedCents <= 0) {
+  const freeTier = options.requestCapPerDay !== undefined;
+  if (!Number.isSafeInteger(options.reservedCents) || options.reservedCents < 0 || (options.reservedCents === 0) !== freeTier) {
     throw new BudgetedCallError(
       "BUDGET_INVALID_RESERVE",
       "reservedCents must be a positive integer",
@@ -200,6 +207,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     ...(options.modelSnapshot ? { modelSnapshot: options.modelSnapshot } : {}),
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,
+    ...(freeTier ? { requestCapPerDay: options.requestCapPerDay } : {}),
   });
   const disposition = replayDisposition(reservation);
   if (disposition) throw new BudgetReplayError(disposition);

@@ -22,7 +22,17 @@ import {
   stripEphemeralCandidates,
 } from "@aistudy/ai";
 import { OpeningProviderError } from "@aistudy/ai";
-import { actualCentsForOutput, reservationCentsForInput, runBudgetedCall, type BudgetedRepository } from "@aistudy/ai";
+import {
+  actualCentsForOutput,
+  isNotSentFailure,
+  reservationCentsForInput,
+  reservationTerms,
+  runBudgetedCall,
+  withModelFallback,
+  type BudgetedRepository,
+  type ReservationTerms,
+  type ResolvedTaskModel,
+} from "@aistudy/ai";
 import {
   isImageOnlySourceChunks,
   makeTutorInstruction,
@@ -67,7 +77,9 @@ export type EphemeralTutorDeps = {
   budget: BudgetedRepository;
   provider: EphemeralProvider | null;
   modelSnapshot?: OpeningModelSnapshot;
-  resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<{ provider: EphemeralProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
+  resolveModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<ResolvedTaskModel>;
+  /** The user's explicit fallback for this mode's task; used only after a not-sent failure. */
+  resolveFallbackModel?: (scope: EphemeralScope, mode: TutorMode) => Promise<ResolvedTaskModel | null>;
   pageImages?: (scope: EphemeralScope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
   /** Package B/C: course membership ready pool when client sourceIds empty + courseId. */
   listReadySourceIdsForCourse?(scope: EphemeralScope, courseId: string): Promise<string[]>;
@@ -174,7 +186,17 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [],
       );
-      const selected = await deps.resolveModel?.(scope, input.mode);
+      const requestId = deps.requestKey?.() ?? `eph:${randomUUID()}`;
+      let selected: ResolvedTaskModel | undefined;
+      let selectedRequestId = requestId;
+      try {
+        selected = await deps.resolveModel?.(scope, input.mode);
+      } catch (error) {
+        const fallback = isNotSentFailure(error) && deps.resolveFallbackModel ? await deps.resolveFallbackModel(scope, input.mode) : null;
+        if (!fallback) throw error;
+        selected = fallback;
+        selectedRequestId = `${requestId}:fallback`;
+      }
       if (imageOnlySources && selected?.supportsVision !== true) {
         throw new EphemeralServiceError("VISION_REQUIRED", VISION_REQUIRED_MESSAGE, 422);
       }
@@ -191,26 +213,28 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only",
         imageParts,
       };
-      const rates = {
-        inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
-        outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,
-      };
-      const requestId = deps.requestKey?.() ?? `eph:${randomUUID()}`;
-      let output: ProviderOutput;
-      try {
-        output = await runBudgetedCall({
-          provider: selected?.provider ?? deps.provider,
-          modelSnapshot: selected?.modelSnapshot ?? deps.modelSnapshot,
+      const callWith = (model: ResolvedTaskModel | undefined, callRequestId: string) => {
+        const terms: ReservationTerms = model
+          ? reservationTerms(model, providerInput, deps.config.reservedCents)
+          : (() => {
+              const rates = { inputCentsPerMillion: deps.config.inputCentsPerMillion, outputCentsPerMillion: deps.config.outputCentsPerMillion };
+              return {
+                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(providerInput), providerInput.maxOutputTokens, rates)),
+                actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
+              };
+            })();
+        return runBudgetedCall({
+          provider: model?.provider ?? deps.provider,
+          modelSnapshot: model?.modelSnapshot ?? deps.modelSnapshot,
           budget: deps.budget,
           input: providerInput,
-          requestId,
+          requestId: callRequestId,
           // Ephemeral turns persist provenance keyed by requestId.
           resultRef: `ephemeral:${requestId}`,
-          reservedCents: Math.max(
-            deps.config.reservedCents,
-            reservationCentsForInput(JSON.stringify(providerInput), providerInput.maxOutputTokens, rates),
-          ),
-          actualCents: (settled) => Math.max(1, actualCentsForOutput(settled, rates)),
+          reservedCents: terms.reservedCents,
+          // Paid calls settle at least 1 cent; free-tier calls settle at zero.
+          actualCents: (settled) => terms.requestCapPerDay ? 0 : Math.max(1, terms.actualCents(settled)),
+          ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
           signal,
           beforeSend: async () => {
             const epoch = await deps.privacy.currentEpoch(scope);
@@ -222,6 +246,17 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
             }
           },
         });
+      };
+      let output: ProviderOutput;
+      try {
+        output = selected && deps.resolveFallbackModel && selectedRequestId === requestId
+          ? await withModelFallback({
+              primary: async () => selected!,
+              fallback: () => deps.resolveFallbackModel!(scope, input.mode),
+              operationId: requestId,
+              run: (model, operationId) => callWith(model, operationId),
+            })
+          : await callWith(selected, selectedRequestId);
       } catch (error) {
         if (error instanceof OpeningProviderError) throw error;
         throw error;

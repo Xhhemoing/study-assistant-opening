@@ -3,6 +3,8 @@ import type { OpeningModelSummary } from "@aistudy/contracts";
 export type WorkspaceCatalogModel = {
   id: string; providerId: string; providerLabel: string; label: string;
   modelName: string; baseUrl: string; apiKey: string; supportsVision: boolean;
+  supportsAudio?: boolean | undefined; billing?: "metered" | "free_tier" | undefined;
+  dailyRequestCap?: number | null | undefined;
   inputCentsPerMillion: number; outputCentsPerMillion: number;
   vaultConfigBroken?: boolean | undefined;
 };
@@ -13,11 +15,15 @@ function availabilityFor(
     vaultConfigBroken?: boolean | undefined;
     inputCentsPerMillion: number;
     outputCentsPerMillion: number;
+    billing?: "metered" | "free_tier" | undefined;
+    dailyRequestCap?: number | null | undefined;
   },
   dailyCapCents: number,
 ): OpeningModelSummary["availability"] {
   if (input.vaultConfigBroken) return "vault_disabled";
   if (!input.apiKey) return "missing_key";
+  // Free tier: no spend, bounded by its own request cap instead of the cents cap.
+  if (input.billing === "free_tier") return input.dailyRequestCap ? "available" : "pricing_missing";
   if (dailyCapCents <= 0) return "budget_disabled";
   if (input.inputCentsPerMillion <= 0 || input.outputCentsPerMillion <= 0) return "pricing_missing";
   return "available";
@@ -98,6 +104,9 @@ export function mergeOpeningCatalog(
     label: model.label, modelName: model.modelName,
     availability: availabilityFor(model, input.dailyCapCents),
     supportsVision: model.supportsVision,
+    supportsAudio: model.supportsAudio ?? false,
+    billing: model.billing ?? "metered",
+    dailyRequestCap: model.dailyRequestCap ?? null,
     baseUrl: model.baseUrl, apiKey: model.apiKey,
     inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
     source: "workspace" as const,

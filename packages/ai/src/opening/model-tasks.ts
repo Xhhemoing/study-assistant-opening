@@ -1,6 +1,6 @@
 import type { TutorMode } from "@aistudy/contracts";
 
-export type ModelTaskGroup = "tutor" | "materials" | "teaching";
+export type ModelTaskGroup = "tutor" | "materials" | "teaching" | "practice";
 
 export type ModelTaskSpec = {
   /** Settings-page label. */
@@ -10,7 +10,11 @@ export type ModelTaskSpec = {
   purpose: string;
   /** Tutor tasks keep the existing per-mode route in ai_settings. */
   tutorMode?: TutorMode;
+  /** Input kinds the model must accept; routing fails explicitly otherwise. */
+  needs?: readonly ModelInputKind[];
 };
+
+export type ModelInputKind = "vision" | "audio";
 
 /**
  * Every model use in Opening. A new AI feature adds one entry here and calls the

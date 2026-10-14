@@ -24,7 +24,7 @@ function ephemeralError(error: unknown): Response {
     );
   }
   if (isOpeningDataError(error, "budget")) {
-    const status = error.code === "BUDGET_EXCEEDED" ? 429 : error.code === "NOT_FOUND" ? 404 : 409;
+    const status = error.code === "BUDGET_EXCEEDED" || error.code === "REQUEST_CAP_EXCEEDED" ? 429 : error.code === "NOT_FOUND" ? 404 : 409;
     return Response.json(
       { error: { code: error.code, message: error.message } },
       { status },

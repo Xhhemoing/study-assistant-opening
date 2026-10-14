@@ -95,3 +95,14 @@ describe("resolveMergedDefaultModelId", () => {
     )).toBe("default");
   });
 });
+
+describe("free-tier models", () => {
+  it("are available with a key and request cap even when the cents cap is 0", () => {
+    const free = { id: "gemini", providerId: "google", providerLabel: "Google", label: "Gemini Flash", modelName: "gemini-flash",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "k", supportsVision: true, supportsAudio: true,
+      billing: "free_tier" as const, dailyRequestCap: 200, inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
+    const merged = mergeOpeningCatalog([], [free, { ...free, id: "no-cap", dailyRequestCap: null }, { ...free, id: "no-key", apiKey: "" }], { defaultModelId: null, dailyCapCents: 0 });
+    expect(merged.models.map((m) => [m.id, m.availability])).toEqual([["gemini", "available"], ["no-cap", "pricing_missing"], ["no-key", "missing_key"]]);
+    expect(merged.models[0]).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, supportsAudio: true });
+  });
+});

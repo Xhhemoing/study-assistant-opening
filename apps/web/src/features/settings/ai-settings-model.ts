@@ -1,5 +1,5 @@
 import type { OpeningAiSettings, OpeningAiSettingsResponse, OpeningModelSummary, TutorMode } from "@aistudy/contracts";
-import { selectedOpeningModelId } from "@aistudy/ai";
+import { selectedFallbackModelIdForTask, selectedModelIdForTask, selectedOpeningModelId, type ModelTaskKey } from "@aistudy/ai";
 
 export const tutorRouteLabels: Array<{ mode: TutorMode; label: string }> = [
   { mode: "listen", label: "倾听" }, { mode: "hint", label: "提示" },
@@ -24,6 +24,48 @@ export function switchRoutingMode(settings: OpeningAiSettings, mode: OpeningAiSe
   return { ...settings, mode, manualModelId: mode === "manual" ? settings.manualModelId ?? settings.defaultModelId ?? serverDefaultId : settings.manualModelId };
 }
 export function hasRemovedActiveModel(data: OpeningAiSettingsResponse, settings: OpeningAiSettings): boolean {
-  const ids = settings.mode === "manual" ? [settings.manualModelId] : [settings.defaultModelId, ...Object.values(settings.routes)];
+  const ids = [
+    ...(settings.mode === "manual" ? [settings.manualModelId] : [settings.defaultModelId, ...Object.values(settings.routes)]),
+    ...Object.values(settings.taskRoutes ?? {}).flatMap(route => [route.primary, route.fallback]),
+  ];
   return ids.some(id => id !== null && !data.models.some(model => model.id === id));
+}
+
+export type TaskView = NonNullable<OpeningAiSettingsResponse["tasks"]>[number];
+const NEED_LABEL = { vision: "图片输入", audio: "音频输入" } as const;
+export const taskGroupLabels: Record<string, string> = {
+  tutor: "辅导", teaching: "AI 主讲", materials: "材料处理", practice: "练习", planning: "规划",
+};
+
+/** Why a model cannot serve a task, or null. Mirrors gateway routing (availability, then inputs). */
+export function modelProblemForTask(model: OpeningModelSummary | undefined, task: TaskView): string | null {
+  if (!model) return "模型已移除或尚未配置";
+  if (model.availability !== "available") return availabilityLabels[model.availability];
+  const missing = task.needs.find(need => need === "vision" ? !model.supportsVision : !model.supportsAudio);
+  return missing ? `不支持${NEED_LABEL[missing]}` : null;
+}
+
+/** The model each task will use after save, plus its explicit fallback. */
+export function effectiveTaskRoutes(data: OpeningAiSettingsResponse, settings: OpeningAiSettings) {
+  return (data.tasks ?? []).map(task => {
+    const key = task.key as ModelTaskKey;
+    const id = selectedModelIdForTask(settings, key, data.defaultModelId);
+    const model = data.models.find(item => item.id === id);
+    const fallbackId = selectedFallbackModelIdForTask(settings, key);
+    const fallbackModel = fallbackId ? data.models.find(item => item.id === fallbackId) : undefined;
+    return {
+      task, id, model, problem: modelProblemForTask(model, task),
+      fallbackId, fallbackModel, fallbackProblem: fallbackId ? modelProblemForTask(fallbackModel, task) : null,
+    };
+  });
+}
+
+export function setTaskRoute(settings: OpeningAiSettings, task: string, patch: { primary?: string | null; fallback?: string | null }): OpeningAiSettings {
+  const current = settings.taskRoutes?.[task] ?? { primary: null, fallback: null };
+  const next = { ...current, ...patch };
+  const taskRoutes = { ...(settings.taskRoutes ?? {}) };
+  if (next.primary === null && next.fallback === null) delete taskRoutes[task];
+  else taskRoutes[task] = next;
+  const { taskRoutes: _drop, ...rest } = settings;
+  return Object.keys(taskRoutes).length ? { ...rest, taskRoutes } : rest;
 }

@@ -3,7 +3,7 @@ import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
   createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
-import { createDbModelGateway, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
+import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
@@ -138,6 +138,7 @@ export async function main(): Promise<void> {
     budget,
     provider: null,
     resolveModel: (scope, mode) => resolveTutorModel(sql, scope, mode),
+    resolveFallbackModel: (scope, mode) => resolveTutorFallbackModel(sql, scope, mode),
     pageImages: createSourcePageImages(sql, storage),
     config: {
       ...loadOpeningTutorConfig(),

@@ -10,7 +10,7 @@ import {
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
-export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE";
+export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE" | "REQUEST_CAP_EXCEEDED";
 
 export class OpeningBudgetError extends Error {
   readonly code: OpeningBudgetErrorCode;
@@ -87,6 +87,11 @@ export type ReserveInput = {
   purpose: string;
   amountCents: number;
   requestId: string;
+  /**
+   * Free-tier models: at most this many non-released reservations for the snapshot's
+   * model on the local budget day. Required for (and only meaningful with) amountCents 0.
+   */
+  requestCapPerDay?: number;
 };
 
 export type OpeningBudgetRepository = {
@@ -291,10 +296,19 @@ export function createOpeningBudgetRepository(
 
   return {
     async reserve(scope, input) {
-      if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
+      const requestCap = input.requestCapPerDay;
+      const zeroCost = input.amountCents === 0;
+      if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 0) {
         throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "amount must be a positive integer");
       }
+      if (requestCap !== undefined && (!Number.isSafeInteger(requestCap) || requestCap <= 0)) {
+        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "request cap must be a positive integer");
+      }
       const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
+      // A zero-cost call is only legitimate for a free-tier model with a request cap.
+      if (zeroCost && (requestCap === undefined || modelSnapshot === null)) {
+        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "zero-cost reservation requires a model and a request cap");
+      }
       try {
       return await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -341,12 +355,25 @@ export function createOpeningBudgetRepository(
         }
 
 
+        if (requestCap !== undefined && modelSnapshot) {
+          const [used] = await tx`
+            SELECT count(*)::int AS n FROM opening_budget_reservations
+            WHERE workspace_id=${scope.workspaceId} AND state <> 'released'
+              AND model_snapshot->>'id' = ${modelSnapshot.id}
+              AND created_at >= ${budgetDay.dayStart} AND created_at < ${budgetDay.nextDayStart}
+          `;
+          if (Number(used?.n ?? 0) >= requestCap) {
+            throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
+          }
+        }
+
         // Count all current reserved rows plus completed spend on the local day
         // using half-open [dayStart, nextDayStart) absolute instants (not UTC date).
+        // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
         const rows = await tx`
           INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot)
           SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}
-          WHERE ${input.amountCents} + COALESCE((
+          WHERE ${zeroCost} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE workspace_id=${scope.workspaceId} AND (
               state='reserved' OR
@@ -387,7 +414,7 @@ export function createOpeningBudgetRepository(
       return rows.length === 1;
     },
     async settle(scope, reservationId, actualCents, options = {}) {
-      if (!Number.isSafeInteger(actualCents) || actualCents <= 0) {
+      if (!Number.isSafeInteger(actualCents) || actualCents < 0) {
         throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
       }
       const resultRef = options.resultRef ?? null;
@@ -402,6 +429,10 @@ export function createOpeningBudgetRepository(
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
         const row = mapReservation(current[0] as Record<string, unknown>);
+        // Zero only settles a zero-cost (free-tier) reservation; paid calls stay positive.
+        if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
+          throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
+        }
         if (row.state === "reserved") {
           const rows = await tx`
             UPDATE opening_budget_reservations

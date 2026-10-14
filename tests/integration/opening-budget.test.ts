@@ -16,6 +16,31 @@ afterAll(async () => {
   await fixture?.close();
 });
 
+describe("free-tier zero-cost reservations (0062)", () => {
+  const snapshot = { id: "gemini-free", providerId: "google", modelName: "gemini-flash", inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
+
+  it("records zero-cost calls under a per-model daily request cap, even when the cents cap is 0", async () => {
+    const disabled = createOpeningBudgetRepository(fixture.sql);
+    const reserve = (requestId: string) => disabled.reserve(fixture.scope, { purpose: "tutor", amountCents: 0, requestId, modelSnapshot: snapshot, requestCapPerDay: 2 });
+    const first = await reserve("free-1");
+    await disabled.settle(fixture.scope, first.id, 0);
+    const second = await reserve("free-2");
+    await disabled.release(fixture.scope, "free-2", "not_sent");
+    // Released (not sent) calls do not count; a replay of a consumed key is not a new request.
+    await reserve("free-3");
+    expect((await reserve("free-1")).replayed).toBe(true);
+    await expect(reserve("free-4")).rejects.toMatchObject({ code: "REQUEST_CAP_EXCEEDED" });
+    expect(second.amountCents).toBe(0);
+  });
+
+  it("refuses zero-cost reservations without a cap and zero settles of paid reservations", async () => {
+    await expect(budget.reserve(fixture.scope, { purpose: "tutor", amountCents: 0, requestId: "free-nocap", modelSnapshot: snapshot }))
+      .rejects.toMatchObject({ code: "BUDGET_INVALID_RESERVE" });
+    const paid = await budget.reserve(fixture.scope, { purpose: "tutor", amountCents: 5, requestId: "paid-1" });
+    await expect(budget.settle(fixture.scope, paid.id, 0)).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
 describe("opening budget ledger (guarded)", () => {
   it("two concurrent reservations cannot exceed the workspace cap", async () => {
     const first = budget.reserve(fixture.scope, {

@@ -1,8 +1,11 @@
 import {
+  MODEL_TASKS,
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   mergeOpeningCatalog,
   resolveEffectiveDailyCap,
-  resolveOpeningModel,
+  resolveFallbackModelForTask,
+  resolveModelForTask,
+  type ModelTaskKey,
 } from "@aistudy/ai";
 import {
   openingAiSettingsSchema,
@@ -10,7 +13,6 @@ import {
   type OpeningAiSettingsResponse,
   type OpeningModelSummary,
   type Scope,
-  type TutorMode,
 } from "@aistudy/contracts";
 import { loadOpeningModelCatalog } from "@aistudy/config";
 import { createOpeningAiSettingsRepository, createOpeningModelProvidersRepository } from "@aistudy/database";
@@ -38,8 +40,20 @@ function toSummary(model: OpeningModelSummary & { supportsVision?: boolean | und
     id: model.id, providerId: model.providerId, providerLabel: model.providerLabel,
     label: model.label, modelName: model.modelName, availability: model.availability,
     supportsVision: model.supportsVision ?? false, source: model.source,
+    supportsAudio: model.supportsAudio ?? false, billing: model.billing ?? "metered",
+    dailyRequestCap: model.dailyRequestCap ?? null,
     inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
   };
+}
+
+/** The routing UI is generated from the registry, so a new task shows up without UI changes. */
+const TASK_VIEWS = Object.entries(MODEL_TASKS).map(([key, spec]) => ({
+  key, label: spec.label, group: spec.group,
+  needs: [...("needs" in spec ? (spec.needs as readonly ("vision" | "audio")[]) : [])],
+}));
+
+function isModelTaskKey(key: string): key is ModelTaskKey {
+  return Object.prototype.hasOwnProperty.call(MODEL_TASKS, key);
 }
 
 function resolveCapFromSettings(
@@ -107,6 +121,7 @@ export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiS
     envCapCents: catalog.dailyCapCents,
     personalCeilingCents: OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
     models: merged.models.map(toSummary),
+    tasks: TASK_VIEWS,
   };
 }
 
@@ -124,10 +139,23 @@ export async function saveAiSettings(sql: Sql, scope: Scope, input: unknown): Pr
       dailyCapCents: effective.capCents,
     });
     const settings = parsed.data;
-    const ids = (settings.mode === "manual" ? [settings.manualModelId] : [settings.defaultModelId, ...Object.values(settings.routes)]).filter(id => id !== null);
+    const taskRoutes = Object.entries(settings.taskRoutes ?? {});
+    if (taskRoutes.some(([key]) => !isModelTaskKey(key))) throw new ApiError("VALIDATION", "包含未知的模型用途，请刷新设置页后重新保存。", 422);
+    const ids = [
+      ...(settings.mode === "manual" ? [settings.manualModelId] : [settings.defaultModelId, ...Object.values(settings.routes)]),
+      ...taskRoutes.flatMap(([, route]) => [route.primary, route.fallback]),
+    ].filter(id => id !== null);
     if (ids.some(id => !merged.models.some(model => model.id === id))) throw new ApiError("VALIDATION", "有模型已从目录移除，请重新选择或恢复默认设置。", 422);
-    for (const mode of ["listen", "hint", "explain", "think_together"] as TutorMode[]) {
-      resolveOpeningModel(merged.models, settings, mode, merged.defaultModelId);
+    // Every tutor mode and every explicitly routed task must resolve as saved.
+    const checked = new Set<ModelTaskKey>([
+      ...(Object.keys(MODEL_TASKS) as ModelTaskKey[]).filter(key => key.startsWith("tutor.")),
+      ...taskRoutes.map(([key]) => key as ModelTaskKey),
+    ]);
+    for (const task of checked) {
+      resolveModelForTask(merged.models, settings, task, merged.defaultModelId);
+      if (settings.taskRoutes?.[task]?.fallback && !resolveFallbackModelForTask(merged.models, settings, task)) {
+        throw new ApiError("VALIDATION", `「${MODEL_TASKS[task].label}」的备用模型暂不可用或不支持该用途。`, 422);
+      }
     }
   }
   await createOpeningAiSettingsRepository(sql).set(scope, parsed.data);

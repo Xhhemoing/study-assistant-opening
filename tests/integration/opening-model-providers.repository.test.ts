@@ -64,6 +64,23 @@ describe("workspace model provider repository", () => {
     await repo.createModel(fixture.scope, provider.id, modelInput);
     expect((await repo.listResolvableModels(fixture.scope))[0]!.apiKey).toBe("sk-rotated-9999");
   });
+  it("stores free-tier models with a request cap and audio input, and rejects inconsistent pricing", async () => {
+    const repo = createOpeningModelProvidersRepository(fixture.sql);
+    const provider = await repo.createProvider(fixture.scope, { label: "Google", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "gm-key-9999" });
+    const free = await repo.createModel(fixture.scope, provider.id, {
+      label: "Gemini 免费", modelName: "gemini-flash", inputCentsPerMillion: 0, outputCentsPerMillion: 0,
+      supportsVision: true, supportsAudio: true, billing: "free_tier", dailyRequestCap: 200,
+    });
+    expect(free).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, supportsAudio: true });
+    const [resolved] = await repo.listResolvableModels(fixture.scope);
+    expect(resolved).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, supportsAudio: true, apiKey: "gm-key-9999" });
+    await expect(repo.createModel(fixture.scope, provider.id, { label: "无上限", modelName: "x", inputCentsPerMillion: 0, outputCentsPerMillion: 0, billing: "free_tier" }))
+      .rejects.toBeInstanceOf(OpeningModelProviderError);
+    await expect(repo.updateModel(fixture.scope, free.id, { billing: "metered" })).rejects.toBeInstanceOf(OpeningModelProviderError);
+    const paid = await repo.updateModel(fixture.scope, free.id, { billing: "metered", inputCentsPerMillion: 1, outputCentsPerMillion: 2 });
+    expect(paid).toMatchObject({ billing: "metered", inputCentsPerMillion: 1 });
+  });
+
   it("enforces provider label uniqueness and the 8-provider cap", async () => {
     const repo = createOpeningModelProvidersRepository(fixture.sql);
     await repo.createProvider(fixture.scope, providerInput);

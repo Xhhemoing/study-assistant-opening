@@ -33,7 +33,7 @@ import {
   createOpeningSourceRepository,
 } from "@aistudy/database";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
-import { resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
+import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
 export async function requireOpeningScope(request: Request) {
@@ -153,6 +153,7 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
           createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(ownedScope, courseId),
         provider: override?.provider ?? null,
         resolveModel: override ? undefined : (ownedScope, mode) => resolveTutorModel(sql, ownedScope, mode),
+        resolveFallbackModel: override ? undefined : (ownedScope, mode) => resolveTutorFallbackModel(sql, ownedScope, mode),
         config: tutor,
       }).replyEphemeral(scope, input, signal);
     },

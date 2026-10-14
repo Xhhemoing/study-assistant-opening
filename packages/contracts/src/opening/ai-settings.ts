@@ -9,6 +9,8 @@ const modelId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
  * else <= OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS (2000).
  */
 export const OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS = 2_147_483_647;
+/** Model task key shape ("group.name"); the registry lives in @aistudy/ai MODEL_TASKS. */
+export const modelTaskKeySchema = z.string().regex(/^[a-z][a-z_]{0,31}\.[a-z][a-z_]{0,31}$/);
 export const openingAiSettingsSchema = z.object({
   mode: z.enum(["manual", "automatic"]),
   defaultModelId: modelId.nullable(),
@@ -17,6 +19,16 @@ export const openingAiSettingsSchema = z.object({
     listen: modelId.nullable(), hint: modelId.nullable(),
     explain: modelId.nullable(), think_together: modelId.nullable(),
   }).strict(),
+  /**
+   * Per-task routes keyed by model task (e.g. "teaching.compile"). primary overrides the
+   * tutor mode route / workspace default for that task; fallback is used only when the
+   * primary request was certainly not sent (unavailable, auth, rate limit, budget/request
+   * cap). Unknown keys are kept but ignored by routing.
+   */
+  taskRoutes: z.record(modelTaskKeySchema, z.object({
+    primary: modelId.nullable(),
+    fallback: modelId.nullable(),
+  }).strict()).optional(),
   /** Optional per-workspace daily budget in cents; absent/null means unset. */
   dailyCapCents: z.number().int().nonnegative().max(OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS).nullable().optional(),
   /** ISO timestamp when the owner confirmed enabling a personal daily cap. */
@@ -49,6 +61,9 @@ export const openingModelSummarySchema = openingModelSnapshotSchema.extend({
   providerLabel: z.string().min(1).max(120),
   availability: z.enum(["available", "missing_key", "budget_disabled", "pricing_missing", "vault_disabled"]),
   supportsVision: z.boolean().optional(),
+  supportsAudio: z.boolean().optional(),
+  billing: z.enum(["metered", "free_tier"]).optional(),
+  dailyRequestCap: z.number().int().positive().nullable().optional(),
   /** Absent for the server env catalog; "workspace" marks a web-managed custom model. */
   source: z.enum(["server", "workspace"]).optional(),
 });
@@ -62,6 +77,13 @@ export const openingAiSettingsResponseSchema = z.object({
   envCapCents: z.number().int().nonnegative(),
   personalCeilingCents: z.number().int().nonnegative(),
   settings: openingAiSettingsSchema,
+  /** Model task registry for the routing UI (labels, groups, required input kinds). */
+  tasks: z.array(z.object({
+    key: modelTaskKeySchema,
+    label: z.string().min(1).max(120),
+    group: z.string().min(1).max(32),
+    needs: z.array(z.enum(["vision", "audio"])).max(2),
+  }).strict()).max(64).optional(),
   saved: z.boolean(),
   invalidStoredSettings: z.boolean(),
 });

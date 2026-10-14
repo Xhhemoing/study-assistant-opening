@@ -24,13 +24,46 @@ export const openingProviderInputSchema = z.object({
 }).strict();
 export type OpeningProviderInput = z.infer<typeof openingProviderInputSchema>;
 
-export const openingProviderModelInputSchema = z.object({
+/**
+ * metered: positive per-token prices, bounded by the daily cents cap.
+ * free_tier: provider free quota (e.g. Gemini API free tier) — prices may be 0 and a
+ * per-day request cap bounds use instead. Free-tier inputs may be used by the provider
+ * to improve its products, so the UI must say so before saving.
+ */
+export const openingModelBillingSchema = z.enum(["metered", "free_tier"]);
+export type OpeningModelBilling = z.infer<typeof openingModelBillingSchema>;
+export const OPENING_DAILY_REQUEST_CAP_MAX = 100_000;
+const dailyRequestCapSchema = z.number().int().min(1).max(OPENING_DAILY_REQUEST_CAP_MAX);
+
+/** Price/billing invariant shared by create and quick setup (mirrors the 0062 CHECK). */
+export function pricingIssue(input: {
+  billing?: OpeningModelBilling | undefined;
+  inputCentsPerMillion: number;
+  outputCentsPerMillion: number;
+  dailyRequestCap?: number | null | undefined;
+}): string | null {
+  if ((input.billing ?? "metered") === "metered") {
+    return input.inputCentsPerMillion > 0 && input.outputCentsPerMillion > 0 ? null : "按量计费模型的输入/输出价格必须大于 0";
+  }
+  if (input.inputCentsPerMillion < 0 || input.outputCentsPerMillion < 0) return "价格不能为负数";
+  return input.dailyRequestCap ? null : "免费额度模型必须设置每日请求上限";
+}
+
+const modelFields = {
   label: z.string().trim().min(1).max(120),
   modelName: z.string().trim().min(1).max(200),
-  inputCentsPerMillion: z.number().finite().positive(),
-  outputCentsPerMillion: z.number().finite().positive(),
+  inputCentsPerMillion: z.number().finite().nonnegative(),
+  outputCentsPerMillion: z.number().finite().nonnegative(),
   supportsVision: z.boolean().optional(),
-}).strict();
+  supportsAudio: z.boolean().optional(),
+  billing: openingModelBillingSchema.optional(),
+  dailyRequestCap: dailyRequestCapSchema.nullable().optional(),
+};
+
+export const openingProviderModelInputSchema = z.object(modelFields).strict().superRefine((input, ctx) => {
+  const issue = pricingIssue(input);
+  if (issue) ctx.addIssue({ code: "custom", path: ["inputCentsPerMillion"], message: issue });
+});
 export type OpeningProviderModelInput = z.infer<typeof openingProviderModelInputSchema>;
 
 export const openingProviderUpdateSchema = z.object({
@@ -40,12 +73,16 @@ export const openingProviderUpdateSchema = z.object({
 }).strict().refine(input => Object.keys(input).length > 0, "至少提供一个要更新的字段");
 export type OpeningProviderUpdate = z.infer<typeof openingProviderUpdateSchema>;
 
+/** Partial update; the merged row is re-checked with pricingIssue (and the DB CHECK). */
 export const openingProviderModelUpdateSchema = z.object({
-  label: z.string().trim().min(1).max(120).optional(),
-  modelName: z.string().trim().min(1).max(200).optional(),
-  inputCentsPerMillion: z.number().finite().positive().optional(),
-  outputCentsPerMillion: z.number().finite().positive().optional(),
+  label: modelFields.label.optional(),
+  modelName: modelFields.modelName.optional(),
+  inputCentsPerMillion: modelFields.inputCentsPerMillion.optional(),
+  outputCentsPerMillion: modelFields.outputCentsPerMillion.optional(),
   supportsVision: z.boolean().optional(),
+  supportsAudio: z.boolean().optional(),
+  billing: openingModelBillingSchema.optional(),
+  dailyRequestCap: dailyRequestCapSchema.nullable().optional(),
 }).strict().refine(input => Object.keys(input).length > 0, "至少提供一个要更新的字段");
 export type OpeningProviderModelUpdate = z.infer<typeof openingProviderModelUpdateSchema>;
 
@@ -68,9 +105,12 @@ export const openingProviderModelViewSchema = z.object({
   providerId: uuidSchema,
   label: z.string().min(1).max(120),
   modelName: z.string().min(1).max(200),
-  inputCentsPerMillion: z.number().finite().positive(),
-  outputCentsPerMillion: z.number().finite().positive(),
+  inputCentsPerMillion: z.number().finite().nonnegative(),
+  outputCentsPerMillion: z.number().finite().nonnegative(),
   supportsVision: z.boolean(),
+  supportsAudio: z.boolean(),
+  billing: openingModelBillingSchema,
+  dailyRequestCap: z.number().int().positive().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 }).strict();

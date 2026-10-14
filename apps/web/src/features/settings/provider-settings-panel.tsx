@@ -8,7 +8,7 @@ import { KeyRound, LoaderCircle, Plus, RefreshCw, Save, Trash2 } from "lucide-re
 import { useCallback, useEffect, useState } from "react";
 import { ui } from "../opening/design/ui";
 import {
-  emptyModelDraft, emptyProviderDraft, keyStatusText, modelDraftFromView, modelRequestBody,
+  FREE_TIER_NOTICE, emptyModelDraft, emptyProviderDraft, keyStatusText, modelDraftFromView, modelRequestBody,
   providerDraftFromView, providerRequestBody, validateModelDraft, validateProviderDraft,
   type ProviderDraft, type ProviderModelDraft,
 } from "./provider-settings-model";
@@ -65,6 +65,24 @@ function ModelForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
       <span>支持视觉（可分析 PDF 页图像）</span>
       <input checked={draft.supportsVision} className="size-4 accent-emerald-700" disabled={busy} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} type="checkbox" />
     </label>
+    <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-zinc-700">
+      <span>支持音频输入（可用于转写音视频材料）</span>
+      <input checked={draft.supportsAudio} className="size-4 accent-emerald-700" disabled={busy} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} type="checkbox" />
+    </label>
+    <fieldset className="space-y-2 px-3" disabled={busy}>
+      <legend className={ui.label}>计费方式</legend>
+      <div className="flex flex-wrap gap-4">
+        {([["metered", "按量计费（计入每日额度）"], ["free_tier", "免费额度（按每日请求数限制）"]] as const).map(([value, label]) =>
+          <label key={value} className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-700">
+            <input checked={draft.billing === value} className="size-4 accent-emerald-700" name={`billing-${submitLabel}`} onChange={() => onChange({ ...draft, billing: value })} type="radio" />{label}
+          </label>)}
+      </div>
+      {draft.billing === "free_tier" ? <>
+        <label className="block space-y-1.5"><span className={ui.label}>每日请求上限</span>
+          <input className={ui.input} inputMode="numeric" onChange={event => onChange({ ...draft, dailyRequestCap: event.target.value })} placeholder="例如 200（以供应商免费额度为准）" value={draft.dailyRequestCap} /></label>
+        <p className="text-xs leading-6 text-amber-800" role="note">{FREE_TIER_NOTICE}</p>
+      </> : null}
+    </fieldset>
     {problem ? <p className="text-xs leading-6 text-amber-800" role="alert">{problem}</p> : null}
     <div className="flex flex-wrap gap-2">
       <button className={ui.primary} disabled={busy || problem !== null} onClick={onSubmit} type="button">
@@ -119,8 +137,8 @@ export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdatePro
           return <li className="rounded-md bg-zinc-50 p-2" key={model.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0 text-xs leading-6 text-zinc-700">
-                <p className="font-medium text-zinc-900">{model.label} · {model.modelName}{model.supportsVision ? " · 视觉" : ""}</p>
-                <p>输入 {model.inputCentsPerMillion}、输出 {model.outputCentsPerMillion} 分 / 百万 token</p>
+                <p className="font-medium text-zinc-900">{model.label} · {model.modelName}{model.supportsVision ? " · 视觉" : ""}{model.supportsAudio ? " · 音频" : ""}</p>
+                <p>{model.billing === "free_tier" ? `免费额度 · 每日最多 ${model.dailyRequestCap ?? "?"} 次请求` : `输入 ${model.inputCentsPerMillion}、输出 ${model.outputCentsPerMillion} 分 / 百万 token`}</p>
               </div>
               <div className="flex gap-2">
                 <button className={ui.quiet} disabled={busy} onClick={() => setEditingModels(current => {

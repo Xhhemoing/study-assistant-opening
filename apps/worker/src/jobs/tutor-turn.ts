@@ -2,7 +2,6 @@ export { makeTutorInstruction } from "@aistudy/domain";
 import {
   providerOutputSchema,
   type MemoryItem,
-  type OpeningModelSnapshot,
   type ProviderOutput,
   type ProviderInput,
   type SourceChunk,
@@ -26,7 +25,15 @@ import type {
 import { mergeContextSourceRefs } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
-import { actualCentsForOutput, reservationCentsForInput } from "@aistudy/ai";
+import {
+  actualCentsForOutput,
+  isNotSentFailure,
+  reservationCentsForInput,
+  reservationTerms,
+  withModelFallback,
+  type ReservationTerms,
+  type ResolvedTaskModel,
+} from "@aistudy/ai";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import {
   isBudgetReplayError,
@@ -46,7 +53,9 @@ export type TutorTurnDeps = {
   };
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   provider: BudgetedProvider | null;
-  resolveModel?: (scope: Scope, mode: TutorMode) => Promise<{ provider: BudgetedProvider; modelSnapshot: OpeningModelSnapshot; inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision?: boolean }>;
+  resolveModel?: (scope: Scope, mode: TutorMode) => Promise<ResolvedTaskModel>;
+  /** The user's explicit fallback for this mode's task; used only after a not-sent failure. */
+  resolveFallbackModel?: (scope: Scope, mode: TutorMode) => Promise<ResolvedTaskModel | null>;
   pageImages?: (scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
   config: {
     maxContextCharacters: number;
@@ -155,7 +164,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       );
       const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
       const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`;
-      const selected = await deps.resolveModel?.(scope, mode);
+      const tutorOperationId = `tutor:${claimed.id}`;
+      // An unusable primary route may hand over to the user's fallback before anything is sent.
+      let selected: ResolvedTaskModel | undefined;
+      let selectedOperationId = tutorOperationId;
+      try {
+        selected = await deps.resolveModel?.(scope, mode);
+      } catch (error) {
+        const fallback = isNotSentFailure(error) && deps.resolveFallbackModel ? await deps.resolveFallbackModel(scope, mode) : null;
+        if (!fallback) throw error;
+        selected = fallback;
+        selectedOperationId = `${tutorOperationId}:fallback`;
+      }
       const supportsVision = selected?.supportsVision === true;
       if (imageOnlySources && !supportsVision) {
         throw new Error(VISION_REQUIRED_MESSAGE);
@@ -169,31 +189,45 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
         mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only", imageParts,
       };
-      const rates = {
-        inputCentsPerMillion: selected?.inputCentsPerMillion ?? deps.config.inputCentsPerMillion,
-        outputCentsPerMillion: selected?.outputCentsPerMillion ?? deps.config.outputCentsPerMillion,
-      };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
-      // reservation. requestId stays the same string today (attempt-scoped ids are
-      // a future option). Ephemeral (apps/web) wiring deferred — Experience out of scope.
-      const tutorOperationId = `tutor:${claimed.id}`;
+      // reservation; a fallback model runs under its own ":fallback" key.
+      const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
+        const terms = model
+          ? reservationTerms(model, input, deps.config.reservedCents)
+          : (() => {
+              const rates = { inputCentsPerMillion: deps.config.inputCentsPerMillion, outputCentsPerMillion: deps.config.outputCentsPerMillion };
+              return {
+                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
+                actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
+              } as ReservationTerms;
+            })();
+        return runBudgetedCall({
+          provider: model?.provider ?? deps.provider,
+          modelSnapshot: model?.modelSnapshot,
+          budget: scopedBudget,
+          input,
+          requestId: operationId,
+          operationId,
+          // Persisted result reference: the assistant turn this call fills.
+          resultRef: `opening_turn:${claimed.assistantTurnId}`,
+          reservedCents: terms.reservedCents,
+          actualCents: terms.actualCents,
+          ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
+          beforeSend: deps.privacy && jobEpoch !== null
+            ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
+            : undefined,
+        });
+      };
       let output: ProviderOutput;
       try {
-      output = await runBudgetedCall({
-        provider: selected?.provider ?? deps.provider,
-        modelSnapshot: selected?.modelSnapshot,
-        budget: scopedBudget,
-        input,
-        requestId: tutorOperationId,
-        operationId: tutorOperationId,
-        // Persisted result reference: the assistant turn this call fills.
-        resultRef: `opening_turn:${claimed.assistantTurnId}`,
-        reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
-        actualCents: (settled) => actualCentsForOutput(settled, rates),
-        beforeSend: deps.privacy && jobEpoch !== null
-          ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
-          : undefined,
-      });
+      output = selected && deps.resolveFallbackModel && selectedOperationId === tutorOperationId
+        ? await withModelFallback({
+            primary: async () => selected!,
+            fallback: () => deps.resolveFallbackModel!(scope, mode),
+            operationId: tutorOperationId,
+            run: (model, operationId) => callWith(model, operationId),
+          })
+        : await callWith(selected, selectedOperationId);
       } catch (error) {
         // PR-D: completed ledger key → load the persisted result through its
         // resultRef. Never call the provider or charge again; never fake success.

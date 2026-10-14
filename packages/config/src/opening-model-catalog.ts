@@ -17,7 +17,12 @@ const modelSchema = z.object({
   inputCentsPerMillion: z.number().finite().nonnegative(),
   outputCentsPerMillion: z.number().finite().nonnegative(),
   supportsVision: z.boolean().default(false),
-}).strict();
+  supportsAudio: z.boolean().default(false),
+  /** free_tier: provider free quota; prices may be 0 and dailyRequestCap bounds use. */
+  billing: z.enum(["metered", "free_tier"]).default("metered"),
+  dailyRequestCap: z.number().int().min(1).max(100_000).nullable().default(null),
+}).strict().refine(model => model.billing === "metered" || model.dailyRequestCap !== null,
+  "free_tier models need dailyRequestCap");
 const catalogSchema = z.array(modelSchema).max(32).superRefine((models, ctx) => {
   if (new Set(models.map(model => model.id)).size !== models.length) ctx.addIssue({ code: "custom", message: "model ids must be unique" });
   const labels = new Map<string, string>();
@@ -39,10 +44,13 @@ export function loadOpeningModelCatalog(source: NodeJS.ProcessEnv = process.env)
     const entries = directory
       ? catalogSchema.parse(JSON.parse(directory))
       : [{ id: "default", label: legacy!.name, providerId: "default", providerLabel: "默认供应商", modelName: legacy!.name,
-          baseUrl: legacy!.baseUrl, apiKeyEnv: "OPENING_MODEL_API_KEY", supportsVision: false, inputCentsPerMillion: legacy!.inputCentsPerMillion, outputCentsPerMillion: legacy!.outputCentsPerMillion }];
+          baseUrl: legacy!.baseUrl, apiKeyEnv: "OPENING_MODEL_API_KEY", supportsVision: false, supportsAudio: false,
+          billing: "metered" as const, dailyRequestCap: null, inputCentsPerMillion: legacy!.inputCentsPerMillion, outputCentsPerMillion: legacy!.outputCentsPerMillion }];
     const models = entries.map(({ apiKeyEnv, ...entry }) => {
       const apiKey = source[apiKeyEnv]?.trim() ?? "";
-      const availability = !apiKey ? "missing_key" as const : dailyCapCents <= 0 ? "budget_disabled" as const
+      const availability = !apiKey ? "missing_key" as const
+        : entry.billing === "free_tier" ? "available" as const
+        : dailyCapCents <= 0 ? "budget_disabled" as const
         : entry.inputCentsPerMillion <= 0 || entry.outputCentsPerMillion <= 0 ? "pricing_missing" as const : "available" as const;
       return { ...entry, apiKey, availability };
     });

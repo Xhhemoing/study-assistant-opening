@@ -20,14 +20,17 @@ export type OpeningProviderConfigView = {
   hasApiKey: boolean; apiKeyHint: string | null; apiKeyUpdatedAt: string | null;
   modelCount: number; createdAt: string; updatedAt: string;
 };
+export type OpeningModelBilling = "metered" | "free_tier";
 export type OpeningProviderModelView = {
   id: string; providerId: string; label: string; modelName: string;
   inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision: boolean;
+  supportsAudio: boolean; billing: OpeningModelBilling; dailyRequestCap: number | null;
   createdAt: string; updatedAt: string;
 };
 export type OpeningResolvableModel = {
   id: string; providerId: string; providerLabel: string; label: string; modelName: string;
-  baseUrl: string; apiKey: string; supportsVision: boolean;
+  baseUrl: string; apiKey: string; supportsVision: boolean; supportsAudio: boolean;
+  billing: OpeningModelBilling; dailyRequestCap: number | null;
   inputCentsPerMillion: number; outputCentsPerMillion: number;
   createdAt: string; vaultConfigBroken: boolean;
 };
@@ -40,12 +43,27 @@ type ProviderUpdate = {
 type ModelInput = {
   label: string; modelName: string; inputCentsPerMillion: number;
   outputCentsPerMillion: number; supportsVision?: boolean | undefined;
+  supportsAudio?: boolean | undefined; billing?: OpeningModelBilling | undefined;
+  dailyRequestCap?: number | null | undefined;
 };
 type ModelUpdate = {
   label?: string | undefined; modelName?: string | undefined;
   inputCentsPerMillion?: number | undefined; outputCentsPerMillion?: number | undefined;
-  supportsVision?: boolean | undefined;
+  supportsVision?: boolean | undefined; supportsAudio?: boolean | undefined;
+  billing?: OpeningModelBilling | undefined; dailyRequestCap?: number | null | undefined;
 };
+
+/** Mirrors the 0062 pricing CHECK so callers get a readable error instead of a constraint violation. */
+function assertPricing(input: { billing: OpeningModelBilling; inputCentsPerMillion: number; outputCentsPerMillion: number; dailyRequestCap: number | null }) {
+  const ok = input.billing === "metered"
+    ? input.inputCentsPerMillion > 0 && input.outputCentsPerMillion > 0
+    : input.inputCentsPerMillion >= 0 && input.outputCentsPerMillion >= 0 && input.dailyRequestCap !== null;
+  if (!ok) {
+    throw new OpeningModelProviderError("CONFLICT", input.billing === "metered"
+      ? "按量计费模型的输入/输出价格必须大于 0"
+      : "免费额度模型必须设置每日请求上限");
+  }
+}
 
 function iso(value: unknown): string {
   return new Date(value as string | Date).toISOString();
@@ -65,7 +83,10 @@ function modelView(row: Row): OpeningProviderModelView {
     modelName: String(row.model_name),
     inputCentsPerMillion: Number(row.input_cents_per_million),
     outputCentsPerMillion: Number(row.output_cents_per_million),
-    supportsVision: Boolean(row.supports_vision), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+    supportsVision: Boolean(row.supports_vision), supportsAudio: Boolean(row.supports_audio),
+    billing: row.billing === "free_tier" ? "free_tier" : "metered",
+    dailyRequestCap: row.daily_request_cap === null || row.daily_request_cap === undefined ? null : Number(row.daily_request_cap),
+    createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
   };
 }
 function secretHint(secret: string): string {
@@ -96,6 +117,65 @@ async function countModels(tx: Sql | TransactionSql, providerId: string): Promis
   const rows = await tx`SELECT count(*)::int AS n FROM opening_model_provider_models WHERE provider_id=${providerId}`;
   return Number(rows[0]!.n);
 }
+/** Caller holds lockOwner. */
+export async function insertProvider(tx: TransactionSql, scope: Scope, input: ProviderInput): Promise<OpeningProviderConfigView> {
+  const [existing] = await tx`SELECT id FROM opening_model_providers
+    WHERE workspace_id=${scope.workspaceId} AND label=${input.label}`;
+  if (existing) throw new OpeningModelProviderError("CONFLICT", "provider label already exists");
+  const [count] = await tx`SELECT count(*)::int AS n FROM opening_model_providers
+    WHERE workspace_id=${scope.workspaceId}`;
+  if (Number(count!.n) >= OPENING_MODEL_PROVIDER_MAX) {
+    throw new OpeningModelProviderError("LIMIT", `最多 ${OPENING_MODEL_PROVIDER_MAX} 个服务商`);
+  }
+  const id = randomUUID();
+  await tx`INSERT INTO opening_model_providers
+    (id,workspace_id,owner_user_id,label,base_url)
+    VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.label},${input.baseUrl})`;
+  if (input.apiKey) {
+    const encrypted = encryptWorkspaceSecret({
+      workspaceId: scope.workspaceId, providerId: id, secret: input.apiKey,
+    });
+    await tx`INSERT INTO opening_model_provider_credentials
+      (provider_id,workspace_id,key_id,nonce,ciphertext,auth_tag)
+      VALUES (${id},${scope.workspaceId},${encrypted.keyId},${encrypted.nonce},${encrypted.ciphertext},${encrypted.authTag})`;
+    await tx`UPDATE opening_model_providers SET api_key_hint=${secretHint(input.apiKey)} WHERE id=${id}`;
+  }
+  const [fresh] = await tx`SELECT p.id AS provider_id, p.label, p.base_url, p.api_key_hint, p.created_at, p.updated_at,
+      c.key_id, c.updated_at AS credential_updated_at
+    FROM opening_model_providers p
+    LEFT JOIN opening_model_provider_credentials c ON c.provider_id=p.id WHERE p.id=${id}`;
+  return providerView(fresh!, 0);
+}
+
+/** Caller holds lockOwner and has checked provider ownership. */
+export async function insertModel(tx: TransactionSql, scope: Scope, providerId: string, input: ModelInput): Promise<OpeningProviderModelView> {
+  const billing = input.billing ?? "metered";
+  const dailyRequestCap = input.dailyRequestCap ?? null;
+  assertPricing({ billing, inputCentsPerMillion: input.inputCentsPerMillion, outputCentsPerMillion: input.outputCentsPerMillion, dailyRequestCap });
+  const [clash] = await tx`SELECT id FROM opening_model_provider_models
+    WHERE provider_id=${providerId} AND label=${input.label}`;
+  if (clash) throw new OpeningModelProviderError("CONFLICT", "model label already exists");
+  const providerCount = await countModels(tx, providerId);
+  if (providerCount >= OPENING_MODEL_PROVIDER_MODEL_MAX) {
+    throw new OpeningModelProviderError("LIMIT", `单个服务商最多 ${OPENING_MODEL_PROVIDER_MODEL_MAX} 个模型`);
+  }
+  const [total] = await tx`SELECT count(*)::int AS n
+    FROM opening_model_provider_models WHERE workspace_id=${scope.workspaceId}`;
+  if (Number(total!.n) >= OPENING_MODEL_MERGED_MAX) {
+    throw new OpeningModelProviderError("LIMIT", `自定义模型总数最多 ${OPENING_MODEL_MERGED_MAX} 个`);
+  }
+  const [row] = await tx`INSERT INTO opening_model_provider_models
+    (id,provider_id,workspace_id,owner_user_id,label,model_name,supports_vision,supports_audio,
+     billing,daily_request_cap,input_cents_per_million,output_cents_per_million)
+    VALUES (${randomUUID()},${providerId},${scope.workspaceId},${scope.ownerUserId},${input.label},
+      ${input.modelName},${input.supportsVision ?? false},${input.supportsAudio ?? false},
+      ${billing},${dailyRequestCap},${input.inputCentsPerMillion},${input.outputCentsPerMillion})
+    RETURNING *`;
+  return modelView(row!);
+}
+
+export { lockOwner as lockModelProviderOwner };
+
 export function createOpeningModelProvidersRepository(sql: Sql) {
   return {
     async list(scope: Scope) {
@@ -113,32 +193,7 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
     async createProvider(scope: Scope, input: ProviderInput) {
       return sql.begin(async tx => {
         await lockOwner(tx, scope);
-        const [existing] = await tx`SELECT id FROM opening_model_providers
-          WHERE workspace_id=${scope.workspaceId} AND label=${input.label}`;
-        if (existing) throw new OpeningModelProviderError("CONFLICT", "provider label already exists");
-        const [count] = await tx`SELECT count(*)::int AS n FROM opening_model_providers
-          WHERE workspace_id=${scope.workspaceId}`;
-        if (Number(count!.n) >= OPENING_MODEL_PROVIDER_MAX) {
-          throw new OpeningModelProviderError("LIMIT", `最多 ${OPENING_MODEL_PROVIDER_MAX} 个服务商`);
-        }
-        const id = randomUUID();
-        await tx`INSERT INTO opening_model_providers
-          (id,workspace_id,owner_user_id,label,base_url)
-          VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.label},${input.baseUrl})`;
-        if (input.apiKey) {
-          const encrypted = encryptWorkspaceSecret({
-            workspaceId: scope.workspaceId, providerId: id, secret: input.apiKey,
-          });
-          await tx`INSERT INTO opening_model_provider_credentials
-            (provider_id,workspace_id,key_id,nonce,ciphertext,auth_tag)
-            VALUES (${id},${scope.workspaceId},${encrypted.keyId},${encrypted.nonce},${encrypted.ciphertext},${encrypted.authTag})`;
-          await tx`UPDATE opening_model_providers SET api_key_hint=${secretHint(input.apiKey)} WHERE id=${id}`;
-        }
-        const [fresh] = await tx`SELECT p.id AS provider_id, p.label, p.base_url, p.api_key_hint, p.created_at, p.updated_at,
-            c.key_id, c.updated_at AS credential_updated_at
-          FROM opening_model_providers p
-          LEFT JOIN opening_model_provider_credentials c ON c.provider_id=p.id WHERE p.id=${id}`;
-        return providerView(fresh!, 0);
+        return insertProvider(tx, scope, input);
       });
     },
 
@@ -187,25 +242,7 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
       return sql.begin(async tx => {
         await lockOwner(tx, scope);
         await ownedProvider(tx, scope, providerId);
-        const [clash] = await tx`SELECT id FROM opening_model_provider_models
-          WHERE provider_id=${providerId} AND label=${input.label}`;
-        if (clash) throw new OpeningModelProviderError("CONFLICT", "model label already exists");
-        const providerCount = await countModels(tx, providerId);
-        if (providerCount >= OPENING_MODEL_PROVIDER_MODEL_MAX) {
-          throw new OpeningModelProviderError("LIMIT", `单个服务商最多 ${OPENING_MODEL_PROVIDER_MODEL_MAX} 个模型`);
-        }
-        const [total] = await tx`SELECT count(*)::int AS n
-          FROM opening_model_provider_models WHERE workspace_id=${scope.workspaceId}`;
-        if (Number(total!.n) >= OPENING_MODEL_MERGED_MAX) {
-          throw new OpeningModelProviderError("LIMIT", `自定义模型总数最多 ${OPENING_MODEL_MERGED_MAX} 个`);
-        }
-        const [row] = await tx`INSERT INTO opening_model_provider_models
-          (id,provider_id,workspace_id,owner_user_id,label,model_name,supports_vision,
-           input_cents_per_million,output_cents_per_million)
-          VALUES (${randomUUID()},${providerId},${scope.workspaceId},${scope.ownerUserId},${input.label},
-            ${input.modelName},${input.supportsVision ?? false},${input.inputCentsPerMillion},${input.outputCentsPerMillion})
-          RETURNING *`;
-        return modelView(row!);
+        return insertModel(tx, scope, providerId, input);
       });
     },
 
@@ -218,11 +255,20 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
         const [clash] = await tx`SELECT id FROM opening_model_provider_models
           WHERE provider_id=${current.providerId} AND label=${label} AND id<>${id}`;
         if (clash) throw new OpeningModelProviderError("CONFLICT", "model label already exists");
+        const next = {
+          billing: input.billing ?? current.billing,
+          inputCentsPerMillion: input.inputCentsPerMillion ?? current.inputCentsPerMillion,
+          outputCentsPerMillion: input.outputCentsPerMillion ?? current.outputCentsPerMillion,
+          dailyRequestCap: input.dailyRequestCap === undefined ? current.dailyRequestCap : input.dailyRequestCap,
+        };
+        assertPricing(next);
         const [row] = await tx`UPDATE opening_model_provider_models SET
             label=${label},model_name=${input.modelName ?? current.modelName},
             supports_vision=${input.supportsVision ?? current.supportsVision},
-            input_cents_per_million=${input.inputCentsPerMillion ?? current.inputCentsPerMillion},
-            output_cents_per_million=${input.outputCentsPerMillion ?? current.outputCentsPerMillion},
+            supports_audio=${input.supportsAudio ?? current.supportsAudio},
+            billing=${next.billing},daily_request_cap=${next.dailyRequestCap},
+            input_cents_per_million=${next.inputCentsPerMillion},
+            output_cents_per_million=${next.outputCentsPerMillion},
             updated_at=now()
           WHERE id=${id} RETURNING *`;
         return modelView(row!);
@@ -253,6 +299,7 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
      */
     async listResolvableModels(scope: Scope): Promise<OpeningResolvableModel[]> {
       const rows = await sql`SELECT m.id, m.provider_id, m.label, m.model_name, m.supports_vision,
+          m.supports_audio, m.billing, m.daily_request_cap,
           m.input_cents_per_million, m.output_cents_per_million, m.created_at,
           p.label AS provider_label, p.base_url, p.owner_user_id,
           c.key_id, c.nonce, c.ciphertext, c.auth_tag
@@ -282,6 +329,9 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
           providerLabel: String(row.provider_label), label: String(row.label),
           modelName: String(row.model_name), baseUrl: String(row.base_url), apiKey,
           supportsVision: Boolean(row.supports_vision),
+          supportsAudio: Boolean(row.supports_audio),
+          billing: row.billing === "free_tier" ? "free_tier" : "metered",
+          dailyRequestCap: row.daily_request_cap === null ? null : Number(row.daily_request_cap),
           inputCentsPerMillion: Number(row.input_cents_per_million),
           outputCentsPerMillion: Number(row.output_cents_per_million),
           createdAt: iso(row.created_at), vaultConfigBroken,
