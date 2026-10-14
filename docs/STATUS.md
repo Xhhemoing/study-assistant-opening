@@ -2,28 +2,30 @@
 
 每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
 
-**更新：** 2026-10-13
+**更新：** 2026-10-14
 **目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
 
 ## 主干
 
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
-- 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、jingwei PR1–3。
+- 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38。
+- Hermes 已部署 `8b500e6`（含 #33）。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| S4b 行内引用：正文 `[n]` 渲染为来源链接 | Claude（Grok 401，改为自做） | `feat/inline-citation-chips` / #32 | CI 中；待用户浏览器验收 |
-
-已合入（2026-10-13）：#29 选区按源码保存、#31 S4a 服务端引用编号。
+| G9 保存回合按模式过滤任务建议（只有 listen 不提任务） | Grok + Claude | `fix/tutor-turn-candidate-mode` / #39 | CI 中，绿后可合 |
 
 ## 下一步（按顺序）
 
-1. 部署到 Hermes 开始自用：打开 `OPENING_CHAT_PROSE`、`OPENING_ANSWER_STYLE`；`OPENING_CHAT_ARTIFACTS` 保持关。
-2. AI 主讲试跑（V2-16）：V2-04…16 代码已在主干、默认关。部署时打开 `OPENING_TEACHING_LOOP`、`OPENING_TEACHING_WORKSPACE`、`OPENING_TEACHING_COMPILER_ENABLED`、`OPENING_TEACHING_VALIDATION_ENABLED` 并启用 worker，用「秩与零空间」单元（`tests/fixtures/opening/teaching/unit-rank-nullspace`）真实模型走一遍，问题记到“使用反馈”。
-3. 按试跑反馈选：V2-20 探索与笔记接入教学（笔记 hub 方向，优先）或 V2-17 证据条件化教学选择。
+1. 自用：Hermes 换新 Lant key（用户直接写 `/opt/aistudy/.env.production`），确认对话可用；登录后复现“侧栏卡住”，现象记到使用反馈。
+2. 大问题方案（用户在问外部意见，回来后定方案再开工）：
+   - A 规划 Agent：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
+   - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。
+   - C 安全：`/api/opening/health` 无鉴权现场探测；`deploy-hermes.sh` 用保存的 root 密码且跳过主机指纹并改 sshd。
+3. AI 主讲试跑（V2-16）：教学 provider 仍是桩（`compile-teaching-unit-wiring.ts`），大纲是模板；试跑前要先接真实模型，否则测不到核心体验。开关见 `docs/operations/hermes-deployment.md`「自用开关」。
 4. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
 
 ## 负责人已定（2026-10-13）
@@ -35,10 +37,10 @@
 
 ## 等用户决定
 
-- Hermes SSH：22 端口连接被重置（HTTPS 正常），部署脚本需要 SSH。请检查安全组/fail2ban 或本机出口 IP。
-- Grok CLI 401：在终端运行 `grok` 重新登录后才能派卡。
-- 合并与删除 worktree 会被 Claude 的权限拦截：需用户合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
-- 本地 25 个 worktree：18 个干净且已在主干或远端，可删；`AIstudy`、`_wt-g1-learning-v2`、`sao-fix-migration-checksum-compat`、`sao-typecheck-int` 有未提交改动，先别删。
+- 合并与删除 worktree 会被 Claude 的权限拦截：需用户/Shipper 合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
+- 本地 worktree 过多（超过 3 个上限）：已合 PR 的 `sao-fix-shell-review-badge-error`、`sao-docs-hermes-self-use-flags`、`sao-test-real-use-ac-03` 可删。
+
+已解决（2026-10-14）：Hermes SSH reset 是后量子 KEX 握手在本机网络被掐断，`~/.ssh/config` 加 `KexAlgorithms curve25519-sha256`；Grok 改由 bot 团队按卡执行。
 
 ## 使用反馈
 
