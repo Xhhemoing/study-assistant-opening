@@ -193,6 +193,71 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
 
+  it("drops task candidates but keeps memory when listen cannot propose tasks", async () => {
+    const task = { kind: "task" as const, title: "Review Newton", minutes: 10, dueText: null };
+    const memory = { kind: "memory" as const, text: "Learner asked about Newton", temporary: false };
+    const { deps, tutorJobs } = setup({
+      claim: { ...claimedJob, mode: "listen" },
+      provider: async () => ({
+        text: "I hear you",
+        citedChunkIds: [chunkA.id],
+        requestId: null,
+        candidates: [task, memory],
+        inputTokens: 10,
+        outputTokens: 5,
+      }),
+    });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      candidates: [{ payload: memory, sourceIds: [chunkA.sourceId] }],
+    }));
+  });
+
+  it("keeps task and memory candidates when think_together can propose tasks", async () => {
+    const task = { kind: "task" as const, title: "Review Newton", minutes: 10, dueText: null };
+    const memory = { kind: "memory" as const, text: "Learner asked about Newton", temporary: false };
+    const { deps, tutorJobs } = setup({
+      claim: { ...claimedJob, mode: "think_together" },
+      provider: async () => ({
+        text: "Let us think",
+        citedChunkIds: [chunkA.id],
+        requestId: null,
+        candidates: [task, memory],
+        inputTokens: 10,
+        outputTokens: 5,
+      }),
+    });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      candidates: [
+        { payload: task, sourceIds: [chunkA.sourceId] },
+        { payload: memory, sourceIds: [chunkA.sourceId] },
+      ],
+    }));
+  });
+
+  it("keeps task and memory candidates in the default explain mode", async () => {
+    const task = { kind: "task" as const, title: "Review Newton", minutes: 10, dueText: null };
+    const memory = { kind: "memory" as const, text: "Learner asked about Newton", temporary: false };
+    const { deps, tutorJobs } = setup({
+      provider: async () => ({
+        text: "F = ma",
+        citedChunkIds: [chunkA.id],
+        requestId: null,
+        candidates: [task, memory],
+        inputTokens: 10,
+        outputTokens: 5,
+      }),
+    });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      candidates: [
+        { payload: task, sourceIds: [chunkA.sourceId] },
+        { payload: memory, sourceIds: [chunkA.sourceId] },
+      ],
+    }));
+  });
+
   it("renumbers inline [n] markers to the citations that survive the page filter", async () => {
     // Model cites page 2 first, then page 1; the current-page guard keeps only page 1.
     const { deps, tutorJobs } = setup({ provider: async () => ({ text: "引力[1]，运动定律[2]。", citedChunkIds: [chunkB.id, chunkA.id], requestId: null, candidates: [], inputTokens: 10, outputTokens: 5 }) });

@@ -8,7 +8,7 @@ import {
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
-import { OpeningProviderError, renumberInlineCitations, resolveCitations, selectContext } from "@aistudy/ai";
+import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -258,7 +258,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         text,
         citations,
         contextSourceRefs,
-        candidates: validated.candidates.map((payload) => ({
+        candidates: (canProposeTask(mode)
+          ? validated.candidates
+          : validated.candidates.filter((payload) => payload.kind !== "task")
+        ).map((payload) => ({
           payload,
           sourceIds: contextSourceIds,
         })),
