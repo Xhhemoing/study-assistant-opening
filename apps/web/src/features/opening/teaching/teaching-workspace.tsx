@@ -353,6 +353,20 @@ export function TeachingWorkspace({
   );
 }
 
+
+/** wait_init action visibility — no endless client-init retry when nothing is in flight. */
+export function waitInitActionVisibility(input: {
+  jobGate: "ready" | "in_flight" | "unknown" | "stale" | null | undefined;
+  canCompile: boolean;
+}): { showCompile: boolean; showRetryFetch: boolean; showBack: boolean } {
+  const inFlight = input.jobGate === "in_flight";
+  return {
+    showCompile: input.canCompile,
+    showRetryFetch: inFlight,
+    showBack: true,
+  };
+}
+
 /**
  * V2-14 continue entry: show LearningResume card, then mount TeachingWorkspace.
  * Prefers resume.clientInit when present; null clientInit → re-fetch / wait (fail-soft).
@@ -513,15 +527,27 @@ export function TeachingContinueEntry({
   }
 
   if (phase === "wait_init") {
+    const canCompile = canRequestTeachingCompile(liveResume ?? activity, {
+      compilerEnabled: teachingCompileEnabled,
+    });
+    const actions = waitInitActionVisibility({
+      jobGate: liveResume?.gates.job,
+      canCompile,
+    });
+    const waitingInFlight = liveResume?.gates.job === "in_flight";
     return (
       <section
         className="flex h-full min-h-0 flex-col px-5 py-5"
         data-teaching-continue-entry="wait_init"
         data-resume-client-init="null"
       >
-        <h2 className="text-sm font-semibold text-zinc-900">等待主讲内容</h2>
+        <h2 className="text-sm font-semibold text-zinc-900">
+          {waitingInFlight ? "等待主讲内容" : "主讲内容暂不可用"}
+        </h2>
         <p className="mt-2 text-xs leading-5 text-zinc-600">
-          断点已恢复，但 clientInit 暂缺或不可用。不会伪造讲义；生成中/未知时请等待。
+          {waitingInFlight
+            ? "断点已恢复，但 clientInit 暂缺或不可用。不会伪造讲义；生成中请等待。"
+            : "断点已恢复，但当前没有可用的主讲内容。可重新生成，或返回断点卡片；不会反复空拉 client-init。"}
         </p>
         {liveResume ? (
           <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
@@ -535,9 +561,7 @@ export function TeachingContinueEntry({
           </p>
         ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
-          {canRequestTeachingCompile(liveResume ?? activity, {
-            compilerEnabled: teachingCompileEnabled,
-          }) ? (
+          {actions.showCompile ? (
             <button
               type="button"
               className={ui.primary}
@@ -545,26 +569,30 @@ export function TeachingContinueEntry({
               data-teaching-request-compile="true"
               onClick={() => void requestCompile()}
             >
-              {waitBusy ? "正在提交…" : "生成主讲内容"}
+              {waitBusy ? "正在提交…" : "重新生成主讲内容"}
             </button>
           ) : null}
-          <button
-            type="button"
-            className={ui.secondary}
-            disabled={waitBusy}
-            data-resume-retry-client-init="true"
-            onClick={() => void retryFromFreshResume()}
-          >
-            {waitBusy ? "拉取中…" : "重试拉取 client-init"}
-          </button>
-          <button
-            type="button"
-            className={ui.quiet}
-            data-resume-back-to-card="true"
-            onClick={backToCard}
-          >
-            返回断点卡片
-          </button>
+          {actions.showRetryFetch ? (
+            <button
+              type="button"
+              className={ui.secondary}
+              disabled={waitBusy}
+              data-resume-retry-client-init="true"
+              onClick={() => void retryFromFreshResume()}
+            >
+              {waitBusy ? "拉取中…" : "重试拉取 client-init"}
+            </button>
+          ) : null}
+          {actions.showBack ? (
+            <button
+              type="button"
+              className={ui.quiet}
+              data-resume-back-to-card="true"
+              onClick={backToCard}
+            >
+              返回断点卡片
+            </button>
+          ) : null}
         </div>
       </section>
     );

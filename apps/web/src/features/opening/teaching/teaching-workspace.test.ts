@@ -53,6 +53,7 @@ import {
   isTeachingWorkspaceContentUsable,
   TeachingContinueEntry,
   TeachingWorkspace,
+  waitInitActionVisibility,
 } from "./teaching-workspace";
 
 const AID = "11111111-1111-4111-8111-111111111111";
@@ -337,3 +338,17 @@ describe("TeachingContinueEntry", () => {
   });
 });
 
+describe("waitInitActionVisibility (S6)", () => {
+  it("offers compile (not endless client-init retry) when nothing is in flight", () => {
+    const actions = waitInitActionVisibility({ jobGate: "unknown", canCompile: true });
+    expect(actions.showCompile).toBe(true);
+    expect(actions.showRetryFetch).toBe(false);
+    expect(actions.showBack).toBe(true);
+  });
+
+  it("keeps client-init retry while job is in_flight", () => {
+    const actions = waitInitActionVisibility({ jobGate: "in_flight", canCompile: false });
+    expect(actions.showRetryFetch).toBe(true);
+    expect(actions.showCompile).toBe(false);
+  });
+});
