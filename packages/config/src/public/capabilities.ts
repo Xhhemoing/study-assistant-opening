@@ -19,6 +19,10 @@ export const openingCapabilitiesSchema = z.object({
   chatProse: z.boolean(),
   /** Self-registration; /api/auth/register re-checks the same switch. */
   registrationOpen: z.boolean(),
+  /** Learning-signal daily drafts, autonomy modes and suggested tasks; routes re-check. */
+  adaptivePlanning: z.boolean(),
+  /** Model-assisted re-planning (L7); requires adaptivePlanning. */
+  planAgent: z.boolean(),
 }).strict();
 
 export const openingCapabilitiesResponseSchema = z.object({
@@ -38,6 +42,8 @@ export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   chatArtifacts: false,
   chatProse: false,
   registrationOpen: false,
+  adaptivePlanning: false,
+  planAgent: false,
 };
 
 /**

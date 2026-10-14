@@ -9,6 +9,7 @@ import { OpeningPlanError } from "./opening-plan-error";
 import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
 import { insertAcceptedRetestActivity } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { resolveTaskPlanningColumns, withTaskPlanningFields } from "./opening-task-fields";
 
 export function retestPayloadHash(input: TaskCreateInput): string {
   return createHash("sha256")
@@ -27,7 +28,7 @@ export function retestPayloadHash(input: TaskCreateInput): string {
 }
 
 function mapTask(row: Record<string, unknown>): TaskItem {
-  return {
+  return withTaskPlanningFields({
     id: row.id as string,
     version: Number(row.version),
     title: row.title as string,
@@ -36,7 +37,7 @@ function mapTask(row: Record<string, unknown>): TaskItem {
     priority: Number(row.priority),
     status: row.status as TaskItem["status"],
     retest: null,
-  };
+  }, row);
 }
 
 async function findRetestReplay(
@@ -191,14 +192,15 @@ async function insertQuickAddWithKey(
   clientKey: string,
 ): Promise<TaskCreateOutcome> {
   const fingerprint = quickAddFingerprint(inputIntent(input));
+  const planning = await resolveTaskPlanningColumns(tx, scope, input);
   const inserted = await tx`
     INSERT INTO opening_tasks (
       id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
-      priority, status, version, candidate_id, client_key
+      priority, status, version, candidate_id, client_key, course_id, skill_label, origin
     ) VALUES (
       ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
       ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
-      ${null}, ${clientKey}
+      ${null}, ${clientKey}, ${planning.courseId}, ${planning.skillLabel}, ${planning.origin}
     )
     ON CONFLICT (workspace_id, owner_user_id, client_key) WHERE client_key IS NOT NULL DO NOTHING
     RETURNING *`;
@@ -247,14 +249,15 @@ export async function insertOpeningTaskWithOutcome(
   // A rolled-back insert's id is never returned, so id equality proves creation.
   let createdId: string | null = null;
   const insert = async (tx: TransactionSql): Promise<TaskItem> => {
+    const planning = await resolveTaskPlanningColumns(tx, scope, input);
     const rows = await tx`
       INSERT INTO opening_tasks (
         id, workspace_id, owner_user_id, title, minutes, due_at, due_text,
-        priority, status, version, candidate_id, client_key
+        priority, status, version, candidate_id, client_key, course_id, skill_label, origin
       ) VALUES (
         ${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.minutes},
         ${input.dueAt}, ${input.dueText ?? null}, ${input.priority}, ${"pending"}, ${1},
-        ${input.candidateId}, ${null}
+        ${input.candidateId}, ${null}, ${planning.courseId}, ${planning.skillLabel}, ${planning.origin}
       ) RETURNING *`;
     const task = mapTask(rows[0] as Record<string, unknown>);
     createdId = task.id;
@@ -293,7 +296,7 @@ async function insertRetestOrPlainTask(
     if (input.inputSnapshot?.kind === "retest") await lockWorkspaceLearningHistory(tx, scope);
     const retestReplay = await prepareRetestTask(tx, scope, input);
     if (retestReplay) return retestReplay;
-    const task = await insert(tx);
+    let task = await insert(tx);
     await consumeRetestCandidate(tx, scope, input, task.id);
     const candidateRows = await tx`SELECT payload FROM opening_jobs
       WHERE id=${input.candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
@@ -314,6 +317,12 @@ async function insertRetestOrPlainTask(
         acceptedAt: new Date().toISOString(),
       });
       await nextWorkspaceLearningHistoryRevision(tx, scope);
+      // The candidate (server-written) is the authority for the retest's course and skill.
+      const tagged = await tx`UPDATE opening_tasks
+        SET origin = ${"retest"}, course_id = ${candidate.courseId}, skill_label = ${candidate.skillLabel}
+        WHERE id = ${task.id} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+        RETURNING *`;
+      task = mapTask(tagged[0] as Record<string, unknown>);
     }
     return task;
   });

@@ -47,6 +47,7 @@ export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
 export {
   planDay,
+  taskNotBeforeAt,
   type DayPlanResult,
   type PlanDayOptions,
   type UnscheduledReasonCode,
@@ -465,3 +466,5 @@ export {
   type MatrixTransformStep,
   type StaticFallbackModel,
 } from "./opening/teaching-math-model";
+
+export * from "./opening/adaptive";

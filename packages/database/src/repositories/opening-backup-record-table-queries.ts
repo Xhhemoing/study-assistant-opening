@@ -154,7 +154,7 @@ export async function readOpeningBackupTableRows(
     FROM opening_privacy_exclusions WHERE workspace_id = ${id} ORDER BY source_id`);
   tables.opening_tasks = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
-      candidate_id, client_key, created_at, updated_at
+      candidate_id, client_key, course_id, skill_label, origin, not_before, created_at, updated_at
     FROM opening_tasks WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,
@@ -177,7 +177,8 @@ export async function readOpeningBackupTableRows(
     FROM opening_plan_state WHERE workspace_id = ${id} ORDER BY day`);
   tables.opening_plan_drafts = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, day, version, base_version, status, blocks, unscheduled_task_ids,
-      input_snapshot, hard_blocks_fingerprint, propose_client_key, created_at, updated_at
+      input_snapshot, hard_blocks_fingerprint, propose_client_key, origin, suggested_tasks, reasons, strategy_version,
+      created_at, updated_at
     FROM opening_plan_drafts WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
   tables.opening_plan_acceptances = asRows(await tx`
     SELECT a.workspace_id, a.client_key, a.draft_id, a.day, a.accepted_version, a.payload_hash, a.created_at

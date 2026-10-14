@@ -267,6 +267,7 @@ describe("learning semantic revision writers", () => {
       if (query.startsWith("SELECT s.id FROM opening_sources")) return [];
       if (query.startsWith("SELECT id, payload FROM opening_jobs")) return payload.accepted ? [{ id: candidateId, payload }] : [];
       if (query.startsWith("INSERT INTO opening_tasks") || query.startsWith("SELECT * FROM opening_tasks")) return [task()];
+      if (query.startsWith("UPDATE opening_tasks SET origin")) return [task()];
       if (query.startsWith("UPDATE opening_jobs")) { payload = { ...payload, ...(values[0] as Row) }; return [{ id: candidateId }]; }
       if (query.startsWith("SELECT * FROM opening_retest_activities")) return [currentActivity];
       if (query.startsWith("UPDATE opening_retest_activities")) { currentActivity = persistedActivity(currentActivity, values); return [currentActivity]; }

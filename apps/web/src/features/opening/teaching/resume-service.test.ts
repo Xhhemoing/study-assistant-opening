@@ -53,9 +53,12 @@ describe("resume-service surface (V2-14)", () => {
     const numbered = readdirSync(migrDir)
       .filter((f) => f.endsWith(".sql") && /^\d{4}_/.test(f))
       .sort();
-    // PR-D: 0059_opening_budget_reconcile (budget ledger); PR-E: 0060_opening_retest_accept_key (retest accept key). Only additions
-    // after PR-C's clarify migration; still no teaching/resume migration.
-    expect(numbered.filter((f) => f >= "0058")).toEqual(["0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql"]);
+    // PR-D: 0059_opening_budget_reconcile (budget ledger); PR-E: 0060_opening_retest_accept_key (retest accept key);
+    // 0061_opening_adaptive_planning (planning columns). Only additions after PR-C's clarify migration; still no teaching/resume migration.
+    expect(numbered.filter((f) => f >= "0058")).toEqual([
+      "0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql",
+      "0061_opening_adaptive_planning.sql",
+    ]);
     expect(numbered.some((f) => /resume/i.test(f))).toBe(false);
   });
 });

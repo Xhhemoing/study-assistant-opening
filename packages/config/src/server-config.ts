@@ -124,6 +124,8 @@ export type FeatureSwitches = {
   chatArtifacts: boolean;
   chatProse: boolean;
   openingRelease: boolean;
+  adaptivePlanning: boolean;
+  planAgent: boolean;
 };
 
 /** Strict, infrastructure-free switches (used per request for re-authorization). */
@@ -141,6 +143,8 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
   const openingRelease = read("OPENING_RELEASE", false);
+  const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
+  const planAgent = read("OPENING_PLAN_AGENT", false);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
   let rolloutPercent = 100;
   if (rolloutRaw !== undefined) {
@@ -149,7 +153,10 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
     } else rolloutPercent = Number(rolloutRaw);
   }
   if (issues.length) throw new EnvValidationError(issues);
-  return { teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, openingRelease };
+  return {
+    teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, openingRelease,
+    adaptivePlanning, planAgent,
+  };
 }
 
 /** Stable 0-99 bucket per user (FNV-1a 32). Same input → same bucket in every process. */
@@ -173,6 +180,8 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     chatArtifacts: switches.chatArtifacts,
     chatProse: switches.chatProse,
     registrationOpen: !switches.openingRelease,
+    adaptivePlanning: switches.adaptivePlanning,
+    planAgent: switches.adaptivePlanning && switches.planAgent,
   };
 }
 

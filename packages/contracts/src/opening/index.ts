@@ -168,6 +168,22 @@ export {
   type TaskCreateResult,
   taskStatusUpdateInputSchema,
   type TaskStatusUpdateInput,
+  taskOriginSchema,
+  taskDeferInputSchema,
+  type TaskOrigin,
+  type TaskDeferInput,
+  planReasonCodeSchema,
+  planBlockReasonSchema,
+  suggestionKindSchema,
+  suggestedTaskSchema,
+  planDraftOriginSchema,
+  planUndoInputSchema,
+  type PlanReasonCode,
+  type PlanBlockReason,
+  type SuggestionKind,
+  type SuggestedTask,
+  type PlanDraftOrigin,
+  type PlanUndoInput,
   type PlannedBlock,
   type PlanDraft,
   type AcceptPlanInput,
@@ -211,6 +227,7 @@ export {
 
 export * from "./ai-settings";
 export * from "./planning-settings";
+export * from "./adaptive-planning";
 export * from "./intervention-prefs";
 export * from "./model-providers";
 export * from "./learning-history";

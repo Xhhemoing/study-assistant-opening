@@ -106,7 +106,7 @@ const RESTORE_GUARANTEES: OpeningRestoreApplyGuarantees = {
 /** Allowlisted insert columns per APPLY_ORDER table (snake_case as exported). */
 export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_ORDER)[number], readonly string[]> = {
   workspace_preferences: [
-    "workspace_id", "default_entry", "ai_settings", "planning_settings", "intervention_settings",
+    "workspace_id", "default_entry", "ai_settings", "planning_settings", "adaptive_planning", "intervention_settings",
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
   ],
@@ -206,7 +206,8 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_tasks: [
     "id", "workspace_id", "owner_user_id", "title", "minutes", "due_at", "due_text", "priority",
-    "status", "version", "candidate_id", "client_key", "created_at", "updated_at",
+    "status", "version", "candidate_id", "client_key", "course_id", "skill_label", "origin", "not_before",
+    "created_at", "updated_at",
   ],
   opening_retest_activities: [
     "id", "workspace_id", "owner_user_id", "course_id", "skill_label", "requirement_key", "purpose",
@@ -228,7 +229,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_plan_drafts: [
     "id", "workspace_id", "owner_user_id", "day", "version", "base_version", "status", "blocks",
     "unscheduled_task_ids", "input_snapshot", "hard_blocks_fingerprint", "propose_client_key",
-    "created_at", "updated_at",
+    "origin", "suggested_tasks", "reasons", "strategy_version", "created_at", "updated_at",
   ],
   opening_plan_acceptances: [
     "workspace_id", "client_key", "draft_id", "day", "accepted_version", "payload_hash", "created_at",
@@ -238,6 +239,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 const JSONB_COLUMNS = new Set([
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",
+  "workspace_preferences.adaptive_planning",
   "workspace_preferences.intervention_settings",
   "courses.intervention_settings",
   "opening_sources.error",
@@ -256,6 +258,8 @@ const JSONB_COLUMNS = new Set([
   "opening_plan_drafts.blocks",
   "opening_plan_drafts.unscheduled_task_ids",
   "opening_plan_drafts.input_snapshot",
+  "opening_plan_drafts.suggested_tasks",
+  "opening_plan_drafts.reasons",
 ]);
 
 function bodyFromMap(

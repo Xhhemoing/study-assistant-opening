@@ -8,6 +8,8 @@ export const workspacePreferences = pgTable("workspace_preferences", {
   defaultEntry: text("default_entry"),
   aiSettings: jsonb("ai_settings"),
   planningSettings: jsonb("planning_settings"),
+  /** 0061: autonomy mode, coach budget, course goals. */
+  adaptivePlanning: jsonb("adaptive_planning"),
   interventionSettings: jsonb("intervention_settings").notNull().default({
     proactivity: "balanced",
     nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
