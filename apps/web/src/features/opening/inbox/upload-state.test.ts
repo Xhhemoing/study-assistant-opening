@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { canDeleteSourceShortcut, isAgedQueuedParse, resolveUploadMime, sourceStatusLabel, unsupportedUploadMessage } from "./upload-state";
+import { canDeleteSourceShortcut, isAgedQueuedParse, resolveUploadMime, sourceHasUsableChunksForQuestions, sourceStatusLabel, unsupportedUploadMessage } from "./upload-state";
 
 it("distinguishes stored originals from parsed material", () => {
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" })).toBe("原件已保存，解析失败");
@@ -114,4 +114,48 @@ it("three layers agree on text/plain (S9)", async () => {
   expect(isAcceptedUploadFile({ name: "a.txt", type: "text/plain" } as File, openingUploadAccept)).toBe(true);
   expect(sourceMimeSchema.safeParse("application/x-unknown").success).toBe(false);
   expect(resolveUploadMime({ name: "a.bin", type: "application/x-unknown" })).toBeNull();
+});
+
+it("maps upload/parse states to status copy (S10 table)", () => {
+  const now = Date.parse("2026-10-14T12:00:00.000Z");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "ready" }, now)).toBe("可以用于提问");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "queued" }, now)).toBe("原件已保存，解析排队中");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "running" }, now)).toBe("原件已保存，正在解析");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "failed" }, now)).toBe("原件已保存，解析失败");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "unsupported" }, now)).toBe("原件已保存，暂不能提取文字");
+  expect(sourceStatusLabel({ uploadState: "pending", parseState: "not_started" }, now)).toBe("上传未完成");
+});
+
+it("「可以用于提问」 shares the chunks-usable predicate (S10)", () => {
+  expect(sourceHasUsableChunksForQuestions({ uploadState: "uploaded", parseState: "ready" })).toBe(true);
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "ready" })).toBe("可以用于提问");
+
+  // Chunks known present → usable even if parse copy would otherwise say 正在解析
+  expect(
+    sourceHasUsableChunksForQuestions({
+      uploadState: "uploaded",
+      parseState: "running",
+      hasChunks: true,
+    }),
+  ).toBe(true);
+  expect(
+    sourceStatusLabel({ uploadState: "uploaded", parseState: "running", hasChunks: true }),
+  ).toBe("可以用于提问");
+
+  // Chunks known absent → never claim 可以用于提问 even if parseState ready
+  expect(
+    sourceHasUsableChunksForQuestions({
+      uploadState: "uploaded",
+      parseState: "ready",
+      hasChunks: false,
+    }),
+  ).toBe(false);
+  expect(
+    sourceStatusLabel({ uploadState: "uploaded", parseState: "ready", hasChunks: false }),
+  ).not.toBe("可以用于提问");
+
+  // Label 可以用于提问 ⇒ predicate true (same function, not a copied condition)
+  const usable = { uploadState: "uploaded" as const, parseState: "ready" as const, hasChunks: true };
+  expect(sourceStatusLabel(usable)).toBe("可以用于提问");
+  expect(sourceHasUsableChunksForQuestions(usable)).toBe(true);
 });

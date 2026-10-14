@@ -77,16 +77,38 @@ export function canDeleteSourceShortcut(
   return isAgedQueuedParse(record, nowMs);
 }
 
-export function sourceStatusLabel(
+/**
+ * Shared predicate for 「可以用于提问」 and tutoring materials admit.
+ * Chunks presence is the source of truth when known; parseState ready is the
+ * wire-level proxy (worker sets ready only after replaceChunks).
+ */
+export function sourceHasUsableChunksForQuestions(
   record: Pick<SourceRecord, "uploadState" | "parseState"> & {
     error?: SourceRecord["error"];
-    createdAt?: string;
+    /** Same chunks-exists check as opening-learning-facts admit/probe. */
+    hasChunks?: boolean;
   },
+): boolean {
+  if (record.uploadState !== "uploaded") return false;
+  if (record.error?.code === "PRIVACY_EXCLUDED") return false;
+  if (record.hasChunks === false) return false;
+  if (record.hasChunks === true) return true;
+  return record.parseState === "ready";
+}
+
+export type SourceStatusLabelRecord = Pick<SourceRecord, "uploadState" | "parseState"> & {
+  error?: SourceRecord["error"];
+  createdAt?: string;
+  hasChunks?: boolean;
+};
+
+export function sourceStatusLabel(
+  record: SourceStatusLabelRecord,
   nowMs: number = Date.now(),
 ): string {
   if (record.uploadState !== "uploaded") return "上传未完成";
   if (record.error?.code === "PRIVACY_EXCLUDED") return "已从学习上下文中排除";
-  if (record.parseState === "ready") return "可以用于提问";
+  if (sourceHasUsableChunksForQuestions(record)) return "可以用于提问";
   if (record.parseState === "failed") {
     const message = record.error?.message?.trim();
     return message || "原件已保存，解析失败";
