@@ -1,0 +1,23 @@
+name: Learning loop source snapshot
+on:
+  push:
+    branches: [feat/learning-loop-hardening-20261014]
+    paths: [.github/workflows/learning-loop-source-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-loop-source
+          path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
