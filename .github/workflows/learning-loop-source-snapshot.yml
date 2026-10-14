@@ -8,16 +8,31 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Archive tracked source only
-        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Archive tracked source and dependency toolchain
+        shell: bash
+        run: |
+          git archive --format=tar.gz --output=source.tar.gz HEAD
+          find . -type d -name node_modules -prune -print0 | tar --null -T - -czf dependencies.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: learning-loop-source
           path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-loop-toolchain
+          path: dependencies.tar.gz
           retention-days: 1
           if-no-files-found: error
