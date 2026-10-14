@@ -83,6 +83,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "S3_ACCESS_KEY_ID", group: "storage", doc: "Access key id.", consumers: both, kind: "string", secret: true, required: "production", dev: { value: "minioadmin" }, docker: { value: "REPLACE_ME_s3_access_key" } },
   { name: "S3_SECRET_ACCESS_KEY", group: "storage", doc: "Secret access key.", consumers: both, kind: "string", secret: true, required: "production", dev: { value: "minioadmin" }, docker: { value: "REPLACE_ME_s3_secret_key_long_random" } },
   { name: "S3_FORCE_PATH_STYLE", group: "storage", doc: "Path-style addressing (true for MinIO).", consumers: both, kind: "bool", secret: false, dev: { value: "true" }, docker: { value: "true" } },
+  { name: "OPENING_S3_FORCE_PATH_STYLE", group: "storage", doc: "Restore CLI alias of S3_FORCE_PATH_STYLE; takes precedence when set, so leave unset unless overriding.", consumers: ["scripts"], kind: "bool", secret: false },
 
   { name: "AUTH_SECRET", group: "auth", doc: "Session JWT secret, at least 32 characters.", consumers: ["web"], kind: "string", min: 32, secret: true, required: "always", dev: { value: "dev-only-change-me-to-a-long-random-secret" }, docker: { value: "REPLACE_ME_auth_secret_long_random" } },
   { name: "SESSION_COOKIE_SECURE", group: "auth", doc: "false only for plain-HTTP loopback/CI E2E. Production must use true.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "false" }, docker: { value: "true" } },
@@ -148,6 +149,13 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_OWNER_DISPLAY_NAME", group: "e2e", doc: "Owner bootstrap script.", consumers: ["scripts"], kind: "string", secret: false },
   { name: "FFMPEG_PATH", group: "e2e", doc: "Optional ffmpeg path for scripts.", consumers: ["scripts"], kind: "string", secret: false },
   { name: "FFPROBE_PATH", group: "e2e", doc: "Optional ffprobe path for scripts.", consumers: ["scripts"], kind: "string", secret: false },
+  { name: "OPENING_BACKUP_STAGING", group: "e2e", doc: "Staging directory for opening-backup publish (or --staging).", consumers: ["scripts"], kind: "string", secret: false },
+  { name: "OPENING_BACKUP_DRAFT", group: "e2e", doc: "Path to staged backup.json draft (or --draft).", consumers: ["scripts"], kind: "string", secret: false },
+  { name: "OPENING_BACKUP_OUT", group: "e2e", doc: "Output path for .opening archive (or --out).", consumers: ["scripts"], kind: "string", secret: false },
+  { name: "OPENING_BACKUP_ENCRYPT_OUT", group: "e2e", doc: "Optional encrypted archive output path (or --encrypt-out).", consumers: ["scripts"], kind: "string", secret: false },
+  { name: "OPENING_BACKUP_PASSPHRASE", group: "e2e", doc: "Encrypt passphrase for opening-backup (required with encrypt-out; never argv).", consumers: ["scripts"], kind: "string", secret: true },
+  { name: "OPENING_BACKUP_ARCHIVE_PATH", group: "e2e", doc: "Local archive path for readiness backupFreshness probe.", consumers: ["scripts"], kind: "string", secret: false, dev: { value: "", commented: true }, docker: { value: "", commented: true } },
+  { name: "OPENING_BACKUP_MAX_AGE_HOURS", group: "e2e", doc: "Max age hours for backup freshness (default 24).", consumers: ["scripts"], kind: "int", min: 1, secret: false, dev: { value: "24", commented: true }, docker: { value: "24", commented: true } },
 ];
 
 /** Removed build-time twins: a value here at runtime cannot reach the shipped bundle. */
