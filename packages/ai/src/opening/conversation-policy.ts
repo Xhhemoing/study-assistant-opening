@@ -12,9 +12,9 @@ export class ConversationPolicyError extends Error {
   }
 }
 
-/** Listening never proposes a task. Only think-together may. */
+/** Listening never proposes a task; other modes may suggest one for the learner to confirm. */
 export function canProposeTask(mode: TutorMode): boolean {
-  return mode === "think_together";
+  return mode !== "listen";
 }
 
 export function assertEphemeralInput(input: unknown): void {

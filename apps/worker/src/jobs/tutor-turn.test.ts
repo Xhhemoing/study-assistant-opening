@@ -236,7 +236,7 @@ describe("tutor turn handler", () => {
     }));
   });
 
-  it("drops task candidates but keeps memory in explain mode", async () => {
+  it("keeps task and memory candidates in the default explain mode", async () => {
     const task = { kind: "task" as const, title: "Review Newton", minutes: 10, dueText: null };
     const memory = { kind: "memory" as const, text: "Learner asked about Newton", temporary: false };
     const { deps, tutorJobs } = setup({
@@ -251,7 +251,10 @@ describe("tutor turn handler", () => {
     });
     await createTutorTurnHandler(deps)(claimedJob.id);
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
-      candidates: [{ payload: memory, sourceIds: [chunkA.sourceId] }],
+      candidates: [
+        { payload: task, sourceIds: [chunkA.sourceId] },
+        { payload: memory, sourceIds: [chunkA.sourceId] },
+      ],
     }));
   });
 

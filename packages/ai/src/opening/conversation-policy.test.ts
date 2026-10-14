@@ -25,8 +25,8 @@ describe("conversation policy", () => {
   it("does not turn listening into a task generator", () => {
     expect(canProposeTask("listen")).toBe(false);
     expect(canProposeTask("think_together")).toBe(true);
-    expect(canProposeTask("hint")).toBe(false);
-    expect(canProposeTask("explain")).toBe(false);
+    expect(canProposeTask("hint")).toBe(true);
+    expect(canProposeTask("explain")).toBe(true);
   });
 
   it("rejects history over 16 turns or 24000 characters", () => {
