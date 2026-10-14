@@ -220,11 +220,16 @@ export function TodayDashboard({
     }
     setCtaBusy(true);
     try {
+      const continueSources = Object.keys(state.continueItem?.sourceVersions ?? {});
       const input = buildStartLearningCreateInput({
         localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
-        continueSourceIds: Object.keys(state.continueItem?.sourceVersions ?? {}),
+        continueSourceIds: continueSources,
+        courseId: state.continueItem?.courseId,
+        // Conversation title is the best available label when starting from continue context.
+        courseTitle: state.continueItem?.title,
+        sourceIds: continueSources,
       });
       const created = await api.createTeachingActivity(input);
       setActivities((rows) => {
