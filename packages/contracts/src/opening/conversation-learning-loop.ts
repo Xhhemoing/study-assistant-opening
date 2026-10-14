@@ -22,6 +22,7 @@ export const conversationLearningIntentSchema = z.object({
   dailyMinutes: z.number().int().min(10).max(240).nullable(),
   selfReportedDifficulty: z.boolean(),
   preferredStyle: z.enum(["explain_then_practice", "practice_first", "unspecified"]),
+  preferredDaypart: z.enum(["morning", "afternoon", "evening", "unspecified"]),
   missing: z.array(z.enum(["topic", "exam_date", "time_budget"])).max(3),
 }).strict();
 

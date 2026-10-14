@@ -39,7 +39,7 @@ describe("conversation intent and diagnostics", () => {
     const intent = extractConversationLearningIntent(message, [topic, "矩阵"]);
     expect(intent).toMatchObject({
       kind: "study_and_plan", topic, examInDays: 10, dailyMinutes: 60,
-      preferredStyle: "explain_then_practice", selfReportedDifficulty: true, missing: [],
+      preferredStyle: "explain_then_practice", preferredDaypart: "evening", selfReportedDifficulty: true, missing: [],
     });
     expect(diagnoseConversationLearning({
       intent, skills: [], summaryComplete: true, hasUsableMaterials: true,
@@ -76,6 +76,11 @@ describe("conversation plan preview", () => {
     expect(result.plan.retainedAcceptedBlockCount).toBe(1);
     expect(result.plan.isCommitted).toBe(false);
     expect(result.diagnosis.masteryUpdated).toBe(false);
+  });
+  it("does not schedule an evening request into the morning", () => {
+    const morningOnly = [{ kind: "free" as const, start: "2026-10-15T01:00:00.000Z", end: "2026-10-15T03:00:00.000Z" }];
+    const result = previewConversationLearningLoop({ ...defaults, acceptedBlocks: [], tasks: [], freeBlocks: morningOnly });
+    expect(result.plan.status).toBe("unscheduled");
   });
   it("neither fabricates scheduling settings nor moves existing work", () => {
     const missing = previewConversationLearningLoop({ ...defaults, freeBlocks: null });

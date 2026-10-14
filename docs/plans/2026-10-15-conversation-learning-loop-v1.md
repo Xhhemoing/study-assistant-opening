@@ -15,7 +15,7 @@ The V1 seam is:
 2. Extract bounded, **provisional** natural-language intent (zero-LLM deterministic fallback).
 3. Load server-owned knowledge nodes, complete/partial qualified learning-summary aggregates, and accessible sources.
 4. Diagnose using verified evidence only; self-reported difficulty is a hint for **diagnosis**, never a mastery upgrade.
-5. Offer a conditional study session and time-slot preview. Use existing planDay and lock all accepted blocks; do not mutate tasks or plans.
+5. Offer a conditional study session and time-slot preview. Apply the user-mentioned morning/afternoon/evening window in the workspace timezone, use existing planDay, and lock all accepted blocks; do not mutate tasks or plans.
 6. For a **later server-qualified observation**, run replanAfterVerifiedObservation and recommendConversationDelta to produce next-step suggestions. Neither function persists results or changes mastery.
 
 ## API (implemented)
@@ -44,7 +44,7 @@ POST /api/opening/learning-agent/preview
     version: "conversation-intent-v1", extraction: "rule_fallback",
     kind: "study_and_plan", topic: "矩阵乘法",
     examInDays: 10, dailyMinutes: 60, selfReportedDifficulty: true,
-    preferredStyle: "explain_then_practice", missing: []
+    preferredStyle: "explain_then_practice", preferredDaypart: "evening", missing: []
   },
   diagnosis: {
     topic: "矩阵乘法", evidenceStatus: "unobserved",

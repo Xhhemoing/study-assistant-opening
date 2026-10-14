@@ -16,6 +16,7 @@ import {
 } from "@aistudy/contracts";
 import { planDay } from "../day-planner";
 import { localDateKeyInZone } from "../daily-draft";
+import { zonedLocalInstant } from "../local-day-bounds";
 import { shouldOfferReplan } from "./replan-trigger";
 import { stableHash } from "./types";
 
@@ -53,6 +54,9 @@ export function extractConversationLearningIntent(message: string, knownTopics: 
   const selfReportedDifficulty = /不懂|不太懂|不太会|不会|很绕|困难|薄弱|struggl|confus|don't understand/i.test(message);
   const preferredStyle = /边讲边练|讲练结合|讲解.*练习|explain.{0,20}practice/i.test(message)
     ? "explain_then_practice" as const : /先做题|先练习|practice first/i.test(message) ? "practice_first" as const : "unspecified" as const;
+  const preferredDaypart = /每天晚上|每晚|晚上|evening/i.test(message) ? "evening" as const
+    : /每天早上|早上|morning/i.test(message) ? "morning" as const
+      : /每天下午|下午|afternoon/i.test(message) ? "afternoon" as const : "unspecified" as const;
   const wantsPlan = /计划|安排|排期|规划|每天|备考|schedule|plan/i.test(message);
   const wantsStudy = /学|练|讲|题|不懂|不太会|考试|矩阵|learn|study|practice|understand/i.test(message) || topic !== null;
   const kind = wantsPlan && wantsStudy ? "study_and_plan" : wantsPlan ? "plan_only" : wantsStudy ? "study_only" : "unknown";
@@ -61,7 +65,7 @@ export function extractConversationLearningIntent(message: string, knownTopics: 
   if (/考试|测验|考|exam|test/i.test(message) && examInDays === null) missing.push("exam_date");
   if (wantsPlan && dailyMinutes === null) missing.push("time_budget");
   return { version: "conversation-intent-v1", extraction: "rule_fallback", kind, topic,
-    examInDays, dailyMinutes, selfReportedDifficulty, preferredStyle, missing };
+    examInDays, dailyMinutes, selfReportedDifficulty, preferredStyle, preferredDaypart, missing };
 }
 
 export function diagnoseConversationLearning(input: {
@@ -164,7 +168,17 @@ export function previewConversationLearningLoop(input: ConversationLoopPreviewIn
       localDate: input.date, timeZone: input.timeZone,
       ...(localDateKeyInZone(input.now, input.timeZone) === input.date ? { planningNow: input.now.toISOString() } : {}),
     };
-    const planned = planDay([...remaining, proposedTask], [...input.freeBlocks, ...locks], options);
+    // A conversational "every evening" constraint is a preference, not a new hard calendar entry.
+    const windows = { morning: ["06:00", "12:00"], afternoon: ["12:00", "18:00"], evening: ["18:00", "23:00"] } as const;
+    const window = intent.preferredDaypart === "unspecified" ? null : windows[intent.preferredDaypart];
+    const from = window ? zonedLocalInstant(input.date + "T" + window[0], input.timeZone).getTime() : null;
+    const until = window ? zonedLocalInstant(input.date + "T" + window[1], input.timeZone).getTime() : null;
+    const available: TimeBlock[] = input.freeBlocks.flatMap((block) => {
+      if (block.kind !== "free" || from === null || until === null) return [block];
+      const start = Math.max(from, Date.parse(block.start)), end = Math.min(until, Date.parse(block.end));
+      return start < end ? [{ kind: "free" as const, start: new Date(start).toISOString(), end: new Date(end).toISOString() }] : [];
+    });
+    const planned = planDay([...remaining, proposedTask], [...available, ...locks], options);
     proposedBlock = planned.blocks.find((block) => block.taskId === proposedTask.id) ?? null;
     const unscheduled = planned.unscheduled.find((entry) => entry.taskId === proposedTask.id);
     status = proposedBlock ? "scheduled" : "unscheduled";
@@ -175,6 +189,7 @@ export function previewConversationLearningLoop(input: ConversationLoopPreviewIn
   if (!input.summaryComplete) warnings.push("学情投影尚未完全就绪，仅提供诊断建议，不判断掌握。");
   if (intent.dailyMinutes === null) warnings.push("没有明确的每日学习时长，先按45分钟模拟。");
   if (!input.hasUsableMaterials) warnings.push("本课程暂无可用材料；AI讲解需进一步核对依据。");
+  if (intent.preferredDaypart !== "unspecified") warnings.push("仅按所述时段粗略模拟；具体空闲窗口仍需要确认。");
   if (status === "no_planning_settings") warnings.push("学期作息未配置，因此不提供可执行时间。");
   if (status === "unscheduled") warnings.push("现有计划和固定安排占用时间，本建议没有可用时段。");
   return conversationLearningPreviewSchema.parse({
