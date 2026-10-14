@@ -83,6 +83,20 @@ describe("buildDailyDraftInput", () => {
     expect(result.orderedTaskIds).not.toContain(id(1));
   });
 
+  it("excludes tasks deferred past the local day, including yesterday's carry-over", () => {
+    // 2026-09-15T00:00 CST is 2026-09-14T16:00Z: tomorrow in Asia/Shanghai.
+    const deferred = task(1, { notBefore: "2026-09-14T16:00:00.000Z" });
+    const result = buildDailyDraftInput({
+      tasks: [deferred, task(2)],
+      yesterdayAccepted: [yesterdayBlock(1)],
+      dueRetests: [],
+      freeBlocks: [slot("09:00", "12:00")],
+      now,
+      timeZone: tz,
+    });
+    expect(result.orderedTaskIds).toEqual([id(2)]);
+  });
+
   it("marks overflow as unscheduled suggestions prefer_tomorrow or shorten_duration", () => {
     // One 30-min free slot; three 30-min tasks → two overflow prefer_tomorrow
     const tight = buildDailyDraftInput({

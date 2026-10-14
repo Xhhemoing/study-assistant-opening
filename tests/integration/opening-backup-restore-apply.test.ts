@@ -226,6 +226,20 @@ describe.skipIf(!enabled)("opening export→archive→apply live MinIO E2E (dedi
     await storage.putObject(seedKey, body, { mime: "text/plain" });
     trackedKeys.push(seedKey);
 
+    // 0061 adaptive planning columns must survive the round trip.
+    const courseId = randomUUID(), taskId = randomUUID(), draftId = randomUUID();
+    const adaptivePrefs = { autonomy: "coach", coachBudgetMinutes: 45, courseGoals: { [courseId]: { targetDate: "2026-11-01", weeklyMinutes: 300 } } };
+    const suggested = [{ key: `planner:2026-09-25:weak_skill:${courseId}`, id: randomUUID(), kind: "weak_skill", title: "极限 · 巩固练习",
+      minutes: 25, courseId, skillLabel: "数列极限", reasonCode: "weak_skill", reason: "近期作答依赖提示" }];
+    await sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseId}, ${workspaceId}, '高等数学', ${`calc-${courseId}`})`;
+    await sql`INSERT INTO workspace_preferences (workspace_id, adaptive_planning) VALUES (${workspaceId}, ${sql.json(adaptivePrefs as never)})`;
+    await sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, course_id, skill_label, origin, not_before)
+      VALUES (${taskId}, ${workspaceId}, ${userId}, '极限入门', 25, ${courseId}, '数列极限', 'planner', '2026-09-26T00:00:00Z')`;
+    await sql`INSERT INTO opening_plan_drafts (id, workspace_id, owner_user_id, day, base_version, input_snapshot, hard_blocks_fingerprint,
+        origin, suggested_tasks, reasons, strategy_version)
+      VALUES (${draftId}, ${workspaceId}, ${userId}, '2026-09-25', 0, '{}'::jsonb, 'fingerprint', 'auto_draft',
+        ${sql.json(suggested as never)}, ${sql.json({ [taskId]: { code: "carry_over", label: "顺延自昨天" } } as never)}, 'adaptive-1')`;
+
     const scope = { workspaceId, ownerUserId: userId };
     const backup = await exportOpeningBackup(sql, scope, scratch, reader);
     expect(backup.workspaceId.toLowerCase()).toBe(workspaceId.toLowerCase());
@@ -243,6 +257,10 @@ describe.skipIf(!enabled)("opening export→archive→apply live MinIO E2E (dedi
     // Empty this workspace's durable restore namespace only (dedicated UUID — not shared wipe)
     await sql`DELETE FROM opening_jobs WHERE workspace_id = ${workspaceId}`;
     await sql`DELETE FROM opening_sources WHERE workspace_id = ${workspaceId}`;
+    await sql`DELETE FROM opening_plan_drafts WHERE workspace_id = ${workspaceId}`;
+    await sql`DELETE FROM opening_tasks WHERE workspace_id = ${workspaceId}`;
+    await sql`DELETE FROM workspace_preferences WHERE workspace_id = ${workspaceId}`;
+    await sql`DELETE FROM courses WHERE workspace_id = ${workspaceId}`;
     await storage.deleteObject(seedKey);
 
     const empty = await readOpeningRestoreNamespaceCounts(sql, workspaceId);
@@ -266,14 +284,15 @@ describe.skipIf(!enabled)("opening export→archive→apply live MinIO E2E (dedi
       backup,
       currentDeletionJournal: [],
       currentMemoryDeletions: { workspaceId: backup.workspaceId, memories: [] },
+      // The workspace_preferences row requires the (now empty) target learning state.
+      currentLearningState: { workspacePreferences: null, courses: [] },
       sql,
       objectPut,
       stagingDirectory,
     });
     trackedKeys.push(...objectPut.keys);
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
+    if (!result.ok) throw new Error(`restore failed: ${JSON.stringify(result.errors)}`);
     expect(result.code).toBe("APPLY_OK");
     expect(result.mutated).toBe(true);
     expect(result.objectApplyDeferred).toBe(false);
@@ -302,6 +321,15 @@ describe.skipIf(!enabled)("opening export→archive→apply live MinIO E2E (dedi
       WHERE workspace_id = ${workspaceId} AND id = ${sourceId}
     `;
     expect(src).toMatchObject({ id: sourceId, name: "e2e.txt" });
+
+    const [task] = await sql`SELECT course_id::text AS course_id, skill_label, origin, not_before FROM opening_tasks WHERE id = ${taskId}`;
+    expect(task).toMatchObject({ course_id: courseId, skill_label: "数列极限", origin: "planner" });
+    expect(new Date(task!.not_before as string).toISOString()).toBe("2026-09-26T00:00:00.000Z");
+    const [draft] = await sql`SELECT origin, suggested_tasks, reasons, strategy_version FROM opening_plan_drafts WHERE id = ${draftId}`;
+    expect(draft).toMatchObject({ origin: "auto_draft", suggested_tasks: suggested, strategy_version: "adaptive-1",
+      reasons: { [taskId]: { code: "carry_over", label: "顺延自昨天" } } });
+    const [prefs] = await sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id = ${workspaceId}`;
+    expect(prefs?.adaptive_planning).toEqual(adaptivePrefs);
   });
 });
 

@@ -95,17 +95,28 @@ function resolveDayEnd(free: readonly TimeBlock[], options: PlanDayOptions): Day
   return { endMs: Date.parse(`${day}T23:59:59.999Z`), exclusive: false };
 }
 
+/**
+ * Earliest allowable start: the later of a retest's recommendedAt and a deferral's
+ * notBefore. Null when neither is set.
+ */
+export function taskNotBeforeAt(task: TaskItem): string | null {
+  const candidates = [task.retest?.recommendedAt, task.notBefore].filter(
+    (value): value is string => typeof value === "string" && value !== "",
+  );
+  if (!candidates.length) return null;
+  return candidates.reduce((latest, value) => (Date.parse(value) > Date.parse(latest) ? value : latest));
+}
+
 function isRetestNotYetDue(task: TaskItem, endMs: number, exclusive: boolean): boolean {
-  const recommendedAt = task.retest?.recommendedAt;
-  if (!recommendedAt) return false;
-  const t = Date.parse(recommendedAt);
+  const notBefore = taskNotBeforeAt(task);
+  if (!notBefore) return false;
+  const t = Date.parse(notBefore);
   return exclusive ? t >= endMs : t > endMs;
 }
 
-/** Earliest allowable start: retest recommendedAt acts as not-before. */
 function taskNotBeforeMs(task: TaskItem): number {
-  const recommendedAt = task.retest?.recommendedAt;
-  return recommendedAt ? Date.parse(recommendedAt) : Number.NEGATIVE_INFINITY;
+  const notBefore = taskNotBeforeAt(task);
+  return notBefore ? Date.parse(notBefore) : Number.NEGATIVE_INFINITY;
 }
 
 /**

@@ -32,16 +32,20 @@ export const timeBlockSchema = z
 
 export {
   taskItemSchema,
+  taskOriginSchema,
   taskRetestProjectionSchema,
   retestTaskSnapshotSchema,
   taskCreateInputSchema,
   taskCreateResultSchema,
   taskStatusUpdateInputSchema,
+  taskDeferInputSchema,
   type TaskItem,
+  type TaskOrigin,
   type TaskRetestProjection,
   type TaskCreateInput,
   type TaskCreateResult,
   type TaskStatusUpdateInput,
+  type TaskDeferInput,
 } from "./planning-tasks";
 
 export const plannedBlockSchema = z
@@ -65,6 +69,44 @@ export const unscheduledTaskSchema = z
   .object({ taskId: uuidSchema, reason: unscheduledReasonCodeSchema })
   .strict();
 
+/** Why a task sits where it does in an adaptive draft (UX policy §6 reason_codes). */
+export const planReasonCodeSchema = z.enum([
+  "deadline",
+  "retest_due",
+  "carry_over",
+  "pending_task",
+  "weak_skill",
+  "review_cards",
+  "new_skill",
+  "course_pace",
+  "repeatedly_skipped",
+]);
+
+export const planBlockReasonSchema = z
+  .object({ code: planReasonCodeSchema, label: z.string().min(1).max(500) })
+  .strict();
+
+/** Tasks the planner proposes; they are created only when the learner accepts the draft. */
+export const suggestionKindSchema = z.enum(["weak_skill", "review_cards", "new_skill", "course_pace"]);
+
+export const suggestedTaskSchema = z
+  .object({
+    /** Becomes the task clientKey on accept. */
+    key: z.string().min(8).max(200),
+    /** Pre-assigned task id; draft blocks reference it. */
+    id: uuidSchema,
+    kind: suggestionKindSchema,
+    title: z.string().min(1).max(240),
+    minutes: z.number().int().positive().max(240),
+    courseId: uuidSchema.nullable(),
+    skillLabel: z.string().min(1).max(200).nullable(),
+    reasonCode: planReasonCodeSchema,
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
+
+export const planDraftOriginSchema = z.enum(["user", "auto_draft", "coach", "agent"]);
+
 export const planDraftSchema = z
   .object({
     id: uuidSchema,
@@ -76,6 +118,11 @@ export const planDraftSchema = z
     unscheduledTaskIds: z.array(uuidSchema).max(200),
     /** PR-B additive: per-task reason for unscheduledTaskIds (same order); optional for older payloads. */
     unscheduled: z.array(unscheduledTaskSchema).max(200).optional(),
+    /** Adaptive planning (0061) — omitted for plain drafts. */
+    origin: planDraftOriginSchema.optional(),
+    suggestedTasks: z.array(suggestedTaskSchema).max(10).optional(),
+    reasons: z.record(uuidSchema, planBlockReasonSchema).optional(),
+    strategyVersion: z.string().min(1).max(40).optional(),
   })
   .strict();
 
@@ -83,6 +130,16 @@ export const acceptPlanInputSchema = z
   .object({
     draftId: uuidSchema,
     expectedBaseVersion: z.number().int().nonnegative(),
+    clientKey: z.string().min(8).max(200),
+    /** Suggested-task keys to create with the plan. Omitted = all suggestions in the draft. */
+    acceptSuggestedKeys: z.array(z.string().min(8).max(200)).max(10).optional(),
+  })
+  .strict();
+
+/** Undo the coach's automatic confirmation for a day. */
+export const planUndoInputSchema = z
+  .object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     clientKey: z.string().min(8).max(200),
   })
   .strict();
@@ -184,6 +241,12 @@ export type TimeBlock = z.infer<typeof timeBlockSchema>;
 export type PlannedBlock = z.infer<typeof plannedBlockSchema>;
 export type PlanDraft = z.infer<typeof planDraftSchema>;
 export type AcceptPlanInput = z.infer<typeof acceptPlanInputSchema>;
+export type PlanReasonCode = z.infer<typeof planReasonCodeSchema>;
+export type PlanBlockReason = z.infer<typeof planBlockReasonSchema>;
+export type SuggestionKind = z.infer<typeof suggestionKindSchema>;
+export type SuggestedTask = z.infer<typeof suggestedTaskSchema>;
+export type PlanDraftOrigin = z.infer<typeof planDraftOriginSchema>;
+export type PlanUndoInput = z.infer<typeof planUndoInputSchema>;
 export type Reminder = z.infer<typeof reminderSchema>;
 export type ReminderList = z.infer<typeof reminderListSchema>;
 export type ReminderEnqueueInput = z.infer<typeof reminderEnqueueInputSchema>;

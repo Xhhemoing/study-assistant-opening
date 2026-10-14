@@ -12,6 +12,9 @@ export const taskRetestProjectionSchema = z.object({
   recommendedAt: isoDateTimeSchema.nullable(),
 }).strict();
 
+/** Who put the task in the queue. `planner`/`agent` tasks only exist after the learner accepted a draft. */
+export const taskOriginSchema = z.enum(["manual", "course_seed", "retest", "planner", "agent"]);
+
 export const taskItemSchema = z.object({
   id: uuidSchema,
   version: z.number().int().positive().optional(),
@@ -22,6 +25,13 @@ export const taskItemSchema = z.object({
   status: z.enum(["pending", "done", "skipped"]),
   /** Present for retest-origin tasks; null/omitted for ordinary tasks. */
   retest: taskRetestProjectionSchema.nullable().optional(),
+  /** Adaptive planning (0061); omitted when unset. */
+  courseId: uuidSchema.optional(),
+  skillLabel: z.string().min(1).max(200).optional(),
+  /** Omitted for `manual`. */
+  origin: taskOriginSchema.optional(),
+  /** Planners must not place the task before this instant (deferral). */
+  notBefore: isoDateTimeSchema.optional(),
 }).strict();
 
 /** Stored with a retest-origin task. Not a calendar schedule. */
@@ -53,6 +63,11 @@ export const taskCreateInputSchema = z.object({
   /** Plan version the retest snapshot was based on. Not calendar scheduling. */
   baseVersion: z.number().int().nonnegative().optional(),
   inputSnapshot: retestTaskSnapshotSchema.optional(),
+  /** Owned, unarchived course; checked by the repository. */
+  courseId: uuidSchema.nullable().optional(),
+  skillLabel: z.string().min(1).max(200).nullable().optional(),
+  /** Client-settable origins only; retest/planner/agent are assigned server-side. */
+  origin: z.enum(["manual", "course_seed"]).optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.dueText && value.dueAt) {
     ctx.addIssue({ code: "custom", message: "dueText cannot become a formal deadline while dueAt is set", path: ["dueText"] });
@@ -80,8 +95,15 @@ export const taskStatusUpdateInputSchema = z.object({
   expectedVersion: z.number().int().positive(),
   at: isoDateTimeSchema,
 }).strict();
+/** Defer a pending task: planners skip it until `notBefore` (null clears the deferral). */
+export const taskDeferInputSchema = z.object({
+  notBefore: isoDateTimeSchema.nullable(),
+  expectedVersion: z.number().int().positive(),
+}).strict();
 export type TaskCreateResult = z.infer<typeof taskCreateResultSchema>;
 export type TaskStatusUpdateInput = z.infer<typeof taskStatusUpdateInputSchema>;
+export type TaskDeferInput = z.infer<typeof taskDeferInputSchema>;
+export type TaskOrigin = z.infer<typeof taskOriginSchema>;
 
 export type TaskItem = z.infer<typeof taskItemSchema>;
 export type TaskRetestProjection = z.infer<typeof taskRetestProjectionSchema>;

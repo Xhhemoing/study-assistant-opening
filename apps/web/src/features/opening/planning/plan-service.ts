@@ -10,6 +10,7 @@ import {
   type TaskItem,
   type TimeBlock,
   type WeekSession,
+  taskDeferInputSchema,
   taskStatusUpdateInputSchema,
   uuidSchema,
 } from "@aistudy/contracts";
@@ -268,6 +269,15 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       const input = taskStatusUpdateInputSchema.parse(raw);
       try {
         return await repo.updateTaskStatus(scope, uuidSchema.parse(taskId), input);
+      } catch (error) {
+        throw mapRepoError(error);
+      }
+    },
+
+    async deferTask(scope: Scope, taskId: string, raw: unknown) {
+      const input = taskDeferInputSchema.parse(raw);
+      try {
+        return await repo.deferTask(scope, uuidSchema.parse(taskId), input);
       } catch (error) {
         throw mapRepoError(error);
       }

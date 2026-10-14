@@ -1,5 +1,6 @@
 import type { PlannedBlock, TaskItem, TimeBlock } from "@aistudy/contracts";
 import { availableTimeSlots } from "./planning-time";
+import { taskNotBeforeAt } from "./day-planner";
 
 /** Machine-readable reason codes for daily auto-draft explanations. */
 export type DailyDraftReasonCode =
@@ -75,10 +76,11 @@ function compareTasks(a: TaskItem, b: TaskItem): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/** Retest recommendedAt or a deferral's notBefore falls on a later local day. */
 function isRetestNotYetDue(task: TaskItem, localDate: string, timeZone: string): boolean {
-  const recommendedAt = task.retest?.recommendedAt;
-  if (!recommendedAt) return false;
-  return localDateOf(recommendedAt, timeZone) > localDate;
+  const notBefore = taskNotBeforeAt(task);
+  if (!notBefore) return false;
+  return localDateOf(notBefore, timeZone) > localDate;
 }
 
 function maxFreeSlotMinutes(freeBlocks: readonly TimeBlock[]): number {

@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type {
+  PlanBlockReason,
   PlanDraft,
+  PlanDraftOrigin,
   PlannedBlock,
+  SuggestedTask,
   TaskCreateInput,
   TaskCreateResult,
+  TaskDeferInput,
   TaskItem,
   TaskStatusUpdateInput,
   TimeBlock,
@@ -15,6 +19,7 @@ import { OpeningPlanError } from "./opening-plan-error";
 import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { withTaskPlanningFields } from "./opening-task-fields";
 
 export { OpeningPlanError };
 export type { OpeningPlanErrorCode } from "./opening-plan-error";
@@ -55,9 +60,9 @@ function mapTask(row: Record<string, unknown>): TaskItem {
     retest: null,
   };
   const activityId = row.retest_activity_id as string | null | undefined;
-  if (!activityId) return base;
+  if (!activityId) return withTaskPlanningFields(base, row);
   const prompt = (row.retest_prompt as string | null | undefined) ?? base.title;
-  return {
+  return withTaskPlanningFields({
     ...base,
     retest: {
       candidateId: row.retest_candidate_id as string,
@@ -69,7 +74,7 @@ function mapTask(row: Record<string, unknown>): TaskItem {
         ? new Date(row.retest_recommended_at as string | Date).toISOString()
         : null,
     },
-  };
+  }, row);
 }
 
 function formatPlanDay(value: unknown): string {
@@ -88,7 +93,7 @@ function formatPlanDay(value: unknown): string {
 }
 
 function mapDraft(row: Record<string, unknown>): PlanDraft {
-  return {
+  const draft: PlanDraft = {
     id: row.id as string,
     date: formatPlanDay(row.day),
     version: Number(row.version),
@@ -97,6 +102,14 @@ function mapDraft(row: Record<string, unknown>): PlanDraft {
     blocks: (row.blocks as PlannedBlock[]) ?? [],
     unscheduledTaskIds: (row.unscheduled_task_ids as string[]) ?? [],
   };
+  // 0061 fields are omitted at their defaults so plain drafts keep their shape.
+  if (typeof row.origin === "string" && row.origin !== "user") draft.origin = row.origin as PlanDraftOrigin;
+  const suggested = row.suggested_tasks as SuggestedTask[] | null | undefined;
+  if (Array.isArray(suggested) && suggested.length) draft.suggestedTasks = suggested;
+  const reasons = row.reasons as Record<string, PlanBlockReason> | null | undefined;
+  if (reasons && Object.keys(reasons).length) draft.reasons = reasons;
+  if (typeof row.strategy_version === "string") draft.strategyVersion = row.strategy_version;
+  return draft;
 }
 
 export function createOpeningPlansRepository(sql: Sql) {
@@ -185,6 +198,25 @@ export function createOpeningPlansRepository(sql: Sql) {
         if (activity) await nextWorkspaceLearningHistoryRevision(tx, scope);
         return mapTask(updated[0] as Record<string, unknown>);
       });
+    },
+
+    /** Defer (or un-defer) a pending task; planners skip it until notBefore. */
+    async deferTask(scope: OpeningScope, taskId: string, input: TaskDeferInput): Promise<TaskItem> {
+      const rows = await sql`SELECT version, status FROM opening_tasks
+        WHERE id = ${taskId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+      if (!rows.length) throw new OpeningPlanError("NOT_FOUND", "task not found");
+      const current = rows[0] as Record<string, unknown>;
+      if (current.status !== "pending") throw new OpeningPlanError("CONFLICT", "only pending tasks can be deferred");
+      const updated = await sql`UPDATE opening_tasks
+        SET not_before = ${input.notBefore}, version = version + 1, updated_at = now()
+        WHERE id = ${taskId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND version = ${input.expectedVersion} AND status = 'pending'
+        RETURNING id`;
+      if (!updated.length) throw new OpeningPlanError("CONFLICT", "task version is stale");
+      const tasks = await this.listTasks(scope);
+      const task = tasks.find((item) => item.id === taskId);
+      if (!task) throw new OpeningPlanError("NOT_FOUND", "task not found");
+      return task;
     },
 
     async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {

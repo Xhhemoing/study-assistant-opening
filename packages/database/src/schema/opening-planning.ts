@@ -26,6 +26,11 @@ export const openingTasks = pgTable("opening_tasks", {
   candidateId: uuid("candidate_id"),
   /** Quick-add idempotency only; retest/assistant keep their own receipts. */
   clientKey: text("client_key"),
+  /** 0061: FK courses ON DELETE SET NULL; writers check workspace ownership. */
+  courseId: uuid("course_id"),
+  skillLabel: text("skill_label"),
+  origin: text("origin").notNull().default("manual"),
+  notBefore: timestamp("not_before", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -85,6 +90,10 @@ export const openingPlanDrafts = pgTable("opening_plan_drafts", {
   inputSnapshot: jsonb("input_snapshot").notNull(),
   hardBlocksFingerprint: text("hard_blocks_fingerprint").notNull(),
   proposeClientKey: text("propose_client_key"),
+  origin: text("origin").notNull().default("user"),
+  suggestedTasks: jsonb("suggested_tasks").notNull().default([]),
+  reasons: jsonb("reasons").notNull().default({}),
+  strategyVersion: text("strategy_version"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

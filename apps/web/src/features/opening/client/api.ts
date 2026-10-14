@@ -30,9 +30,15 @@ import {
   type TaskItem,
   type TaskCreateInput,
   type TaskStatusUpdateInput,
+  type TaskDeferInput,
   type CandidateRef,
+  type OpeningAdaptivePrefsPatch,
+  type OpeningAdaptivePrefsResponse,
   taskCreateInputSchema,
   taskStatusUpdateInputSchema,
+  taskDeferInputSchema,
+  openingAdaptivePrefsPatchSchema,
+  openingAdaptivePrefsResponseSchema,
   taskCreateResultSchema,
   taskItemSchema,
   type EphemeralTurnResponse,
@@ -385,6 +391,14 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return taskListSchema.shape.tasks.element.parse(body);
     },
 
+    /** Defer a pending task until notBefore (null clears it). */
+    async deferTask(taskId: string, input: TaskDeferInput) {
+      const body = await request(`/api/opening/tasks/${taskId}`, {
+        method: "PATCH", body: JSON.stringify(taskDeferInputSchema.parse(input)),
+      }, fetchImpl);
+      return taskListSchema.shape.tasks.element.parse(body);
+    },
+
     async listRetestCandidates() {
       const body = await request("/api/opening/retests", { method: "GET" }, fetchImpl);
       return z.array(retestReviewSchema).parse(body);
@@ -474,6 +488,18 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         fetchImpl,
       );
       return openingPlanningSettingsResponseSchema.parse(body);
+    },
+
+    async getAdaptivePrefs(): Promise<OpeningAdaptivePrefsResponse> {
+      const body = await request("/api/opening/adaptive-planning", { method: "GET" }, fetchImpl);
+      return openingAdaptivePrefsResponseSchema.parse(body);
+    },
+
+    async patchAdaptivePrefs(patch: OpeningAdaptivePrefsPatch): Promise<OpeningAdaptivePrefsResponse> {
+      const body = await request("/api/opening/adaptive-planning", {
+        method: "PATCH", body: JSON.stringify(openingAdaptivePrefsPatchSchema.parse(patch)),
+      }, fetchImpl);
+      return openingAdaptivePrefsResponseSchema.parse(body);
     },
 
     async getToday(date: string): Promise<TodayPlanRead> {

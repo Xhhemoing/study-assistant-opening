@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TaskItem, TimeBlock } from "@aistudy/contracts";
-import { planDay } from "./day-planner";
+import { planDay, taskNotBeforeAt } from "./day-planner";
 
 const at = (clock: string) => `2026-09-14T${clock}:00.000Z`;
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -119,6 +119,25 @@ describe("planDay", () => {
       start: at("10:00"), end: at("10:30"),
     });
     expect(result.unscheduledTaskIds).toEqual([]);
+  });
+
+  it("treats a deferral's notBefore like a retest not-before", () => {
+    const deferredToTomorrow = task(1, { notBefore: "2026-09-15T00:00:00.000Z" });
+    const deferredToLater = task(2, { notBefore: at("10:30") });
+    const ordinary = task(3);
+    const result = planDay([deferredToTomorrow, deferredToLater, ordinary], [slot("09:00", "12:00")], {
+      dayEnd: "2026-09-14T23:59:59.999Z",
+    });
+    // Tomorrow's deferral is neither placed nor reported unscheduled; today's starts at notBefore.
+    expect(result.blocks.map((b) => b.taskId)).toEqual([id(3), id(2)]);
+    expect(result.blocks.find((b) => b.taskId === id(2))).toMatchObject({ start: at("10:30") });
+    expect(result.unscheduledTaskIds).toEqual([]);
+  });
+
+  it("uses the later of retest recommendedAt and notBefore", () => {
+    expect(taskNotBeforeAt(retest(1, at("10:00"), { notBefore: at("11:00") }))).toBe(at("11:00"));
+    expect(taskNotBeforeAt(retest(1, at("12:00"), { notBefore: at("11:00") }))).toBe(at("12:00"));
+    expect(taskNotBeforeAt(task(1))).toBeNull();
   });
 
   it("schedules a retest on the day its recommendedAt falls", () => {
