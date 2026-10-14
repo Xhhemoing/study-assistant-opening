@@ -1,3 +1,5 @@
+import { getOpeningOnboardingStatus } from "../../../../features/opening/server/workspace-setup-service";
+import { isOpeningRelease } from "../../../../features/opening/access-policy";
 import {
   jsonError,
   mapDomainError,
@@ -14,14 +16,16 @@ export async function GET(request: Request): Promise<Response> {
     if (!user) {
       throw new ApiError("NOT_FOUND", "User not found", 404);
     }
+    const onboardingRequired = isOpeningRelease() && (await getOpeningOnboardingStatus(runtime.sql, { workspaceId: principal.workspaceId, ownerUserId: principal.userId })).needsOnboarding;
     return Response.json({
+      onboardingRequired,
       user: {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
         workspaceId: principal.workspaceId,
       },
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }

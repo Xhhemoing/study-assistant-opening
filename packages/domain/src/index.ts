@@ -465,3 +465,7 @@ export {
   type MatrixTransformStep,
   type StaticFallbackModel,
 } from "./opening/teaching-math-model";
+
+export { buildOpeningOnboardingSeed } from "./opening/onboarding";
+
+export { guidanceProtectedBlocks } from "./opening/guidance-blocks";

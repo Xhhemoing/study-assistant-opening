@@ -75,6 +75,7 @@ export type StartLearningContext = {
   continueConversationId?: string | null;
   /** Current-version, AI-eligible materials of the continued conversation. */
   continueSourceIds?: readonly string[];
+  task?: { id: string; title: string; version?: number; courseId?: string | null; sourceIds?: string[] } | null;
 };
 
 /**
@@ -111,16 +112,14 @@ export function buildStartLearningCreateInput(
       },
     };
   }
-  const summary = "今日主题学习";
+  if (!ctx.task?.title.trim()) throw new Error("请先选择一个真实学习任务，或从材料与笔记开始。");
   return {
-    clientKey: `today-topic:${ctx.localDate}`,
+    clientKey: `today-task:${ctx.localDate}:${ctx.task.id}:v${ctx.task.version ?? 1}`,
     intentKind: "topic",
-    intentSummary: summary,
-    createIntent: {
-      intentKind: "topic",
-      source: "today",
-      localDate: ctx.localDate,
-    },
+    intentSummary: ctx.task.title,
+    courseId: ctx.task.courseId ?? null,
+    sourceIds: ctx.task.sourceIds ?? [],
+    createIntent: { intentKind: "topic", source: "today", taskId: ctx.task.id, taskVersion: ctx.task.version ?? 1, localDate: ctx.localDate },
   };
 }
 

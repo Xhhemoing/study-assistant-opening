@@ -1,4 +1,5 @@
 import {
+  planningAgentInputSchema, planningAgentResultSchema, type PlanningAgentInput, type PlanningAgentResult,
   snippetCreateInputSchema,
   snippetCreateResponseSchema,
   type SnippetCreateInput,
@@ -463,6 +464,12 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
     async listTasks(): Promise<{ tasks: TaskItem[] }> {
       const body = await request("/api/opening/tasks", { method: "GET" }, fetchImpl);
       return taskListSchema.parse(body);
+    },
+
+    async planWithAgent(input: PlanningAgentInput, signal?: AbortSignal): Promise<PlanningAgentResult> {
+      const body = await request("/api/opening/planning-agent", { method: "POST", signal,
+        body: JSON.stringify(planningAgentInputSchema.parse(input)) }, fetchImpl);
+      return planningAgentResultSchema.parse(body);
     },
 
     async proposePlan(input: unknown): Promise<PlanDraft> {

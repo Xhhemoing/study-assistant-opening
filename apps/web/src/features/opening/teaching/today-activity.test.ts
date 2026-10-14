@@ -55,11 +55,16 @@ it("builds idempotent resume or topic create input with honest Chinese summary",
   expect(resume.intentKind).toBe("resume");
   expect(resume.intentSummary).toBe("继续：线性代数答疑");
   expect(resume.clientKey).toContain("today-resume:2026-10-11:");
-  const topic = buildStartLearningCreateInput({ localDate: "2026-10-11" });
+  const topic = buildStartLearningCreateInput({ localDate: "2026-10-11", task: {
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", title: "分部积分：独立选择 u 与 dv", version: 2,
+    courseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", sourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+  } });
   expect(topic).toMatchObject({
-    clientKey: "today-topic:2026-10-11",
+    clientKey: "today-task:2026-10-11:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb:v2",
     intentKind: "topic",
-    intentSummary: "今日主题学习",
+    intentSummary: "分部积分：独立选择 u 与 dv",
+    courseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    sourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
   });
 });
 
@@ -97,4 +102,8 @@ it("labels generateStatus honestly and does not claim fake ready teaching conten
   expect(teachingActivityGenerateStatusLabel("queued")).toBe("生成排队中");
   expect(teachingActivityContentHonesty("ready")).toContain("不会伪造讲义");
   expect(teachingActivityContentHonesty("queued")).toContain("不会假装");
+});
+
+it("does not create a fake topic when the workspace has no real learning context", () => {
+  expect(() => buildStartLearningCreateInput({ localDate: "2026-10-11" })).toThrow();
 });

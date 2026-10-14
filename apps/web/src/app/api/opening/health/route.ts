@@ -1,10 +1,9 @@
-import { runReadinessProbes } from "../../../../../../../scripts/opening-readiness-probes.mjs";
-import { summarizeOpeningHealth } from "../../../../features/opening/health/health-summary";
-
+/** Public process liveness only. Dependency diagnostics stay in the operator CLI. */
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(): Promise<Response> {
-  const probes = await runReadinessProbes(process.env);
-  const body = summarizeOpeningHealth(probes);
-  return Response.json(body, { status: body.status === "ok" ? 200 : 503 });
+  return Response.json({ status: "ok", kind: "liveness" }, {
+    headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+  });
 }

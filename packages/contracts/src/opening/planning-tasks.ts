@@ -22,6 +22,8 @@ export const taskItemSchema = z.object({
   status: z.enum(["pending", "done", "skipped"]),
   /** Present for retest-origin tasks; null/omitted for ordinary tasks. */
   retest: taskRetestProjectionSchema.nullable().optional(),
+  courseId: uuidSchema.nullable().optional(),
+  sourceIds: z.array(uuidSchema).max(32).optional(),
 }).strict();
 
 /** Stored with a retest-origin task. Not a calendar schedule. */

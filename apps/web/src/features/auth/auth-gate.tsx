@@ -13,9 +13,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true;
     fetch("/api/auth/me", { cache: "no-store" })
-      .then((response) => {
+      .then(async (response) => {
         if (!active) return;
-        if (response.ok) setReady(true);
+        if (response.ok) {
+          const body = await response.json();
+          if (!active) return;
+          if (body.onboardingRequired && window.location.pathname !== "/onboarding") router.replace("/onboarding");
+          else setReady(true);
+        }
         else if (response.status === 401) router.replace(loginHrefForReturn(`${window.location.pathname}${window.location.search}${window.location.hash}`));
         else setError("暂时无法验证登录状态，请稍后重试。");
       })

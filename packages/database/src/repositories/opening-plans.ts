@@ -14,6 +14,7 @@ import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
 import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
+import { assertAgentPlanCurrent, type AgentPlanGuard } from "./opening-agent-plan-guard";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
 export { OpeningPlanError };
@@ -53,6 +54,8 @@ function mapTask(row: Record<string, unknown>): TaskItem {
     priority: Number(row.priority),
     status: row.status as TaskItem["status"],
     retest: null,
+    ...(row.course_id ? { courseId: row.course_id as string | null } : {}),
+    ...(Array.isArray(row.source_ids) && row.source_ids.length ? { sourceIds: row.source_ids as string[] } : {}),
   };
   const activityId = row.retest_activity_id as string | null | undefined;
   if (!activityId) return base;
@@ -308,7 +311,12 @@ export function createOpeningPlansRepository(sql: Sql) {
         WHERE id = ${draftId} AND workspace_id = ${scope.workspaceId}
           AND owner_user_id = ${scope.ownerUserId} AND status = 'draft'
         RETURNING *`;
-      if (!rows.length) throw new OpeningPlanError("NOT_FOUND", "draft not found");
+      if (!rows.length) {
+        const prior = await sql`SELECT * FROM opening_plan_drafts WHERE id=${draftId} AND workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND status='rejected'`;
+        if (!prior.length) throw new OpeningPlanError("NOT_FOUND", "draft not found or already accepted");
+        return mapDraft(prior[0] as Record<string, unknown>);
+      }
       return mapDraft(rows[0] as Record<string, unknown>);
     },
 
@@ -321,6 +329,8 @@ export function createOpeningPlansRepository(sql: Sql) {
         .digest("hex");
 
       return sql.begin(async (tx) => {
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
         const existing = await tx`
           SELECT draft_id, payload_hash FROM opening_plan_acceptances
           WHERE workspace_id = ${scope.workspaceId} AND client_key = ${input.clientKey}
@@ -345,7 +355,11 @@ export function createOpeningPlansRepository(sql: Sql) {
         if (draft.status !== "draft") {
           throw new OpeningPlanError("CONFLICT", "draft is not open");
         }
-        const day = String(draft.day);
+        const day = formatPlanDay(draft.day);
+        const snapshot = draft.input_snapshot as { agentGuard?: AgentPlanGuard; originalBlocks?: PlannedBlock[] } | null;
+        if (snapshot?.agentGuard) {
+          await assertAgentPlanCurrent(tx, scope, day, snapshot.agentGuard, draft.blocks as PlannedBlock[], snapshot.originalBlocks ?? []);
+        }
 
         await tx`SELECT workspace_id FROM opening_plan_state
           WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date
@@ -366,7 +380,7 @@ export function createOpeningPlansRepository(sql: Sql) {
         if (acceptedVersion !== Number(draft.base_version)) {
           throw new OpeningPlanError("CONFLICT", "stale draft baseVersion");
         }
-        if (currentFp && currentFp !== String(draft.hard_blocks_fingerprint)) {
+        if (!snapshot?.agentGuard && currentFp && currentFp !== String(draft.hard_blocks_fingerprint)) {
           throw new OpeningPlanError("CONFLICT", "hard blocks changed; draft stale");
         }
 

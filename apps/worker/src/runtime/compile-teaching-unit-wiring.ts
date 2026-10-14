@@ -1,3 +1,5 @@
+import { assembleTeachingEvidencePack, buildModelTeachingInput, compileModelTeaching, estimateUsage, usageFromOutput, OpeningProviderError } from "@aistudy/ai";
+import { resolveTutorModel } from "./tutor-model";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
@@ -18,7 +20,7 @@ import {
 
 /**
  * Production dependency construction for the compile-teaching-unit worker
- * handler (moved verbatim from index.ts so tests exercise the real wiring,
+ * handler (tests exercise the same production wiring,
  * including the PR-D resultRef replay loader).
  */
 export function createCompileTeachingUnitWorkerDeps(
@@ -32,28 +34,48 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-08: teaching-compiler via buildPublishInput when OPENING_TEACHING_COMPILER_ENABLED;
-  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Budget/cancel/epoch fences unchanged.
+  // Production always resolves a real model when the compiler is enabled.
+  // Disabled or unavailable models fail honestly; no stub is published.
   // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
   return {
     budget,
-    provider: {
-      complete: async () => ({
-        text: JSON.stringify(
-          teachingCompilerOn
-            ? { compiler: "teaching-compiler" }
-            : { stub: true },
-        ),
-        citedChunkIds: [],
-        requestId: null,
-        candidates: [],
-        inputTokens: 1,
-        outputTokens: 1,
-      }),
+    provider: null,
+    prepareModelCall: async (scope, payload) => {
+      if (!teachingCompilerOn) throw new OpeningProviderError("PROVIDER_DISABLED", "teaching compiler is disabled");
+      const activity = await teachingActivities.get(scope, payload.activityId);
+      if (!activity) throw new Error("teaching activity not found");
+      const sourceIds = payload.sourceIds ?? [];
+      const chunks = await shared.chunks.listForSources(scope, sourceIds);
+      const pack = assembleTeachingEvidencePack({
+        chunks, query: activity.intentSummary, maxCharacters: 12_000,
+        allowlistSourceIds: sourceIds,
+      });
+      if (sourceIds.length && !pack.chunks.length)
+        throw new OpeningProviderError("PROVIDER_MEDIA_UNSUPPORTED", "authorized material has no readable text; use the vision tutor or review parsing");
+      const model = await resolveTutorModel(sql, scope, "explain", { answerStyle: false });
+      const input = buildModelTeachingInput(activity.intentSummary, pack.chunks);
+      const reservedCents = Math.max(1, estimateUsage({
+        inputTokens: Buffer.byteLength(JSON.stringify(input), "utf8") + 4096,
+        outputTokens: input.maxOutputTokens, estimated: true,
+      }, model));
+      return {
+        input, provider: model.provider, modelSnapshot: model.modelSnapshot, reservedCents,
+        actualCents: (output) => estimateUsage(usageFromOutput(output), model),
+        buildPublishInput: async (ownedScope, body, output) => {
+          if (!output || !body.teachingUnitId) throw new Error("model teaching result or unit missing");
+          const compiled = compileModelTeaching({
+            text: output.text, chunks: pack.chunks,
+            activityId: body.activityId, teachingUnitId: body.teachingUnitId,
+            expectedContentVersion: body.expectedContentVersion,
+            revisionNumber: 1, newId: randomUUID,
+          });
+          const written = await teachingContent.writeUnitBlocks(ownedScope, body.teachingUnitId, compiled.blocks);
+          return { ...compiled.publishInput, revisionNumber: written.revisionNumber };
+        },
+      };
     },
-    reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
     publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
@@ -72,8 +94,9 @@ export function createCompileTeachingUnitWorkerDeps(
       if (payload.teachingUnitId) return payload.teachingUnitId;
       // A library document needs at least one block; the compiled blocks
       // replace this placeholder as the next revision before publish.
+      const activity = await teachingActivities.get(scope, payload.activityId);
       const unit = await teachingContent.createUnit(scope, {
-        title: `Teaching draft ${payload.activityId.slice(0, 8)}`,
+        title: activity?.intentSummary.slice(0, 160) || `Teaching draft ${payload.activityId.slice(0, 8)}`,
         blocks: [{ id: randomUUID(), type: "meta", content: { text: "draft" } }],
       });
       return unit.id;

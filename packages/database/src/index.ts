@@ -205,3 +205,9 @@ export {
   type OpeningRestoreCliLiveDepsMissing,
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
+
+export { createOpeningPlanningAgentRepository } from "./repositories/opening-planning-agent";
+
+export { createOpeningOnboardingRepository } from "./repositories/opening-onboarding";
+
+export { createOpeningGuidanceSettingsRepository } from "./repositories/opening-guidance-settings";

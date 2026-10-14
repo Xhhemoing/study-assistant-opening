@@ -60,3 +60,9 @@ bash infra/deploy/deploy-hermes.sh deploy
 
 Tutor / vision 默认模型统一到可用的 Lant + `glm-5.3` 时，由 PM 编辑 `.env.production`（勿提交密钥），键清单与示例 JSON 见 `docs/operations/opening-model-routing.md`「Hermes 运维清单」。改完后 `bash infra/deploy/deploy-hermes.sh restart`（或完整 `deploy`）；本仓库任务默认不自动 redeploy。
 
+
+## 2026-10-14：SSH 失败关闭与健康检查边界
+
+部署只接受公钥认证和已核验的 `known_hosts`。`ssh`、`scp` 都启用 `BatchMode=yes` 和 `StrictHostKeyChecking=yes`。连接失败会立即停止，不再读取本地 root 密码、不自动写 `authorized_keys`、不修改或重载 `sshd`。应通过服务器提供商的可信控制台核对公钥指纹；不要把未经核对的 `ssh-keyscan` 输出当作信任依据。旧 `.aistudy-deploy/hermes.secret` 不再被使用；运营者确认其他用途后清理并按需轮换原密码。
+
+`/api/opening/health` 仅报告进程存活，HTTP 200 **不代表依赖、worker、模型或备份健康**。完整诊断保留为服务器内运行的 `node --import tsx scripts/opening-readiness.mjs`（按该脚本的参数说明执行），不再通过公开 HTTP 请求触发。将依赖告警继续接在受保护的运维检查上；不要用 liveness 代替部署 readiness。公网反向代理仍应设置请求速率和连接上限。

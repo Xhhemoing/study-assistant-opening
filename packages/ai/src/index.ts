@@ -115,3 +115,7 @@ export {
   type AnswerStyleCategory,
   type AnswerStyleSample,
 } from "./opening/answer-style-samples";
+
+export { buildModelTeachingInput, compileModelTeaching } from "./opening/model-teaching";
+
+export { runPlanningAgent, PLANNING_AGENT_MAX_CALLS } from "./opening/planning-agent";

@@ -20,6 +20,9 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   createOpeningTeachingContentRepository: () => content,
 }));
 
+const resolveModel = vi.hoisted(() => vi.fn());
+vi.mock("./tutor-model", () => ({ resolveTutorModel: resolveModel }));
+
 import { createCompileTeachingUnitHandler } from "../jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "./compile-teaching-unit-wiring";
 
@@ -78,6 +81,19 @@ let published: ActivitySpecPublishInput[];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resolveModel.mockResolvedValue({
+    provider: { complete: vi.fn(async (input) => ({
+      text: JSON.stringify({
+        title: "秩与零空间", goals: ["解释秩—零化度定理"], outline: ["秩与零空间", "独立验证"],
+        blocks: [
+          { type: "text", text: "矩阵的秩与零空间维数之和等于列数，这就是秩—零化度定理。", citedChunkIds: input.chunks.map((c: SourceChunk) => c.id) },
+          { type: "prompt", text: "请独立计算一个三列矩阵的秩与零空间维数。", citedChunkIds: [] },
+        ],
+      }), citedChunkIds: [], candidates: [], requestId: "real-adapter-mock", inputTokens: 120, outputTokens: 200,
+    })) },
+    modelSnapshot: { catalogId: "test", providerId: "test", providerDisplayName: "Test", modelName: "test", modelDisplayName: "Test", source: "server" },
+    inputCentsPerMillion: 100, outputCentsPerMillion: 200,
+  });
   statuses = [];
   writtenBlocks = [];
   published = [];
@@ -129,7 +145,11 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(spec.revisionNumber).toBe(2);
     expect(spec.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((b) => b.id));
     expect(spec.generationConfig?.extras).not.toHaveProperty("stub");
-    // Learner's intent drives the outline, not the provider stub text.
+    expect(resolveModel).toHaveBeenCalledWith(jobStateSql, scope, "explain", { answerStyle: false });
+    const preparedModel = await resolveModel.mock.results[0]!.value;
+    expect(preparedModel.provider.complete).toHaveBeenCalledWith(expect.objectContaining({ chunks: [chunk] }), undefined);
+    expect(spec.generationConfig?.extras).toMatchObject({ modelGenerated: true });
+    // Real model content, not the old generic Hook/Example templates.
     expect(JSON.stringify(writtenBlocks)).toContain("秩与零空间");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
@@ -169,6 +189,21 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     await expect(run(job, payload)).rejects.toThrow("document revision conflict");
     expect(published).toEqual([]);
     expect(statuses).toEqual(["generating", "failed"]);
+  });
+
+  it("uses real usage accounting, never the old fixed 50 cents", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const deps = shared();
+    await createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, deps))(job, payload);
+    expect(deps.budget.settle).toHaveBeenCalledWith(scope, "res-1", 1, { resultRef: `teaching_activity:${ACTIVITY}` });
+  });
+
+  it("disabled production compiler never reports stub success or spends budget", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "0");
+    const deps = shared();
+    await expect(createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, deps))(job, payload)).rejects.toThrow("disabled");
+    expect(deps.budget.reserve).not.toHaveBeenCalled();
+    expect(published).toEqual([]);
   });
 
   it("budget exceeded fails soft: activity failed, nothing published", async () => {

@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ChevronDown, ListTodo } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { TaskQueueRefreshContext } from "./task-status-control";
@@ -56,6 +57,7 @@ export function TodayDashboard({
    */
   teachingLoopTrialEnabled?: boolean;
 }) {
+  const router = useRouter();
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   // PR-H: UI visibility comes from GET /api/opening/capabilities (server switches),
   // never from process.env in this client component. The API re-checks anyway.
@@ -213,6 +215,7 @@ export function TodayDashboard({
 
   const runPrimaryCta = useCallback(async () => {
     setCtaError(null);
+    if (!teachingLoopTrialEnabled) { router.push(task?.courseId ? `/opening/assistant?courseId=${task.courseId}` : assistantHref); return; }
     const existing = pickCurrentTeachingActivity(activities);
     if (existing) {
       setSelectedActivity(existing);
@@ -220,7 +223,10 @@ export function TodayDashboard({
     }
     setCtaBusy(true);
     try {
+      const selectedTask = task ?? (await api.listTasks()).tasks.find(item => item.status === "pending") ?? null;
+      if (!selectedTask && !state.continueItem) { router.push("/opening/library"); return; }
       const input = buildStartLearningCreateInput({
+        task: selectedTask,
         localDate: localDateKey(new Date(), timeZone),
         continueTitle: state.continueItem?.title,
         continueConversationId: state.continueItem?.conversationId,
@@ -240,7 +246,7 @@ export function TodayDashboard({
     } finally {
       setCtaBusy(false);
     }
-  }, [activities, api, state.continueItem]);
+  }, [activities, api, state.continueItem, task, timeZone, router, teachingLoopTrialEnabled, assistantHref]);
 
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;

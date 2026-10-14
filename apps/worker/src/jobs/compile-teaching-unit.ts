@@ -2,6 +2,7 @@ import type {
   ActivitySpecPublishInput,
   ProviderInput,
   ProviderOutput,
+  OpeningModelSnapshot,
   Scope,
 } from "@aistudy/contracts";
 import {
@@ -50,7 +51,16 @@ export type TeachingGenerateStatus =
 
 export type CompileTeachingUnitDeps = {
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
-  /** Stub provider OK until V2-08; null disables model path. */
+  /** Prepare a scoped, genuinely model-backed call. Production must not use a stub. */
+  prepareModelCall?(scope: Scope, payload: CompileTeachingUnitPayload): Promise<{
+    input: ProviderInput;
+    provider: BudgetedProvider;
+    modelSnapshot: OpeningModelSnapshot;
+    reservedCents: number;
+    actualCents(output: ProviderOutput): number;
+    buildPublishInput(scope: Scope, payload: CompileTeachingUnitPayload, output: ProviderOutput | null): Promise<ActivitySpecPublishInput>;
+  }>;
+  /** Legacy injection seam for handler tests; null disables the model path. */
   provider: BudgetedProvider | null;
   reservedCents?: number;
   /**
@@ -209,9 +219,10 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
     };
 
     try {
-      await deps.setGenerateStatus(scope, body.activityId, "generating", {
+      const claimed = await deps.setGenerateStatus(scope, body.activityId, "generating", {
         from: ["queued", "generating"],
       });
+      if (!claimed) return { discarded: true, reason: "generate_status_fence" };
 
       const excluded = new Set(
         deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
@@ -224,9 +235,11 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       const skipProvider = body.mode === "repair" && deps.skipProviderForRepair === true;
       let providerOutput: ProviderOutput | null = null;
+      const prepared = !skipProvider && deps.prepareModelCall
+        ? await deps.prepareModelCall(scope, { ...body, sourceIds: allowedSources }) : null;
 
       if (!skipProvider) {
-        const input: ProviderInput = {
+        const input: ProviderInput = prepared?.input ?? {
           instruction: deps.buildPublishInput
             ? "Compile the current teaching activity from editable outline + authorized sources (V2-08)."
             : "Compile a teaching unit from authorized sources (stub until V2-08).",
@@ -244,7 +257,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         };
         try {
           providerOutput = await runBudgetedCall({
-            provider: deps.provider,
+            provider: prepared?.provider ?? deps.provider,
+            ...(prepared ? { modelSnapshot: prepared.modelSnapshot } : {}),
             budget: scopedBudget,
             input,
             requestId: operationId,
@@ -252,15 +266,13 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
             purpose: "compile-teaching-unit",
             // Persisted result reference: the teaching activity this call compiles.
             resultRef: `teaching_activity:${body.activityId}`,
-            reservedCents: deps.reservedCents ?? 100,
-            actualCents: () => Math.min(deps.reservedCents ?? 100, 50),
-            beforeSend: deps.privacy
-              ? async () =>
-                  assertCurrentEpoch(
-                    job.privacyEpoch,
-                    await deps.privacy!.getWorkspaceEpoch(scope),
-                  )
-              : undefined,
+            reservedCents: prepared?.reservedCents ?? deps.reservedCents ?? 100,
+            actualCents: prepared?.actualCents ?? (() => Math.min(deps.reservedCents ?? 100, 50)),
+            beforeSend: async () => {
+              if (await deps.getJobState(job.id) === "cancelled")
+                throw new Error("teaching job cancelled before provider send");
+              if (deps.privacy) assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+            },
           });
         } catch (error) {
           // PR-D: completed ledger key → load the persisted result via resultRef;
@@ -315,8 +327,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         teachingUnitId = await deps.ensureTeachingUnitId(scope, body);
       }
 
-      const publishInput = deps.buildPublishInput
-        ? await deps.buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput)
+      const buildPublishInput = prepared?.buildPublishInput ?? deps.buildPublishInput;
+      const publishInput = buildPublishInput
+        ? await buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput)
         : defaultStubPublish({ ...body, teachingUnitId, sourceIds: allowedSources }, teachingUnitId);
 
       // Re-check cancel immediately before publish (late-result fence).

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
+import { ChatPlanningPanel } from "../planning/chat-planning-panel";
+import { ChatSuggestions } from "./chat-suggestions";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
@@ -757,6 +759,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         </div>
       ) : null}
 
+      {!learningAttempt && privacy === "saved" ? <ChatPlanningPanel key={`planning:${boundCourseId ?? "workspace"}`} api={api} courseId={boundCourseId} /> : null}
+      {privacy === "saved" ? <ChatSuggestions key={`suggestions:${resume?.conversationId ?? "new"}`} api={api} sources={sources} turnIds={display.messages.map(message => message.id)} /> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
       {!learningAttempt ? <p className="mx-5 mb-2 text-[11px] leading-5 text-zinc-500"><Link href="/opening/settings/connections" className="underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800">数据连接与授权</Link>：不可用时显示不可用，不填充示例同步内容。</p> : null}
       <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />

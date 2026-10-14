@@ -1,5 +1,6 @@
 "use client";
 
+import { openingGuidanceSettingsSchema } from "@aistudy/contracts";
 import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { ArrowLeft, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import Link from "next/link";
@@ -21,6 +22,7 @@ export function AdvancedSettingsView() {
     mode: defaultGuidanceMode(),
     protectedSlots: [],
   }));
+  const [dailyMinutes, setDailyMinutes] = useState(60);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -32,6 +34,11 @@ export function AdvancedSettingsView() {
     try {
       const body = await fetchWorkspacePreferences();
       setDefaultEntry(body.defaultEntry ?? null);
+      const response = await fetch("/api/opening/guidance-settings", { cache: "no-store" });
+      if (!response.ok) throw new Error("guidance_read_failed");
+      const settings = openingGuidanceSettingsSchema.parse((await response.json()).settings);
+      setAutonomyDraft({ mode: settings.mode, protectedSlots: settings.protectedSlots });
+      setDailyMinutes(settings.dailyMinutes);
     } catch {
       setError("设置暂时无法读取，请重试。");
     } finally {
@@ -56,6 +63,18 @@ export function AdvancedSettingsView() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveGuidance() {
+    if (saving) return;
+    setSaving(true); setError(""); setNotice("");
+    try {
+      const settings = openingGuidanceSettingsSchema.parse({ ...autonomyDraft, dailyMinutes });
+      const response = await fetch("/api/opening/guidance-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(settings) });
+      if (!response.ok) throw new Error("guidance_save_failed");
+      setNotice("模式、受保护时段和时间预算已保存。自动重排尚未开启，正式计划仍需确认。");
+    } catch { setError("指导偏好保存失败，请检查时间预算与时段后重试。"); }
+    finally { setSaving(false); }
   }
 
   return (
@@ -107,9 +126,16 @@ export function AdvancedSettingsView() {
                 <section className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="autonomy-heading">
                   <div>
                     <h2 className="text-sm font-medium text-zinc-900" id="autonomy-heading">计划自主权</h2>
-                    <p className="mt-1 text-xs leading-6 text-zinc-500">预览自动调整规则和探索时段；当前选择仅保留在此页面。</p>
+                    <p className="mt-1 text-xs leading-6 text-zinc-500">偏好保存在当前工作区。受保护时段用于 AI 和规则排程；自动重排尚未开放，所有正式计划仍需确认。</p>
                   </div>
-                  <GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} />
+                  <div className="space-y-4">
+                    <GuidanceModePicker value={autonomyDraft} onChange={setAutonomyDraft} />
+                    <label className="block text-sm text-zinc-700">每日规划时间预算（分钟）
+                      <input className="ml-2 w-24 rounded border border-zinc-300 px-2 py-1" type="number" min={10} max={480} value={dailyMinutes} onChange={e => setDailyMinutes(Number(e.target.value))} />
+                    </label>
+                    <p className="text-xs leading-5 text-zinc-600">预算与受保护时段不会追溯修改已确认计划。教练自动重排需等待撤销与变更摘要能力完成，目前未启用。</p>
+                    <button className={ui.primary} disabled={saving} onClick={() => void saveGuidance()} type="button">保存指导偏好</button>
+                  </div>
                 </section>
               </>
             ) : null}

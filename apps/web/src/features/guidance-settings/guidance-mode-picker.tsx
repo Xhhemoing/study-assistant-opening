@@ -58,7 +58,7 @@ export function GuidanceModePicker({
       <fieldset className="space-y-3">
         <legend className="text-sm font-semibold text-zinc-900">指导模式</legend>
         <p className="text-xs text-zinc-500">
-          决定系统能否自动调整计划，以及建议是否需要确认。
+          设置期望的指导方式；本版自动重排尚未开放，正式计划均需确认。
         </p>
         <div className="divide-y divide-zinc-200 border-y border-zinc-200">
           {GUIDANCE_MODE_OPTIONS.map((option) => (
@@ -95,7 +95,7 @@ export function GuidanceModePicker({
           </h3>
         </div>
         <p className="text-xs text-zinc-500">
-          教练模式自动排计划时不会占用这些时段。
+          保存后，AI 与规则排程不会占用这些时段。
         </p>
         <div className="flex flex-wrap items-end gap-2">
           <label className="grid gap-1">

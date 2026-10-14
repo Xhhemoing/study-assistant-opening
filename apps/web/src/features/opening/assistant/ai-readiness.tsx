@@ -89,6 +89,7 @@ export function AiReadinessChecklistView({
           </Link>
         </div>
       ) : null}
+      <p className="text-sm leading-6 text-amber-950">AI 暂不可用，不影响学习：<Link href="/opening/library" className="font-medium underline underline-offset-2">从材料或笔记开始</Link>，记录问题后再继续辅导。</p>
       <h3 id="ai-readiness-heading" className="text-sm font-medium text-amber-950">AI 为何还不可用</h3>
       <ul className="space-y-2 text-xs leading-6 text-amber-950">
         {displayItems.map(item => (

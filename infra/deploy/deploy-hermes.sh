@@ -18,34 +18,15 @@ DIR="${DIR:-/opt/aistudy}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 SHA="$(git rev-parse --short HEAD)"
 
-sshq() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"; }
+# Pin the server key in known_hosts out of band. Never trust an unknown key here.
+SSH_OPTIONS=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+sshq() { ssh "${SSH_OPTIONS[@]}" "$HOST" "$@"; }
 die() { echo "[!] $*" >&2; exit 1; }
 
 check_ssh() {
-  if sshq true 2>/dev/null; then return 0; fi
-  repair_ssh_key || die "无法免密 SSH 到 $HOST（自动修复失败）。手动：ssh-copy-id -i ~/.ssh/id_ed25519.pub root@23.251.32.22（见 docs/operations/hermes-deployment.md）"
+  sshq true || die "SSH 公钥或主机指纹验证失败：停止部署，不读取密码、不修改 sshd。请通过可信控制台核对主机指纹并修复 authorized_keys 后重试（docs/operations/hermes-deployment.md）。"
 }
 
-# 免密失效时用本机保存的密码（%USERPROFILE%/.aistudy-deploy/hermes.secret，git 外）自动重装公钥。
-repair_ssh_key() {
-  local secret="$HOME/.aistudy-deploy/hermes.secret"
-  [ -f "$secret" ] || return 1
-  echo "==> 公钥登录失效，用保存的凭据自动重装公钥…"
-  python3 - "$secret" <<'PY' || return 1
-import sys, pathlib, paramiko
-secret = pathlib.Path(sys.argv[1]).read_text().strip()
-pub = pathlib.Path.home().joinpath(".ssh/id_ed25519.pub").read_text().strip()
-c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect("23.251.32.22", username="root", password=secret, timeout=15, look_for_keys=False, allow_agent=False)
-cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-       "grep -qF '%s' ~/.ssh/authorized_keys || echo '%s' >> ~/.ssh/authorized_keys; "
-       "grep -qE '^PubkeyAuthentication yes' /etc/ssh/sshd_config || "
-       "(sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config && sshd -t && systemctl reload sshd)" % (pub, pub))
-c.exec_command(cmd, timeout=15)[1].channel.recv_exit_status()
-c.close()
-PY
-  sleep 1; sshq true 2>/dev/null
-}
 require_clean_push() {
   local remote_sha
   remote_sha="$(git ls-remote study-assistant-opening "refs/heads/$BRANCH" | cut -f1)"
@@ -57,7 +38,7 @@ sync_source() {
   echo "==> 打包 HEAD 并上传（tar-over-ssh，不含 .git/node_modules/.next）"
   local archive="/tmp/aistudy-src-$SHA.tar.gz"
   git archive --format=tar.gz -o "$archive" HEAD
-  scp -q "$archive" "$HOST:/tmp/aistudy-src.tar.gz" && rm -f "$archive"
+  scp "${SSH_OPTIONS[@]}" -q "$archive" "$HOST:/tmp/aistudy-src.tar.gz" && rm -f "$archive"
   sshq "set -e
     mkdir -p $DIR
     # 保留服务器本地配置与运行期文件

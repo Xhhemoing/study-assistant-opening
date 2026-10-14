@@ -380,3 +380,11 @@ export const workerSmokeJobSchema = z.object({
 export type WorkerSmokeJob = z.infer<typeof workerSmokeJobSchema>;
 
 export * from "./opening";
+
+export * from "./opening/model-teaching";
+
+export * from "./opening/planning-agent";
+
+export * from "./opening/onboarding";
+
+export { openingGuidanceSettingsSchema, DEFAULT_OPENING_GUIDANCE_SETTINGS, type OpeningGuidanceSettings } from "./opening/guidance-settings";

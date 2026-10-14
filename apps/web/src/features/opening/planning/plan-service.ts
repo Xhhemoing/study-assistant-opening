@@ -18,6 +18,7 @@ import {
   buildDailyDraftInput,
   dailyDraftClientKey,
   deriveDayBlocks,
+  guidanceProtectedBlocks,
   planDay,
   resolveLocalDayBounds,
   type PlanDayOptions,
@@ -25,6 +26,7 @@ import {
 import {
   createOpeningPlansRepository,
   createOpeningPlanningSettingsRepository,
+  createOpeningGuidanceSettingsRepository,
   OpeningPlanError,
   type OpeningPlansRepository,
 } from "@aistudy/database";
@@ -155,6 +157,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
   const repo: OpeningPlansRepository = createOpeningPlansRepository(sql);
   const clock = () => serviceOptions.now?.() ?? new Date();
 
+  async function protectedBlocks(scope: Scope, date: string, timeZone: string): Promise<TimeBlock[]> {
+    return guidanceProtectedBlocks(date, timeZone, await createOpeningGuidanceSettingsRepository(sql).get(scope));
+  }
+
   async function resolveFreeBlocks(scope: Scope, date: string): Promise<TimeBlock[] | null> {
     const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
     if (!preference.saved || preference.invalidStoredSettings || preference.settings == null) {
@@ -163,7 +169,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     const settings = openingPlanningSettingsSchema.parse(preference.settings);
     const sessions = await repo.listTimetable(scope);
     try {
-      return deriveDayBlocks(date, settings, sessions);
+      return deriveDayBlocks(date, settings, sessions, await protectedBlocks(scope, date, settings.timeZone));
     } catch {
       return null;
     }
@@ -312,7 +318,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];
       if (body.free !== undefined) {
-        freeBlocks = body.free as TimeBlock[];
+        freeBlocks = [...body.free as TimeBlock[], ...await protectedBlocks(scope, body.date, timeZone)];
       } else {
         if (!preference.saved || preference.invalidStoredSettings || preference.settings == null) {
           throw new OpeningPlanError(
@@ -323,7 +329,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         const settings = openingPlanningSettingsSchema.parse(preference.settings);
         const sessions = await repo.listTimetable(scope);
         try {
-          freeBlocks = deriveDayBlocks(body.date, settings, sessions);
+          freeBlocks = deriveDayBlocks(body.date, settings, sessions, await protectedBlocks(scope, body.date, timeZone));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           throw new OpeningPlanError("VALIDATION", message);
@@ -368,7 +374,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];
       if (body.free !== undefined) {
-        freeBlocks = body.free as TimeBlock[];
+        freeBlocks = [...body.free as TimeBlock[], ...await protectedBlocks(scope, body.date, timeZone)];
       } else {
         if (!preference.saved || preference.invalidStoredSettings || preference.settings == null) {
           throw new OpeningPlanError(
@@ -379,7 +385,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         const settings = openingPlanningSettingsSchema.parse(preference.settings);
         const sessions = await repo.listTimetable(scope);
         try {
-          freeBlocks = deriveDayBlocks(body.date, settings, sessions);
+          freeBlocks = deriveDayBlocks(body.date, settings, sessions, await protectedBlocks(scope, body.date, timeZone));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           throw new OpeningPlanError("VALIDATION", message);
