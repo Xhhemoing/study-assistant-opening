@@ -17,6 +17,7 @@
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
 | G9 保存回合按模式过滤任务建议（只有 listen 不提任务） | Grok + Claude | `fix/tutor-turn-candidate-mode` / #39 | CI 中，绿后可合 |
+| 统一模型调度 + 证据闭环计划（M1–M6、E1–E5） | Claude | `claude/keen-carson-ls19ie`，`docs/plans/2026-10-15-model-gateway-and-evidence-loop-plan.md` | proposed；排在 #43 L2/L3 之后，0062 等 #43 合并 |
 
 ## 下一步（按顺序）
 
