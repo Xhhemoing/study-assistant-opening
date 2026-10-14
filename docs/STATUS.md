@@ -15,7 +15,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| L1 学习闭环基础：安全、首启、受限规划、真实教学 | ChatGPT | `feat/learning-loop-hardening-20261014` | 本地定向单测/边界通过；数据库 CI 验证中，未合并/部署；范围见 `docs/plans/2026-10-14-learning-loop-hardening.md` |
+| L1 学习闭环基础：安全、首启、受限规划、真实教学 | ChatGPT | `feat/learning-loop-hardening-20261014` | 145 项定向测试、六包类型、边界及隔离 PostgreSQL CI 通过；待用户浏览器/真实模型验收，未合并/部署；详见 `docs/plans/2026-10-14-learning-loop-validation.md` |
 | S4b 行内引用：正文 `[n]` 渲染为来源链接 | Claude（Grok 401，改为自做） | `feat/inline-citation-chips` / #32 | CI 中；待用户浏览器验收 |
 
 已合入（2026-10-13）：#29 选区按源码保存、#31 S4a 服务端引用编号。
