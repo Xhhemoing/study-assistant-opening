@@ -65,4 +65,12 @@ describe("UploadDropzone", () => {
     expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("MP4");
     expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("WebM");
   });
+
+  it("accepts .txt on the default accept list (S9)", () => {
+    expect(openingUploadAccept.split(",")).toContain(".txt");
+    expect(isAcceptedUploadFile({ name: "notes.txt", type: "" } as File, openingUploadAccept)).toBe(true);
+    expect(isAcceptedUploadFile({ name: "notes.txt", type: "text/plain" } as File, openingUploadAccept)).toBe(true);
+    expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("TXT");
+  });
+
 });

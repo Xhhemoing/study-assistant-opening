@@ -13,6 +13,7 @@ const cases: [string, number[]][] = [
   ["video/webm", [0x1a, 0x45, 0xdf, 0xa3]],
   ["application/vnd.openxmlformats-officedocument.presentationml.presentation", [0x50, 0x4b, 0x03, 0x04]],
   ["text/markdown", [...Buffer.from("# 标题\n正文")]],
+  ["text/plain", [...Buffer.from("plain notes")]],
   ["text/html", [...Buffer.from("<!doctype html>")]],
   ["message/rfc822", [...Buffer.from("From: a@example.e")]],
   ["application/vnd.ms-powerpoint", [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]],

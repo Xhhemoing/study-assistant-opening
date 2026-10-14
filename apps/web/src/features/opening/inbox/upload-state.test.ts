@@ -98,3 +98,20 @@ it("exposes aged-queued and delete-shortcut helpers", () => {
   expect(canDeleteSourceShortcut({ uploadState: "uploaded", parseState: "queued", createdAt: "2026-10-10T13:56:00.000Z" }, now)).toBe(true);
   expect(canDeleteSourceShortcut({ uploadState: "uploaded", parseState: "ready" }, now)).toBe(false);
 });
+
+it("accepts .txt as text/plain and still rejects unknown declared MIME (S9)", () => {
+  expect(resolveUploadMime({ name: "notes.txt", type: "" })).toBe("text/plain");
+  expect(resolveUploadMime({ name: "notes.txt", type: "text/plain" })).toBe("text/plain");
+  expect(resolveUploadMime({ name: "notes.txt", type: "application/x-unknown" })).toBeNull();
+});
+
+it("three layers agree on text/plain (S9)", async () => {
+  const { sourceMimeSchema } = await import("@aistudy/contracts");
+  const { openingUploadAccept, isAcceptedUploadFile } = await import("./upload-dropzone");
+  const mime = resolveUploadMime({ name: "a.txt", type: "text/plain" });
+  expect(mime).toBe("text/plain");
+  expect(sourceMimeSchema.safeParse(mime).success).toBe(true);
+  expect(isAcceptedUploadFile({ name: "a.txt", type: "text/plain" } as File, openingUploadAccept)).toBe(true);
+  expect(sourceMimeSchema.safeParse("application/x-unknown").success).toBe(false);
+  expect(resolveUploadMime({ name: "a.bin", type: "application/x-unknown" })).toBeNull();
+});

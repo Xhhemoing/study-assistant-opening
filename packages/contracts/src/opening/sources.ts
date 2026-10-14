@@ -19,6 +19,7 @@ export const sourceMimeSchema = z.enum([
   "video/webm",
   "message/rfc822",
   "text/markdown",
+  "text/plain",
   "text/html",
   "application/vnd.ms-powerpoint",
 ]);
@@ -33,7 +34,7 @@ function maxBytesForMime(mime: z.infer<typeof sourceMimeSchema>): number {
   if (mime.startsWith("audio/")) return AUDIO_MAX;
   if (mime.startsWith("video/")) return 512 * 1024 * 1024;
   if (mime === "message/rfc822") return 25 * 1024 * 1024;
-  if (mime === "text/markdown" || mime === "text/html") return DOCUMENT_MAX;
+  if (mime === "text/markdown" || mime === "text/plain" || mime === "text/html") return DOCUMENT_MAX;
   if (mime === "application/vnd.ms-powerpoint") return DOCUMENT_MAX;
   return DOCUMENT_MAX;
 }

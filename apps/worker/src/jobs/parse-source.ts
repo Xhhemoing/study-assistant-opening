@@ -27,13 +27,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
     const scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
     const source = await deps.sources.get(scope, sourceId);
     if (source.uploadState !== "uploaded") throw new Error("source is not uploaded");
-    if (source.mime === "text/markdown" || source.mime === "text/html") {
+    if (source.mime === "text/markdown" || source.mime === "text/plain" || source.mime === "text/html") {
       const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
       const response = await fetch(url);
       if (!response.ok) throw new Error("source download failed");
       const text = await response.text();
       if (Buffer.byteLength(text) > source.bytes) throw new Error("source download exceeds declared bytes");
-      const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text);
+      const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text); // plain text uses markdown chunker
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
       return { pages: chunks.length };
     }
