@@ -83,7 +83,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "S3_ACCESS_KEY_ID", group: "storage", doc: "Access key id.", consumers: both, kind: "string", secret: true, required: "production", dev: { value: "minioadmin" }, docker: { value: "REPLACE_ME_s3_access_key" } },
   { name: "S3_SECRET_ACCESS_KEY", group: "storage", doc: "Secret access key.", consumers: both, kind: "string", secret: true, required: "production", dev: { value: "minioadmin" }, docker: { value: "REPLACE_ME_s3_secret_key_long_random" } },
   { name: "S3_FORCE_PATH_STYLE", group: "storage", doc: "Path-style addressing (true for MinIO).", consumers: both, kind: "bool", secret: false, dev: { value: "true" }, docker: { value: "true" } },
-  { name: "OPENING_S3_FORCE_PATH_STYLE", group: "storage", doc: "Alias of S3_FORCE_PATH_STYLE (OPENING_S3_* preferred by restore CLI).", consumers: both, kind: "bool", secret: false, dev: { value: "true" }, docker: { value: "true" } },
+  { name: "OPENING_S3_FORCE_PATH_STYLE", group: "storage", doc: "Restore CLI alias of S3_FORCE_PATH_STYLE; takes precedence when set, so leave unset unless overriding.", consumers: ["scripts"], kind: "bool", secret: false },
 
   { name: "AUTH_SECRET", group: "auth", doc: "Session JWT secret, at least 32 characters.", consumers: ["web"], kind: "string", min: 32, secret: true, required: "always", dev: { value: "dev-only-change-me-to-a-long-random-secret" }, docker: { value: "REPLACE_ME_auth_secret_long_random" } },
   { name: "SESSION_COOKIE_SECURE", group: "auth", doc: "false only for plain-HTTP loopback/CI E2E. Production must use true.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "false" }, docker: { value: "true" } },
