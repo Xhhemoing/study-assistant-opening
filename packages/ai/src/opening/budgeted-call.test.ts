@@ -4,7 +4,7 @@ import {
   runBudgetedCall,
   settleCentsForActual,
 } from "./budgeted-call";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningProviderError } from "./provider";
 import type { ProviderOutput } from "@aistudy/contracts";
 
 const output: ProviderOutput = {

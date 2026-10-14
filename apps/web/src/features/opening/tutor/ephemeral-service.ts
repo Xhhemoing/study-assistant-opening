@@ -22,8 +22,7 @@ import {
   stripEphemeralCandidates,
 } from "@aistudy/ai";
 import { OpeningProviderError } from "@aistudy/ai";
-import { runBudgetedCall, type BudgetedRepository } from "../../../../../worker/src/runtime/budgeted-call";
-import { tutorActualCents, tutorReservationCents } from "../../../../../worker/src/jobs/tutor-cost";
+import { actualCentsForOutput, reservationCentsForInput, runBudgetedCall, type BudgetedRepository } from "@aistudy/ai";
 import {
   isImageOnlySourceChunks,
   makeTutorInstruction,
@@ -209,9 +208,9 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           resultRef: `ephemeral:${requestId}`,
           reservedCents: Math.max(
             deps.config.reservedCents,
-            tutorReservationCents(JSON.stringify(providerInput), providerInput.maxOutputTokens, rates),
+            reservationCentsForInput(JSON.stringify(providerInput), providerInput.maxOutputTokens, rates),
           ),
-          actualCents: (settled) => Math.max(1, tutorActualCents(settled, rates)),
+          actualCents: (settled) => Math.max(1, actualCentsForOutput(settled, rates)),
           signal,
           beforeSend: async () => {
             const epoch = await deps.privacy.currentEpoch(scope);

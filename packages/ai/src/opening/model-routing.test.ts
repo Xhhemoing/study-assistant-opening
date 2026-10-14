@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS, type OpeningModelSummary } from "@aistudy/contracts";
-import { openingModelSnapshot, resolveOpeningModel } from "./model-routing";
+import { openingModelSnapshot, resolveModelForTask, resolveOpeningModel } from "./model-routing";
 const first: OpeningModelSummary = { id: "one", providerId: "a", providerLabel: "A", label: "Large Name", modelName: "model-1", availability: "available", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
 const second: OpeningModelSummary = { ...first, id: "two", providerId: "b", modelName: "model-2" };
 describe("explicit model routing", () => {
@@ -24,6 +24,15 @@ describe("explicit model routing", () => {
     const settings = { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual" as const, manualModelId: "two", defaultModelId: "one" };
     expect(() => resolveOpeningModel([first], settings, "explain", "one")).toThrow(/重新选择/);
     expect(() => resolveOpeningModel([first, { ...second, availability: "missing_key" }], settings, "explain", "one")).toThrow(/不会自动切换供应商/);
+  });
+  it("routes tutor tasks by mode and non-tutor tasks by default, never borrowing a tutor mode route", () => {
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: "one", routes: { ...DEFAULT_OPENING_AI_SETTINGS.routes, explain: "two" } };
+    expect(resolveModelForTask([first, second], settings, "tutor.explain", "one")).toBe(second);
+    expect(resolveModelForTask([first, second], settings, "knowledge.extract", "two")).toBe(first);
+    expect(resolveModelForTask([first, second], DEFAULT_OPENING_AI_SETTINGS, "knowledge.extract", "two")).toBe(second);
+    const manual = { ...settings, mode: "manual" as const, manualModelId: "two" };
+    expect(resolveModelForTask([first, second], manual, "knowledge.extract", "one")).toBe(second);
+    expect(() => resolveModelForTask([first, { ...second, availability: "missing_key" }], manual, "knowledge.extract", "one")).toThrow(/不会自动切换供应商/);
   });
   it("snapshots only routing identity and actual configured rates", () => {
     expect(openingModelSnapshot({ ...second, apiKey: "private" } as never)).toEqual({ id: "two", providerId: "b", modelName: "model-2", inputCentsPerMillion: 10, outputCentsPerMillion: 20 });

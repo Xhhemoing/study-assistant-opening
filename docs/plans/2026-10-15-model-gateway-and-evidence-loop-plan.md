@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-15
 **Baseline:** `feat/opening-release` @ `649353f`；与 PR #43（`feat/adaptive-loop-v2`，自适应排程 L0/L1）并行
-**Status:** proposed
+**Status:** M1、M2a（知识抽取进入调度器与预算）已实现于 `claude/keen-carson-ls19ie`；其余 proposed
 **关联：** [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md)（PR #43，排程侧 L0–L8）、[`2026-10-14-learning-loop-closure-plan.md`](2026-10-14-learning-loop-closure-plan.md)（S1–S10）
 
 > 编号说明：PR #43 已经用了 L0–L8（排程）。本计划用 **M**（模型调度）和 **E**（证据闭环），避免撞号。

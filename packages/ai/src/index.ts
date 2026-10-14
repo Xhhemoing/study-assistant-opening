@@ -7,8 +7,10 @@ export {
 } from "./opening/provider";
 export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
 export {
+  actualCentsForOutput,
   estimateUsage,
   extractUsage,
+  reservationCentsForInput,
   usageFromOutput,
   type OpeningPricing,
   type OpeningUsage,
@@ -42,7 +44,32 @@ export {
   stripEphemeralCandidates,
 } from "./opening/conversation-policy";
 
-export { selectedOpeningModelId, resolveOpeningModel, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";
+export { selectedOpeningModelId, selectedModelIdForTask, resolveOpeningModel, resolveModelForTask, openingModelSnapshot, OpeningModelRoutingError } from "./opening/model-routing";
+export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
+export {
+  createModelGateway,
+  type GatewayScope,
+  type ModelGateway,
+  type ModelGatewayCallOptions,
+  type ResolvedTaskModel,
+} from "./opening/model-gateway";
+export {
+  BudgetReplayError,
+  BudgetedCallError,
+  isBudgetReplayError,
+  ledgerActionForProviderError,
+  replayDisposition,
+  runBudgetedCall,
+  settleCentsForActual,
+  type BudgetCallOutcomeCode,
+  type BudgetReplayDisposition,
+  type BudgetedCallOptions,
+  type BudgetedProvider,
+  type BudgetedRepository,
+  type BudgetedReservation,
+  type LedgerAction,
+  type OverageAudit,
+} from "./opening/budgeted-call";
 export { mergeOpeningCatalog, resolveMergedDefaultModelId, type WorkspaceCatalogModel } from "./opening/catalog-merge";
 export { resolveEffectiveDailyCap, OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS, type ResolveEffectiveDailyCapInput, type EffectiveDailyCap } from "./opening/effective-cap";
 export {

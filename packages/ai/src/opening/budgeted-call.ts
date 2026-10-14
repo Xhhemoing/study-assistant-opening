@@ -1,5 +1,5 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningProviderError } from "./provider";
 
 export type BudgetedProvider = {
   complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput>;

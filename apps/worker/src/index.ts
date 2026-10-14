@@ -3,7 +3,7 @@ import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
   createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
-import { resolveTutorModel } from "./runtime/tutor-model";
+import { createDbModelGateway, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
@@ -79,12 +79,20 @@ export async function main(): Promise<void> {
     },
     send: (input, signal) => feishu.send(input, signal),
   });
+  // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
+  // and counts completed spend via resolveBudgetLocalDay half-open bounds.
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const models = createDbModelGateway(sql);
   const knowledge = createOpeningKnowledgeRepository(sql);
   const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
     listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
     get: (scope, courseId) => knowledge.get(scope, courseId),
     replace: (scope, courseId, input) => knowledge.replace(scope, courseId, input),
-    resolveProvider: async (scope) => (await resolveTutorModel(sql, scope, "explain")).provider,
+    // Own task route and ledger entry; retries of one job reuse one reservation.
+    resolveProvider: async (scope, job) => models.budgetedProvider(scope, "knowledge.extract", {
+      budget: scopeBudget(budget, scope),
+      operationId: `build-course-knowledge:${job.id}`,
+    }),
   });
   const parseMedia = createParseMediaHandler({
     sources,
@@ -111,9 +119,6 @@ export async function main(): Promise<void> {
       importChunks.listAuthorizedImportChunks(scope, courseId, receiptIds),
   });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
-  // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
-  // and counts completed spend via resolveBudgetLocalDay half-open bounds.
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   // Production compile-teaching-unit dependency construction (shared with tests).
   const compileTeachingUnit = createCompileTeachingUnitHandler(
     createCompileTeachingUnitWorkerDeps(sql, { budget, chunks, privacy: privacyRepo }),

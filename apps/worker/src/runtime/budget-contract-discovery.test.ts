@@ -14,8 +14,8 @@ import {
   ledgerActionForProviderError,
   runBudgetedCall,
   settleCentsForActual,
-} from "./budgeted-call";
-import { tutorReservationCents } from "../jobs/tutor-cost";
+} from "@aistudy/ai";
+import { reservationCentsForInput } from "@aistudy/ai";
 import type { ProviderOutput } from "@aistudy/contracts";
 
 const output: ProviderOutput = {
@@ -86,7 +86,7 @@ describe("P0 family 1 — missing per-request budget", () => {
   });
 
   it("already: zero pricing yields zero reservation bound (caller must not treat as free)", () => {
-    expect(tutorReservationCents("hi", 10, { inputCentsPerMillion: 0, outputCentsPerMillion: 0 })).toBe(0);
+    expect(reservationCentsForInput("hi", 10, { inputCentsPerMillion: 0, outputCentsPerMillion: 0 })).toBe(0);
   });
 });
 

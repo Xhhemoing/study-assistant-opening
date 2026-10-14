@@ -29,6 +29,19 @@ SECONDARY_MODEL_API_KEY=
 - 密钥缺失、价格为零或日上限为零会显示不可用。配置仅表示具备调用条件，不代表完成真实供应商连通性和质量验证。
 - 将相同目录、密钥和日上限配置到 web 与 worker，重启两者。目录变化需要重启；工作区路由偏好保存后无需重启；工作区自定义供应商保存后立即生效，同样无需重启。
 
+## 统一模型调度（M1）
+
+所有模型调用都经过同一个调度器：`packages/ai/src/opening/model-tasks.ts` 的用途注册表 `MODEL_TASKS` 列出每种用途；`apps/worker/src/runtime/model-gateway.ts` 是唯一把配置变成 provider 的地方（服务器目录 + 工作区自定义模型 + 有效日额度 + 工作区路由），web 与 worker 共用。ESLint 禁止在其他地方直接引用 `createOpeningProvider`。新增 AI 功能时在 `MODEL_TASKS` 加一项，调用 `createDbModelGateway(sql).call(...)` 或 `.budgetedProvider(...)`，预算预留、模型快照和 `purpose` 自动记录。
+
+当前用途：
+
+| 用途 | 选型 | 预算 purpose |
+|---|---|---|
+| `tutor.listen / hint / explain / think_together` | 手动锁 → 该辅导模式映射 → 工作区默认 → 服务器默认（与之前相同） | `tutor` |
+| `knowledge.extract`（课程知识图谱抽取） | 手动锁 → 工作区默认 → 服务器默认 | `build-course-knowledge` |
+
+**行为变化：** 知识图谱抽取以前借用「解释」模式的模型且不经过预算账本；现在走自己的用途，按工作区默认模型选型，每次抽取都有预算预留、模型快照，并受日额度约束（额度为 0 时明确失败）。同一个抽取任务的重试复用一笔预留（`build-course-knowledge:<jobId>`），已结算后重放不会再次请求或计费。
+
 ## 工作区日额度 schema 上限
 
 `openingAiSettingsSchema.dailyCapCents` 的 Zod 上限与 `OPENING_MODEL_DAILY_CAP_CENTS` 一致（`OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS` = 2_147_483_647），**不再**硬编码 2000。否则当工作区把 `dailyCapCents` 写成与大额 env 上限相同的值（例如 1_000_000）时，整段 `ai_settings` 会 `safeParse` 失败 → `invalidStoredSettings` → 回退默认设置并落到缺密钥的 legacy `gpt-4o-mini`。

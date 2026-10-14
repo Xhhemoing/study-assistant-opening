@@ -33,7 +33,7 @@ import {
   createOpeningSourceRepository,
 } from "@aistudy/database";
 import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
-import { resolveTutorModel } from "../../../../worker/src/runtime/tutor-model";
+import { resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
 export async function requireOpeningScope(request: Request) {

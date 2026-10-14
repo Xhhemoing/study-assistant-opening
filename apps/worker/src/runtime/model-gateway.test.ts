@@ -8,7 +8,7 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
 }));
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
-import { resolveTutorModel } from "./tutor-model";
+import { resolveTutorModel } from "./model-gateway";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };
 beforeEach(() => {

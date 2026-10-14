@@ -10,7 +10,7 @@ import type { Sql } from "postgres";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { ProviderOutput } from "@aistudy/contracts";
 import { createOpeningBudgetRepository, type OpeningScope } from "@aistudy/database";
-import { runBudgetedCall, type BudgetedRepository } from "../../apps/worker/src/runtime/budgeted-call";
+import { runBudgetedCall, type BudgetedRepository } from "@aistudy/ai";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track, type RaceSession } from "./opening-race-helpers";
 

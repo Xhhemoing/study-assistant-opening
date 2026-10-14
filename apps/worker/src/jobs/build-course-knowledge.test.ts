@@ -179,6 +179,24 @@ describe("createBuildCourseKnowledgeHandler", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
+  it("resolves the live provider per job so the extraction call has its own ledger key", async () => {
+    const complete = vi.fn(async () => ({
+      text: JSON.stringify({ nodes: [{ label: "定义域", kind: "concept", evidenceChunkIds: [chunkId] }], edges: [] }),
+      citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1,
+    }));
+    const resolveProvider = vi.fn(async () => ({ complete }));
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [chunk()],
+      get: async () => null,
+      validateSnapshot: (snapshot) => snapshot,
+      replace: async (_s, _c, input) => ({ version: input.expectedVersion + 1, snapshot: input.snapshot }),
+      resolveProvider,
+    });
+    await handler(job as never, { courseId });
+    expect(resolveProvider).toHaveBeenCalledWith({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }, job);
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a missing courseId payload", async () => {
     const handler = createBuildCourseKnowledgeHandler({
       listAuthorizedChunks: async () => [],

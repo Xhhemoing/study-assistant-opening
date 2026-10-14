@@ -45,8 +45,8 @@ export type BuildCourseKnowledgeDeps = {
     },
   ): Promise<{ version: number; snapshot: KnowledgeSnapshot }>;
   provider?: KnowledgeExtractProvider | null;
-  /** Resolve a live provider when extractGraph is not injected (production). */
-  resolveProvider?: (scope: Scope) => Promise<KnowledgeExtractProvider>;
+  /** Resolve a live, budgeted provider when extractGraph is not injected (production). */
+  resolveProvider?: (scope: Scope, job: OpeningJobRecord) => Promise<KnowledgeExtractProvider>;
   /** Optional: override LLM extraction for tests. */
   extractGraph?: (chunks: AuthorizedChunk[]) => Promise<ExtractedGraph>;
 };
@@ -182,7 +182,7 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       ? await deps.extractGraph(chunks)
       : await (async () => {
           const provider = deps.provider
-            ?? (deps.resolveProvider ? await deps.resolveProvider(scope) : null);
+            ?? (deps.resolveProvider ? await deps.resolveProvider(scope, job) : null);
           if (!provider) {
             if (!chunks.length) return { nodes: [], edges: [] };
             throw new Error("build-course-knowledge requires a model provider");

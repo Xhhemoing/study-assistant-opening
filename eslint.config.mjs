@@ -89,6 +89,21 @@ export default tseslint.config(
     },
   },
   {
+    // One model gateway: providers are built only from configured routes, so every
+    // model call is selectable in settings and recorded in the budget ledger.
+    files: ["apps/**/*.{ts,tsx}", "packages/**/*.{ts,tsx}"],
+    ignores: ["apps/worker/src/runtime/model-gateway.ts", "packages/ai/src/**", "**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        paths: [{
+          name: "@aistudy/ai",
+          importNames: ["createOpeningProvider"],
+          message: "Call models through the model gateway (apps/worker/src/runtime/model-gateway.ts) and register the use in MODEL_TASKS.",
+        }],
+      }],
+    },
+  },
+  {
     // Jingwei core stays host-agnostic so other apps and agents can reuse it.
     files: ["packages/jingwei/src/**/*.{ts,tsx}"],
     ignores: ["packages/jingwei/src/**/*.test.{ts,tsx}", "packages/jingwei/src/react/**"],

@@ -26,14 +26,14 @@ import type {
 import { mergeContextSourceRefs } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
-import { tutorActualCents, tutorReservationCents } from "./tutor-cost";
+import { actualCentsForOutput, reservationCentsForInput } from "@aistudy/ai";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import {
   isBudgetReplayError,
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
-} from "../runtime/budgeted-call";
+} from "@aistudy/ai";
 
 
 type Scope = { workspaceId: string; ownerUserId: string };
@@ -188,8 +188,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         operationId: tutorOperationId,
         // Persisted result reference: the assistant turn this call fills.
         resultRef: `opening_turn:${claimed.assistantTurnId}`,
-        reservedCents: Math.max(deps.config.reservedCents, tutorReservationCents(JSON.stringify(input), input.maxOutputTokens, rates)),
-        actualCents: (settled) => tutorActualCents(settled, rates),
+        reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
+        actualCents: (settled) => actualCentsForOutput(settled, rates),
         beforeSend: deps.privacy && jobEpoch !== null
           ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
           : undefined,

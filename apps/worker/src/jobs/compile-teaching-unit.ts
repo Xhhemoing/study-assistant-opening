@@ -24,7 +24,7 @@ import {
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
-} from "../runtime/budgeted-call";
+} from "@aistudy/ai";
 
 export type CompileTeachingUnitMode = "generate" | "repair";
 

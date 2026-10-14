@@ -51,3 +51,16 @@ export function usageFromOutput(output: ProviderOutput): OpeningUsage {
     0,
   );
 }
+
+type TokenRates = { inputCentsPerMillion: number; outputCentsPerMillion: number };
+
+/** Local cost bound for a reservation. Not a vendor billing guarantee. */
+export function reservationCentsForInput(serializedInput: string, maxOutputTokens: number, rates: TokenRates): number {
+  const inputTokens = new TextEncoder().encode(serializedInput).length + 4096;
+  return Math.ceil((inputTokens * rates.inputCentsPerMillion + maxOutputTokens * rates.outputCentsPerMillion) / 1_000_000);
+}
+
+export function actualCentsForOutput(output: ProviderOutput, rates: TokenRates): number {
+  const usage = usageFromOutput(output);
+  return Math.ceil((usage.inputTokens * rates.inputCentsPerMillion + usage.outputTokens * rates.outputCentsPerMillion) / 1_000_000);
+}
