@@ -466,3 +466,5 @@ export {
   type MatrixTransformStep,
   type StaticFallbackModel,
 } from "./opening/teaching-math-model";
+
+export * from "./opening/adaptive";
