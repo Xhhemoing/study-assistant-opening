@@ -12,6 +12,21 @@ import {
 const draftId = "11111111-1111-4111-8111-111111111111";
 const taskA = "22222222-2222-4222-8222-222222222222";
 
+function draftApi(partial: {
+  proposePlan?: ReturnType<typeof vi.fn>;
+  acceptPlan?: ReturnType<typeof vi.fn>;
+  rejectPlan?: ReturnType<typeof vi.fn>;
+} = {}) {
+  return {
+    proposePlan: partial.proposePlan ?? vi.fn(),
+    acceptPlan: partial.acceptPlan ?? vi.fn(),
+    rejectPlan: partial.rejectPlan ?? vi.fn(),
+    getPlanningSettings: vi.fn(),
+    putPlanningSettings: vi.fn(),
+    createTask: vi.fn(),
+  };
+}
+
 function draft(partial: Partial<PlanDraft> & Pick<PlanDraft, "blocks" | "unscheduledTaskIds">): PlanDraft {
   return {
     id: draftId,
@@ -122,7 +137,7 @@ describe("DailyDraftCard", () => {
     const acceptPlan = vi.fn();
     const rejectPlan = vi.fn();
     const html = renderToStaticMarkup(createElement(DailyDraftCard, {
-      api: { proposePlan, acceptPlan, rejectPlan },
+      api: draftApi({ proposePlan, acceptPlan, rejectPlan }),
       date: "2026-10-09",
       dailyDraft: sampleDraft,
       tasks: [{
@@ -146,7 +161,7 @@ describe("DailyDraftCard", () => {
 
   it("shows skipped copy when plan already accepted", () => {
     const html = renderToStaticMarkup(createElement(DailyDraftCard, {
-      api: { proposePlan: vi.fn(), acceptPlan: vi.fn(), rejectPlan: vi.fn() },
+      api: draftApi(),
       date: "2026-10-09",
       dailyDraftSkippedReason: "accepted",
       unplannedPendingCount: 2,
@@ -157,18 +172,20 @@ describe("DailyDraftCard", () => {
 
   it("shows rejected and no_settings copy without inventing a draft", () => {
     const rejected = renderToStaticMarkup(createElement(DailyDraftCard, {
-      api: { proposePlan: vi.fn(), acceptPlan: vi.fn(), rejectPlan: vi.fn() },
+      api: draftApi(),
       date: "2026-10-09",
       dailyDraftSkippedReason: "rejected",
     }));
     expect(rejected).toContain("已拒绝");
     expect(rejected).not.toContain("确认");
+    expect(rejected).not.toContain("用默认作息生成本日计划");
 
     const noSettings = renderToStaticMarkup(createElement(DailyDraftCard, {
-      api: { proposePlan: vi.fn(), acceptPlan: vi.fn(), rejectPlan: vi.fn() },
+      api: draftApi(),
       date: "2026-10-09",
       dailyDraftSkippedReason: "no_settings",
     }));
     expect(noSettings).toContain("学期设置");
+    expect(noSettings).toContain("用默认作息生成本日计划");
   });
 });

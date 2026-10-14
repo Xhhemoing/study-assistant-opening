@@ -178,7 +178,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
   return <main className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
     <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
-      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} />
+      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} />
       <CourseLearningView courseId={id} />
       <CourseKnowledge courseId={id} />
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>

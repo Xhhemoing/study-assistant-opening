@@ -83,6 +83,10 @@ import {
   type TeachingCheckpointSaveInput,
   type TeachingCheckpointSaveResult,
   type TeachingActivityStatusUpdateInput,
+  openingPlanningSettingsSchema,
+  openingPlanningSettingsResponseSchema,
+  type OpeningPlanningSettings,
+  type OpeningPlanningSettingsResponse,
 } from "@aistudy/contracts";
 import { z } from "zod";
 import { retestReviewSchema } from "../planning/review-types";
@@ -453,6 +457,23 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
     async listReminders(): Promise<ReminderList> {
       const body = await request("/api/opening/reminders", { method: "GET" }, fetchImpl);
       return reminderListSchema.parse(body);
+    },
+
+    async getPlanningSettings(): Promise<OpeningPlanningSettingsResponse> {
+      const body = await request("/api/opening/planning-settings", { method: "GET" }, fetchImpl);
+      return openingPlanningSettingsResponseSchema.parse(body);
+    },
+
+    async putPlanningSettings(
+      settings: OpeningPlanningSettings | null,
+    ): Promise<OpeningPlanningSettingsResponse> {
+      const payload = settings === null ? null : openingPlanningSettingsSchema.parse(settings);
+      const body = await request(
+        "/api/opening/planning-settings",
+        { method: "PUT", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return openingPlanningSettingsResponseSchema.parse(body);
     },
 
     async getToday(date: string): Promise<TodayPlanRead> {
