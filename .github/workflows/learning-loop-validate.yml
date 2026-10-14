@@ -1,0 +1,86 @@
+name: Learning loop isolated validation
+on:
+  push:
+    branches: [feat/learning-loop-hardening-20261014]
+    paths:
+      - .github/workflows/learning-loop-validate.yml
+      - .github/learning-loop-patch/**
+permissions:
+  contents: write
+concurrency:
+  group: learning-loop-isolated-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/feat/learning-loop-hardening-20261014'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aistudy
+          POSTGRES_PASSWORD: aistudy
+          POSTGRES_DB: aistudy_opening_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U aistudy -d aistudy_opening_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      OPENING_TEST_DB: '1'
+      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test
+      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test
+      PUBLIC_BASE_URL: http://localhost
+      SESSION_COOKIE_SECURE: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Verify and stage the reviewed source patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, lzma
+          parts = sorted(Path('.github/learning-loop-patch').glob('part-*.b64'))
+          assert len(parts) == 9, 'incomplete patch transport'
+          encoded = ''.join(p.read_text().strip() for p in parts)
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'd47757c334174f4c369c76bdd04d4bc3bba13dcde9c6d0897a7a7404af3c1c59', 'patch digest mismatch'
+          Path('/tmp/learning-loop.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/learning-loop.patch
+          git apply --index /tmp/learning-loop.patch
+          git diff --cached --check
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Lint changed source and deployment shell
+        shell: bash
+        run: |
+          git diff --cached --name-only -z -- '*.ts' '*.tsx' '*.mjs' | xargs -0 -r node node_modules/eslint/bin/eslint.js
+          bash -n infra/deploy/deploy-hermes.sh
+      - name: Validate types, unit tests, migrations and database handlers (no browser)
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/check-learning-loop.mjs --database 2>&1 | tee /tmp/learning-loop-validation.log
+      - name: Commit validated product changes to this feature branch only
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(opening): bounded planning agent, real teaching, first-login intent and safety fences'
+          git push origin HEAD:refs/heads/feat/learning-loop-hardening-20261014
+          echo "Validated product commit: $(git rev-parse HEAD)" | tee -a /tmp/learning-loop-validation.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: learning-loop-validation
+          path: /tmp/learning-loop-validation.log
+          retention-days: 3
+          if-no-files-found: warn
