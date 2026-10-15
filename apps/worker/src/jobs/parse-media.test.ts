@@ -351,6 +351,60 @@ describe("parse-media handler", () => {
     expect(await readdir(tempDir)).toEqual([]);
   });
 
+  it("marks an empty transcription as unreadable instead of leaving the source queued", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "opening-parse-media-"));
+    dirs.push(tempDir);
+    const states: unknown[] = [];
+    const fileBytes = Buffer.alloc(16, 4);
+    const handler = createParseMediaHandler({
+      sources: {
+        get: async () => source({ mime: "audio/mpeg", bytes: fileBytes.length }),
+        markParseState: async (_scope, _id, state, error) => { states.push({ state, error }); return source(); },
+      },
+      chunks: { replaceChunks: async () => { throw new Error("must not invent readable chunks"); } },
+      storage: { finalKey: () => "k", presignGet: async () => `data:audio/mpeg;base64,${fileBytes.toString("base64")}` },
+      tempDir,
+      media: createMediaProcess({ run: async () => ({ exitCode: 0, stderr: "", stdout: JSON.stringify({
+        format: { duration: "1", size: String(fileBytes.length), format_name: "mp3" }, streams: [{ codec_type: "audio" }],
+      }) }) }),
+      transcribe: async () => [],
+    });
+    expect(await handler(job, { sourceId })).toMatchObject({ ok: false, transcription: "completed", error: "no readable media content" });
+    expect(states).toEqual([{ state: "failed", error: expect.objectContaining({ code: "no_readable_media", retryable: false }) }]);
+    expect(await readdir(tempDir)).toEqual([]);
+  });
+
+  it("discards model-derived chunks if privacy changes during transcription", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "opening-parse-media-"));
+    dirs.push(tempDir);
+    let allowed = true;
+    let persisted = false;
+    const fileBytes = Buffer.alloc(16, 4);
+    const handler = createParseMediaHandler({
+      sources: { get: async () => source({ mime: "audio/mpeg", bytes: fileBytes.length }), markParseState: async () => source() },
+      chunks: { replaceChunks: async () => { persisted = true; } },
+      storage: { finalKey: () => "k", presignGet: async () => `data:audio/mpeg;base64,${fileBytes.toString("base64")}` },
+      tempDir,
+      media: createMediaProcess({ run: async () => ({ exitCode: 0, stderr: "", stdout: JSON.stringify({
+        format: { duration: "1", size: String(fileBytes.length), format_name: "mp3" }, streams: [{ codec_type: "audio" }],
+      }) }) }),
+      assertPrivacyCurrent: async () => { if (!allowed) throw new Error("privacy changed"); },
+      resolveTranscribe: async (ownedScope, ownedJob, id) => {
+        expect(ownedScope).toEqual(scope);
+        expect(ownedJob).toBe(job);
+        expect(id).toBe(sourceId);
+        return async (input) => {
+          expect(input).toMatchObject({ sourceId, sourceVersion: 1 });
+          allowed = false;
+          return [{ sourceId, sourceVersion: 1, startMs: 0, endMs: 500, text: "private", frameChunkIds: [], quality: "needs_check" }];
+        };
+      },
+    });
+    await expect(handler(job, { sourceId })).rejects.toThrow("privacy changed");
+    expect(persisted).toBe(false);
+    expect(await readdir(tempDir)).toEqual([]);
+  });
+
   it("skips re-transcription for segments-correction receipt payloads", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "opening-parse-media-"));
     dirs.push(tempDir);

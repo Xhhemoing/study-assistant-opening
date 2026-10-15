@@ -3,7 +3,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
-import type { MediaSegment } from "@aistudy/contracts";
+import type { MediaSegment, Scope } from "@aistudy/contracts";
 import type { OpeningJobRecord, OpeningSourceChunksRepository, OpeningSourceRepository } from "@aistudy/database";
 import {
   MEDIA_VIDEO_MAX_BYTES,
@@ -16,6 +16,7 @@ import {
   type MediaProcess,
 } from "../parsers/media-process";
 import { validateMediaSegments } from "../parsers/media-segments";
+import type { TranscribeAdapterInput } from "../parsers/transcribe-adapter";
 
 const MEDIA_MIMES = new Set([
   "video/mp4",
@@ -28,7 +29,7 @@ const MEDIA_MIMES = new Set([
 /** Persist when faster-whisper / transcribe adapter is not configured (audio or video). */
 const BLOCKED_NOT_CONFIGURED_ERROR = {
   code: "blocked_not_configured",
-  message: "转写服务未配置（需 faster-whisper），原件已保存；配置完成前重试无效。",
+  message: "转写服务未配置，请到设置选择本地或模型转写；原件已保存，配置完成前重试无效。",
   retryable: false,
 } as const;
 
@@ -55,9 +56,13 @@ export type ParseMediaDeps = {
    * runs and the job records that live transcription is blocked/not configured.
    */
   transcribe?: (
-    input: { path: string; mime: string; durationMs: number; hasAudio: boolean },
+    input: TranscribeAdapterInput,
     signal: AbortSignal,
   ) => Promise<MediaSegment[]>;
+  /** Resolve once per job from the workspace's current engine setting. */
+  resolveTranscribe?: (scope: Scope, job: OpeningJobRecord, sourceId: string) => Promise<NonNullable<ParseMediaDeps["transcribe"]>>;
+  /** Check deletion/exclusion fences before reading and before persisting derived data. */
+  assertPrivacyCurrent?: (scope: Scope, job: OpeningJobRecord, sourceId: string) => Promise<void>;
   /**
    * Persist keyframe PNGs under the I02 opening/sources/.../frames/ layout.
    * When omitted, extracted frames stay local-only and are not linked as chunks.
@@ -129,6 +134,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
         `media exceeds size limit: ${source.bytes} bytes > ${maxBytes} bytes`,
       );
     }
+    await deps.assertPrivacyCurrent?.(scope, job, source.id);
 
     await mkdir(tempDir, { recursive: true });
     const temp = path.join(tempDir, `${source.id}-${source.version}.media`);
@@ -171,10 +177,14 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
       if (!probe.hasAudio) {
         transcription = "skipped_no_audio";
         segments = [];
-      } else if (deps.transcribe) {
+      } else if (deps.transcribe || deps.resolveTranscribe) {
         try {
-          segments = await deps.transcribe(
-            { path: temp, mime: source.mime, durationMs: probe.durationMs, hasAudio: probe.hasAudio },
+          const transcribe = deps.resolveTranscribe
+            ? await deps.resolveTranscribe(scope, job, source.id)
+            : deps.transcribe!;
+          segments = await transcribe(
+            { path: temp, mime: source.mime, durationMs: probe.durationMs, hasAudio: probe.hasAudio,
+              sourceId: source.id, sourceVersion: source.version },
             signal,
           );
           segments = validateMediaSegments(
@@ -237,6 +247,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
       }
 
       const frameChunkMeta: Array<{ objectKey: string; timestampMs: number; page: number }> = [];
+      await deps.assertPrivacyCurrent?.(scope, job, source.id);
       if (frames.length > 0 && deps.putObject) {
         let page = chunkRows.length + 1;
         for (const frame of frames) {
@@ -259,6 +270,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
       }
 
       if (chunkRows.length > 0) {
+        await deps.assertPrivacyCurrent?.(scope, job, source.id);
         await deps.chunks.replaceChunks(scope, {
           sourceId: source.id,
           sourceVersion: source.version,
@@ -287,7 +299,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
           durationMs: probe.durationMs,
           hasAudio: probe.hasAudio,
           hasVideo: probe.hasVideo,
-          error: "transcription adapter not configured (faster-whisper / opening_parser.transcribe)",
+          error: "transcription engine not configured",
         };
       } else if (transcription === "blocked_not_configured") {
         // Video without wired transcription and without persisted frames.
@@ -303,8 +315,16 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
           error:
             frames.length > 0 && !deps.putObject
               ? "keyframes extracted but putObject not configured for I02 frame persistence"
-              : "transcription adapter not configured (faster-whisper / opening_parser.transcribe)",
+              : "transcription engine not configured",
         };
+      } else {
+        // A silent audio track is a valid transcription result, but does not
+        // make the material readable. Do not leave it queued after a successful job.
+        await deps.sources.markParseState(scope, source.id, "failed", {
+          code: "no_readable_media", message: "没有识别到可用的语音或关键帧，原件已保存。", retryable: false,
+        });
+        return { ok: false, transcription, durationMs: probe.durationMs,
+          hasAudio: probe.hasAudio, hasVideo: probe.hasVideo, error: "no readable media content" };
       }
 
       return {

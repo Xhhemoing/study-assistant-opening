@@ -19,12 +19,12 @@ import { createParseMediaHandler } from "./jobs/parse-media";
 import { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
 import { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";
 import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "./jobs/sweep-pending-uploads";
-import { createPythonTranscribeAdapter } from "./parsers/transcribe-adapter";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
 import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
+import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -99,9 +99,7 @@ export async function main(): Promise<void> {
     chunks,
     storage,
     tempDir: env.parserTempDir,
-    // Wire faster-whisper when the optional parser extra + offline weights exist;
-    // CONFIGURATION / blocked_not_configured otherwise (no auto-download).
-    transcribe: createPythonTranscribeAdapter(),
+    ...createMediaTranscribeWorkerDeps(sql, { budget, privacy: privacyRepo }),
     putObject: async ({ key, body, mime }) => {
       await storage.client.send(
         new PutObjectCommand({
