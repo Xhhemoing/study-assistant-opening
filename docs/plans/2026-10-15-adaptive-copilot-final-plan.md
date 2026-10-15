@@ -59,7 +59,7 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 | 外部建议 | 本计划 | 理由 |
 |---|---|---|
 | 稳定技能身份：alias 映射、双写、迁移 | 批次 A 只修默认值来源和复用提示（G3，不加迁移）；`skill_ref` 列放批次 C | 碎片化的主因是默认值取活动标题；加列要等估计器上线才有收益 |
-| 快照带 privacyEpoch、计划版本等完整 provenance | 只带已有的 `workspaceHistoryRevision`、`strategyVersion` 和各数据源 `dataStatus` | 授权与版本在接受事务里重读重验，快照版本只用于追溯 |
+| 快照带 privacyEpoch、计划版本等完整 provenance | 只带 `plannerInputRevision`（快照来源的哈希）、`strategyVersion` 和各数据源 `dataStatus` | 授权与版本在接受事务里重读重验，快照版本只用于追溯 |
 | `TeachingTarget` 九个字段 | 批次 A 只传技能名、活动类型、原因码、答错的那条观察、近期辅助、策略版本 | 先证明“不同证据 → 不同讲解重点” |
 | 窄题型自动判分进第一批 | 放批次 B | 参考自核已能产生有效负证据 |
 | 对话意图抽取前移 | 放批次 C | 先跑通 Today 这条确定性入口；对话复用同一接受通道，晚接不返工 |
@@ -284,14 +284,14 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 
 ### C1｜快照读取服务（第 2 波）
 
-- 新增 `apps/web/src/features/opening/planning/learner-snapshot-service.ts`：认证 scope → 按课程批量读取 → 构造 `LearnerSnapshotSources` → 调 `assembleLearnerSnapshot`（G5）。返回 `{ snapshot, dataStatus, workspaceHistoryRevision }`。
+- 新增 `apps/web/src/features/opening/planning/learner-snapshot-service.ts`：认证 scope → 按课程批量读取 → 构造 `LearnerSnapshotSources` → 调 `assembleLearnerSnapshot`（G5）。返回 `{ snapshot, dataStatus, plannerInputRevision }`。
 - 证据来自 `read-service.ts` 内部完整计算入口；只取有效 head；读取在事务外；记录查询次数与耗时，不加缓存。
 - 集成测试 `tests/integration/opening-learner-snapshot.test.ts`：25 条观察按全量计算；独立答错 → `needs_review`；`unknown` 不当错；提示后答对不升级；观察被修订只按新 head；当日 done/skipped 进入 `plannerHistory`；单门课证据读取失败时其他课正常且 `dataStatus.evidence = 'unavailable'`；跨工作区被拒。
 
 ### C2｜自适应草案接线（第 2 波）
 
 - `ensureDailyDraft` 在开关开启且非手工档时走 `C1 → proposeAdaptiveTasks → rankForPlan → planDay`，持久化 `suggested_tasks`、`reasons`、`strategy_version`。
-- 约束不可用时退回现有规则草案并写原因；快照与规则计算在 `ensureAutoDraft` 锁外；锁内比较输入（任务、free/hard blocks、`workspaceHistoryRevision`、建议集合）。
+- 约束不可用时退回现有规则草案并写原因；快照与规则计算在 `ensureAutoDraft` 锁外；锁内比较输入（任务、free/hard blocks、`plannerInputRevision`、建议集合）。
 - 草案仅“不是最优”时保持草案 id 并返回 `hasNewerSuggestion`；不可执行时才重建；已接受计划不自动重建。放不下的建议进入草案已有的 `unscheduledTaskIds` / `unscheduled`。
 - 核心测试：写入一条合格的独立错误观察后草案出现 `weak_skill` 及原因；只有未核对作答不出现；未接受不建任务；开关关闭时既有测试原样通过。其余边界交 G9。
 
