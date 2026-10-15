@@ -2,12 +2,12 @@
 
 **Date:** 2026-10-15
 **Baseline:** `feat/opening-release` @ `649353f`；与 PR #43（`feat/adaptive-loop-v2`，自适应排程 L0/L1）并行
-**Status:** M1/M2a/M2b 为已有基线；M3/M4/M5/E3/E4/E5 代码已实现，集成与跨包验证中；E1 并发边界修复中，E2 按用户决定暂缓；M6 已同步 0064 卡片来源、备份隐私与一键配置未知结果处理。浏览器待用户验收，未完成生产/真实供应商验证。执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)。
+**Status:** M1/M2a/M2b 为已有基线；M3–M6、E1、E3–E5 已实现并完成本轮非浏览器验证；E2 按用户决定暂缓。浏览器、真实供应商/模型和生产部署仍待用户验收。执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)。
 **关联：** [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md)（PR #43，排程侧 L0–L8）、[`2026-10-14-learning-loop-closure-plan.md`](2026-10-14-learning-loop-closure-plan.md)（S1–S10）
 
 > 编号说明：PR #43 已经用了 L0–L8（排程）。本计划用 **M**（模型调度）和 **E**（证据闭环），避免撞号。
 
-**当前验证范围（2026-10-15）：** M3 相关测试通过；M4 atomic/probe 的 7 项 handler 已通过，新增音频备用模型与未知结果回归待主线程汇总；E3 的 2 项 handler 通过；E4 补齐来源链、native 课程范围和评分锁序后正在验证数据库回归；M5 的 29 项单测通过，worker 跨包类型检查待 E1 稳定后汇总；E5 相关单测、数据库完整性测试、domain 类型检查通过；M6 配置的 43 项单测、环境模板一致性与 config 类型检查通过。以上为切片结果，不代表全仓检查或用户体验验收。GitHub 干运行推送使用现有环境 `GH_TOKEN` 返回 `Invalid username or token`，推送/合并仍受鉴权阻塞；未强行合并或删除分支，旧分支不能据此认定已合入。
+**当前验证范围（2026-10-15）：** M3 相关单元与 handler 通过；M4 一键配置、音频备用模型、未知结果及 probe handler 通过；M5 29 项适配器/worker 单测通过；E1/E3 相关单元、9 项教学并发 handler 通过；E4 290 项单元、13 项数据库/handler 回归通过；E5 单元与真实数据库字段完整性通过；M6 配置 43 项单测、模板一致性、config 类型检查通过；整合后的 50 个变更单元文件 391 项通过，8 个跨模块集成文件 62 项通过，3 个教学/卡片 handler 文件 22 项通过，contracts/ai/domain/database/config/ui/worker/web 类型检查、E2E 类型检查、变更 TypeScript lint 和边界 lint 通过。Python 3.13 与锁定 parser 依赖已补齐，parser 自检及 PDF 页图像测试通过；Docling 固定模型缓存仍缺，真实 PDF 内容转换未通过。以上不代表浏览器、真实供应商或生产验收。GitHub 干运行推送使用现有环境 `GH_TOKEN` 返回 `Invalid username or token`，推送/合并仍受鉴权阻塞；未强行合并或删除分支，旧分支不能据此认定已合入。
 
 ## Outcome
 
@@ -129,7 +129,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 | M4 | 一键配置接口 + 连通性测试 + 设置页一键表单 | Claude（接口）→ Grok（表单） | M3 | 无 |
 | M5 | 转写纳入供应商页：本地 faster-whisper 或 Gemini 音频转写 | Claude（worker 适配）→ Grok（选择界面） | M3 | 无 |
 | M6 | lint 防绕过规则 + 更新 `docs/operations/opening-model-routing.md` | Claude | M2 | 无 |
-| E1 | 主讲内作答 + 对照答案核对 | Grok | PR #43 L5 先合并（`teaching/*` 归 L5） | 无 |
+| E1 | 主讲内作答 + 对照答案核对 | GPT | 用户确认 Grok 停止后接手 `teaching/*` | 无 |
 | E2 | AI 判分建议（**延后**） | — | M1、E1 | 无 |
 | E3 | 活动 `completed` + 学完小结数据 | Claude | — | 无 |
 | E4 | 卡片进入账本 + 错题生成卡片 | Claude | M1（`cards.suggest`） | 0062（cards 两列） |
@@ -140,13 +140,13 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 **顺序（10-15 调整：先闭环能力和质量）：**
 1. **M1 → M2**：统一调度器，知识抽取进入预算，主讲编译接真实模型。主讲有了真实内容，其他环节的质量才测得出来，这也是 V2-16 试跑的前提。与 PR #43 剩下的 L2/L3 并行，文件不重叠。
 2. **E3**：活动能结束，学完询问是否标记任务完成。
-3. **E1**：主讲内作答 + 对照答案核对（等 PR #43 L5 合并）。
+3. **E1**：主讲内作答 + 对照答案核对（Grok 已停止，由 GPT 接续）。
 4. **M3 → M4**：用途映射、备用模型、免费额度计费、一键配置。Gemini 免费额度从这里开始可用。
 5. **E4 → E5**：卡片进入账本，评价器接口。
 6. **M5**：转写引擎选择。
 7. E2（AI 判分）和 PR #43 的 L7（规划 Agent，使用 `planning.agent` 用途）延后。
 
-**文件所有权：** `packages/contracts`、`packages/ai/src/opening/gateway.ts`、迁移由 Claude 写；`teaching/*` 在 PR #43 L5 合并前归 Grok L5；设置页面板（`apps/web/src/features/settings/*panel.tsx`）在 M3/M4 交给 Grok。
+**文件所有权：** `packages/contracts`、`packages/ai/src/opening/gateway.ts`、迁移由 Claude 写；用户确认 Grok 停止后，`teaching/*` 由 GPT 接续；设置页面板（`apps/web/src/features/settings/*panel.tsx`）已随 M4/M5 接入。
 
 ## 任务卡（交给 Grok 的部分）
 
