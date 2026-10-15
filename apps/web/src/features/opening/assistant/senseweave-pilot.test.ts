@@ -3,7 +3,7 @@ import { safeSenseWeaveMessageId, shouldShowSenseWeavePilot } from "./senseweave
 
 describe("SenseWeave pilot boundary", () => {
   it("keeps ids stable and valid for the SDK", () => {
-    expect(safeSenseWeaveMessageId("assistant:数学/1")).toBe("assistant-数学-1");
+    expect(safeSenseWeaveMessageId("assistant:数学/1")).toBe("assistant-1");
     expect(safeSenseWeaveMessageId("***")).toBe("opening-message");
   });
 
