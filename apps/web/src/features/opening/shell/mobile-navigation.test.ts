@@ -14,6 +14,7 @@ vi.mock("react", async importOriginal => ({
   useState: () => [expanded, (value: boolean) => { expanded = value; }],
 }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: { children: ReactNode; href: string }) => createElement("a", props, children) }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/opening/today" }));
 
 import { OpeningMobileNavigation } from "./mobile-navigation";
 
