@@ -1,242 +1,325 @@
 # 自适应副驾驶闭环：最终执行计划
 
 **日期：** 2026-10-15
-**基线：** `feat/opening-release` @ `e69a406`（含 #47；上游两份外部建议基于更早的 `544304e`）
-**取代：** 外部《优化实施计划 v2》的 T00–T11 编号，以及 PR #46 中的 `docs/plans/2026-10-15-human-ai-adaptive-architecture.md`。编号沿用 [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md) 的 L0–L8，本文只补充新增切片和对原卡片的修订；原文的接口、档位规则、L4/L6/L8 任务卡仍然有效，冲突处以本文为准。
+**基线：** `feat/opening-release` @ `e69a406`（含 #47；两份外部建议基于更早的 `544304e`）
+**取代：** 外部《优化实施计划 v2》的 T00–T11 编号，以及 PR #46 中的 `docs/plans/2026-10-15-human-ai-adaptive-architecture.md`。切片名沿用 [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md) 的 L0–L8；该文的接口、档位规则和 L4/L6/L8 原卡仍然有效，冲突处以本文为准。
 **状态：** 计划。本文不代表任何切片已实现。
 
-## 0. 一句话目标
+## 0. 目标
 
 **一次有依据的学习表现，能改变下一份每日草案和下一次讲解；学生能看懂原因，并能接受、修改或拒绝。**
 
-批次 A 完成后，下面这条路径在真实数据库上成立：作答 → 核对 → 观察入账 → 次日（或当日刷新）草案出现对应活动及原因 → 学生勾选接受 → 恰好创建一次任务 → 开始此项时主讲知道要针对什么困难。
+批次 A 完成后，这条路径在真实数据库上成立：作答 → 核对 → 观察入账 → 草案出现对应活动及原因 → 学生勾选接受 → 恰好创建一次任务 → 开始此项时主讲知道要针对什么困难。
 
-## 1. 已核实的基线（2026-10-15，本计划作者复核）
+## 1. 分工原则
 
-外部两份分析的大方向成立，以下几处已按源码和 CI 核对或修正：
+按 [`agent-workflow.md`](../operations/agent-workflow.md) 的判断标准，**能交给 Grok 的都交给 Grok**，Claude 只保留下列三类，以及最后的收尾：
+
+- 动 `packages/contracts` 公共导出、migration、事务/锁/幂等、权限的；
+- 需要在 web / worker / database 多个包之间权衡接线的；
+- 失败一次代价大（数据重复、半写入、越权、CI 门禁）的。
+
+为了让 Grok 尽早并行，难卡里能剥出来的**纯函数、UI、测试**都拆成独立的 Grok 卡；Claude 先落一个很小的接口切片（K0），把 Grok 需要的类型和契约定死。
+
+| 负责 | 卡 |
+|---|---|
+| **Grok（9 张）** | G1 #46 收尾准备、G2 交替不跨层、G3 技能名默认值、G4 课程目标编辑、G5 快照组装纯函数、G6 下一步学习活动纯函数、G7 Today 副驾驶界面、G8 接受失败与原因展示文案、G9 草案回归测试补齐 |
+| **Claude（6 张）** | K0 接口切片、C0 主干浏览器测试失败、C1 快照读取服务、C2 自适应草案接线、C3 接受选中建议的事务、C4 学情进入主讲的接线 |
+| **Claude 收尾（Z）** | 审查并合并所有 Grok PR、端到端 handler 测试、CI 全绿、STATUS 与发布清单、交付用户浏览器验收脚本 |
+| pi | 每张 Grok 卡合并前用不同模型做一次只读审查（改动小的可跳过） |
+| 用户 | 合并 PR、Hermes 部署与开关、浏览器验收 |
+
+## 2. 已核实的基线
+
+外部两份分析的方向成立。以下按源码与 CI 逐项核对，含两处更正和两处新发现：
 
 | 事项 | 结论 | 依据 |
 |---|---|---|
-| 实际每日草案不走自适应规则 | **属实**。`plan-service.ts` 只调用 `buildDailyDraftInput → planDay`；`proposeAdaptiveTasks`、`rankForPlan` 在 `packages/domain` 之外没有任何生产调用方 | `apps/web/src/features/opening/planning/plan-service.ts:200-213` |
-| 接受事务不含选中建议 | **属实**。`acceptPlan` 的 payloadHash 只含 `draftId + expectedBaseVersion`，不创建建议任务 | `packages/database/src/repositories/opening-plans.ts:347-353` |
-| HTTP 学情摘要裁剪为 20 条 | **属实**。`REPRESENTATIVE_LIMIT = 20` 仅用于展示 | `apps/web/src/features/opening/learning/summary-response.ts:5` |
-| 技能名默认取活动意图 | **属实**。`context.intentSummary.slice(0, 200)`；数据库只有 `skill_label TEXT`，没有稳定技能 id | `teaching/inline-attempt.tsx:34`，迁移 `0019` |
-| 技能名不稳定还会破坏排程去重 | **新增**。建议身份 `suggestionIdentity(kind, courseId, hash(skillLabel))`，任务 clientKey 为 `planner:<日期>:<身份>`，`plannerHistory` 由此重建。技能名漂移会让“连续跳过减负”“同日不重复”全部失效 | `packages/domain/src/opening/adaptive/types.ts:58-71` |
-| 主讲输入没有学情 | **属实**。worker 只传材料、`intentSummary`、`intentKind` | `apps/worker/src/runtime/compile-teaching-unit-wiring.ts:53,107` |
-| 课程交替会跨越优先层 | **属实**。`interleaveCourses` 作用于截止任务之后的整段（补测/顺延/自有任务/建议），可把低优先项提到补测之前 | `rank-for-plan.ts:46-66` |
-| 估计器 `firstAttempt` 恒为 null | 属实，但**估计器目前没有生产调用方**，不影响现有功能；只在接 BKT 前需要补 | `packages/domain/src/opening/estimators/skill-evidence.ts:9` |
-| 已有技能名归一化工具 | **新增**。`normalizeSkillLabelKey`、`collectSkillLabelOptions`、`findSkillLabelReuseHint`、`nodeIdForSkillLabel` 已存在，可直接复用 | `learning/skill-label-options.ts`、`learning/knowledge-node-lookup.ts` |
-| PR #46 的 CI | 外部报告说“workflow 布局与 Jobs API 不一致”，**不成立**：CI 只有一个 job `lint-typecheck-test-build`。PR #46 的 Lint、Typecheck、单元、集成、handler **全部通过**，仅 `Browser tests` 失败、`Build` 因此被跳过 | Actions run 38731475149 |
-| 浏览器步骤失败的归属 | **基线问题，不是 #46 引起的**：`feat/opening-release` 上 `7fb4f85`、`544304e`、`c96211f`、`e69a406` 四次 push 的 CI 都在同一步 `Browser tests` 失败 | Actions runs 179/180/183/184 |
-| 主干 | `e69a406`（#47 已 squash 合入，外加一个 lint 修复）；#48（侧栏导航）open | — |
+| 实际每日草案不走自适应规则 | 属实。`proposeAdaptiveTasks`、`rankForPlan` 在 `packages/domain` 之外没有生产调用方 | `planning/plan-service.ts:200-213` |
+| 接受事务不含选中建议 | 属实。payloadHash 只含 `draftId + expectedBaseVersion` | `repositories/opening-plans.ts:347-353` |
+| HTTP 学情摘要裁剪为 20 条 | 属实，仅用于展示 | `learning/summary-response.ts:5` |
+| 技能名默认取活动意图 | 属实；数据库只有 `skill_label TEXT`，没有稳定技能 id | `teaching/inline-attempt.tsx:34`，迁移 `0019` |
+| 主讲输入没有学情 | 属实，只传材料、`intentSummary`、`intentKind` | `worker/src/runtime/compile-teaching-unit-wiring.ts:53,107` |
+| 课程交替跨越优先层 | 属实，可把低优先项提到补测之前 | `adaptive/rank-for-plan.ts:46-66` |
+| **新发现①** 技能名漂移会破坏排程去重 | 建议身份 = `kind + courseId + hash(skillLabel)`，任务 clientKey 为 `planner:<日期>:<身份>`，`plannerHistory` 由此重建。技能名一变，“同日不重复”“连续跳过减负”都失效 | `adaptive/types.ts:58-71` |
+| **新发现②** 独立答错不会触发薄弱点建议 | `summarizeObservations` 只在有到期补测时给 `needs_review`，独立核对错误只得到 `needs_check`；而 `weak_skill` 只认 `needs_review` 或近 3 次多数提示。快照组装时必须补上“最近有效观察 `verifiedCorrect = no` → 计划用 `needs_review`”的映射（G5） | `learning-summary.ts:68-75`，`propose-tasks.ts:136` |
+| 估计器 `firstAttempt` 恒为 null | 属实，但估计器没有生产调用方；接 BKT 前再补 | `estimators/skill-evidence.ts:9` |
+| 已有技能名归一化与节点匹配工具 | `normalizeSkillLabelKey`、`findSkillLabelReuseHint`、`nodeIdForSkillLabel` 可直接复用 | `learning/skill-label-options.ts`、`learning/knowledge-node-lookup.ts` |
+| **更正①** PR #46 的 CI | 外部报告的“workflow 布局与 Jobs API 不一致”不成立：CI 只有一个 job。#46 的 Lint、Typecheck、单元、集成、handler 全部通过，只有 `Browser tests` 失败、`Build` 被跳过 | Actions run 38731475149 |
+| **更正②** 浏览器步骤失败的归属 | 基线问题：主干 `7fb4f85`、`544304e`、`c96211f`、`e69a406` 四次 push 都在 `Browser tests` 失败 | Actions runs 179/180/183/184 |
 
-PR #46 的代码改动（`propose-tasks.ts` 两处、30 行左右）已复核：同日 done/skipped 不复活、卡片复习减负不反增时长，逻辑正确且有 vitest 测试。
+PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复核，逻辑正确。
 
-## 2. 对两份外部建议的取舍
+## 3. 对外部建议的取舍
 
-**采纳：**
-- 不重写、不建多 Agent 平台；规则引擎是主干，LLM 只做意图理解与局部讲解。
-- 学情同时驱动“排什么”和“讲什么”；教学目标由服务器构造，不交给提示词自由发挥。
-- 内部快照用完整证据计算入口，20 条是展示上限。
-- `verifiedCorrect = no` 是有效负证据，`unknown` 才是无法确认；提示后答对不算独立。
-- 接受时重验 + 选中集合进幂等身份 + 原子提交；GET 不承担新的执行权。
-- 跳过/拒绝/系统撤销语义分开；系统撤销不计入学生连续跳过。
-- 副驾驶先上，教练单独验收；BKT 先影子运行。
+**采纳：** 不重写、不建多 Agent 平台，规则引擎为主、LLM 只做意图理解与局部讲解；学情同时驱动“排什么”和“讲什么”；内部用完整证据；`verifiedCorrect` 三值不合并；接受时重验、选中集合进幂等身份、原子提交；GET 不承担新的执行权；系统撤销不计入学生跳过；副驾驶先上、教练单独验收、BKT 先影子运行。
 
-**修改或推迟（理由：当前是单人自用阶段，见 STATUS 目标；按 AGENTS.md“最小必要实现”）：**
+**缩小或推迟**（当前是单人自用阶段，按 AGENTS.md“最小必要实现”）：
 
-| 外部建议 | 本计划的处理 | 理由 |
+| 外部建议 | 本计划 | 理由 |
 |---|---|---|
-| 稳定技能身份先做 alias 映射、双写、迁移 | 批次 A 只修**默认值来源**和复用提示（不加迁移）；`skill_ref` 列放批次 C，与 BKT 一起做 | 碎片化的主因是默认值取活动标题；单人数据量小，加列迁移的收益要等估计器真正上线才兑现 |
-| `LearnerContext` 带 privacyEpoch、计划版本等完整 provenance | 只带 `workspaceHistoryRevision`（已有）+ `strategyVersion` + 各数据源 `dataStatus` | 授权与版本在接受事务里重读重验，快照里的版本号只用于追溯，不当作安全依据 |
-| `TeachingTarget` 九个字段 | 批次 A 只传五项：技能名、最近观察结论（含错因文本）、辅助情况、活动类型、学生的表达偏好 | 先证明“不同证据 → 不同讲解重点”，再扩字段 |
-| T08 窄题型自动判分进第一批 | 放批次 B | 参考自核已能产生有效负证据，副驾驶闭环不依赖自动判分 |
-| T10a 对话意图抽取随草案管道前移 | 放批次 C，L3a 稳定后再开 | 先让 Today 这条确定性入口跑通真实自用；对话入口复用同一接受通道，晚接不返工 |
-| T00 核对“工作流不一致” | 改为 **C0：定位基线浏览器步骤失败**（独立任务，不阻塞开发） | 不一致不存在；真正问题是主干浏览器步骤持续红 |
-| 新建 `TeachingTarget` 表、快照哈希、事件总线 | 不做 | 现有修订号、版本、幂等键足够 |
+| 稳定技能身份：alias 映射、双写、迁移 | 批次 A 只修默认值来源和复用提示（G3，不加迁移）；`skill_ref` 列放批次 C | 碎片化的主因是默认值取活动标题；加列要等估计器上线才有收益 |
+| 快照带 privacyEpoch、计划版本等完整 provenance | 只带已有的 `workspaceHistoryRevision`、`strategyVersion` 和各数据源 `dataStatus` | 授权与版本在接受事务里重读重验，快照版本只用于追溯 |
+| `TeachingTarget` 九个字段 | 批次 A 只传五项（技能名、活动类型、关注点、近期辅助、表达偏好） | 先证明“不同证据 → 不同讲解重点” |
+| 窄题型自动判分进第一批 | 放批次 B | 参考自核已能产生有效负证据 |
+| 对话意图抽取前移 | 放批次 C | 先跑通 Today 这条确定性入口；对话复用同一接受通道，晚接不返工 |
+| T00 核对“工作流不一致” | 改为 C0：定位主干浏览器测试失败 | 不一致不存在 |
+| 课程目标加“阶段成果”字段 | 批次 B | 需要改 contracts，批次 A 不依赖它 |
 
-## 3. 设计约束（所有卡片共用）
+## 4. 设计约束（所有卡共用）
 
-1. **事实与判断分离**：作答、核对、辅助暴露是事实，只能经现有观察写入路径产生；掌握状态是可重算的投影。任何 LLM 输出、学生自述“我会了”都不直接生成作答事实。
-2. **负证据保留**：快照与教学使用 `verifiedCorrect` 的三值语义；不得把 `no` 和 `unknown` 合并，也不得只筛 `yes`。
-3. **完整证据**：快照复用 `learning/read-service.ts` 内部的完整 `CourseEvidence` + `summarizeObservations`，不调用 HTTP 摘要接口、不用 `summary-response.ts` 的投影。
-4. **读取失败 ≠ 空**：每个数据源返回 `available | not_configured | unavailable`。课表/约束 `unavailable` 时不生成自适应建议（退回现有规则草案并说明原因），不能当成“全天空闲”。单门课程读取失败只跳过该课程。
-5. **草案无副作用**：接受前不创建任务；建议正文只来自服务器保存的 `suggested_tasks`，不信任客户端提交的任务内容。
-6. **GET 只读+兼容**：Today GET 维持现有“确保未确认草案”的行为，不在 GET 里加模型调用、教练自动接受或外部写入。
-7. **锁与事务**：不在持锁事务中调用模型或做大批量查询；规则计算在事务外完成，提交事务只做重验和写入。新增锁顺序必须与 `opening-learning-facts.ts` 现有顺序一致。
-8. **开关**：所有新行为在 `OPENING_ADAPTIVE_PLANNING=1` 时才生效；关闭时现有 `opening-daily-draft`、`opening-plans`、`opening-today-read` 测试不改且通过。
+1. **事实与判断分离**：作答、核对、辅助暴露只能经现有观察写入路径产生；掌握状态是可重算投影。LLM 输出和学生自述“我会了”都不生成作答事实。
+2. **负证据保留**：`verifiedCorrect` 的 `no` 与 `unknown` 不合并，也不只筛 `yes`。
+3. **完整证据**：快照复用 `read-service.ts` 的完整 `CourseEvidence` + `summarizeObservations`，不用 HTTP 摘要。
+4. **读取失败 ≠ 空**：每个数据源标 `available | not_configured | unavailable`。时间约束不可用时不出自适应建议、退回现有规则草案并说明；单门课失败只跳过该课。
+5. **草案无副作用**：接受前不创建任务；建议正文只来自服务器保存的 `suggested_tasks`。
+6. **GET 只读兼容**：Today GET 维持现有“确保未确认草案”，不加模型调用、自动接受或外部写入。
+7. **锁与事务**：持锁事务内不调模型、不做大批量查询；规则计算在锁外，提交只做重验与写入；锁顺序与 `opening-learning-facts.ts` 一致。
+8. **开关**：新行为只在 `OPENING_ADAPTIVE_PLANNING=1` 时生效；关闭时现有 `opening-daily-draft`、`opening-plans`、`opening-today-read` 测试不改且通过。
 9. **不新增**：通用 Agent 框架、事件总线、快照哈希、gate/baseline/evidence 文件、`setMastery` 类接口。
 
-## 4. 批次与依赖
+## 5. 执行顺序
+
+同时最多 3 个活跃 worktree，Grok 按波次领卡。Claude 的卡在云端会话中执行。
 
 ```text
-批次 A（副驾驶最小闭环）
-  C0 浏览器基线失败定位 ──────────────(并行，阻塞发布不阻塞开发)
-  A0 合入 #46 代码 ─┐
-  A1 交替不跨层 ────┼─▶ L2a 学生快照 ─▶ L2b 自适应草案 ─▶ L3a 接受选中建议 ─▶ L4 Today 副驾驶
-  A2 技能名默认值 ──┘          │                                     └──▶ L6 课程目标编辑(可与 L4 并行)
-                              └─▶ TT 学情进入主讲（L2a 后即可开始，与 L2b/L3a 并行）
-批次 B（真实负担与可靠评价）：L5 反馈与低打扰重排 → L8 闭环指标 → E1 窄题型自动评价
-批次 C（有限自主与扩展）：L3b 教练自动确认与条件撤销；L7a 对话进入同一草案管道；I2 skill_ref 迁移 + firstAttempt + BKT 影子
+第 1 波（立即）  Grok: G1  G2  G3              Claude: K0 → C0（并行）
+第 2 波（K0 后） Grok: G5  G6  G4              Claude: C1（接 G5）→ C2
+第 3 波          Grok: G7  G8  G9              Claude: C3 → C4（接 G6）
+收尾             Claude: Z
 ```
 
-**分工（按 `docs/operations/agent-workflow.md`）：** 动 contracts / migration / 事务 / 跨包的卡由 Claude 负责（L2a、L2b、L3a、TT、L3b、I2、C0）；边界清楚的卡交 Grok（A1、A2、L4、L6、L8、L5 的 UI 部分）；每张 Grok 卡合并前由 pi 用不同模型做只读审查。同时最多 3 个 worktree；`today-dashboard.tsx` 同一时间只允许一个写入者（L4 先合，L5 后改）。
+依赖：G5、G6、G7、G8 需要 K0 已合入（类型与契约定死）；G9 需要 C2；G7 可以先用 K0 的契约做界面，C3 合入后联调。C1 若先于 G5 完成，Claude 先用 G5 卡里的函数签名写服务，G5 合入后替换。
 
-**批次 A 的完成标准**见第 7 节验收矩阵；批次 A 全部合入且用户浏览器验收通过后，才在 Hermes 上把 `OPENING_ADAPTIVE_PLANNING` 设为 1。
+**批次 A 完成**：第 9 节验收矩阵中可自动验证的项全部通过、CI 全绿、用户浏览器验收通过。之后才在 Hermes 上把 `OPENING_ADAPTIVE_PLANNING` 设为 1。
 
-## 5. 批次 A 任务卡
+## 6. Grok 任务卡（可直接粘贴）
 
-每张卡的通用要求：基于最新 `feat/opening-release` 新建分支、独立 worktree；先读根 `AGENTS.md` 和目标包 `AGENTS.md`；只跑最近的测试和所属包类型检查；不跑浏览器测试、不调用付费模型；返回改了哪些文件、实际命令与结果、未解决问题。
+所有 Grok 卡共用以下尾注，粘贴时附在每张卡末尾：
 
-### C0｜主干浏览器步骤失败定位（Claude，并行）
+```text
+仓库：E:/Project/study-assistant-opening，基于最新 feat/opening-release 新建分支，在独立 worktree 里做。
+不许动：packages/contracts 公共导出、migration、package.json/lockfile、CI（需要时停下来报告）。
+先读根 AGENTS.md 和目标包的 AGENTS.md。不要做 commit/push 之外的 Git 历史操作，不跑浏览器测试，不调用付费模型 API。
+返回：改了哪些文件、实际运行的命令和结果、没解决的问题。卡片规则和代码现状对不上时，停下来报告，不要自行扩大范围。
+```
 
-- **目标**：查明 `feat/opening-release` CI 的 `Browser tests` 自 `7fb4f85` 起持续失败的根因，恢复 CI 全绿或给出明确阻塞说明。
-- **做法**：下载 run 38752215093（`e69a406`）的 Playwright 报告/日志，找到第一个失败用例；对照最后一次绿的 run 的提交范围二分。根据 AGENTS.md，浏览器验收归用户，但 **CI 中既有浏览器测试的失败需要定位**；只做最小修复。
-- **不许**：跳过、禁用或放宽浏览器用例；把失败改成 `continue-on-error`。
-- **完成标准**：CI `Browser tests` 与 `Build` 在主干变绿；或在 STATUS 写明根因、需要用户做什么。
-- **回滚**：普通 revert。
+### G1｜PR #46 收尾准备（第 1 波）
 
-### A0｜合入 PR #46 的规则修复（用户/Claude）
+```text
+目标：PR #46 只保留规则修复和测试，可以转为 ready 等用户合并。
+分支：在已有分支 fix/adaptive-learner-feedback-20261015 上操作（例外：不新建分支）。
+做法：删除 docs/plans/2026-10-15-human-ai-adaptive-architecture.md（内容已并入 docs/plans/2026-10-15-adaptive-copilot-final-plan.md）；git merge origin/feat/opening-release（用 merge，不 rebase、不 force-push）；保留 packages/domain/src/opening/adaptive/propose-tasks.ts 与 propose-tasks-feedback.test.ts 的改动。
+要保留的行为：同日 done/skipped 建议不复活；卡片复习减负不反增时长；手工档零建议。
+完成标准：npx vitest run --project unit packages/domain/src/opening/adaptive 通过；npm run typecheck -w @aistudy/domain 通过；推送到原分支。不要自己合并 PR。
+```
 
-- **做法**：PR #46 的 CI 非浏览器步骤已全绿，浏览器失败属于基线（见 C0）。从 #46 删除 `docs/plans/2026-10-15-human-ai-adaptive-architecture.md`（内容已并入本文），保留 `propose-tasks.ts` 与 `propose-tasks-feedback.test.ts`，与主干合并后转为 ready，由用户合并。
-- **验收**：`npx vitest run --project unit packages/domain/src/opening/adaptive`；`npm run typecheck -w @aistudy/domain`。
-- **注意**：这两项修复要等 L2a 把同日 done/skipped 历史读进快照后才真正生效。
+### G2｜课程交替不跨越优先层（第 1 波）
 
-### A1｜课程交替不跨越优先层（Grok）
+```text
+目标：每日计划里，补测、顺延、自有任务、建议四层的先后顺序不再被“换课程”打乱。
+允许修改：packages/domain/src/opening/adaptive/rank-for-plan.ts 及其测试。
+做法：interleaveCourses 分别作用于每一层（截止层仍不参与）；每层内保持“同课程最多连续 2 项”；层与层之间不为交替借位。
+要保留的行为：每个任务都有结构化原因；同输入结果完全相同；loop-simulation.test.ts 的其余断言不变。
+完成标准：新增用例——课程 A 有 3 个到期补测、课程 B 有 1 个自有任务时，B 的任务排在 A 的第 3 个补测之后；npx vitest run --project unit packages/domain/src/opening/adaptive 通过；npm run typecheck -w @aistudy/domain 通过。
+```
 
-- **目标**：交替只在同一优先层内部调整顺序；补测、顺延、自有任务、建议四层的先后不被打乱。
-- **允许修改**：`packages/domain/src/opening/adaptive/rank-for-plan.ts` 及其测试。
-- **要求**：`interleaveCourses` 分别作用于每一层（截止层仍不参与）；每层内保持“同课程最多连续 2 项”；层与层边界处不再为交替而跨层借位。
-- **验收**：新增用例——课程 A 有 3 个到期补测、课程 B 有 1 个自有任务时，B 的任务排在 A 的第 3 个补测之后；`loop-simulation.test.ts` 其余断言不变。`npx vitest run --project unit packages/domain/src/opening/adaptive`；`npm run typecheck -w @aistudy/domain`。
+### G3｜作答技能名默认值不再取活动标题（第 1 波）
 
-### A2｜作答技能名默认值不再取活动标题（Grok）
-
-- **目标**：同一知识点的作答落到同一个技能名下，排程建议身份因此稳定。
-- **允许修改**：`apps/web/src/features/opening/teaching/inline-attempt.tsx`、`inline-attempt-submission*`、其测试；只读复用 `learning/skill-label-options.ts`、`learning/knowledge-node-lookup.ts`。
-- **规则**（按优先级取默认值）：
-  1. 当前讲解块/大纲条目对应的课程知识节点标题（经 `nodeIdForSkillLabel` 能对上节点的）；
-  2. 本课程已有技能名中与当前大纲条目标题归一化后相同的那个（`findSkillLabelReuseHint`）；
+```text
+目标：同一知识点的作答落到同一个技能名下（排程建议身份也依赖它）。
+允许修改：apps/web/src/features/opening/teaching/inline-attempt.tsx、teaching/inline-attempt-submission.ts 及其测试；只读复用 learning/skill-label-options.ts、learning/knowledge-node-lookup.ts。
+默认值按优先级取：
+  1. 当前讲解块/大纲条目对应的课程知识节点标题（nodeIdForSkillLabel 能对上节点的）；
+  2. 本课程已有技能名中与当前大纲条目标题归一化后相同的那个（findSkillLabelReuseHint）；
   3. 当前大纲条目标题；
-  4. 都没有：留空并显示本课程已有技能名供选择，**不再回退到 `intentSummary`**。
-  学生仍可编辑；输入与已有技能只差空格/全半角/大小写时提示复用（不自动改写）。
-- **不许动**：数据库、contracts、观察写入路径、历史数据。
-- **验收**：单测覆盖四级回退、`intentSummary` 不再作为默认值、复用提示；`npx vitest run --project unit apps/web/src/features/opening/teaching apps/web/src/features/opening/learning/skill-label-options.test.ts`；`npm run typecheck -w @aistudy/web`。
-- **若当前讲解块拿不到大纲条目/节点信息**：停下来报告，由 Claude 在 TT 中补充活动上下文，不在本卡改契约。
+  4. 都没有：留空，并列出本课程已有技能名供选择。
+  任何情况下都不再回退到 intentSummary。学生仍可编辑；输入与已有技能只差空格/全半角/大小写时提示复用，不自动改写。
+不许动（额外）：数据库、观察写入路径、历史数据。
+要保留的行为：已有草稿（initialDraft.skillLabel）优先；提交后不可改；课程为空时不能提交。
+完成标准：单测覆盖四级回退、intentSummary 不再作为默认值、复用提示；npx vitest run --project unit apps/web/src/features/opening/teaching apps/web/src/features/opening/learning/skill-label-options.test.ts 通过；npm run typecheck -w @aistudy/web 通过。
+如果当前讲解块拿不到大纲条目或节点信息：停下来报告，由 Claude 在 C4 中补充活动上下文。
+```
 
-### L2a｜学生快照服务（Claude）
+### G4｜课程目标编辑（第 2 波）
 
-- **目标**：服务器内部一次读出排程与教学共用的 `LearnerSnapshot`，覆盖现有 `types.ts` 中的全部字段，再加数据状态与追溯信息。
-- **新增**：`apps/web/src/features/opening/planning/learner-snapshot-service.ts`（use case，依赖注入仓储，便于 handler/集成测试）。
-- **读取内容**：
-  - 课程：未归档课程、`adaptive_planning.courseGoals`、本周已完成分钟（标注为“投入”而非“掌握”）。
-  - 技能：经 `read-service.ts` 内部完整证据 + `summarizeObservations` 得到的每个技能状态、最近观察时间、最近 3 次 `assistance`；保留最近一次有效观察的 `verifiedCorrect` 三值与学生填写的错因文本（供 TT 使用）。只取有效 head（被修订/撤回的不计）。
-  - `nextSkills`：课程知识图中先修已 `observed_independent`（或无先修）且自身 `unobserved` 的节点，且课程 `hasUsableMaterials`。
-  - 到期卡片数；任务；昨日已确认块；时间窗口与硬约束。
-  - `plannerHistory`：近 7 天 `client_key` 以 `planner:` 开头的任务，用 `parseSuggestionKey` 还原 `{date, identity, status}`，**包括当日 done/skipped 与更早仍 pending 的**。
-- **新增字段**（扩展 domain `LearnerSnapshot` 类型，可选字段，不破坏现有纯函数测试）：`dataStatus: Record<'courses'|'evidence'|'cards'|'constraints'|'history', 'available'|'not_configured'|'unavailable'>`、`workspaceHistoryRevision`（复用 `opening-learning-facts.ts` 的修订计数）。
-- **要求**：scope 只来自认证；按课程批量查询，记录查询次数与耗时（日志），先不加缓存；读取在事务外完成。
-- **验收（integration）**：新增 `tests/integration/opening-learner-snapshot.test.ts`：
-  - 同一技能 25 条观察 → 快照状态与按全量计算一致（证明不受 20 条裁剪影响）；
-  - 一条 `verifiedCorrect=no` 的独立作答 → 技能为 `needs_review` 且保留负证据；`unknown` 不被当作错；
-  - 提示后答对 → `recentAssistance` 含 `hinted`，不升级为 `observed_independent`；
-  - 被修订的观察只按新 head 计算；
-  - 当日 done/skipped 的 planner 任务出现在 `plannerHistory`；
-  - 某课程证据读取抛错 → 其他课程正常，`dataStatus.evidence = 'unavailable'`；
-  - 跨工作区读取被拒。
-  - 类型：`npm run typecheck -w @aistudy/domain -w @aistudy/web`。
+按 `2026-10-15-adaptive-learning-loop-v2.md` 的“任务卡 L6”原样执行，附共用尾注。本批次不加“阶段成果”字段。
 
-### L2b｜真实自适应每日草案（Claude）
+### G5｜学生快照组装纯函数（第 2 波，需 K0）
 
-- **目标**：开关开启时，`ensureDailyDraft` 走 `snapshot → proposeAdaptiveTasks → rankForPlan → planDay`，草案持久化 `suggested_tasks`、`reasons`、`strategy_version`。
-- **允许修改**：`planning/plan-service.ts`、`packages/database/src/repositories/opening-plans.ts`（自动草案输入与映射）、相关 contracts（如需）。
-- **要求**：
-  - 开关关闭或 `autonomy=manual`：完全走现有路径。
-  - `dataStatus.constraints !== 'available'`：退回现有规则草案并在 `reasons` 中给出“时间约束读取失败，未生成建议”。
-  - 快照与规则计算在 `ensureAutoDraft` 的锁外完成；锁内只比较输入（任务、free/hard blocks、**以及 `workspaceHistoryRevision` 与建议集合**）并写入。
-  - 草案“仅变得不是最优”（学情修订号变了但已有草案仍可执行）时**保持原草案 id**，在 Today 返回 `hasNewerSuggestion: true`；草案已不可执行（任务完成、材料不可用、时段已过）时才重建。已接受计划不被自动重建（现有行为保持）。
-  - 建议时段放不下时保留在 `suggested_tasks` 并标 `unplaced` 原因，不伪造时段。
-- **验收**：
-  - handler：`opening-daily-draft.test.ts` 开关关闭用例原样通过；新增开关开启用例——在 DB 中写入一条合格的独立错误观察后，下一份草案出现该技能的 `weak_skill` 建议并带原因与 `adaptive-1`；只写一条未核对作答不产生 `weak_skill`；未接受时 `opening_tasks` 无新增行。
-  - integration / handler：`tests/integration/opening-adaptive-loop.test.ts`、`tests/integration/handler/opening-prb-auto-draft-recompute.test.ts` 补“同日完成一项建议后刷新，不再出现同一建议”“剩余时间不足 25 分钟时给出短活动或说明无可行项”。
-  - `npm run typecheck -w @aistudy/database -w @aistudy/web`。
+```text
+目标：把从数据库读出的原始数据，确定性地组装成排程用的 LearnerSnapshot。数据库读取由 Claude 的 C1 负责，本卡只写纯函数。
+新增：packages/domain/src/opening/adaptive/assemble-snapshot.ts 及测试；在 adaptive/index.ts 导出。
+签名（K0 已定义输入类型 LearnerSnapshotSources，以 K0 合入后的实际定义为准）：
+  assembleLearnerSnapshot(sources: LearnerSnapshotSources) → LearnerSnapshot
+规则：
+  1. 技能状态：以 summarizeObservations 的结果为基础；若该技能最近一次有效观察的 verifiedCorrect 为 "no"（不论是否独立），计划用状态记为 needs_review；为 "unknown" 时保持原状态，不当作错。summary 已是 needs_review 的保持。
+  2. recentAssistance：该技能最近 3 条有效观察的 assistance，新的在前。被修订/撤回的观察只按有效 head（输入里已标出）计。
+  3. nextSkills：课程知识图中，先修全部为 observed_independent（或无先修）且自身未观察的节点，按大纲顺序；课程 hasUsableMaterials 为 false 时为空。
+  4. plannerHistory：只取 clientKey 以 "planner:" 开头的任务，用 parseSuggestionKey 还原 {date, identity, status}；包含当日 done/skipped 和更早仍 pending 的；只取 date 前 7 天内。
+  5. minutesThisWeek：本地周内 status=done 且归属该课程的任务分钟数（这是投入，不是掌握）。
+  6. 已归档课程不出现；单门课程的 evidence 标记为 unavailable 时，该课程 skills 为空、nextSkills 为空（不报错）。
+要保留的行为：纯函数、无 IO、不修改输入、同输入同输出。
+完成标准：单测覆盖以上 6 条，另含“同一技能 25 条观察时状态与全量计算一致”“独立答错→needs_review→proposeAdaptiveTasks 产出 weak_skill”“仅未核对作答不产出 weak_skill”；npx vitest run --project unit packages/domain/src/opening/adaptive 通过；npm run typecheck -w @aistudy/domain 通过。
+```
 
-### L3a｜接受选中建议的原子事务（Claude）
+### G6｜下一步学习活动纯函数（第 2 波，需 K0）
 
-- **目标**：`POST /api/opening/plans/[id]/accept` 携带 `acceptSuggestedKeys` 时，在一个事务里创建选中的建议任务并接受计划。
-- **允许修改**：`opening-plans.ts` 的 `acceptPlan`、plan-service、accept route、client、契约（`acceptPlanInputSchema` 已有可选 `acceptSuggestedKeys`）。
-- **事务内顺序**：确保并锁定 plan-state 行（不存在时先 `INSERT … ON CONFLICT DO NOTHING` 再 `FOR UPDATE`，不能依赖对空结果的 `FOR UPDATE`）→ 读服务器存储的草案 → 规范化选中集合（去重、排序；未知 key 返回 `VALIDATION`）→ 幂等检查（**payloadHash 纳入规范化后的选中集合**；同 clientKey 不同集合返回 `CONFLICT`）→ 重验：baseVersion、草案仍为 draft、引用任务仍 pending、建议的课程未归档且材料可准入、时段未过期 → 以 `planner:<日期>:<身份>` 为 clientKey 幂等创建任务（正文来自草案）→ 写 plan state 与 acceptance。任一步失败整体回滚，错误码区分 `STALE_VERSION / TASK_CHANGED / SOURCE_UNAVAILABLE / SLOT_EXPIRED`。
-- **省略 `acceptSuggestedKeys`**：按 L0 契约等于“全部建议”；空数组等于只接受已有任务部分。
-- **验收（integration + handler）**：同请求重放不增任务；同 clientKey 不同集合冲突；未选中不创建；`unplaced` 建议不创建；两个并发首次接受只成功一个；确认前任务已完成不被复活；材料撤销/课程归档/版本变化/时段过期各有用例；任何失败后 `opening_tasks` 与 plan state 均无半写入。`npm run test:handler -- opening-plans`、`npx vitest run --project integration tests/integration/opening-adaptive-loop.test.ts`。
-- **回滚**：关开关后接受入口退回旧语义；已创建任务保留。
+```text
+目标：根据某个技能的学情，决定下一次讲解的活动类型和关注点，供主讲使用。
+新增：packages/domain/src/opening/adaptive/next-learning-step.ts 及测试；在 adaptive/index.ts 导出。
+签名（类型由 K0 定义）：nextLearningStep(input: NextLearningStepInput) → NextLearningStep
+  NextLearningStep = { activityKind: "diagnose" | "targeted_explain" | "reduced_help_practice" | "transfer_check" | "full_explain"; focus: string | null; reasonCode: string }
+规则（按顺序判断）：
+  1. 学生本次明确要求完整讲解 → full_explain（focus 为 null）。
+  2. 无观察，或只有 verifiedCorrect=unknown 的作答 → diagnose。
+  3. 最近一次有效观察 verifiedCorrect=no：有错因文本 → targeted_explain，focus=错因文本（截断到 200 字）；无错因 → diagnose。
+  4. 最近 3 次中多数为 hinted/revealed → reduced_help_practice。
+  5. 状态 observed_independent → transfer_check。
+  6. 其他 → diagnose。
+要保留的行为：纯函数；不把学生自述当作作答结果；full_explain 不视为失败。
+完成标准：每条规则至少一个用例，另含“提示后答对→reduced_help_practice 而非 transfer_check”；npx vitest run --project unit packages/domain/src/opening/adaptive 通过；npm run typecheck -w @aistudy/domain 通过。
+```
 
-### TT｜学情进入主讲（Claude）
+### G7｜Today 副驾驶界面（第 3 波，需 K0；C3 合入后联调）
 
-- **目标**：同一材料、不同学情的学生得到不同的讲解重点和第一道练习。
-- **新增纯函数**：`packages/domain/src/opening/adaptive/next-learning-step.ts`：输入某技能的快照条目，输出 `{ activityKind: 'diagnose' | 'targeted_explain' | 'reduced_help_practice' | 'transfer_check' | 'full_explain', focus: string | null, reasonCode }`。
-  - 无观察或只有未核对作答 → `diagnose`（一道有区分度的短题）
-  - 有独立错误且有错因文本 → `targeted_explain`，`focus` = 错因
-  - 最近多为 `hinted/revealed` → `reduced_help_practice`
-  - 已 `observed_independent` → `transfer_check`
-  - 学生在本次活动明确要求完整讲解 → `full_explain`（记为辅助，不惩罚）
-- **接线**：创建教学活动时由服务器从 L2a 快照取该技能条目，构造 `learnerFocus { skillLabel, activityKind, focus, recentAssistance, presentationPreference }`，存入活动并传给 `compile-teaching-unit-wiring.ts` 的编译输入；编译提示只拿这五项和少量例证，不发全部学情。
-- **要求**：开始作答后内容版本固定，新证据不改写进行中的题目；模型不可用时现有降级路径不变；`learnerFocus` 缺失时行为与现在完全一致。
-- **验收**：domain 单测覆盖五种分支；worker 单测用假模型断言三种学情（未知 / 行列配对错 / 已独立）产生不同的编译输入；`npx vitest run --project unit packages/domain/src/opening/adaptive apps/worker/src/runtime`；`npm run typecheck -w @aistudy/domain -w @aistudy/worker -w @aistudy/web`。真实模型生成质量由用户自用抽检。
+按原“任务卡 L4”执行，附共用尾注，并作以下修订：
 
-### L4｜Today 副驾驶（Grok，按原 L4 卡并作以下修订）
+```text
+- 首屏只显示“下一项 + 一句原因”；依据（观察时间、辅助情况、strategyVersion）放展开区。
+- 每条建议可勾选；“不适合我”只是取消勾选（原因收集放批次 B）。
+- Today 返回 hasNewerSuggestion=true 时显示“有新建议”，点击后才刷新草案，界面不自动跳变。
+- unplaced 的建议显示为“今天放不下”及原因，不可勾选。
+- 教练摘要条、撤销按钮隐藏（批次 C 再做）。
+- 重复点击确认只发一次请求；旧响应不覆盖新状态。
+- 只用 Tailwind 和 lucide-react；保持可访问性状态。
+交付：页面入口、数据前提、操作步骤、预期结果，标“待用户浏览器验收”。
+完成标准：npx vitest run --project unit apps/web/src/features/opening/planning 通过（daily-draft-card.tsx、today-dashboard.tsx 都在该目录）；npm run typecheck -w @aistudy/web 通过。
+```
 
-原卡见 `2026-10-15-adaptive-learning-loop-v2.md` 的“任务卡 L4”，修订：
-- 默认只显示“下一项 + 一句原因”，原因与依据（观察时间、辅助情况、策略版本）放在展开区；不在首屏展示权限表。
-- 每条建议提供：勾选、“不适合我”（可选原因：没时间 / 太难 / 已经会了 / 不相关，可不选）。本批次只记录原因并从当日草案移除，不改变能力状态；原因的规则化使用放 L5。
-- `hasNewerSuggestion` 为真时显示“有新建议”提示，用户点击后才刷新草案，界面不自动跳变。
-- 教练摘要条、撤销按钮在 L3b 前隐藏。
-- 交付时附：页面入口、数据前提、操作步骤、预期结果；标“待用户浏览器验收”。
+### G8｜接受失败与原因展示文案（第 3 波，需 K0）
 
-### L6｜课程目标编辑（Grok，按原 L6 卡）
+```text
+目标：接受草案失败时，学生看到能理解、能操作的提示，而不是通用错误。
+允许修改：apps/web/src/features/opening/planning/ 下的错误映射与展示组件（新增 plan-accept-errors.ts 及测试），以及 daily-draft-card.tsx 中调用处（如 G7 同时在改该文件，等 G7 合入后再改）。
+映射（错误码由 K0 定义）：
+  STALE_VERSION → “计划已在别处更新，已为你刷新”并触发重新读取
+  TASK_CHANGED → “有任务已完成或被修改，请重新确认”
+  SOURCE_UNAVAILABLE → “相关材料暂不可用，这项建议已移除”
+  SLOT_EXPIRED → “部分时段已过，请重新安排”
+  CONFLICT（同一请求不同选择）→ “请刷新后重新选择”
+  其他 → 保留现有通用错误
+要保留的行为：不吞错；失败时不清空用户已勾选的内容。
+完成标准：单测覆盖每个错误码；npx vitest run --project unit apps/web/src/features/opening/planning 通过；npm run typecheck -w @aistudy/web 通过。
+```
 
-补充一条：目标表单把“每周投入分钟”与“阶段成果（文字，可选）”分开展示；成果字段本批次只存储和显示，不参与规则。
+### G9｜自适应草案回归测试补齐（第 3 波，需 C2）
 
-## 6. 批次 B / C 概要（批次 A 合入并自用一周后再细化成卡）
+```text
+目标：给 C2 的自适应草案补齐边界用例（Claude 已写核心用例）。
+允许修改：tests/integration/handler/opening-daily-draft.test.ts、tests/integration/handler/opening-prb-auto-draft-recompute.test.ts、tests/integration/opening-adaptive-loop.test.ts（只加用例，不改已有断言）。
+补充用例：
+  1. 同日完成一项建议后刷新，不再出现同一建议；
+  2. 剩余时间不足 25 分钟时，建议标 unplaced 或给出短卡片复习，不伪造时段；
+  3. 手工档零建议；
+  4. 开关关闭时同一组数据的草案与改动前一致；
+  5. 技能名只差空格/大小写的两条观察，只产生一条建议。
+完成标准：npm run test:handler -- opening-daily-draft opening-prb-auto-draft-recompute 与 npx vitest run --project integration tests/integration/opening-adaptive-loop.test.ts 通过。如发现 C2 的真实缺陷，写出复现用例并报告，不改实现代码。
+```
 
-| 卡 | 内容 | 关键不变量 |
+## 7. Claude 任务卡
+
+### K0｜接口切片（第 1 波，最先做）
+
+只定类型与契约，不接线，让 G5–G8 能并行开工。
+
+- domain：`LearnerSnapshotSources`（G5 输入：课程、完整证据摘要与有效观察、知识图节点与先修、任务、到期卡片数、日期/时区）、`NextLearningStepInput` / `NextLearningStep`（G6）。
+- contracts：Today 响应可选 `hasNewerSuggestion`；`suggestedTaskSchema` 可选 `unplaced` 原因；接受计划错误码 `STALE_VERSION / TASK_CHANGED / SOURCE_UNAVAILABLE / SLOT_EXPIRED / CONFLICT`；教学活动可选 `learnerFocus { skillLabel, activityKind, focus, recentAssistance, presentationPreference }`。全部可选，开关关闭时不出现。
+- 验收：`npm run typecheck`（受影响包）；现有 contracts 单测通过。
+
+### C0｜主干浏览器测试失败定位（第 1 波，并行）
+
+- 取 run 38752215093（`e69a406`）的 Playwright 报告与日志，找到第一个失败用例；对照最后一次全绿 run 的提交范围定位引入点。
+- AGENTS.md 规定浏览器验收归用户，但 CI 里既有浏览器测试的失败需要定位；本卡只读日志和产物，不在本地跑 Playwright（除非用户授权）。
+- 不跳过、不禁用、不放宽用例，不加 `continue-on-error`。
+- 完成：主干 `Browser tests` 与 `Build` 变绿；或在 STATUS 写明根因及需要用户做什么。
+
+### C1｜快照读取服务（第 2 波）
+
+- 新增 `apps/web/src/features/opening/planning/learner-snapshot-service.ts`：认证 scope → 按课程批量读取 → 构造 `LearnerSnapshotSources` → 调 `assembleLearnerSnapshot`（G5）。返回 `{ snapshot, dataStatus, workspaceHistoryRevision }`。
+- 证据来自 `read-service.ts` 内部完整计算入口；只取有效 head；读取在事务外；记录查询次数与耗时，不加缓存。
+- 集成测试 `tests/integration/opening-learner-snapshot.test.ts`：25 条观察按全量计算；独立答错 → `needs_review`；`unknown` 不当错；提示后答对不升级；观察被修订只按新 head；当日 done/skipped 进入 `plannerHistory`；单门课证据读取失败时其他课正常且 `dataStatus.evidence = 'unavailable'`；跨工作区被拒。
+
+### C2｜自适应草案接线（第 2 波）
+
+- `ensureDailyDraft` 在开关开启且非手工档时走 `C1 → proposeAdaptiveTasks → rankForPlan → planDay`，持久化 `suggested_tasks`、`reasons`、`strategy_version`。
+- 约束不可用时退回现有规则草案并写原因；快照与规则计算在 `ensureAutoDraft` 锁外；锁内比较输入（任务、free/hard blocks、`workspaceHistoryRevision`、建议集合）。
+- 草案仅“不是最优”时保持草案 id 并返回 `hasNewerSuggestion`；不可执行时才重建；已接受计划不自动重建。放不下的建议标 `unplaced`。
+- 核心测试：写入一条合格的独立错误观察后草案出现 `weak_skill` 及原因；只有未核对作答不出现；未接受不建任务；开关关闭时既有测试原样通过。其余边界交 G9。
+
+### C3｜接受选中建议的事务（第 3 波）
+
+- 事务内：确保并锁定 plan-state 行（不存在时先 `INSERT … ON CONFLICT DO NOTHING` 再 `FOR UPDATE`）→ 读服务器存储的草案 → 规范化选中集合（未知 key 报 `VALIDATION`）→ 幂等检查（payloadHash 纳入规范化后的选中集合，同 key 不同集合报 `CONFLICT`）→ 重验版本、任务状态、课程未归档、材料可准入、时段未过期 → 以 `planner:<日期>:<身份>` 幂等创建任务（正文来自草案）→ 写 plan state 与 acceptance。任一步失败整体回滚。
+- 省略 `acceptSuggestedKeys` 等于全部建议，空数组等于不接受建议。
+- 测试：重放不增任务；同 key 不同集合冲突；未选中与 `unplaced` 不创建；并发首次接受只成功一次；确认前任务已完成不复活；材料撤销、课程归档、版本变化、时段过期各一例；失败后无半写入。
+
+### C4｜学情进入主讲的接线（第 3 波）
+
+- 创建教学活动时，服务器从 C1 快照取该技能条目，经 `nextLearningStep`（G6）得到 `learnerFocus` 并存入活动；`compile-teaching-unit-wiring.ts` 把这五项和少量例证传给编译输入，不发全部学情。
+- 开始作答后内容版本固定；模型不可用时降级路径不变；`learnerFocus` 缺失时行为与现在一致。
+- 如 G3 报告讲解块拿不到大纲/节点信息，在此补上活动上下文。
+- 测试：worker 单测用假模型断言三种学情（未知 / 有错因的独立错误 / 已独立）产生不同编译输入。真实生成质量由用户自用抽检。
+
+### Z｜收尾
+
+1. 逐个审查 Grok PR 的 diff 和 CI，只修确定的缺陷，风格不返工；按依赖顺序合并到 `feat/opening-release`。
+2. 新增一个端到端 handler 测试：写观察 → 取 Today 草案 → 勾选接受 → 开始此项 → 断言活动的 `learnerFocus`。
+3. 确认 CI 全绿（含 C0 的结果）；跑受影响包的类型检查。
+4. 更新 STATUS；写 Hermes 发布清单（先以开关 0 部署，再由用户开 1）和用户浏览器验收步骤。
+
+## 8. 批次 B / C 分工（批次 A 合入并自用一周后再细化成卡）
+
+| 切片 | Grok | Claude |
 |---|---|---|
-| L5 | 完成/跳过/推迟/“不适合我”回写；`replan-trigger` 只在任务明显超时、可用时间变化、材料撤销或用户主动请求时提出局部重排 | 跳过不降能力；已开始/已确认块不移动；刷新失败不丢学习事实；旧响应不覆盖新计划 |
-| L8 | 闭环指标只读接口（原卡）+ 分三组报告：运行可靠性、学习结果（独立检验、提示依赖变化、延迟表现）、负担与控制（计划/实际用时偏差、拒绝原因、改动次数） | 不做混合总分；接受率不当作教学效果 |
-| E1 | 一个可客观校验的题型（矩阵维数判断或矩阵运算）走现有 evaluator → observation 通道 | 有拒判；错误参考可争议；评价器与基准不互相泄漏答案 |
-| L3b | 教练自动确认（不在 GET 内）+ 条件撤销 | 迁移为 `opening_tasks` 增加关闭来源（学生/系统），**系统撤销关闭的任务不计入 `consecutiveSkippedDays`，但仍计入同日去重**；已开始任务或学生后续编辑不回滚；不删学习事实 |
-| L7a | 对话一轮结构化意图抽取（目标、今日时间、先学什么）→ 产出候选 → 同一草案与 L3a 接受通道 | 含糊日期必须确认；模型臆造的 courseId/授权被拒；预算耗尽不重复执行 |
-| I2 | 观察/作答增加可空 `skill_ref`（指向课程知识节点）；服务器定义 `firstAttempt`（同题同版本同学生的首个持久化原始作答，含错误与未核对）；BKT 影子预测只写诊断表 | 一个作答多技能共享 attempt 身份，验证集按 attempt/题目划分；影子模型不控制正式计划 |
+| L5 反馈与低打扰重排 | 完成/跳过/推迟/“不适合我”原因的 UI 与客户端 | 原因持久化、`replan-trigger` 局部重排、旧响应不覆盖新计划 |
+| L8 闭环指标 | 只读接口与诊断页（原卡），按运行可靠性 / 学习结果 / 负担与控制三组展示 | 审查口径，不做混合总分 |
+| E1 窄题型自动评价 | 矩阵维数/运算的校验纯函数与测试 | 接入 evaluator → observation 通道、拒判与争议 |
+| 课程目标“阶段成果” | 表单与展示 | contracts 字段 |
+| L3b 教练自动确认与条件撤销 | 教练摘要条、撤销按钮 | 迁移增加任务关闭来源（学生/系统），系统撤销不计入连续跳过但仍计入同日去重；自动接受不在 GET 内；条件撤销 |
+| L7a 对话进入同一草案管道 | 聊天内草案卡 | 结构化意图抽取、预算、拒绝臆造的 courseId 与授权 |
+| I2 技能身份与首次作答、BKT 影子 | 离线比较脚本（按 attempt/题目划分验证集，报告校准与误报掌握） | 可空 `skill_ref` 迁移、服务器定义的 `firstAttempt`、影子预测只写诊断表 |
 
-L7 的多步工具循环（外部 T10b）、外部日历写入、跨用户教学：本计划不排期。
+L7 多步工具循环、外部日历写入、跨用户教学：不排期。
 
-## 7. 批次 A 验收矩阵
+## 9. 批次 A 验收矩阵
 
-| 场景 | 必须成立 | 验证层（卡） |
+| 场景 | 必须成立 | 卡 |
 |---|---|---|
-| 学生只说“不会”、未作答 | 不产生作答事实，不出现 `weak_skill`，可出现 `diagnose` 讲解 | handler（L2b、TT） |
-| 一条独立核对错误 | 次日草案出现对应 `weak_skill`；开始此项时主讲 `activityKind=targeted_explain` | integration（L2b）+ worker 单测（TT） |
-| 提示后答对 | 不升级为独立掌握；下一步为 `reduced_help_practice` | integration（L2a）、domain（TT） |
-| 超过 20 条证据 | 快照状态按全量计算 | integration（L2a） |
-| 观察被修订 | 只按有效 head 计算 | integration（L2a） |
-| 同日已完成/跳过建议后刷新 | 不再出现同一建议 | domain（A0）+ integration（L2b） |
-| 技能名只差空格/大小写 | 默认复用已有技能名，建议身份不分裂 | 单测（A2） |
-| 补测与低优先任务并存 | 交替不把低优先项提到补测前 | domain（A1） |
-| 未接受草案 | 不创建任务 | handler（L2b） |
-| 重复确认 / 不同选择同 key / 并发首次确认 | 不重复建任务 / 冲突 / 只成功一次 | integration（L3a） |
-| 草案生成后材料撤销、任务完成、版本变化、时段过期 | 接受时被识别，整体回滚，错误可读 | integration（L3a） |
-| 约束读取失败 | 不当作全天空闲，退回规则草案并说明 | handler（L2b） |
-| 开关关闭 | 现有草案/计划/Today 测试原样通过 | handler（L2b、L3a） |
-| 模型不可用 | 学习事实与规则草案不受影响 | 现有降级测试（TT 回归） |
-| 整条路径 | 作答 → 草案变化 → 接受 → 开始此项 → 讲解重点不同 | **待用户浏览器验收** |
+| 学生只说“不会”、未作答 | 不产生作答事实，不出 `weak_skill`；讲解为 `diagnose` | C2、G6 |
+| 一条独立核对错误 | 草案出现 `weak_skill`；开始此项时 `activityKind=targeted_explain` | G5、C2、C4 |
+| 提示后答对 | 不升级为独立掌握；下一步 `reduced_help_practice` | G5、G6 |
+| 超过 20 条证据 | 按全量计算 | G5、C1 |
+| 观察被修订 | 只按有效 head 计算 | G5、C1 |
+| 同日已完成/跳过建议后刷新 | 不再出现同一建议 | G1、G9 |
+| 技能名只差空格/大小写 | 默认复用已有技能名，只产生一条建议 | G3、G9 |
+| 补测与低优先任务并存 | 交替不把低优先项提到补测前 | G2 |
+| 未接受草案 | 不创建任务 | C2 |
+| 重复确认 / 同 key 不同选择 / 并发首次确认 | 不重复 / 冲突 / 只成功一次 | C3 |
+| 材料撤销、任务完成、版本变化、时段过期 | 接受时识别，整体回滚，提示可读 | C3、G8 |
+| 约束读取失败 | 不当作全天空闲，退回规则草案并说明 | C2 |
+| 开关关闭 | 现有草案/计划/Today 测试原样通过 | C2、C3、G9 |
+| 模型不可用 | 学习事实与规则草案不受影响 | C4 |
+| 整条路径 | 作答 → 草案变化 → 接受 → 开始此项 → 讲解重点不同 | Z 的端到端测试 + **用户浏览器验收** |
 
-## 8. 发布与回滚
+## 10. 发布与回滚
 
-- 批次 A 无数据库迁移（A2 明确不加列）。回滚 = 关闭 `OPENING_ADAPTIVE_PLANNING`；已创建任务与学习事实保留。
-- 发布顺序：C0 让 CI 恢复全绿 → 批次 A 各 PR 合入主干 → Hermes 先以开关 0 部署（行为不变）→ 用户在 Hermes 上开关 1 自用并验收 → 记录到 STATUS“使用反馈”。
-- Hermes 当前部署版本、0061–0064 迁移是否已应用，以现场核对为准（STATUS 记录的 `8b500e6` 可能已过时）。
-- 批次 C 的 L3b、I2 含迁移：届时按主干实际序号分配，迁移文件末尾写回滚语句，并跑备份恢复相关集成测试。
+- 批次 A 无数据库迁移。回滚 = 关闭 `OPENING_ADAPTIVE_PLANNING`；已创建任务与学习事实保留。
+- 发布顺序：C0 让 CI 恢复全绿 → 批次 A 按依赖合入 → Hermes 以开关 0 部署（行为不变）→ 用户开 1 自用验收 → 问题记到 STATUS“使用反馈”。
+- Hermes 当前部署版本、0061–0064 是否已应用，以现场核对为准（STATUS 记录的 `8b500e6` 可能已过时）。
+- 批次 C 的迁移按主干实际序号分配，文件末尾写回滚语句，并跑备份恢复相关集成测试。
 
-## 9. 需要用户决定
+## 11. 需要用户决定
 
-1. 是否同意按 A0 处理 PR #46（删其架构文档、保留代码、转 ready 后合并）。
-2. C0 若定位到需要改 CI 环境或 secrets，需用户操作。
-3. 批次 A 合入后何时在 Hermes 打开 `OPENING_ADAPTIVE_PLANNING=1`。
+1. 同意 G1 的处理方式后，由你把 PR #46 转为 ready 并合并。
+2. C0 如果需要改 CI 环境或 secrets，需要你操作。
+3. 批次 A 合入后，什么时候在 Hermes 上把 `OPENING_ADAPTIVE_PLANNING` 设为 1。
