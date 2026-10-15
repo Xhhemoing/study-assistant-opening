@@ -12,6 +12,7 @@ import {
 import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { validateStoredUpload, UploadPolicyError } from "./upload-policy";
+import { isPreviewableMime } from "./preview-mime";
 import type { Principal } from "../../../lib/authorization";
 import { assertAuthorized, boundWorkspaceId } from "../../../lib/authorization";
 
@@ -32,13 +33,28 @@ function stagingUploadUrl(sourceId: string): string {
   return new URL(`/api/opening/sources/${sourceId}/staging`, configured).toString();
 }
 
-function contentDispositionAttachment(filename: string): string {
+function contentDispositionHeader(filename: string, kind: "attachment" | "inline"): string {
   const fallback = Array.from(filename).map((ch) => {
     const code = ch.charCodeAt(0);
     return code === 34 || code === 13 || code === 10 ? "_" : ch;
   }).join("") || "download";
   const encoded = encodeURIComponent(filename);
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+  return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+function contentDispositionAttachment(filename: string): string {
+  return contentDispositionHeader(filename, "attachment");
+}
+
+export type DownloadDisposition = "attachment" | "inline";
+
+/** Resolve attachment vs inline; non-previewable MIME always stays attachment. */
+export function resolveDownloadDisposition(
+  mime: string,
+  requested: DownloadDisposition = "attachment",
+): DownloadDisposition {
+  if (requested === "inline" && isPreviewableMime(mime)) return "inline";
+  return "attachment";
 }
 
 
@@ -165,7 +181,12 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     /**
      * Same-origin download: GetObject stream + disposition metadata (no MinIO URL to browser).
      */
-    async getDownloadStream(p: Principal, id: string, version?: number) {
+    async getDownloadStream(
+      p: Principal,
+      id: string,
+      version?: number,
+      options?: { disposition?: DownloadDisposition },
+    ) {
       auth(p, "source.read");
       const source = await sources.get(scopeOf(p), id);
       if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
@@ -175,11 +196,13 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       }
       const key = storage.finalKey(id, requested);
       const object = await storage.getObjectStream(key);
+      const contentType = source.mime || object.contentType;
+      const disposition = resolveDownloadDisposition(contentType, options?.disposition ?? "attachment");
       return {
         body: object.body,
-        contentType: source.mime || object.contentType,
+        contentType,
         contentLength: object.contentLength ?? source.bytes,
-        contentDisposition: contentDispositionAttachment(source.name),
+        contentDisposition: contentDispositionHeader(source.name, disposition),
         version: requested,
         currentVersion: source.version,
         versionMismatch: requested !== source.version,

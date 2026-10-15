@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
-import { createOpeningSourceService } from "./source-service";
+import { createOpeningSourceService, resolveDownloadDisposition } from "./source-service";
 import { OpeningSourceError, type OpeningStorage } from "@aistudy/database";
 import type { Principal } from "../../../lib/authorization";
 
@@ -649,6 +649,23 @@ describe("opening signed upload service", () => {
     ].join(" ");
     expect(asText).not.toContain("127.0.0.1:9000");
     expect(asText).not.toMatch(/https?:\/\/[^/]*:?9000/);
+  });
+
+  it("streams previewable MIME with inline disposition when requested", async () => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, {
+      name: "a.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const download = await svc.getDownloadStream(principal, ticket.source.id, undefined, {
+      disposition: "inline",
+    });
+    expect(download.contentDisposition).toContain("inline");
+    expect(download.contentDisposition).toContain("a.pdf");
   });
 
   it("reissueUploadTicket refreshes the same-origin staging lease for pending only", async () => {

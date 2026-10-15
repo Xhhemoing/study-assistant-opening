@@ -1,6 +1,9 @@
 import { jsonError, mapDomainError } from "../../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../../features/opening/runtime";
-import { createOpeningSourceService } from "../../../../../../features/opening/sources/source-service";
+import {
+  createOpeningSourceService,
+  type DownloadDisposition,
+} from "../../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../../features/opening/sources/upload-policy";
 import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
 
@@ -19,16 +22,22 @@ function storageError(error: unknown): Response | undefined {
   return undefined;
 }
 
+function parseDisposition(raw: string | null): DownloadDisposition {
+  return raw === "inline" ? "inline" : "attachment";
+}
+
 /**
  * Same-origin download: streams object bytes with Content-Disposition.
  * Contract change (Package A): response is **binary**, not JSON with a MinIO presign URL.
  * Experience should use `/api/opening/sources/:id/download?version=` as `<a href>` (cookies apply).
+ * Pass `disposition=inline` for previewable MIME (PDF / image / plain / markdown); default stays attachment.
  * Version metadata is also mirrored on response headers for fetch-based clients.
  */
 export async function GET(request: Request, context: Params): Promise<Response> {
   try {
     const { principal, sql } = await requireOpeningScope(request);
-    const raw = new URL(request.url).searchParams.get("version");
+    const url = new URL(request.url);
+    const raw = url.searchParams.get("version");
     const version = raw === null ? undefined : Number(raw);
     if (version !== undefined && !Number.isInteger(version)) {
       return Response.json(
@@ -36,8 +45,11 @@ export async function GET(request: Request, context: Params): Promise<Response> 
         { status: 422 },
       );
     }
+    const disposition = parseDisposition(url.searchParams.get("disposition"));
     const id = (await context.params).id;
-    const download = await createOpeningSourceService(sql).getDownloadStream(principal, id, version);
+    const download = await createOpeningSourceService(sql).getDownloadStream(principal, id, version, {
+      disposition,
+    });
     const headers = new Headers({
       "Content-Type": download.contentType,
       "Content-Disposition": download.contentDisposition,

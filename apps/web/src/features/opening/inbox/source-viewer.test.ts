@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
-import { buildSourceDownloadView, citationChipLabel, parseSourceViewerSearchParams, sourceDownloadHref, sourceViewerCopy, sourceViewerHref, SourceViewer } from "./source-viewer";
+import { buildSourceDownloadView, citationChipLabel, parseSourceViewerSearchParams, sourceDownloadHref, sourcePreviewHref, sourceViewerCopy, sourceViewerHref, SourceViewer } from "./source-viewer";
 
 const record = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -128,5 +128,82 @@ describe("source viewer deep-link (cite Package D)", () => {
       versionMismatch: false,
       page: 4,
     })).toContain("第 4 页");
+  });
+});
+
+describe("source preview panes", () => {
+  function escapedPreviewHref(sourceId: string, version: number, page?: number | null): string {
+    return sourcePreviewHref(sourceId, version, page).replaceAll("&", "&amp;");
+  }
+
+  it("renders an iframe preview for PDF with an inline disposition URL", () => {
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record,
+      latestRecord: { ...record, parseState: "ready", version: 2 },
+      requestedVersion: 2,
+      download: buildSourceDownloadView(record.id, 2, 2),
+    }));
+    expect(html).toContain("预览");
+    expect(html).toContain(`src="${escapedPreviewHref(record.id, 2)}"`);
+    expect(html).toContain("disposition=inline");
+    expect(html).toContain("<iframe");
+    expect(html).toContain("打开原件 v2");
+    expect(html).toContain(`href="${sourceDownloadHref(record.id, 2)}"`);
+    expect(html).not.toContain("页面标签随原件查看");
+    expect(html).not.toContain("127.0.0.1:9000");
+  });
+
+  it("renders an img preview for image MIME", () => {
+    const image = { ...record, name: "photo.png", mime: "image/png" };
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: image,
+      latestRecord: image,
+      requestedVersion: 2,
+      download: buildSourceDownloadView(image.id, 2, 2),
+    }));
+    expect(html).toContain("<img");
+    expect(html).toContain(escapedPreviewHref(image.id, 2));
+    expect(html).toContain("预览");
+  });
+
+  it("renders a text preview pane for plain text MIME", () => {
+    const plain = { ...record, name: "notes.txt", mime: "text/plain" };
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: plain,
+      latestRecord: plain,
+      requestedVersion: 2,
+      download: buildSourceDownloadView(plain.id, 2, 2),
+    }));
+    expect(html).toContain("正在加载预览");
+    expect(html).toContain("预览");
+    expect(html).toContain(escapedPreviewHref(plain.id, 2));
+  });
+
+  it("skips inline preview for non-previewable MIME and keeps attachment download", () => {
+    const pptx = {
+      ...record,
+      name: "deck.pptx",
+      mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    };
+    const html = renderToStaticMarkup(createElement(SourceViewer, {
+      record: pptx,
+      latestRecord: pptx,
+      requestedVersion: 2,
+      download: buildSourceDownloadView(pptx.id, 2, 2),
+    }));
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("正在加载预览");
+    expect(html).toContain("打开原件 v2");
+    expect(html).toContain(sourceDownloadHref(pptx.id, 2));
+    expect(html).not.toContain("disposition=inline");
+  });
+
+  it("builds preview href with inline disposition and optional page hash", () => {
+    expect(sourcePreviewHref(record.id, 1)).toBe(
+      `/api/opening/sources/${record.id}/download?version=1&disposition=inline`,
+    );
+    expect(sourcePreviewHref(record.id, 1, 3)).toContain("#page=3");
+    expect(sourcePreviewHref(record.id, 1, 3)).toContain("disposition=inline");
   });
 });
