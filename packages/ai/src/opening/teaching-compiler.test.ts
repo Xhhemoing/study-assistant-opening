@@ -15,6 +15,8 @@ import {
   proposeTeachingOutline,
   createCompilerProviderInput,
   continuationNote,
+  nextMaterialWindow,
+  verifiedQuote,
 } from "./teaching-compiler";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -360,6 +362,55 @@ describe("teaching-compiler", () => {
     const published = await build({}, payload, { text: JSON.stringify({ itemTitles: ["引入", "零空间的维数"], blocks: [{ type: "text", text: "维数等于 n − rank。" }] }) });
     expect(published.generationConfig?.extras).toMatchObject({ focusItemId: "item-02" });
     expect(published.goals?.[0]?.statement).toBe("零空间的维数");
+  });
+
+  // Real example: English Math I slides (Unit 8), one chunk per page, taught in Chinese.
+  const unit8 = [
+    [3, "Jacobian Let f : U ⊂ Rn → Rn be defined on an open set U. The determinant of the differential matrix of f at u is called the Jacobian of f at u, and is denoted by Jf (u)."],
+    [4, "Inverse Function Theorem Let f be of class C 1 on U, and satisfy Jf (u) ̸= 0 for some u ∈ U. Then there exist open sets V ⊂ U and W ⊂ f (U)."],
+    [10, "Local Extrema Fermat's Theorem If the function attains a relative extremum at an interior point x0 of U and the partial derivatives exist, then ∇f (x0 ) = 0."],
+    [16, "Criterion for the Two-Variable Case If ∆ > 0 and D11 f (a, b) > 0, then f (a, b) is a relative minimum. If ∆ < 0, then f presents a saddle point."],
+    [19, "Lagrange Multipliers Suppose that {∇Φ1 (u), . . . , ∇Φk (u)} are linearly independent vectors for all u ∈ U."],
+  ].map(([page, text]) => chunk(`p${page}`, String(text).padEnd(900, " "), { page: Number(page) }));
+
+  it("a material walk teaches the slides in order, one stretch per section, then reviews", () => {
+    const first = nextMaterialWindow([...unit8].reverse(), [SRC_A], [], 2400);
+    expect(first.chunks.map((c) => c.id)).toEqual(["p3", "p4"]);
+    expect(first.review).toBe(false);
+    const second = nextMaterialWindow(unit8, [SRC_A], ["p3", "p4"], 2400);
+    expect(second.chunks.map((c) => c.id)).toEqual(["p10", "p16"]);
+    const third = nextMaterialWindow(unit8, [SRC_A], ["p3", "p4", "p10", "p16"], 2400);
+    expect(third.chunks.map((c) => c.id)).toEqual(["p19"]);
+    const review = nextMaterialWindow(unit8, [SRC_A], unit8.map((c) => c.id), 2400);
+    expect(review).toMatchObject({ review: true });
+    expect(review.chunks[0]!.id).toBe("p3");
+  });
+
+  it("keeps a quote only when it occurs verbatim in a cited chunk (spacing and case ignored)", () => {
+    const texts = new Map(unit8.map((c) => [c.id, c.text]));
+    const quote = "the determinant of the differential matrix of f at u is called the Jacobian";
+    expect(verifiedQuote(quote, ["p3"], texts)).toBe(quote);
+    expect(verifiedQuote("If ∆ > 0 and D11 f(a,b) > 0", ["p16"], texts)).toBeTruthy();
+    expect(verifiedQuote(quote, ["p16"], texts)).toBeUndefined();
+    expect(verifiedQuote("Jacobian 是行列式", ["p3"], texts)).toBeUndefined();
+    expect(verifiedQuote("Jf", ["p3"], texts)).toBeUndefined();
+  });
+
+  it("a Chinese lesson on English slides publishes the walk window and the checked quote", async () => {
+    const build = createCompilerBuildPublishInput({
+      loadChunks: async () => unit8, intentSummary: "Math I · 第8单元", intentKind: "goal", newBlockId: stableBlockId,
+      requireModelOutput: true, materialWalk: { priorChunkIds: ["p3", "p4"], sectionCharacters: 2400 },
+      writeLibraryBlocks: async (blocks) => { written = blocks; },
+    });
+    let written: Array<{ type: string; content: Record<string, unknown> }> = [];
+    blockSeq = 0;
+    const published = await build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: JSON.stringify({ itemTitles: [], blocks: [
+      { type: "text", text: "费马定理（Fermat's Theorem）：内点取得极值且偏导存在时，梯度为零。", citedChunkIds: ["p10"], quote: "then ∇f (x0 ) = 0" },
+      { type: "text", text: "鞍点（saddle point）判别。", citedChunkIds: ["p16"], quote: "this sentence is not on the slide" },
+    ] }) });
+    expect(published.sourceRefs?.map((ref) => ref.chunkId)).toEqual(["p10", "p16"]);
+    expect(written[0]!.content.sourceQuote).toBe("then ∇f (x0 ) = 0");
+    expect(written[1]!.content).not.toHaveProperty("sourceQuote");
   });
 
   it("places each answer_key right after its question so the learner can see the reference", () => {

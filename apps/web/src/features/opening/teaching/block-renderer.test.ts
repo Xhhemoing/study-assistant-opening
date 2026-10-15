@@ -67,6 +67,17 @@ describe("BlockRenderer", () => {
     expect(stepHtml).toContain('data-catalog="step"');
   });
 
+  it("shows the checked original-text quote under a Chinese explanation", () => {
+    const html = renderToStaticMarkup(
+      createElement(BlockRenderer, {
+        block: { blockId: BID, position: 0, blockType: "text", role: "teach",
+          content: { text: "雅可比行列式（Jacobian）", sourceQuote: "is called the Jacobian of f at u" } },
+      }),
+    );
+    expect(html).toContain('data-source-quote="true"');
+    expect(html).toContain("is called the Jacobian of f at u");
+  });
+
   it("fail-soft unknown / hidden answer while continuing sibling blocks (C1/C2)", () => {
     const decisions = renderClientInitBlocks(
       {

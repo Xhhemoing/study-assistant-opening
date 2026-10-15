@@ -127,6 +127,20 @@ describe("teaching-verifiers", () => {
     expect(mayPublishVerified(report)).toBe(false);
   });
 
+  it("a Chinese explanation of English slides is supported by its checked original-text quote; formulas are not core claims", async () => {
+    const slide = "Fermat's Theorem If the function attains a relative extremum at an interior point x0 of U and the partial derivatives exist, then ∇f (x0 ) = 0.";
+    const pack = packWithSupport(slide);
+    const FORMULA = "00000000-0000-4000-8000-0000000000b2";
+    const blocks = (quote?: string) => [
+      { id: BLOCK, type: "text", role: "teach", content: { text: "费马定理：内点取得极值且偏导存在时，梯度为零。", citedChunkIds: [CHUNK], ...(quote ? { sourceQuote: quote } : {}) } },
+      { id: FORMULA, type: "formula", role: "teach", content: { latex: "\\nabla f(x_0)=0" } },
+    ];
+    const run = (quote?: string) => verifyTeachingContent({ activityId: ACT, publishInput: basePublish(), blocks: blocks(quote), pack, keyClaims: [] });
+    const claim = (report: Awaited<ReturnType<typeof run>>) => report.layers.find((l) => l.layer === "claim_support")?.outcome;
+    expect(claim(await run())).toBe("fail");
+    expect(claim(await run("then ∇f (x0 ) = 0"))).toBe("pass");
+  });
+
   it("C3: coverage conflict on core → refuse verified", async () => {
     const pack = assembleTeachingEvidencePack({
       chunks: [chunk(CHUNK, "nullspace basis vectors")],

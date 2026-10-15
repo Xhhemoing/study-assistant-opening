@@ -43,8 +43,18 @@ export function createCompileTeachingUnitWorkerDeps(
   const models = createDbModelGateway(sql);
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   // 「再学一节」: the prompt and the publish step must agree on which outline item is taught.
-  const priorSectionTitles = async (scope: Scope, activityId: string) =>
-    (await teachingActivities.listPriorSections(scope, activityId)).map((section) => section.title);
+  const priorSections = async (scope: Scope, activityId: string) => {
+    const [sections, courseTaught] = await Promise.all([
+      teachingActivities.listPriorSections(scope, activityId),
+      teachingActivities.listCourseTaughtChunkIds(scope, activityId),
+    ]);
+    return {
+      priorSectionTitles: sections.map((section) => section.title),
+      // Each section teaches the next stretch of the materials, after what this chain
+      // and the course's completed lessons (earlier days' tasks) already used.
+      materialWalk: { priorChunkIds: [...new Set([...sections.flatMap((section) => section.chunkIds), ...courseTaught])] },
+    };
+  };
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
         callModel: (scope, input, options) =>
@@ -55,7 +65,7 @@ export function createCompileTeachingUnitWorkerDeps(
             loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
-            priorSectionTitles: await priorSectionTitles(scope, payload.activityId),
+            ...(await priorSections(scope, payload.activityId)),
           })(scope, payload);
         },
       }
@@ -110,7 +120,7 @@ export function createCompileTeachingUnitWorkerDeps(
             loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
-            priorSectionTitles: await priorSectionTitles(scope, payload.activityId),
+            ...(await priorSections(scope, payload.activityId)),
             // A real model wrote this activity: never fall back to template filler.
             requireModelOutput: true,
             writeLibraryBlocks: async (blocks) => {

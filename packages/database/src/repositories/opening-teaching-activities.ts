@@ -287,7 +287,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
      * Earlier sections of a continued activity, oldest first, with the title each
      * one taught (its published goal). Empty for a first section.
      */
-    async listPriorSections(scope: Scope, activityId: string): Promise<Array<{ activityId: string; title: string | null }>> {
+    async listPriorSections(scope: Scope, activityId: string): Promise<Array<{ activityId: string; title: string | null; chunkIds: string[] }>> {
       const rows = await sql`
         WITH RECURSIVE chain AS (
           SELECT a.id, a.create_intent, 0 AS depth FROM opening_teaching_activities a
@@ -298,15 +298,41 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             AND p.workspace_id = ${scope.workspaceId} AND p.owner_user_id = ${scope.ownerUserId}
           WHERE c.depth < ${MAX_ACTIVITY_CONTINUATIONS}
         )
-        SELECT c.id, c.depth, s.goals_json FROM chain c
+        SELECT c.id, c.depth, s.goals_json, s.source_refs FROM chain c
         LEFT JOIN opening_teaching_activity_specs s ON s.activity_id = c.id
           AND s.workspace_id = ${scope.workspaceId} AND s.owner_user_id = ${scope.ownerUserId}
         WHERE c.depth > 0 ORDER BY c.depth DESC`;
       return rows.map((row) => {
         const goals = Array.isArray(row.goals_json) ? row.goals_json as Array<{ statement?: unknown }> : [];
         const statement = goals[0]?.statement;
-        return { activityId: String(row.id), title: typeof statement === "string" && statement.trim() ? statement.trim().slice(0, 200) : null };
+        const refs = Array.isArray(row.source_refs) ? row.source_refs as Array<{ chunkId?: unknown }> : [];
+        return {
+          activityId: String(row.id),
+          title: typeof statement === "string" && statement.trim() ? statement.trim().slice(0, 200) : null,
+          // Material the section taught, so the next one continues after it.
+          chunkIds: refs.flatMap((ref) => (typeof ref.chunkId === "string" ? [ref.chunkId] : [])),
+        };
       });
+    },
+
+    /**
+     * Material already taught in this course: chunks cited by the course's completed
+     * lessons. A new day's task continues the course's material instead of restarting.
+     */
+    async listCourseTaughtChunkIds(scope: Scope, activityId: string): Promise<string[]> {
+      const rows = await sql`
+        SELECT s.source_refs FROM opening_teaching_activities current
+        JOIN opening_teaching_activities a ON a.course_id = current.course_id
+          AND a.workspace_id = current.workspace_id AND a.owner_user_id = current.owner_user_id
+          AND a.status = 'completed' AND a.id <> current.id
+        JOIN opening_teaching_activity_specs s ON s.activity_id = a.id
+          AND s.workspace_id = a.workspace_id AND s.owner_user_id = a.owner_user_id
+        WHERE current.id = ${activityId} AND current.workspace_id = ${scope.workspaceId}
+          AND current.owner_user_id = ${scope.ownerUserId} AND current.course_id IS NOT NULL
+        ORDER BY a.created_at, a.id`;
+      const ids = rows.flatMap((row) => (Array.isArray(row.source_refs) ? row.source_refs as Array<{ chunkId?: unknown }> : [])
+        .flatMap((ref) => (typeof ref.chunkId === "string" ? [ref.chunkId] : [])));
+      return [...new Set(ids)];
     },
 
     /**

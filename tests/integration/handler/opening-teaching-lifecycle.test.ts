@@ -109,7 +109,7 @@ describe("starting again after a completed activity (R1)", () => {
     const second = await response.json();
     expect(second).toMatchObject({ status: "active", courseId, sourceIds: [sourceId], intentSummary: activity.intentSummary, clientKey: `${activity.clientKey}:next:${activity.id}` });
     expect((await (await nextSection(req("POST"), context(activity.id))).json()).id).toBe(second.id);
-    expect(await repo.listPriorSections(f.scope, second.id)).toEqual([{ activityId: activity.id, title: "矩阵的秩" }]);
+    expect(await repo.listPriorSections(f.scope, second.id)).toEqual([{ activityId: activity.id, title: "矩阵的秩", chunkIds: [] }]);
     expect(await repo.listPriorSections(f.scope, activity.id)).toEqual([]);
 
     await repo.setStatus(f.scope, second.id, { status: "completed" });
@@ -119,6 +119,14 @@ describe("starting again after a completed activity (R1)", () => {
     expect((await repo.listPriorSections(f.scope, third.id)).map((row) => row.activityId)).toEqual([activity.id, second.id]);
     const foreign = await repo.create(f.otherScope, { clientKey: `other-${randomUUID()}`, intentKind: "topic", intentSummary: "他人的活动", createIntent: {} });
     expect((await nextSection(req("POST"), context(foreign.id))).status).toBe(404);
+
+    // A new day's task in the same course continues after the course's taught material.
+    const [{ id: taught }] = await f.sql<{ id: string }[]>`SELECT id FROM opening_source_chunks WHERE source_id=${sourceId}`;
+    await f.sql`UPDATE opening_teaching_activity_specs SET source_refs=${f.sql.json([{ sourceId, chunkId: taught, version: 1 }])} WHERE activity_id=${activity.id}`;
+    const nextDay = await repo.create(f.scope, { clientKey: `task:${randomUUID()}`, intentKind: "goal", intentSummary: "第二天", courseId, sourceIds: [sourceId], createIntent: {} });
+    expect(await repo.listCourseTaughtChunkIds(f.scope, nextDay.id)).toEqual([taught]);
+    const unbound = await repo.create(f.scope, { clientKey: `topic-${randomUUID()}`, intentKind: "topic", intentSummary: "无课程", createIntent: {} });
+    expect(await repo.listCourseTaughtChunkIds(f.scope, unbound.id)).toEqual([]);
   });
 });
 

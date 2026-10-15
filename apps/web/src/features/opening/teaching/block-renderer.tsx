@@ -81,6 +81,18 @@ function FailSoftCard({ reason, blockId }: { reason: FailSoftReason; blockId: st
   );
 }
 
+/** Verbatim sentence from the cited material (checked when the lesson was written). */
+function SourceQuote({ params }: { params: Record<string, unknown> }) {
+  const quote = asText(params.sourceQuote);
+  if (!quote) return null;
+  return (
+    <p className="mt-1.5 border-l-2 border-zinc-200 pl-2 text-xs leading-5 text-zinc-500" data-source-quote="true">
+      <span className="mr-1 font-medium text-zinc-600">原文</span>
+      <span lang="und">{quote}</span>
+    </p>
+  );
+}
+
 function CatalogBody({
   catalogId,
   params,
@@ -98,6 +110,7 @@ function CatalogBody({
       return (
         <div className="text-sm leading-6 text-zinc-800" data-catalog="text">
           {text ? <LearningProse text={text} /> : "（空文本块）"}
+          <SourceQuote params={params} />
         </div>
       );
     case "math": {
@@ -123,14 +136,17 @@ function CatalogBody({
         );
       }
       return (
-        <ol
-          className="list-decimal space-y-1.5 pl-5 text-sm leading-6 text-zinc-800"
-          data-catalog="step"
-        >
-          {steps.map((step, i) => (
-            <li key={i}><LearningProse text={step} /></li>
-          ))}
-        </ol>
+        <div>
+          <ol
+            className="list-decimal space-y-1.5 pl-5 text-sm leading-6 text-zinc-800"
+            data-catalog="step"
+          >
+            {steps.map((step, i) => (
+              <li key={i}><LearningProse text={step} /></li>
+            ))}
+          </ol>
+          <SourceQuote params={params} />
+        </div>
       );
     }
     case "example":
@@ -141,6 +157,7 @@ function CatalogBody({
         >
           <p className="mb-1 text-[11px] font-medium text-emerald-800">例题 / 示例</p>
           {text ? <LearningProse text={text} /> : <p>（空示例）</p>}
+          <SourceQuote params={params} />
         </aside>
       );
     case "question":

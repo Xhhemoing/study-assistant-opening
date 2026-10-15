@@ -318,10 +318,14 @@ function extractClaimsFromBlocks(
   const out: VerifyTeachingKeyClaim[] = [];
   for (const block of blocks) {
     if (block.role !== "teach" && block.role !== "example") continue;
-    const text =
+    const body =
       (typeof block.content.text === "string" && block.content.text) ||
       (typeof block.content.body === "string" && block.content.body) ||
       textFromContent(block.content);
+    // A verbatim quote of a cited chunk (checked at compile time) carries support
+    // for an explanation written in another language than the material.
+    const quote = typeof block.content.sourceQuote === "string" ? block.content.sourceQuote : "";
+    const text = quote ? `${body}\n${quote}` : body;
     if (!text.trim()) continue;
     const cited =
       (Array.isArray(block.content.citedChunkIds) &&
@@ -333,7 +337,9 @@ function extractClaimsFromBlocks(
       claimId: `auto:${block.id}`,
       text: text.slice(0, 2000),
       citedChunkIds: cited,
-      isCoreConclusion: block.role === "teach",
+      // Formulas are notation that cannot be matched as text; the explanation around
+      // them carries the claim and must still be supported.
+      isCoreConclusion: block.role === "teach" && block.type !== "formula",
     });
   }
   return out;
