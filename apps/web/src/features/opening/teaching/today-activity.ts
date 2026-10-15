@@ -121,6 +121,7 @@ export function buildStartLearningCreateInput(
       ...(ctx.courseId !== undefined ? { courseId: ctx.courseId } : {}),
       sourceIds: normalizeSourceIds(ctx.sourceIds),
       createIntent: { intentKind: "goal", source: "task", taskId: ctx.taskId },
+      continueAfterCompleted: true,
     };
   }
   if (ctx.continueConversationId && ctx.continueTitle) {
@@ -139,6 +140,7 @@ export function buildStartLearningCreateInput(
         conversationId: ctx.continueConversationId,
         localDate: ctx.localDate,
       },
+      continueAfterCompleted: true,
     };
   }
   const courseTitle = ctx.courseTitle?.trim() || null;
@@ -155,6 +157,8 @@ export function buildStartLearningCreateInput(
       source: "today",
       localDate: ctx.localDate,
     },
+    // Ending today's session must not block another one the same day.
+    continueAfterCompleted: true,
   };
 }
 

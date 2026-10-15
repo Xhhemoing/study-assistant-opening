@@ -1,4 +1,4 @@
-import { DEFAULT_OPENING_AI_SETTINGS, openingModelQuickSetupInputSchema, type OpeningAiSettings, type Scope } from "@aistudy/contracts";
+import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsSchema, openingModelQuickSetupInputSchema, type OpeningAiSettings, type Scope } from "@aistudy/contracts";
 import { loadOpeningModelCatalog } from "@aistudy/config";
 import { CredentialVaultError, insertModel, insertProvider, lockModelProviderOwner, OpeningModelProviderError, setOpeningAiSettingsInTx } from "@aistudy/database";
 import type { Sql } from "postgres";
@@ -17,12 +17,23 @@ export async function quickSetupModel(sql: Sql, scope: Scope, raw: unknown) {
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND quick_setup_key=${input.clientKey}`;
       if (existing) return;
       const billing = input.billing ?? "metered";
+      const [stored] = await tx`SELECT ai_settings FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
+      const parsedCurrent = openingAiSettingsSchema.safeParse(stored?.ai_settings ?? null);
+      const current = parsedCurrent.success ? parsedCurrent.data : DEFAULT_OPENING_AI_SETTINGS;
+      // The new model becomes the primary everywhere. Explicit fallbacks and the
+      // transcription engine survive, and a free model never clears the cents cap that
+      // the workspace's paid models depend on.
+      const fallbacks = Object.fromEntries(Object.entries(current.taskRoutes ?? {})
+        .flatMap(([task, route]) => route.fallback ? [[task, { primary: null, fallback: route.fallback }]] : []));
       const settings: OpeningAiSettings = {
         ...DEFAULT_OPENING_AI_SETTINGS,
-        dailyCapCents: billing === "free_tier" ? 0 : input.dailyCapCents!,
-        budgetConfirmedAt: billing === "free_tier" ? null : new Date().toISOString(),
+        ...(Object.keys(fallbacks).length ? { taskRoutes: fallbacks } : {}),
+        ...(current.transcription ? { transcription: current.transcription } : {}),
+        dailyCapCents: billing === "free_tier" ? current.dailyCapCents ?? 0 : input.dailyCapCents!,
+        budgetConfirmedAt: billing === "free_tier" ? current.budgetConfirmedAt ?? null : new Date().toISOString(),
       };
-      validateBudgetFields(settings, loadOpeningModelCatalog().dailyCapCents, billing === "metered");
+      // A preserved cap was validated when it was saved; only a new paid cap is checked here.
+      if (billing === "metered") validateBudgetFields(settings, loadOpeningModelCatalog().dailyCapCents, true);
       const provider = await insertProvider(tx, scope, input);
       const model = await insertModel(tx, scope, provider.id, input);
       await tx`UPDATE opening_model_providers SET quick_setup_key=${input.clientKey} WHERE id=${provider.id}`;

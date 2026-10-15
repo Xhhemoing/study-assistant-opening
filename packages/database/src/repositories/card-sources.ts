@@ -18,15 +18,35 @@ export function cardReadable(db: Db, workspaceId: string) {
       AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, db`np.context_source_refs`, true)})))`;
 }
 
-/** Legacy note-linked cards inherit all note lineage when their review becomes a learning fact. */
-export async function readCardSourceIds(db: Db, workspaceId: string, cardId: string): Promise<string[]> {
+export type CardEvidenceSkipReason = "skipped_no_course" | "skipped_course_archived" | "skipped_source_unavailable";
+export type CardEvidencePlan =
+  | { kind: "record"; courseId: string; sourceIds: string[] }
+  | { kind: "skip"; reason: CardEvidenceSkipReason };
+
+/**
+ * Whether this card's review can become a learning fact. Legacy note-linked cards
+ * inherit all note lineage. An archived course or a source that cannot be admitted
+ * (deleted, excluded, re-parsing, >32 sources) skips the fact but never the SRS review.
+ * Mirrors the admission rules of createOpeningLearningSessionInTx/admitLearningSources.
+ */
+export async function planCardEvidence(db: Db, workspaceId: string, card: { id: string; courseId: string | null }): Promise<CardEvidencePlan> {
+  if (!card.courseId) return { kind: "skip", reason: "skipped_no_course" };
+  const [course] = await db`SELECT id FROM courses WHERE id=${card.courseId} AND workspace_id=${workspaceId} AND archived_at IS NULL`;
+  if (!course) return { kind: "skip", reason: "skipped_course_archived" };
   const [row] = await db`SELECT c.source_ids,np.document_id AS provenance_id,np.context_source_refs FROM cards c
     LEFT JOIN opening_note_provenance np ON np.document_id=c.source_document_id AND np.workspace_id=c.workspace_id
-    WHERE c.id=${cardId} AND c.workspace_id=${workspaceId}`;
+    WHERE c.id=${card.id} AND c.workspace_id=${workspaceId}`;
   if (!row) throw new CardRepositoryError("NOT_FOUND", "card not found");
   const refs = row.provenance_id ? parseContextSourceRefs(row.context_source_refs) : [];
-  if (!refs) throw new CardRepositoryError("NOT_FOUND", "card source provenance unavailable");
+  if (!refs) return { kind: "skip", reason: "skipped_source_unavailable" };
   const ids = [...new Set([...(row.source_ids as string[]), ...refs.map(ref => ref.sourceId)])].sort();
-  if (ids.length > 32) throw new CardRepositoryError("VALIDATION", "卡片来源超过32份材料，无法完整写入学习记录。");
-  return ids;
+  if (ids.length > 32) return { kind: "skip", reason: "skipped_source_unavailable" };
+  if (ids.length) {
+    const [admitted] = await db`SELECT count(*)::int AS n FROM opening_sources s
+      WHERE s.workspace_id=${workspaceId} AND s.id IN ${db(ids)} AND s.upload_state='uploaded'
+        AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version)
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)`;
+    if (Number(admitted?.n ?? 0) !== ids.length) return { kind: "skip", reason: "skipped_source_unavailable" };
+  }
+  return { kind: "record", courseId: card.courseId, sourceIds: ids };
 }

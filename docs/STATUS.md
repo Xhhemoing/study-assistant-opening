@@ -16,13 +16,13 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 评审修复 R1–R8（结束后无法再学、Gemini 转写超限、卡片复习被归档课程阻断、提示后复习记成独立、一键配置清零额度、过期迁移清单测试等） | 待分配 | — | 未开始；清单与验收见 `docs/plans/2026-10-15-review-and-next-steps.md` 第 3 节，**部署前先修 R1–R5、R7** |
+| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待合入 `feat/opening-release`；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应排程 L2–L8（按学习情况出建议、教练自动确认/撤销、Today 档位、课程目标、闭环指标） | Claude（L2/L3）→ GPT/Grok（L4/L6/L8） | — | 只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；本地 WIP `bd201d7` 如仍在请先推送 |
 
 ## 下一步（按顺序）
 
-1. 修复 R1–R5、R7（约 1 天），再部署 Hermes：备份 → `db:migrate`（0061–0064）→ `OPENING_TEACHING_COMPILER_ENABLED=1`、`OPENING_ADAPTIVE_PLANNING=0` → 换新 Lant key → 确认 Hermes 能访问 `generativelanguage.googleapis.com` 后再配 Gemini。
+1. 合入评审修复（`claude/keen-carson-ls19ie` 快进到 `feat/opening-release`），再部署 Hermes：备份 → `db:migrate`（0061–0064）→ `OPENING_TEACHING_COMPILER_ENABLED=1`、`OPENING_ADAPTIVE_PLANNING=0` → 换新 Lant key → 确认 Hermes 能访问 `generativelanguage.googleapis.com` 后再配 Gemini。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
 3. 自适应排程 L2–L8，让每日计划随学习证据变化。
 4. 大问题方案：

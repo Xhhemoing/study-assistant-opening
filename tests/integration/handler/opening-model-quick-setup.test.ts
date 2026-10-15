@@ -33,6 +33,27 @@ afterAll(async () => {
   if (f) { await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`; await f.close(); }
 });
 
+describe("quick setup keeps what other models rely on (R5)", () => {
+  it("a free model keeps the confirmed cents cap, explicit fallbacks and the transcription engine", async () => {
+    const confirmedAt = "2026-10-15T00:00:00.000Z";
+    const paid = await quickSetup(req({ ...input, clientKey: "setup-paid-0001", label: "Lant", baseUrl: "https://lant.example/v1", modelName: "glm-5.3",
+      billing: "metered", inputCentsPerMillion: 10, outputCentsPerMillion: 20, dailyRequestCap: null, dailyCapCents: 300, confirmBudget: true }));
+    expect(paid.status).toBe(200);
+    const paidModelId = (await paid.json()).settings.defaultModelId as string;
+    await f.sql`UPDATE workspace_preferences SET ai_settings=jsonb_set(jsonb_set(jsonb_set(ai_settings,
+      '{budgetConfirmedAt}', ${f.sql.json(confirmedAt)}),
+      '{taskRoutes}', ${f.sql.json({ "teaching.compile": { primary: paidModelId, fallback: paidModelId } })}),
+      '{transcription}', ${f.sql.json({ engine: "local" })}) WHERE workspace_id=${f.scope.workspaceId}`;
+    const free = await quickSetup(req(input));
+    expect(free.status).toBe(200);
+    const data = await free.json();
+    expect(data.settings).toMatchObject({ dailyCapCents: 300, budgetConfirmedAt: confirmedAt, transcription: { engine: "local" },
+      taskRoutes: { "teaching.compile": { primary: null, fallback: paidModelId } } });
+    expect(data.settings.defaultModelId).not.toBe(paidModelId);
+    expect(data.models.find((model: { id: string }) => model.id === paidModelId)).toMatchObject({ availability: "available" });
+  });
+});
+
 describe("atomic model quick setup", () => {
   it("requires auth and valid HTTPS, pricing, quota and budget confirmation", async () => {
     expect((await quickSetup(req(input, ""))).status).toBe(401);
@@ -107,7 +128,7 @@ describe("atomic model quick setup", () => {
     const response = await probe(req({ clientKey: "probe-success-1" }), { params: Promise.resolve({ id: model.providerId, modelId: model.id }) });
     expect(await response.json()).toEqual({ ok: true, message: "本次请求成功。" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [entry] = await f.sql`SELECT purpose,amount_cents,state FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} AND request_id='probe:probe-success-1'`;
+    const [entry] = await f.sql`SELECT purpose,amount_cents,state FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} AND request_id=${`probe:${f.scope.workspaceId}:${model.id}:probe-success-1`}`;
     expect(entry).toMatchObject({ purpose: "probe", amount_cents: 0, state: "completed" });
     fetchMock.mockRejectedValue(new Error(secret));
     const failed = await probe(req({ clientKey: "probe-unknown-1" }), { params: Promise.resolve({ id: model.providerId, modelId: model.id }) });

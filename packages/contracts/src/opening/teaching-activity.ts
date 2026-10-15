@@ -38,6 +38,12 @@ export const teachingActivityCreateInputSchema = z
     courseId: uuidSchema.nullable().optional(),
     goalJson: z.record(z.string(), z.unknown()).optional(),
     createIntent: z.record(z.string(), z.unknown()),
+    /**
+     * When the clientKey already names a completed activity, start the next one in
+     * its chain (`<clientKey>:next:<previous id>`) instead of replaying it. Still
+     * idempotent: the same request lands on the same next activity.
+     */
+    continueAfterCompleted: z.boolean().optional(),
   })
   .strict();
 

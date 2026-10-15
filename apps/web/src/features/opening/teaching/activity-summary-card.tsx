@@ -26,6 +26,7 @@ export function ActivitySummaryContent({ summary, task, api, onReread }: {
       <TaskQueueRefreshContext.Provider value={onReread}><TaskStatusControl task={task} api={api} disabled={false} /></TaskQueueRefreshContext.Provider>
     </div> : null}
     {summary.taskId && !task ? <p className="text-xs text-zinc-500">关联任务当前不可用，学习小结已保留。</p> : null}
+    <p className="text-xs leading-6 text-zinc-500">想接着学：回到今日页点「开始学习」，或在今日队列中对任务选「开始此项」，会开始新的一节，本节记录保持不变。</p>
   </section>;
 }
 

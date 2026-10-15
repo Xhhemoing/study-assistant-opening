@@ -74,6 +74,8 @@ describe("ledgerActionForProviderError", () => {
     expect(ledgerActionForProviderError("PROVIDER_UNAVAILABLE")).toBe("markUnknown");
     expect(ledgerActionForProviderError("PROVIDER_TIMEOUT")).toBe("markUnknown");
     expect(ledgerActionForProviderError("PROVIDER_MEDIA_UNSUPPORTED")).toBe("release");
+    // 413: the provider refused the payload size before processing it.
+    expect(ledgerActionForProviderError("PROVIDER_PAYLOAD_TOO_LARGE")).toBe("release");
   });
 });
 

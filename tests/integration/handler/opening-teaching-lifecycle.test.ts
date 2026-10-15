@@ -55,6 +55,27 @@ async function seedActivity() {
   return { activity, courseId, sourceId, taskId };
 }
 
+describe("starting again after a completed activity (R1)", () => {
+  it("continues to a new activity on the same key, idempotently, and keeps plain replays unchanged", async () => {
+    const repo = createOpeningTeachingActivitiesRepository(f.sql);
+    const input = { clientKey: "today-topic:2026-10-15", intentKind: "topic" as const, intentSummary: "今日主题学习", createIntent: { intentKind: "topic", localDate: "2026-10-15" } };
+    const first = await repo.create(f.scope, { ...input, continueAfterCompleted: true });
+    expect((await repo.create(f.scope, { ...input, continueAfterCompleted: true })).id).toBe(first.id);
+    await repo.setStatus(f.scope, first.id, { status: "completed" });
+    const second = await repo.create(f.scope, { ...input, continueAfterCompleted: true });
+    expect(second.id).not.toBe(first.id);
+    expect(second.status).toBe("active");
+    expect(second.clientKey).toBe(`today-topic:2026-10-15:next:${first.id}`);
+    // Repeating the same request lands on the same next activity.
+    expect((await repo.create(f.scope, { ...input, continueAfterCompleted: true })).id).toBe(second.id);
+    await repo.setStatus(f.scope, second.id, { status: "completed" });
+    const third = await repo.create(f.scope, { ...input, continueAfterCompleted: true });
+    expect(third.clientKey).toBe(`today-topic:2026-10-15:next:${second.id}`);
+    // Without the flag a replay still returns the original (completed) activity.
+    expect((await repo.create(f.scope, input)).id).toBe(first.id);
+  });
+});
+
 describe("teaching activity completion handlers", () => {
   it("requires authentication and ownership, and rejects reopening a completed activity", async () => {
     const { activity } = await seedActivity();

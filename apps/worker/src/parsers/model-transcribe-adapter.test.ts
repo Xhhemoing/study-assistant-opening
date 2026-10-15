@@ -8,7 +8,7 @@ import { createModelTranscribeAdapter } from "./model-transcribe-adapter";
 import { MediaValidationError } from "./media-process";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
-const input = { path: "/tmp/local.mp4", mime: "video/mp4", durationMs: 601_000, hasAudio: true,
+const input = { path: "/tmp/local.mp4", mime: "video/mp4", durationMs: 301_000, hasAudio: true,
   sourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 2 };
 const signal = new AbortController().signal;
 const dirs: string[] = [];
@@ -36,10 +36,10 @@ describe("model transcription adapter", () => {
     const segments = await s.adapter(input, signal);
     expect(segments).toEqual([
       { sourceId: input.sourceId, sourceVersion: 2, startMs: 100, endMs: 500, text: "first", frameChunkIds: [], quality: "needs_check" },
-      { sourceId: input.sourceId, sourceVersion: 2, startMs: 600_000, endMs: 600_900, text: "second", frameChunkIds: [], quality: "needs_check" },
+      { sourceId: input.sourceId, sourceVersion: 2, startMs: 300_000, endMs: 300_900, text: "second", frameChunkIds: [], quality: "needs_check" },
     ]);
-    expect(s.run.mock.calls[0]![1]).toEqual(expect.arrayContaining(["-ss", "0", "-t", "600", "-c:a", "pcm_s16le", "-ar", "16000"]));
-    expect(s.run.mock.calls[1]![1]).toEqual(expect.arrayContaining(["-ss", "600", "-t", "1"]));
+    expect(s.run.mock.calls[0]![1]).toEqual(expect.arrayContaining(["-ss", "0", "-t", "300", "-c:a", "pcm_s16le", "-ar", "16000"]));
+    expect(s.run.mock.calls[1]![1]).toEqual(expect.arrayContaining(["-ss", "300", "-t", "1"]));
     expect(s.call.mock.calls.map(call => call[2].operationId)).toEqual(["transcribe:job-id:0", "transcribe:job-id:1"]);
     expect(s.call.mock.calls[0]).toEqual([scope, "media.transcribe", expect.objectContaining({
       beforeSend: s.beforeSend,
@@ -77,6 +77,23 @@ describe("model transcription adapter", () => {
     await expect(s.adapter(input, signal)).rejects.toThrow("outcome unknown");
     expect(s.call).toHaveBeenCalledTimes(1);
     expect(await readdir(s.dir)).toEqual([]);
+  });
+
+  it("keeps every chunk of a long recording under the 20 MB inline request limit", async () => {
+    // 20 minutes of 16 kHz 16-bit mono: 32 000 bytes per second of real WAV payload.
+    const s = await setup(Array.from({ length: 4 }, () => JSON.stringify({ segments: [] })));
+    s.run.mockImplementation(async (_binary, argv: string[]) => {
+      const seconds = Number(argv[argv.indexOf("-t") + 1]);
+      await writeFile(argv.at(-1)!, "");
+      await truncate(argv.at(-1)!, 44 + seconds * 32_000);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    await s.adapter({ ...input, durationMs: 1_200_000 }, signal);
+    expect(s.call).toHaveBeenCalledTimes(4);
+    for (const [, , options] of s.call.mock.calls as unknown as Array<[unknown, unknown, { input: { audioParts: Array<{ data: string }>; instruction: string; text: string } }]>) {
+      const bytes = options.input.audioParts[0]!.data.length + options.input.instruction.length + options.input.text.length;
+      expect(bytes).toBeLessThan(18 * 1024 * 1024);
+    }
   });
 
   it("rejects oversized conversion before sending audio", async () => {

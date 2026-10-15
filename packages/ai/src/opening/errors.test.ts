@@ -22,5 +22,9 @@ describe("provider failures", () => {
       retryable: false,
       code: "PROVIDER_REQUEST",
     });
+    expect(classifyProviderFailure(413)).toEqual({
+      retryable: false,
+      code: "PROVIDER_PAYLOAD_TOO_LARGE",
+    });
   });
 });

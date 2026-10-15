@@ -158,6 +158,7 @@ export {
 export {
   gradeReviewRequestSchema,
   gradeReviewResponseSchema,
+  cardReviewEvidenceSchema,
   createCardRequestSchema,
   createCardResponseSchema,
   listReviewQueueQuerySchema,

@@ -22,15 +22,16 @@ async function course(workspaceId = fixture.scope.workspaceId) {
 function create(courseId?: string) {
   return createCardRepository(fixture.sql).createCard({ ...fixture.scope, front: "What is a derivative?", back: "A limit.", courseId, skillLabel: courseId ? "derivatives" : null });
 }
-function grade(cardId: string, value: "again" | "hard" | "good" | "easy", idempotencyKey = randomUUID()) {
-  return createCardRepository(fixture.sql).grade({ ...fixture.scope, cardId, grade: value, idempotencyKey, occurredAt: new Date().toISOString() });
+function grade(cardId: string, value: "again" | "hard" | "good" | "easy", idempotencyKey = randomUUID(), assisted?: boolean) {
+  return createCardRepository(fixture.sql).grade({ ...fixture.scope, cardId, grade: value, idempotencyKey, occurredAt: new Date().toISOString(), ...(assisted === undefined ? {} : { assisted }) });
 }
 
 it.each(["again", "hard", "good", "easy"] as const)("records %s as self-report evidence in the same review transaction and replays once", async value => {
   const courseId = await course(), card = await create(courseId), key = randomUUID();
   const result = await grade(card.id, value, key);
   const replay = await grade(card.id, value, key);
-  expect(replay).toMatchObject({ created: false, event: { id: result.event.id } });
+  expect(result.evidence).toBe("recorded");
+  expect(replay).toMatchObject({ created: false, event: { id: result.event.id }, evidence: "recorded" });
   const rows = await fixture.sql`SELECT * FROM opening_learning_observations WHERE client_key=${`card-review:${result.event.id}`}`;
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({ course_id: courseId, skill_label: "derivatives", outcome: value === "again" ? "incorrect" : "correct", assistance: "independent", verdict_source: "self_report" });
@@ -44,18 +45,28 @@ it("keeps unlinked cards in SRS only", async () => {
   const card = await create();
   const result = await grade(card.id, "good");
   expect(result.state.reps).toBe(1);
+  expect(result.evidence).toBe("skipped_no_course");
   expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${fixture.scope.workspaceId}`).toHaveLength(0);
 });
 
-it("rejects foreign/archived courses and rolls back an entire review if its course becomes unavailable", async () => {
+it("rejects foreign/archived courses on create, and still saves the SRS review when the course is archived later", async () => {
   await expect(create(await course(fixture.otherScope.workspaceId))).rejects.toMatchObject({ code: "NOT_FOUND" });
   const courseId = await course(), card = await create(courseId);
   await fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
   await expect(create(courseId)).rejects.toMatchObject({ code: "NOT_FOUND" });
-  await expect(grade(card.id, "good")).rejects.toMatchObject({ code: "NOT_FOUND" });
-  expect(await fixture.sql`SELECT id FROM learning_events WHERE content_id=${card.id}`).toHaveLength(0);
-  expect(await createCardRepository(fixture.sql).getState({ ...fixture.scope, cardId: card.id })).toMatchObject({ reps: 0 });
+  // Archiving a course must not block reviewing its cards; only the learning fact is skipped.
+  const result = await grade(card.id, "good");
+  expect(result.evidence).toBe("skipped_course_archived");
+  expect(await fixture.sql`SELECT id FROM learning_events WHERE content_id=${card.id}`).toHaveLength(1);
+  expect(await createCardRepository(fixture.sql).getState({ ...fixture.scope, cardId: card.id })).toMatchObject({ reps: 1 });
   expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${fixture.scope.workspaceId}`).toHaveLength(0);
+});
+
+it("records a review answered after a hint as hinted, not independent", async () => {
+  const courseId = await course(), card = await create(courseId);
+  const result = await grade(card.id, "good", randomUUID(), true);
+  const [row] = await fixture.sql`SELECT assistance FROM opening_learning_observations WHERE client_key=${`card-review:${result.event.id}`}`;
+  expect(row).toMatchObject({ assistance: "hinted" });
 });
 
 it("round-trips independent cards, course attribution, SRS state, and review idempotency in Opening backup", async () => {

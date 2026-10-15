@@ -128,6 +128,8 @@ it("uses courseTitle in topic summary instead of bare 今日主题学习", () =>
   expect(input.intentSummary.includes("今日主题学习")).toBe(false);
   expect(input.courseId).toBe("44444444-4444-4444-8444-444444444444");
   expect(input.clientKey).toBe("today-topic:2026-10-14");
+  // Ending a session must not block starting another one the same day (R1).
+  expect(input.continueAfterCompleted).toBe(true);
 });
 
 it("writes deduped sorted sourceIds capped at 32 on topic create", () => {

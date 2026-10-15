@@ -12,6 +12,7 @@ function failureReason(error: unknown): string {
     case "REQUEST_CAP_EXCEEDED": return "已达到每日免费请求上限。";
     case "PROVIDER_AUTH": return "供应商未接受密钥，请检查配置。";
     case "PROVIDER_RATE_LIMIT": return "供应商当前限流，请稍后再主动测试。";
+    case "PROVIDER_PAYLOAD_TOO_LARGE": return "请求内容超过供应商的大小限制。";
     case "AI_ROUTE_UNAVAILABLE": return "模型配置、定价或额度暂不可用。";
     case "PROVIDER_RESPONSE": return "供应商返回了无法识别的确认。";
     default: return "请检查模型配置、额度及服务器网络；结果未知时不会自动重发。";
@@ -23,9 +24,10 @@ export async function probeModel(sql: Sql, scope: Scope, ids: { id: string; mode
   const models = await createOpeningModelProvidersRepository(sql).listModels(scope);
   if (!models.some(model => model.id === ids.modelId && model.providerId === ids.id)) throw new ApiError("NOT_FOUND", "模型不存在。", 404);
   const budget = createOpeningBudgetRepository(sql, { envCapCents: loadOpeningModelCatalog().dailyCapCents });
+  // The ledger request id is unique across all workspaces, so scope it here.
   try {
     const output = await probeDbModel(sql, scope, ids.id, ids.modelId, {
-      budget: scopeBudget(budget, scope), operationId: `probe:${clientKey}`, resultRef: "settings:probe",
+      budget: scopeBudget(budget, scope), operationId: `probe:${scope.workspaceId}:${ids.modelId}:${clientKey}`, resultRef: "settings:probe",
       input: { instruction: 'Return exactly {"ok":true}.', text: "Connectivity test", mode: "listen", chunks: [], imageParts: [], mediaCapability: "text_only", outputFormat: "json", maxOutputTokens: 16 },
     });
     const parsed: unknown = JSON.parse(output.text);

@@ -229,6 +229,10 @@ describe("identity migration compatibility", () => {
       "0058_opening_turn_clarify.sql",
       "0059_opening_budget_reconcile.sql",
       "0060_opening_retest_accept_key.sql",
+      "0061_opening_adaptive_planning.sql",
+      "0062_opening_model_routing_and_card_evidence.sql",
+      "0063_opening_model_quick_setup.sql",
+      "0064_card_source_lineage.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -327,6 +331,10 @@ describe("identity migration compatibility", () => {
       "0058_opening_turn_clarify.sql",
       "0059_opening_budget_reconcile.sql",
       "0060_opening_retest_accept_key.sql",
+      "0061_opening_adaptive_planning.sql",
+      "0062_opening_model_routing_and_card_evidence.sql",
+      "0063_opening_model_quick_setup.sql",
+      "0064_card_source_lineage.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -680,6 +688,10 @@ describe("identity migration compatibility", () => {
       "0058_opening_turn_clarify.sql",
       "0059_opening_budget_reconcile.sql",
       "0060_opening_retest_accept_key.sql",
+      "0061_opening_adaptive_planning.sql",
+      "0062_opening_model_routing_and_card_evidence.sql",
+      "0063_opening_model_quick_setup.sql",
+      "0064_card_source_lineage.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

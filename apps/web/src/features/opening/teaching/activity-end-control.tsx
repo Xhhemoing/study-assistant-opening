@@ -24,6 +24,8 @@ export function ActivityEndControl({ activity, api, onActivityUpdated }: {
   const inFlight = useRef(false);
   async function end() {
     if (inFlight.current || uncertain) return;
+    // Ending is final for this session; a new one can always be started afterwards.
+    if (!window.confirm("结束后本节不能再作答，学习记录会保留；之后可以随时开始新的一节。确定结束？")) return;
     inFlight.current = true; setPending(true); setError("");
     try { onActivityUpdated(await endTeachingActivity(api, activity.id)); }
     catch (reason) { setUncertain(true); setError(reason instanceof Error ? reason.message : "结束状态尚未确认，请重新读取。"); }

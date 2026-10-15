@@ -15,9 +15,14 @@ export const gradeReviewRequestSchema = z.object({
   occurredAt: z.string().datetime().optional(),
 });
 
+/** Whether the review also became a learning fact (the SRS review itself always saves). */
+export const cardReviewEvidenceSchema = z.enum([
+  "recorded", "skipped_no_course", "skipped_course_archived", "skipped_source_unavailable", "skipped_unknown",
+]);
 export const gradeReviewResponseSchema = z.object({
   state: reviewStateSchema,
   event: learningEventSchema,
+  evidence: cardReviewEvidenceSchema.optional(),
 });
 
 export const createCardRequestSchema = z.object({

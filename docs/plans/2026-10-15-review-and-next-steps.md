@@ -27,6 +27,8 @@
 
 ## 3. 需要修的问题（按优先级）
 
+> **2026-10-15 修复进度：** R1–R8 已在 `claude/keen-carson-ls19ie` 修复（见文末「修复记录」）；R9、R10 仍待做。
+
 ### R1 高：结束今天的学习后，当天无法再开始新的学习
 - **现象：** Today「开始学习」用 `clientKey = today-topic:<日期>`（`apps/web/src/features/opening/teaching/today-activity.ts:148`）。活动结束后状态变为 `completed`，不再算可继续的活动，按钮又显示「开始学习」；但点击后仓库按同一个 clientKey **重放出那个已结束的活动**（`packages/database/src/repositories/opening-teaching-activities.ts` 的 create replay），页面只显示小结，学不了新内容。`task:<taskId>` 同理：一个任务学完一次后不能再学。
 - **修法：** 小结卡增加「再学一节」，用确定性的链式 key 创建新活动：`${上一个活动的 clientKey}:next:${上一个活动 id}`。同一个按钮重复点击仍然幂等，又不会撞回已结束的活动。Today 的「开始学习」在发现当天 `today-topic` 活动已结束时走同样的链式 key。
@@ -102,3 +104,18 @@ R1–R5、R7 一个提交批次，R6、R8 顺手做；R9、R10 可以放到第 4
 
 ### 暂缓
 E2 AI 判分、L7 规划 Agent、BKT 影子运行：等至少两周的真实使用数据。到时先补 R10（技能身份、首次作答）再接 BKT。
+
+## 修复记录（2026-10-15，Claude）
+
+| # | 改动 | 验证 |
+|---|---|---|
+| R1 | 创建活动支持 `continueAfterCompleted`：同一 clientKey 已结束时，按 `<key>:next:<上一个活动 id>` 链式创建新活动，重复请求落到同一个新活动；Today「开始学习」、任务「开始此项」、继续对话都带此标记；小结卡提示如何接着学 | handler：`opening-teaching-lifecycle` 新增链式用例；单测：`today-activity` |
+| R2 | 转写切片改为 300 秒；按 base64 实际体积 + 提示词校验 ≤ 18 MB；HTTP 413 归为 `PROVIDER_PAYLOAD_TOO_LARGE`，账本 release（确定未处理） | 单测：20 分钟录音 4 段均 < 18 MB；`errors`、`budgeted-call` 映射 |
+| R3 | 卡片评分先判断能否写入学习记录（课程未归档、来源可准入、≤32 份），不满足时只保存复习、返回 `evidence: skipped_*`，复习页提示原因 | 集成：归档课程的卡片可评分、SRS 前进、不写 observation；原先「整次回滚」的断言已按新行为改写 |
+| R4 | 「提示后作答」写为 `assistance: hinted` | 集成：assisted 评分产生 hinted |
+| R5 | 一键配置保留已确认的每日额度、用户指定的备用模型和转写引擎；新模型仍成为所有用途的主模型 | handler：已有 Lant + 额度时配置 Gemini 免费模型，Lant 仍可用 |
+| R6 | 「结束本次学习」前确认 | — |
+| R7 | `identity-migration-compatibility.test.ts` 三处迁移清单补上 0061–0064 | 集成通过 |
+| R8 | 连通性测试账本键改为 `probe:<workspaceId>:<modelId>:<clientKey>` | handler 通过 |
+
+整体检查：全量类型检查、lint（0 个边界违规）通过；单元 3580/3581（唯一失败为缺 Python 的 PDF 测试）；handler 268 项全部通过（1 个文件缺 Redis/S3 环境未运行）；集成 644 项通过，7 个失败均为本环境没有 Redis/MinIO。浏览器验收待用户。

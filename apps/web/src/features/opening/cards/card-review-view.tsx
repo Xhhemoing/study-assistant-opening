@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
+import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
 import { Check, CircleHelp, Eye, LoaderCircle, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +30,13 @@ type ReadState =
   | { kind: "error"; message: string }
   | { kind: "loggedOut" };
 
+/** The SRS review always saves; say so when it could not also become a learning fact. */
+export function cardEvidenceNotice(evidence: GradeReviewResponse["evidence"]): string {
+  if (evidence === "skipped_course_archived") return "上一张的复习已保存，但所属课程已归档，没有计入学习记录。";
+  if (evidence === "skipped_source_unavailable") return "上一张的复习已保存，但关联材料暂不可用（已删除、排除或正在重新解析），没有计入学习记录。";
+  return "";
+}
+
 export function advanceGradedCard(state: ReadState, cardId: string, queueRequest: number, activeQueueRequest: number): ReadState {
   if (state.kind !== "ready" || queueRequest !== activeQueueRequest || state.items[state.index]?.card.id !== cardId) return state;
   return { ...state, index: state.index + 1, flipped: false };
@@ -40,6 +47,7 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
   const [state, setState] = useState<ReadState>({ kind: "loading" });
   const [grading, setGrading] = useState(false);
   const [gradeError, setGradeError] = useState("");
+  const [evidenceNotice, setEvidenceNotice] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const gradeIdentity = useRef<CardGradeIdentity | null>(null);
   // Guards against a late response from a superseded load overwriting newer state.
@@ -79,6 +87,7 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
     const queueRequest = requestId.current;
     setGrading(true);
     setGradeError("");
+    setEvidenceNotice("");
     const identity = resolveCardGradeIdentity(
       gradeIdentity.current,
       current.card.id,
@@ -87,12 +96,13 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
     );
     gradeIdentity.current = identity;
     try {
-      await client.grade({
+      const result = await client.grade({
         cardId: current.card.id,
         grade,
         idempotencyKey: identity.key,
       });
       if (queueRequest !== requestId.current) return;
+      setEvidenceNotice(cardEvidenceNotice(result.evidence));
       gradeIdentity.current = null;
       setState((currentState) => advanceGradedCard(currentState, current.card.id, queueRequest, requestId.current));
     } catch (error) {
@@ -182,6 +192,11 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
             {gradeError ? (
               <p className="text-sm text-red-700" role="alert">
                 {gradeError}
+              </p>
+            ) : null}
+            {evidenceNotice ? (
+              <p className="text-xs leading-6 text-amber-800" role="status">
+                {evidenceNotice}
               </p>
             ) : null}
             <button

@@ -150,6 +150,9 @@ async function insertCompileJob(
   return jobId;
 }
 
+/** Bounds the continuation walk; a learner does not finish this many sessions on one key. */
+const MAX_ACTIVITY_CONTINUATIONS = 100;
+
 export function createOpeningTeachingActivitiesRepository(sql: Sql) {
   return {
     assertOwnedActivity: (scope: Scope, activityId: string) =>
@@ -197,17 +200,28 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             FOR SHARE`;
           if (!course.length) throw learningError("NOT_FOUND", "course not found");
         }
-        const replay = await tx`
-          SELECT * FROM opening_teaching_activities
-          WHERE workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-            AND client_key = ${input.clientKey}
-          FOR UPDATE`;
-        if (replay[0]) {
-          if (!isDeepStrictEqual(replay[0].create_intent, input.createIntent)) {
+        // A completed activity is final; with continueAfterCompleted the same request
+        // walks to the next key in its chain, so repeats still land on one activity.
+        let clientKey = input.clientKey;
+        let createIntent: Record<string, unknown> = input.createIntent;
+        for (let hop = 0; ; hop += 1) {
+          const replay = await tx`
+            SELECT * FROM opening_teaching_activities
+            WHERE workspace_id = ${scope.workspaceId}
+              AND owner_user_id = ${scope.ownerUserId}
+              AND client_key = ${clientKey}
+            FOR UPDATE`;
+          if (!replay[0]) break;
+          if (!isDeepStrictEqual(replay[0].create_intent, createIntent)) {
             throw learningError("CONFLICT", "activity clientKey payload conflict");
           }
-          return mapTeachingActivity(replay[0] as Record<string, unknown>);
+          if (!input.continueAfterCompleted || replay[0].status !== "completed") {
+            return mapTeachingActivity(replay[0] as Record<string, unknown>);
+          }
+          if (hop >= MAX_ACTIVITY_CONTINUATIONS) throw learningError("CONFLICT", "too many continued activities for this clientKey");
+          const previousId = String(replay[0].id);
+          clientKey = `${input.clientKey}:next:${previousId}`;
+          createIntent = { ...input.createIntent, continuesActivityId: previousId };
         }
         const id = randomUUID();
         const goalJson = input.goalJson ?? {};
@@ -220,8 +234,8 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           ) VALUES (
             ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.courseId ?? null},
             'active', ${generateStatus}, ${input.intentKind}, ${input.intentSummary}, ${sourceIds},
-            ${tx.json(goalJson as never)}, 1, 0, ${tx.json({})}, ${input.clientKey},
-            ${tx.json(input.createIntent as never)}
+            ${tx.json(goalJson as never)}, 1, 0, ${tx.json({})}, ${clientKey},
+            ${tx.json(createIntent as never)}
           )
           ON CONFLICT (workspace_id, owner_user_id, client_key) DO NOTHING
           RETURNING *`;
@@ -230,7 +244,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           await insertCompileJob(tx, scope, {
             activityId: id,
             mode: "generate",
-            clientKey: input.clientKey,
+            clientKey,
             expectedContentVersion: 0,
             sourceIds,
           });

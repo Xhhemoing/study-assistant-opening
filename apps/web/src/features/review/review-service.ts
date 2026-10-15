@@ -27,7 +27,7 @@ export async function gradeReviewForPrincipal(
     idempotencyKey: parsed.idempotencyKey,
     occurredAt: parsed.occurredAt ?? new Date().toISOString(),
   });
-  return { state: result.state, event: result.event };
+  return { state: result.state, event: result.event, evidence: result.evidence };
 }
 
 export type ListReviewQueueDeps = {

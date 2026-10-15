@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReviewQueueItem } from "@aistudy/contracts";
 
 const scenario = vi.hoisted(() => ({ items: [] as ReviewQueueItem[], grading: false }));
@@ -21,7 +21,7 @@ vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: { children: unknown; href: string }) => createElement("a", { ...props, href }, children),
 }));
 
-import { advanceGradedCard, CardReviewView } from "./card-review-view";
+import { advanceGradedCard, CardReviewView, cardEvidenceNotice } from "./card-review-view";
 
 function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
@@ -61,4 +61,14 @@ it("disables queue reload while a grade is being saved", () => {
 it("offers a direct assistant entry when no cards are due", () => {
   const html = renderToStaticMarkup(createElement(CardReviewView));
   expect(html).toMatch(/href="\/opening\/assistant"[^>]*>去助理制成卡片<\/a>/);
+});
+
+describe("card review evidence notice", () => {
+  it("explains a saved review that did not become a learning fact, and stays quiet otherwise", () => {
+    expect(cardEvidenceNotice("skipped_course_archived")).toContain("已归档");
+    expect(cardEvidenceNotice("skipped_source_unavailable")).toContain("材料暂不可用");
+    expect(cardEvidenceNotice("recorded")).toBe("");
+    expect(cardEvidenceNotice("skipped_no_course")).toBe("");
+    expect(cardEvidenceNotice(undefined)).toBe("");
+  });
 });

@@ -87,7 +87,7 @@ export type CardRepository = {
     occurredAt: string;
     assisted?: boolean;
     now?: Date;
-  }): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean }>;
+  }): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean; evidence: "recorded" | "skipped_no_course" | "skipped_course_archived" | "skipped_source_unavailable" | "skipped_unknown" }>;
   listQueue(input: {
     workspaceId: string;
     ownerUserId: string;

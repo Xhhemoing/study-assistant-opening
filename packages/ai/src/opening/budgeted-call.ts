@@ -144,7 +144,7 @@ export type LedgerAction = "release" | "markUnknown";
 
 /**
  * BC1 v1 code→ledger action table (Integrator Accept).
- * - AUTH / RATE_LIMIT / MEDIA_UNSUPPORTED → release
+ * - AUTH / RATE_LIMIT / MEDIA_UNSUPPORTED / PAYLOAD_TOO_LARGE (413) → release
  * - REQUEST not-sent/client → release; already-sent failed → markUnknown
  * - UNAVAILABLE / timeout / network / response / refusal / default → markUnknown
  * Missing usage is handled separately in runBudgetedCall (always markUnknown).
@@ -157,6 +157,7 @@ export function ledgerActionForProviderError(
     case "PROVIDER_AUTH":
     case "PROVIDER_RATE_LIMIT":
     case "PROVIDER_MEDIA_UNSUPPORTED":
+    case "PROVIDER_PAYLOAD_TOO_LARGE":
       return "release";
     case "PROVIDER_REQUEST":
       return options?.requestSent ? "markUnknown" : "release";

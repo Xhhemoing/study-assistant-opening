@@ -1,4 +1,4 @@
-import { readCardSourceIds } from "./card-sources";
+import { planCardEvidence, type CardEvidenceSkipReason } from "./card-sources";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
   reviewGradeSchema,
@@ -23,6 +23,9 @@ import {
 import { assertReplayableReviewEvent } from "./cards-replay";
 import { CardRepositoryError, type CardStateRecord } from "./cards-types";
 
+/** Whether a review also became a learning fact; replays of older events may not know why it was skipped. */
+export type CardReviewEvidence = "recorded" | CardEvidenceSkipReason | "skipped_unknown";
+
 export async function gradeCard(
   sql: Sql,
   input: {
@@ -35,7 +38,7 @@ export async function gradeCard(
     assisted?: boolean;
     now?: Date;
   },
-): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean }> {
+): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean; evidence: CardReviewEvidence }> {
   const grade = reviewGradeSchema.parse(input.grade);
   const now = input.now ?? new Date(input.occurredAt);
   return sql.begin(async (tx) => {
@@ -44,7 +47,6 @@ export async function gradeCard(
     await lockWorkspaceLearningHistory(tx, scope);
     await lockCardForUpdate(client, input.workspaceId, input.ownerUserId, input.cardId);
     const card = await loadCard(client, input.workspaceId, input.cardId);
-    const sourceIds = await readCardSourceIds(tx, input.workspaceId, input.cardId);
     const events = createLearningEventRepository(client);
     const existing = await events.findByIdempotency({
       workspaceId: input.workspaceId,
@@ -62,7 +64,9 @@ export async function gradeCard(
       if (!replayed) {
         throw new CardRepositoryError("NOT_FOUND", `Review state not found for ${input.cardId}`);
       }
-      return { state: replayed, event: existing, created: false };
+      const [recorded] = await tx`SELECT 1 FROM opening_learning_observations
+        WHERE workspace_id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} AND client_key=${`card-review:${existing.id}`}`;
+      return { state: replayed, event: existing, created: false, evidence: recorded ? "recorded" : card.courseId ? "skipped_unknown" : "skipped_no_course" };
     }
 
     await assertWorkspaceOwner(client, input.workspaceId, input.ownerUserId);
@@ -92,18 +96,22 @@ export async function gradeCard(
         },
       });
       assertReplayableReviewEvent(event, input.cardId);
-      if (card.courseId) {
+      // The SRS review always commits; the learning fact is written only when admissible.
+      const plan = await planCardEvidence(tx, input.workspaceId, card);
+      if (plan.kind === "record") {
         const skillLabel = card.skillLabel ?? "记忆卡片复习";
         const session = await createOpeningLearningSessionInTx(tx, scope, {
-          courseId: card.courseId, skillLabel, sourceIds,
+          courseId: plan.courseId, skillLabel, sourceIds: plan.sourceIds,
         });
         await insertOpeningLearningObservationInTx(tx, scope, {
-          sessionId: session.id, courseId: card.courseId, skillLabel, sourceIds,
+          sessionId: session.id, courseId: plan.courseId, skillLabel, sourceIds: plan.sourceIds,
           answer: `记忆卡片复习（${grade}）\n题目：${card.front}`, outcome: grade === "again" ? "incorrect" : "correct",
-          assistance: "independent", verdictSource: "self_report", clientKey: `card-review:${event.id}`,
+          // A review answered after a hint is not independent evidence.
+          assistance: input.assisted ? "hinted" : "independent",
+          verdictSource: "self_report", clientKey: `card-review:${event.id}`,
         });
       }
-      return { state, event, created: true };
+      return { state, event, created: true, evidence: plan.kind === "record" ? "recorded" : plan.reason };
     } catch (error) {
       if (error instanceof CardRepositoryError) throw error;
       if (error instanceof LearningEventRepositoryError) {
