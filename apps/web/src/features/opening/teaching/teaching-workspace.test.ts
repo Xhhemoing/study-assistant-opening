@@ -50,6 +50,7 @@ vi.mock("./resume-card", async () => {
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
+  formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
   TeachingContinueEntry,
   TeachingWorkspace,
@@ -163,7 +164,10 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("data-teaching-workspace=\"true\"");
     expect(html).toContain("当前 AI 教学");
     expect(html).toContain("矩阵的秩");
-    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+    // Focus: only current block is fully rendered (first block by default).
+    expect(html).toContain('data-teaching-block-focus="current"');
+    expect(html).toContain(`data-current-block-id="${BID}"`);
+    expect(html).not.toContain("data-block-fail-soft=\"answer_hidden\"");
     expect(html).toContain("提纲（按需展开）");
     expect(html).toContain("原材料 / 引用");
     expect(html).toContain("打开自由对话（次要）");
@@ -176,6 +180,55 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain('data-path-version="1"');
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
+  });
+
+  it("focuses currentBlockId after skip checkpoint; does not list every block as active", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: activityReady,
+        clientInit: clientInit({
+          checkpointJson: {
+            currentBlockId: BID2,
+            skippedBlockIds: [BID],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain(`data-current-block-id="${BID2}"`);
+    expect(html).toContain('data-teaching-block-focus="current"');
+    expect(html).toContain(`data-block-id="${BID2}"`);
+    expect(html).toContain("data-teaching-past-collapsed");
+    // First block content should not appear as an equally active teach block.
+    expect(html).not.toContain("矩阵的秩表示线性无关行的最大个数。");
+    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+  });
+
+  it("shows material title not bare UUID as the sole source label", () => {
+    const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: { ...activityReady, sourceIds: [sourceId] },
+        clientInit: clientInit({
+          sourceRefs: [{ sourceId, version: 1, page: 2 }],
+        }),
+        sourceNameById: { [sourceId]: "gaoshu-limits.md" },
+      }),
+    );
+    expect(html).toContain("gaoshu-limits.md");
+    expect(html).toContain('data-source-ref="' + sourceId + '"');
+    // Full UUID must not be the sole visible label (title is primary).
+    expect(html).not.toMatch(new RegExp(`data-source-ref="${sourceId}"[^>]*>\\s*<span[^>]*>来源</span>`));
+    expect(html).not.toContain(`>${sourceId}<`);
+  });
+
+  it("formatTeachingSourceLabel never returns bare UUID as primary", () => {
+    const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const named = formatTeachingSourceLabel({ sourceId }, { [sourceId]: "极限讲义.md" });
+    expect(named.primary).toBe("极限讲义.md");
+    expect(named.secondary).toContain("6a80b8ed");
+    const unnamed = formatTeachingSourceLabel({ sourceId });
+    expect(unnamed.primary).toBe("未命名材料");
+    expect(unnamed.primary).not.toBe(sourceId);
   });
 
   it("shows 待核对 status when generateStatus is needs_check", () => {

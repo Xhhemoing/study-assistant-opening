@@ -8,6 +8,8 @@ import {
   assertCommandAllowed,
   buildStructuredRewriteBlocks,
   buildWhyAssist,
+  WHY_ASSIST_AVAILABLE,
+  WHY_ASSIST_UNAVAILABLE_SUMMARY,
   classifySkipSideEffects,
   createBranchFrame,
   draftsSurvivingBlockIds,
@@ -18,6 +20,7 @@ import {
   popBranch,
   pushBranch,
   readBranchStack,
+  resolveTeachingBlockFocus,
 } from "./teaching-commands";
 
 const blockA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -166,7 +169,10 @@ describe("teaching-commands domain", () => {
   it("T16 why assist does not rewrite blocks; structured rewrite annotates target only", () => {
     const assist = buildWhyAssist({ blockId: blockA, prompt: "rank", blockType: "teach" });
     expect(assist.kind).toBe("why");
-    expect(assist.summary).toContain(blockA);
+    expect(WHY_ASSIST_AVAILABLE).toBe(false);
+    expect(assist.summary).toBe(WHY_ASSIST_UNAVAILABLE_SUMMARY);
+    expect(assist.summary).not.toContain(blockA);
+    expect(assist.summary).not.toMatch(/Why this block/i);
     const prior = [
       { id: blockA, type: "text", content: { text: "hello" } },
       { id: blockB, type: "text", content: { text: "other" } },
@@ -190,4 +196,30 @@ describe("teaching-commands domain", () => {
     expect(nextBlockIdAfter(order, blockC)).toBeNull();
     expect(nextBlockIdAfter(order, blockA, blockC)).toBe(blockC);
   });
+
+  it("resolveTeachingBlockFocus focuses current and classifies past/upcoming/skipped", () => {
+    const order = [{ blockId: blockA }, { blockId: blockB }, { blockId: blockC }];
+    const empty = resolveTeachingBlockFocus(order, {});
+    expect(empty.currentBlockId).toBe(blockA);
+    expect(empty.statusById.get(blockA)).toBe("current");
+    expect(empty.statusById.get(blockB)).toBe("upcoming");
+    expect(empty.statusById.get(blockC)).toBe("upcoming");
+
+    const mid = resolveTeachingBlockFocus(order, {
+      currentBlockId: blockB,
+      skippedBlockIds: [blockA],
+    });
+    expect(mid.currentBlockId).toBe(blockB);
+    expect(mid.statusById.get(blockA)).toBe("skipped");
+    expect(mid.statusById.get(blockB)).toBe("current");
+    expect(mid.statusById.get(blockC)).toBe("upcoming");
+
+    const afterSkip = resolveTeachingBlockFocus(order, {
+      currentBlockId: blockC,
+      skippedBlockIds: [blockA, blockB],
+    });
+    expect(afterSkip.currentBlockId).toBe(blockC);
+    expect([...afterSkip.statusById.values()].filter((s) => s === "current")).toHaveLength(1);
+  });
+
 });
