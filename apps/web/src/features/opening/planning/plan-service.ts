@@ -27,11 +27,14 @@ import {
   createOpeningPlansRepository,
   createOpeningPlanningSettingsRepository,
   OpeningPlanError,
+  type AutoDraftBuild,
   type OpeningPlansRepository,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
+import { buildAdaptiveDraft, type AdaptiveDraftSnapshot } from "./adaptive-draft";
+import type { LearnerSnapshotRead } from "./learner-snapshot-service";
 
 const proposeBodySchema = z
   .object({
@@ -74,6 +77,12 @@ export type EnsureDailyDraftResult = {
   skippedBecauseAccepted: boolean;
   dailyDraftSkippedReason: DailyDraftSkippedReason | null;
   unplannedPendingCount?: number;
+  hasNewerSuggestion?: boolean;
+};
+
+export type EnsureDailyDraftOptions = {
+  /** Learner asked for the newer suggestions offered via hasNewerSuggestion. */
+  refreshSuggestions?: boolean;
 };
 
 export type TodayPlanResult = {
@@ -155,6 +164,12 @@ function countUnplannedPending(tasks: TaskItem[], acceptedBlocks: PlannedBlock[]
 export type OpeningPlanServiceOptions = {
   /** Test seam for DL11 planningNow; production uses wall clock. */
   now?: () => Date;
+  /** OPENING_ADAPTIVE_PLANNING; omitted or disabled keeps the rule-based daily draft. */
+  adaptive?: {
+    enabled(): boolean;
+    readSnapshot(scope: Scope, input: { date: string; timeZone: string }): Promise<LearnerSnapshotRead>;
+    onSnapshotFailure?(error: unknown): void;
+  };
 };
 
 export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanServiceOptions = {}) {
@@ -175,17 +190,41 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     }
   }
 
-  async function ensureDailyDraft(scope: Scope, date: string): Promise<EnsureDailyDraftResult> {
+  /**
+   * The learner snapshot is read before the draft lock (many queries); a failed read
+   * falls back to the rule draft and records why. Rules run inside the lock on the
+   * tasks read there, so the draft always matches what it was compared against.
+   */
+  async function readAdaptiveSnapshot(scope: Scope, date: string): Promise<AdaptiveDraftSnapshot | { fallbackReason: string } | null> {
+    const adaptive = serviceOptions.adaptive;
+    if (!adaptive?.enabled()) return null;
+    const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
+    const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
+    try {
+      const read = await adaptive.readSnapshot(scope, { date, timeZone });
+      return { snapshot: read.snapshot, autonomy: read.autonomy, plannerInputRevision: read.plannerInputRevision };
+    } catch (error) {
+      adaptive.onSnapshotFailure?.(error);
+      return { fallbackReason: "snapshot_unavailable" };
+    }
+  }
+
+  async function ensureDailyDraft(
+    scope: Scope,
+    date: string,
+    options: EnsureDailyDraftOptions = {},
+  ): Promise<EnsureDailyDraftResult> {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
     }
     const clientKey = dailyDraftClientKey(date);
+    const adaptive = await readAdaptiveSnapshot(scope, date);
 
     return repo.ensureAutoDraft(
       scope,
       date,
       clientKey,
-      async () => {
+      async (): Promise<AutoDraftBuild> => {
         const freeBlocks = await resolveFreeBlocks(scope, date);
         if (!freeBlocks) {
           return { kind: "skip", reason: "no_settings" };
@@ -196,6 +235,32 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         const yesterday = addLocalDays(date, -1);
         const yesterdayState = await repo.getToday(scope, yesterday);
         const yesterdayAccepted = yesterdayState?.blocks ?? [];
+        if (adaptive && "snapshot" in adaptive) {
+          const now = clock();
+          const built = buildAdaptiveDraft({
+            workspaceId: scope.workspaceId,
+            adaptive,
+            tasks,
+            freeBlocks,
+            yesterdayAccepted,
+            date,
+            timeZone,
+            now,
+            planDayOptions: (preferredOrder) => buildServerPlanDayOptions({ date, timeZone, now, preferredOrder }),
+          });
+          return {
+            kind: "propose",
+            input: {
+              date,
+              tasks,
+              free: freeBlocks,
+              blocks: built.blocks,
+              unscheduledTaskIds: built.unscheduledTaskIds,
+              clientKey,
+            },
+            adaptive: built.adaptive,
+          };
+        }
         const dueRetests = tasks.filter((task) => {
           if (task.status !== "pending" || !task.retest?.recommendedAt) return false;
           // Local-day filter is applied again inside buildDailyDraftInput.
@@ -236,6 +301,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             unscheduledTaskIds: planned.unscheduledTaskIds,
             clientKey,
           },
+          ...(adaptive && "fallbackReason" in adaptive ? { fallbackReason: adaptive.fallbackReason } : {}),
         };
       },
       async () => {
@@ -243,6 +309,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         const state = await repo.getToday(scope, date);
         return countUnplannedPending(tasks, state?.blocks ?? []);
       },
+      { refreshSuggestions: options.refreshSuggestions },
     );
   }
 
@@ -299,11 +366,11 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
 
     ensureDailyDraft,
 
-    async getToday(scope: Scope, date: string): Promise<TodayPlanResult> {
+    async getToday(scope: Scope, date: string, options: EnsureDailyDraftOptions = {}): Promise<TodayPlanResult> {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
       }
-      const ensured = await ensureDailyDraft(scope, date);
+      const ensured = await ensureDailyDraft(scope, date, options);
       const state = await repo.getToday(scope, date);
       const hard = await repo.listHardBlocks(scope, date);
       const result: TodayPlanResult = {
@@ -317,6 +384,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       if (ensured.unplannedPendingCount !== undefined) {
         result.unplannedPendingCount = ensured.unplannedPendingCount;
       }
+      if (ensured.hasNewerSuggestion) result.hasNewerSuggestion = true;
       return result;
     },
 

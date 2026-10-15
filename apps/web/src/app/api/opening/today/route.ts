@@ -9,7 +9,8 @@ export async function GET(request: Request): Promise<Response> {
     if (!date) {
       return Response.json({ error: { code: "VALIDATION", message: "date query required YYYY-MM-DD" } }, { status: 422 });
     }
-    const today = await getPlanService(sql).getToday(scope, date);
+    const refreshSuggestions = url.searchParams.get("refresh") === "suggestions";
+    const today = await getPlanService(sql).getToday(scope, date, { refreshSuggestions });
     return Response.json(today);
   } catch (error) {
     return jsonError(mapDomainError(error));

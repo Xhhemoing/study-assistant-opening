@@ -33,6 +33,24 @@ export type ProposePlanInput = {
   clientKey?: string | null;
 };
 
+/** Adaptive auto draft (OPENING_ADAPTIVE_PLANNING): suggestions, reasons and what they were built from. */
+export type AdaptiveDraftInput = {
+  suggestedTasks: SuggestedTask[];
+  reasons: Record<string, PlanBlockReason>;
+  strategyVersion: string;
+  /** Hash of the learner snapshot sources the suggestions came from. */
+  plannerInputRevision: string;
+};
+
+export type AutoDraftBuild =
+  | { kind: "propose"; input: ProposePlanInput; adaptive?: AdaptiveDraftInput; fallbackReason?: string }
+  | { kind: "skip"; reason: "no_settings" };
+
+export type EnsureAutoDraftOptions = {
+  /** Replace an open adaptive draft whose suggestions are out of date (learner asked to refresh). */
+  refreshSuggestions?: boolean;
+};
+
 
 function fingerprintHardBlocks(blocks: TimeBlock[]): string {
   const hard = blocks
@@ -460,16 +478,16 @@ export function createOpeningPlansRepository(sql: Sql) {
       scope: OpeningScope,
       day: string,
       clientKey: string,
-      build: () => Promise<
-        | { kind: "propose"; input: ProposePlanInput }
-        | { kind: "skip"; reason: "no_settings" }
-      >,
+      build: () => Promise<AutoDraftBuild>,
       countUnplannedPending: () => Promise<number>,
+      options: EnsureAutoDraftOptions = {},
     ): Promise<{
       draft: PlanDraft | null;
       skippedBecauseAccepted: boolean;
       dailyDraftSkippedReason: "accepted" | "rejected" | "no_settings" | null;
       unplannedPendingCount?: number;
+      /** The open draft is still executable but newer suggestions exist. */
+      hasNewerSuggestion?: boolean;
     }> {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
         throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
@@ -503,7 +521,7 @@ export function createOpeningPlansRepository(sql: Sql) {
           ORDER BY created_at DESC, id DESC
           LIMIT 1`;
         let supersede: string | null = null;
-        let prebuilt: Awaited<ReturnType<typeof build>> | null = null;
+        let prebuilt: AutoDraftBuild | null = null;
         if (existingRows.length) {
           const existing = mapDraft(existingRows[0] as Record<string, unknown>);
           if (existing.status === "rejected") {
@@ -532,8 +550,16 @@ export function createOpeningPlansRepository(sql: Sql) {
           if (rebuilt.kind === "skip") {
             return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
           }
-          if (autoDraftInputsUnchanged((existingRows[0] as Record<string, unknown>).input_snapshot, rebuilt.input)) {
-            return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
+          const stored = (existingRows[0] as Record<string, unknown>).input_snapshot;
+          if (autoDraftInputsUnchanged(stored, rebuilt)) {
+            // Learning moved but the draft is still executable: offer, never swap it under the learner.
+            const newer = rebuilt.adaptive !== undefined && adaptiveSuggestionsChanged(stored, rebuilt.adaptive);
+            if (!newer || !options.refreshSuggestions) {
+              return {
+                draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null,
+                ...(newer ? { hasNewerSuggestion: true } : {}),
+              };
+            }
           }
           supersede = existing.id;
           prebuilt = rebuilt;
@@ -548,7 +574,7 @@ export function createOpeningPlansRepository(sql: Sql) {
           };
         }
 
-        const input = built.input;
+        const { input, adaptive } = built;
         // Persist hard blocks (non-free) for the day inside this transaction.
         await tx`DELETE FROM opening_hard_blocks
           WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
@@ -576,7 +602,12 @@ export function createOpeningPlansRepository(sql: Sql) {
           free: input.free,
           proposedAt: new Date().toISOString(),
           autoDraft: true,
-          algo: AUTO_DRAFT_ALGO,
+          algo: autoDraftAlgo(built),
+          ...(adaptive ? {
+            plannerInputRevision: adaptive.plannerInputRevision,
+            suggestionKeys: adaptive.suggestedTasks.map((task) => task.key),
+          } : {}),
+          ...(built.fallbackReason ? { adaptiveFallback: built.fallbackReason } : {}),
         };
         if (supersede) {
           await tx`
@@ -590,11 +621,14 @@ export function createOpeningPlansRepository(sql: Sql) {
         const rows = await tx`
           INSERT INTO opening_plan_drafts (
             id, workspace_id, owner_user_id, day, version, base_version, status,
-            blocks, unscheduled_task_ids, input_snapshot, hard_blocks_fingerprint, propose_client_key
+            blocks, unscheduled_task_ids, input_snapshot, hard_blocks_fingerprint, propose_client_key,
+            origin, suggested_tasks, reasons, strategy_version
           ) VALUES (
             ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${day}::date, ${0}, ${baseVersion},
             ${"draft"}, ${tx.json(input.blocks as never)}, ${tx.json(input.unscheduledTaskIds as never)},
-            ${tx.json(snapshot as never)}, ${fp}, ${clientKey}
+            ${tx.json(snapshot as never)}, ${fp}, ${clientKey},
+            ${adaptive ? "auto_draft" : "user"}, ${tx.json((adaptive?.suggestedTasks ?? []) as never)},
+            ${tx.json((adaptive?.reasons ?? {}) as never)}, ${adaptive?.strategyVersion ?? null}
           ) RETURNING *`;
         return {
           draft: mapDraft(rows[0] as Record<string, unknown>),
@@ -624,12 +658,24 @@ function canonicalJson(value: unknown): string {
   });
 }
 
-function autoDraftInputsUnchanged(existingSnapshot: unknown, input: ProposePlanInput): boolean {
+/** Adaptive drafts carry their strategy so turning the switch on or off rebuilds the open draft. */
+function autoDraftAlgo(built: Extract<AutoDraftBuild, { kind: "propose" }>): string {
+  return built.adaptive ? `${AUTO_DRAFT_ALGO}+${built.adaptive.strategyVersion}` : AUTO_DRAFT_ALGO;
+}
+
+function autoDraftInputsUnchanged(existingSnapshot: unknown, built: Extract<AutoDraftBuild, { kind: "propose" }>): boolean {
   if (!existingSnapshot || typeof existingSnapshot !== "object") return false;
   const snap = existingSnapshot as Record<string, unknown>;
-  return snap.algo === AUTO_DRAFT_ALGO
-    && canonicalJson(snap.tasks) === canonicalJson(JSON.parse(JSON.stringify(input.tasks)))
-    && canonicalJson(snap.free) === canonicalJson(JSON.parse(JSON.stringify(input.free)));
+  return snap.algo === autoDraftAlgo(built)
+    && canonicalJson(snap.tasks) === canonicalJson(JSON.parse(JSON.stringify(built.input.tasks)))
+    && canonicalJson(snap.free) === canonicalJson(JSON.parse(JSON.stringify(built.input.free)));
+}
+
+/** The learner's evidence or the suggestion set moved since the open draft was built. */
+function adaptiveSuggestionsChanged(existingSnapshot: unknown, adaptive: AdaptiveDraftInput): boolean {
+  const snap = existingSnapshot as Record<string, unknown>;
+  return snap.plannerInputRevision !== adaptive.plannerInputRevision
+    || canonicalJson(snap.suggestionKeys) !== canonicalJson(adaptive.suggestedTasks.map((task) => task.key));
 }
 
 export type OpeningPlansRepository = ReturnType<typeof createOpeningPlansRepository>;

@@ -509,8 +509,10 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return openingAdaptivePrefsResponseSchema.parse(body);
     },
 
-    async getToday(date: string): Promise<TodayPlanRead> {
-      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}`, { method: "GET" }, fetchImpl);
+    /** `refreshSuggestions` replaces an open draft whose suggestions are out of date (hasNewerSuggestion). */
+    async getToday(date: string, options: { refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
+      const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
+      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
       return todayPlanSchema.parse(body);
     },
 

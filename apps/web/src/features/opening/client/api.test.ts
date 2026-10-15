@@ -286,6 +286,11 @@ describe("openingApi integration helpers", () => {
     );
     const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
     await expect(api.getToday("2026-10-15")).resolves.toMatchObject({ hasNewerSuggestion: true });
+    await api.getToday("2026-10-15", { refreshSuggestions: true });
+    expect(fetchImpl.mock.calls.map((call) => String((call as unknown[])[0]))).toEqual([
+      "/api/opening/today?date=2026-10-15",
+      "/api/opening/today?date=2026-10-15&refresh=suggestions",
+    ]);
   });
 
   it("builds same-origin download href without MinIO hosts", () => {
