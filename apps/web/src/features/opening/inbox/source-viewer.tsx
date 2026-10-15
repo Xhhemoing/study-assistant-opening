@@ -2,6 +2,8 @@ import type { SourceRecord } from "@aistudy/contracts";
 import { z } from "zod";
 import { sourceStatusLabel } from "./upload-state";
 import { ui } from "../design/ui";
+import { sourcePreviewKind } from "../sources/preview-mime";
+import { SourceTextPreview } from "./source-text-preview";
 
 export type SourceDownloadView = {
   /** Same-origin download path preferred; MinIO hosts must never appear here for browser open. */
@@ -43,9 +45,15 @@ export function sourceViewerHref(
   return `/opening/library?${params.toString()}`;
 }
 
-/** Same-origin binary download; optional `#page=` for PDF viewers that honor it. */
+/** Same-origin binary download (attachment); optional `#page=` for PDF viewers that honor it. */
 export function sourceDownloadHref(sourceId: string, version: number, page?: number | null): string {
   const base = `/api/opening/sources/${sourceId}/download?version=${version}`;
+  return page != null && page > 0 ? `${base}#page=${page}` : base;
+}
+
+/** Same-origin inline preview URL for PDF / image / plain / markdown. */
+export function sourcePreviewHref(sourceId: string, version: number, page?: number | null): string {
+  const base = `/api/opening/sources/${sourceId}/download?version=${version}&disposition=inline`;
   return page != null && page > 0 ? `${base}#page=${page}` : base;
 }
 
@@ -128,6 +136,40 @@ export function buildSourceDownloadView(
   };
 }
 
+function SourcePreviewPane({
+  mime,
+  previewHref,
+  name,
+}: {
+  mime: string;
+  previewHref: string;
+  name: string;
+}) {
+  const kind = sourcePreviewKind(mime);
+  if (kind === "pdf") {
+    return (
+      <iframe
+        title={`${name} 预览`}
+        src={previewHref}
+        className="h-[32rem] w-full rounded-md border border-zinc-200 bg-zinc-50"
+      />
+    );
+  }
+  if (kind === "image") {
+    return (
+      <img
+        src={previewHref}
+        alt={`${name} 预览`}
+        className="max-h-[32rem] w-full rounded-md border border-zinc-200 object-contain bg-zinc-50"
+      />
+    );
+  }
+  if (kind === "text") {
+    return <SourceTextPreview url={previewHref} />;
+  }
+  return null;
+}
+
 export function SourceViewer({
   record,
   latestRecord = record,
@@ -135,8 +177,10 @@ export function SourceViewer({
   download,
   page,
 }: {
-  record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version">;
-  latestRecord?: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version">;
+  record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version"> &
+    Partial<Pick<SourceRecord, "mime">>;
+  latestRecord?: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version"> &
+    Partial<Pick<SourceRecord, "mime">>;
   requestedVersion: number;
   download: SourceDownloadView;
   /** Physical page to prefer in open-original / viewer copy. */
@@ -152,22 +196,35 @@ export function SourceViewer({
   });
   // Always same-origin binary link with cookies — never trust a MinIO/presign URL in download.url.
   const href = sourceDownloadHref(record.id, download.version, page);
+  const mime = record.mime ?? latestRecord.mime ?? "";
+  const previewable = sourcePreviewKind(mime) != null;
+  const previewHref = sourcePreviewHref(record.id, download.version, page);
   return (
     <section className="space-y-3 border-t border-zinc-200 bg-white py-4">
       <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2>
       <p className="text-sm text-zinc-700">{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
       <p className="text-sm text-amber-800">{copy}</p>
-      <a
-        className={ui.primary}
-        href={href}
-        rel="noreferrer"
-      >
-        打开原件 v{download.version}
-        {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
-      </a>
-      <div className="overflow-x-auto text-sm text-zinc-800">
-        <p>页面标签随原件查看。公式可横向滚动。</p>
+      <div className="flex flex-wrap gap-2">
+        {previewable ? (
+          <a className={ui.primary} href={previewHref} rel="noreferrer">
+            预览
+            {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
+          </a>
+        ) : null}
+        <a
+          className={previewable ? ui.secondary : ui.primary}
+          href={href}
+          rel="noreferrer"
+        >
+          打开原件 v{download.version}
+          {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
+        </a>
       </div>
+      {previewable ? (
+        <div className="space-y-2" aria-label="原件预览">
+          <SourcePreviewPane mime={mime} previewHref={previewHref} name={latestRecord.name} />
+        </div>
+      ) : null}
     </section>
   );
 }

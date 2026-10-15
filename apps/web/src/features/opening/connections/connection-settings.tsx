@@ -149,7 +149,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
           );
         })}
       </ul>
-      {!loading && rows.length === 0 ? <p className="text-sm text-zinc-600">还没有连接。未配置的服务显示为不可用，不会填充示例内容。</p> : null}
+      {!loading && rows.length === 0 ? <p className="text-sm text-zinc-600">还没有连接。</p> : null}
 
       <section className="space-y-3 border-t border-zinc-200 pt-4" aria-labelledby="imap-create-heading">
         <h2 className="text-sm font-semibold text-zinc-900" id="imap-create-heading">添加学校邮箱</h2>
@@ -168,7 +168,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
 
       <section className="space-y-2 border-t border-zinc-200 pt-4" aria-labelledby="manual-import-heading">
         <h2 className="text-sm font-semibold text-zinc-900" id="manual-import-heading">手工导入邮件</h2>
-        <p className="text-xs leading-5 text-zinc-500">此路径明确标记为<strong>手工</strong>，不会伪装成自动邮箱同步。</p>
+        <p className="text-xs leading-5 text-zinc-500">手工导入，非自动同步。</p>
         <input type="file" accept=".eml,message/rfc822" aria-label="选择 .eml 文件手工导入" disabled={manualBusy}
           onChange={(e) => void importManual(e.target.files?.[0] ?? null)} />
       </section>

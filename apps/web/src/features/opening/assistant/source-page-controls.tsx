@@ -89,9 +89,7 @@ export function SourcePageControls({
       <div>
         <h2 className="text-xs font-semibold text-zinc-800">指定材料</h2>
         <p className="mt-1 text-xs leading-5 text-zinc-500">
-          {courseScoped
-            ? "默认显示本课已挂接且解析就绪的材料；可选最多 32 份。选文件不等于选当前页。"
-            : "仅已完成上传且解析就绪的材料可选；解析中的材料不可用于辅导，选文件也不等于选当前页。"}
+          {courseScoped ? "本课就绪材料，最多 32 份。" : "仅解析就绪的材料可选。"}
         </p>
         {selectedSourceIds.length >= MAX_ASSISTANT_SOURCE_IDS ? (
           <p className="mt-2 text-xs text-amber-800" role="status">已选满 {MAX_ASSISTANT_SOURCE_IDS} 份材料。</p>

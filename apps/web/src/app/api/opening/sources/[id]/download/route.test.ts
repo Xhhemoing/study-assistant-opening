@@ -22,11 +22,14 @@ import { GET } from "./route";
 const SOURCE_ID = "00000000-0000-4000-8000-0000000000aa";
 const principal = { userId: "u", workspaceId: "w", sessionId: "s" };
 
-function getRequest(version?: number) {
-  const url =
-    version === undefined
-      ? `http://localhost/api/opening/sources/${SOURCE_ID}/download`
-      : `http://localhost/api/opening/sources/${SOURCE_ID}/download?version=${version}`;
+function getRequest(version?: number, disposition?: "inline" | "attachment") {
+  const params = new URLSearchParams();
+  if (version !== undefined) params.set("version", String(version));
+  if (disposition) params.set("disposition", disposition);
+  const query = params.toString();
+  const url = query
+    ? `http://localhost/api/opening/sources/${SOURCE_ID}/download?${query}`
+    : `http://localhost/api/opening/sources/${SOURCE_ID}/download`;
   return new Request(url, { method: "GET" });
 }
 
@@ -77,7 +80,9 @@ describe("GET /api/opening/sources/:id/download", () => {
     const asText = body.toString("utf8");
     expect(asText).not.toContain("127.0.0.1:9000");
     expect(asText).not.toContain("presign");
-    expect(mocks.getDownloadStream).toHaveBeenCalledWith(principal, SOURCE_ID, 0);
+    expect(mocks.getDownloadStream).toHaveBeenCalledWith(principal, SOURCE_ID, 0, {
+      disposition: "attachment",
+    });
   });
 
   it("rejects a non-integer version with 422", async () => {
@@ -120,5 +125,35 @@ describe("GET /api/opening/sources/:id/download", () => {
     });
     expect(response.status).toBe(401);
     expect(mocks.getDownloadStream).not.toHaveBeenCalled();
+  });
+
+  it("passes disposition=inline through to the download stream", async () => {
+    mocks.getDownloadStream.mockResolvedValue({
+      body: bytesStream(new Uint8Array([1, 2, 3])),
+      contentType: "application/pdf",
+      contentLength: 3,
+      contentDisposition: 'inline; filename="doc.pdf"; filename*=UTF-8\'\'doc.pdf',
+      version: 0,
+      currentVersion: 0,
+      versionMismatch: false,
+    });
+    const response = await GET(getRequest(0, "inline"), {
+      params: Promise.resolve({ id: SOURCE_ID }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toContain("inline");
+    expect(mocks.getDownloadStream).toHaveBeenCalledWith(principal, SOURCE_ID, 0, {
+      disposition: "inline",
+    });
+  });
+
+  it("defaults disposition to attachment when omitted", async () => {
+    const response = await GET(getRequest(0), {
+      params: Promise.resolve({ id: SOURCE_ID }),
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.getDownloadStream).toHaveBeenCalledWith(principal, SOURCE_ID, 0, {
+      disposition: "attachment",
+    });
   });
 });

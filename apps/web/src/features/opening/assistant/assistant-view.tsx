@@ -811,13 +811,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       ) : null}
 
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
-      {!learningAttempt ? <p className="mx-5 mb-2 text-[11px] leading-5 text-zinc-500"><Link href="/opening/settings/connections" className="underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800">数据连接与授权</Link>：不可用时显示不可用，不填充示例同步内容。</p> : null}
       <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
-      <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}。仅选中的就绪材料用于本轮提问。</p>
+      <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}</p>
       <UploadStrip api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
       <SourcePageControls
         sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources}
@@ -830,7 +829,6 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       />
       <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/opening/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
       <details className="mt-5 border-t border-zinc-200 pt-2"><summary className="flex min-h-10 cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700"><ShieldCheck size={14} aria-hidden />AI 记忆与待确认建议</summary><MemoryPanel api={api} /></details>
-      <p className="mt-6 text-[11px] leading-5 text-zinc-500">选择资料不会发送消息。AI 建议需由你确认后才进入后续上下文。</p>
     </ResponsiveInspector>
   </section>;
 }

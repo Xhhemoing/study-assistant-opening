@@ -7,7 +7,7 @@ export default function OpeningConnectionsSettingsPage() {
     <main className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
       <PageHeading
         title="数据连接"
-        description="管理学校邮箱与钉钉授权：范围、同步时间、错误、暂停与撤销。邮箱密码不会回显；手工导入单独标记。"
+        description="管理学校邮箱与钉钉授权。"
         action={
           <Link
             href="/opening/today"
