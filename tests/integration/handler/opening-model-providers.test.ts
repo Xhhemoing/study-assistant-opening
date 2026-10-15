@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
@@ -93,6 +94,22 @@ describe("model provider handlers", () => {
     expect((await deleteProvider(req("DELETE"), idContext("22222222-2222-4222-8222-222222222222"))).status).toBe(404);
     expect((await deleteModel(req("DELETE"), modelContext(provider.id, "22222222-2222-4222-8222-222222222222"))).status).toBe(404);
     expect((await updateModel(req("PUT", { label: "Y" }), modelContext(provider.id, model.id))).status).toBe(200);
+  });
+  it("validates explicit task routes and roundtrips a supported primary and fallback", async () => {
+    const { provider, model } = await createProviderWithKey();
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: model.id };
+    const save = (taskRoutes: unknown) => saveSettings(req("PUT", { ...settings, taskRoutes }));
+    expect((await save({ "unknown.task": { primary: model.id, fallback: null } })).status).toBe(422);
+    expect((await save({ "tutor.hint": { primary: "removed-model", fallback: null } })).status).toBe(422);
+    const noKey = await (await createProvider(req("POST", { label: "没有密钥", baseUrl: providerInput.baseUrl }))).json();
+    const unavailable = await (await createModel(req("POST", modelInput), idContext(noKey.id))).json();
+    expect((await save({ "tutor.hint": { primary: model.id, fallback: unavailable.id } })).status).toBe(422);
+    const fallback = await (await createModel(req("POST", { ...modelInput, label: "备用", modelName: "backup" }), idContext(provider.id))).json();
+    const taskRoutes = { "tutor.hint": { primary: model.id, fallback: fallback.id } };
+    const response = await save(taskRoutes);
+    expect(response.status).toBe(200);
+    expect((await response.json()).settings.taskRoutes).toEqual(taskRoutes);
+    expect((await (await readSettings(req("GET"))).json()).settings.taskRoutes).toEqual(taskRoutes);
   });
   it("surfaces a broken vault as 503 instead of leaking a client error", async () => {
     const response = await createProvider(req("POST", providerInput));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  keyStatusText, modelRequestBody, providerRequestBody, validateModelDraft, validateProviderDraft,
+  emptyModelDraft, keyStatusText, modelRequestBody, providerRequestBody, validateModelDraft, validateProviderDraft,
 } from "./provider-settings-model";
 
 const providerId = "22222222-2222-4222-8222-222222222222";
@@ -23,14 +23,26 @@ describe("provider settings presentation", () => {
     expect(providerRequestBody({ label: "A", baseUrl: "https://example.com", apiKey: " k " })).toEqual({ label: "A", baseUrl: "https://example.com", apiKey: " k " });
   });
   it("requires positive numeric prices for models", () => {
-    const base = { label: "M", modelName: "m", supportsVision: false };
+    const base = { ...emptyModelDraft, label: "M", modelName: "m" };
     expect(validateModelDraft({ ...base, inputCentsPerMillion: "1", outputCentsPerMillion: "2" })).toBeNull();
     expect(validateModelDraft({ ...base, inputCentsPerMillion: "0", outputCentsPerMillion: "2" })).toContain("输入");
     expect(validateModelDraft({ ...base, inputCentsPerMillion: "1", outputCentsPerMillion: "-1" })).toContain("输出");
     expect(validateModelDraft({ ...base, inputCentsPerMillion: "abc", outputCentsPerMillion: "2" })).toContain("输入");
     expect(modelRequestBody({ ...base, inputCentsPerMillion: "1.5", outputCentsPerMillion: "2" })).toEqual({
       label: "M", modelName: "m", inputCentsPerMillion: 1.5, outputCentsPerMillion: 2, supportsVision: false,
+      supportsAudio: false, billing: "metered", dailyRequestCap: null,
     });
+  });
+  it("accepts zero-priced free tier models only with a bounded daily request cap", () => {
+    const draft = { ...emptyModelDraft, label: "Free", modelName: "free", billing: "free_tier" as const, inputCentsPerMillion: "0", outputCentsPerMillion: "0", dailyRequestCap: "200" };
+    expect(validateModelDraft(draft)).toBeNull();
+    expect(modelRequestBody(draft)).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, inputCentsPerMillion: 0, outputCentsPerMillion: 0 });
+    for (const dailyRequestCap of ["", "0", "100001", "1.5"]) {
+      expect(validateModelDraft({ ...draft, dailyRequestCap })).not.toBeNull();
+    }
+    for (const dailyRequestCap of ["1", "100000"]) {
+      expect(validateModelDraft({ ...draft, dailyRequestCap })).toBeNull();
+    }
   });
   it("shows the masked key hint without exposing key material", () => {
     expect(keyStatusText({ id: providerId, label: "P", baseUrl: "https://x", hasApiKey: false, apiKeyHint: null, apiKeyUpdatedAt: null, modelCount: 0, createdAt: "", updatedAt: "" })).toBe("未配置密钥");

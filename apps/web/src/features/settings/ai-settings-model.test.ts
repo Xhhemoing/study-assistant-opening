@@ -2,12 +2,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsSchema, type OpeningAiSettingsResponse } from "@aistudy/contracts";
-import { effectiveModelRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode } from "./ai-settings-model";
+import { effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, setTaskRoute, switchRoutingMode } from "./ai-settings-model";
 import { AiSettingsForm } from "./ai-settings-panel";
 const data: OpeningAiSettingsResponse = {
   defaultModelId: "a", dailyCapCents: 200, envCapCents: 200, personalCeilingCents: 2000, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false,
   models: [{ id: "a", providerId: "one", providerLabel: "One", label: "Model A", modelName: "a", inputCentsPerMillion: 10, outputCentsPerMillion: 20, availability: "available" },
     { id: "b", providerId: "two", providerLabel: "Two", label: "Model B", modelName: "b", inputCentsPerMillion: 30, outputCentsPerMillion: 40, availability: "missing_key" }],
+  tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: [] }],
 };
 describe("AI settings presentation", () => {
   it("preserves mode mappings through a temporary manual lock and ignores inactive removed routes", () => {
@@ -53,9 +54,24 @@ describe("AI settings presentation", () => {
   it("renders accessible mode controls, explicit costs and recovery", () => {
     const html = renderToStaticMarkup(createElement(AiSettingsForm, { data, draft: data.settings, busy: false, onChange() {}, onSave() {}, onReset() {} }));
     expect(html).toContain('name="ai-routing-mode"');
-    expect(html).toContain("不会自动重试或改用其他供应商");
+    expect(html).toContain("只有你为该用途明确指定了备用模型");
+    expect(html).toContain("按用途指定模型与备用模型");
     expect(html).toContain("不自动换汇");
     expect(html).toContain("保存模型设置");
+  });
+  it("prefers an explicit task primary over the tutor mode mapping", () => {
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, routes: { ...DEFAULT_OPENING_AI_SETTINGS.routes, hint: "b" }, taskRoutes: { "tutor.hint": { primary: "a", fallback: null } } };
+    expect(effectiveTaskRoutes(data, settings)[0]).toMatchObject({ id: "a", problem: null });
+  });
+  it("reports missing audio capability on an explicit fallback", () => {
+    const settings = setTaskRoute(DEFAULT_OPENING_AI_SETTINGS, "tutor.hint", { fallback: "a" });
+    expect(effectiveTaskRoutes({ ...data, tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: ["audio"] }] }, settings)[0].fallbackProblem).toBe("不支持音频输入");
+  });
+  it("removes a cleared route and omits an empty taskRoutes object", () => {
+    const settings = setTaskRoute(DEFAULT_OPENING_AI_SETTINGS, "tutor.hint", { primary: "a", fallback: "b" });
+    const primaryCleared = setTaskRoute(settings, "tutor.hint", { primary: null });
+    expect(primaryCleared.taskRoutes?.["tutor.hint"]).toEqual({ primary: null, fallback: "b" });
+    expect(setTaskRoute(primaryCleared, "tutor.hint", { fallback: null })).not.toHaveProperty("taskRoutes");
   });
   it("allows reset and disables save for a removed model", () => {
     const draft = { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual" as const, manualModelId: "removed" };
