@@ -9,25 +9,28 @@
 
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
-- 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38。
-- Hermes 已部署 `8b500e6`（含 #33）。
+- 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
+- Hermes 已部署 `8b500e6`（含 #33），**落后主干 0061–0064 四个迁移**，升级步骤见 `docs/plans/2026-10-15-review-and-next-steps.md` 第 4 节第 2 步。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| G9 保存回合按模式过滤任务建议（只有 listen 不提任务） | Grok + Claude | `fix/tutor-turn-candidate-mode` / #39 | CI 中，绿后可合 |
-| 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release`；交接 `docs/plans/2026-10-15-gpt-handoff.md` | M3–M6、E1、E3–E5 已实现并推送；单元/类型/handler/集成回归通过；E2 暂缓，浏览器与真实供应商仍待用户 |
+| 评审修复 R1–R8（结束后无法再学、Gemini 转写超限、卡片复习被归档课程阻断、提示后复习记成独立、一键配置清零额度、过期迁移清单测试等） | 待分配 | — | 未开始；清单与验收见 `docs/plans/2026-10-15-review-and-next-steps.md` 第 3 节，**部署前先修 R1–R5、R7** |
+| 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
+| 自适应排程 L2–L8（按学习情况出建议、教练自动确认/撤销、Today 档位、课程目标、闭环指标） | Claude（L2/L3）→ GPT/Grok（L4/L6/L8） | — | 只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；本地 WIP `bd201d7` 如仍在请先推送 |
 
 ## 下一步（按顺序）
 
-1. 自用：Hermes 换新 Lant key（用户直接写 `/opt/aistudy/.env.production`），确认对话可用；登录后复现“侧栏卡住”，现象记到使用反馈。
-2. 大问题方案（用户在问外部意见，回来后定方案再开工）：
-   - A 规划 Agent：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
+1. 修复 R1–R5、R7（约 1 天），再部署 Hermes：备份 → `db:migrate`（0061–0064）→ `OPENING_TEACHING_COMPILER_ENABLED=1`、`OPENING_ADAPTIVE_PLANNING=0` → 换新 Lant key → 确认 Hermes 能访问 `generativelanguage.googleapis.com` 后再配 Gemini。
+2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
+3. 自适应排程 L2–L8，让每日计划随学习证据变化。
+4. 大问题方案：
+   - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。
-   - C 安全：`/api/opening/health` 无鉴权现场探测；`deploy-hermes.sh` 用保存的 root 密码且跳过主机指纹并改 sshd。
-3. AI 主讲试跑（V2-16）：教学 provider 仍是桩（`compile-teaching-unit-wiring.ts`），大纲是模板；试跑前要先接真实模型，否则测不到核心体验。开关见 `docs/operations/hermes-deployment.md`「自用开关」。
-4. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
+   - C 安全（小，可与第 3 步并行）：`/api/opening/health` 无鉴权现场探测；`deploy-hermes.sh` 用保存的 root 密码且跳过主机指纹并改 sshd。
+5. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
+6. 暂缓：E2 AI 判分、BKT 影子运行（先补技能身份与首次作答字段，见 R10）。
 
 ## 负责人已定（2026-10-13）
 

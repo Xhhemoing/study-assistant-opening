@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-15
 **Baseline:** `study-assistant-opening/feat/opening-release` @ `649353f`（Hermes 已部署）
-**Status:** L0 实现中（Claude）；L1–L3 由 Claude 实现；L4/L5/L6/L8 按下方任务卡交 Grok；L7 延后
+**Status:** L0、L1 已在 `feat/opening-release`；L5 的「开始此项」与学完询问完成已随证据闭环实现，L5 其余（推迟到明天、上下移、日内重排）与 L2、L3、L4、L6、L8 未开始（2026-10-15 复核）；L7 延后
 **开关:** `OPENING_ADAPTIVE_PLANNING`（默认 0，关闭时线上行为不变）、`OPENING_PLAN_AGENT`（默认 0，L7 用）
 
 ## 目标

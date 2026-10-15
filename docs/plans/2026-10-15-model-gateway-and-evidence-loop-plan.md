@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-15
 **Baseline:** `feat/opening-release` @ `649353f`；与 PR #43（`feat/adaptive-loop-v2`，自适应排程 L0/L1）并行
-**Status:** M1/M2a/M2b 为已有基线；M3–M6、E1、E3–E5 已实现并完成本轮非浏览器验证；E2 按用户决定暂缓。浏览器、真实供应商/模型和生产部署仍待用户验收。执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)。
+**Status:** M1/M2a/M2b 为已有基线；M3–M6、E1、E3–E5 已实现并完成本轮非浏览器验证；E2 按用户决定暂缓。浏览器、真实供应商/模型和生产部署仍待用户验收。执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)。 2026-10-15 Claude 复核结论与修复项见 [`2026-10-15-review-and-next-steps.md`](2026-10-15-review-and-next-steps.md)。
 **关联：** [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md)（PR #43，排程侧 L0–L8）、[`2026-10-14-learning-loop-closure-plan.md`](2026-10-14-learning-loop-closure-plan.md)（S1–S10）
 
 > 编号说明：PR #43 已经用了 L0–L8（排程）。本计划用 **M**（模型调度）和 **E**（证据闭环），避免撞号。
