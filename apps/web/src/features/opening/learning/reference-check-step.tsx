@@ -4,6 +4,8 @@ import { useRef, useState, type FormEvent } from "react";
 import type { LearningObservation } from "@aistudy/contracts";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
+import { sourceViewerHref } from "../inbox/source-viewer";
+import { ui } from "../design/ui";
 import {
   buildSelfCompareRevision,
   referenceCheckFailure,
@@ -44,6 +46,7 @@ export function ReferenceCheckStep({
   const [conflict, setConflict] = useState(false);
   const [done, setDone] = useState<LearningObservation | null>(null);
   const retry = useRef<{ intent: string; clientKey: string } | null>(null);
+  const referenceVersion = observation.sourceVersions?.[referenceSourceId];
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -108,6 +111,18 @@ export function ReferenceCheckStep({
           先打开会话绑定的参考来源整体对照；答案已锁定，不能在核对时改写。
           {referenceSourceName ? ` 参考材料：${referenceSourceName}。` : null}
         </p>
+        {referenceVersion != null ? (
+          <a
+            href={sourceViewerHref(referenceSourceId, referenceVersion)}
+            target="_blank"
+            rel="noreferrer"
+            className={`${ui.secondary} mt-2`}
+          >
+            打开参考材料（新窗口）
+          </a>
+        ) : (
+          <p className="mt-1 text-xs leading-6 text-amber-800" role="status">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
+        )}
       </div>
       <label className="block text-sm text-zinc-800">
         我的答案（已锁定）

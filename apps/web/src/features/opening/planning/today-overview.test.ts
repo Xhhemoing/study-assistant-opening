@@ -80,7 +80,7 @@ describe("Today learning context", () => {
     expect(html).toContain('href="/opening/review"');
     expect(html).toContain('href="/opening/settings/connections"');
     expect(html).toContain('href="#action-digest"');
-    expect(html).toContain("课程知识 / 材料在课程页");
+    expect(html.match(/href="\/opening\/courses"/g)).toHaveLength(1);
     expect(html).toContain('href="/opening/courses"');
   });
 });

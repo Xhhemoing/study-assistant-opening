@@ -14,7 +14,7 @@ export const AI_READINESS_CHECKLIST_SOFT_KEYS = new Set([
 ]);
 
 /** Deep link to advanced settings daily-budget section (hash already used by settings nav). */
-export const BUDGET_CONFIRM_HREF = "/settings/advanced#daily-budget";
+export const BUDGET_CONFIRM_HREF = "/opening/settings/advanced#daily-budget";
 
 /** Lead copy when hard-blocked by budget / no available model (cap/confirm). */
 export const BUDGET_CONFIRM_LEAD = "日额度未开启/未确认，辅导暂不可用";

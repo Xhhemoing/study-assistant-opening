@@ -65,11 +65,12 @@ export function TodayLearningContext({
       </div>
     </div>
     <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">
-      <Link href="/opening/cards" className={ui.quiet}>卡片</Link>
-      <Link href="/opening/review" className={ui.quiet}>待确认</Link>
-      <Link href="/opening/settings/connections" className={ui.quiet}>连接</Link>
       {onShowActions ? <button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button> : <a href="#action-digest" className={ui.quiet}>优先行动</a>}
-      <Link href={courseHref} className={ui.quiet} title="课程知识 / 材料在课程页">课程知识 / 材料在课程页</Link>
+      <details className="relative"><summary className={`${ui.quiet} cursor-pointer list-none`}>更多学习方式</summary><div className="absolute left-0 top-full z-20 flex min-w-40 flex-col rounded-xl border border-zinc-200 bg-white p-2 shadow-md">
+        <Link href="/opening/cards" className={`${ui.quiet} justify-start`}>复习记忆卡片</Link>
+        <Link href="/opening/review" className={`${ui.quiet} justify-start`}>审核 AI 建议</Link>
+        <Link href="/opening/settings/connections" className={`${ui.quiet} justify-start`}>连接外部材料</Link>
+      </div></details>
     </nav>
   </div>;
 }

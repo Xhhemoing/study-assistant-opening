@@ -46,11 +46,15 @@ vi.mock("../../search/command-palette", () => ({
 vi.mock("./focus-timer", () => ({
   FocusTimer: () => null,
 }));
+vi.mock("./mobile-navigation", () => ({
+  OpeningMobileNavigation: () => null,
+}));
 
 import { OpeningShell } from "./opening-shell";
 
 /** OpeningShell useState order after FocusTimer is mocked away. */
 const PENDING_COUNT_SLOT = 5;
+const FOCUS_MODE_SLOT = 4;
 
 beforeEach(() => {
   effects.length = 0;
@@ -114,5 +118,56 @@ describe("OpeningShell review badge", () => {
     const html = renderShell();
     expect(html).toContain('aria-label="3 项待审核"');
     expect(html).toContain("bg-amber-500");
+  });
+});
+
+describe("OpeningShell focus mode keyboard exit", () => {
+  let keyboardTarget: EventTarget;
+  const querySelector = vi.fn();
+
+  beforeEach(() => {
+    keyboardTarget = new EventTarget();
+    vi.stubGlobal("window", Object.assign(keyboardTarget, { localStorage: { getItem: () => null } }));
+    vi.stubGlobal("document", { querySelector });
+    querySelector.mockReturnValue(null);
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 404 }));
+    stateSlots[FOCUS_MODE_SLOT] = true;
+  });
+
+  function pressEscape(prevented = false) {
+    const event = new Event("keydown", { cancelable: true });
+    Object.defineProperty(event, "key", { value: "Escape" });
+    if (prevented) event.preventDefault();
+    keyboardTarget.dispatchEvent(event);
+  }
+
+  it("exits focus mode with Escape", async () => {
+    renderShell();
+    await runCapturedEffects();
+    pressEscape();
+    expect(stateSlots[FOCUS_MODE_SLOT]).toBe(false);
+  });
+
+  it("leaves Escape to an open native dialog", async () => {
+    querySelector.mockReturnValue({ open: true });
+    renderShell();
+    await runCapturedEffects();
+    pressEscape();
+    expect(stateSlots[FOCUS_MODE_SLOT]).toBe(true);
+  });
+
+  it("keeps focus mode when a panel has already handled Escape", async () => {
+    renderShell();
+    await runCapturedEffects();
+    pressEscape(true);
+    expect(stateSlots[FOCUS_MODE_SLOT]).toBe(true);
+  });
+
+  it("removes its keyboard handler when focus mode ends", async () => {
+    renderShell();
+    const cleanups = effects.map(effect => effect());
+    for (const cleanup of cleanups) if (typeof cleanup === "function") cleanup();
+    pressEscape();
+    expect(stateSlots[FOCUS_MODE_SLOT]).toBe(true);
   });
 });

@@ -65,6 +65,19 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [savedAsNewHref, setSavedAsNewHref] = useState<string | null>(null);
   const [relationNote, setRelationNote] = useState<string | null>(null);
+  const saveInFlight = useRef(false);
+  const saveShortcut = useRef(saveDocument);
+  saveShortcut.current = saveDocument;
+
+  useEffect(() => {
+    const handleSave = (event: KeyboardEvent) => {
+      if (event.isComposing || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s" || window.document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      void saveShortcut.current();
+    };
+    window.addEventListener("keydown", handleSave);
+    return () => window.removeEventListener("keydown", handleSave);
+  }, []);
 
   function enterConflict(reason: DraftConflict["reason"] | null) {
     conflictRef.current = reason;
@@ -135,7 +148,8 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   }
 
   async function saveDocument() {
-    if (!document || !draft || saveState === "saving" || conflictRef.current) return;
+    if (!document || !draft || saveState === "saving" || saveInFlight.current || conflictRef.current) return;
+    saveInFlight.current = true;
     const requestVersion = editVersionRef.current;
     setSaveState("saving");
     setNotice("");
@@ -169,6 +183,8 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
       } else {
         setSaveState("error");
       }
+    } finally {
+      saveInFlight.current = false;
     }
   }
 
@@ -308,7 +324,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
       <label className="min-w-28 flex-1"><span className="sr-only">笔记标题</span><input className={`${ui.input} border-transparent font-medium`} value={draft.title} onChange={(event) => updateSafetyCopy({ ...draft, title: event.target.value, updatedAt: new Date().toISOString() })} /></label>
       <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-emerald-700" /> : null}{notice || statusText}</span>
       <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-emerald-50 text-emerald-800" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
-      <button className={ui.primary} type="button" onClick={saveDocument} disabled={saveState === "saving" || conflict !== null}><Save aria-hidden="true" size={14} />保存</button>
+      <button className={ui.primary} title="保存 · Ctrl / ⌘ S" type="button" onClick={saveDocument} disabled={saveState === "saving" || conflict !== null}><Save aria-hidden="true" size={14} />保存</button>
     </header>
     <div className="flex min-h-0 flex-1">
       <main className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-zinc-500">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-zinc-500">本地保留安全副本；保存会创建服务器版本。</p></div>

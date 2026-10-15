@@ -221,7 +221,7 @@ export function QuickAddTask({
           disabled={disabled}
           onClick={() => setOpen(true)}
         >
-          快速添加任务
+          {unknown ? "继续核对添加结果" : "快速添加任务"}
         </button>
       ) : (
         <form className="space-y-3" onSubmit={(event) => void onSubmit(event)} aria-label="快速添加任务">
@@ -233,12 +233,12 @@ export function QuickAddTask({
               disabled={busy}
               onClick={() => {
                 if (!busy) {
-                  resetForm();
+                  if (!unknown) resetForm();
                   setOpen(false);
                 }
               }}
             >
-              取消
+              {unknown ? "收起" : "取消"}
             </button>
           </div>
           <label className="block text-xs text-zinc-600">
@@ -299,7 +299,7 @@ export function QuickAddTask({
           {error ? <p className="text-xs leading-5 text-red-700" role="alert">{error}</p> : null}
           {unknown ? (
             <div className="space-y-2">
-              <p className="text-xs leading-5 text-amber-800" role="status">可能已添加，正在核对</p>
+              <p className="text-xs leading-5 text-amber-800" role="status">可能已添加，请重新读取或重试核对。收起后会保留本次请求。</p>
               <button
                 type="button"
                 className={secondaryButtonClass}

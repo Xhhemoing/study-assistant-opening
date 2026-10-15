@@ -94,17 +94,17 @@ export function TeachingActivityEmpty({
 }) {
   return (
     <section className="flex h-full min-h-0 flex-col items-center justify-center px-5 py-10 text-center" data-today-activity-empty="true">
-      <h2 className="text-[15px] font-semibold text-zinc-900">还没有进行中的教学活动</h2>
+      <h2 className="text-xl font-semibold tracking-tight text-zinc-900">今天，开始一点新的理解</h2>
       <p className="mt-2 max-w-md text-sm leading-6 text-zinc-500">
-        点「开始学习」会创建一条教学活动记录。完整 AI 主讲生成可能仍在后续版本；此处不会伪造讲义。
+        选一项任务开始，或从一个想弄懂的问题出发。AI 主讲需要先配置模型并开启教学功能。
       </p>
-      <button type="button" className={`${ui.primary} mt-5`} onClick={onStart} disabled={busy}>
+      <button type="button" data-today-primary-cta="true" className={`${ui.primary} mt-5`} onClick={onStart} disabled={busy}>
         {busy ? "正在创建…" : "开始学习"}
       </button>
       {error ? <p className="mt-3 text-xs text-red-700" role="alert">{error}</p> : null}
       <p className="mt-4">
         <Link href={assistantHref ?? "/opening/assistant"} className={ui.quiet}>
-          打开自由对话（次要）
+          先聊一个问题
         </Link>
       </p>
     </section>

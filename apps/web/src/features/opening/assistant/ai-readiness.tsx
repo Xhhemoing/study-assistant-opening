@@ -57,7 +57,7 @@ export function AiReadinessChecklistView({
         <h3 id="ai-readiness-soft-heading" className="text-sm font-medium text-zinc-800">提示（不挡文字辅导）</h3>
         <p className="text-xs leading-6 text-zinc-600">照片/PDF 图片材料需要视觉模型；文字辅导仍可用。</p>
         <p className="text-xs text-zinc-700">
-          <Link href="/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
+          <Link href="/opening/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
         </p>
       </section>
     );
@@ -65,7 +65,7 @@ export function AiReadinessChecklistView({
 
   return (
     <section
-      className={`space-y-2 rounded-lg border border-amber-200 bg-amber-50/80 p-3 ${className}`}
+      className={`space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 ${className}`}
       aria-labelledby="ai-readiness-heading"
       data-ai-readiness="hard-blocked"
       data-budget-confirm={showBudgetCta ? "needed" : "not-needed"}
@@ -73,13 +73,10 @@ export function AiReadinessChecklistView({
       {showBudgetCta ? (
         <div
           role="status"
-          className="space-y-2 rounded-md border border-amber-300 bg-amber-100/90 px-3 py-2"
+          className="flex flex-wrap items-center justify-between gap-2"
           data-testid="ai-readiness-budget-banner"
         >
           <p className="text-sm font-medium text-amber-950">{BUDGET_CONFIRM_LEAD}</p>
-          <p className="text-xs leading-5 text-amber-900">
-            辅导需要有效日额度（正数）并确认后才会开放。请到高级设置开启并确认每日额度。
-          </p>
           <Link
             href={BUDGET_CONFIRM_HREF}
             className="inline-flex min-h-9 items-center justify-center rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50"
@@ -89,7 +86,9 @@ export function AiReadinessChecklistView({
           </Link>
         </div>
       ) : null}
-      <h3 id="ai-readiness-heading" className="text-sm font-medium text-amber-950">AI 为何还不可用</h3>
+      <h3 id="ai-readiness-heading" className={showBudgetCta ? "sr-only" : "text-sm font-medium text-amber-950"}>AI 为何还不可用</h3>
+      <p className="text-xs leading-5 text-amber-900">你仍可写笔记、整理材料和记录自己的练习。</p>
+      <details><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700">查看原因与解决方法</summary>
       <ul className="space-y-2 text-xs leading-6 text-amber-950">
         {displayItems.map(item => (
           <li key={item.key} className="flex flex-col gap-0.5">
@@ -100,7 +99,7 @@ export function AiReadinessChecklistView({
       </ul>
       {!showBudgetCta ? (
         <p className="text-xs text-amber-900">
-          <Link href="/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
+          <Link href="/opening/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
           {" "}调整密钥、定价与每日额度。
         </p>
       ) : (
@@ -110,6 +109,7 @@ export function AiReadinessChecklistView({
           {" "}调整密钥、定价与确认状态。
         </p>
       )}
+      </details>
     </section>
   );
 }

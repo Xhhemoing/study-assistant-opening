@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
-import { UploadDropzone, isAcceptedUploadFile, openingUploadAccept, supportedUploadTypesLabel } from "./upload-dropzone";
+import { describe, expect, it, vi } from "vitest";
+import { UploadDropzone, isAcceptedUploadFile, openingUploadAccept, supportedUploadTypesLabel, uploadFileRejection } from "./upload-dropzone";
 
 describe("UploadDropzone", () => {
   it("renders a keyboard-accessible multi-file drop target", () => {
@@ -71,6 +71,24 @@ describe("UploadDropzone", () => {
     expect(isAcceptedUploadFile({ name: "notes.txt", type: "" } as File, openingUploadAccept)).toBe(true);
     expect(isAcceptedUploadFile({ name: "notes.txt", type: "text/plain" } as File, openingUploadAccept)).toBe(true);
     expect(supportedUploadTypesLabel(openingUploadAccept)).toContain("TXT");
+  });
+
+  it.each([
+    { name: "image.png", type: "image/png", limit: 20 * 1024 * 1024 },
+    { name: "notes.pdf", type: "application/pdf", limit: 50 * 1024 * 1024 },
+    { name: "lecture.mp3", type: "audio/mpeg", limit: 200 * 1024 * 1024 },
+    { name: "lesson.mp4", type: "video/mp4", limit: 512 * 1024 * 1024 },
+  ])("validates $name against the upload contract before reading its bytes", ({ name, type, limit }) => {
+    const arrayBuffer = vi.fn();
+    const file = { name, type, size: limit, arrayBuffer };
+    expect(uploadFileRejection(file)).toBeNull();
+    expect(uploadFileRejection({ ...file, size: limit + 1 })).toContain("超过此格式的大小限制");
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty files and unusable names with a readable reason", () => {
+    expect(uploadFileRejection({ name: "empty.txt", type: "text/plain", size: 0 })).toContain("为空");
+    expect(uploadFileRejection({ name: "../notes.txt", type: "text/plain", size: 4 })).toContain("请重命名");
   });
 
 });

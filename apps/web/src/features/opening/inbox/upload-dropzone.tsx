@@ -1,6 +1,7 @@
 "use client";
 
 import { Files, LoaderCircle, Upload } from "lucide-react";
+import { uploadInputSchema } from "@aistudy/contracts";
 import { useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
 import { ui } from "../design/ui";
 import { resolveUploadMime } from "./upload-state";
@@ -38,6 +39,19 @@ export function isAcceptedUploadFile(file: Pick<File, "name" | "type">, accept: 
   return tokens.some(token => token.startsWith(".") ? name.endsWith(token) : token.endsWith("/*") ? resolved?.startsWith(token.slice(0, -1)) : resolved === token);
 }
 
+export function uploadFileRejection(file: Pick<File, "name" | "type" | "size">, accept = openingUploadAccept): string | null {
+  const mime = resolveUploadMime(file);
+  if (!mime || !isAcceptedUploadFile(file, accept)) return `不支持的文件类型：${file.name}。支持类型：${supportedUploadTypesLabel(accept)}`;
+  // This preflight checks file metadata before reading bytes. The upload client
+  // computes the actual SHA-256 after reading the file; this value is never sent.
+  const result = uploadInputSchema.safeParse({ name: file.name.slice(0, 180), mime, bytes: file.size, sha256: "0".repeat(64) });
+  if (result.success) return null;
+  if (result.error.issues.some(issue => issue.path[0] === "bytes")) {
+    return file.size === 0 ? `文件「${file.name}」为空，请选择有内容的文件。` : `文件「${file.name}」超过此格式的大小限制，请压缩或拆分后重试。`;
+  }
+  return `文件名「${file.name}」无法使用，请重命名后重试。`;
+}
+
 type Props = {
   disabled?: boolean;
   multiple?: boolean;
@@ -61,9 +75,10 @@ export function UploadDropzone({ disabled = false, multiple = true, accept = ope
 
   function handleFiles(files: File[]) {
     if (disabled || !files.length) return;
-    const accepted = files.filter(file => isAcceptedUploadFile(file, accept));
-    const rejected = files.filter(file => !isAcceptedUploadFile(file, accept));
-    setRejection(rejected.length ? `不支持的文件类型：${rejected.map(file => file.name).join("、")}。支持类型：${supportedUploadTypesLabel(accept)}` : null);
+    const checked = files.map(file => ({ file, rejection: uploadFileRejection(file, accept) }));
+    const accepted = checked.filter(item => item.rejection === null).map(item => item.file);
+    const rejected = checked.flatMap(item => item.rejection ? [item.rejection] : []);
+    setRejection(rejected.length ? rejected.join(" ") : null);
     if (accepted.length) onFiles(multiple ? accepted : accepted.slice(0, 1));
   }
 

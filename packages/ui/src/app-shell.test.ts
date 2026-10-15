@@ -38,4 +38,20 @@ describe("AppShell utility cluster", () => {
     expect(expanded).toContain('data-sidebar-collapsed="false"');
     expect(expanded).toContain('aria-label="收起侧栏"');
   });
+
+  it("accepts workspace-specific settings and mobile navigation without replacing desktop links", () => {
+    const html = renderToStaticMarkup(createElement(AppShell, {
+      activeEntry: "learn",
+      children: "内容",
+      settingsHref: "/opening/settings",
+      navigation: createElement("nav", { "aria-label": "桌面导航" }, "完整导航"),
+      mobileNavigation: createElement("nav", { "aria-label": "手机导航" }, "核心导航"),
+    }));
+    expect(html).toContain('href="/opening/settings"');
+    expect(html).not.toContain('href="/settings"');
+    expect(html).toContain('aria-label="桌面导航"');
+    expect(html).toContain('aria-label="手机导航"');
+    expect(html.match(/完整导航/g)).toHaveLength(1);
+    expect(html.match(/核心导航/g)).toHaveLength(1);
+  });
 });

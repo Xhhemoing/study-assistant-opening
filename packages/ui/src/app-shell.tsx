@@ -7,7 +7,7 @@ const iconClass = `inline-flex size-10 shrink-0 items-center justify-center roun
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "aistudy.shell.sidebarCollapsed";
 
-export function AppShell({ activeEntry, children, userLabel, onLogout, onOpenCommandPalette, logoutPending = false, navigation, topbar, title = "学习工作台", focusMode = false, sidebarCollapsed = false, onToggleSidebar }: {
+export function AppShell({ activeEntry, children, userLabel, onLogout, onOpenCommandPalette, logoutPending = false, navigation, mobileNavigation, settingsHref = "/settings", topbar, title = "学习工作台", focusMode = false, sidebarCollapsed = false, onToggleSidebar }: {
   activeEntry: WorkspaceEntry;
   children: ReactNode;
   userLabel?: string;
@@ -15,6 +15,8 @@ export function AppShell({ activeEntry, children, userLabel, onLogout, onOpenCom
   onOpenCommandPalette?: () => void;
   logoutPending?: boolean;
   navigation?: ReactNode;
+  mobileNavigation?: ReactNode;
+  settingsHref?: string;
   topbar?: ReactNode;
   title?: string;
   focusMode?: boolean;
@@ -44,12 +46,12 @@ export function AppShell({ activeEntry, children, userLabel, onLogout, onOpenCom
         <div className="flex shrink-0 items-center gap-1" data-shell-utilities="true">
           {onOpenCommandPalette ? <button aria-label="打开全局搜索" title="全局搜索与快捷导航 (Ctrl / ⌘ K)" className={`${iconClass} lg:mr-1 lg:w-48 lg:justify-between lg:gap-2 lg:border lg:border-zinc-200 lg:bg-zinc-50 lg:px-2.5 lg:text-xs lg:text-zinc-500 lg:hover:border-zinc-300 lg:hover:bg-white`} onClick={onOpenCommandPalette} type="button"><span className="inline-flex items-center gap-2"><Search aria-hidden="true" size={15} /><span className="hidden lg:inline" aria-hidden="true">搜索或跳转…</span></span><kbd className="hidden rounded border border-zinc-200 bg-white px-1.5 font-sans text-[10px] font-medium text-zinc-500 lg:inline" aria-hidden="true">⌘K</kbd></button> : <a aria-label="打开全局搜索" className={iconClass} href="/search"><Search aria-hidden="true" size={16} /></a>}
           {topbar}
-          <a aria-label="设置" className={iconClass} href="/settings" title="设置"><Settings aria-hidden="true" size={16} /></a>
+          <a aria-label="设置" className={iconClass} href={settingsHref} title="设置"><Settings aria-hidden="true" size={16} /></a>
           {onLogout ? <button className={`${iconClass} md:hidden`} type="button" onClick={onLogout} disabled={logoutPending} aria-label="退出登录"><LogOut aria-hidden="true" size={16} /></button> : null}
         </div>
       </header>
       <main className="min-h-0 min-w-0 flex-1 overflow-auto" id="main-content" tabIndex={-1}>{children}</main>
-      <div className="shrink-0 overflow-x-auto border-t border-zinc-200/80 bg-white/90 pb-[env(safe-area-inset-bottom)] pt-1 backdrop-blur-md group-data-[focus=true]/workspace:hidden md:hidden" data-shell-navigation="mobile">{navigation ?? <WorkspaceNavigation activeEntry={activeEntry} placement="bottom" />}</div>
+      <div className="shrink-0 overflow-x-auto border-t border-zinc-200/80 bg-white/90 pb-[env(safe-area-inset-bottom)] pt-1 backdrop-blur-md group-data-[focus=true]/workspace:hidden md:hidden" data-shell-navigation="mobile">{mobileNavigation ?? navigation ?? <WorkspaceNavigation activeEntry={activeEntry} placement="bottom" />}</div>
     </div>
   </div>;
 }

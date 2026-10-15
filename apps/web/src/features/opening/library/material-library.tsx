@@ -52,9 +52,9 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
   const changeSpace = (next: typeof space) => { library.changeSpace(next); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
-  const incompleteUpload = sources.filter(record => materialStatus(record) === "incomplete_upload").length;
-  const parsing = sources.filter(record => materialStatus(record) === "parsing").length;
-  const failures = sources.filter(record => materialStatus(record) === "attention").length;
+  const incompleteUpload = scoped.filter(record => materialStatus(record) === "incomplete_upload").length;
+  const parsing = scoped.filter(record => materialStatus(record) === "parsing").length;
+  const failures = scoped.filter(record => materialStatus(record) === "attention").length;
   return <div className="grid min-w-0 gap-6 lg:grid-cols-[180px_minmax(0,1fr)]">
     <MaterialSpaceNav sources={sources} organization={organization} space={space} onSpace={changeSpace} onCreate={library.createCourse} disabled={busy || loading || !library.organizationReady} />
     <div className="min-w-0 space-y-4">
@@ -98,7 +98,7 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
           onDelete={() => library.deleteSelected()} onClear={library.clearSelection} /> : null}
         <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label>
-        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady} courseId={uploadCourseId} initialOpen={initialOpen}
+        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
           renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
           onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
           renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}

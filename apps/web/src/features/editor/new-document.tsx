@@ -2,8 +2,9 @@
 
 import { FilePlus2, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { createEditorApi, type EditorDocument } from "./editor-api";
+import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { createSingleFlight } from "./single-flight";
 import { createEmptyLocalDraft } from "./local-draft";
 import { DEFAULT_LIBRARY_BASE_PATH, libraryNotePath, type LibraryBasePath } from "./library-paths";
@@ -12,6 +13,8 @@ export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath
   const router = useRouter();
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [slow, setSlow] = useState(false);
+  const [unknown, setUnknown] = useState(false);
 
   // StrictMode re-runs this effect with the same attempt; join the in-flight
   // POST instead of creating a second empty note (G5). Retry bumps attempt.
@@ -19,6 +22,8 @@ export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath
 
   useEffect(() => {
     let active = true;
+    setSlow(false); setUnknown(false);
+    const timeout = window.setTimeout(() => { if (active) setSlow(true); }, 20_000);
     flight.current.run(attempt, () => {
       const draft = createEmptyLocalDraft();
       return createEditorApi().createDocument({
@@ -30,17 +35,24 @@ export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath
       })),
       });
     }).then((document) => {
+      window.clearTimeout(timeout);
       if (active) router.replace(libraryNotePath(basePath, document.id));
-    }).catch(() => {
-      if (active) setError("暂时无法创建笔记，请稍后重试。");
+    }).catch((failure: unknown) => {
+      window.clearTimeout(timeout);
+      if (!active) return;
+      const unconfirmed = !(failure instanceof EditorApiError) || failure.status >= 500;
+      setUnknown(unconfirmed);
+      setError(unconfirmed ? "创建结果尚未确认，请先到知识库检查，避免重复创建。" : "暂时无法创建笔记，请稍后重试。");
     });
-    return () => { active = false; };
+    return () => { active = false; window.clearTimeout(timeout); };
   }, [attempt, basePath, router]);
 
   return (
     <main className="flex min-h-[60vh] items-center justify-center px-6 py-12">
       <div className="grid max-w-sm justify-items-center gap-4 text-center">
-        {error ? <><FilePlus2 aria-hidden="true" className="text-red-700" size={24} /><p className="text-sm text-red-700" role="alert">{error}</p><button className="inline-flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button></> : <><FilePlus2 aria-hidden="true" className="text-emerald-700" size={24} /><p className="text-sm text-zinc-500" role="status">正在创建笔记...</p></>}
+        {error ? <><FilePlus2 aria-hidden="true" className="text-red-700" size={24} /><p className="text-sm text-red-700" role="alert">{error}</p>{!unknown ? <button className="inline-flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button> : null}</> : <><FilePlus2 aria-hidden="true" className="text-emerald-700" size={24} /><p className="text-sm text-zinc-500" role="status">正在创建笔记...</p></>}
+        {slow && !error ? <p role="status" className="text-xs leading-6 text-zinc-600">请求耗时较长，可以先到知识库查看；不会自动再创建一篇。</p> : null}
+        <Link className="inline-flex min-h-10 items-center rounded-lg px-3 text-sm text-zinc-700 underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" href={basePath}>{unknown || slow ? "检查知识库" : "返回知识库"}</Link>
       </div>
     </main>
   );

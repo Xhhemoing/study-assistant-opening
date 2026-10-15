@@ -167,7 +167,7 @@ describe("G18 AiReadinessChecklistView budget banner", () => {
     expect(html).toContain('data-budget-confirm="not-needed"');
     expect(html).not.toContain('data-testid="ai-readiness-budget-banner"');
     expect(html).not.toContain(BUDGET_CONFIRM_LEAD);
-    expect(html).toContain('href="/settings/advanced"');
+    expect(html).toContain('href="/opening/settings/advanced"');
   });
 
   it("renders nothing when only soft parser_ocr fails (never hard-blocks)", () => {

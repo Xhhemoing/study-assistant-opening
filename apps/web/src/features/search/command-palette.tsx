@@ -33,6 +33,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [retryToken, setRetryToken] = useState(0);
+  const [composing, setComposing] = useState(false);
   const options = useMemo(() => buildOptions(query, hits), [query, hits]);
 
   useEffect(() => {
@@ -47,7 +48,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
     const dialog = dialogRef.current;
     if (!open || !dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setQuery(""); setHits([]); setActiveIndex(0); setError("");
+    setQuery(""); setHits([]); setActiveIndex(0); setError(""); setComposing(false);
     dialog.showModal();
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
     return () => {
@@ -58,7 +59,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
   }, [open]);
 
   useEffect(() => {
-    if (!open || !query.trim()) { setHits([]); setLoading(false); setError(""); return; }
+    if (!open || composing || !query.trim()) { setHits([]); setLoading(false); setError(""); return; }
     let active = true;
     setLoading(true); setError(""); setHits([]);
     const timer = window.setTimeout(() => {
@@ -68,7 +69,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
         .finally(() => { if (active) setLoading(false); });
     }, SEARCH_DEBOUNCE_MS);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [open, query, retryToken, searchApi]);
+  }, [open, query, composing, retryToken, searchApi]);
 
   useEffect(() => { setActiveIndex((current) => Math.max(0, Math.min(current, Math.max(options.length - 1, 0)))); }, [options.length]);
   useEffect(() => {
@@ -92,7 +93,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
   }}>
     <div className="flex min-h-12 items-center gap-3 border-b border-zinc-200 px-4">
       <Search aria-hidden="true" className="shrink-0 text-zinc-500" size={17} /><h2 id="command-palette-title" className="sr-only">快捷导航与内容搜索</h2>
-      <input aria-activedescendant={options[activeIndex] ? `command-option-${options[activeIndex].id}` : undefined} ref={inputRef} aria-controls="command-palette-options" aria-expanded="true" aria-label="搜索页面、笔记和课程" autoComplete="off" className="min-h-12 min-w-0 flex-1 bg-transparent text-sm text-zinc-800 outline-none placeholder:text-zinc-500" onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} onKeyDown={handleKeyDown} placeholder="搜索页面、笔记和课程" role="combobox" value={query} />
+      <input aria-activedescendant={options[activeIndex] ? `command-option-${options[activeIndex].id}` : undefined} ref={inputRef} aria-controls="command-palette-options" aria-expanded="true" aria-label="搜索页面、笔记和课程" autoComplete="off" className="min-h-12 min-w-0 flex-1 bg-transparent text-sm text-zinc-800 outline-none placeholder:text-zinc-500" onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} onCompositionStart={() => setComposing(true)} onCompositionEnd={event => { setComposing(false); setQuery(event.currentTarget.value); }} onKeyDown={handleKeyDown} placeholder="搜索页面、笔记和课程" role="combobox" value={query} />
       <span className="hidden items-center gap-1 text-xs text-zinc-400 sm:flex"><Command aria-hidden="true" size={12} />K</span><button aria-label="关闭搜索" className={ui.icon} onClick={onClose} type="button"><X aria-hidden="true" size={16} /></button>
     </div>
     <div className="max-h-[60dvh] overflow-y-auto p-2">

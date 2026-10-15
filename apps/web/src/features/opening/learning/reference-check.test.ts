@@ -146,4 +146,27 @@ describe("ReferenceCheckStep", () => {
     expect(html).toContain("看不懂参考");
     expect(html).toContain("答案页.pdf");
   });
+
+  it.each([0, 4])("opens the captured reference version %s in a separate window", (version) => {
+    const html = renderToStaticMarkup(createElement(ReferenceCheckStep, {
+      observation: { ...observation, sourceVersions: { [SOURCE]: version } },
+      referenceSourceId: SOURCE,
+      onChecked: () => undefined,
+      onSkip: () => undefined,
+    }));
+    expect(html).toContain(`href="/opening/library?tab=materials&amp;source=${SOURCE}&amp;version=${version}"`);
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain("打开参考材料（新窗口）");
+  });
+
+  it("explains a missing captured version without linking to a different reference", () => {
+    const html = renderToStaticMarkup(createElement(ReferenceCheckStep, {
+      observation,
+      referenceSourceId: SOURCE,
+      onChecked: () => undefined,
+      onSkip: () => undefined,
+    }));
+    expect(html).toContain("这条记录未保留参考版本");
+    expect(html).not.toContain("/opening/library?");
+  });
 });
