@@ -1,14 +1,30 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
-import { InlineAttempt, defaultInlineSkillLabel } from "./inline-attempt";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { InlineAttempt } from "./inline-attempt";
 import { createInlineAttemptSubmission } from "./inline-attempt-submission";
 import { createInlineAttemptDrafts, inlineAttemptIdentityKey } from "./inline-attempt-drafts";
+import { collectSkillLabelOptions, findSkillLabelReuseHint } from "../learning/skill-label-options";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const identity = { activityId: id, courseId: id, blockId: id, contentVersion: 3, sourceIds: [id], prompt: "求矩阵的秩", skillLabel: "矩阵秩", answer: "我的原答案" };
 
+const summaryRows = [{ skillLabel: "矩阵秩" }, { skillLabel: "极限定义" }];
+const getSummary = vi.fn().mockResolvedValue(summaryRows);
+
+vi.mock("../client/learning-client", () => ({
+  createOpeningLearningClient: () => ({
+    getSummary: (...args: unknown[]) => getSummary(...args),
+    listRevisionCourses: vi.fn().mockResolvedValue([]),
+  }),
+}));
+
 describe("inline teaching attempt", () => {
+  beforeEach(() => {
+    getSummary.mockClear();
+    getSummary.mockResolvedValue(summaryRows);
+  });
+
   it("isolates activity and content versions while retaining only the user's old draft", () => {
     const drafts = createInlineAttemptDrafts();
     const oldKey = inlineAttemptIdentityKey(id, id, 1);
@@ -42,16 +58,26 @@ describe("inline teaching attempt", () => {
     expect(client.submitAttempt).toHaveBeenCalledTimes(1);
   });
 
-  it("defaults the skill label from the prompt, not the activity intent title", () => {
-    expect(defaultInlineSkillLabel("求矩阵的秩")).toBe("求矩阵的秩");
-    expect(defaultInlineSkillLabel("  a\n\tb  ")).toBe("a b");
+  it("keeps the skill label empty by default and uses the prompt only as placeholder", () => {
+    const prompt = "求极限定义";
+    const intentSummary = "今日主题学习";
     const html = renderToStaticMarkup(createElement(InlineAttempt, {
       blockId: id,
-      prompt: "求极限定义",
-      context: { id, courseId: id, sourceIds: [id], contentVersion: 3, intentSummary: "今日主题学习", status: "active", onCourseAssociated: vi.fn() },
+      prompt,
+      context: { id, courseId: id, sourceIds: [id], contentVersion: 3, intentSummary, status: "active", onCourseAssociated: vi.fn() },
     }));
-    expect(html).toContain("求极限定义");
-    expect(html).not.toContain('value="今日主题学习"');
+    expect(html).toContain(`placeholder="${prompt}"`);
+    expect(html).toContain('value=""');
+    expect(html).not.toContain(`value="${prompt}"`);
+    expect(html).not.toContain(`value="${intentSummary}"`);
+    expect(html).toContain("<datalist");
+    // Options hydrate via client.getSummary → collectSkillLabelOptions (effects skip in static markup).
+    expect(collectSkillLabelOptions(summaryRows)).toEqual(["极限定义", "矩阵秩"]);
+  });
+
+  it("hints near-duplicate skill reuse the same way as the learning attempt form", () => {
+    expect(findSkillLabelReuseHint("矩阵 秩", ["矩阵秩"])).toBe("矩阵秩");
+    expect(findSkillLabelReuseHint("矩阵秩", ["矩阵秩"])).toBeNull();
   });
 
   it("uses one in-flight submission and reuses its identity and client key after an unknown result", async () => {
