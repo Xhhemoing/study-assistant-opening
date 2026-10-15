@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import {
+  createOpeningStudyPlansRepository,
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
   type OpeningBudgetRepository,
@@ -34,6 +35,7 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
+  const studyPlans = createOpeningStudyPlansRepository(sql);
   // V2-08 + M2b: when OPENING_TEACHING_COMPILER_ENABLED, the teaching.compile route's model
   // writes the focus item through the model gateway (reservation, snapshot, settle there);
   // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Cancel/epoch fences unchanged.
@@ -44,15 +46,22 @@ export function createCompileTeachingUnitWorkerDeps(
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   // 「再学一节」: the prompt and the publish step must agree on which outline item is taught.
   const priorSections = async (scope: Scope, activityId: string) => {
-    const [sections, courseTaught] = await Promise.all([
+    const [sections, courseTaught, planSlot] = await Promise.all([
       teachingActivities.listPriorSections(scope, activityId),
       teachingActivities.listCourseTaughtChunkIds(scope, activityId),
+      studyPlans.activityPlanSlot(scope, activityId),
     ]);
+    const chainChunkIds = sections.flatMap((section) => section.chunkIds);
     return {
       priorSectionTitles: sections.map((section) => section.title),
       // Each section teaches the next stretch of the materials, after what this chain
-      // and the course's completed lessons (earlier days' tasks) already used.
-      materialWalk: { priorChunkIds: [...new Set([...sections.flatMap((section) => section.chunkIds), ...courseTaught])] },
+      // and the course's completed lessons (earlier days' tasks) already used. A study-plan
+      // task's first lesson teaches (or reviews) exactly the material the plan gave it.
+      materialWalk: {
+        priorChunkIds: [...new Set([...chainChunkIds, ...courseTaught])],
+        chainChunkIds,
+        ...(planSlot ? { planned: { chunkIds: planSlot.chunkIds, review: planSlot.kind === "review", ...(planSlot.note ? { note: planSlot.note } : {}) } } : {}),
+      },
     };
   };
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn

@@ -88,6 +88,18 @@ export type SeedTodayPlanApi = Pick<
   "getPlanningSettings" | "putPlanningSettings" | "createTask"
 >;
 
+/** Writes the default self-study schedule when none (or an unreadable one) is saved. */
+export async function ensurePlanningSettings(
+  api: Pick<OpeningApi, "getPlanningSettings" | "putPlanningSettings">,
+  now: Date = new Date(),
+  timeZone: string = SEED_TODAY_TIME_ZONE,
+): Promise<void> {
+  const current = await api.getPlanningSettings();
+  if (needsPlanningSettingsSeed(current)) {
+    await api.putPlanningSettings(buildSeedSettings(now, timeZone));
+  }
+}
+
 /**
  * Client composition: ensure valid planning settings, create one seed task
  * (409 / same-clientKey replay = success), optionally navigate to Today.
@@ -105,10 +117,7 @@ export async function runSeedTodayPlan(
   const now = options.now ?? new Date();
   const localDate = localDateKeyInZone(now, timeZone);
 
-  const current = await api.getPlanningSettings();
-  if (needsPlanningSettingsSeed(current)) {
-    await api.putPlanningSettings(buildSeedSettings(now, timeZone));
-  }
+  await ensurePlanningSettings(api, now, timeZone);
 
   const input =
     options.target.kind === "course"

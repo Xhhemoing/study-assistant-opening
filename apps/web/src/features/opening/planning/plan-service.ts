@@ -19,6 +19,7 @@ import {
   buildDailyDraftInput,
   dailyDraftClientKey,
   deriveDayBlocks,
+  localDateKeyInZone,
   planDay,
   resolveLocalDayBounds,
   type PlanDayOptions,
@@ -32,6 +33,7 @@ import {
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
+import { createOpeningStudyPlanService } from "./study-plan-service";
 
 const proposeBodySchema = z
   .object({
@@ -84,6 +86,8 @@ export type TodayPlanResult = {
   dailyDraft?: PlanDraft | null;
   dailyDraftSkippedReason?: DailyDraftSkippedReason | null;
   unplannedPendingCount?: number;
+  /** Study-plan lessons added for this day by this read (the task list should reload). */
+  planTasksAdded?: number;
 };
 
 /** Workspace default when settings omit timeZone (aligned with planning-settings / DL7). */
@@ -298,6 +302,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
       }
+      // Course study plans add the day's lessons first, so the draft can place them.
+      const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
+      const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
+      const planTasksAdded = await createOpeningStudyPlanService(sql).ensureDay(scope, date, localDateKeyInZone(clock(), timeZone), timeZone);
       const ensured = await ensureDailyDraft(scope, date);
       const state = await repo.getToday(scope, date);
       const hard = await repo.listHardBlocks(scope, date);
@@ -312,6 +320,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       if (ensured.unplannedPendingCount !== undefined) {
         result.unplannedPendingCount = ensured.unplannedPendingCount;
       }
+      if (planTasksAdded > 0) result.planTasksAdded = planTasksAdded;
       return result;
     },
 

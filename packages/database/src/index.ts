@@ -64,6 +64,7 @@ export * from "./repositories/opening-privacy";
 export * from "./repositories/opening-retests";
 export * from "./schema/opening-planning";
 export * from "./repositories/opening-plans";
+export * from "./repositories/opening-study-plans";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
 export * from "./schema/opening-imports";

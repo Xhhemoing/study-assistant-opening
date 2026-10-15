@@ -8,6 +8,7 @@ const activities = vi.hoisted(() => ({
   listPriorSections: vi.fn(async () => [] as Array<{ activityId: string; title: string | null; chunkIds: string[] }>),
   listCourseTaughtChunkIds: vi.fn(async () => [] as string[]),
 }));
+const studyPlans = vi.hoisted(() => ({ activityPlanSlot: vi.fn(async () => null) }));
 const content = vi.hoisted(() => ({
   createUnit: vi.fn(),
   getUnit: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@aistudy/database")>()),
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
+  createOpeningStudyPlansRepository: () => studyPlans,
 }));
 
 import { createCompileTeachingUnitHandler } from "../jobs/compile-teaching-unit";

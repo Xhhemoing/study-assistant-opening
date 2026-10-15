@@ -34,11 +34,15 @@ import {
   type CandidateRef,
   type OpeningAdaptivePrefsPatch,
   type OpeningAdaptivePrefsResponse,
+  type CourseStudyPlanInput,
+  type CourseStudyPlanView,
   taskCreateInputSchema,
   taskStatusUpdateInputSchema,
   taskDeferInputSchema,
   openingAdaptivePrefsPatchSchema,
   openingAdaptivePrefsResponseSchema,
+  courseStudyPlanInputSchema,
+  courseStudyPlanViewSchema,
   taskCreateResultSchema,
   taskItemSchema,
   type EphemeralTurnResponse,
@@ -187,6 +191,7 @@ const todayPlanSchema = z.object({
   dailyDraft: planDraftSchema.nullable().optional(),
   dailyDraftSkippedReason: dailyDraftSkippedReasonSchema.nullable().optional(),
   unplannedPendingCount: z.number().int().nonnegative().optional(),
+  planTasksAdded: z.number().int().positive().optional(),
 });
 export type TodayPlanRead = z.infer<typeof todayPlanSchema>;
 const taskListSchema = z.object({ tasks: z.array(taskItemSchema) });
@@ -500,6 +505,18 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         method: "PATCH", body: JSON.stringify(openingAdaptivePrefsPatchSchema.parse(patch)),
       }, fetchImpl);
       return openingAdaptivePrefsResponseSchema.parse(body);
+    },
+
+    async getCourseStudyPlan(courseId: string): Promise<CourseStudyPlanView> {
+      const body = await request(`/api/opening/courses/${encodeURIComponent(courseId)}/study-plan`, { method: "GET" }, fetchImpl);
+      return courseStudyPlanViewSchema.parse(body);
+    },
+
+    async putCourseStudyPlan(courseId: string, input: CourseStudyPlanInput): Promise<CourseStudyPlanView> {
+      const body = await request(`/api/opening/courses/${encodeURIComponent(courseId)}/study-plan`, {
+        method: "PUT", body: JSON.stringify(courseStudyPlanInputSchema.parse(input)),
+      }, fetchImpl);
+      return courseStudyPlanViewSchema.parse(body);
     },
 
     async getToday(date: string): Promise<TodayPlanRead> {

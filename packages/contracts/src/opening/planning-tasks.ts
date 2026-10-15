@@ -32,6 +32,12 @@ export const taskItemSchema = z.object({
   origin: taskOriginSchema.optional(),
   /** Planners must not place the task before this instant (deferral). */
   notBefore: isoDateTimeSchema.optional(),
+  /** Course study plan (0065): which lessons this task teaches or reviews. */
+  studyPlan: z.object({
+    kind: z.enum(["lesson", "review"]),
+    localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    lessonNumbers: z.array(z.number().int().positive()).max(100),
+  }).strict().optional(),
 }).strict();
 
 /** Stored with a retest-origin task. Not a calendar schedule. */

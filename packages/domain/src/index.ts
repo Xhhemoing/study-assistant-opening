@@ -478,3 +478,14 @@ export {
   type SkillStateEstimator,
   type RulesSkillStateEstimatorOptions,
 } from "./opening/estimators";
+export {
+  STUDY_PLAN_HORIZON_DAYS,
+  STUDY_REVIEW_OFFSETS_DAYS,
+  isLessonReviewDue,
+  planStudyDay,
+  projectStudyPlan,
+  type StudyDayInput,
+  type StudyDaySlots,
+  type StudyLessonProgress,
+  type StudyPlanProjection,
+} from "./opening/study-plan";

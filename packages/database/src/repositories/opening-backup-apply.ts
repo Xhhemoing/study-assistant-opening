@@ -220,7 +220,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_tasks: [
     "id", "workspace_id", "owner_user_id", "title", "minutes", "due_at", "due_text", "priority",
     "status", "version", "candidate_id", "client_key", "course_id", "skill_label", "origin", "not_before",
-    "created_at", "updated_at",
+    "plan_slot", "created_at", "updated_at",
   ],
   opening_retest_activities: [
     "id", "workspace_id", "owner_user_id", "course_id", "skill_label", "requirement_key", "purpose",
@@ -269,6 +269,7 @@ const JSONB_COLUMNS = new Set([
   "opening_learning_attempts.source_versions",
   "opening_learning_attempts.create_intent",
   "opening_plan_state.accepted_blocks",
+  "opening_tasks.plan_slot",
   "opening_plan_drafts.blocks",
   "opening_plan_drafts.unscheduled_task_ids",
   "opening_plan_drafts.input_snapshot",

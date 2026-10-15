@@ -16,6 +16,7 @@ import {
   createCompilerProviderInput,
   continuationNote,
   nextMaterialWindow,
+  splitMaterialIntoLessons,
   verifiedQuote,
 } from "./teaching-compiler";
 
@@ -384,6 +385,50 @@ describe("teaching-compiler", () => {
     const review = nextMaterialWindow(unit8, [SRC_A], unit8.map((c) => c.id), 2400);
     expect(review).toMatchObject({ review: true });
     expect(review.chunks[0]!.id).toBe("p3");
+    // The next review in the same chain moves on instead of repeating the first pages.
+    const nextReview = nextMaterialWindow(unit8, [SRC_A], unit8.map((c) => c.id), 2400, ["p3", "p4"]);
+    expect(nextReview.chunks.map((c) => c.id)).toEqual(["p10", "p16"]);
+  });
+
+  it("splits the course material into lessons titled by the slides' own headings", () => {
+    const lessons = splitMaterialIntoLessons([...unit8].reverse(), [SRC_A], 2400);
+    expect(lessons.map((l) => l.chunkIds)).toEqual([["p3", "p4"], ["p10", "p16"], ["p19"]]);
+    expect(lessons[0]).toMatchObject({ index: 0, pages: [3, 4] });
+    // One-line padded fixtures have no heading line: titles fall back to the lesson number.
+    expect(lessons[2]!.title).toBe("第 3 课");
+    const body = "x".repeat(400);
+    const slides = [
+      [1, "8-Inverse, implicit functions and calculus of\nextrema"],
+      [2, `The main objectives of this unit are:\n${body}`],
+      [3, `Jacobian\n${body}`],
+      [4, `Inverse Function Theorem\n${body}`],
+      [11, `Proof: If we have a local maximum at x0 (the minimum is analogous), given\n${body}`],
+      [17, `Example\n${body}`],
+    ].map(([page, text]) => chunk(`s${page}`, String(text), { page: Number(page) }));
+    expect(splitMaterialIntoLessons(slides, [SRC_A], 100_000)[0]!.title).toBe("Jacobian · Inverse Function Theorem");
+  });
+
+  it("a study-plan lesson teaches exactly its own pages; a planned review says so and carries its notes", async () => {
+    const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] };
+    const lesson = await createCompilerProviderInput({
+      loadChunks: async () => unit8, intentSummary: "第 2 课", intentKind: "goal",
+      materialWalk: { priorChunkIds: [], planned: { chunkIds: ["p16", "p10"], review: false } },
+    })({}, payload);
+    expect(lesson.text).toContain("本节只讲下面这段材料（第 10–16 页）");
+    expect(lesson.text).toContain("chunk p10");
+    expect(lesson.text).not.toContain("chunk p3");
+    const review = await createCompilerProviderInput({
+      loadChunks: async () => unit8, intentSummary: "复习", intentKind: "goal",
+      materialWalk: { priorChunkIds: [], planned: { chunkIds: ["p3", "p4"], review: true, note: "上次答错：求雅可比行列式" } },
+    })({}, payload);
+    expect(review.text).toContain("学习计划里的复习课");
+    expect(review.text).toContain("上次答错：求雅可比行列式");
+    // Material the plan named is gone (replaced upload): fall back to the walk.
+    const fallback = await createCompilerProviderInput({
+      loadChunks: async () => unit8, intentSummary: "第 9 课", intentKind: "goal",
+      materialWalk: { priorChunkIds: ["p3", "p4"], planned: { chunkIds: ["gone"], review: false } },
+    })({}, payload);
+    expect(fallback.text).toContain("chunk p10");
   });
 
   it("keeps a quote only when it occurs verbatim in a cited chunk (spacing and case ignored)", () => {
@@ -411,6 +456,15 @@ describe("teaching-compiler", () => {
     expect(published.sourceRefs?.map((ref) => ref.chunkId)).toEqual(["p10", "p16"]);
     expect(written[0]!.content.sourceQuote).toBe("then ∇f (x0 ) = 0");
     expect(written[1]!.content).not.toHaveProperty("sourceQuote");
+  });
+
+  it("caps long output without cutting a question off from its reference answer", () => {
+    const teach = Array.from({ length: 13 }, (_, i) => ({ type: "text", text: `讲解 ${i + 1}` }));
+    const parsed = parseCompileModelOutput(JSON.stringify({ itemTitles: [], blocks: [
+      ...teach, { type: "prompt", text: "题一" }, { type: "prompt", text: "题二" }, { type: "answer_key", text: "答一" }, { type: "answer_key", text: "答二" },
+    ] }), new Set());
+    expect(parsed.blocks.map((b) => b.text).slice(-3)).toEqual(["讲解 13", "题一", "答一"]);
+    expect(parsed.blocks).toHaveLength(15);
   });
 
   it("places each answer_key right after its question so the learner can see the reference", () => {

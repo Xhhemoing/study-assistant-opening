@@ -79,7 +79,9 @@ export class TeachingCompileOutputError extends Error {
   readonly code = "TEACHING_COMPILE_OUTPUT";
 }
 
-const MODEL_BLOCK_LIMIT = 10;
+const MODEL_BLOCK_LIMIT = 16;
+/** Entries read from the model before pairing and trimming to MODEL_BLOCK_LIMIT. */
+const MODEL_ENTRY_LIMIT = 40;
 const MODEL_TEXT_LIMIT = 4000;
 
 /**
@@ -104,7 +106,7 @@ export function parseCompileModelOutput(
   const value = raw as Record<string, unknown>;
   const allowedTypes = new Set<string>(COMPILE_MODEL_BLOCK_TYPES);
   const blocks: CompileModelBlock[] = [];
-  for (const entry of Array.isArray(value.blocks) ? value.blocks.slice(0, MODEL_BLOCK_LIMIT) : []) {
+  for (const entry of Array.isArray(value.blocks) ? value.blocks.slice(0, MODEL_ENTRY_LIMIT) : []) {
     if (!entry || typeof entry !== "object") continue;
     const block = entry as Record<string, unknown>;
     if (typeof block.type !== "string" || !allowedTypes.has(block.type)) continue;
@@ -128,7 +130,20 @@ export function parseCompileModelOutput(
     ? value.itemTitles.filter((title): title is string => typeof title === "string" && title.trim().length > 0)
       .map((title) => title.trim().slice(0, 80))
     : [];
-  return { itemTitles, blocks: pairAnswerKeys(blocks) };
+  return { itemTitles, blocks: trimKeepingPairs(pairAnswerKeys(blocks), MODEL_BLOCK_LIMIT) };
+}
+
+/** Cap the block count without leaving a question whose reference answer was cut off. */
+function trimKeepingPairs(blocks: CompileModelBlock[], limit: number): CompileModelBlock[] {
+  const out: CompileModelBlock[] = [];
+  for (let i = 0; i < blocks.length && out.length < limit; i += 1) {
+    const block = blocks[i]!;
+    const paired = block.type === "prompt" && blocks[i + 1]?.type === "answer_key";
+    if (paired && out.length + 2 > limit) break;
+    out.push(block);
+    if (paired) out.push(blocks[++i]!);
+  }
+  return out;
 }
 
 /**
@@ -643,35 +658,40 @@ export type BuildCompilerPublishInputOptions = {
    * (sourceIds order, then page), skipping chunks earlier sections already used.
    * Without it, evidence is chosen by the focus title (question-driven lessons).
    */
-  materialWalk?: { priorChunkIds: string[]; sectionCharacters?: number };
+  materialWalk?: {
+    priorChunkIds: string[];
+    /** Chunks this lesson chain already used; a review starts past them. */
+    chainChunkIds?: string[];
+    sectionCharacters?: number;
+    /** A study-plan lesson (or review) fixes the material instead of walking. */
+    planned?: { chunkIds: string[]; review: boolean; note?: string };
+  };
 };
 
 /** Characters of material one section teaches (a 25-minute lesson is ~4–6 slides). */
 export const SECTION_MATERIAL_CHARACTERS = 3500;
 
-export type MaterialWindow = { chunks: SourceChunk[]; review: boolean; pages: Array<number | null> };
+export type MaterialWindow = {
+  chunks: SourceChunk[];
+  review: boolean;
+  pages: Array<number | null>;
+  /** Set when a study plan fixed this lesson's material (and any review notes). */
+  planned?: { note?: string };
+};
 
-/**
- * The next stretch of material in reading order. When every chunk has been taught,
- * the section becomes a review over the material from the start.
- */
-export function nextMaterialWindow(
-  chunks: SourceChunk[],
-  sourceOrder: readonly string[],
-  priorChunkIds: readonly string[],
-  maxCharacters = SECTION_MATERIAL_CHARACTERS,
-): MaterialWindow {
+/** Material in reading order: sourceIds order, then page; empty chunks dropped. */
+export function orderMaterial(chunks: readonly SourceChunk[], sourceOrder: readonly string[]): SourceChunk[] {
   const rank = new Map(sourceOrder.map((id, index) => [id, index]));
   const last = Number.MAX_SAFE_INTEGER;
-  const ordered = chunks
+  return chunks
     .filter((chunk) => chunk.text.trim().length > 0)
     .sort((a, b) =>
       (rank.get(a.sourceId) ?? last) - (rank.get(b.sourceId) ?? last)
       || (a.page ?? last) - (b.page ?? last)
       || a.id.localeCompare(b.id));
-  const used = new Set(priorChunkIds);
-  const remaining = ordered.filter((chunk) => !used.has(chunk.id));
-  const pool = remaining.length ? remaining : ordered;
+}
+
+function fillWindow(pool: readonly SourceChunk[], maxCharacters: number): SourceChunk[] {
   const window: SourceChunk[] = [];
   let size = 0;
   for (const chunk of pool) {
@@ -681,7 +701,87 @@ export function nextMaterialWindow(
     window.push(chunk);
     size += length;
   }
+  return window;
+}
+
+/**
+ * The next stretch of material in reading order. When every chunk has been taught,
+ * the section becomes a review, starting past what this lesson chain already reviewed.
+ */
+export function nextMaterialWindow(
+  chunks: SourceChunk[],
+  sourceOrder: readonly string[],
+  priorChunkIds: readonly string[],
+  maxCharacters = SECTION_MATERIAL_CHARACTERS,
+  chainChunkIds: readonly string[] = [],
+): MaterialWindow {
+  const ordered = orderMaterial(chunks, sourceOrder);
+  const used = new Set(priorChunkIds);
+  const remaining = ordered.filter((chunk) => !used.has(chunk.id));
+  const chain = new Set(chainChunkIds);
+  const unreviewed = ordered.filter((chunk) => !chain.has(chunk.id));
+  const pool = remaining.length ? remaining : unreviewed.length ? unreviewed : ordered;
+  const window = fillWindow(pool, maxCharacters);
   return { chunks: window, review: remaining.length === 0 && ordered.length > 0, pages: window.map((chunk) => chunk.page ?? null) };
+}
+
+export type MaterialLesson = {
+  index: number;
+  title: string;
+  chunkIds: string[];
+  pages: Array<number | null>;
+};
+
+const GENERIC_HEADINGS = /^(examples?|example \(.*\)|proofs?|observations?|definitions?|remarks?|exercises?|notes?)$/i;
+
+/**
+ * A slide/page heading: its first line when that reads like a title. Cover pages
+ * (little text), run-on sentences, "Proof:" continuations and generic labels
+ * ("Example") give none, so lesson titles name the topics actually taught.
+ */
+export function chunkHeading(text: string): string {
+  if (text.replace(/\s+/g, "").length < 200) return "";
+  const line = text.split(/\n/).map((part) => part.replace(/\s+/g, " ").trim()).find((part) => part.length > 0) ?? "";
+  if (line.length > 50 || /[:.;,]$/.test(line) || /^proof\b/i.test(line) || /^[a-z]/.test(line)) return "";
+  return GENERIC_HEADINGS.test(line) ? "" : line;
+}
+
+/**
+ * The course's material as a sequence of lessons, each one stretch of the walk.
+ * Titles come from the pages' own headings, so the plan names what each lesson covers.
+ */
+export function splitMaterialIntoLessons(
+  chunks: readonly SourceChunk[],
+  sourceOrder: readonly string[],
+  maxCharacters = SECTION_MATERIAL_CHARACTERS,
+): MaterialLesson[] {
+  let pool = orderMaterial(chunks, sourceOrder);
+  const lessons: MaterialLesson[] = [];
+  while (pool.length) {
+    const window = fillWindow(pool, maxCharacters);
+    pool = pool.slice(window.length);
+    const headings = [...new Set(window.map((chunk) => chunkHeading(chunk.text)).filter(Boolean))];
+    const title = headings.length > 3 ? `${headings.slice(0, 3).join(" · ")} 等` : headings.join(" · ");
+    lessons.push({
+      index: lessons.length,
+      title: title || `第 ${lessons.length + 1} 课`,
+      chunkIds: window.map((chunk) => chunk.id),
+      pages: window.map((chunk) => chunk.page ?? null),
+    });
+  }
+  return lessons;
+}
+
+/** A planned lesson's own material, in reading order; null when none of it is still available. */
+function plannedWindow(
+  chunks: SourceChunk[],
+  sourceOrder: readonly string[],
+  planned: { chunkIds: string[]; review: boolean; note?: string },
+): MaterialWindow | null {
+  const wanted = new Set(planned.chunkIds);
+  const window = orderMaterial(chunks.filter((chunk) => wanted.has(chunk.id)), sourceOrder);
+  if (!window.length) return null;
+  return { chunks: window, review: planned.review, pages: window.map((chunk) => chunk.page ?? null), planned: { ...(planned.note ? { note: planned.note } : {}) } };
 }
 
 type CompilePayload = {
@@ -744,8 +844,10 @@ async function prepareCompile(
     proposed.focusItemId = proposed.items[Math.min(priorCount, proposed.items.length - 1)]!.itemId;
   }
 
-  const window = options.materialWalk && chunks.length
-    ? nextMaterialWindow(chunks, sourceIds, options.materialWalk.priorChunkIds, options.materialWalk.sectionCharacters)
+  const walk = options.materialWalk;
+  const window = walk && chunks.length
+    ? (walk.planned ? plannedWindow(chunks, sourceIds, walk.planned) : null)
+      ?? nextMaterialWindow(chunks, sourceIds, walk.priorChunkIds, walk.sectionCharacters, walk.chainChunkIds)
     : null;
   const pack = assembleTeachingEvidencePack({
     chunks: window ? window.chunks : chunks,
@@ -766,6 +868,10 @@ export function materialWindowNote(window: MaterialWindow | null): string {
   if (!window || !window.chunks.length) return "";
   const pages = window.pages.filter((page): page is number => page != null);
   const range = pages.length ? `第 ${Math.min(...pages)}–${Math.max(...pages)} 页` : `${window.chunks.length} 段`;
+  if (window.planned && window.review) {
+    const note = window.planned.note ? `${window.planned.note}\n` : "";
+    return `本节是学习计划里的复习课：先用几句话串联下面材料（${range}）的要点，再多出几道新的练习题（不要照搬已出过的原题）。\n${note}`;
+  }
   return window.review
     ? `前面各节已经讲完全部材料。本节是综合复习：用下面的材料（${range}）串联要点，多出练习题，不要逐页重讲。\n`
     : `本节只讲下面这段材料（${range}），按材料顺序讲清楚；后面的内容留给下一节。\n`;

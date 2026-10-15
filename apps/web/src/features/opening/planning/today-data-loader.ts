@@ -9,15 +9,23 @@ type Observer = {
   planError: (reason: unknown) => void;
 };
 
-/** Tasks render independently of the plan. Optional reminder tools are not read here. */
+/**
+ * Tasks render independently of the plan. Reading the plan can add the day's
+ * study-plan lessons; the task list is then read again so they show up.
+ * Optional reminder tools are not read here.
+ */
 export async function readTodayData(api: TodayApi, date: string, observer: Observer): Promise<void> {
+  const readTasks = () => api.listTasks().then(
+    result => { if (observer.isCurrent()) observer.tasks(result.tasks); },
+    reason => { if (observer.isCurrent()) observer.taskError(reason); },
+  );
   await Promise.all([
-    api.listTasks().then(
-      result => { if (observer.isCurrent()) observer.tasks(result.tasks); },
-      reason => { if (observer.isCurrent()) observer.taskError(reason); },
-    ),
+    readTasks(),
     api.getToday(date).then(
-      result => { if (observer.isCurrent()) observer.plan(result); },
+      async result => {
+        if (observer.isCurrent()) observer.plan(result);
+        if (result.planTasksAdded) await readTasks();
+      },
       reason => { if (observer.isCurrent()) observer.planError(reason); },
     ),
   ]);

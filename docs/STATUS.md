@@ -18,6 +18,7 @@
 |---|---|---|---|
 | 评审修复 R1–R8 | Claude | `feat/opening-release` | 已合入；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 第 8 单元真实资料优化（按材料顺序分节推进 + 课程级进度；中英原文引证与核验；公式不单独算核心结论）+ 学习计划 `docs/plans/2026-10-15-unit8-study-plan.md` | Claude | `claude/keen-carson-ls19ie` | 已实现并通过非浏览器检查；待部署后按计划第 4 节验收并反馈实际分节 |
+| 课程学习计划（migration 0065 `opening_tasks.plan_slot`；课程页设每天几节/截止日，按材料分课；打开今日自动排当天的课：1/3/7 天复习 + 错题优先，再学新课；计划任务只讲自己的页；复习轮换取页；模型块截断不丢答案）+ 学习模拟 `tests/integration/handler/opening-study-simulation.test.ts` | Claude | `claude/keen-carson-ls19ie` | 已实现并通过非浏览器检查；待用户浏览器验收（计划第 4 节）。回滚：0065 注释内 DROP；计划设置在 adaptive_planning.courseGoals 内，删掉 studyPlan 即停止 |
 | 日计划闭环走查修复 W1–W4（10-15 走查四个缺口） | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待用户浏览器复验：开始任务/学习后自动等待并打开主讲；模板与提纲改中文；参考答案不再要求紧接题目，无材料时可自评；小结「再学一节」按节推进不重复；课程「设为今日计划」任务绑定课程，任务主讲自动带课程可用材料 |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应排程 L2–L8（按学习情况出建议、教练自动确认/撤销、Today 档位、课程目标、闭环指标） | Claude（L2/L3）→ GPT/Grok（L4/L6/L8） | — | 只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；本地 WIP `bd201d7` 如仍在请先推送 |
