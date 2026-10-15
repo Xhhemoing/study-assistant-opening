@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
-import { createOpeningSourceService, resolveDownloadDisposition } from "./source-service";
+import { createOpeningSourceService } from "./source-service";
 import { OpeningSourceError, type OpeningStorage } from "@aistudy/database";
 import type { Principal } from "../../../lib/authorization";
 
