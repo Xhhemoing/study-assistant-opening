@@ -25,6 +25,14 @@ describe("learning completion", () => {
     expect(html).toContain("标记完成");
     expect(api.updateTaskStatus).not.toHaveBeenCalled();
   });
+  it("offers 「再学一节」 only where the page can open the next section", () => {
+    const api = { updateTaskStatus: vi.fn() };
+    const withNext = renderToStaticMarkup(createElement(ActivitySummaryContent, { summary, task: null, api, onReread: vi.fn(), next: { start: vi.fn(), pending: false, error: "" } }));
+    expect(withNext).toContain('data-teaching-next-section="true"');
+    expect(withNext).toContain("再学一节");
+    const without = renderToStaticMarkup(createElement(ActivitySummaryContent, { summary, task: null, api, onReread: vi.fn() }));
+    expect(without).not.toContain("data-teaching-next-section");
+  });
   it("ends through the current activity version without completing a task", async () => {
     const activity = { id: "activity-1", status: "active", updatedAt: "2026-10-15T01:00:00.000Z" };
     const api = { getTeachingActivity: vi.fn().mockResolvedValue(activity), patchTeachingActivityStatus: vi.fn().mockResolvedValue({ ...activity, status: "completed" }), updateTaskStatus: vi.fn() };

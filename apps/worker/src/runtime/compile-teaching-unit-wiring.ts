@@ -42,6 +42,9 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
+  // 「再学一节」: the prompt and the publish step must agree on which outline item is taught.
+  const priorSectionTitles = async (scope: Scope, activityId: string) =>
+    (await teachingActivities.listPriorSections(scope, activityId)).map((section) => section.title);
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
         callModel: (scope, input, options) =>
@@ -52,6 +55,7 @@ export function createCompileTeachingUnitWorkerDeps(
             loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
+            priorSectionTitles: await priorSectionTitles(scope, payload.activityId),
           })(scope, payload);
         },
       }
@@ -106,6 +110,7 @@ export function createCompileTeachingUnitWorkerDeps(
             loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
+            priorSectionTitles: await priorSectionTitles(scope, payload.activityId),
             // A real model wrote this activity: never fall back to template filler.
             requireModelOutput: true,
             writeLibraryBlocks: async (blocks) => {

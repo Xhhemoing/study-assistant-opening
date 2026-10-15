@@ -7,6 +7,8 @@ import { PATCH as setStatus } from "../../../apps/web/src/app/api/opening/teachi
 import { GET as getSummary } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/summary/route";
 import { GET as getAnswerKey } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/answer-key/route";
 import { GET as getClientInit } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/client-init/route";
+import { POST as nextSection } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/next/route";
+import { POST as createActivity } from "../../../apps/web/src/app/api/opening/teaching-activities/route";
 import { POST as createSession } from "../../../apps/web/src/app/api/opening/learning-sessions/route";
 import { POST as createAttempt } from "../../../apps/web/src/app/api/opening/attempts/route";
 import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
@@ -74,6 +76,50 @@ describe("starting again after a completed activity (R1)", () => {
     // Without the flag a replay still returns the original (completed) activity.
     expect((await repo.create(f.scope, input)).id).toBe(first.id);
   });
+
+  it("a course task's lesson teaches from the course's ready materials when none are given", async () => {
+    const courseId = randomUUID();
+    await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'线性代数',${courseId})`;
+    const ready = await backupRows(f.sql, f.scope).source();
+    await backupRows(f.sql, f.scope).chunk(ready);
+    const pending = await backupRows(f.sql, f.scope).source("pending");
+    for (const [order, sourceId] of [ready, pending].entries()) {
+      await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+        VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core',${order},'private')`;
+    }
+    const taskId = randomUUID();
+    const response = await createActivity(req("POST", { clientKey: `task:${taskId}`, intentKind: "goal", intentSummary: "线性代数 · 今日主题", courseId, sourceIds: [], createIntent: { intentKind: "goal", source: "task", taskId }, continueAfterCompleted: true }));
+    expect(response.status).toBe(201);
+    expect((await response.json()).sourceIds).toEqual([ready]);
+  });
+
+  it("「再学一节」 continues a finished section from its root key and remembers what earlier sections taught", async () => {
+    const { activity, courseId, sourceId } = await seedActivity();
+    const repo = createOpeningTeachingActivitiesRepository(f.sql);
+    const content = createOpeningTeachingContentRepository(f.sql);
+    expect((await nextSection(req("POST"), context(activity.id))).status).toBe(409);
+    const blockId = randomUUID();
+    const unit = await content.createUnit(f.scope, { title: "第一节", blocks: [{ id: blockId, type: "text", content: { text: "讲解" } }] });
+    await content.publishActivitySpec(f.scope, { activityId: activity.id, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: unit.currentRevisionNumber,
+      expectedRevisionNumber: unit.currentRevisionNumber, blockOrder: [{ blockId, position: 0, blockType: "text", role: "teach" }], goals: [{ goalId: "goal-1", statement: "矩阵的秩", linkedSourceIds: [] }] });
+    await repo.setStatus(f.scope, activity.id, { status: "completed" });
+
+    const response = await nextSection(req("POST"), context(activity.id));
+    expect(response.status).toBe(201);
+    const second = await response.json();
+    expect(second).toMatchObject({ status: "active", courseId, sourceIds: [sourceId], intentSummary: activity.intentSummary, clientKey: `${activity.clientKey}:next:${activity.id}` });
+    expect((await (await nextSection(req("POST"), context(activity.id))).json()).id).toBe(second.id);
+    expect(await repo.listPriorSections(f.scope, second.id)).toEqual([{ activityId: activity.id, title: "矩阵的秩" }]);
+    expect(await repo.listPriorSections(f.scope, activity.id)).toEqual([]);
+
+    await repo.setStatus(f.scope, second.id, { status: "completed" });
+    const third = await (await nextSection(req("POST"), context(second.id))).json();
+    // Keys do not grow: every section hangs off the root key.
+    expect(third.clientKey).toBe(`${activity.clientKey}:next:${second.id}`);
+    expect((await repo.listPriorSections(f.scope, third.id)).map((row) => row.activityId)).toEqual([activity.id, second.id]);
+    const foreign = await repo.create(f.otherScope, { clientKey: `other-${randomUUID()}`, intentKind: "topic", intentSummary: "他人的活动", createIntent: {} });
+    expect((await nextSection(req("POST"), context(foreign.id))).status).toBe(404);
+  });
 });
 
 describe("teaching activity completion handlers", () => {
@@ -114,19 +160,27 @@ describe("teaching activity completion handlers", () => {
 });
 
 describe("teaching inline attempts and answer gates", () => {
-  async function seedQuestion() {
+  async function seedQuestion(options: { explainBetween?: boolean } = {}) {
     const seeded = await seedActivity();
-    const question = randomUUID(), answer = randomUUID(), otherQuestion = randomUUID(), otherAnswer = randomUUID();
+    const question = randomUUID(), answer = randomUUID(), otherQuestion = randomUUID(), otherAnswer = randomUUID(), explain = randomUUID();
     const content = createOpeningTeachingContentRepository(f.sql);
     const unit = await content.createUnit(f.scope, { title: "内联作答讲义", blocks: [
       { id: question, type: "prompt", content: { text: "求单位矩阵的秩" } },
+      { id: explain, type: "text", content: { text: "提示：看主对角线" } },
       { id: answer, type: "answer_key", content: { text: "受保护的参考答案：秩为2" } },
       { id: otherQuestion, type: "prompt", content: { text: "求零矩阵的秩" } },
       { id: otherAnswer, type: "answer_key", content: { text: "另一题参考答案：秩为0" } },
     ] });
+    const order = [
+      { blockId: question, blockType: "prompt", role: "prompt" as const },
+      ...(options.explainBetween ? [{ blockId: explain, blockType: "text", role: "teach" as const }] : []),
+      { blockId: answer, blockType: "answer_key", role: "answer_key" as const },
+      { blockId: otherQuestion, blockType: "prompt", role: "prompt" as const },
+      { blockId: otherAnswer, blockType: "answer_key", role: "answer_key" as const },
+    ];
     await content.publishActivitySpec(f.scope, { activityId: seeded.activity.id, teachingUnitId: unit.id, expectedVersion: 0,
       revisionNumber: unit.currentRevisionNumber, expectedRevisionNumber: unit.currentRevisionNumber,
-      blockOrder: [question, answer, otherQuestion, otherAnswer].map((blockId, position) => ({ blockId, position, blockType: position % 2 ? "answer_key" : "prompt", role: position % 2 ? "answer_key" as const : "prompt" as const })),
+      blockOrder: order.map((block, position) => ({ ...block, position })),
       sourceRefs: [{ sourceId: seeded.sourceId, version: 1 }],
     });
     return { ...seeded, question, otherQuestion, unit };
@@ -166,6 +220,15 @@ describe("teaching inline attempts and answer gates", () => {
     expect(summary.attempts).toEqual({ total: 1, correct: 0, incorrect: 1, unverified: 0 });
     await f.sql`UPDATE opening_teaching_activities SET content_version=content_version+1 WHERE id=${activity.id}`;
     expect((await getAnswerKey(answerRequest(activity.id, question, attempt.id), context(activity.id))).status).toBe(409);
+  });
+
+  it("finds the question's reference answer past an inserted explanation block", async () => {
+    const seeded = await seedQuestion({ explainBetween: true });
+    const { attempt, submission } = await openAttempt(seeded);
+    await createOpeningAttemptService(f.sql).submit(f.scope, attempt.id, submission);
+    const reference = await getAnswerKey(answerRequest(seeded.activity.id, seeded.question, attempt.id), context(seeded.activity.id));
+    expect(reference.status).toBe(200);
+    expect(await reference.json()).toEqual({ answer: "受保护的参考答案：秩为2", referenceSourceId: seeded.sourceId });
   });
 
   it("rejects a foreign activity, mismatched course, arbitrary block, or stale content version", async () => {

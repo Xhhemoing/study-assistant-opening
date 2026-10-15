@@ -13,6 +13,8 @@ import {
   TeachingCompileOutputError,
   projectClientSafeLibraryBlocks,
   proposeTeachingOutline,
+  createCompilerProviderInput,
+  continuationNote,
 } from "./teaching-compiler";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -137,7 +139,7 @@ describe("teaching-compiler", () => {
       newBlockId: stableBlockId,
     });
     expect(compiled.outlineUsed.items[0]!.title).toBe("EDITED HOOK TITLE");
-    expect(JSON.stringify(compiled.publishInput.goals)).toContain("user edit wins");
+    expect(JSON.stringify(compiled.publishInput.goals)).toContain("EDITED HOOK TITLE");
   });
 
   it("C2: compiles current focus only; prefetch ≤1 skeleton", () => {
@@ -207,11 +209,11 @@ describe("teaching-compiler", () => {
 
   it("C7: distinct outline notes for intent variants without mastery lock", () => {
     const variants: Array<{ kind: string; summary: string; expectNote: RegExp }> = [
-      { kind: "topic", summary: "topic-only: linear maps", expectNote: /topic-only/i },
-      { kind: "material", summary: "already know → skimming please", expectNote: /skim/i },
-      { kind: "goal", summary: "无基础 learner needs foundations", expectNote: /no-foundation|foundation/i },
-      { kind: "question", summary: "conflict goals between depth and speed", expectNote: /conflict/i },
-      { kind: "material", summary: "intent-only material path", expectNote: /material|intent/i },
+      { kind: "topic", summary: "topic-only: linear maps", expectNote: /主题学习/ },
+      { kind: "material", summary: "already know → skimming please", expectNote: /速览/ },
+      { kind: "goal", summary: "无基础 learner needs foundations", expectNote: /零基础/ },
+      { kind: "question", summary: "conflict goals between depth and speed", expectNote: /目标冲突/ },
+      { kind: "material", summary: "intent-only material path", expectNote: /材料|学习意图/ },
     ];
     for (const v of variants) {
       const outline = proposeTeachingOutline({
@@ -342,6 +344,36 @@ describe("teaching-compiler", () => {
     expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "prompt", text: "q?" }] }), new Set())).toThrow(/no teaching block/);
   });
 
+  it("a continued section teaches the next outline item and tells the model what was covered", async () => {
+    const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] };
+    const options = { loadChunks: async () => [chunk("c1", "零空间材料")], intentSummary: "零空间", intentKind: "goal" };
+    const first = await createCompilerProviderInput(options)({}, payload);
+    expect(first.text).toContain("focusItemId=item-01");
+    expect(first.text).not.toContain("第 2 节");
+    const second = await createCompilerProviderInput({ ...options, priorSectionTitles: ["零空间是什么"] })({}, payload);
+    expect(second.text).toContain("focusItemId=item-02");
+    expect(second.text).toContain("第1节：零空间是什么");
+    expect(continuationNote([])).toBe("");
+
+    const build = createCompilerBuildPublishInput({ ...options, priorSectionTitles: ["零空间是什么"], newBlockId: stableBlockId, writeLibraryBlocks: async () => {} });
+    blockSeq = 0;
+    const published = await build({}, payload, { text: JSON.stringify({ itemTitles: ["引入", "零空间的维数"], blocks: [{ type: "text", text: "维数等于 n − rank。" }] }) });
+    expect(published.generationConfig?.extras).toMatchObject({ focusItemId: "item-02" });
+    expect(published.goals?.[0]?.statement).toBe("零空间的维数");
+  });
+
+  it("places each answer_key right after its question so the learner can see the reference", () => {
+    const parsed = parseCompileModelOutput(JSON.stringify({ itemTitles: [], blocks: [
+      { type: "text", text: "讲解" },
+      { type: "prompt", text: "第一题" },
+      { type: "example", text: "例子" },
+      { type: "prompt", text: "第二题" },
+      { type: "answer_key", text: "答案一" },
+      { type: "answer_key", text: "答案二" },
+    ] }), new Set());
+    expect(parsed.blocks.map((b) => b.text)).toEqual(["讲解", "第一题", "答案一", "例子", "第二题", "答案二"]);
+  });
+
   it("model output replaces template blocks, keeps answer_key hidden and applies learner-facing titles", async () => {
     const build = createCompilerBuildPublishInput({
       loadChunks: async () => [chunk("c1", "authorized material on nullspace")],
@@ -366,7 +398,7 @@ describe("teaching-compiler", () => {
     expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
     expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true } });
     expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
-    expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
+    expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toMatch(/Hook:|引入：|path:/);
     await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))
       .rejects.toBeInstanceOf(TeachingCompileOutputError);
   });

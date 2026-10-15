@@ -646,6 +646,16 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
     },
 
     /** Queue AI 主讲 generation; returns the activity now `queued`. */
+    /** 「再学一节」 after a completed section (server-side chain, idempotent). */
+    async continueTeachingActivity(id: string): Promise<TeachingActivity> {
+      const body = await request(
+        `/api/opening/teaching-activities/${id}/next`,
+        { method: "POST" },
+        fetchImpl,
+      );
+      return teachingActivitySchema.parse(body);
+    },
+
     async requestTeachingCompile(id: string, clientKey: string): Promise<TeachingActivity> {
       const body = await request(
         `/api/opening/teaching-activities/${id}/compile`,

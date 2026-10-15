@@ -99,6 +99,42 @@ export function buildSelfCompareRevision(input: {
   });
 }
 
+export const SELF_JUDGE_REASON = "对照参考答案自评";
+
+/**
+ * Self-judgment against a reference answer that no material backs (topic learning
+ * without sources, model-written key). Stays self_report: the outcome is recorded for
+ * review and retest, but never counts as reference-checked or independent evidence.
+ */
+export function buildSelfJudgedRevision(input: {
+  observation: Pick<
+    LearningObservation,
+    "id" | "rootObservationId" | "answer" | "assistance" | "courseId" | "skillLabel" | "requirementKey"
+  >;
+  choice: "match" | "mismatch";
+  clientKey: string;
+}): ObservationRevisionInput {
+  const headId = input.observation.id;
+  return observationRevisionInputSchema.parse({
+    rootObservationId: input.observation.rootObservationId ?? headId,
+    revisesObservationId: headId,
+    expectedHead: headId,
+    revisionKind: "replace",
+    reason: SELF_JUDGE_REASON,
+    clientKey: input.clientKey,
+    replacement: {
+      answer: input.observation.answer,
+      outcome: input.choice === "match" ? "correct" : "incorrect",
+      assistance: input.observation.assistance,
+      courseId: input.observation.courseId,
+      skillLabel: input.observation.skillLabel,
+      requirementKey: input.observation.requirementKey ?? null,
+      verdictSource: "self_report",
+      referenceSourceId: null,
+    },
+  });
+}
+
 /** Stable clientKey for one self-compare intent (choice + page + head). */
 export function selfCompareRevisionIntentKey(
   observationId: string,

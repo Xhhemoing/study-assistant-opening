@@ -237,9 +237,16 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
           if (Number.isInteger(version) && (currentVersions.get(ref.sourceId) !== version || capturedVersions[ref.sourceId] !== version)) throw learningError("CONFLICT", "teaching reference material version changed; reread the teaching content");
         }
         const ordered = [...spec.blockOrder].sort((a, b) => a.position - b.position);
-        const index = ordered.findIndex((block) => block.blockId === blockId && (block.role === "prompt" || block.blockType === "question" || block.blockType === "prompt"));
-        const following = index < 0 ? undefined : ordered[index + 1];
-        if (!following || !isAnswerKeyBlock(following.blockType, following.role)) return { answer: null, referenceSourceId: null };
+        const isQuestion = (block: (typeof ordered)[number]) => block.role === "prompt" || block.blockType === "question" || block.blockType === "prompt";
+        const index = ordered.findIndex((block) => block.blockId === blockId && isQuestion(block));
+        // The question's key is the first answer_key after it and before the next question;
+        // inserted branch/explanation blocks between them must not hide the reference.
+        let following: (typeof ordered)[number] | undefined;
+        for (const block of index < 0 ? [] : ordered.slice(index + 1)) {
+          if (isQuestion(block)) break;
+          if (isAnswerKeyBlock(block.blockType, block.role)) { following = block; break; }
+        }
+        if (!following) return { answer: null, referenceSourceId: null };
         const revisions = await tx`SELECT blocks FROM library_revisions WHERE workspace_id=${scope.workspaceId}
           AND document_id=${spec.documentId} AND revision_number=${spec.revisionNumber}`;
         if (!revisions[0]) throw learningError("NOT_FOUND", "teaching revision not found");

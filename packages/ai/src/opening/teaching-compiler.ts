@@ -103,8 +103,28 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
     ? value.itemTitles.filter((title): title is string => typeof title === "string" && title.trim().length > 0)
       .map((title) => title.trim().slice(0, 80))
     : [];
-  return { itemTitles, blocks };
+  return { itemTitles, blocks: pairAnswerKeys(blocks) };
 }
+
+/**
+ * The learner sees a question's reference answer only when its answer_key directly
+ * follows the prompt. Models sometimes put keys at the end or between other blocks,
+ * so the n-th key is placed right after the n-th question, in the model's order.
+ */
+export function pairAnswerKeys(blocks: CompileModelBlock[]): CompileModelBlock[] {
+  const keys = blocks.filter((block) => block.type === "answer_key");
+  const out: CompileModelBlock[] = [];
+  let next = 0;
+  for (const block of blocks) {
+    if (block.type === "answer_key") continue;
+    out.push(block);
+    if (block.type === "prompt" && next < keys.length) out.push(keys[next++]!);
+  }
+  // Keys without a question stay hidden at the end; they are never shown.
+  while (next < keys.length) out.push(keys[next++]!);
+  return out;
+}
+
 
 function blocksFromModel(blocks: CompileModelBlock[], newBlockId: () => string): CompileLibraryBlock[] {
   return blocks.map((block) => {
@@ -133,8 +153,9 @@ function blocksFromModel(blocks: CompileModelBlock[], newBlockId: () => string):
 
 /** Apply model-written learner-facing titles when they line up with the outline. */
 export function applyModelItemTitles(outline: TeachingOutline, titles: string[]): TeachingOutline {
-  if (titles.length !== outline.items.length) return outline;
-  return { ...outline, items: outline.items.map((item, index) => ({ ...item, title: titles[index]! })) };
+  // Models often return fewer titles than items; use what lines up, keep the rest.
+  if (!titles.length) return outline;
+  return { ...outline, items: outline.items.map((item, index) => (titles[index] ? { ...item, title: titles[index]! } : item)) };
 }
 
 export type CompileCurrentInput = {
@@ -196,27 +217,27 @@ function notesForIntent(intentKind: string, intentSummary: string): string {
     intentKind === "topic" ||
     /\btopic[\s-]?only\b/i.test(intentSummary)
   ) {
-    return "Topic-only path: outline from topic intent; sources optional.";
+    return "主题学习：按学习主题拟定小范围提纲，材料可选。";
   }
   if (
     /already know|skimming|速览|已会/i.test(intentSummary) ||
     summary.includes("skim")
   ) {
-    return "Skimming path: learner reports prior knowledge — keep light, skippable depth.";
+    return "速览：学习者自述已有基础，保持轻量，可跳过深入部分。";
   }
   if (/no.?foundation|无基础|零基础/i.test(intentSummary)) {
-    return "No-foundation path: start from basics; prerequisites suggested but skippable.";
+    return "零基础：从基础讲起；前置知识只作建议，可跳过。";
   }
   if (/conflict|目标冲突/i.test(intentSummary)) {
-    return "Conflict-goals path: surface competing goals in notes; no mastery lock.";
+    return "目标冲突：列出相互竞争的目标，不锁定掌握进度。";
   }
   if (intentKind === "question") {
-    return "Question-driven path: focus on the asked question with evidence anchors.";
+    return "问题驱动：围绕提出的问题讲解，并给出材料依据。";
   }
   if (intentKind === "material" || intentKind === "goal") {
-    return "Material/goal path: compile from authorized sources and stated goals.";
+    return "材料/目标：依据授权材料和学习目标讲解。";
   }
-  return "Intent path: small-scope outline before compiling the current activity.";
+  return "按学习意图拟定小范围提纲，再讲当前这一节。";
 }
 
 function normalizeExistingOutline(outline: TeachingOutline): TeachingOutline {
@@ -252,8 +273,8 @@ export function proposeTeachingOutline(input: ProposeOutlineInput): TeachingOutl
   const sourceIds = [...input.sourceIds];
   const pageHint =
     input.currentPage == null
-      ? " (no current page — still using authorized sources when present)"
-      : ` (page ${input.currentPage})`;
+      ? "（未指定页码，有授权材料时仍依据材料）"
+      : `（第 ${input.currentPage} 页）`;
 
   const items: TeachingOutlineItem[] = [];
   const titles = buildItemTitles(input.intentSummary, maxItems);
@@ -292,16 +313,17 @@ export function proposeTeachingOutline(input: ProposeOutlineInput): TeachingOutl
 
 function buildItemTitles(intentSummary: string, maxItems: number): string[] {
   const trimmed = intentSummary.trim();
-  const base = trimmed.length > 0 ? trimmed.slice(0, 80) : "Teaching focus";
+  const base = trimmed.length > 0 ? trimmed.slice(0, 80) : "本次学习";
+  // Learner-facing until the model's own titles replace them (applyModelItemTitles).
   const titles = [
-    `Hook: ${base}`,
-    "Observe & relate",
-    "Define core idea",
-    "Worked example",
-    "Check understanding",
-    "Optional practice",
-    "Wrap-up",
-    "Extension",
+    `引入：${base}`,
+    "联系已有知识",
+    "核心概念",
+    "例题讲解",
+    "检查理解",
+    "巩固练习",
+    "小结",
+    "拓展",
   ];
   return titles.slice(0, maxItems);
 }
@@ -309,7 +331,8 @@ function buildItemTitles(intentSummary: string, maxItems: number): string[] {
 function goalsFromItem(item: TeachingOutlineItem): TeachingGoal[] {
   return item.goalIds.map((goalId) => ({
     goalId,
-    statement: item.notes?.trim() || item.title,
+    // The section title is what the learner sees; notes are compiler guidance.
+    statement: item.title,
     linkedSourceIds: item.sourceIds.filter(isUuid).slice(0, 32),
   }));
 }
@@ -366,7 +389,7 @@ function buildBlocksForItem(
         role,
         content: {
           // Server-side only; never projected to client init while hidden.
-          answer: `Key points for ${item.title}`,
+          answer: `「${item.title}」的要点`,
           hidden: true,
         },
       });
@@ -378,7 +401,7 @@ function buildBlocksForItem(
         type: blockType,
         role,
         content: {
-          text: `Prompt: reflect on “${item.title}”.`,
+          text: `想一想：用自己的话说说「${item.title}」。`,
         },
       });
       continue;
@@ -390,8 +413,8 @@ function buildBlocksForItem(
         role,
         content: {
           text: evidenceSnippet
-            ? `Example drawn from authorized material: ${evidenceSnippet}`
-            : `Example for “${item.title}” (no materials — generated_example).`,
+            ? `材料中的例子：${evidenceSnippet}`
+            : `「${item.title}」的示例（没有材料，为生成示例）。`,
           ...evidenceCite,
         },
       });
@@ -404,10 +427,10 @@ function buildBlocksForItem(
       content: {
         text:
           blockType === "formula"
-            ? `Formula notes for “${item.title}”.`
+            ? `「${item.title}」的公式说明。`
             : evidenceSnippet
               ? `${item.title}: ${evidenceSnippet}`
-              : `${item.title}: presentable teaching block from outline${item.notes ? ` — ${item.notes}` : ""}.`,
+              : `${item.title}${item.notes ? `：${item.notes}` : ""}`,
         ...(blockType === "formula" ? {} : evidenceCite),
       },
     });
@@ -581,6 +604,11 @@ export type BuildCompilerPublishInputOptions = {
   newBlockId?: () => string;
   /** Production with a real model: fail instead of publishing template blocks. */
   requireModelOutput?: boolean;
+  /**
+   * Titles of the earlier sections when this activity continues a finished one
+   * (「再学一节」). The outline focus moves past them and the model is told not to repeat.
+   */
+  priorSectionTitles?: Array<string | null>;
 };
 
 type CompilePayload = {
@@ -626,7 +654,7 @@ async function prepareCompile(
       // Legacy stub text only; model JSON is content, not intent.
       (providerText && providerText.length > 0 && !providerText.trimStart().startsWith("{")
         ? providerText.slice(0, 500)
-        : `Compile teaching for activity ${payload.activityId}`),
+        : "本次学习"),
     intentKind: options.intentKind ?? "material",
     sourceIds,
     chunks,
@@ -637,6 +665,11 @@ async function prepareCompile(
   });
 
   assertOutlineHonest(proposed);
+  // A continued section teaches the next outline item; an edited outline keeps its own focus.
+  const priorCount = options.priorSectionTitles?.length ?? 0;
+  if (!outline && priorCount > 0 && proposed.items.length) {
+    proposed.focusItemId = proposed.items[Math.min(priorCount, proposed.items.length - 1)]!.itemId;
+  }
 
   const pack = assembleTeachingEvidencePack({
     chunks,
@@ -651,6 +684,18 @@ async function prepareCompile(
   return { outline: proposed, pack, sourceIds };
 }
 
+/** Tells the model which section this is and what earlier sections already taught. */
+export function continuationNote(priorSectionTitles: Array<string | null> | undefined): string {
+  if (!priorSectionTitles?.length) return "";
+  const titles = priorSectionTitles.map((title, index) => `第${index + 1}节：${title ?? "（未记录标题）"}`).slice(-8);
+  return [
+    `这是同一学习主题的第 ${priorSectionTitles.length + 1} 节。前面已经学过：`,
+    ...titles,
+    "接着往下讲 focusItemId 对应的新内容，可以一句话回顾上一节，但不要重复已讲内容和已出过的题。",
+    "",
+  ].join("\n");
+}
+
 /** Factory for the worker's provider input: same outline/evidence as publish, JSON output. */
 export function createCompilerProviderInput(options: BuildCompilerPublishInputOptions = {}) {
   return async function buildProviderInput(scope: unknown, payload: CompilePayload): Promise<ProviderInput> {
@@ -659,7 +704,7 @@ export function createCompilerProviderInput(options: BuildCompilerPublishInputOp
     const intent = options.intentSummary ? `学习意图：${options.intentSummary.slice(0, 500)}\n` : "";
     return {
       instruction: prompt.instruction,
-      text: `${intent}${prompt.text}`,
+      text: `${intent}${continuationNote(options.priorSectionTitles)}${prompt.text}`,
       chunks: [],
       mode: "explain",
       maxOutputTokens: 3000,

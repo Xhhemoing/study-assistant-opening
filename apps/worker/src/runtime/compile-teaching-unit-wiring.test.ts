@@ -5,6 +5,7 @@ import type { OpeningJobRecord } from "@aistudy/database";
 const activities = vi.hoisted(() => ({
   get: vi.fn(),
   setGenerateStatus: vi.fn(),
+  listPriorSections: vi.fn(async () => [] as Array<{ activityId: string; title: string | null }>),
 }));
 const content = vi.hoisted(() => ({
   createUnit: vi.fn(),

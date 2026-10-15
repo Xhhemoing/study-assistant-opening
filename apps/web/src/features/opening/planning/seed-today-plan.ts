@@ -63,6 +63,8 @@ export function buildCourseSeedTaskInput(
     priority: 1,
     candidateId: null,
     clientKey: `course-seed:${courseId}:${localDate}`,
+    // Binds the task's lessons to the course and its materials.
+    courseId,
   });
 }
 

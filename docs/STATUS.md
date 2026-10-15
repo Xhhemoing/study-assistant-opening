@@ -16,7 +16,8 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待合入 `feat/opening-release`；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
+| 评审修复 R1–R8 | Claude | `feat/opening-release` | 已合入；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
+| 日计划闭环走查修复 W1–W4（10-15 走查四个缺口） | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待用户浏览器复验：开始任务/学习后自动等待并打开主讲；模板与提纲改中文；参考答案不再要求紧接题目，无材料时可自评；小结「再学一节」按节推进不重复；课程「设为今日计划」任务绑定课程，任务主讲自动带课程可用材料 |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应排程 L2–L8（按学习情况出建议、教练自动确认/撤销、Today 档位、课程目标、闭环指标） | Claude（L2/L3）→ GPT/Grok（L4/L6/L8） | — | 只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；本地 WIP `bd201d7` 如仍在请先推送 |
 

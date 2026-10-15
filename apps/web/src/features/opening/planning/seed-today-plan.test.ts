@@ -63,6 +63,7 @@ describe("buildCourseSeedTaskInput", () => {
       priority: 1,
       candidateId: null,
       clientKey: `course-seed:${COURSE_ID}:2026-10-14`,
+      courseId: COURSE_ID,
     });
   });
 });
@@ -149,6 +150,7 @@ describe("runSeedTodayPlan", () => {
       priority: 1,
       candidateId: null,
       clientKey: `course-seed:${COURSE_ID}:2026-10-14`,
+      courseId: COURSE_ID,
     });
     expect(navigate).toHaveBeenCalledWith(SEED_TODAY_HREF);
   });

@@ -254,6 +254,62 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     },
 
     /**
+     * 「再学一节」: start (or replay) the section after a completed one. Walks the
+     * chain from its root key, so keys do not grow and a repeated request lands on
+     * the same next section; an unfinished later section is returned as is.
+     */
+    async continueAfter(
+      scope: Scope,
+      activityId: string,
+      options: { enqueueCompile?: boolean } = {},
+    ): Promise<TeachingActivity> {
+      const rows = await sql`
+        SELECT a.* FROM opening_teaching_activities a
+        JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+        WHERE a.id = ${activityId} AND a.workspace_id = ${scope.workspaceId}
+          AND a.owner_user_id = ${scope.ownerUserId}`;
+      const row = rows[0];
+      if (!row) throw learningError("NOT_FOUND", "teaching activity not found");
+      if (row.status !== "completed") throw learningError("CONFLICT", "finish this section before starting the next one");
+      const { continuesActivityId: _previous, ...rootIntent } = (row.create_intent ?? {}) as Record<string, unknown>;
+      return createOpeningTeachingActivitiesRepository(sql).create(scope, {
+        clientKey: String(row.client_key).split(":next:")[0]!,
+        intentKind: row.intent_kind as TeachingActivity["intentKind"],
+        intentSummary: String(row.intent_summary),
+        sourceIds: (row.source_ids ?? []) as string[],
+        courseId: (row.course_id ?? null) as string | null,
+        createIntent: rootIntent,
+        continueAfterCompleted: true,
+      }, options);
+    },
+
+    /**
+     * Earlier sections of a continued activity, oldest first, with the title each
+     * one taught (its published goal). Empty for a first section.
+     */
+    async listPriorSections(scope: Scope, activityId: string): Promise<Array<{ activityId: string; title: string | null }>> {
+      const rows = await sql`
+        WITH RECURSIVE chain AS (
+          SELECT a.id, a.create_intent, 0 AS depth FROM opening_teaching_activities a
+          WHERE a.id = ${activityId} AND a.workspace_id = ${scope.workspaceId} AND a.owner_user_id = ${scope.ownerUserId}
+          UNION ALL
+          SELECT p.id, p.create_intent, c.depth + 1 FROM chain c
+          JOIN opening_teaching_activities p ON p.id::text = c.create_intent->>'continuesActivityId'
+            AND p.workspace_id = ${scope.workspaceId} AND p.owner_user_id = ${scope.ownerUserId}
+          WHERE c.depth < ${MAX_ACTIVITY_CONTINUATIONS}
+        )
+        SELECT c.id, c.depth, s.goals_json FROM chain c
+        LEFT JOIN opening_teaching_activity_specs s ON s.activity_id = c.id
+          AND s.workspace_id = ${scope.workspaceId} AND s.owner_user_id = ${scope.ownerUserId}
+        WHERE c.depth > 0 ORDER BY c.depth DESC`;
+      return rows.map((row) => {
+        const goals = Array.isArray(row.goals_json) ? row.goals_json as Array<{ statement?: unknown }> : [];
+        const statement = goals[0]?.statement;
+        return { activityId: String(row.id), title: typeof statement === "string" && statement.trim() ? statement.trim().slice(0, 200) : null };
+      });
+    },
+
+    /**
      * Associate / unassociate course on the activity row only.
      * Never rewrites historical observation/attempt course_id (ADR D5 #4).
      */

@@ -6,6 +6,7 @@ import { OpeningApiError } from "../client/api";
 import {
   buildSelfCompareMethod,
   buildSelfCompareRevision,
+  buildSelfJudgedRevision,
   isAssistanceAllowed,
   preselectAssistance,
   raiseAssistanceOnly,
@@ -168,5 +169,17 @@ describe("ReferenceCheckStep", () => {
     }));
     expect(html).toContain("这条记录未保留参考版本");
     expect(html).not.toContain("/opening/library?");
+  });
+});
+
+describe("buildSelfJudgedRevision", () => {
+  it("records a judgment against an unbacked reference as self_report without a reference check", () => {
+    const command = buildSelfJudgedRevision({ observation, choice: "mismatch", clientKey: "self-judge-key-01" });
+    expect(command).toMatchObject({
+      revisionKind: "replace",
+      expectedHead: observation.id,
+      replacement: { answer: "原始答案不得改动", outcome: "incorrect", verdictSource: "self_report", referenceSourceId: null },
+    });
+    expect(command.revisionKind === "replace" && command.replacement.referenceCheck).toBeFalsy();
   });
 });

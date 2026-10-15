@@ -50,6 +50,7 @@ vi.mock("./resume-card", async () => {
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
+  autoOpenStep,
   isTeachingWorkspaceContentUsable,
   TeachingContinueEntry,
   TeachingWorkspace,
@@ -350,5 +351,26 @@ describe("waitInitActionVisibility (S6)", () => {
     const actions = waitInitActionVisibility({ jobGate: "in_flight", canCompile: false });
     expect(actions.showRetryFetch).toBe(true);
     expect(actions.showCompile).toBe(false);
+  });
+});
+
+describe("autoOpenStep (start → lecture)", () => {
+  it("opens usable content, waits while compiling, reads init once ready, stops on failure", () => {
+    expect(autoOpenStep(learningResume())).toBe("open");
+    expect(autoOpenStep(learningResume({ clientInit: null, generateStatus: "generating", gates: { ...learningResume().gates, job: "in_flight" } }))).toBe("wait");
+    expect(autoOpenStep(learningResume({ clientInit: null, generateStatus: "needs_check" }))).toBe("fetch_init");
+    expect(autoOpenStep(learningResume({ clientInit: null, generateStatus: "failed", gates: { ...learningResume().gates, job: "unknown" } }))).toBe("stop");
+  });
+
+  it("never opens another activity's content right after a create", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingContinueEntry, {
+        activity: { ...activityReady, id: "99999999-9999-4999-8999-999999999999" },
+        startInWorkspace: true,
+        initialClientInit: clientInit(),
+      }),
+    );
+    expect(html).toContain('data-teaching-continue-entry="card"');
+    expect(html).not.toContain("data-teaching-workspace");
   });
 });

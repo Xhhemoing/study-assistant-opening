@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ChevronDown, BookOpen } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ActivitySpecClientInit,
   LearningResume,
@@ -39,6 +39,8 @@ export type TeachingWorkspaceProps = {
   /** Optional OpeningApi inject (tests). */
   api?: OpeningApi;
   onActivityUpdated?: (activity: TeachingActivity) => void;
+  /** 「再学一节」 created the next section; the page switches to it. */
+  onNextActivity?: (activity: TeachingActivity) => void;
 };
 
 /**
@@ -102,6 +104,7 @@ export function TeachingWorkspace({
   timeZone = "Asia/Shanghai",
   api: apiProp,
   onActivityUpdated,
+  onNextActivity,
 }: TeachingWorkspaceProps) {
   const api = apiProp ?? createOpeningApi();
   const [liveActivity, setLiveActivity] = useState(activity);
@@ -355,7 +358,7 @@ export function TeachingWorkspace({
           打开自由对话（次要）
         </Link>
       </p>
-      <div className="mt-5"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={(next) => { setLiveActivity(next); onActivityUpdated?.(next); }} /></div>
+      <div className="mt-5"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={(next) => { setLiveActivity(next); onActivityUpdated?.(next); }} {...(onNextActivity ? { onNextActivity } : {})} /></div>
     </section>
   );
 }
@@ -375,6 +378,22 @@ export function waitInitActionVisibility(input: {
 }
 
 /**
+ * What a resume read means for a learner who asked to go straight into the lecture:
+ * open it, keep waiting for the running compile, read client-init once, or stop and
+ * show the manual actions (failed, cancelled, unknown outcome — never poll those).
+ */
+export function autoOpenStep(resume: Pick<LearningResume, "clientInit" | "generateStatus" | "gates">): "open" | "wait" | "fetch_init" | "stop" {
+  if (resume.clientInit && isTeachingWorkspaceContentUsable({ generateStatus: resume.generateStatus }, resume.clientInit)) return "open";
+  if (resume.gates.job === "in_flight") return "wait";
+  if (resume.generateStatus === "ready" || resume.generateStatus === "needs_check") return "fetch_init";
+  return "stop";
+}
+
+/** Poll cadence while the lecture is being prepared; bounded so a stuck job ends in manual actions. */
+export const AUTO_OPEN_POLL_MS = 3000;
+export const AUTO_OPEN_MAX_POLLS = 60;
+
+/**
  * V2-14 continue entry: show LearningResume card, then mount TeachingWorkspace.
  * Prefers resume.clientInit when present; null clientInit → re-fetch / wait (fail-soft).
  * Does **not** route through ConversationResume.
@@ -391,6 +410,7 @@ export type TeachingContinueEntryProps = {
   startInWorkspace?: boolean;
   initialClientInit?: ActivitySpecClientInit | null;
   onActivityUpdated?: (activity: TeachingActivity) => void;
+  onNextActivity?: (activity: TeachingActivity) => void;
   /**
    * When false, hide 「生成主讲内容」 (compiler off / capabilities).
    * Default true preserves prior call sites; Today wires the real switch.
@@ -408,31 +428,40 @@ export function TeachingContinueEntry({
   startInWorkspace = false,
   initialClientInit = null,
   onActivityUpdated,
+  onNextActivity,
   teachingCompileEnabled = true,
 }: TeachingContinueEntryProps) {
   const api = apiProp ?? createOpeningApi();
   const [activity, setActivity] = useState(activityProp);
+  // Right after a create the parent may still hold the previous activity's content.
+  const ownInit = initialClientInit?.activityId === activityProp.id ? initialClientInit : null;
   const [phase, setPhase] = useState<"card" | "workspace" | "wait_init">(
     startInWorkspace &&
-      initialClientInit &&
-      isTeachingWorkspaceContentUsable(activityProp, initialClientInit)
+      ownInit &&
+      isTeachingWorkspaceContentUsable(activityProp, ownInit)
       ? "workspace"
       : "card",
   );
-  const [workspaceInit, setWorkspaceInit] = useState<ActivitySpecClientInit | null>(
-    initialClientInit,
-  );
+  const [workspaceInit, setWorkspaceInit] = useState<ActivitySpecClientInit | null>(ownInit);
   const [waitError, setWaitError] = useState<string | null>(null);
   const [waitBusy, setWaitBusy] = useState(false);
   const [liveResume, setLiveResume] = useState<LearningResume | null>(resumeProp);
+  /** Set by 「开始学习」/「开始任务主讲」: open the lecture by itself once it is ready. */
+  const autoOpen = useRef(startInWorkspace);
+  const polls = useRef(0);
+  // Parent callbacks are inline; keep the poll timer independent of re-renders.
+  const onActivityUpdatedRef = useRef(onActivityUpdated);
+  onActivityUpdatedRef.current = onActivityUpdated;
+  const [pollExhausted, setPollExhausted] = useState(false);
 
   useEffect(() => {
     setActivity(activityProp);
   }, [activityProp]);
 
   useEffect(() => {
-    if (resumeProp) setLiveResume(resumeProp);
-  }, [resumeProp]);
+    // The parent may still hold the previous activity's resume right after a create.
+    if (resumeProp && resumeProp.activityId === activityProp.id) setLiveResume(resumeProp);
+  }, [resumeProp, activityProp.id]);
 
   const openWorkspaceFromResume = useCallback(
     async (resume: LearningResume) => {
@@ -486,6 +515,39 @@ export function TeachingContinueEntry({
     [activity, api],
   );
 
+  // First resume read for this activity: go straight in (or to the waiting view).
+  useEffect(() => {
+    if (!autoOpen.current || phase !== "card" || !liveResume || liveResume.activityId !== activity.id) return;
+    autoOpen.current = false;
+    void openWorkspaceFromResume(liveResume);
+  }, [activity.id, liveResume, openWorkspaceFromResume, phase]);
+
+  // While the compile runs, re-read the resume until the lecture can open.
+  useEffect(() => {
+    if (phase !== "wait_init" || liveResume?.gates.job !== "in_flight") return;
+    if (polls.current >= AUTO_OPEN_MAX_POLLS) { setPollExhausted(true); return; }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      polls.current += 1;
+      void (async () => {
+        try {
+          const fresh = await api.getTeachingResume(activity.id);
+          if (cancelled) return;
+          if (fresh.generateStatus !== activity.generateStatus || fresh.contentVersion !== activity.contentVersion) {
+            const next = await api.getTeachingActivity(activity.id);
+            if (cancelled) return;
+            setActivity(next);
+            onActivityUpdatedRef.current?.(next);
+          }
+          await openWorkspaceFromResume(fresh);
+        } catch (err) {
+          if (!cancelled) setWaitError(err instanceof Error ? err.message : "暂时无法读取备课进度，可稍后重试。");
+        }
+      })();
+    }, AUTO_OPEN_POLL_MS);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [activity.contentVersion, activity.generateStatus, activity.id, api, liveResume, openWorkspaceFromResume, phase]);
+
   const backToCard = useCallback(() => {
     setPhase("card");
     setWaitError(null);
@@ -493,6 +555,9 @@ export function TeachingContinueEntry({
 
   // Re-read the resume so a finished job is seen; the cached one still says in_flight.
   const retryFromFreshResume = useCallback(async () => {
+    polls.current = 0;
+    setPollExhausted(false);
+    setWaitError(null);
     setWaitBusy(true);
     try {
       const fresh = await api.getTeachingResume(activity.id);
@@ -500,7 +565,7 @@ export function TeachingContinueEntry({
       await openWorkspaceFromResume(fresh);
     } catch (err) {
       setWaitBusy(false);
-      setWaitError(err instanceof Error ? err.message : "无法刷新断点；不会伪造讲义。");
+      setWaitError(err instanceof Error ? err.message : "暂时无法读取备课进度，可稍后重试。");
     }
   }, [activity.id, api, openWorkspaceFromResume]);
 
@@ -520,7 +585,7 @@ export function TeachingContinueEntry({
   }, [activity.id, api, onActivityUpdated]);
 
   if (activity.status === "completed" && phase !== "workspace") {
-    return <div className="p-5" data-teaching-continue-entry="completed"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>;
+    return <div className="p-5" data-teaching-continue-entry="completed"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} {...(onNextActivity ? { onNextActivity } : {})} /></div>;
   }
   if (phase === "workspace" && workspaceInit) {
     return (
@@ -532,6 +597,7 @@ export function TeachingContinueEntry({
           timeZone={timeZone}
           api={api}
           onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }}
+          {...(onNextActivity ? { onNextActivity } : {})}
         />
       </div>
     );
@@ -545,7 +611,7 @@ export function TeachingContinueEntry({
       jobGate: liveResume?.gates.job,
       canCompile,
     });
-    const waitingInFlight = liveResume?.gates.job === "in_flight";
+    const waitingInFlight = liveResume?.gates.job === "in_flight" && !pollExhausted;
     return (
       <section
         className="flex h-full min-h-0 flex-col px-5 py-5"
@@ -553,19 +619,15 @@ export function TeachingContinueEntry({
         data-resume-client-init="null"
       >
         <h2 className="text-sm font-semibold text-zinc-900">
-          {waitingInFlight ? "等待主讲内容" : "主讲内容暂不可用"}
+          {waitingInFlight ? "AI 老师正在备课" : "主讲内容暂不可用"}
         </h2>
-        <p className="mt-2 text-xs leading-5 text-zinc-600">
+        <p className="mt-2 text-xs leading-5 text-zinc-600" role="status" data-teaching-wait-auto={waitingInFlight ? "polling" : "stopped"}>
           {waitingInFlight
-            ? "断点已恢复，但 clientInit 暂缺或不可用。不会伪造讲义；生成中请等待。"
-            : "断点已恢复，但当前没有可用的主讲内容。可重新生成，或返回断点卡片；不会反复空拉 client-init。"}
+            ? "正在根据你的任务和材料准备这一节，通常需要十几秒到一分钟；准备好后会自动打开，不用刷新。"
+            : liveResume?.gates.job === "in_flight"
+              ? "备课时间比平时长。可以稍后点「刷新备课进度」，或先去自由对话。"
+              : "这一节还没有可用的主讲内容。可以重新生成，或返回学习记录卡片。"}
         </p>
-        {liveResume ? (
-          <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
-            jobGate={liveResume.gates.job} · materials={liveResume.gates.materials} · cv{" "}
-            {liveResume.contentVersion}
-          </p>
-        ) : null}
         {waitError ? (
           <p className={`mt-3 text-xs ${tone.danger}`} role="alert">
             {waitError}
@@ -591,7 +653,7 @@ export function TeachingContinueEntry({
               data-resume-retry-client-init="true"
               onClick={() => void retryFromFreshResume()}
             >
-              {waitBusy ? "拉取中…" : "重试拉取 client-init"}
+              {waitBusy ? "读取中…" : "刷新备课进度"}
             </button>
           ) : null}
           {actions.showBack ? (
@@ -605,7 +667,7 @@ export function TeachingContinueEntry({
             </button>
           ) : null}
         </div>
-        <div className="mt-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
+        <div className="mt-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} {...(onNextActivity ? { onNextActivity } : {})} /></div>
       </section>
     );
   }
@@ -624,7 +686,7 @@ export function TeachingContinueEntry({
         }}
         onResumeUpdated={setLiveResume}
       />
-      <div className="px-5 pb-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
+      <div className="px-5 pb-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} {...(onNextActivity ? { onNextActivity } : {})} /></div>
     </div>
   );
 }

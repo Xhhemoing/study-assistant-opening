@@ -122,7 +122,8 @@ export function TodayDashboard({
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
-  const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
+  // After finishing the shown section the next step is the next section, not an older breakpoint.
+  const ctaLabel = currentActivity?.status === "completed" ? "再学一节" : todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
     ? `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}`
     : "/opening/assistant";
@@ -245,14 +246,36 @@ export function TodayDashboard({
   }, []);
   const taskStartInFlight = useRef(false);
 
+  const openNextActivity = useCallback((next: TeachingActivity) => {
+    setActivities((rows) => [next, ...rows.filter((row) => row.id !== next.id)]);
+    setSelectedActivity(next);
+    setActivityLoad("ready");
+    setCtaPreferWorkspace(true);
+    setCtaFocusNonce((n) => n + 1);
+  }, []);
+
   const runPrimaryCta = useCallback(async () => {
     if (taskStartInFlight.current) return;
     setCtaError(null);
+    if (currentActivity?.status === "completed") {
+      taskStartInFlight.current = true;
+      setCtaBusy(true);
+      try {
+        openNextActivity(await api.continueTeachingActivity(currentActivity.id));
+      } catch (error) {
+        setCtaError(error instanceof OpeningApiError ? error.message : "下一节还没有确认创建，可以再点一次。");
+      } finally {
+        taskStartInFlight.current = false;
+        setCtaBusy(false);
+      }
+      return;
+    }
     const existing = pickCurrentTeachingActivity(activities);
     const plan = planTodayPrimaryCta(existing, clientInit);
     if (plan.kind === "focus-existing") {
       setSelectedActivity(existing);
-      setCtaPreferWorkspace(plan.preferWorkspace);
+      // 「继续学习」 goes into the lecture; the entry waits for it when it is still being prepared.
+      setCtaPreferWorkspace(true);
       setCtaFocusNonce((n) => n + 1);
       return;
     }
@@ -277,6 +300,8 @@ export function TodayDashboard({
       });
       setSelectedActivity(created);
       setActivityLoad("ready");
+      setCtaPreferWorkspace(true);
+      setCtaFocusNonce((n) => n + 1);
     } catch (error) {
       const message =
         error instanceof OpeningApiError ? error.message : "创建教学活动失败";
@@ -285,7 +310,7 @@ export function TodayDashboard({
       taskStartInFlight.current = false;
       setCtaBusy(false);
     }
-  }, [activities, api, clientInit, state.continueItem, timeZone]);
+  }, [activities, api, clientInit, currentActivity, openNextActivity, state.continueItem, timeZone]);
 
   const startTaskLearning = useCallback(async (selected: StudyTask) => {
     if (taskStartInFlight.current || !teachingLoopTrialEnabled) return;
@@ -411,6 +436,7 @@ export function TodayDashboard({
                   initialClientInit={clientInit}
                   teachingCompileEnabled={teachingCompileEnabled}
                   startInWorkspace={ctaPreferWorkspace && ctaFocusNonce > 0}
+                  onNextActivity={openNextActivity}
                   onActivityUpdated={(next) => {
                     setSelectedActivity(next);
                     setActivities((rows) =>

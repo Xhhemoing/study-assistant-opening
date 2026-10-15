@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { LearningObservation, TeachingActivity, TeachingAnswerKey } from "@aistudy/contracts";
 import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
-import { buildSelfCompareRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
+import { buildSelfCompareRevision, buildSelfJudgedRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
 import { LearningProse } from "../assistant/learning-prose";
 import { ui } from "../design/ui";
 import { createTeachingActivityClient } from "./activity-client";
@@ -81,10 +81,14 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
     finally { inFlight.current = false; setPending(false); }
   }
   async function compare(choice: "match" | "mismatch") {
-    if (!recorded || !answerKey?.referenceSourceId || inFlight.current || checked || rereadNeeded) return;
-    const intent = selfCompareRevisionIntentKey(recorded.id, choice, null);
+    if (!recorded || !answerKey?.answer || inFlight.current || checked || rereadNeeded) return;
+    const referenceSourceId = answerKey.referenceSourceId;
+    const intent = selfCompareRevisionIntentKey(recorded.id, choice, null) + (referenceSourceId ? "" : ":self");
     if (revision.current?.intent !== intent) revision.current = { intent, clientKey: `teaching-compare:${crypto.randomUUID()}` };
-    const input = buildSelfCompareRevision({ observation: recorded, referenceSourceId: answerKey.referenceSourceId, choice, clientKey: revision.current.clientKey });
+    // Without a material behind the key the judgment stays a self-report.
+    const input = referenceSourceId
+      ? buildSelfCompareRevision({ observation: recorded, referenceSourceId, choice, clientKey: revision.current.clientKey })
+      : buildSelfJudgedRevision({ observation: recorded, choice, clientKey: revision.current.clientKey });
     if (!input) return;
     inFlight.current = true; setPending(true); setError("");
     try {
@@ -127,11 +131,11 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
       <button type="submit" className={ui.primary} disabled={pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : "提交原答案，再看参考"}</button>
     </form> : <div className="space-y-2">
       <p className="text-xs font-medium text-zinc-700">原答案已保存</p><p className="whitespace-pre-wrap text-sm text-zinc-800">{recorded.answer}</p>
-      {answerKey ? <div className="rounded-lg bg-white p-3 ring-1 ring-zinc-900/5"><p className="mb-2 text-xs font-medium text-zinc-600">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-zinc-500">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <button type="button" className={ui.secondary} disabled={pending || !attemptId} onClick={() => { if (attemptId) void readAnswer(attemptId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取参考答案")); }}>重新读取参考答案</button>}
-      {!checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
+      {answerKey ? <div className="rounded-lg bg-white p-3 ring-1 ring-zinc-900/5"><p className="mb-2 text-xs font-medium text-zinc-600">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-zinc-500">这道题没有配套的参考答案，已保留未核对记录；可以去自由对话请 AI 老师讲解。</p>}</div> : <button type="button" className={ui.secondary} disabled={pending || !attemptId} onClick={() => { if (attemptId) void readAnswer(attemptId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取参考答案")); }}>重新读取参考答案</button>}
+      {!checked && !rereadNeeded && answerKey?.answer ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
-      {answerKey?.answer && !answerKey.referenceSourceId ? <p className="text-xs text-zinc-600">参考答案没有关联可核验材料，本次保留为未核对。</p> : null}
-      {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? "已记录你对照参考后的正确判断。" : recorded.outcome === "incorrect" ? "已记录需要复查，后续可安排复测。" : "已保留未核对记录。"}</p> : null}
+      {answerKey?.answer && !answerKey.referenceSourceId && !checked ? <p className="text-xs text-zinc-600">这份参考答案由 AI 老师给出、没有关联材料：你的判断按自评记录，可用于复习安排，但不计入独立掌握证据。</p> : null}
+      {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? (recorded.verdictSource === "reference_checked" ? "已记录你对照参考后的正确判断。" : "已按自评记录为答对。") : recorded.outcome === "incorrect" ? "已记录这题需要复查。" : "已保留未核对记录。"}</p> : null}
     </div>}
     {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
   </div>;

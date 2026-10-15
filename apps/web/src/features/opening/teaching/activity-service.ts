@@ -6,7 +6,7 @@ import {
   type TeachingActivity,
 } from "@aistudy/contracts";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { createOpeningTeachingActivitiesRepository } from "@aistudy/database";
+import { createOpeningTeachingActivitiesRepository, listReadySourceIdsForCourse } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
@@ -46,8 +46,13 @@ export function createOpeningTeachingActivityService(
   const repo = createOpeningTeachingActivitiesRepository(sql);
   return {
     async create(scope: Scope, raw: unknown) {
-      const input = teachingActivityCreateInputSchema.parse(raw);
+      const parsed = teachingActivityCreateInputSchema.parse(raw);
       try {
+        // A course-bound lesson (task or topic) without explicit materials teaches from the
+        // course's ready materials, so blocks can cite them and answers can be reference-checked.
+        const input = parsed.courseId && !parsed.sourceIds?.length && parsed.intentKind !== "resume"
+          ? { ...parsed, sourceIds: await listReadySourceIdsForCourse(sql, scope, parsed.courseId) }
+          : parsed;
         return await repo.create(scope, input, { enqueueCompile: isTeachingCompilerEnabled(env) });
       } catch (error) {
         mapError(error);
@@ -75,6 +80,15 @@ export function createOpeningTeachingActivityService(
       const input = teachingActivityAssociateCourseInputSchema.parse(raw);
       try {
         return await repo.associateCourse(scope, activityId, input);
+      } catch (error) {
+        mapError(error);
+      }
+    },
+    /** 「再学一节」 after a completed section; the next one is compiled like a new activity. */
+    async continueAfter(scope: Scope, activityIdRaw: string) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      try {
+        return await repo.continueAfter(scope, activityId, { enqueueCompile: isTeachingCompilerEnabled(env) });
       } catch (error) {
         mapError(error);
       }
