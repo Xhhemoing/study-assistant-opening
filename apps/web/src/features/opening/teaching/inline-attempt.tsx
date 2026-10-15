@@ -11,6 +11,14 @@ import { createTeachingActivityClient } from "./activity-client";
 import { createInlineAttemptSubmission } from "./inline-attempt-submission";
 import { createInlineAttemptDrafts, inlineAttemptIdentityKey, type InlineAttemptDraft } from "./inline-attempt-drafts";
 
+
+/** Temporary skill label until the server supplies a stable node — never the activity title. */
+export function defaultInlineSkillLabel(prompt: string): string {
+  const trimmed = prompt.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
+}
+
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   onCourseAssociated: (activity: TeachingActivity) => void;
 };
@@ -31,7 +39,7 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
   const api = useMemo(() => createOpeningApi(), []);
   const teaching = useMemo(() => createTeachingActivityClient(), []);
   const [answer, setAnswer] = useState(initialDraft?.answer ?? "");
-  const [skillLabel, setSkillLabel] = useState(initialDraft?.skillLabel ?? context.intentSummary.slice(0, 200));
+  const [skillLabel, setSkillLabel] = useState(initialDraft?.skillLabel ?? defaultInlineSkillLabel(prompt));
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [recorded, setRecorded] = useState<LearningObservation | null>(null);

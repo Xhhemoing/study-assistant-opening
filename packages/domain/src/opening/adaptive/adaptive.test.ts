@@ -147,6 +147,25 @@ describe("rankForPlan", () => {
     }));
     expect(interleaveCourses(items).map((item) => item.courseId)).toEqual([courseA, courseA, courseB, courseA, null, courseA]);
   });
+
+  it("does not let course alternation pull a lower band ahead of a higher band", () => {
+    // Three A retests would invite a B pull-forward if bands were flat-merged;
+    // B is only an own pending task, so it must stay after all retests.
+    const result = rankForPlan({
+      tasks: [
+        task(1, { courseId: courseA, retest: { candidateId: id(80), activityId: id(81), courseId: courseA, skillLabel: "a1", prompt: "r1", recommendedAt: "2026-10-21T01:00:00.000Z" } }),
+        task(2, { courseId: courseA, retest: { candidateId: id(82), activityId: id(83), courseId: courseA, skillLabel: "a2", prompt: "r2", recommendedAt: "2026-10-21T01:01:00.000Z" } }),
+        task(3, { courseId: courseA, retest: { candidateId: id(84), activityId: id(85), courseId: courseA, skillLabel: "a3", prompt: "r3", recommendedAt: "2026-10-21T01:02:00.000Z" } }),
+        task(4, { courseId: courseB, priority: 1 }),
+      ],
+      suggestions: [],
+      yesterdayAccepted: [],
+      date: "2026-10-21", timeZone: tz, now: new Date("2026-10-21T02:00:00.000Z"),
+    });
+    expect(result.orderedTaskIds).toEqual([id(1), id(2), id(3), id(4)]);
+    expect(result.reasons[id(1)]?.code).toBe("retest_due");
+    expect(result.reasons[id(4)]?.code).toBe("pending_task");
+  });
 });
 
 describe("autonomy and coach", () => {

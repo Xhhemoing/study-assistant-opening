@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { InlineAttempt } from "./inline-attempt";
+import { InlineAttempt, defaultInlineSkillLabel } from "./inline-attempt";
 import { createInlineAttemptSubmission } from "./inline-attempt-submission";
 import { createInlineAttemptDrafts, inlineAttemptIdentityKey } from "./inline-attempt-drafts";
 
@@ -41,6 +41,19 @@ describe("inline teaching attempt", () => {
     await session.submit();
     expect(client.submitAttempt).toHaveBeenCalledTimes(1);
   });
+
+  it("defaults the skill label from the prompt, not the activity intent title", () => {
+    expect(defaultInlineSkillLabel("求矩阵的秩")).toBe("求矩阵的秩");
+    expect(defaultInlineSkillLabel("  a\n\tb  ")).toBe("a b");
+    const html = renderToStaticMarkup(createElement(InlineAttempt, {
+      blockId: id,
+      prompt: "求极限定义",
+      context: { id, courseId: id, sourceIds: [id], contentVersion: 3, intentSummary: "今日主题学习", status: "active", onCourseAssociated: vi.fn() },
+    }));
+    expect(html).toContain("求极限定义");
+    expect(html).not.toContain('value="今日主题学习"');
+  });
+
   it("uses one in-flight submission and reuses its identity and client key after an unknown result", async () => {
     const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue({ id }), submitAttempt: vi.fn().mockRejectedValueOnce(new Error("reply lost")).mockResolvedValue({ id }) };
     const session = createInlineAttemptSubmission(identity, client);
