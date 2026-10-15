@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { TurnInput, TurnRecord } from "@aistudy/contracts";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
-import { resetE2eDatabase } from "../../scripts/db-reset-e2e";
+import { resetE2eDatabase } from "./e2e-database";
 
 const conversationId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -73,9 +73,7 @@ async function unknownConversation(page: Page, { newerAnswerDuringPoll = false, 
 }
 
 test.beforeAll(async () => {
-  const url = process.env.E2E_DATABASE_URL;
-  if (!url) throw new Error("E2E_DATABASE_URL is required for the isolated recovery suite");
-  await resetE2eDatabase(url);
+  resetE2eDatabase("recovery");
   await seedOpeningOwner();
 });
 test.beforeEach(async ({ context, baseURL }) => { await loginOpeningOwner(context.request, baseURL!); });
