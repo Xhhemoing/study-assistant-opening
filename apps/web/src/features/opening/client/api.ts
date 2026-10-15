@@ -26,6 +26,7 @@ import {
   type MemoryDecision,
   type MemoryCandidateDecision,
   type MemoryItem,
+  type AcceptPlanInput,
   type PlanDraft,
   type TaskItem,
   type TaskCreateInput,
@@ -114,11 +115,14 @@ export type ThinTutorActionView = z.infer<typeof thinTutorActionSchema>;
 export class OpeningApiError extends Error {
   readonly status: number;
   readonly code: string | null;
-  constructor(status: number, message: string, code: string | null = null) {
+  /** Machine-readable cause the server attached (e.g. a plan-accept conflict reason). */
+  readonly reason: string | null;
+  constructor(status: number, message: string, code: string | null = null, reason: string | null = null) {
     super(message);
     this.name = "OpeningApiError";
     this.status = status;
     this.code = code;
+    this.reason = reason;
   }
 }
 
@@ -132,7 +136,7 @@ async function parseJson(res: Response): Promise<unknown> {
   }
 }
 
-function readError(body: unknown): { message: string; code: string | null } {
+function readError(body: unknown): { message: string; code: string | null; reason: string | null } {
   if (
     body &&
     typeof body === "object" &&
@@ -140,13 +144,14 @@ function readError(body: unknown): { message: string; code: string | null } {
     body.error &&
     typeof body.error === "object"
   ) {
-    const err = body.error as { message?: unknown; code?: unknown };
+    const err = body.error as { message?: unknown; code?: unknown; reason?: unknown };
     const message =
       typeof err.message === "string" ? err.message : "request failed";
     const code = typeof err.code === "string" ? err.code : null;
-    return { message, code };
+    const reason = typeof err.reason === "string" ? err.reason : null;
+    return { message, code, reason };
   }
-  return { message: "request failed", code: null };
+  return { message: "request failed", code: null, reason: null };
 }
 
 async function request(
@@ -163,11 +168,12 @@ async function request(
   });
   const body = await parseJson(res);
   if (!res.ok) {
-    const { message, code } = readError(body);
+    const { message, code, reason } = readError(body);
     throw new OpeningApiError(
       res.status,
       message === "request failed" ? `request failed (${res.status})` : message,
       code,
+      reason,
     );
   }
   return body;
@@ -187,6 +193,7 @@ const todayPlanSchema = z.object({
   dailyDraft: planDraftSchema.nullable().optional(),
   dailyDraftSkippedReason: dailyDraftSkippedReasonSchema.nullable().optional(),
   unplannedPendingCount: z.number().int().nonnegative().optional(),
+  hasNewerSuggestion: z.boolean().optional(),
 });
 export type TodayPlanRead = z.infer<typeof todayPlanSchema>;
 const taskListSchema = z.object({ tasks: z.array(taskItemSchema) });
@@ -517,7 +524,7 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return planDraftSchema.parse(body);
     },
 
-    async acceptPlan(input: { draftId: string; expectedBaseVersion: number; clientKey: string }): Promise<PlanDraft> {
+    async acceptPlan(input: AcceptPlanInput): Promise<PlanDraft> {
       const body = await request(`/api/opening/plans/${input.draftId}/accept`, { method: "POST", body: JSON.stringify(input) }, fetchImpl);
       return planDraftSchema.parse(body);
     },

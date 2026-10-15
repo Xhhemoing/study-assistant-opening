@@ -3,6 +3,7 @@ import {
   teachingActivityAssociateCourseInputSchema,
   teachingActivityCreateInputSchema,
   teachingActivitySchema,
+  teachingLearnerFocusSchema,
 } from "./teaching-activity";
 import {
   learningSessionCreateInputSchema,
@@ -88,4 +89,19 @@ it("parses a stored teaching activity with null courseId", () => {
     updatedAt: "2026-10-11T02:00:00.000Z",
   });
   expect(row.courseId).toBeNull();
+});
+
+it("accepts a server-built learner focus and rejects unknown kinds or extra fields", () => {
+  const focus = {
+    skillLabel: "矩阵乘法",
+    activityKind: "targeted_explain",
+    reasonCode: "verified_incorrect",
+    focusObservationId: uuid,
+    recentAssistance: ["independent", "hinted"],
+    strategyVersion: "adaptive-1",
+  };
+  expect(teachingLearnerFocusSchema.parse(focus)).toEqual(focus);
+  expect(teachingLearnerFocusSchema.safeParse({ ...focus, activityKind: "lecture" }).success).toBe(false);
+  expect(teachingLearnerFocusSchema.safeParse({ ...focus, mastery: 0.9 }).success).toBe(false);
+  expect(teachingLearnerFocusSchema.safeParse({ ...focus, recentAssistance: ["hinted", "hinted", "hinted", "hinted"] }).success).toBe(false);
 });

@@ -22,6 +22,7 @@ import {
   CardRepositoryError,
   PracticeContentRepositoryError,
   OpeningSourceError,
+  OpeningPlanError,
   BackupRestoreError,
   type RevisionProposalRepository,
   type CourseMembershipRepository,
@@ -339,6 +340,12 @@ export function mapDomainError(error: unknown): ApiError {
   }
   const message =
     error instanceof Error ? error.message : "Unexpected error";
+  if (error instanceof OpeningPlanError) {
+    if (error.code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
+    if (error.code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
+    const conflict = new ApiError("CONFLICT", error.message, 409);
+    return error.reason ? Object.assign(conflict, { reason: error.reason }) : conflict;
+  }
   if (error instanceof OpeningSourceError) {
     if (error.code === "NOT_FOUND") {
       return new ApiError("NOT_FOUND", error.message, 404);

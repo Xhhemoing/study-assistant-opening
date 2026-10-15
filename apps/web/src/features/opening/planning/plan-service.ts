@@ -84,6 +84,11 @@ export type TodayPlanResult = {
   dailyDraft?: PlanDraft | null;
   dailyDraftSkippedReason?: DailyDraftSkippedReason | null;
   unplannedPendingCount?: number;
+  /**
+   * Adaptive planning: learning changed since the open draft was built, but the draft is
+   * still executable. The UI offers a refresh instead of replacing the draft on its own.
+   */
+  hasNewerSuggestion?: boolean;
 };
 
 /** Workspace default when settings omit timeZone (aligned with planning-settings / DL7). */

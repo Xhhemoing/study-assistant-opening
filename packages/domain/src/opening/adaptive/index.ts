@@ -36,3 +36,15 @@ export {
   type CoachDenyReason,
 } from "./autonomy";
 export { MIN_FREED_MINUTES, shouldOfferReplan, type ReplanOffer } from "./replan-trigger";
+export type {
+  LearnerSnapshotSources,
+  NextLearningStep,
+  NextLearningStepInput,
+  NextStepReasonCode,
+  SnapshotCourseSource,
+  SnapshotDataStatus,
+  SnapshotKnowledgeNode,
+  SnapshotObservation,
+  SnapshotSkillSummary,
+  SnapshotTaskRow,
+} from "./snapshot-sources";
