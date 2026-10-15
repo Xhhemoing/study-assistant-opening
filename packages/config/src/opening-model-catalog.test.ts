@@ -7,6 +7,21 @@ describe("server model catalog", () => {
     expect(loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsVision: true }]) }).models[0]).toMatchObject({ supportsVision: true });
     expect(loadOpeningModelCatalog(env).models[0]?.supportsVision).toBe(false);
   });
+  it("enables audio only when the server catalog declares support", () => {
+    expect(loadOpeningModelCatalog(env).models[0]?.supportsAudio).toBe(false);
+    expect(loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsAudio: true }]) }).models[0]?.supportsAudio).toBe(true);
+  });
+  it("allows zero-price free models without a paid budget only under a valid daily request cap", () => {
+    const free = { ...entry, billing: "free_tier", inputCentsPerMillion: 0, outputCentsPerMillion: 0, dailyRequestCap: 200 };
+    const source = { ...env, OPENING_MODEL_DAILY_CAP_CENTS: "0", OPENING_MODEL_CATALOG: JSON.stringify([free]) };
+    expect(loadOpeningModelCatalog(source).models[0]).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, availability: "available" });
+    for (const dailyRequestCap of [null, 0, 1.5, 100_001]) {
+      expect(() => loadOpeningModelCatalog({ ...source, OPENING_MODEL_CATALOG: JSON.stringify([{ ...free, dailyRequestCap }]) })).toThrow(/配置无效/);
+    }
+    for (const dailyRequestCap of [1, 100_000]) {
+      expect(loadOpeningModelCatalog({ ...source, OPENING_MODEL_CATALOG: JSON.stringify([{ ...free, dailyRequestCap }]) }).models[0]?.availability).toBe("available");
+    }
+  });
   it("preserves all legacy environment defaults", () => {
     expect(loadOpeningModelCatalog({})).toMatchObject({ defaultModelId: "default", dailyCapCents: 0, models: [{ id: "default", modelName: "gpt-4o-mini", availability: "missing_key" }] });
   });

@@ -1,8 +1,9 @@
+import { readOpeningObservationCardDraft } from "./opening-card-drafts";
+import { createOpeningLearningSessionInTx } from "./opening-learning-session-create";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
-import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { HelpExposure, LearningObservation, LearningSessionCreateInput, ObservationInput, ObservationRevisionInput, ProblemRef, Scope } from "@aistudy/contracts";
-import { admitLearningSources, learningError, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, mapLearningObservation } from "./opening-learning-facts";
+import { admitLearningSources, learningError, lockLearningSession, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, mapLearningObservation } from "./opening-learning-facts";
 import { reviseOpeningLearningObservation, readOpeningObservationHistory } from "./opening-observation-revisions";
 import { insertOpeningLearningObservation } from "./opening-learning-observations";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
@@ -18,47 +19,11 @@ export function createOpeningLearningRepository(sql: Sql) {
   }
   return {
     getSession,
+    observationCardDraft: (scope: Scope, id: string) => readOpeningObservationCardDraft(sql, scope, id),
     reviseObservation: (scope: Scope, input: ObservationRevisionInput) => reviseOpeningLearningObservation(sql, scope, input),
     observationHistory: (scope: Scope, id: string) => readOpeningObservationHistory(sql, scope, id),
     async createSession(scope: Scope, input: LearningSessionCreateInput): Promise<{ id: string }> {
-      return sql.begin(async (tx) => {
-        await lockLearningOwner(tx, scope);
-        const course = await tx`SELECT id FROM courses WHERE id=${input.courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
-        if (!course.length) throw learningError("NOT_FOUND", "course not found");
-        await admitLearningSources(tx, scope, input.sourceIds);
-        const clientKey = `legacy-course-continue:${input.courseId}`;
-        const existing = await tx`
-          SELECT id FROM opening_teaching_activities
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}
-          FOR UPDATE`;
-        let activityId = existing[0] ? String(existing[0].id) : randomUUID();
-        if (!existing[0]) {
-          const createIntent = { intentKind: "course_continue", courseId: input.courseId, legacy: true };
-          const inserted = await tx`
-            INSERT INTO opening_teaching_activities (
-              id, workspace_id, owner_user_id, course_id, status, generate_status,
-              intent_kind, intent_summary, source_ids, goal_json, path_version, content_version,
-              checkpoint_json, client_key, create_intent
-            ) VALUES (
-              ${activityId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.courseId}, 'active', 'ready',
-              'course_continue', 'Legacy course activity', ${[] as string[]}, ${tx.json({})},
-              1, 0, ${tx.json({})}, ${clientKey}, ${tx.json(createIntent as never)}
-            )
-            ON CONFLICT (workspace_id, owner_user_id, client_key) DO NOTHING
-            RETURNING id`;
-          if (!inserted[0]) {
-            const raced = await tx`
-              SELECT id FROM opening_teaching_activities
-              WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}`;
-            if (!raced[0]) throw learningError("CONFLICT", "course continue activity write conflict");
-            activityId = String(raced[0].id);
-          }
-        }
-        const id = randomUUID();
-        await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)
-          VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.courseId},${activityId},${input.skillLabel},${input.sourceIds})`;
-        return { id };
-      });
+      return sql.begin(tx => createOpeningLearningSessionInTx(tx, scope, input));
     },
     async assertOwnedCourse(scope: Scope, courseId: string): Promise<void> {
       const rows = await sql`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id

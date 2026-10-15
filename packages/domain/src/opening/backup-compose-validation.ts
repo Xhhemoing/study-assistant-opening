@@ -4,6 +4,7 @@ import { isJournal, isUuid } from "./backup-validation";
 
 export const BACKUP_TABLES = new Set([
   ...LEARNING_STATE_TABLES,
+  "cards", "card_review_states", "learning_events",
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
@@ -126,5 +127,5 @@ export function validBackupTableSet(tables: Record<string, unknown[]>): boolean 
   const names = Object.keys(tables);
   return names.every(name => BACKUP_TABLES.has(name))
     && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name)
-      || name === "opening_workspace_history_revisions" || name in tables);
+      || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events"].includes(name) || name in tables);
 }

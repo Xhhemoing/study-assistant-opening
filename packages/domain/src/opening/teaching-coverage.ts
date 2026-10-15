@@ -192,3 +192,17 @@ export function mergeCoverageStatus(rows: CoverageRow[]): CoverageStatus {
   }
   return worst;
 }
+
+/** Only recorded progress counts; finishing never implies all blocks were read. */
+export function summarizeTeachingBlockCoverage(
+  blocks: readonly { blockId: string; position: number; role: string; blockType: string }[],
+  checkpoint: Record<string, unknown>,
+): { coveredBlockIds: string[]; skippedBlockIds: string[] } {
+  const visible = [...blocks].filter((b) => b.role !== "answer_key" && b.blockType !== "answer_key" && b.blockType !== "solution").sort((a, b) => a.position - b.position);
+  const skipped = new Set(Array.isArray(checkpoint.skippedBlockIds) ? checkpoint.skippedBlockIds.filter((id): id is string => typeof id === "string") : []);
+  const cursor = visible.find((b) => b.blockId === checkpoint.currentBlockId);
+  return {
+    coveredBlockIds: cursor ? visible.filter((b) => b.position <= cursor.position && !skipped.has(b.blockId)).map((b) => b.blockId) : [],
+    skippedBlockIds: visible.filter((b) => skipped.has(b.blockId)).map((b) => b.blockId),
+  };
+}

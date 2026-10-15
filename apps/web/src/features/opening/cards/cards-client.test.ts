@@ -16,6 +16,8 @@ const sampleCard = {
   back: "背面",
   sourceDocumentId: DOC,
   syllabusPointId: null,
+  courseId: null,
+  skillLabel: null,
   tags: [],
   archived: false,
   contentVersion: 1,
@@ -105,4 +107,12 @@ it("reuses the same idempotencyKey when retrying the same card grade intent", ()
   const changed = resolveCardGradeIdentity(first, CARD, "hard", () => "new-key");
   expect(changed.key).toBe("new-key");
   expect(changed.fingerprint).toBe(`${CARD}:hard`);
+});
+
+it("posts course/skill attribution and stable card identity without forcing a source note", async () => {
+  const client = createOpeningCardsClient(async (_url, init) => {
+    expect(JSON.parse(String(init?.body))).toEqual({ cardId: CARD, front: "Q", back: "A", courseId: WORKSPACE, skillLabel: "fractions" });
+    return Response.json({ card: { ...sampleCard, sourceDocumentId: null, courseId: WORKSPACE, skillLabel: "fractions" } });
+  });
+  expect((await client.createCard({ cardId: CARD, front: "Q", back: "A", courseId: WORKSPACE, skillLabel: "fractions" })).card.courseId).toBe(WORKSPACE);
 });

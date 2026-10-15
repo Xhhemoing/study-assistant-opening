@@ -27,6 +27,8 @@ export type CardRecord = {
   sourceDocumentId: string | null;
   syllabusPointId: string | null;
   tags: string[];
+  courseId: string | null;
+  skillLabel: string | null;
   archived: boolean;
   contentVersion: number;
   pausedUntil: string | null;
@@ -50,6 +52,9 @@ export type CardRepository = {
     front: string;
     back: string;
     tags?: string[];
+    courseId?: string | null;
+    observationId?: string;
+    skillLabel?: string | null;
     sourceDocumentId?: string | null;
     syllabusPointId?: string | null;
     cardId?: string;
@@ -119,6 +124,8 @@ export function mapCard(row: Row): CardRecord {
     sourceDocumentId: row.source_document_id,
     syllabusPointId: row.syllabus_point_id,
     tags: row.tags ?? [],
+    courseId: row.course_id ?? null,
+    skillLabel: row.skill_label ?? null,
     archived: row.archived,
     contentVersion: row.content_version,
     pausedUntil: row.paused_until == null ? null : toIso(row.paused_until),

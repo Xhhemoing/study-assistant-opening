@@ -55,6 +55,12 @@ export const ENV_GROUPS: { id: EnvGroupId; title: string }[] = [
 ];
 
 const both: EnvConsumer[] = ["web", "worker"];
+const modelCatalogExample: TemplateLine = {
+  value: JSON.stringify([{ id: "fast", label: "日常模型", providerId: "primary", providerLabel: "主供应商", modelName: "your-model-name",
+    baseUrl: "https://your-provider.example/v1", apiKeyEnv: "PRIMARY_MODEL_API_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20,
+    supportsVision: false, supportsAudio: false, billing: "metered", dailyRequestCap: null }]),
+  commented: true,
+};
 
 export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "NODE_ENV", group: "runtime", doc: "development | test | production.", consumers: [...both, "compose"], kind: "enum", enumValues: ["development", "test", "production"], secret: false, dev: { value: "development" }, docker: { value: "production" } },
@@ -95,12 +101,12 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_MODEL_BASE_URL", group: "model", doc: "OpenAI-compatible base URL.", consumers: both, kind: "url", secret: false, dev: { value: "https://api.openai.com/v1" }, docker: { value: "https://api.openai.com/v1" } },
   { name: "OPENING_MODEL_API_KEY", group: "model", doc: "Model API key (secret store only). Key + positive cap requires positive prices.", consumers: both, kind: "string", secret: true, dev: { value: "" }, docker: { value: "" } },
   { name: "OPENING_MODEL_NAME", group: "model", doc: "Model name.", consumers: both, kind: "string", secret: false, dev: { value: "gpt-4o-mini" }, docker: { value: "gpt-4o-mini" } },
-  { name: "OPENING_MODEL_DAILY_CAP_CENTS", group: "model", doc: "Daily cap in provider billing cents (UTC day). 0 disables paid calls.", consumers: both, kind: "int", min: 0, secret: false, dev: { value: "0" }, docker: { value: "0" } },
+  { name: "OPENING_MODEL_DAILY_CAP_CENTS", group: "model", doc: "Daily paid cap in provider billing cents (workspace planning timezone). 0 disables paid calls; configured free_tier models use their request cap.", consumers: both, kind: "int", min: 0, secret: false, dev: { value: "0" }, docker: { value: "0" } },
   { name: "OPENING_MODEL_INPUT_CENTS_PER_MILLION", group: "model", doc: "Input price per million tokens.", consumers: both, kind: "string", secret: false, dev: { value: "0" }, docker: { value: "0" } },
   { name: "OPENING_MODEL_OUTPUT_CENTS_PER_MILLION", group: "model", doc: "Output price per million tokens.", consumers: both, kind: "string", secret: false, dev: { value: "0" }, docker: { value: "0" } },
-  { name: "OPENING_MODEL_CATALOG", group: "model", doc: "Optional JSON model catalog (max 32). apiKeyEnv names a SERVER env var; never inline a key. See docs/operations/opening-model-routing.md.", consumers: both, kind: "json", secret: false, dev: { value: "[{\"id\":\"fast\",\"label\":\"日常模型\",\"providerId\":\"primary\",\"providerLabel\":\"主供应商\",\"modelName\":\"your-model-name\",\"baseUrl\":\"https://your-provider.example/v1\",\"apiKeyEnv\":\"PRIMARY_MODEL_API_KEY\",\"inputCentsPerMillion\":10,\"outputCentsPerMillion\":20}]", commented: true } },
-  { name: "OPENING_MODEL_DEFAULT_ID", group: "model", doc: "Catalog default model id.", consumers: both, kind: "string", secret: false, dev: { value: "fast", commented: true } },
-  { name: "PRIMARY_MODEL_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true } },
+  { name: "OPENING_MODEL_CATALOG", group: "model", doc: "Optional JSON catalog (max 32). apiKeyEnv names a SERVER secret; never inline a key. supportsAudio defaults false; billing=metered requires positive prices, billing=free_tier allows zero prices and requires dailyRequestCap=1..100000. See docs/operations/opening-model-routing.md.", consumers: both, kind: "json", secret: false, dev: modelCatalogExample, docker: modelCatalogExample },
+  { name: "OPENING_MODEL_DEFAULT_ID", group: "model", doc: "Catalog default model id.", consumers: both, kind: "string", secret: false, dev: { value: "fast", commented: true }, docker: { value: "fast", commented: true } },
+  { name: "PRIMARY_MODEL_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true }, docker: { value: "", commented: true } },
   { name: "LANT_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target for a Lant provider (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true } },
 
   { name: "OPENING_TUTOR_MAX_CONTEXT_CHARS", group: "tutor", doc: "Finite positive integer.", consumers: ["worker"], kind: "int", min: 1, max: 100000, secret: false, dev: { value: "12000" }, docker: { value: "12000" } },

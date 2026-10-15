@@ -30,6 +30,11 @@ type ReadState =
   | { kind: "error"; message: string }
   | { kind: "loggedOut" };
 
+export function advanceGradedCard(state: ReadState, cardId: string, queueRequest: number, activeQueueRequest: number): ReadState {
+  if (state.kind !== "ready" || queueRequest !== activeQueueRequest || state.items[state.index]?.card.id !== cardId) return state;
+  return { ...state, index: state.index + 1, flipped: false };
+}
+
 export function CardReviewView({ client: supplied }: { client?: OpeningCardsClient }) {
   const client = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
   const [state, setState] = useState<ReadState>({ kind: "loading" });
@@ -64,12 +69,14 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
 
   useEffect(() => {
     void refresh();
+    return () => { requestId.current++; };
   }, [refresh, retryToken]);
 
   const current = state.kind === "ready" ? state.items[state.index] ?? null : null;
 
   const gradeCard = useCallback(async (grade: ReviewGrade) => {
     if (state.kind !== "ready" || !current || !state.flipped || grading) return;
+    const queueRequest = requestId.current;
     setGrading(true);
     setGradeError("");
     const identity = resolveCardGradeIdentity(
@@ -85,16 +92,11 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
         grade,
         idempotencyKey: identity.key,
       });
+      if (queueRequest !== requestId.current) return;
       gradeIdentity.current = null;
-      setState((currentState) => {
-        if (currentState.kind !== "ready") return currentState;
-        return {
-          ...currentState,
-          index: currentState.index + 1,
-          flipped: false,
-        };
-      });
+      setState((currentState) => advanceGradedCard(currentState, current.card.id, queueRequest, requestId.current));
     } catch (error) {
+      if (queueRequest !== requestId.current) return;
       setGradeError(
         error instanceof Error ? error.message : "评分保存失败，请保持当前卡片并重试。",
       );
@@ -107,13 +109,14 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
     <section className="flex h-full min-h-0 w-full flex-col bg-white">
       <PageHeader
         title="记忆卡片"
-        description="复习你从材料或辅导回答制成的卡片。评分只影响记忆调度，不会写入补测或学习证据。"
+        description="复习你制成的卡片。关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。"
         action={
           <div className="flex flex-wrap gap-2">
             {state.kind !== "loggedOut" && state.kind !== "loading" ? (
               <button
                 type="button"
                 className={secondaryButtonClass}
+                disabled={grading}
                 onClick={() => setRetryToken((value) => value + 1)}
               >
                 <RefreshCw size={14} aria-hidden />
@@ -151,8 +154,8 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
             title="今天没有到期的记忆卡片"
             description="可在辅导回答中用「制成卡片」把材料沉淀为记忆卡；到期后会出现在这里。"
             action={
-              <Link href="/opening/today" className={secondaryButtonClass}>
-                返回今天
+              <Link href="/opening/assistant" className={ui.primary}>
+                去助理制成卡片
               </Link>
             }
           />

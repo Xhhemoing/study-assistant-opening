@@ -58,8 +58,8 @@ describe("Today teaching-activity CTA semantics (CT-03)", () => {
       createElement(TeachingActivityEmpty, { onStart: () => undefined }),
     );
     expect(html).toContain("开始学习");
-    expect(html).toContain("不会伪造讲义");
-    expect(html).toContain("打开自由对话（次要）");
+    expect(html).toContain("AI 主讲需要先配置模型并开启教学功能");
+    expect(html).toContain("先聊一个问题");
     expect(html).not.toContain("AssistantView");
   });
 

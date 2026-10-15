@@ -26,6 +26,7 @@ import {
 } from "../teaching/teaching-workspace";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
+import { TaskLearningActionContext } from "./task-row-actions";
 
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
@@ -242,8 +243,10 @@ export function TodayDashboard({
     setTask(next);
     if (shouldCloseTodayQueue(source)) setQueueOpen(false);
   }, []);
+  const taskStartInFlight = useRef(false);
 
   const runPrimaryCta = useCallback(async () => {
+    if (taskStartInFlight.current) return;
     setCtaError(null);
     const existing = pickCurrentTeachingActivity(activities);
     const plan = planTodayPrimaryCta(existing, clientInit);
@@ -253,6 +256,7 @@ export function TodayDashboard({
       setCtaFocusNonce((n) => n + 1);
       return;
     }
+    taskStartInFlight.current = true;
     setCtaBusy(true);
     try {
       const continueSources = Object.keys(state.continueItem?.sourceVersions ?? {});
@@ -278,9 +282,26 @@ export function TodayDashboard({
         error instanceof OpeningApiError ? error.message : "创建教学活动失败";
       setCtaError(message);
     } finally {
+      taskStartInFlight.current = false;
       setCtaBusy(false);
     }
   }, [activities, api, clientInit, state.continueItem, timeZone]);
+
+  const startTaskLearning = useCallback(async (selected: StudyTask) => {
+    if (taskStartInFlight.current || !teachingLoopTrialEnabled) return;
+    taskStartInFlight.current = true; setCtaBusy(true); setCtaError(null);
+    try {
+      const created = await api.createTeachingActivity(buildStartLearningCreateInput({
+        localDate: localDateKey(new Date(), timeZone), taskId: selected.id,
+        courseId: selected.courseId, courseTitle: selected.title,
+      }));
+      setTask(selected);
+      setActivities((rows) => [created, ...rows.filter((row) => row.id !== created.id)]);
+      setSelectedActivity(created); setActivityLoad("ready");
+      setCtaPreferWorkspace(true); setCtaFocusNonce((n) => n + 1); setQueueOpen(false);
+    } catch (reason) { setCtaError(reason instanceof Error ? reason.message : "任务主讲创建未确认，请用同一任务重新读取。"); }
+    finally { taskStartInFlight.current = false; setCtaBusy(false); }
+  }, [api, teachingLoopTrialEnabled, timeZone]);
 
 
   useEffect(() => {
@@ -294,6 +315,7 @@ export function TodayDashboard({
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
+      <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex h-full min-h-0 flex-col">
         <h1 className="sr-only">今日学习工作台</h1>
         <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 lg:hidden">
@@ -314,7 +336,7 @@ export function TodayDashboard({
           <TodayLearningContext
             item={state.continueItem}
             onShowActions={showActions}
-            primaryAction={
+            primaryAction={currentActivity ? (
               <button
                 type="button"
                 className={buttonClass}
@@ -324,7 +346,7 @@ export function TodayDashboard({
               >
                 {ctaBusy ? "处理中…" : ctaLabel}
               </button>
-            }
+            ) : null}
             secondaryAction={
               <Link href={assistantHref} className={ui.quiet}>
                 自由对话
@@ -422,6 +444,7 @@ export function TodayDashboard({
           </div>
         </div>
       </div>
+      </TaskLearningActionContext.Provider>
     </TaskQueueRefreshContext.Provider>
   );
 }

@@ -172,6 +172,8 @@ function buildCards(ownerUserId: string, now: Date): { cards: ReviewCard[]; stat
       front,
       back,
       sourceDocumentId: null,
+      courseId: null,
+      skillLabel: null,
       syllabusPointId: pointIndex === null || pointIndex === undefined ? null : (SEED_SYLLABUS[pointIndex]?.id ?? null),
       tags: ["高数"],
       archived: i === 7,

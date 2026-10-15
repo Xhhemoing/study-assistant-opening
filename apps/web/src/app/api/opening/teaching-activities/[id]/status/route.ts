@@ -7,8 +7,7 @@ import {
 import { readOpeningJsonBody } from "../../../../../../features/opening/request-body";
 
 /**
- * PATCH teaching activity status active↔paused (V2-14 thin).
- * complete ≠ mastery remains a separate product path.
+ * PATCH teaching activity status; completion is terminal and does not imply mastery.
  */
 export async function PATCH(
   request: Request,

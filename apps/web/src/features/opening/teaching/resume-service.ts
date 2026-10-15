@@ -3,6 +3,7 @@ import {
   teachingActivityStatusUpdateInputSchema,
   teachingCheckpointSaveInputSchema,
   teachingCheckpointSaveResultSchema,
+  teachingActivitySummarySchema,
   uuidSchema,
   type LearningResume,
   type Scope,
@@ -31,6 +32,7 @@ import {
   readInteractionParams,
   readOpenProblemIds,
   resumeSummarySkipped,
+  summarizeTeachingBlockCoverage,
 } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
@@ -56,6 +58,23 @@ export function createOpeningTeachingResumeService(sql: Sql) {
   const attemptsRepo = createOpeningLearningAttemptRepository(sql);
 
   return {
+    async getSummary(scope: Scope, activityIdRaw: string) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      try {
+        const activity = await assertOwnedActivity(sql, scope, activityId);
+        const [init, facts] = await Promise.all([
+          content.getClientInit(scope, activityId),
+          activities.readSummaryFacts(scope, activityId),
+        ]);
+        const taskId = uuidSchema.safeParse(facts.taskId);
+        return teachingActivitySummarySchema.parse({
+          ...summarizeTeachingBlockCoverage(init?.blockOrder ?? [], activity.checkpointJson ?? {}),
+          attempts: facts.attempts,
+          openQuestions: facts.openQuestions,
+          taskId: taskId.success ? taskId.data : null,
+        });
+      } catch (error) { mapError(error); }
+    },
     async getResume(scope: Scope, activityIdRaw: string): Promise<LearningResume> {
       const activityId = uuidSchema.parse(activityIdRaw);
       try {

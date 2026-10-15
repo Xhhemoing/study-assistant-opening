@@ -86,6 +86,9 @@ export async function createCardForPrincipal(
     tags: parsed.tags,
     sourceDocumentId: parsed.sourceDocumentId,
     syllabusPointId: parsed.syllabusPointId,
+    courseId: parsed.courseId,
+    observationId: parsed.observationId,
+    skillLabel: parsed.skillLabel,
   });
   return { card };
 }

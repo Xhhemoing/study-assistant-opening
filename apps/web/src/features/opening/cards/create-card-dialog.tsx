@@ -1,6 +1,6 @@
 "use client";
 
-import type { SnippetCreateInput } from "@aistudy/contracts";
+import type { ObservationCardDraft, SnippetCreateInput } from "@aistudy/contracts";
 import { Check, LoaderCircle, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -8,13 +8,13 @@ import type { OpeningApi } from "../client/api";
 import { OpeningApiError } from "../client/api";
 import { buttonClass, secondaryButtonClass, textareaClass, ui } from "../design/ui";
 import { createOpeningCardsClient, type OpeningCardsClient } from "./cards-client";
+import { createOpeningLearningClient } from "../client/learning-client";
 
 type Props = {
-  draft: SnippetCreateInput;
-  api: Pick<OpeningApi, "createSnippet">;
   cards?: OpeningCardsClient;
   onClose: () => void;
-};
+} & ({ draft: SnippetCreateInput; api: Pick<OpeningApi, "createSnippet">; initial?: never }
+  | { initial: ObservationCardDraft; draft?: never; api?: never });
 
 function suggestSides(text: string): { front: string; back: string } {
   const trimmed = text.trim();
@@ -25,20 +25,36 @@ function suggestSides(text: string): { front: string; back: string } {
   };
 }
 
-export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props) {
+export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const headingId = useId();
   const descriptionId = useId();
   const frontId = useId();
   const backId = useId();
+  const courseInputId = useId();
+  const skillInputId = useId();
+  const cardIdentity = useRef<{ intent: string; id: string } | null>(null);
+  const inFlight = useRef(false);
   const cards = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
-  const suggested = useMemo(() => suggestSides(draft.text), [draft.text]);
+  const suggested = useMemo(() => initial ?? suggestSides(draft?.text ?? ""), [draft?.text, initial]);
   const [front, setFront] = useState(suggested.front);
   const [back, setBack] = useState(suggested.back);
   const [sourceDocumentId, setSourceDocumentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [courseId, setCourseId] = useState(initial?.courseId ?? "");
+  const [skillLabel, setSkillLabel] = useState(initial?.skillLabel ?? "");
+  const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
+
+  useEffect(() => {
+    let current = true;
+    void createOpeningLearningClient().listRevisionCourses().then(
+      (items) => { if (current) setCourses(items); },
+      () => { if (current) setError("课程列表暂不可用，可保留原课程或不关联课程。"); },
+    );
+    return () => { current = false; };
+  }, []);
 
   const valid = front.trim().length > 0 && back.trim().length > 0;
 
@@ -53,12 +69,13 @@ export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props
   }, []);
 
   async function submit() {
-    if (busy || saved || !valid) return;
+    if (inFlight.current || saved || !valid) return;
+    inFlight.current = true;
     setBusy(true);
     setError("");
     try {
       let documentId = sourceDocumentId;
-      if (!documentId) {
+      if (!documentId && draft && api) {
         const snippet = await api.createSnippet({
           title: draft.title,
           text: draft.text,
@@ -67,11 +84,12 @@ export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props
         documentId = snippet.documentId;
         setSourceDocumentId(documentId);
       }
-      await cards.createCard({
-        front: front.trim(),
-        back: back.trim(),
-        sourceDocumentId: documentId,
-      });
+      const input = { front: front.trim(), back: back.trim(), sourceDocumentId: documentId,
+        courseId: courseId || null, skillLabel: skillLabel.trim() || null,
+        ...(initial ? { observationId: initial.observationId } : {}) };
+      const intent = JSON.stringify(input);
+      if (cardIdentity.current?.intent !== intent) cardIdentity.current = { intent, id: crypto.randomUUID() };
+      await cards.createCard({ ...input, cardId: cardIdentity.current.id });
       setSaved(true);
     } catch (err) {
       if (err instanceof OpeningApiError) {
@@ -80,6 +98,7 @@ export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props
         setError(err instanceof Error ? err.message : "制成卡片失败，请重试。");
       }
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -117,8 +136,8 @@ export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props
         </header>
         <div className="space-y-4 px-5 py-4">
           <div id={descriptionId} className="space-y-1 text-xs leading-6 text-zinc-600">
-            <p>先把当前回答存为关联笔记，再编辑正反面制成记忆卡片。</p>
-            <p>记忆卡片与补测分开；评分只影响复习调度，不写入学习观察或证据。</p>
+            <p>{draft ? "先把当前回答存为关联笔记，再编辑正反面制成记忆卡片。" : "题干与参考内容已预填，请核对并编辑后再创建；背面为空时请补充参考答案。"}</p>
+            <p>关联课程的复习会记入学习记录，结果按自报保存，不作为独立正确的证明；未关联课程只安排复习。</p>
           </div>
           {saved ? (
             <div
@@ -160,6 +179,20 @@ export function CreateCardDialog({ draft, api, cards: supplied, onClose }: Props
                   onChange={(event) => setBack(event.target.value)}
                   required
                 />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <label className={ui.label} htmlFor={courseInputId}>所属课程（可选）</label>
+                  <select id={courseInputId} className={textareaClass} value={courseId} disabled={busy} onChange={(event) => setCourseId(event.target.value)}>
+                    <option value="">不关联课程</option>
+                    {initial?.courseId && !courses.some((course) => course.id === initial.courseId) ? <option value={initial.courseId}>原所属课程</option> : null}
+                    {courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className={ui.label} htmlFor={skillInputId}>知识点（可选）</label>
+                  <input id={skillInputId} className={textareaClass} value={skillLabel} maxLength={200} disabled={busy} onChange={(event) => setSkillLabel(event.target.value)} />
+                </div>
               </div>
               {!valid ? (
                 <p className="text-xs leading-5 text-amber-800">正反面都不能为空。</p>

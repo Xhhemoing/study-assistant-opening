@@ -55,6 +55,7 @@ import {
 
 type ActivityRow = {
   id: string;
+  status: string;
   workspace_id: string;
   owner_user_id: string;
   generate_status: string;
@@ -231,6 +232,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             };
           }
 
+          if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot accept new commands");
           const specRows = await tx`
             SELECT * FROM opening_teaching_activity_specs
             WHERE workspace_id = ${scope.workspaceId}

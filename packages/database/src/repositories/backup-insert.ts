@@ -1,3 +1,5 @@
+import { uuidSchema } from "@aistudy/contracts";
+import { BackupRestoreError } from "./backup-types";
 import { readNoteBackupProvenance } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
@@ -67,7 +69,7 @@ const COLUMNS: Record<RestoreCollection, Record<string, string>> = {
   cards: {
     id: "id", workspace_id: "workspaceId", owner_user_id: "ownerUserId", front: "front",
     back: "back", source_document_id: "sourceDocumentId", syllabus_point_id: "syllabusPointId",
-    tags: "tags", archived: "archived", content_version: "contentVersion",
+    source_ids: "sourceIds", tags: "tags", course_id: "courseId", skill_label: "skillLabel", archived: "archived", content_version: "contentVersion",
     paused_until: "pausedUntil", maintain_until: "maintainUntil",
     exclude_from_assessment: "excludeFromAssessment", created_at: "createdAt",
     updated_at: "updatedAt",
@@ -123,6 +125,20 @@ export async function loadExistingIds(
 
 export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promise<void> {
   for (const step of plan.steps) {
+    if (step.collection === "cards") {
+      for (const card of step.records) {
+        if (card.courseId != null) {
+          if (!uuidSchema.safeParse(card.courseId).success) throw new BackupRestoreError("VALIDATION", "card course is invalid");
+          const courses = await tx`SELECT id FROM courses WHERE id=${String(card.courseId)} AND workspace_id=${String(card.workspaceId)} FOR SHARE`;
+          if (!courses.length) throw new BackupRestoreError("VALIDATION", "card course is outside target workspace");
+        }
+        if (card.sourceDocumentId != null) {
+          if (!uuidSchema.safeParse(card.sourceDocumentId).success) throw new BackupRestoreError("VALIDATION", "card note is invalid");
+          const notes = await tx`SELECT id FROM library_documents WHERE id=${String(card.sourceDocumentId)} AND workspace_id=${String(card.workspaceId)} FOR SHARE`;
+          if (!notes.length) throw new BackupRestoreError("VALIDATION", "card note is outside target workspace");
+        }
+      }
+    }
     await insertRows(tx, COLLECTION_TABLES[step.collection], step.records, COLUMNS[step.collection]);
     if (step.collection === "documents") {
       for (const record of step.records) {

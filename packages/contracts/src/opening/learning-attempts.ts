@@ -13,6 +13,7 @@ export const learningAttemptProblemInputSchema = z.object({
 export const learningAttemptCreateInputSchema = z.object({
   sessionId: uuidSchema, clientKey: z.string().min(8).max(200),
   problemId: uuidSchema.nullable().optional(), problem: learningAttemptProblemInputSchema.optional(),
+  teachingBlock: z.object({ blockId: uuidSchema, contentVersion: z.number().int().positive() }).strict().optional(),
   requirementKey: z.string().trim().min(1).max(200).nullable().optional(),
 }).strict().refine((input) => !(input.problemId && input.problem), "choose an existing problem or a new problem");
 export const learningAttemptSubmitInputSchema = z.object({

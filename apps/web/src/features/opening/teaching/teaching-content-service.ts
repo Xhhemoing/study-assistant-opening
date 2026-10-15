@@ -24,6 +24,13 @@ function mapError(error: unknown): never {
 export function createOpeningTeachingContentService(sql: Sql) {
   const repo = createOpeningTeachingContentRepository(sql);
   return {
+    async getSubmittedAnswerKey(scope: Scope, activityIdRaw: string, blockIdRaw: string | null, attemptIdRaw: string | null) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      const blockId = uuidSchema.parse(blockIdRaw);
+      const attemptId = uuidSchema.parse(attemptIdRaw);
+      try { return await repo.getSubmittedAnswerKey(scope, activityId, blockId, attemptId); }
+      catch (error) { mapError(error); }
+    },
     async createUnit(scope: Scope, raw: unknown) {
       const input = teachingUnitCreateInputSchema.parse(raw);
       try {

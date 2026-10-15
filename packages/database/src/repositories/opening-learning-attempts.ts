@@ -25,7 +25,29 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
         await lockLearningHistory(tx, scope, courseId);
         const sources = await admitLearningSources(tx, scope, session.source_ids as string[]);
         const sourceVersions = Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)]));
-        const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey: input.requirementKey ?? null };
+        let requirementKey = input.requirementKey ?? null;
+        let referencedProblemVersionKnown = !input.teachingBlock;
+        if (input.teachingBlock) {
+          if (input.requirementKey) throw learningError("VALIDATION", "teaching block sets its own requirement key");
+          const specs = await tx`SELECT s.block_order, s.source_refs, s.version, a.content_version, a.status FROM opening_teaching_activity_specs s
+            JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+            WHERE s.activity_id=${String(session.activity_id)} AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} FOR SHARE OF a,s`;
+          const spec = specs[0];
+          if (!spec || Number(spec.content_version) !== input.teachingBlock.contentVersion || Number(spec.version) !== input.teachingBlock.contentVersion) throw learningError("CONFLICT", "teaching content changed; reread before answering");
+          if (spec.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot accept new attempts");
+          const refs = spec.block_order as Array<{ blockId: string; blockType: string; role: string }>;
+          const ref = refs.find((block) => block.blockId === input.teachingBlock!.blockId);
+          if (!ref || ref.role === "answer_key" || !["prompt", "question"].includes(ref.blockType) && ref.role !== "prompt") throw learningError("VALIDATION", "teaching question not found");
+          const references = spec.source_refs as Array<{ sourceId: string; version?: string | number | null }>;
+          for (const source of references) {
+            const version = source.version == null ? NaN : Number(source.version);
+            if (Number.isInteger(version) && sourceVersions[source.sourceId] !== version) throw learningError("CONFLICT", "teaching reference material version changed; reread the teaching content");
+          }
+          referencedProblemVersionKnown = references.some((source) => source.sourceId === input.problem?.sourceId && source.version != null && Number.isInteger(Number(source.version)));
+          requirementKey = `teaching:${input.teachingBlock.blockId}:v${input.teachingBlock.contentVersion}`;
+        }
+        const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
+          ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}) };
         const replay = await tx`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
         if (replay[0]) {
           if (!isDeepStrictEqual(replay[0].create_intent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
@@ -42,7 +64,7 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
           }
           problemId = randomUUID();
           await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
-            VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${problem.artifactKind})`;
+            VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${referencedProblemVersionKnown ? problem.artifactKind : "unknown"})`;
         }
         if (problemId) {
           const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id
@@ -60,7 +82,7 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
         }
         const revision = await nextLearningHistoryRevision(tx, scope, courseId);
         const rows = await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,requirement_key,problem_id,item_version_id,source_ids,source_versions,client_key,create_intent,history_revision)
-          VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${courseId},${String(session.activity_id)},${session.skill_label},${input.requirementKey ?? null},${problemId},${itemVersionId},${session.source_ids},${tx.json(sourceVersions)},${input.clientKey},${tx.json(intent as never)},${revision})
+          VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${courseId},${String(session.activity_id)},${session.skill_label},${requirementKey},${problemId},${itemVersionId},${session.source_ids},${tx.json(sourceVersions)},${input.clientKey},${tx.json(intent as never)},${revision})
           ON CONFLICT (workspace_id,owner_user_id,client_key) DO NOTHING RETURNING *`;
         if (!rows[0]) throw learningError("CONFLICT", "attempt clientKey already used");
         return mapLearningAttempt(rows[0]);

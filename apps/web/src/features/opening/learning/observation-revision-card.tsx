@@ -1,8 +1,10 @@
 "use client";
 
 import { useReducer, useRef, useState } from "react";
-import type { LearningObservation, ObservationHistory } from "@aistudy/contracts";
+import type { LearningObservation, ObservationHistory, ObservationCardDraft } from "@aistudy/contracts";
 import { createOpeningLearningClient } from "../client/learning-client";
+import { CreateCardDialog } from "../cards/create-card-dialog";
+import { createOpeningCardsClient } from "../cards/cards-client";
 import { ObservationRevisionFields } from "./observation-revision-fields";
 import { currentHistoryRecord, observationRevisionCommand, observationRevisionDraft, observationRevisionFailure, reloadObservationRevisionEditor, type ObservationRevisionEditor } from "./observation-revision-model";
 
@@ -23,6 +25,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
   const [{ history, open: historyOpen }, updateHistory] = useReducer(observationHistoryPanelReducer, { history: null, open: false });
   const [editor, setEditor] = useState<ObservationRevisionEditor | null>(null);
   const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
+  const [cardDraft, setCardDraft] = useState<ObservationCardDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [unavailable, setUnavailable] = useState(false);
@@ -38,6 +41,13 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
       setUnavailable(true); updateHistory({ type: "clear" }); setEditor(null); onChanged();
     }
   };
+
+  async function makeCard() {
+    setBusy(true); setMessage("");
+    try {
+      setCardDraft(await createOpeningCardsClient().observationDraft(current.id));
+    } catch (error) { fail(error); } finally { setBusy(false); }
+  }
 
   async function load(kind?: "replace" | "retract") {
     setBusy(true); setMessage("");
@@ -86,6 +96,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
     <p className="whitespace-pre-wrap break-words text-sm text-zinc-800">{current.answer || "（未填写回答）"}</p>
     <p className="text-xs text-zinc-500">原观察时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
     <div className="flex flex-wrap gap-2">
+      {current.outcome === "incorrect" && current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
       <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => historyOpen ? updateHistory({ type: "close" }) : void load()}>{historyOpen ? "收起历史" : "查看历史"}</button>
       <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void load("replace")}>{current.revisionKind === "retract" ? "纠正并重新纳入" : "纠正记录"}</button>
       {current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void load("retract")}>撤回记录</button> : null}
@@ -104,6 +115,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
       {editor.conflict ? <button type="button" className={buttonClass} disabled={busy} onClick={() => void reload()}>重新载入最新版本并保留输入</button> : null}
       <div className="flex gap-2"><button type="submit" className={buttonClass} disabled={busy || editor.conflict || !editor.reason.trim()}>{busy ? "正在保存…" : editor.revisionKind === "retract" ? "确认撤回" : "保存纠正"}</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setEditor(null)}>取消</button></div>
     </form> : null}
+    {cardDraft ? <CreateCardDialog initial={cardDraft} onClose={() => setCardDraft(null)} /> : null}
     {message ? <p role="status" className="text-sm leading-6 text-zinc-500">{message}</p> : null}
     {busy && !editor ? <p role="status" className="text-sm text-zinc-500">正在读取记录…</p> : null}
   </article>;

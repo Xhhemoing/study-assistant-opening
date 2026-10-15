@@ -17,7 +17,7 @@
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
 | G9 保存回合按模式过滤任务建议（只有 listen 不提任务） | Grok + Claude | `fix/tutor-turn-candidate-mode` / #39 | CI 中，绿后可合 |
-| 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `claude/keen-carson-ls19ie`；交接 `docs/plans/2026-10-15-gpt-handoff.md` | M1/M2/M3 已推送（M3 待修 3 个测试期望）；其余交 GPT；分支含 #43 合并提交 |
+| 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `claude/keen-carson-ls19ie`；交接 `docs/plans/2026-10-15-gpt-handoff.md` | M3–M6/E3–E5 代码已实现，0064 来源隐私/跨包验证中；E1 并发修复中，E2 暂缓；浏览器待用户；推送/合并鉴权受阻 |
 
 ## 下一步（按顺序）
 
@@ -38,6 +38,7 @@
 
 ## 等用户决定
 
+- 本次模型/证据交接：带现有环境 `GH_TOKEN` 的干运行推送返回 `Invalid username or token`；未强行合并或删除分支，旧分支合并状态仍须逐支确认。
 - 合并与删除 worktree 会被 Claude 的权限拦截：需用户/Shipper 合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
 - 本地 worktree 过多（超过 3 个上限）：已合 PR 的 `sao-fix-shell-review-badge-error`、`sao-docs-hermes-self-use-flags`、`sao-test-real-use-ac-03` 可删。
 

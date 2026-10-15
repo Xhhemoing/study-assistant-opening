@@ -1,3 +1,4 @@
+import { validateOpeningBackupCards } from "./backup-cards";
 import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
@@ -35,6 +36,7 @@ export type RestorePreview = {
 
 const TABLE_ALLOWLIST = [
   ...LEARNING_STATE_TABLES,
+  "cards", "card_review_states", "learning_events",
   "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
   "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
   "opening_source_chunks",
@@ -364,6 +366,7 @@ export function validateOpeningRestore(
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);
   validateBackupLearningState(tables, errors);
+  validateOpeningBackupCards(tables, errors);
   for (const object of backup.objects as OpeningBackupObject[]) {
     if (deleted.has(object.sourceId.toLowerCase())) errors.push(`deleted source ${object.sourceId} cannot be restored`);
     if (object.actualSha256 !== undefined && object.actualSha256.toLowerCase() !== object.sha256.toLowerCase()) {

@@ -6,6 +6,7 @@ import type {
   ActivitySpecClientInit,
   ActivitySpecPublishInput,
   Scope,
+  TeachingAnswerKey,
   TeachingBlockRef,
   TeachingDraftAnchor,
   TeachingDraftAnchorsSaveInput,
@@ -26,6 +27,7 @@ import {
 import {
   learningError,
   learningIso,
+  admitLearningSources,
   lockLearningOwner,
 } from "./opening-learning-facts";
 import {
@@ -205,6 +207,50 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
   const library = createLibraryRepository(sql);
 
   return {
+    /** Never unlock a different prompt or a changed revision using an old answer. */
+    async getSubmittedAnswerKey(scope: Scope, activityId: string, blockId: string, attemptId: string): Promise<TeachingAnswerKey> {
+      return sql.begin(async (tx) => {
+        await lockLearningOwner(tx, scope);
+        const activities = await tx`SELECT a.* FROM opening_teaching_activities a
+          JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=${scope.ownerUserId}
+          WHERE a.id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} FOR SHARE OF a`;
+        const activity = activities[0];
+        if (!activity) throw learningError("NOT_FOUND", "teaching activity not found");
+        const sourceIds = activity.source_ids as string[];
+        const admitted = await admitLearningSources(tx, scope, sourceIds);
+        const currentVersions = new Map(admitted.map((source) => [String(source.id), Number(source.version)]));
+        const attempts = await tx`SELECT submitted_at,create_intent,source_versions FROM opening_learning_attempts
+          WHERE id=${attemptId} AND activity_id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        const attempt = attempts[0];
+        if (!attempt?.submitted_at) throw learningError("NOT_FOUND", "submitted teaching attempt not found");
+        const intent = attempt.create_intent as { teachingBlock?: { blockId?: unknown; contentVersion?: unknown } };
+        if (intent.teachingBlock?.blockId !== blockId) throw learningError("VALIDATION", "attempt does not belong to this teaching question");
+        if (intent.teachingBlock.contentVersion !== Number(activity.content_version)) throw learningError("CONFLICT", "teaching content changed; the submitted answer belongs to an earlier version");
+        const specs = await tx`SELECT * FROM opening_teaching_activity_specs WHERE activity_id=${activityId}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!specs[0]) throw learningError("NOT_FOUND", "teaching content not found");
+        const spec = mapSpec(specs[0]);
+        if (spec.version !== intent.teachingBlock.contentVersion) throw learningError("CONFLICT", "teaching specification version changed");
+        const capturedVersions = attempt.source_versions as Record<string, number>;
+        for (const ref of spec.sourceRefs) {
+          const version = ref.version == null ? NaN : Number(ref.version);
+          if (Number.isInteger(version) && (currentVersions.get(ref.sourceId) !== version || capturedVersions[ref.sourceId] !== version)) throw learningError("CONFLICT", "teaching reference material version changed; reread the teaching content");
+        }
+        const ordered = [...spec.blockOrder].sort((a, b) => a.position - b.position);
+        const index = ordered.findIndex((block) => block.blockId === blockId && (block.role === "prompt" || block.blockType === "question" || block.blockType === "prompt"));
+        const following = index < 0 ? undefined : ordered[index + 1];
+        if (!following || !isAnswerKeyBlock(following.blockType, following.role)) return { answer: null, referenceSourceId: null };
+        const revisions = await tx`SELECT blocks FROM library_revisions WHERE workspace_id=${scope.workspaceId}
+          AND document_id=${spec.documentId} AND revision_number=${spec.revisionNumber}`;
+        if (!revisions[0]) throw learningError("NOT_FOUND", "teaching revision not found");
+        const revision = revisions[0] as { blocks: Array<{ id: string; content: Record<string, unknown> }> };
+        const block = revision.blocks.find((row) => row.id === following.blockId);
+        const body = block?.content;
+        const answer = body && [body.text, body.markdown, body.answer, body.solution].find((value): value is string => typeof value === "string");
+        const reference = spec.sourceRefs.find((ref) => ref.version != null && Number.isInteger(Number(ref.version)) && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
+        return { answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null };
+      });
+    },
     async createUnit(scope: Scope, input: TeachingUnitCreateInput): Promise<TeachingUnit> {
       const lifecycle = input.lifecycle ?? "candidate";
       const goals = input.goals ?? [];
@@ -372,6 +418,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         if (currentContentVersion !== input.expectedVersion) {
           throw learningError("CONFLICT", "stale activity content version");
         }
+        if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot publish new content");
 
         const specId = existingSpec?.id ?? randomUUID();
         const upserted = await tx`
@@ -490,6 +537,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         if (contentVersion !== input.expectedVersion) {
           throw learningError("CONFLICT", "stale activity content version for draft save");
         }
+        if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot save new drafts");
 
         const specRows = await tx`
           SELECT block_order FROM opening_teaching_activity_specs
@@ -561,6 +609,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         if (contentVersion !== input.expectedVersion) {
           throw learningError("CONFLICT", "stale activity content version for checkpoint save");
         }
+        if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot change its checkpoint");
 
         if (input.drafts) {
           const specRows = await tx`

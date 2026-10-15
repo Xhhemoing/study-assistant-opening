@@ -1,3 +1,6 @@
+import { captureOpeningObservationCardOrigin } from "./opening-card-drafts";
+import { admitLearningSources, lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { parseContextSourceRefs } from "./opening-context-provenance";
 import { createInitialState } from "@aistudy/domain";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
@@ -32,14 +35,36 @@ export function createCardRepository(sql: Sql): CardRepository {
       try {
         return await sql.begin(async (tx) => {
           const client = tx as Sql;
+          const scope = { workspaceId: input.workspaceId, ownerUserId: input.ownerUserId };
+          await lockWorkspaceLearningHistory(tx, scope);
+          let sourceIds = input.observationId ? (await captureOpeningObservationCardOrigin(tx, scope, input.observationId)).sourceIds : [];
+          if (input.sourceDocumentId) {
+            const [document] = await tx`SELECT d.id,np.document_id AS provenance_id,np.context_source_refs FROM library_documents d
+              LEFT JOIN opening_note_provenance np ON np.document_id=d.id AND np.workspace_id=d.workspace_id
+              WHERE d.id=${input.sourceDocumentId} AND d.workspace_id=${input.workspaceId} FOR SHARE OF d`;
+            if (!document) throw new CardRepositoryError("NOT_FOUND", "source note not found");
+            if (document.provenance_id) {
+              const refs = parseContextSourceRefs(document.context_source_refs);
+              if (!refs) throw new CardRepositoryError("VALIDATION", "source note provenance unavailable");
+              sourceIds = [...new Set([...sourceIds, ...refs.map(ref => ref.sourceId)])].sort();
+            }
+          }
+          if (sourceIds.length > 32) throw new CardRepositoryError("VALIDATION", "card source lineage exceeds 32 materials");
+          await admitLearningSources(tx, scope, sourceIds);
+          if (input.courseId) {
+            const courses = await client`SELECT id FROM courses WHERE id=${input.courseId}
+              AND workspace_id=${input.workspaceId} AND archived_at IS NULL FOR SHARE`;
+            if (!courses.length) throw new CardRepositoryError("NOT_FOUND", "course not found");
+          }
           const rows = await client`
             INSERT INTO cards (
               id, workspace_id, owner_user_id, front, back, source_document_id,
-              syllabus_point_id, tags
+              syllabus_point_id, tags, course_id, skill_label, source_ids
             ) VALUES (
               ${cardId}, ${input.workspaceId}, ${input.ownerUserId}, ${input.front.trim()},
               ${input.back.trim()}, ${input.sourceDocumentId ?? null},
-              ${input.syllabusPointId ?? null}, ${input.tags ?? []}
+              ${input.syllabusPointId ?? null}, ${input.tags ?? []},
+              ${input.courseId ?? null}, ${input.skillLabel?.trim() || null}, ${sourceIds}
             )
             RETURNING *
           `;

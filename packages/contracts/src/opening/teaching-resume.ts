@@ -192,13 +192,33 @@ export type TeachingCheckpointSaveResult = z.infer<
   typeof teachingCheckpointSaveResultSchema
 >;
 
-/** M1 resume slice: pause / unpause only (complete ≠ mastery remains separate). */
+/** Completing an activity records the end of a session, not mastery. */
 export const teachingActivityStatusUpdateInputSchema = z
   .object({
-    status: z.enum(["active", "paused"]),
+    status: z.enum(["active", "paused", "completed"]),
     expectedUpdatedAt: isoDateTimeSchema.optional(),
   })
   .strict();
 export type TeachingActivityStatusUpdateInput = z.infer<
   typeof teachingActivityStatusUpdateInputSchema
 >;
+
+export const teachingActivitySummarySchema = z.object({
+  coveredBlockIds: z.array(uuidSchema).max(500),
+  skippedBlockIds: z.array(uuidSchema).max(500),
+  attempts: z.object({
+    total: z.number().int().nonnegative(),
+    correct: z.number().int().nonnegative(),
+    incorrect: z.number().int().nonnegative(),
+    unverified: z.number().int().nonnegative(),
+  }).strict(),
+  openQuestions: z.array(z.string().max(2000)),
+  taskId: uuidSchema.nullable(),
+}).strict();
+export type TeachingActivitySummary = z.infer<typeof teachingActivitySummarySchema>;
+
+export const teachingAnswerKeySchema = z.object({
+  answer: z.string().max(20_000).nullable(),
+  referenceSourceId: uuidSchema.nullable(),
+}).strict();
+export type TeachingAnswerKey = z.infer<typeof teachingAnswerKeySchema>;

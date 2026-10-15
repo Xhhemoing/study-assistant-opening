@@ -1,3 +1,5 @@
+import { cardReadable, cardSourcesIncluded } from "./card-sources";
+import { uuidSchema } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
 import type { NativeBackupSnapshot, NativeBackupRecord } from "@aistudy/domain/native";
@@ -37,7 +39,13 @@ export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string
     const refs = parseContextSourceRefs(row.context_source_refs);
     provenance.set(String(row.document_id), row.included && refs !== null ? { contextSourceRefs: refs } : null);
   }
-  return filterNativeNotes(snapshot, provenance);
+  const blockedCards = new Set((await sql`SELECT c.id FROM cards c WHERE c.workspace_id=${workspaceId}
+    AND NOT (${cardReadable(sql, workspaceId)})`).map(row => String(row.id)));
+  const filtered = filterNativeNotes(snapshot, provenance);
+  return { ...filtered, cards: filtered.cards.filter(row => !blockedCards.has(row.id)),
+    events: filtered.events.filter(row => !blockedCards.has(String(row.contentId))),
+    memberships: filtered.memberships.filter(row => !blockedCards.has(String(row.assetId))),
+    promotions: filtered.promotions.filter(row => !blockedCards.has(String(row.targetId))) };
 }
 
 /** Null denotes an ordinary note; absent metadata is only compatible with pre-0035 archives. */
@@ -60,6 +68,9 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
   for (const row of [...asRecords(packed.records.blocks), ...asRecords(packed.records.revisions)]) {
     if (typeof row.documentId === "string") documentIds.add(row.documentId);
   }
+  for (const card of asRecords(packed.records.cards)) {
+    if (typeof card.sourceDocumentId === "string") documentIds.add(card.sourceDocumentId);
+  }
   const current = documentIds.size ? await sql`SELECT document_id, context_source_refs FROM opening_note_provenance
     WHERE workspace_id=${workspaceId} AND document_id=ANY(${[...documentIds]}::uuid[])` : [];
   const origins = current.map(row => ({ contextSourceRefs: parseContextSourceRefs(row.context_source_refs) }));
@@ -76,5 +87,21 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
     if (origin.contextSourceRefs === null) throw new BackupRestoreError("VALIDATION", "Linked note provenance is unknown");
     const admitted = await sql`SELECT ${contextSourceRefsIncluded(sql, workspaceId, sql`${sql.json(origin.contextSourceRefs)}::jsonb`, true)} AS included`;
     if (!admitted[0]!.included) throw new BackupRestoreError("VALIDATION", "Linked note source is deleted, excluded, or unavailable; restore was not applied");
+  }
+}
+
+/** Native cards keep their original source namespace; importing text cannot drop known lineage. */
+export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: string, packed: NativeBackupPackage): Promise<void> {
+  const modern = Number.parseInt(packed.schemaManifest.latestMigrationId.slice(0, 4), 10) >= 64;
+  for (const card of asRecords(packed.records.cards)) {
+    const ids = card.sourceIds === undefined && !modern ? [] : card.sourceIds;
+    if (!Array.isArray(ids) || ids.length > 32 || !ids.every(id => uuidSchema.safeParse(id).success)) {
+      throw new BackupRestoreError("VALIDATION", "card source lineage is missing or invalid");
+    }
+    const [current] = await sql`SELECT source_ids FROM cards WHERE id=${card.id} AND workspace_id=${workspaceId}`;
+    if (current && (current.source_ids as string[]).some(id => !ids.includes(id))) throw new BackupRestoreError("VALIDATION", "restore cannot remove card source lineage");
+    if (ids.length && packed.sourceWorkspaceId !== workspaceId) throw new BackupRestoreError("VALIDATION", "linked cards require their original workspace and source materials");
+    const [admitted] = await sql`SELECT ${cardSourcesIncluded(sql, workspaceId, sql`${ids}::uuid[]`)} AS included`;
+    if (!admitted?.included) throw new BackupRestoreError("VALIDATION", "card source is deleted, excluded, or unavailable");
   }
 }

@@ -336,6 +336,7 @@ export {
   lexicalOverlapScore,
   markConflict,
   mergeCoverageStatus,
+  summarizeTeachingBlockCoverage,
   type SourceAnchor,
   type CoverageStatus,
   type CoverageRow,

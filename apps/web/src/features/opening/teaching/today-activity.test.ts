@@ -27,6 +27,15 @@ const base: TeachingActivity = {
   updatedAt: "2026-10-11T02:00:00.000Z",
 };
 
+it("starts a task with stable identity across days and stores its taskId in createIntent", () => {
+  const taskId = "77777777-7777-4777-8777-777777777777";
+  const courseId = "88888888-8888-4888-8888-888888888888";
+  const first = buildStartLearningCreateInput({ localDate: "2026-10-15", taskId, courseId, courseTitle: "矩阵练习" });
+  const next = buildStartLearningCreateInput({ localDate: "2026-10-16", taskId, courseId, courseTitle: "矩阵练习" });
+  expect(first).toEqual(next);
+  expect(first).toMatchObject({ clientKey: `task:${taskId}`, courseId, intentSummary: "矩阵练习", createIntent: { taskId } });
+});
+
 it("picks the newest active or paused activity and ignores completed", () => {
   const olderActive = { ...base, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", updatedAt: "2026-10-11T01:00:00.000Z" };
   const paused = {

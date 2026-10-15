@@ -1,3 +1,4 @@
+import { cardSourcesIncluded } from "./card-sources";
 /**
  * Opening-scoped restore apply executor (Q03).
  *
@@ -114,6 +115,18 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "id", "workspace_id", "title", "slug", "description", "schema_version", "archived_at",
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled", "intervention_settings",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
+  ],
+  cards: [
+    "id", "workspace_id", "owner_user_id", "front", "back", "source_document_id", "syllabus_point_id",
+    "tags", "course_id", "skill_label", "source_ids", "archived", "content_version", "paused_until", "maintain_until",
+    "exclude_from_assessment", "created_at", "updated_at",
+  ],
+  card_review_states: [
+    "workspace_id", "owner_user_id", "card_id", "ease", "interval_days", "due_at", "reps", "lapses", "last_grade", "updated_at",
+  ],
+  learning_events: [
+    "id", "workspace_id", "owner_user_id", "type", "schema_version", "idempotency_key", "occurred_at", "created_at",
+    "content_id", "content_version", "syllabus_point_id", "corrects_event_id", "payload",
   ],
   opening_sources: [
     "id", "workspace_id", "name", "mime", "bytes", "sha256", "version",
@@ -237,6 +250,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "learning_events.payload",
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",
   "workspace_preferences.adaptive_planning",
@@ -400,6 +414,10 @@ export async function executeOpeningRestoreApply(
           if (!row || typeof row !== "object") continue;
           const payload = filterPayload(tx as unknown as Sql, table, row, workspaceId);
           if (!payload) continue;
+          if (table === "cards") {
+            const [admitted] = await tx`SELECT ${cardSourcesIncluded(tx, workspaceId, tx`${row.source_ids as string[]}::uuid[]`)} AS included`;
+            if (!admitted?.included) throw new Error("card source is deleted, excluded, or unavailable");
+          }
           await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
           rowsInserted += 1;
         }

@@ -16,6 +16,8 @@ export const reviewCardSchema = z.object({
   sourceDocumentId: z.string().uuid().nullable(),
   syllabusPointId: z.string().uuid().nullable(),
   tags: z.array(z.string().min(1)),
+  courseId: z.string().uuid().nullable().default(null),
+  skillLabel: z.string().min(1).max(200).nullable().default(null),
   archived: z.boolean(),
   contentVersion: z.number().int().positive().default(1),
   pausedUntil: z.string().datetime().nullable().default(null),

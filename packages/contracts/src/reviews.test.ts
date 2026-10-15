@@ -124,3 +124,10 @@ describe("review HTTP contracts", () => {
     ).toThrow();
   });
 });
+
+  it("accepts optional course/skill attribution and rejects malformed values", () => {
+    expect(createCardRequestSchema.parse({ front: "Question", back: "Reference", courseId: cardId, skillLabel: "  fractions  " })).toMatchObject({ courseId: cardId, skillLabel: "fractions" });
+    for (const patch of [{ courseId: "foreign-not-an-id" }, { skillLabel: " " }, { skillLabel: "x".repeat(201) }]) {
+      expect(createCardRequestSchema.safeParse({ front: "Question", back: "Reference", ...patch }).success).toBe(false);
+    }
+  });

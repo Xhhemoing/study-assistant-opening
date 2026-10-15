@@ -1,0 +1,64 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { beforeEach, expect, it, vi } from "vitest";
+import type { ReviewQueueItem } from "@aistudy/contracts";
+
+const scenario = vi.hoisted(() => ({ items: [] as ReviewQueueItem[], grading: false }));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useState: (initial: unknown) => actual.useState(
+      initial && typeof initial === "object" && "kind" in initial && initial.kind === "loading"
+        ? { kind: "ready", items: scenario.items, index: 0, flipped: true }
+        : initial === false ? scenario.grading : initial,
+    ),
+  };
+});
+
+vi.mock("next/link", () => ({
+  default: ({ children, href, ...props }: { children: unknown; href: string }) => createElement("a", { ...props, href }, children),
+}));
+
+import { advanceGradedCard, CardReviewView } from "./card-review-view";
+
+function item(id: string): ReviewQueueItem {
+  const at = "2026-10-15T00:00:00.000Z";
+  return {
+    card: { id, ownerUserId: "owner", front: "问题", back: "答案", sourceDocumentId: null, syllabusPointId: null,
+      tags: [], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
+    state: { cardId: id, ease: 2.5, intervalDays: 1, dueAt: at, reps: 0, lapses: 0, lastGrade: null, updatedAt: at },
+    goalPriority: 0,
+  };
+}
+
+beforeEach(() => { scenario.items = []; scenario.grading = false; });
+
+it("advances only the graded card in the queue that submitted it", () => {
+  const ready = { kind: "ready" as const, items: [item("a"), item("b")], index: 0, flipped: true };
+  expect(advanceGradedCard(ready, "a", 2, 2)).toEqual({ ...ready, index: 1, flipped: false });
+  expect(advanceGradedCard(ready, "a", 1, 2)).toBe(ready);
+  expect(advanceGradedCard(ready, "b", 2, 2)).toBe(ready);
+  const loading = { kind: "loading" as const };
+  expect(advanceGradedCard(loading, "a", 2, 2)).toBe(loading);
+});
+
+it("does not skip a replacement queue card when an old grade completes", () => {
+  const replacement = { kind: "ready" as const, items: [item("a"), item("b")], index: 0, flipped: false };
+  expect(advanceGradedCard(replacement, "a", 1, 2)).toBe(replacement);
+  const advanced = { ...replacement, index: 1 };
+  expect(advanceGradedCard(advanced, "a", 2, 2)).toBe(advanced);
+});
+
+it("disables queue reload while a grade is being saved", () => {
+  scenario.items = [item("a")];
+  scenario.grading = true;
+  const html = renderToStaticMarkup(createElement(CardReviewView));
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[\s\S]*?重新读取<\/button>/);
+});
+
+it("offers a direct assistant entry when no cards are due", () => {
+  const html = renderToStaticMarkup(createElement(CardReviewView));
+  expect(html).toMatch(/href="\/opening\/assistant"[^>]*>去助理制成卡片<\/a>/);
+});

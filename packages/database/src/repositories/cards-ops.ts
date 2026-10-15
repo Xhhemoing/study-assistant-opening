@@ -1,3 +1,4 @@
+import { cardReadable } from "./card-sources";
 import type { ReviewQueueMode, ReviewState } from "@aistudy/contracts";
 import { reviewQueueModeSchema } from "@aistudy/contracts";
 import {
@@ -77,7 +78,8 @@ export async function loadCard(
   cardId: string,
 ): Promise<CardRecord> {
   const rows = await client`
-    SELECT * FROM cards WHERE id = ${cardId} AND workspace_id = ${workspaceId} LIMIT 1
+    SELECT c.* FROM cards c WHERE c.id = ${cardId} AND c.workspace_id = ${workspaceId}
+      AND ${cardReadable(client, workspaceId)} LIMIT 1
   `;
   if (!rows.length) {
     throw new CardRepositoryError("NOT_FOUND", `Card not found: ${cardId}`);
@@ -119,9 +121,10 @@ export async function listWorkspaceCards(
 ): Promise<CardRecord[]> {
   await assertWorkspaceOwner(sql, input.workspaceId, input.ownerUserId);
   const rows = await sql`
-    SELECT * FROM cards
-    WHERE workspace_id = ${input.workspaceId}
-      AND owner_user_id = ${input.ownerUserId}
+    SELECT c.* FROM cards c
+    WHERE c.workspace_id = ${input.workspaceId}
+      AND c.owner_user_id = ${input.ownerUserId}
+      AND ${cardReadable(sql, input.workspaceId)}
     ORDER BY created_at ASC, id ASC
   `;
   return rows.map((row) => mapCard(row as Row));
@@ -162,6 +165,7 @@ export async function listCardQueue(
       ON g.course_id = m.course_id AND g.workspace_id = c.workspace_id
      AND g.active = true AND g.archived_at IS NULL
     WHERE c.workspace_id = ${input.workspaceId}
+      AND ${cardReadable(sql, input.workspaceId)}
     GROUP BY c.id, s.owner_user_id, s.card_id, s.workspace_id, s.ease, s.interval_days,
       s.due_at, s.reps, s.lapses, s.last_grade, s.updated_at
   `;

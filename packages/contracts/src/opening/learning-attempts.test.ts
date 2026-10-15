@@ -13,3 +13,8 @@ it("rejects client submitted server time and qualification", () => {
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, submittedAt: "2026-09-28T00:00:00Z" }).success).toBe(false);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, eligibility: { verifiedCorrect: "yes" } }).success).toBe(false);
 });
+it("accepts a pinned teaching block and rejects invalid versions", () => {
+  const input = { sessionId, clientKey: "teaching-001", teachingBlock: { blockId: sessionId, contentVersion: 1 } };
+  expect(learningAttemptCreateInputSchema.safeParse(input).success).toBe(true);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, teachingBlock: { blockId: sessionId, contentVersion: 0 } }).success).toBe(false);
+});

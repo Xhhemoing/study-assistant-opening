@@ -29,6 +29,7 @@ import {
 } from "./today-activity";
 import { PreferenceControls } from "./preference-controls";
 import { ResumeCard, type LocalUnsentDraft } from "./resume-card";
+import { ActivityEndControl } from "./activity-end-control";
 
 export type TeachingWorkspaceProps = {
   activity: TeachingActivity;
@@ -37,6 +38,7 @@ export type TeachingWorkspaceProps = {
   timeZone?: string;
   /** Optional OpeningApi inject (tests). */
   api?: OpeningApi;
+  onActivityUpdated?: (activity: TeachingActivity) => void;
 };
 
 /**
@@ -99,8 +101,10 @@ export function TeachingWorkspace({
   assistantHref,
   timeZone = "Asia/Shanghai",
   api: apiProp,
+  onActivityUpdated,
 }: TeachingWorkspaceProps) {
   const api = apiProp ?? createOpeningApi();
+  const [liveActivity, setLiveActivity] = useState(activity);
   const [liveInit, setLiveInit] = useState<ActivitySpecClientInit>(clientInitProp);
   const [contentVersion, setContentVersion] = useState(
     clientInitProp.contentVersion ?? activity.contentVersion,
@@ -112,6 +116,7 @@ export function TeachingWorkspace({
 
   // Sync when parent passes a new activity/init identity (e.g. today dashboard reload).
   useEffect(() => {
+    setLiveActivity(activity);
     setLiveInit(clientInitProp);
     setContentVersion(clientInitProp.contentVersion ?? activity.contentVersion);
     setPathVersion(activity.pathVersion);
@@ -197,7 +202,7 @@ export function TeachingWorkspace({
         </div>
         <div className="flex flex-wrap gap-1.5">
           <span className={`${ui.badge} ${tone.neutral}`}>
-            {teachingActivityStatusLabel(activity.status)}
+            {teachingActivityStatusLabel(liveActivity.status)}
           </span>
           <span className={`${ui.badge} ${generateTone}`}>
             {teachingActivityGenerateStatusLabel(activity.generateStatus, { contentVersion: activity.contentVersion })}
@@ -256,8 +261,9 @@ export function TeachingWorkspace({
                 block={block}
                 schemaVersion={schemaVersion}
                 sourceRefs={liveInit.sourceRefs}
+                attemptContext={{ ...liveActivity, contentVersion, onCourseAssociated: (next) => { setLiveActivity(next); onActivityUpdated?.(next); } }}
               />
-              <BlockCommands
+              {liveActivity.status !== "completed" ? <BlockCommands
                 activityId={activity.id}
                 blockId={block.blockId}
                 contentVersion={contentVersion}
@@ -276,7 +282,7 @@ export function TeachingWorkspace({
                     throw err;
                   }
                 }}
-              />
+              /> : null}
             </div>
           ))}
         </div>
@@ -349,6 +355,7 @@ export function TeachingWorkspace({
           打开自由对话（次要）
         </Link>
       </p>
+      <div className="mt-5"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={(next) => { setLiveActivity(next); onActivityUpdated?.(next); }} /></div>
     </section>
   );
 }
@@ -512,6 +519,9 @@ export function TeachingContinueEntry({
     }
   }, [activity.id, api, onActivityUpdated]);
 
+  if (activity.status === "completed" && phase !== "workspace") {
+    return <div className="p-5" data-teaching-continue-entry="completed"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>;
+  }
   if (phase === "workspace" && workspaceInit) {
     return (
       <div data-teaching-continue-entry="workspace">
@@ -521,6 +531,7 @@ export function TeachingContinueEntry({
           assistantHref={assistantHref}
           timeZone={timeZone}
           api={api}
+          onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }}
         />
       </div>
     );
@@ -594,6 +605,7 @@ export function TeachingContinueEntry({
             </button>
           ) : null}
         </div>
+        <div className="mt-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
       </section>
     );
   }
@@ -612,6 +624,7 @@ export function TeachingContinueEntry({
         }}
         onResumeUpdated={setLiveResume}
       />
+      <div className="px-5 pb-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
     </div>
   );
 }

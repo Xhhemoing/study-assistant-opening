@@ -380,3 +380,4 @@ export const workerSmokeJobSchema = z.object({
 export type WorkerSmokeJob = z.infer<typeof workerSmokeJobSchema>;
 
 export * from "./opening";
+export { observationCardDraftSchema, type ObservationCardDraft } from "./reviews";

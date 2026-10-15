@@ -76,6 +76,9 @@ export async function readOpeningRestoreNamespaceCounts(
   const rows = await sql`
     SELECT 'workspace_preferences'::text AS table_name, count(*)::int AS n FROM workspace_preferences WHERE workspace_id = ${id}
     UNION ALL SELECT 'courses', count(*)::int FROM courses WHERE workspace_id = ${id}
+    UNION ALL SELECT 'cards', count(*)::int FROM cards WHERE workspace_id = ${id}
+    UNION ALL SELECT 'card_review_states', count(*)::int FROM card_review_states WHERE workspace_id = ${id}
+    UNION ALL SELECT 'learning_events', count(*)::int FROM learning_events WHERE workspace_id = ${id}
     UNION ALL SELECT 'course_asset_memberships', count(*)::int FROM course_asset_memberships WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_sources', count(*)::int FROM opening_sources WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_source_chunks', count(*)::int FROM opening_source_chunks c

@@ -216,6 +216,7 @@ export const retestCandidateSchema = z
 export const learningSessionCreateInputSchema = z
   .object({
     courseId: uuidSchema,
+    activityId: uuidSchema.optional(),
     skillLabel: z.string().min(1).max(200),
     requirementKey: z.string().max(200).nullable().optional(),
     sourceIds: z.array(uuidSchema).max(32),

@@ -83,6 +83,7 @@ export type StartLearningContext = {
   continueSourceIds?: readonly string[];
   /** Optional course binding when starting from a course or seeded task. */
   courseId?: string | null;
+  taskId?: string | null;
   /** Course/task display name — used in summary when not resuming a conversation. */
   courseTitle?: string | null;
   /** Materials to attach on topic create (deduped/sorted/capped in builder). */
@@ -112,6 +113,16 @@ function normalizeSourceIds(ids: readonly string[] | undefined): string[] {
 export function buildStartLearningCreateInput(
   ctx: StartLearningContext,
 ): TeachingActivityCreateInput {
+  if (ctx.taskId) {
+    return {
+      clientKey: `task:${ctx.taskId}`,
+      intentKind: "goal",
+      intentSummary: (ctx.courseTitle?.trim() || "学习任务").slice(0, 2000),
+      ...(ctx.courseId !== undefined ? { courseId: ctx.courseId } : {}),
+      sourceIds: normalizeSourceIds(ctx.sourceIds),
+      createIntent: { intentKind: "goal", source: "task", taskId: ctx.taskId },
+    };
+  }
   if (ctx.continueConversationId && ctx.continueTitle) {
     const summary = `继续：${ctx.continueTitle}`.slice(0, 2000);
     const sourceIds = normalizeSourceIds(ctx.continueSourceIds ?? ctx.sourceIds);

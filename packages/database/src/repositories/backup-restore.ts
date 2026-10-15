@@ -1,4 +1,4 @@
-import { assertNativeNoteRestorePrivacy } from "./native-note-privacy";
+import { assertNativeCardRestorePrivacy, assertNativeNoteRestorePrivacy } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
 import { planNativeRestore } from "@aistudy/domain/native";
@@ -40,6 +40,7 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
           await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
           await assertBackupWorkspaceOwner(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
           await assertNativeNoteRestorePrivacy(tx as unknown as Sql, input.workspaceId, input.packed);
+          await assertNativeCardRestorePrivacy(tx as unknown as Sql, input.workspaceId, input.packed);
           await applyRestorePlan(tx as Sql, plan);
         });
         return {

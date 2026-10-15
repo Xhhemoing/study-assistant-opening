@@ -6,6 +6,7 @@ const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sourceId = "11111111-1111-4111-8111-111111111111";
 const courseId = "33333333-3333-4333-8333-333333333333";
 const tables = [
+  "cards", "card_review_states", "learning_events",
   "workspace_preferences", "courses", "course_asset_memberships",
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
@@ -111,7 +112,7 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    expect(new Set(names).size).toBe(31);
+    expect(new Set(names).size).toBe(34);
     expect(names.indexOf("opening_sources")).toBeLessThan(names.indexOf("opening_source_chunks"));
     expect(names.indexOf("opening_conversations")).toBeLessThan(names.indexOf("opening_turns"));
     expect(names.indexOf("opening_turns")).toBeLessThan(names.indexOf("opening_assistant_candidates"));

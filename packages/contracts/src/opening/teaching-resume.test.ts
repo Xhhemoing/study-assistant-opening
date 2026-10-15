@@ -150,7 +150,7 @@ describe("teaching-resume contracts (V2-14 T1/T16)", () => {
     );
   });
 
-  it("checkpoint save input requires expectedVersion; status update active|paused only", () => {
+  it("checkpoint save input requires expectedVersion; status permits session completion", () => {
     expect(
       teachingCheckpointSaveInputSchema.parse({
         expectedVersion: 2,
@@ -168,7 +168,7 @@ describe("teaching-resume contracts (V2-14 T1/T16)", () => {
       teachingActivityStatusUpdateInputSchema.safeParse({
         status: "completed",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("T16 LearningResume ≠ ConversationResume shape", () => {

@@ -245,6 +245,7 @@ describe("opening teaching activities repository (unit)", () => {
 describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
   it("enqueues compile-teaching-unit with outbox and sets generate_status queued", async () => {
     const { sql, writes } = db((query) => {
+      if (query.includes("SELECT status FROM opening_teaching_activities")) return [{ status: "active" }];
       if (query.includes("FROM opening_teaching_activities") && query.includes("JOIN workspaces")) {
         return [{
           id: activityId,
@@ -268,6 +269,7 @@ describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
       if (query.includes("SELECT privacy_epoch FROM workspaces")) {
         return [{ privacy_epoch: 2 }];
       }
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
       if (query.includes("INSERT INTO opening_jobs")) {
         return [{ id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1" }];
       }

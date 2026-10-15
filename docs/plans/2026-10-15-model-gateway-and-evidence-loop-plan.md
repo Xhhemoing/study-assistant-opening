@@ -2,10 +2,12 @@
 
 **Date:** 2026-10-15
 **Baseline:** `feat/opening-release` @ `649353f`；与 PR #43（`feat/adaptive-loop-v2`，自适应排程 L0/L1）并行
-**Status:** M1、M2a、M2b 已完成；M3 已实现待修 3 个测试期望；M4、M5、E1、E3、E4、E5、M6 未开始，执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)；E2 暂缓
+**Status:** M1/M2a/M2b 为已有基线；M3/M4/M5/E3/E4/E5 代码已实现，集成与跨包验证中；E1 并发边界修复中，E2 按用户决定暂缓；M6 已同步 0064 卡片来源、备份隐私与一键配置未知结果处理。浏览器待用户验收，未完成生产/真实供应商验证。执行说明见 [`2026-10-15-gpt-handoff.md`](2026-10-15-gpt-handoff.md)。
 **关联：** [`2026-10-15-adaptive-learning-loop-v2.md`](2026-10-15-adaptive-learning-loop-v2.md)（PR #43，排程侧 L0–L8）、[`2026-10-14-learning-loop-closure-plan.md`](2026-10-14-learning-loop-closure-plan.md)（S1–S10）
 
 > 编号说明：PR #43 已经用了 L0–L8（排程）。本计划用 **M**（模型调度）和 **E**（证据闭环），避免撞号。
+
+**当前验证范围（2026-10-15）：** M3 相关测试通过；M4 atomic/probe 的 7 项 handler 已通过，新增音频备用模型与未知结果回归待主线程汇总；E3 的 2 项 handler 通过；E4 补齐来源链、native 课程范围和评分锁序后正在验证数据库回归；M5 的 29 项单测通过，worker 跨包类型检查待 E1 稳定后汇总；E5 相关单测、数据库完整性测试、domain 类型检查通过；M6 配置的 43 项单测、环境模板一致性与 config 类型检查通过。以上为切片结果，不代表全仓检查或用户体验验收。GitHub 干运行推送使用现有环境 `GH_TOKEN` 返回 `Invalid username or token`，推送/合并仍受鉴权阻塞；未强行合并或删除分支，旧分支不能据此认定已合入。
 
 ## Outcome
 
@@ -86,7 +88,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 - 读库装配只有一处：`apps/worker/src/runtime/model-gateway.ts` 的 `createDbModelGateway(sql)`，替代 `resolveTutorModel`，web 和 worker 共用。
 - `providerFactory` 按模型的 `protocol` 选择适配器；现在只有 `openai_chat`（`createOpeningProvider`）。以后加其他协议只改这个工厂。
 - **防绕过**：ESLint `no-restricted-imports` 禁止在 `packages/ai/src/opening/gateway.ts` 以外直接引用 `createOpeningProvider` 和 `runBudgetedCall`。这道检查直接防住「知识抽取绕过预算」这类问题重现，成本是一条 lint 规则。
-- **备用模型（已定，M3 落地）**：每个用途可选一个**用户明确指定**的备用模型，`taskRoutes[task] = { primary, fallback? }`。只在两种情况下切换：请求**确认未发出**（连接失败、401/403、429、模型不可用、缺能力），或预算账本已释放该预留。发出后结果未知（超时、断网）**不切换**，避免重复计费，仍按 `markUnknown` 处理。切换时新开一次预留和模型快照，回合上标注「已改用备用模型 X」。没有指定备用模型时，行为与现在相同：明确失败。逻辑只在 `call()` 里实现。
+- **备用模型（已定，M3 落地）**：每个用途可选一个**用户明确指定**的备用模型，`taskRoutes[task] = { primary, fallback? }`。仅请求**确认未发出**（选型/能力/额度检查拒绝、明确的认证或限流拒绝），或预算账本已释放该预留时切换。超时、网络失败和未知结果**不切换**，避免重复计费，仍按 `markUnknown` 处理。切换时使用 `<operationId>:fallback` 预留与实际模型快照；没有指定备用模型则保留原失败。共用 `withModelFallback`，不在各消费方复制另一套策略。
 
 ### 4. 模型能力与一键配置
 
@@ -114,7 +116,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 - **E1 主讲内作答**：`question` 块改成内联作答，复用 learning-sessions / attempts / observations 接口（session 已经带 `activity_id`）。提交后展示 `answer_key`，接上现有核对步骤（`learning/reference-check.ts`），核对后记为 `verdictSource=reference_checked`。
 - **E2 AI 判分建议（延后，10-15 决定）**：通过 `grading.suggest` 用途调用模型，输出 `{ verdict, rubricHits[], confidence, rationale }`，写成独立的 observation revision，`verdictSource=model_suggestion`。按现有资格规则，**这条记录不能单独让 `verifiedCorrect=yes`**；页面显示「AI 认为…（建议）」，用户可以采纳为核对结果，或者不采纳。判分快照和模型快照都入库，便于以后回放。
 - **E3 活动收尾**：状态接口开放 `completed`（数据库约束本来就允许）。学完后显示小结（用 `teaching-coverage` 汇总讲了什么、做了几题、还有哪些没解决），并询问「把『X』标记为完成？」，复用 `TaskStatusControl` 的 `expectedVersion`。`taskId` 放在 `create_intent`。提示框由 PR #43 L5 负责；本计划只提供接口和小结数据。
-- **E4 卡片进入账本**：迁移 `0062` 同时给 `cards` 加可空的 `course_id`、`skill_label`。有课程的卡片每次评分写一条 observation：`again → incorrect`、其他评分 → `correct`，`verdictSource=self_report`，维度 `recall`，clientKey 为 `card-review:<eventId>` 保证幂等。没有课程的卡片只保留 SRS，不写账本，因为 observation 的 `course_id NOT NULL`。从错题生成卡片（`cards.suggest`）时自动带上课程和技能。
+- **E4 卡片进入账本**：迁移 `0062` 给 `cards` 加可空 `course_id`、`skill_label`，0064 保存服务端来源 ID。有课程的卡片每次评分在同一事务写一条 observation：`again → incorrect`、其他评分 → `correct`，`verdictSource=self_report`，clientKey 为 `card-review:<eventId>` 保证幂等。没有课程的卡片只保留 SRS。当前错题入口只读预填题干/参考内容、课程和技能，由用户确认建卡；`cards.suggest` 的可选 AI 建议未启用。来源隐私随评分、两类备份与恢复持续保留，不将参考内容升级为独立正确证明。
 - **E5 评价器接口（BKT 预留）**：`packages/domain/src/opening/estimators/` 定义 `SkillStateEstimator { version, estimate(evidence[]) → { state, reasons[] } }`。现在的 `learning-summary` 包装成 `rules-1`。BKT 以后作为 `bkt-1` 以**影子方式**运行：只记录结果，不影响页面，等校准指标达标后再切换（ALGORITHM_MAP「复习调度」「能力评价」两行的门槛）。为此保证每条证据带有 BKT 需要的字段：知识点 id（`requirementKey`/节点）、题目 id（`item_version_id`）、是否首次作答、`assistance`、`verdictSource`、时间戳。**不输出掌握百分比**，与 V2 章程一致。
 
 ## 切片
@@ -133,7 +135,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 | E4 | 卡片进入账本 + 错题生成卡片 | Claude | M1（`cards.suggest`） | 0062（cards 两列） |
 | E5 | 评价器接口；`rules-1` 包装；BKT 字段完整性测试 | Claude | E1、E4 | 无 |
 
-**0062 放什么：** 模型表的 `capabilities`、`billing`、`daily_request_cap` 和放宽后的价格 CHECK，以及 cards 的 `course_id`、`skill_label`，都是新增列或带默认值的列，放在同一个迁移里。必须排在 PR #43 的 0061 之后，所以 **PR #43 合并后再开 0062 的分支**。回滚：先把 `billing='free_tier'` 的模型删除或改成正价格，再 `ALTER TABLE opening_model_provider_models DROP COLUMN capabilities, DROP COLUMN billing, DROP COLUMN daily_request_cap;` 并恢复原 CHECK（`> 0`）；`ALTER TABLE cards DROP COLUMN course_id, DROP COLUMN skill_label;`。
+**0062–0064 实际内容：** 0062 包含模型表的 `supports_audio`、`billing`、`daily_request_cap` 和放宽后的价格 CHECK、允许零金额预算记录，以及 cards 的 `course_id`、`skill_label`。0063 增加一键配置幂等键与唯一索引；0064 用服务端捕获的 `cards.source_ids` 保留观察/笔记派生卡片的隐私来源，读取、评分与两类备份/恢复均执行来源准入。迁移编号接在 PR #43 的 0061 之后。应用回退优先保留追加 schema；不得删除免费模型、抹除卡片来源关联或把零成本改成收费。结构回退前提及逆向 SQL 见 [模型运维说明](../operations/opening-model-routing.md#0062--0063--0064-迁移与回退)。
 
 **顺序（10-15 调整：先闭环能力和质量）：**
 1. **M1 → M2**：统一调度器，知识抽取进入预算，主讲编译接真实模型。主讲有了真实内容，其他环节的质量才测得出来，这也是 V2-16 试跑的前提。与 PR #43 剩下的 L2/L3 并行，文件不重叠。
@@ -213,7 +215,7 @@ createModelGateway(deps: { loadCatalog, loadSettings, loadWorkspaceModels, budge
 ## 验证（Claude 负责的切片）
 
 - **M1**：现有 `tutor-turn`、`ephemeral-service`、`budgeted-call`、`model-routing` 测试**不改期望**且通过；新增 gateway 单测，覆盖用途 → 模型 → 快照 → 预留的同一份选择，以及缺能力时明确失败并且不调用 provider。
-- **M2**：`build-course-knowledge` 集成测试断言产生 `purpose=build-course-knowledge` 的预留并带模型快照；日额度为 0 时抽取明确失败而不是静默调用。编译器开关开启时调用 `teaching.compile` 路由的模型；关闭时与现在一致。
+- **M2**：`build-course-knowledge` 集成测试断言产生 `purpose=build-course-knowledge` 的预留并带模型快照；付费日额度为 0 时付费抽取明确失败，免费模型仍必须遵守请求数上限。编译器开关开启时调用 `teaching.compile` 路由的模型；关闭时与现在一致。
 - **M4**：handler 测试覆盖一键配置事务（任一步失败时全部回滚）、clientKey 幂等，以及响应和日志都不含密钥。
 - **E2/E4/E5**：资格规则测试证明 `model_suggestion` 和卡片的 `self_report` 都不能产生 `observed_independent`；卡片评分重放不重复写 observation。
 - 类型检查：`npm run typecheck -w @aistudy/{contracts,ai,domain,database,web,worker}`；单测用 `--project unit` 指定相关文件。

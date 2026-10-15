@@ -27,7 +27,20 @@ export const createCardRequestSchema = z.object({
   sourceDocumentId: z.string().uuid().nullable().optional(),
   syllabusPointId: z.string().uuid().nullable().optional(),
   tags: z.array(z.string().min(1)).optional(),
+  courseId: z.string().uuid().nullable().optional(),
+  observationId: z.string().uuid().optional(),
+  skillLabel: z.string().trim().min(1).max(200).nullable().optional(),
 });
+
+/** Editable suggestions from a submitted, current incorrect observation. No card is created here. */
+export const observationCardDraftSchema = z.object({
+  observationId: z.string().uuid(),
+  front: z.string().max(4000),
+  back: z.string().max(4000),
+  courseId: z.string().uuid(),
+  skillLabel: z.string().min(1).max(200),
+});
+export type ObservationCardDraft = z.infer<typeof observationCardDraftSchema>;
 
 export const createCardResponseSchema = z.object({
   card: reviewCardSchema,

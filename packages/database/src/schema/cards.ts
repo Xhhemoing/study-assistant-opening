@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { courses } from "./courses";
 import { workspaces } from "./library";
 import { users } from "./identity";
 
@@ -27,6 +28,9 @@ export const cards = pgTable(
     back: text("back").notNull(),
     sourceDocumentId: uuid("source_document_id"),
     syllabusPointId: uuid("syllabus_point_id"),
+    courseId: uuid("course_id").references(() => courses.id, { onDelete: "set null" }),
+    skillLabel: text("skill_label"),
+    sourceIds: uuid("source_ids").array().notNull().default([]),
     tags: text("tags").array().notNull().default([]),
     archived: boolean("archived").notNull().default(false),
     contentVersion: integer("content_version").notNull().default(1),

@@ -13,6 +13,7 @@ import { BlockView } from "@aistudy/jingwei/react";
 import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { LearningProse } from "../assistant/learning-prose";
+import { InlineAttempt, type InlineAttemptContext } from "./inline-attempt";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
   teachingArtifactBlock,
@@ -45,6 +46,8 @@ function asText(value: unknown): string {
   if (typeof value === "object") {
     const rec = value as Record<string, unknown>;
     if (typeof rec.text === "string") return rec.text;
+    if (typeof rec.markdown === "string") return rec.markdown;
+    if (typeof rec.prompt === "string") return rec.prompt;
     if (typeof rec.latex === "string") return rec.latex;
     if (typeof rec.formula === "string") return rec.formula;
     if (typeof rec.label === "string") return rec.label;
@@ -82,10 +85,12 @@ function CatalogBody({
   catalogId,
   params,
   sourceRefs,
+  attemptContext,
 }: {
   catalogId: CatalogId;
   params: Record<string, unknown>;
   sourceRefs?: TeachingSourceRef[];
+  attemptContext?: InlineAttemptContext;
 }): ReactNode {
   const text = asText(params.text) || asText(params);
   switch (catalogId) {
@@ -146,9 +151,7 @@ function CatalogBody({
         >
           <p className="mb-1 text-[11px] font-medium text-amber-900">试一试</p>
           {text ? <LearningProse text={text} /> : <p>（空提问）</p>}
-          <p className="mt-2 text-[11px] text-zinc-500">
-            草稿提交需经服务端授权；本页不本地判分。
-          </p>
+          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="mt-2 text-[11px] text-zinc-500">请从教学工作区打开本题以保存作答。</p>}
         </div>
       );
     case "draft":
@@ -217,10 +220,12 @@ export function BlockRenderer({
   block,
   schemaVersion,
   sourceRefs,
+  attemptContext,
 }: {
   block: ClientInitBlock;
   schemaVersion?: string | null;
   sourceRefs?: TeachingSourceRef[];
+  attemptContext?: InlineAttemptContext;
 }) {
   const decision = decideBlockRender(block, { schemaVersion });
   if (!decision.ok) {
@@ -236,6 +241,7 @@ export function BlockRenderer({
         catalogId={decision.catalogId}
         params={decision.params}
         sourceRefs={decision.catalogId === "evidence" ? sourceRefs : undefined}
+        attemptContext={attemptContext}
       />
     </article>
   );

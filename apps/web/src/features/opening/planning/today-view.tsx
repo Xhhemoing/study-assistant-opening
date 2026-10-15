@@ -18,6 +18,7 @@ import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
 import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
 import { isRetestOriginTask, TaskStatusControl } from "./task-status-control";
+import { TaskRowActions } from "./task-row-actions";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 
 type SelectionSource = "focus" | "user";
@@ -214,7 +215,7 @@ export function TodayPlanView({
     </div>
     {hasLoadedTasks && plan ? <fieldset disabled={pending || loadState !== "ready" || planState !== "ready"} className="min-w-0 disabled:opacity-60">
       <DailyDraftCard key={date} api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={refresh} />
-      <TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} />
+      <details className="mx-4 mt-4 rounded-xl border border-zinc-200 bg-white"><summary className="min-h-11 cursor-pointer px-3 py-3 text-xs font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">今日安排与进度</summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
     </fieldset> : null}
     {hasLoadedTasks ? <TodayStudyTools key={date} disabled={pending || loadState !== "ready" || planState !== "ready"} api={api} date={date} plan={plan} tasks={tasks} onChanged={refresh} /> : null}
     <div className="mt-auto px-4 pb-4 pt-6"><p className="text-[11px] leading-5 text-zinc-500">队列包含历史任务，已完成不等于今日完成。<br />选择任务后继续；计时与浏览不会自动标记完成。</p>
@@ -274,6 +275,7 @@ export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect,
         </button>
         {showStatus ? (
           <div className="border-l-2 border-transparent px-4 pb-3" data-today-task-status="true">
+            <TaskRowActions task={task} />
             <TaskStatusControl
               key={`${task.id}:${task.version ?? "unknown"}`}
               task={task}

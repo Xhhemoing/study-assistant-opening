@@ -1,5 +1,8 @@
 import {
+  createCardRequestSchema,
   createCardResponseSchema,
+  observationCardDraftSchema,
+  type CreateCardRequest,
   gradeReviewResponseSchema,
   listReviewQueueResponseSchema,
   type CreateCardResponse,
@@ -43,11 +46,7 @@ async function request(path: string, init: RequestInit, fetchImpl: FetchLike): P
   return body;
 }
 
-export type OpeningCreateCardInput = {
-  front: string;
-  back: string;
-  sourceDocumentId: string;
-};
+export type OpeningCreateCardInput = CreateCardRequest;
 
 export type OpeningGradeCardInput = {
   cardId: string;
@@ -58,16 +57,17 @@ export type OpeningGradeCardInput = {
 /** HTTP cards/reviews client. Failures throw; they never become sample cards. */
 export function createOpeningCardsClient(fetchImpl: FetchLike = fetch) {
   return {
+    async observationDraft(observationId: string) {
+      return observationCardDraftSchema.parse(await request(
+        `/api/opening/observations/${encodeURIComponent(observationId)}/card-draft`, { method: "GET" }, fetchImpl,
+      ));
+    },
     async createCard(input: OpeningCreateCardInput): Promise<CreateCardResponse> {
       const body = await request(
         "/api/cards",
         {
           method: "POST",
-          body: JSON.stringify({
-            front: input.front,
-            back: input.back,
-            sourceDocumentId: input.sourceDocumentId,
-          }),
+          body: JSON.stringify(createCardRequestSchema.parse(input)),
         },
         fetchImpl,
       );
