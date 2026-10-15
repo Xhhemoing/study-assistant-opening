@@ -223,13 +223,22 @@ export function TeachingWorkspace({
     }
   }, [blockFocus.currentBlockId, pathVersion]);
 
-  const pastCount = useMemo(() => {
-    let n = 0;
-    for (const status of blockFocus.statusById.values()) {
-      if (status === "past" || status === "skipped") n += 1;
-    }
-    return n;
-  }, [blockFocus]);
+  const pastOrSkippedBlocks = useMemo(
+    () =>
+      orderedBlocks.filter((block) => {
+        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
+        return status === "past" || status === "skipped";
+      }),
+    [orderedBlocks, blockFocus],
+  );
+  const focusMainBlocks = useMemo(
+    () =>
+      orderedBlocks.filter((block) => {
+        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
+        return status === "current" || status === "upcoming";
+      }),
+    [orderedBlocks, blockFocus],
+  );
 
   const returnDisabled = isBranchStackEmpty(liveInit.checkpointJson ?? {});
   const generateTone =
@@ -348,23 +357,68 @@ export function TeachingWorkspace({
 
       {schemaOk ? (
         <div className="mt-4 space-y-4" data-teaching-blocks="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
-          {pastCount > 0 ? (
-            <p
-              className="text-[11px] leading-5 text-zinc-500"
+          {pastOrSkippedBlocks.length > 0 ? (
+            <details
+              className="rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2"
               data-teaching-past-collapsed="true"
             >
-              已学过或已跳过 {pastCount} 块（已折叠）；当前聚焦下一块。
-            </p>
+              <summary className="cursor-pointer select-none text-[11px] leading-5 text-zinc-600">
+                已学过或已跳过 {pastOrSkippedBlocks.length} 块
+              </summary>
+              <div className="mt-3 space-y-4">
+                {pastOrSkippedBlocks.map((block) => {
+                  const status = blockFocus.statusById.get(block.blockId) ?? "past";
+                  return (
+                    <div
+                      key={block.blockId}
+                      className="space-y-1 opacity-90"
+                      data-teaching-block-focus={status}
+                      data-block-id={block.blockId}
+                    >
+                      <BlockRenderer
+                        block={block}
+                        schemaVersion={schemaVersion}
+                        sourceRefs={liveInit.sourceRefs}
+                        attemptContext={{ ...liveActivity, contentVersion, onCourseAssociated: (next) => { setLiveActivity(next); onActivityUpdated?.(next); } }}
+                      />
+                      {liveActivity.status !== "completed" ? <BlockCommands
+                        activityId={activity.id}
+                        blockId={block.blockId}
+                        contentVersion={contentVersion}
+                        pathVersion={pathVersion}
+                        returnDisabled={returnDisabled}
+                        whyAvailable={WHY_ASSIST_AVAILABLE}
+                        api={api}
+                        onSuccess={applySuccess}
+                        onConflict={handleConflict}
+                        onReread={async () => {
+                          try {
+                            await reread();
+                          } catch (err) {
+                            setRereadError(
+                              err instanceof Error ? err.message : "重新拉取失败",
+                            );
+                            throw err;
+                          }
+                        }}
+                      /> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
           ) : null}
-          {orderedBlocks.map((block) => {
+          {focusMainBlocks.map((block) => {
             const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
-            if (status === "upcoming" || status === "past" || status === "skipped") {
-              return null;
-            }
+            const isCurrent = status === "current";
             return (
             <div
               key={block.blockId}
-              className="space-y-1"
+              className={
+                isCurrent
+                  ? "space-y-1 rounded-lg ring-2 ring-emerald-500/55 ring-offset-2"
+                  : "space-y-1"
+              }
               data-teaching-block-focus={status}
               data-block-id={block.blockId}
             >
