@@ -53,10 +53,28 @@ describe("model transcription adapter", () => {
     JSON.stringify({ segments: {} }),
     JSON.stringify({ segments: [{ startMs: -1, endMs: 2, text: "negative" }] }),
     JSON.stringify({ segments: [{ startMs: 0, endMs: 2, text: "   " }] }),
-    JSON.stringify({ segments: [{ startMs: 0, endMs: 1001, text: "outside chunk" }] }),
     JSON.stringify({ segments: [{ startMs: 0, endMs: 20, text: "one" }, { startMs: 10, endMs: 30, text: "overlap" }] }),
   ])("rejects invalid untrusted transcription and cleans local chunks (%s)", async (text) => {
     const s = await setup([text]);
+    await expect(s.adapter({ ...input, durationMs: 1000 }, signal)).rejects.toBeInstanceOf(MediaValidationError);
+    expect(s.call).toHaveBeenCalledTimes(1);
+    expect(await readdir(s.dir)).toEqual([]);
+  });
+
+  it.each([
+    { endMs: 1001, label: "1ms overrun" },
+    { endMs: 3000, label: "exactly 2s overrun" },
+  ])("clamps segment endMs within 2s of chunk duration ($label)", async ({ endMs }) => {
+    const s = await setup([JSON.stringify({ segments: [{ startMs: 0, endMs, text: "clamped" }] })]);
+    const segments = await s.adapter({ ...input, durationMs: 1000 }, signal);
+    expect(segments).toEqual([
+      { sourceId: input.sourceId, sourceVersion: 2, startMs: 0, endMs: 1000, text: "clamped", frameChunkIds: [], quality: "needs_check" },
+    ]);
+    expect(await readdir(s.dir)).toEqual([]);
+  });
+
+  it("rejects when endMs exceeds chunk duration by more than 2s", async () => {
+    const s = await setup([JSON.stringify({ segments: [{ startMs: 0, endMs: 3001, text: "too far" }] })]);
     await expect(s.adapter({ ...input, durationMs: 1000 }, signal)).rejects.toBeInstanceOf(MediaValidationError);
     expect(s.call).toHaveBeenCalledTimes(1);
     expect(await readdir(s.dir)).toEqual([]);
