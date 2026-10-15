@@ -7,7 +7,7 @@
 
 > 编号说明：PR #43 已经用了 L0–L8（排程）。本计划用 **M**（模型调度）和 **E**（证据闭环），避免撞号。
 
-**当前验证范围（2026-10-15）：** M3 相关单元与 handler 通过；M4 一键配置、音频备用模型、未知结果及 probe handler 通过；M5 29 项适配器/worker 单测通过；E1/E3 相关单元、9 项教学并发 handler 通过；E4 290 项单元、13 项数据库/handler 回归通过；E5 单元与真实数据库字段完整性通过；M6 配置 43 项单测、模板一致性、config 类型检查通过；整合后的 50 个变更单元文件 391 项通过，8 个跨模块集成文件 62 项通过，3 个教学/卡片 handler 文件 22 项通过，contracts/ai/domain/database/config/ui/worker/web 类型检查、E2E 类型检查、变更 TypeScript lint 和边界 lint 通过。Python 3.13 与锁定 parser 依赖已补齐，parser 自检及 PDF 页图像测试通过；Docling 固定模型缓存仍缺，真实 PDF 内容转换未通过。以上不代表浏览器、真实供应商或生产验收。GitHub 干运行推送使用现有环境 `GH_TOKEN` 返回 `Invalid username or token`，推送/合并仍受鉴权阻塞；未强行合并或删除分支，旧分支不能据此认定已合入。
+**当前验证范围（2026-10-15）：** M3 相关单元与 handler 通过；M4 一键配置、音频备用模型、未知结果及 probe handler 通过；M5 29 项适配器/worker 单测通过；E1/E3 相关单元、9 项教学并发 handler 通过；E4 290 项单元、13 项数据库/handler 回归通过；E5 单元与真实数据库字段完整性通过；M6 配置 43 项单测、模板一致性、config 类型检查通过；整合后的 50 个变更单元文件 391 项通过，8 个跨模块集成文件 62 项通过，3 个教学/卡片 handler 文件 22 项通过，contracts/ai/domain/database/config/ui/worker/web 类型检查、E2E 类型检查、变更 TypeScript lint 和边界 lint 通过。Python 3.13 与锁定 parser 依赖已补齐，parser 自检及 PDF 页图像测试通过；Docling 固定模型缓存仍缺，真实 PDF 内容转换未通过。以上不代表浏览器、真实供应商或生产验收。整合结果已推送 `feat/opening-release`；远端 `claude/keen-carson-ls19ie`、`feat/adaptive-loop-v2` 与 `feat/course-seed-today-plan` 已删除，其余含独有提交的分支保留。
 
 ## Outcome
 
