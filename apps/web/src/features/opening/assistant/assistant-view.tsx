@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
@@ -31,6 +31,8 @@ import { AiReadinessChecklist } from "./ai-readiness";
 import type { ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
+import { sameUnknownJob, turnsWithKnownOutcome, unknownTurnQuestion, unknownTurnRecovery } from "./unknown-turn-recovery";
+import { UnknownTurnNotice } from "./unknown-turn-notice";
 
 type Props = {
   api?: OpeningApi;
@@ -118,7 +120,7 @@ export function jobStatusHint(job: JobStatusResponse): string {
   }
   if (job.status === "cancelled") return "回答任务已取消。";
   if (job.status === "outcome_unknown") {
-    return `回答结果状态未知：${job.error?.message ?? "服务未提供原因"}。请勿重复提交。`;
+    return "回答结果状态未知，原请求不会自动重发。请查看回答恢复提示。";
   }
   return "";
 }
@@ -348,6 +350,24 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [tutorActionError, setTutorActionError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const [modePrefill, setModePrefill] = useState<{ mode: TutorMode; nonce: number } | null>(null);
+  const [unknownJob, setUnknownJob] = useState<JobStatusResponse | null>(null);
+  const [recoveryNow, setRecoveryNow] = useState(Date.now);
+  const [retryDraftVersion, setRetryDraftVersion] = useState(0);
+  const draftId = useId();
+  const unknownRecovery = unknownTurnRecovery(unknownJob, recoveryNow);
+  const waitingForUnknown = unknownRecovery !== null && !unknownRecovery.canRetry;
+  const recoveredTurns = useMemo(() => turnsWithKnownOutcome(turns, unknownJob), [turns, unknownJob]);
+  const retryQuestion = unknownTurnQuestion(recoveredTurns);
+
+  useEffect(() => {
+    if (!unknownJob) return;
+    const update = () => setRecoveryNow(Date.now());
+    const readyAt = unknownTurnRecovery(unknownJob, Date.now())?.readyAt ?? Date.now();
+    update();
+    const timer = window.setTimeout(update, Math.max(0, readyAt - Date.now()));
+    document.addEventListener("visibilitychange", update);
+    return () => { window.clearTimeout(timer); document.removeEventListener("visibilitychange", update); };
+  }, [unknownJob]);
 
   const refreshSources = useCallback(async () => {
     setSources(await api.listSources());
@@ -432,6 +452,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       let pendingJob: JobStatusResponse | null;
       try {
         pendingJob = await api.getPendingJob(id);
+        if (pendingJob?.status === "outcome_unknown") {
+          // Another tab may create a turn between these separate API reads.
+          // Read the pair after discovering the job, then confirm it is still current.
+          const currentTurns = await api.listTurns(id);
+          const confirmedJob = await api.getPendingJob(id);
+          if (!sameUnknownJob(pendingJob, confirmedJob)) {
+            setUnknownJob(null);
+            setActiveJobId(null);
+            setPending(false);
+            setRecoveryRequired(true);
+            setPendingHint("对话刚刚发生变化，请重新读取后再恢复提问。");
+            return true;
+          }
+          setTurns(currentTurns);
+        }
       } catch (lookupError) {
         const discovered = pendingJobDiscoveryState({ ok: false, error: lookupError });
         if (discovered.kind === "unavailable") {
@@ -441,6 +476,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         return true;
       }
       setRecoveryRequired(false);
+      setUnknownJob(pendingJob?.status === "outcome_unknown" ? pendingJob : null);
+      setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
       if (discovered.kind === "active") {
         setActiveJobId(discovered.activeJobId);
@@ -455,6 +492,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         setPending(false);
         setPendingHint("");
       }
+      return true;
     },
     [api, initialCourseId, learningAttempt],
   );
@@ -515,8 +553,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         }
         setPending(false);
         setActiveJobId(null);
+        // The latest conversation job may already be newer than this poll result.
         await refreshConversation(conversationId);
-        setPendingHint(jobStatusHint(job));
       },
       onError: (pollError) => {
         setPendingHint(
@@ -531,8 +569,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }, [activeJobId, api, conversationId, refreshConversation]);
 
   const savedDisplay = useMemo(
-    () => resolveChatMessages({ resume, turns }),
-    [resume, turns],
+    () => resolveChatMessages({ resume, turns: recoveredTurns }),
+    [resume, recoveredTurns],
   );
   const display = privacy === "ephemeral"
     ? { messages: mergeChatMessages(savedDisplay.messages, ephemeralMessages), historyTruncated: savedDisplay.historyTruncated }
@@ -568,6 +606,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }
 
   async function handleSubmit(input: ComposerSubmit): Promise<{ accepted: boolean }> {
+    // Check the current clock at the actual send boundary, including background tabs.
+    if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
     setAutoSelectNotice(null);
     let page: number | null | undefined;
@@ -643,6 +683,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         ...(page !== undefined ? { currentPage: page } : {}),
       });
       setActiveJobId(submitted.jobId);
+      setUnknownJob(null);
       jobSubmitted = true;
       setPendingHint("回答任务已提交，等待状态更新。");
       abortRef.current = null;
@@ -728,6 +769,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     if (pending || loading || recoveryRequired) return;
     setDraft(replacePromptDraft(draft, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
   }
+  function prepareUnknownQuestion() {
+    if (!retryQuestion || pending || loading || recoveryRequired || unknownTurnRecovery(unknownJob, Date.now())?.canRetry !== true) return;
+    const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的草稿将被替换。"));
+    if (next !== retryQuestion.text) return;
+    setDraft(next);
+    setPrivacy("saved");
+    setModePrefill({ mode: retryQuestion.mode, nonce: Date.now() });
+    // This is an explicit new question, not a replay of an unconfirmed submission key.
+    setRetryDraftVersion(value => value + 1);
+    setPendingHint("");
+    window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
+  }
   const Heading = embedded ? "h2" : "h1";
   return <section aria-label="自由探索工作台" className="flex h-full min-h-[400px] min-w-0 overflow-hidden bg-white lg:min-h-0">
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -739,8 +792,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         </div>
       </header>
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
-      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} sourceNames={Object.fromEntries(sources.map((source) => [source.id, source.name]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} onCreateCard={(message, selectedText) => setCardDraft(prepareSnippetDraft(message, selectedText))} />}
-      {pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={Object.fromEntries(sources.map((source) => [source.id, source.version]))} sourceNames={Object.fromEntries(sources.map((source) => [source.id, source.name]))} onPrompt={setPrompt} onSaveSnippet={(message, selectedText) => setSnippetDraft(prepareSnippetDraft(message, selectedText))} onCreateCard={(message, selectedText) => setCardDraft(prepareSnippetDraft(message, selectedText))} />}
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">
           <p className="min-w-0 flex-1">{autoSelectNotice}</p>
@@ -759,7 +812,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
 
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
       {!learningAttempt ? <p className="mx-5 mb-2 text-[11px] leading-5 text-zinc-500"><Link href="/opening/settings/connections" className="underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800">数据连接与授权</Link>：不可用时显示不可用，不填充示例同步内容。</p> : null}
-      <Composer practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}

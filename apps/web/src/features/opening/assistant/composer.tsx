@@ -16,6 +16,7 @@ type Props = {
   practiceMode?: boolean; disabled?: boolean; pending?: boolean; privacy?: ComposerPrivacy;
   onPrivacyChange?: (privacy: ComposerPrivacy) => void; onCancel?: () => void;
   onContext?: () => void; contextLabel?: string; draft: string;
+  draftId?: string;
   intent?: { sourceIds: readonly string[]; currentPage?: number | null; chunkId?: string | null };
   /** Chip prefill: switches the selected mode once per nonce change. */
   modePrefill?: { mode: TutorMode; nonce: number } | null;
@@ -42,7 +43,7 @@ export function shouldSubmitShortcut(event: { key: string; ctrlKey: boolean; met
   return (event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing;
 }
 export function Composer({ practiceMode = false, disabled, pending, privacy = "saved", onPrivacyChange,
-  onCancel, onContext, contextLabel, draft, intent, modePrefill = null, onDraftChange, onSubmit }: Props) {
+  onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, onDraftChange, onSubmit }: Props) {
   const [selectedMode, setMode] = useState<TutorMode>("explain");
   const lastPrefill = useRef<number | null>(null);
   if (modePrefill && modePrefill.nonce !== lastPrefill.current) {
@@ -75,7 +76,7 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
   }
   return <form ref={form} className="shrink-0 border-t border-zinc-200/70 bg-white px-4 pb-3 pt-3 sm:px-5" onSubmit={handleSubmit}>
     <div className="overflow-hidden rounded-xl border border-zinc-300 bg-white shadow-sm shadow-zinc-900/5 transition-[border-color,box-shadow] duration-200 focus-within:border-emerald-600 focus-within:shadow-md focus-within:shadow-emerald-600/10 motion-reduce:transition-none">
-      <textarea className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-3.5 text-base leading-7 text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 md:text-sm"
+      <textarea id={draftId} className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-3.5 text-base leading-7 text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 md:text-sm"
         value={draft} disabled={blocked} onChange={(event) => onDraftChange(event.target.value)}
         onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
         onKeyDown={(event) => { if (shouldSubmitShortcut({ key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, isComposing: event.nativeEvent.isComposing || composing.current })) { event.preventDefault(); form.current?.requestSubmit(); } }}
@@ -95,7 +96,7 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
         <div className="flex items-center gap-1.5">
           {pending && onCancel ? <button type="button" className={secondaryButtonClass} onClick={onCancel}><Square size={12} aria-hidden />取消</button> : null}
           <button type="submit" className="inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-white shadow-md shadow-zinc-900/20 transition-[background-color,transform,box-shadow] duration-200 ease-out-expo hover:bg-zinc-800 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus-visible:ring-offset-2 active:scale-95 disabled:pointer-events-none disabled:bg-zinc-100 disabled:text-zinc-400 disabled:shadow-none motion-reduce:transition-none motion-reduce:active:scale-100 md:size-9" disabled={blocked || !draft.trim()} aria-label="发送" title="发送 · Ctrl / ⌘ + Enter">
-            {blocked ? <LoaderCircle size={17} className="motion-safe:animate-spin" aria-hidden /> : <ArrowUp size={18} aria-hidden />}
+            {pending || sending ? <LoaderCircle size={17} className="motion-safe:animate-spin" aria-hidden /> : <ArrowUp size={18} aria-hidden />}
           </button>
         </div>
       </div>

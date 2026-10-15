@@ -60,7 +60,7 @@ describe("AssistantView pending job discovery", () => {
     })).toEqual({
       kind: "unknown",
       pending: false,
-      hint: "回答结果状态未知：provider timeout。请勿重复提交。",
+      hint: "回答结果状态未知，原请求不会自动重发。请查看回答恢复提示。",
     });
   });
 });
@@ -188,7 +188,7 @@ describe("AssistantView job polling", () => {
         error: { message: "provider timeout" },
         updatedAt: ISO,
       }),
-    ).toContain("请勿重复提交");
+    ).toContain("原请求不会自动重发");
     expect(
       jobStatusHint({
         id: JOB_ID,

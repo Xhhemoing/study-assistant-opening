@@ -4,7 +4,7 @@ import { getTutorJobService } from "../../../../../../features/opening/server/da
 
 type Params = { params: Promise<{ id: string }> };
 
-/** Discover only an active pending Tutor job in the caller's conversation. */
+/** Discover the latest active or outcome-unknown Tutor job in the caller's conversation. */
 export async function GET(request: Request, context: Params): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);

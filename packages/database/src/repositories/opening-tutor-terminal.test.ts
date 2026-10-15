@@ -119,10 +119,11 @@ describe("opening conversation repository", () => {
 
 describe("opening tutor jobs repository", () => {
   it("discovers only an active pending job in the owner-scoped conversation", async () => {
-    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running', 'outcome_unknown')") && query.includes("t.status = 'pending'")
+    const sql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
       ? [{
           id: "job-1",
           status: "queued",
+          turn_status: "pending",
           error: null,
           updated_at: new Date("2026-09-13T12:00:00.000Z"),
         }]
@@ -140,10 +141,11 @@ describe("opening tutor jobs repository", () => {
   });
 
   it("discovers a recovered unknown outcome without marking it active", async () => {
-    const sql = fakeSql((query) => query.includes("status IN ('queued', 'running', 'outcome_unknown')")
+    const sql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
       ? [{
           id: "job-unknown",
           status: "outcome_unknown",
+          turn_status: "outcome_unknown",
           error: { message: "provider timeout" },
           updated_at: "2026-09-13T12:00:00.000Z",
         }]

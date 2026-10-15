@@ -177,13 +177,19 @@ export function createOpeningConversationRepository(sql: Sql) {
     ): Promise<TurnRecord[]> {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
-        SELECT id, conversation_id, role,
-          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
-          mode, status, created_at, CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations
+        SELECT t.id, t.conversation_id, t.role,
+          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
+          t.mode, t.status, t.created_at, CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
-        WHERE conversation_id = ${conversationId}
-          AND workspace_id = ${scope.workspaceId}
-        ORDER BY created_at ASC
+        LEFT JOIN opening_tutor_jobs j
+          ON j.workspace_id = t.workspace_id AND j.conversation_id = t.conversation_id
+          AND (j.user_turn_id = t.id OR j.assistant_turn_id = t.id)
+        WHERE t.conversation_id = ${conversationId}
+          AND t.workspace_id = ${scope.workspaceId}
+        -- Both turns share the transaction timestamp. Keep each job's pair
+        -- together even when several jobs also have the same timestamp.
+        ORDER BY t.created_at ASC, COALESCE(j.id, t.id) ASC,
+          CASE WHEN t.id = j.user_turn_id THEN 0 ELSE 1 END ASC, t.id ASC
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;

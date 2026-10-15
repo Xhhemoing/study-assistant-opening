@@ -132,7 +132,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       updatedAt: string;
     } | null> {
       const rows = await sql`
-        SELECT j.id, j.status, j.error, j.updated_at
+        SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status
         FROM opening_tutor_jobs j
         JOIN opening_conversations c ON c.id = j.conversation_id
         JOIN opening_turns t ON t.id = j.assistant_turn_id
@@ -140,13 +140,18 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           AND j.workspace_id = ${scope.workspaceId}
           AND c.workspace_id = ${scope.workspaceId}
           AND c.owner_user_id = ${scope.ownerUserId}
-          AND j.status IN ('queued', 'running', 'outcome_unknown')
-          AND t.status = 'pending'
-        ORDER BY j.created_at DESC
+          AND t.workspace_id = ${scope.workspaceId}
+        ORDER BY j.created_at DESC, j.id DESC
         LIMIT 1
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;
+      // Inspect the latest job before filtering statuses so an older unknown
+      // result cannot resurface after a newer answer has already ended.
+      const active = (row.status === "queued" || row.status === "running") && row.turn_status === "pending";
+      const unknown = row.status === "outcome_unknown"
+        && (row.turn_status === "pending" || row.turn_status === "outcome_unknown");
+      if (!active && !unknown) return null;
       return {
         id: row.id as string,
         status: row.status as OpeningTutorJobRecord["status"],

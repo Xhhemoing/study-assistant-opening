@@ -3,7 +3,7 @@
 import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
 import type { Citation } from "@aistudy/contracts";
 import { ArtifactView } from "@aistudy/jingwei/react";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { artifactsForMessages, openingCapabilities, openingRenderers } from "../jingwei-host";
 import { snippetSaveAvailability, type SelectedExcerpt } from "./save-snippet";
@@ -33,6 +33,7 @@ type Props = {
   artifactsEnabled?: boolean;
   /** Markdown + math rendering for assistant answers. Defaults to the server capability. */
   proseEnabled?: boolean;
+  disabled?: boolean;
 };
 const prompts = [
   { title: "把一个概念讲明白", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。" },
@@ -48,11 +49,25 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
   const messageElements = useRef<Record<string, HTMLElement | null>>({});
+  const scrollArea = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const [unread, setUnread] = useState(false);
+  const lastMessage = messages.at(-1);
+  function showLatest() {
+    const element = scrollArea.current;
+    if (element) element.scrollTop = element.scrollHeight;
+    following.current = true;
+    setUnread(false);
+  }
+  useEffect(() => {
+    if (following.current) showLatest();
+    else setUnread(true);
+  }, [lastMessage?.id, lastMessage?.text, messages.length]);
   const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
   function selectedTextFor(message: ChatMessageView): SelectedExcerpt | undefined {
     const selection = window.getSelection();
@@ -69,19 +84,19 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
   function createCard(message: ChatMessageView) {
     onCreateCard?.(message, selectedTextFor(message));
   }
-  return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-gradient-to-b from-zinc-50/30 to-white px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
+  return <div className="relative flex min-h-0 flex-1"><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-gradient-to-b from-zinc-50/30 to-white px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
     {historyTruncated ? <p className="mb-5 rounded-lg bg-amber-50 px-3.5 py-2.5 text-xs leading-6 text-amber-900 ring-1 ring-amber-600/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
     {!messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
       <span className="mb-5 inline-flex size-14 items-center justify-center self-start rounded-2xl bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-lg shadow-zinc-900/20 ring-1 ring-white/10" aria-hidden="true"><PanelsTopLeft size={24} strokeWidth={1.75} /></span>
       <h2 className="text-xl font-semibold tracking-tight text-zinc-950">今天，想弄懂什么？</h2>
       <p className="mt-2 text-[15px] leading-7 text-zinc-500">还没有消息。自由交流，或选一份材料一起读。</p>
-      {onPrompt ? <div className="mt-6 divide-y divide-zinc-200/80 overflow-hidden rounded-xl border border-zinc-200/80 shadow-xs shadow-zinc-900/5">{prompts.map((prompt) => <button key={prompt.title} type="button" onClick={() => onPrompt(prompt.text)} className="group flex min-h-12 w-full items-center justify-between gap-3 bg-white px-4 text-left text-sm text-zinc-700 transition-[color,background-color] duration-150 hover:bg-zinc-50 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600/50 motion-reduce:transition-none"><span className="font-medium">{prompt.title}</span><ArrowUpRight size={14} aria-hidden className="text-zinc-400 transition-colors group-hover:text-zinc-600" /></button>)}</div> : null}
+      {onPrompt ? <div className="mt-6 divide-y divide-zinc-200/80 overflow-hidden rounded-xl border border-zinc-200/80 shadow-xs shadow-zinc-900/5">{prompts.map((prompt) => <button key={prompt.title} type="button" disabled={disabled} onClick={() => onPrompt(prompt.text)} className="group flex min-h-12 w-full items-center justify-between gap-3 bg-white px-4 text-left text-sm text-zinc-700 transition-[color,background-color] duration-150 hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600/50 motion-reduce:transition-none"><span className="font-medium">{prompt.title}</span><ArrowUpRight size={14} aria-hidden className="text-zinc-400 transition-colors group-hover:text-zinc-600" /></button>)}</div> : null}
     </div> : <ul className="mx-auto flex w-full max-w-[72ch] flex-col gap-6">{messages.map((message, index) => {
       const saveAvailability = (onSaveSnippet || onCreateCard) ? snippetSaveAvailability(message) : "hidden";
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
-      {message.role === "assistant" && proseEnabled
+      {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-zinc-700">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
         ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} /> : null}</div>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
@@ -103,10 +118,10 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
         </span>;
       })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-zinc-500" role="status">一般说明（未引用材料）</p> : null}
       {message.status === "pending" ? <p className="mt-2 text-xs text-zinc-500">生成中…</p> : null}
-      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">结果状态未知，请勿重复提交</p> : null}
+      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">原请求不会自动重发，费用仍待确认。</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-amber-800">{CLARIFY_FOLLOW_UP}</p> : null}
-      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
+      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
     </li>; })}</ul>}
-  </div>;
+  </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-zinc-900 px-4 text-xs font-medium text-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
 }

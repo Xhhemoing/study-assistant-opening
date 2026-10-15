@@ -182,7 +182,7 @@ describe("MessageList", () => {
     expect(html).not.toContain("text-red-700");
   });
 
-  it("renders outcome_unknown as an explicit no-resubmit warning, not failed", () => {
+  it("keeps outcome_unknown and unconfirmed charges distinct from failure", () => {
     const html = renderToStaticMarkup(createElement(MessageList, {
       messages: [{
         id: "turn-1",
@@ -193,7 +193,8 @@ describe("MessageList", () => {
       }],
     }));
 
-    expect(html).toContain(">结果状态未知，请勿重复提交<");
+    expect(html).toContain("这次回答未能确认是否生成成功");
+    expect(html).toContain("原请求不会自动重发，费用仍待确认");
     expect(html).not.toContain("本轮失败");
   });
 
