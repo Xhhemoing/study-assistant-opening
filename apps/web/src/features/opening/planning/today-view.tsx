@@ -218,8 +218,7 @@ export function TodayPlanView({
       <details className="mx-4 mt-4 rounded-xl border border-zinc-200 bg-white"><summary className="min-h-11 cursor-pointer px-3 py-3 text-xs font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">今日安排与进度</summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
     </fieldset> : null}
     {hasLoadedTasks ? <TodayStudyTools key={date} disabled={pending || loadState !== "ready" || planState !== "ready"} api={api} date={date} plan={plan} tasks={tasks} onChanged={refresh} /> : null}
-    <div className="mt-auto px-4 pb-4 pt-6"><p className="text-[11px] leading-5 text-zinc-500">队列包含历史任务，已完成不等于今日完成。<br />选择任务后继续；计时与浏览不会自动标记完成。</p>
-    </div>
+    <div className="mt-auto px-4 pb-4 pt-6" />
   </section>;
 }
 
