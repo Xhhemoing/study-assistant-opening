@@ -468,3 +468,12 @@ export {
 } from "./opening/teaching-math-model";
 
 export * from "./opening/adaptive";
+
+export {
+  createRulesSkillStateEstimator,
+  toSkillEvidence,
+  type SkillEvidence as EstimatorSkillEvidence,
+  type SkillStateEstimate,
+  type SkillStateEstimator,
+  type RulesSkillStateEstimatorOptions,
+} from "./opening/estimators";
