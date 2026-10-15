@@ -10,6 +10,7 @@ import {
   OpeningModelRoutingError,
   type BudgetedRepository,
   type ModelTaskKey,
+  type ModelGatewayCallOptions,
   type ResolvedTaskModel,
 } from "@aistudy/ai";
 import { loadOpeningModelCatalog, parseBooleanEnv } from "@aistudy/config";
@@ -95,6 +96,16 @@ export function createDbModelGateway(sql: Sql) {
     resolve: (scope, task) => resolveTaskModel(sql, scope, task),
     resolveFallback: (scope, task) => resolveFallbackTaskModel(sql, scope, task),
   });
+}
+
+/** Connectivity checks use one explicitly selected owned model, with no fallback. */
+export async function probeDbModel(sql: Sql, scope: Scope, providerId: string, modelId: string, options: ModelGatewayCallOptions) {
+  const { settings, merged } = await loadRouting(sql, scope);
+  const model = resolveModelForTask(merged.models, {
+    ...settings, mode: "automatic", taskRoutes: { ...settings.taskRoutes, "settings.probe": { primary: modelId, fallback: null } },
+  }, "settings.probe", merged.defaultModelId);
+  if (model.providerId !== providerId || model.source !== "workspace") throw new OpeningModelRoutingError("模型不存在或不属于此服务商。");
+  return createModelGateway({ resolve: async () => toResolved(model) }).call(scope, "settings.probe", options);
 }
 
 /** Bind the shared ledger repository to one owner scope for runBudgetedCall. */

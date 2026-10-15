@@ -14,22 +14,26 @@ import {
   putWorkspacePreferences,
 } from "./settings-shared";
 import { PreferenceControls } from "../opening/teaching/preference-controls";
+import { QuickSetupPanel } from "./quick-setup-panel";
 
 const navLinkClass = "text-sm text-zinc-600 underline-offset-2 hover:text-zinc-900 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 rounded-sm";
 
-export function SettingsView() {
+export function SettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
   const [learningPreferences, setLearningPreferences] = useState<LearningPreferences>(disabledLearningPreferences);
   const [loading, setLoading] = useState(true);
+  const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
+    setReady(false);
     setError("");
     try {
       const body = await fetchWorkspacePreferences();
       setLearningPreferences(body.learningPreferences ?? disabledLearningPreferences);
+      setReady(true);
     } catch {
       setError("设置暂时无法读取，请重试。");
     } finally {
@@ -42,7 +46,7 @@ export function SettingsView() {
   }, [loadSettings]);
 
   async function saveLearningPreferences() {
-    if (saving) return;
+    if (!ready || loading || saving) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -61,10 +65,12 @@ export function SettingsView() {
     <main className="min-w-0 bg-white">
       <PageHeading
         title="设置"
-        description="管理数据连接、开学排程与学习偏好。AI 模型、默认入口、诊断等见高级设置。"
+        description="配置 AI 模型，管理数据连接、开学排程与学习偏好。模型路由、默认入口、诊断等见高级设置。"
       />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
         <nav aria-label="设置分区" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-zinc-500">
+          <a className={navLinkClass} href="#quick-model-setup">AI 快速配置</a>
+          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#connections">连接</a>
           <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#planning">排程</a>
@@ -73,10 +79,12 @@ export function SettingsView() {
           <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#intervention">介入偏好</a>
           <span aria-hidden="true">·</span>
-          <Link className={navLinkClass} href="/settings/advanced">高级</Link>
+          <Link className={navLinkClass} href={`${basePath}/advanced`}>高级</Link>
           <span aria-hidden="true">·</span>
-          <Link className={navLinkClass} href="/settings/advanced#daily-budget">开启 AI 每日额度</Link>
+          <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>开启 AI 每日额度</Link>
         </nav>
+
+        <QuickSetupPanel basePath={basePath} />
 
         <section id="connections" className="scroll-mt-6 border-b border-zinc-200 pb-6" aria-labelledby="opening-connections-heading">
           <div className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]">
@@ -116,7 +124,7 @@ export function SettingsView() {
                 </button>
               </div>
             ) : null}
-            {!loading ? (
+            {!loading && ready ? (
               <>
                 <div className="divide-y divide-zinc-100">
                   {learningSwitches.map(({ key, label }) => (
@@ -125,7 +133,7 @@ export function SettingsView() {
                       <input
                         checked={learningPreferences[key]}
                         className="size-4 accent-emerald-700"
-                        disabled={key !== "assessmentEnabled" && !learningPreferences.assessmentEnabled}
+                        disabled={saving || (key !== "assessmentEnabled" && !learningPreferences.assessmentEnabled)}
                         onChange={(event) => setLearningPreferences((current) =>
                           key === "assessmentEnabled" && !event.target.checked
                             ? disabledLearningPreferences
@@ -136,7 +144,7 @@ export function SettingsView() {
                     </label>
                   ))}
                 </div>
-                <button className={ui.primary} disabled={saving} onClick={() => void saveLearningPreferences()} type="button">
+                <button className={ui.primary} disabled={saving || !ready} onClick={() => void saveLearningPreferences()} type="button">
                   {saving ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}
                   保存学习偏好
                 </button>
@@ -159,8 +167,8 @@ export function SettingsView() {
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
           <p className="text-xs leading-6 text-zinc-500">AI 模型与每日额度、默认入口、指导模式、计划自主权、导出与诊断等在高级设置。</p>
           <div className="flex flex-wrap gap-2">
-            <Link className={ui.secondary} href="/settings/advanced#daily-budget">AI 模型与每日额度</Link>
-            <Link className={ui.secondary} href="/settings/advanced">打开高级设置</Link>
+            <Link className={ui.secondary} href={`${basePath}/advanced#daily-budget`}>AI 模型与每日额度</Link>
+            <Link className={ui.secondary} href={`${basePath}/advanced`}>打开高级设置</Link>
           </div>
         </div>
 

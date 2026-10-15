@@ -60,6 +60,20 @@ export function effectiveTaskRoutes(data: OpeningAiSettingsResponse, settings: O
   });
 }
 
+/** Model transcription can use the selected primary or its explicit, usable fallback. */
+export function transcriptionModelProblem(data: OpeningAiSettingsResponse, settings: OpeningAiSettings): string | null {
+  if (settings.transcription?.engine !== "model") return null;
+  const task: TaskView = { key: "media.transcribe", label: "音视频转写", group: "materials", needs: ["audio"] };
+  const key = task.key as ModelTaskKey;
+  const primaryId = selectedModelIdForTask(settings, key, data.defaultModelId);
+  const primaryProblem = modelProblemForTask(data.models.find(model => model.id === primaryId), task);
+  if (primaryProblem === null) return null;
+  const fallbackId = selectedFallbackModelIdForTask(settings, key);
+  const fallbackProblem = fallbackId ? modelProblemForTask(data.models.find(model => model.id === fallbackId), task) : null;
+  if (fallbackId && fallbackProblem === null) return null;
+  return `主模型：${primaryProblem}${fallbackProblem ? `；备用模型：${fallbackProblem}` : ""}`;
+}
+
 export function setTaskRoute(settings: OpeningAiSettings, task: string, patch: { primary?: string | null; fallback?: string | null }): OpeningAiSettings {
   const current = settings.taskRoutes?.[task] ?? { primary: null, fallback: null };
   const next = { ...current, ...patch };

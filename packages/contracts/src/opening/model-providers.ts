@@ -66,6 +66,31 @@ export const openingProviderModelInputSchema = z.object(modelFields).strict().su
 });
 export type OpeningProviderModelInput = z.infer<typeof openingProviderModelInputSchema>;
 
+export const openingModelQuickSetupInputSchema = z.object({
+  clientKey: z.string().min(8).max(120),
+  label: modelFields.label,
+  baseUrl: providerBaseUrlSchema,
+  apiKey: z.string().min(1).max(4096),
+  modelName: modelFields.modelName,
+  inputCentsPerMillion: modelFields.inputCentsPerMillion,
+  outputCentsPerMillion: modelFields.outputCentsPerMillion,
+  supportsVision: modelFields.supportsVision,
+  supportsAudio: modelFields.supportsAudio,
+  billing: openingModelBillingSchema.optional(),
+  dailyRequestCap: dailyRequestCapSchema.nullable().optional(),
+  dailyCapCents: z.number().int().nonnegative().max(2_147_483_647).nullable().optional(),
+  confirmBudget: z.boolean().optional(),
+}).strict().superRefine((input, ctx) => {
+  const issue = pricingIssue(input);
+  if (issue) ctx.addIssue({ code: "custom", path: ["inputCentsPerMillion"], message: issue });
+  if ((input.billing ?? "metered") === "metered" && (!input.confirmBudget || !input.dailyCapCents)) {
+    ctx.addIssue({ code: "custom", path: ["confirmBudget"], message: "请确认正数的每日预算。" });
+  }
+});
+export type OpeningModelQuickSetupInput = z.infer<typeof openingModelQuickSetupInputSchema>;
+
+export const openingModelProbeInputSchema = z.object({ clientKey: z.string().min(8).max(120) }).strict();
+
 export const openingProviderUpdateSchema = z.object({
   label: z.string().trim().min(1).max(120).optional(),
   baseUrl: providerBaseUrlSchema.optional(),

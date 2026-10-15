@@ -8,7 +8,7 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
 }));
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
-import { resolveTutorModel } from "./model-gateway";
+import { probeDbModel, resolveTutorModel } from "./model-gateway";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };
 beforeEach(() => {
@@ -39,6 +39,19 @@ describe("shared tutor model selection", () => {
     mocks.get.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS, saved: true, invalidStoredSettings: true });
     await expect(resolveTutorModel({} as never, scope, "hint")).rejects.toThrow(/重新保存/);
     expect(mocks.provider).not.toHaveBeenCalled();
+  });
+  it("probes the exact model even when another model is manually locked", async () => {
+    const custom = { ...model, id: "probe-model", modelName: "probe-actual-model", providerId: "probe-provider", supportsAudio: false, createdAt: new Date().toISOString(), vaultConfigBroken: false };
+    mocks.models.mockResolvedValue([custom]);
+    mocks.get.mockResolvedValue({ settings: { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual", manualModelId: "chosen" }, saved: true, invalidStoredSettings: false });
+    // Stop at reservation: selection must already have constructed only the probe provider.
+    const budget = { reserve: vi.fn().mockRejectedValue(new Error("stop at reservation")) };
+    await expect(probeDbModel({} as never, scope, "probe-provider", "probe-model", {
+      budget: budget as never, operationId: "probe:exact-model", input: { instruction: "Reply OK", text: "Test", mode: "listen", chunks: [], imageParts: [], mediaCapability: "text_only", outputFormat: "json", maxOutputTokens: 16 },
+    })).rejects.toThrow();
+    expect(mocks.provider).toHaveBeenCalledTimes(1);
+    expect(mocks.provider).toHaveBeenCalledWith(expect.objectContaining({ model: custom.modelName }));
+    expect(budget.reserve).toHaveBeenCalledWith(expect.objectContaining({ modelSnapshot: expect.objectContaining({ id: "probe-model" }), purpose: "probe" }));
   });
   it("blocks a removed manual selection instead of using the deployment default", async () => {
     mocks.get.mockResolvedValue({ settings: { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual", manualModelId: "removed" }, saved: true, invalidStoredSettings: false });

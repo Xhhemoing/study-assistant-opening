@@ -4,7 +4,7 @@ import { openingAiSettingsResponseSchema, type OpeningAiSettings, type OpeningAi
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ui } from "../opening/design/ui";
-import { availabilityLabels, effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode, tutorRouteLabels } from "./ai-settings-model";
+import { availabilityLabels, effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode, transcriptionModelProblem, tutorRouteLabels } from "./ai-settings-model";
 import { TaskRoutesSection } from "./task-routes-section";
 
 function ModelSelect({ label, models, supplier, value, fallback, onChange }: {
@@ -35,6 +35,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
   // Only explicit task routes block saving; tasks that follow the default report their state above.
   const brokenTaskRoute = effectiveTaskRoutes(data, draft).some(route =>
     (draft.taskRoutes?.[route.task.key]?.primary && route.problem !== null) || route.fallbackProblem !== null);
+  const transcriptionProblem = transcriptionModelProblem(data, draft);
   return <div className="space-y-4">
     {data.invalidStoredSettings ? <p className="text-sm text-amber-800" role="alert">已保存的设置无效，AI 请求已暂停。请重新选择后保存，或恢复服务器默认设置。</p> : null}
     {!data.models.length ? <p className="text-sm leading-6 text-amber-800">服务器尚未部署可选模型。请联系管理员配置模型目录后重新读取。</p> : null}
@@ -69,6 +70,12 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
       <ModelSelect label={draft.mode === "manual" ? "所有辅导模式使用的模型" : "默认模型"} models={data.models} supplier={supplier} value={draft.mode === "manual" ? draft.manualModelId : draft.defaultModelId} fallback={draft.mode === "manual" ? "请选择明确的模型" : `跟随服务器默认${defaultModel ? `（${defaultModel.label}）` : "（尚未配置）"}`} onChange={id => onChange(draft.mode === "manual" ? { ...draft, manualModelId: id } : { ...draft, defaultModelId: id })} />
       {draft.mode === "automatic" ? <div className="grid gap-3 sm:grid-cols-2">{tutorRouteLabels.map(({ mode, label }) => <ModelSelect key={mode} label={label} models={data.models} supplier={supplier} value={draft.routes[mode]} fallback="使用默认模型" onChange={id => onChange({ ...draft, routes: { ...draft.routes, [mode]: id } })} />)}</div> : null}
       <TaskRoutesSection data={data} draft={draft} onChange={onChange} />
+      <fieldset className="space-y-2 rounded-lg border border-zinc-200 p-3" aria-describedby="transcription-engine-description">
+        <legend className="px-1 text-sm font-medium text-zinc-900">转写引擎</legend>
+        <p id="transcription-engine-description" className="text-xs leading-6 text-zinc-500">默认使用本地转写。模型转写按上方「音视频转写」的主模型与备用模型执行，音频会发送给所选模型供应商。</p>
+        <div className="flex flex-wrap gap-4">{[{ value: "local" as const, label: "本地转写" }, { value: "model" as const, label: "模型转写" }].map(option => <label key={option.value} className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-700"><input className="size-4 accent-emerald-700" type="radio" name="transcription-engine" checked={(draft.transcription?.engine ?? "local") === option.value} onChange={() => onChange({ ...draft, transcription: { engine: option.value } })} />{option.label}</label>)}</div>
+        {transcriptionProblem ? <p className="text-xs leading-6 text-amber-800" role="alert">模型转写需要可用且支持音频输入的模型。请在「音视频转写」中选择主模型或备用模型。{transcriptionProblem}。</p> : null}
+      </fieldset>
     </fieldset>
     <div className="space-y-2 border-t border-zinc-100 pt-3">
       <h3 className="text-xs font-medium text-zinc-800">{dirty || data.invalidStoredSettings ? "保存后使用" : "当前生效规则"}</h3>
@@ -78,7 +85,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
     </div>
 
     <div className="space-y-1 text-xs leading-6 text-zinc-500"><p>支持文本模型；标记为“视觉”的模型可分析指定 PDF 页图像。价格由服务器或本工作区配置；所有供应商须换算为同一记账币种，不自动换汇。工作区共享日上限当前为 {data.dailyCapCents} 分（按用户本地日，默认 Asia/Shanghai），切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。所选模型不可用时会停止；只有你为该用途明确指定了备用模型，且主模型请求确定没有发出时，才会改用备用模型。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>服务器目录模型由管理员维护；本工作区自建的供应商与模型可在下方「自定义供应商与密钥」中配置，保存后立即生效，无需重启服务。</p><p>设置中的原生备份暂不包含模型选择、路由与自定义供应商配置，请在迁移服务器前另行记录。</p></div>
-    <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || stale || brokenTaskRoute || routes.some(route => route.problem !== null) || (!dirty && data.saved && !data.invalidStoredSettings)} onClick={onSave}>{busy ? <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}保存模型设置</button><button type="button" className={ui.secondary} disabled={busy || (!data.saved && !dirty)} onClick={onReset}>恢复服务器默认设置</button></div>
+    <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || stale || brokenTaskRoute || transcriptionProblem !== null || routes.some(route => route.problem !== null) || (!dirty && data.saved && !data.invalidStoredSettings)} onClick={onSave}>{busy ? <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}保存模型设置</button><button type="button" className={ui.secondary} disabled={busy || (!data.saved && !dirty)} onClick={onReset}>恢复服务器默认设置</button></div>
   </div>;
 }
 

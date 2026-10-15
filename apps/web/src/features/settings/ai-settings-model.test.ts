@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsSchema, type OpeningAiSettingsResponse } from "@aistudy/contracts";
-import { effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, setTaskRoute, switchRoutingMode } from "./ai-settings-model";
+import { effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, setTaskRoute, switchRoutingMode, transcriptionModelProblem } from "./ai-settings-model";
 import { AiSettingsForm } from "./ai-settings-panel";
 const data: OpeningAiSettingsResponse = {
   defaultModelId: "a", dailyCapCents: 200, envCapCents: 200, personalCeilingCents: 2000, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false,
@@ -72,6 +72,19 @@ describe("AI settings presentation", () => {
     const primaryCleared = setTaskRoute(settings, "tutor.hint", { primary: null });
     expect(primaryCleared.taskRoutes?.["tutor.hint"]).toEqual({ primary: null, fallback: "b" });
     expect(setTaskRoute(primaryCleared, "tutor.hint", { fallback: null })).not.toHaveProperty("taskRoutes");
+  });
+  it("defaults to local transcription and requires an available audio route for model transcription", () => {
+    expect(transcriptionModelProblem(data, DEFAULT_OPENING_AI_SETTINGS)).toBeNull();
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, transcription: { engine: "model" as const } };
+    expect(transcriptionModelProblem(data, settings)).toContain("音频");
+    const withAudio = { ...data, models: data.models.map(model => ({ ...model, supportsAudio: true })) };
+    expect(transcriptionModelProblem(withAudio, settings)).toBeNull();
+    const audioFallback = { ...data, models: [...data.models, { ...data.models[0]!, id: "audio", supportsAudio: true }] };
+    expect(transcriptionModelProblem(audioFallback, setTaskRoute(settings, "media.transcribe", { fallback: "audio" }))).toBeNull();
+    const localHtml = renderToStaticMarkup(createElement(AiSettingsForm, { data, draft: DEFAULT_OPENING_AI_SETTINGS, busy: false, onChange() {}, onSave() {}, onReset() {} }));
+    expect(localHtml).toMatch(/name="transcription-engine" checked=""\/>本地转写/);
+    const html = renderToStaticMarkup(createElement(AiSettingsForm, { data, draft: settings, busy: false, onChange() {}, onSave() {}, onReset() {} }));
+    expect(html).toMatch(/disabled=""[^>]*>.*?保存模型设置/s);
   });
   it("allows reset and disables save for a removed model", () => {
     const draft = { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual" as const, manualModelId: "removed" };

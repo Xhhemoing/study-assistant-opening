@@ -79,4 +79,11 @@ describe("settings page split structure", () => {
     // explore soft-demotion copy lives inside the loaded entry form (client fetch)
     expect(html).toContain('href="/settings/export"');
   });
+
+  it("keeps advanced settings links inside the Opening shell when reused there", () => {
+    const html = renderToStaticMarkup(createElement(SettingsView, { basePath: "/opening/settings" }));
+    expect(html).toContain('href="/opening/settings/advanced"');
+    expect(html).toContain('href="/opening/settings/advanced#daily-budget"');
+    expect(html).not.toContain('href="/settings/advanced');
+  });
 });

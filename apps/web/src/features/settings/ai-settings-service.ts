@@ -1,5 +1,6 @@
 import {
   MODEL_TASKS,
+  OpeningModelRoutingError,
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   mergeOpeningCatalog,
   resolveEffectiveDailyCap,
@@ -47,7 +48,7 @@ function toSummary(model: OpeningModelSummary & { supportsVision?: boolean | und
 }
 
 /** The routing UI is generated from the registry, so a new task shows up without UI changes. */
-const TASK_VIEWS = Object.entries(MODEL_TASKS).map(([key, spec]) => ({
+const TASK_VIEWS = Object.entries(MODEL_TASKS).filter(([, spec]) => spec.group !== "settings").map(([key, spec]) => ({
   key, label: spec.label, group: spec.group,
   needs: [...("needs" in spec ? (spec.needs as readonly ("vision" | "audio")[]) : [])],
 }));
@@ -70,7 +71,7 @@ function resolveCapFromSettings(
   });
 }
 
-function validateBudgetFields(settings: OpeningAiSettings, envCapCents: number, pricingConfigured: boolean) {
+export function validateBudgetFields(settings: OpeningAiSettings, envCapCents: number, pricingConfigured: boolean) {
   const cap = settings.dailyCapCents;
   if (cap === undefined) return;
   if (cap === null) {
@@ -152,9 +153,25 @@ export async function saveAiSettings(sql: Sql, scope: Scope, input: unknown): Pr
       ...taskRoutes.map(([key]) => key as ModelTaskKey),
     ]);
     for (const task of checked) {
-      resolveModelForTask(merged.models, settings, task, merged.defaultModelId);
-      if (settings.taskRoutes?.[task]?.fallback && !resolveFallbackModelForTask(merged.models, settings, task)) {
+      const fallback = resolveFallbackModelForTask(merged.models, settings, task);
+      if (settings.taskRoutes?.[task]?.fallback && !fallback) {
         throw new ApiError("VALIDATION", `「${MODEL_TASKS[task].label}」的备用模型暂不可用或不支持该用途。`, 422);
+      }
+      try {
+        resolveModelForTask(merged.models, settings, task, merged.defaultModelId);
+      } catch (error) {
+        // An inherited text default can still transcribe via the user's explicit audio fallback.
+        if (!(error instanceof OpeningModelRoutingError) || task !== "media.transcribe" || settings.taskRoutes?.[task]?.primary || !fallback) throw error;
+      }
+    }
+    if (settings.transcription?.engine === "model") {
+      try {
+        resolveModelForTask(merged.models, settings, "media.transcribe", merged.defaultModelId);
+      } catch (error) {
+        if (!(error instanceof OpeningModelRoutingError)) throw error;
+        if (!resolveFallbackModelForTask(merged.models, settings, "media.transcribe")) {
+          throw new ApiError("VALIDATION", "模型转写需要可用且支持音频输入的模型，请先配置音视频转写用途。", 422);
+        }
       }
     }
   }

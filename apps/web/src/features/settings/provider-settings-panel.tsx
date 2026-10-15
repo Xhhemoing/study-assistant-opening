@@ -4,8 +4,8 @@ import {
   openingProviderConfigResponseSchema,
   type OpeningProviderConfigResponse, type OpeningProviderModelView, type OpeningProviderView,
 } from "@aistudy/contracts";
-import { KeyRound, LoaderCircle, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { KeyRound, LoaderCircle, PlugZap, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ui } from "../opening/design/ui";
 import {
   FREE_TIER_NOTICE, emptyModelDraft, emptyProviderDraft, keyStatusText, modelDraftFromView, modelRequestBody,
@@ -92,14 +92,16 @@ function ModelForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
   </div>;
 }
 
-export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdateProvider, onDeleteProvider, onCreateModel, onUpdateModel, onDeleteModel }: {
+export function ProviderSettingsForm({ data, busy, probingId, probeResults = {}, onCreateProvider, onUpdateProvider, onDeleteProvider, onCreateModel, onUpdateModel, onDeleteModel, onProbeModel }: {
   data: OpeningProviderConfigResponse; busy: boolean;
+  probingId?: string | null; probeResults?: Record<string, { ok: boolean; message: string }>;
   onCreateProvider: (draft: ProviderDraft) => void;
   onUpdateProvider: (id: string, draft: ProviderDraft) => void;
   onDeleteProvider: (view: OpeningProviderView) => void;
   onCreateModel: (providerId: string, draft: ProviderModelDraft) => void;
   onUpdateModel: (model: OpeningProviderModelView, draft: ProviderModelDraft) => void;
   onDeleteModel: (model: OpeningProviderModelView) => void;
+  onProbeModel: (model: OpeningProviderModelView) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [newProvider, setNewProvider] = useState<ProviderDraft>(emptyProviderDraft);
@@ -109,6 +111,7 @@ export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdatePro
   const [editingModels, setEditingModels] = useState<Record<string, ProviderModelDraft>>({});
   return <div className="space-y-4">
     <p className="text-xs leading-6 text-zinc-500">这里配置本工作区自己的模型供应商与密钥：密钥加密保存在服务器、永不下发浏览器，配置后可在上方「模型路由」选择这些模型。价格按分 / 百万 token 记账，与服务器目录使用同一预算上限。</p>
+    <p className="text-xs leading-6 text-zinc-500">连通性测试会发送一次小请求，计入模型的费用或免费请求上限；每次点击只测试一次，不评价回答质量，也不会自动重发。</p>
     {data.providers.length === 0 && !creating ? <p className="text-sm leading-6 text-zinc-500">尚未添加自定义供应商。服务器目录中的模型不受影响。</p> : null}
     <ul className="space-y-3">{data.providers.map(provider => {
       const models = data.models.filter(model => model.providerId === provider.id);
@@ -134,6 +137,7 @@ export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdatePro
         {addingModelFor === provider.id ? <div className="mt-3"><ModelForm draft={newModel} busy={busy} onCancel={() => { setAddingModelFor(null); setNewModel(emptyModelDraft); }} onChange={setNewModel} onSubmit={() => onCreateModel(provider.id, newModel)} submitLabel="添加模型" /></div> : null}
         {models.length ? <ul className="mt-3 space-y-2">{models.map(model => {
           const modelEdit = editingModels[model.id];
+          const probeResult = probeResults[model.id];
           return <li className="rounded-md bg-zinc-50 p-2" key={model.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0 text-xs leading-6 text-zinc-700">
@@ -141,6 +145,9 @@ export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdatePro
                 <p>{model.billing === "free_tier" ? `免费额度 · 每日最多 ${model.dailyRequestCap ?? "?"} 次请求` : `输入 ${model.inputCentsPerMillion}、输出 ${model.outputCentsPerMillion} 分 / 百万 token`}</p>
               </div>
               <div className="flex gap-2">
+                <button className={ui.quiet} disabled={busy} onClick={() => onProbeModel(model)} type="button" aria-label={`测试 ${model.label} 的连通性`}>
+                  {probingId === model.id ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <PlugZap aria-hidden="true" size={14} />}{probingId === model.id ? "正在测试…" : "连通性测试"}
+                </button>
                 <button className={ui.quiet} disabled={busy} onClick={() => setEditingModels(current => {
                   const next = { ...current };
                   if (next[model.id]) delete next[model.id]; else next[model.id] = modelDraftFromView(model);
@@ -149,6 +156,7 @@ export function ProviderSettingsForm({ data, busy, onCreateProvider, onUpdatePro
                 <button className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-red-200 px-2 text-xs text-red-700 hover:bg-red-50" disabled={busy} onClick={() => onDeleteModel(model)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
               </div>
             </div>
+            {probeResult ? <p className={`mt-1 text-xs leading-6 ${probeResult.ok ? "text-emerald-700" : "text-amber-800"}`} role="status">{probeResult.message}</p> : null}
             {modelEdit ? <div className="mt-2"><ModelForm draft={modelEdit} busy={busy} onCancel={() => setEditingModels(current => { const next = { ...current }; delete next[model.id]; return next; })} onChange={value => setEditingModels({ ...editingModels, [model.id]: value })} onSubmit={() => onUpdateModel(model, modelEdit)} submitLabel="保存模型" /></div> : null}
           </li>;
         })}</ul> : null}
@@ -163,6 +171,9 @@ export function ProviderSettingsPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [probingId, setProbingId] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const activeProbe = useRef(false);
   const load = useCallback(async (signal?: AbortSignal) => {
     setBusy(true); setError(""); setNotice("");
     try {
@@ -182,6 +193,23 @@ export function ProviderSettingsPanel() {
   const jsonInit = (method: string, body: unknown): RequestInit => ({
     method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
+  async function probe(model: OpeningProviderModelView) {
+    if (busy || activeProbe.current) return;
+    activeProbe.current = true;
+    setBusy(true); setProbingId(model.id); setError(""); setNotice("");
+    setProbeResults(current => { const next = { ...current }; delete next[model.id]; return next; });
+    try {
+      const response = await fetch(`/api/opening/model-providers/${model.providerId}/models/${model.id}/probe`, jsonInit("POST", { clientKey: crypto.randomUUID() }));
+      const body: unknown = await response.json();
+      let result = { ok: false, message: "本次请求失败（测试服务未返回有效结果）。" };
+      if (typeof body === "object" && body !== null && "ok" in body && typeof body.ok === "boolean" && "message" in body && typeof body.message === "string") {
+        result = { ok: response.ok && body.ok, message: body.message };
+      }
+      setProbeResults(current => ({ ...current, [model.id]: result }));
+    } catch {
+      setProbeResults(current => ({ ...current, [model.id]: { ok: false, message: "本次请求失败（无法确认远端执行结果）。不会自动重发；再次点击会发出新请求。" } }));
+    } finally { activeProbe.current = false; setProbingId(null); setBusy(false); }
+  }
   return <section aria-labelledby="provider-settings-heading" className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
     <div><h2 className="text-sm font-medium text-zinc-900" id="provider-settings-heading">自定义供应商与密钥</h2><p className="mt-1 text-xs leading-6 text-zinc-500">管理工作区自己的模型供应商。</p></div>
     <div className="min-w-0 space-y-3">
@@ -190,6 +218,9 @@ export function ProviderSettingsPanel() {
       {data ? <ProviderSettingsForm
         busy={busy}
         data={data}
+        probingId={probingId}
+        probeResults={probeResults}
+        onProbeModel={model => void probe(model)}
         onCreateProvider={draft => void run(async () => {
           await requestJson("/api/opening/model-providers", jsonInit("POST", providerRequestBody(draft)));
           return "服务商已添加。请确认密钥与接口地址后添加模型。";

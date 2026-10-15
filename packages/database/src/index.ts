@@ -91,7 +91,7 @@ export {
 export * from "./schema/opening-learning-attempts";
 export * from "./repositories/opening-observation-revisions";
 
-export { createOpeningAiSettingsRepository } from "./repositories/opening-ai-settings";
+export { createOpeningAiSettingsRepository, setOpeningAiSettingsInTx } from "./repositories/opening-ai-settings";
 export { createOpeningPlanningSettingsRepository } from "./repositories/opening-planning-settings";
 export { createOpeningAdaptivePrefsRepository, type OpeningAdaptivePrefsRepository } from "./repositories/opening-adaptive-prefs";
 export { createOpeningInterventionSettingsRepository } from "./repositories/opening-intervention-settings";

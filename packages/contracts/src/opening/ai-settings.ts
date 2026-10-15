@@ -29,6 +29,7 @@ export const openingAiSettingsSchema = z.object({
     primary: modelId.nullable(),
     fallback: modelId.nullable(),
   }).strict()).optional(),
+  transcription: z.object({ engine: z.enum(["local", "model"]) }).strict().optional(),
   /** Optional per-workspace daily budget in cents; absent/null means unset. */
   dailyCapCents: z.number().int().nonnegative().max(OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS).nullable().optional(),
   /** ISO timestamp when the owner confirmed enabling a personal daily cap. */

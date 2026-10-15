@@ -8,6 +8,7 @@ import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
+import { QuickSetupPanel } from "./quick-setup-panel";
 import {
   fetchWorkspacePreferences,
   putWorkspacePreferences,
@@ -15,7 +16,8 @@ import {
   type WorkspaceEntry,
 } from "./settings-shared";
 
-export function AdvancedSettingsView() {
+export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
+  const [modelRevision, setModelRevision] = useState(0);
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
     mode: defaultGuidanceMode(),
@@ -63,11 +65,12 @@ export function AdvancedSettingsView() {
       <PageHeading
         title="高级设置"
         description="每日额度与 AI 模型、默认入口、计划自主权、导出与备份。学习闭环相关项在主设置页。"
-        action={<Link className={ui.quiet} href="/settings"><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
+        action={<Link className={ui.quiet} href={basePath}><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
       />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
-        <AiSettingsPanel />
-        <ProviderSettingsPanel />
+        <QuickSetupPanel basePath={basePath} onConfigured={() => setModelRevision(current => current + 1)} />
+        <AiSettingsPanel key={`ai-${modelRevision}`} />
+        <ProviderSettingsPanel key={`providers-${modelRevision}`} />
         {error ? (
           <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert">
             <p className="text-sm text-red-700">{error}</p>
@@ -126,7 +129,7 @@ export function AdvancedSettingsView() {
             </div>
             <div className="space-y-3">
               <p className="text-sm leading-7 text-zinc-600">Markdown / Anki 是内容投影；原生备份可恢复笔记、课程、卡片等原生数据，不包含材料原件、助理对话与练习进度。具体范围见导出与备份页。</p>
-              <Link className={ui.secondary} href="/settings/export">打开导出与备份</Link>
+              <Link className={ui.secondary} href={`${basePath}/export`}>打开导出与备份</Link>
             </div>
           </section>
         </details>
