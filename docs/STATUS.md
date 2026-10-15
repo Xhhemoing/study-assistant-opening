@@ -16,10 +16,10 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待合入 `feat/opening-release`；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
+| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
-| 自适应副驾驶闭环批次 A | Grok：G1–G9（第 1 波 G1/G2/G3 可立即领）；Claude：K0、C0–C4 与收尾 Z | K0：`claude/exciting-thompson-y5hyrv`（已完成，待合入；G5–G8 依赖它） | 计划与可粘贴任务卡：`docs/plans/2026-10-15-adaptive-copilot-final-plan.md`（取代外部 T00–T11）；只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；PR #46 按 G1 收尾后待用户合并 |
-| 主干 CI `Browser tests` 失败 | Claude（C0） | — | 自 `7fb4f85` 起主干每次 push 都在该步失败，`Build` 被跳过；非 PR #46 引起，根因待定位 |
+| 自适应副驾驶闭环批次 A | Grok：G1–G11；Claude：K0、C0–C4、R9b 与收尾 Z | #49（G2/G3）、#50（教学三项）待 squash；K0 → #52 待合；#46（G1）hold | 现在可派：Grok G4、G10；#52 合入后派 G5、G6；#50 合入后 G11。Claude：C0 修复 PR → C1 → C2。分工与卡片见 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 第 5–7 节；`OPENING_ADAPTIVE_PLANNING` 保持 0 |
+| 主干 CI `Browser tests` 失败 | Claude（C0） | 修复 PR 待 #52 合入后开 | 已定位：两个 e2e spec 静态 import 了用 `import.meta` 的 `scripts/db-reset-e2e.ts`，Playwright 按 CommonJS 加载失败（自 `544304e` 起；`7fb4f85` 是集成测试先挂，已由 R7 修复）。修复改为子进程调用，详见计划 C0 卡 |
 
 ## 下一步（按顺序）
 

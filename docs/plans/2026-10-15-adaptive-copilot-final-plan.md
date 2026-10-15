@@ -87,9 +87,12 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 第 2 波（K0 后） Grok: G5  G6  G4              Claude: C1（接 G5）→ C2
 第 3 波          Grok: G7  G8  G9              Claude: C3 → C4（接 G6）
 收尾             Claude: Z
+插空（不占波次） Grok: G10（R9a）  G11（#50 后）  Claude: C0 修复 PR → R9b（G10 合入后）
 ```
 
-依赖：G5、G6、G7、G8 需要 K0 已合入（类型与契约定死）；G9 需要 C2；G7 可以先用 K0 的契约做界面，C3 合入后联调。C1 若先于 G5 完成，Claude 先用 G5 卡里的函数签名写服务，G5 合入后替换。
+依赖：G5、G6、G7、G8 需要 K0 已合入（类型与契约定死）；G9 需要 C2；G7 可以先用 K0 的契约做界面，C3 合入后联调。C1 若先于 G5 完成，Claude 先用 G5 卡里的函数签名写服务，G5 合入后替换。G10、G11 在某一波有空位时领，不得让活跃 worktree 超过 3 个。
+
+**进度（2026-10-15 晚）**：G2/G3 → #49、教学三项 → #50，均已审查通过待 squash；K0 → #52 待合；G1 → #46 仍 hold；C0 已定位（见 C0 卡），修复 PR 在 #52 合入后开。评审遗留 R10 的技能名部分已由 G3 解决，`firstAttempt` 留到 I2（批次 C）；R9 拆为 G10 + R9b。#51（SenseWeave 试点，draft）不在本计划内，由用户决定。
 
 **批次 A 完成**：第 9 节验收矩阵中可自动验证的项全部通过、CI 全绿、用户浏览器验收通过。之后才在 Hermes 上把 `OPENING_ADAPTIVE_PLANNING` 设为 1。
 
@@ -232,6 +235,26 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 完成标准：npm run test:handler -- opening-daily-draft opening-prb-auto-draft-recompute 与 npx vitest run --project integration tests/integration/opening-adaptive-loop.test.ts 通过。如发现 C2 的真实缺陷，写出复现用例并报告，不改实现代码。
 ```
 
+### G10｜转写时间戳容差（插空，评审 R9 前半）
+
+```text
+目标：模型给的段落结束时间略超过切片时长时，不再让整段转写失败。
+允许修改：apps/worker/src/parsers/model-transcribe-adapter.ts 的 parseSegments，及其同目录测试。
+做法：endMs 超出 durationMs 不超过 2000 时截断为 durationMs；超出更多、startMs >= durationMs、非整数、倒序或重叠仍按现在报 MediaValidationError。容差写成具名常量。截断后若 endMs <= startMs 视为无效。
+不要动：分段循环、预算结算、operationId、重试逻辑（R9 后半由 Claude 做）。
+完成标准：单测覆盖“超 1 ms / 恰好 2000 ms 截断”“超 2001 ms 报错”“截断后为空段报错”；npx vitest run --project unit apps/worker/src/parsers 通过；npm run typecheck -w @aistudy/worker 通过。
+```
+
+### G11｜教学块渲染去重（插空，#50 合入后）
+
+```text
+目标：teaching-workspace.tsx 里“已学/跳过折叠区”和“当前+后续主列表”两处几乎相同的块渲染合成一个组件，行为不变。
+允许修改：apps/web/src/features/opening/teaching/teaching-workspace.tsx，可在同目录新增一个组件文件。
+要保留：当前块的高亮 class、折叠区的 data-teaching-past-collapsed、BlockRenderer 与 BlockCommands 的全部 props、键盘与无障碍属性。
+不要改：teaching-commands.ts、block-commands.tsx、任何文案。不新增测试，复用现有测试证明行为不变。
+完成标准：npx vitest run --project unit apps/web/src/features/opening/teaching 通过；npm run typecheck -w @aistudy/web 通过；改动文件 eslint 通过。
+```
+
 ## 7. Claude 任务卡
 
 ### K0｜接口切片（已完成，见本分支提交）
@@ -251,6 +274,13 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 - AGENTS.md 规定浏览器验收归用户，但 CI 里既有浏览器测试的失败需要定位；本卡只读日志和产物，不在本地跑 Playwright（除非用户授权）。
 - 不跳过、不禁用、不放宽用例，不加 `continue-on-error`。
 - 完成：主干 `Browser tests` 与 `Build` 变绿；或在 STATUS 写明根因及需要用户做什么。
+- **已定位（2026-10-15）**：不是用例断言失败，是加载失败。`tests/e2e/opening-experience.spec.ts:3` 与 `tests/e2e/opening-unknown-recovery.spec.ts:4` 静态 import `scripts/db-reset-e2e.ts`；根 `package.json` 无 `"type": "module"`，Playwright 按 CommonJS 编译，而该脚本及其引用的 `packages/database/src/migrate.ts` 使用 `import.meta`，Node 22 下报 `exports is not defined in ES module scope`。最后全绿 `649353f`（#42），引入于 `64e889f`、`8eb2eed`。
+- **修复**：两个 spec 改为在 `beforeAll` 里以子进程 `npx tsx scripts/db-reset-e2e.ts` 重置（与 `playwright.config.ts`、`scripts/opening-e2e/server.mjs` 同一方式），只改这两个文件。修复后这两个 spec 第一次真正在 CI 运行，若暴露真实断言失败，按产品缺陷另行处理。
+
+### R9b｜转写部分完成后的重试（G10 合入后）
+
+- 前几段已结算、后面失败时，重试在第一段命中“已结算但结果未保存”。改为每段结果按 `transcribe:<jobId>:<段号>` 先持久化，重试只补缺失段；已结算段不重复计费。
+- 涉及预算账本幂等与任务重试，测试：第 3 段失败后重试只调用模型补第 3 段起；账本无重复结算；全部成功后结果与一次成功一致。
 
 ### C1｜快照读取服务（第 2 波）
 
