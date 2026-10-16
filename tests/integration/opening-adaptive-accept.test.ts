@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AcceptPlanInput, PlannedBlock, Scope, SuggestedTask, TaskItem } from "@aistudy/contracts";
-import { createOpeningPlansRepository } from "@aistudy/database";
+import { createOpeningPlansRepository, readOpeningLearnerSnapshotBase } from "@aistudy/database";
 import { ADAPTIVE_STRATEGY_VERSION, suggestionIdentity, suggestionKey } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -60,11 +60,16 @@ async function seedDraft(input: {
   const blocks = input.blocks ?? [...tasks, ...suggestions]
     .filter(task => !unscheduledTaskIds.includes(task.id))
     .map((task, index) => block(task.id, index, task.minutes));
+  const inputSnapshot = input.plain ? { tasks } : {
+    tasks,
+    courseMaterialRevisions: Object.fromEntries((await readOpeningLearnerSnapshotBase(sql, scope)).courses
+      .flatMap(course => course.materialRevision ? [[course.courseId, course.materialRevision]] : [])),
+  };
   await sql`INSERT INTO opening_plan_drafts
     (id, workspace_id, owner_user_id, day, version, base_version, status, blocks, unscheduled_task_ids,
       input_snapshot, hard_blocks_fingerprint, origin, suggested_tasks, reasons, strategy_version)
     VALUES (${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${day}::date, 0, 0, 'draft',
-      ${sql.json(blocks)}, ${sql.json(unscheduledTaskIds)}, ${sql.json({ tasks })}, 'acceptance-fixture',
+      ${sql.json(blocks)}, ${sql.json(unscheduledTaskIds)}, ${sql.json(inputSnapshot)}, 'acceptance-fixture',
       ${input.plain ? "user" : "auto_draft"}, ${sql.json(suggestions)}, '{}'::jsonb,
       ${input.plain ? null : ADAPTIVE_STRATEGY_VERSION})`;
   return { id, blocks, suggestions };
@@ -178,6 +183,19 @@ describe("adaptive draft acceptance", () => {
     await rejectsAtomically(acceptance(draft.id, { acceptSuggestedKeys: [suggestionKey(day, "not-in-the-draft")] }), { code: "VALIDATION" });
   });
 
+  it.each(["map", "course"] as const)("rejects an adaptive course suggestion missing its %s material fingerprint without partial writes", async (missing) => {
+    const { courseId } = await seedCourse();
+    const draft = await seedDraft({ suggestions: [suggestion(null), suggestion(courseId)] });
+    if (missing === "map") {
+      await fixture.sql`UPDATE opening_plan_drafts SET input_snapshot=input_snapshot - 'courseMaterialRevisions' WHERE id=${draft.id}`;
+    } else {
+      await fixture.sql`UPDATE opening_plan_drafts
+        SET input_snapshot=jsonb_set(input_snapshot, '{courseMaterialRevisions}', (input_snapshot->'courseMaterialRevisions') - ${courseId})
+        WHERE id=${draft.id}`;
+    }
+    await rejectsAtomically(acceptance(draft.id), { code: "CONFLICT", reason: "source_unavailable" });
+  });
+
   it("serializes two first accepts for the same day so exactly one draft and task set win", async () => {
     const { courseId } = await seedCourse();
     const first = await seedDraft({ suggestions: [suggestion(courseId, "fractions")] });
@@ -227,7 +245,7 @@ describe("adaptive draft acceptance", () => {
     expect((await ledger()).tasks.map(row => row.id)).toEqual([item.id]);
   });
 
-  it.each(["archived", "privacy_excluded", "membership_removed"] as const)("revalidates %s material and rolls back a previously inserted review task", async (change) => {
+  it.each(["archived", "privacy_excluded", "membership_removed"] as const)("revalidates %s material without committing review tasks or acceptance state", async (change) => {
     const { courseId, sourceId } = await seedCourse();
     const first = suggestion(null), unavailable = suggestion(courseId);
     const draft = await seedDraft({ suggestions: [first, unavailable] });

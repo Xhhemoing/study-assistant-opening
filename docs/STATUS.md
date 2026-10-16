@@ -2,7 +2,7 @@
 
 每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
 
-**更新：** 2026-10-15
+**更新：** 2026-10-16
 **目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
 
 ## 主干
@@ -10,7 +10,7 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- Hermes 已部署 `8b500e6`（含 #33），**落后主干 0061–0064 四个迁移**，升级步骤见 `docs/plans/2026-10-15-review-and-next-steps.md` 第 4 节第 2 步。
+- 当前主干 `0e8072d`：#49、#50、#53、#54、#55、#52 均已合入；该提交 CI（含既有 Browser tests/Build）已成功。Hermes 的旧记录为 `8b500e6`；当前部署 SHA 与迁移状态尚未现场核实，不能据旧记录判断。
 
 ## 进行中
 
@@ -18,14 +18,14 @@
 |---|---|---|---|
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
-| 自适应副驾驶闭环批次 A | Grok：G1–G11；Claude：K0、C0–C4、R9b 与收尾 Z | #52 = K0 + C0 修复 + C1 + C2 接线（待合）；#49、#50 待 squash；#53（G4）返工中（lint + 读取失败可覆盖目标）；#54（G10）可合；#46（G1）hold | #52 合入后派 G5、G6；#50 合入后 G11。G5 合入后 Claude 接 C2 运行时与端到端测试，再 C3；#54 合入后 R9b。`OPENING_ADAPTIVE_PLANNING` 保持 0（C3 前开 1 会导致含建议的草案无法接受）。卡片见 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 第 5–7 节 |
-| 主干 CI `Browser tests` 失败 | Claude（C0） | 修复在 #52 | 根因：两个 e2e spec 静态 import 了用 `import.meta` 的 `scripts/db-reset-e2e.ts`，Playwright 按 CommonJS 加载失败（自 `544304e` 起）。已改为子进程重置；这两个 spec 此前从未在 CI 跑过，修复后的首轮结果才是真实结果 |
+| 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | G1/G5–G9、C2/C3/C4 已实现；真实快照→勾选接受→学情主讲，相关单测/类型检查通过。数据库/handler/完整 CI 验证中；待用户浏览器验收。开关继续为 0。#46 仅移植同日去重代码与测试，原 PR 未变动 |
+| 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 主干 CI 已恢复。R9b 持久化分段回执，跨手动重试复用结果、补结算、阻止未知结果重发；免费模型 TTL 回执亦可恢复。无新增迁移；PR CI 验证中 |
 
 ## 下一步（按顺序）
 
-1. 合入评审修复（`claude/keen-carson-ls19ie` 快进到 `feat/opening-release`），再部署 Hermes：备份 → `db:migrate`（0061–0064）→ `OPENING_TEACHING_COMPILER_ENABLED=1`、`OPENING_ADAPTIVE_PLANNING=0` → 换新 Lant key → 确认 Hermes 能访问 `generativelanguage.googleapis.com` 后再配 Gemini。
+1. 评审 #56、#57 并等各自 CI 全绿，再由用户/Shipper 合入。Hermes 先核实 SHA/迁移、备份，再以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
-3. 自适应副驾驶闭环批次 A（见 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md`），让每日计划和主讲随学习证据变化。
+3. 先修复批次 A 自用反馈，再按 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 推进后续批次；教练自动接受仍不启用。
 4. 大问题方案：
    - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。

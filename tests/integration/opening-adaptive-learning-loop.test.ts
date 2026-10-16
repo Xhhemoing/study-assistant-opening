@@ -4,14 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpeningPlanningSettings, PlanDraft } from "@aistudy/contracts";
 import {
   createOpeningAdaptivePrefsRepository,
+  createOpeningKnowledgeRepository,
   createOpeningPlanningSettingsRepository,
   createOpeningPlansRepository,
+  readOpeningLearnerSnapshotBase,
 } from "@aistudy/database";
 import { ADAPTIVE_STRATEGY_VERSION, addLocalDays, suggestionIdentity, suggestionKey } from "@aistudy/domain";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createSqlLearnerSnapshotService } from "../../apps/web/src/features/opening/planning/learner-snapshot-runtime";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
 
 const day = "2026-10-21";
 const timeZone = "Asia/Shanghai";
@@ -52,11 +55,11 @@ async function submitVerifiedError(course: AttemptFixture) {
   });
 }
 
-function services(enabled = true) {
-  const snapshots = createSqlLearnerSnapshotService(fixture.sql, { now: () => now });
+function services(enabled = true, clock = () => now) {
+  const snapshots = createSqlLearnerSnapshotService(fixture.sql, { now: clock });
   const readSnapshot = vi.fn(snapshots.read);
   const plans = createOpeningPlanService(fixture.sql, {
-    now: () => now,
+    now: clock,
     adaptive: { enabled: () => enabled, readSnapshot },
   });
   return { snapshots, readSnapshot, plans };
@@ -119,6 +122,38 @@ describe("adaptive learning loop with real evidence", () => {
     const draft = (await plans.getToday(fixture.scope, day)).dailyDraft!;
     expect(draft.suggestedTasks ?? []).toEqual([]);
     expect(draft.blocks).toEqual([]);
+    expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+  });
+
+  it("combines whitespace and case aliases into one skill and one suggestion from all observations", async () => {
+    const course = await seedCourse();
+    const first = await submitVerifiedError(course);
+    const alias = "  FRACTIONS  ";
+    const session = await course.learning.createSession(fixture.scope, {
+      courseId: course.courseId, skillLabel: alias, sourceIds: [course.sourceId],
+    });
+    const second = await course.submit(await course.start({ sessionId: session.id }), {
+      sessionId: session.id, skillLabel: alias, answer: "2", outcome: "incorrect",
+      verdictSource: "reference_checked", referenceSourceId: course.sourceId,
+      referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
+    });
+    const { snapshots, plans } = services();
+    const read = await snapshots.read(fixture.scope, { date: day, timeZone });
+    const evidence = read.sources.courses.find((row) => row.courseId === course.courseId)!;
+    expect(evidence.observations).toHaveLength(2);
+    expect(evidence.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, skillLabel: "fractions" }),
+      expect.objectContaining({ id: second.id, skillLabel: "fractions" }),
+    ]));
+    expect(evidence.summaries).toEqual([expect.objectContaining({ skillLabel: "fractions", status: "needs_check" })]);
+    expect(read.snapshot.courses.find((row) => row.courseId === course.courseId)?.skills).toEqual([
+      expect.objectContaining({ skillLabel: "fractions", status: "needs_review", recentAssistance: ["independent", "independent"] }),
+    ]);
+    const draft = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+    expect(draft.suggestedTasks).toEqual([
+      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "fractions" }),
+    ]);
+    expect(draft.blocks).toHaveLength(1);
     expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
   });
 
@@ -211,6 +246,194 @@ describe("adaptive learning loop with real evidence", () => {
     expect(rows[0]!.id).toBe(refreshed.dailyDraft!.id);
     expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
   });
+
+  it("replaces an expired adaptive slot with a future draft that can be accepted", async () => {
+    const course = await seedCourse();
+    await submitVerifiedError(course);
+    let current = now;
+    const { plans } = services(true, () => current);
+    const repo = createOpeningPlansRepository(fixture.sql, { now: () => current });
+    const first = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+    expect(first.blocks).toHaveLength(1);
+    expect(Date.parse(first.blocks[0]!.start)).toBeGreaterThan(current.getTime());
+
+    current = new Date(Date.parse(first.blocks[0]!.start) + 1_000);
+    await expect(repo.acceptPlan(fixture.scope, {
+      draftId: first.id, expectedBaseVersion: first.baseVersion, clientKey: randomUUID(),
+      acceptSuggestedKeys: [first.suggestedTasks![0]!.key],
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "slot_expired" });
+    expect(await repo.listTasks(fixture.scope)).toEqual([]);
+
+    const refreshed = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+    expect(refreshed.id).not.toBe(first.id);
+    expect(refreshed.blocks).toHaveLength(1);
+    expect(Date.parse(refreshed.blocks[0]!.start)).toBeGreaterThan(current.getTime());
+    const accepted = await plans.acceptPlan(fixture.scope, {
+      draftId: refreshed.id, expectedBaseVersion: refreshed.baseVersion, clientKey: randomUUID(),
+      acceptSuggestedKeys: [refreshed.suggestedTasks![0]!.key],
+    });
+    expect(accepted).toMatchObject({ id: refreshed.id, status: "accepted", blocks: refreshed.blocks });
+    expect(await repo.listTasks(fixture.scope)).toEqual([
+      expect.objectContaining({ id: refreshed.suggestedTasks![0]!.id, status: "pending", courseId: course.courseId, origin: "planner" }),
+    ]);
+    expect((await plans.getToday(fixture.scope, day)).blocks).toEqual(accepted.blocks);
+  });
+
+  it("rejects an older adaptive draft without material fingerprints and automatically rebuilds it", async () => {
+    const course = await seedCourse();
+    await submitVerifiedError(course);
+    const { plans } = services();
+    const first = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+    expect(first.suggestedTasks).toEqual([expect.objectContaining({ courseId: course.courseId, kind: "weak_skill" })]);
+    await fixture.sql`UPDATE opening_plan_drafts SET input_snapshot=input_snapshot - 'courseMaterialRevisions'
+      WHERE id=${first.id} AND workspace_id=${fixture.scope.workspaceId}`;
+
+    await expect(plans.acceptPlan(fixture.scope, {
+      draftId: first.id, expectedBaseVersion: first.baseVersion, clientKey: randomUUID(),
+      acceptSuggestedKeys: [first.suggestedTasks![0]!.key],
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "source_unavailable" });
+    expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+    expect(await fixture.sql`SELECT draft_id FROM opening_plan_acceptances WHERE draft_id=${first.id}`).toEqual([]);
+    expect(await fixture.sql`SELECT status FROM opening_plan_drafts WHERE id=${first.id}`).toEqual([{ status: "draft" }]);
+
+    const refreshed = await plans.getToday(fixture.scope, day);
+    const replacement = refreshed.dailyDraft!;
+    expect(replacement.id).not.toBe(first.id);
+    expect(refreshed.hasNewerSuggestion).toBeUndefined();
+    expect(replacement.suggestedTasks).toEqual(first.suggestedTasks);
+    const [stored] = await fixture.sql`SELECT input_snapshot FROM opening_plan_drafts WHERE id=${replacement.id}`;
+    expect(stored?.input_snapshot?.courseMaterialRevisions).toEqual({ [course.courseId]: expect.any(String) });
+    await expect(plans.acceptPlan(fixture.scope, {
+      draftId: replacement.id, expectedBaseVersion: replacement.baseVersion, clientKey: randomUUID(),
+      acceptSuggestedKeys: [replacement.suggestedTasks![0]!.key],
+    })).resolves.toMatchObject({ id: replacement.id, status: "accepted", blocks: replacement.blocks });
+    expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([
+      expect.objectContaining({ id: replacement.suggestedTasks![0]!.id, courseId: course.courseId, status: "pending" }),
+    ]);
+  });
+
+  it.each(["material_excluded", "course_archived", "current_version_without_chunks"] as const)(
+    "rebuilds the draft after %s so it no longer offers an unavailable course",
+    async (change) => {
+      const course = await seedCourse();
+      await submitVerifiedError(course);
+      const { snapshots, plans } = services();
+      const first = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+      expect(first.suggestedTasks).toEqual([expect.objectContaining({ courseId: course.courseId, kind: "weak_skill" })]);
+      expect(first.blocks).toHaveLength(1);
+
+      if (change === "material_excluded") {
+        await fixture.sql`INSERT INTO opening_privacy_exclusions (workspace_id, source_id, deleted_at)
+          VALUES (${fixture.scope.workspaceId}, ${course.sourceId}, now())`;
+        await fixture.sql`UPDATE workspaces SET privacy_epoch=privacy_epoch + 1 WHERE id=${fixture.scope.workspaceId}`;
+      } else if (change === "course_archived") {
+        await fixture.sql`UPDATE courses SET archived_at=now()
+          WHERE id=${course.courseId} AND workspace_id=${fixture.scope.workspaceId}`;
+      } else {
+        // Ready is not sufficient: chunks of an older version cannot admit the new version.
+        await fixture.sql`UPDATE opening_sources SET version=version + 1, parse_state='ready'
+          WHERE id=${course.sourceId} AND workspace_id=${fixture.scope.workspaceId}`;
+        expect(await fixture.sql`SELECT source_version FROM opening_source_chunks WHERE source_id=${course.sourceId}`)
+          .toEqual([{ source_version: 1 }]);
+      }
+
+      const read = await snapshots.read(fixture.scope, { date: day, timeZone });
+      expect(read.snapshot.courses.filter((row) => row.hasUsableMaterials).map((row) => row.courseId)).not.toContain(course.courseId);
+      const today = await plans.getToday(fixture.scope, day);
+      const replacement = today.dailyDraft!;
+      expect(replacement.id).not.toBe(first.id);
+      expect(replacement.suggestedTasks ?? []).toEqual([]);
+      expect(replacement.blocks).toEqual([]);
+      expect(replacement.unscheduledTaskIds).toEqual([]);
+      expect(today.hasNewerSuggestion).toBeUndefined();
+      expect(await fixture.sql`SELECT id FROM opening_plan_drafts
+        WHERE workspace_id=${fixture.scope.workspaceId} AND day=${day}::date AND status='draft'`)
+        .toEqual([{ id: replacement.id }]);
+      expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+      await expect(plans.acceptPlan(fixture.scope, {
+        draftId: replacement.id, expectedBaseVersion: replacement.baseVersion, clientKey: randomUUID(), acceptSuggestedKeys: [],
+      })).resolves.toMatchObject({ id: replacement.id, status: "accepted", blocks: [] });
+    },
+  );
+
+  it.each(["source_excluded", "source_version_changed", "source_unlinked", "replace_chunk_same_version"] as const)(
+    "does not use a knowledge graph after %s even while another course material remains usable",
+    async (change) => {
+      const course = await seedCourse();
+      const rows = backupRows(fixture.sql, fixture.scope);
+      const secondSourceId = await rows.source();
+      await rows.chunk(secondSourceId);
+      await fixture.sql`INSERT INTO course_asset_memberships
+        (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
+        VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${secondSourceId}, 'core', 1, 'course')`;
+      const skillLabel = "Equivalent fractions";
+      const nodeId = randomUUID();
+      const knowledge = createOpeningKnowledgeRepository(fixture.sql);
+      const graph = await knowledge.replace(fixture.scope, course.courseId, {
+        expectedVersion: 0, sourceVersions: { [course.sourceId]: 1 },
+        snapshot: {
+          courseId: course.courseId, version: 0,
+          nodes: [{ id: nodeId, courseId: course.courseId, label: skillLabel, kind: "concept",
+            evidenceChunkIds: [course.chunkId], status: "supported" }], edges: [],
+        },
+      });
+      const { snapshots, plans } = services();
+      const before = await snapshots.read(fixture.scope, { date: day, timeZone });
+      expect(before.snapshot.courses.find((row) => row.courseId === course.courseId))
+        .toMatchObject({ hasUsableMaterials: true, nextSkills: [skillLabel] });
+      expect((await readOpeningLearnerSnapshotBase(fixture.sql, fixture.scope)).courses.find((row) => row.courseId === course.courseId))
+        .toMatchObject({ knowledgeSnapshot: graph.snapshot });
+      const first = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+      expect(first.suggestedTasks).toEqual([
+        expect.objectContaining({ courseId: course.courseId, kind: "new_skill", skillLabel }),
+      ]);
+      expect(first.blocks).toHaveLength(1);
+
+      if (change === "source_excluded") {
+        await rows.exclude(course.sourceId);
+      } else if (change === "source_version_changed") {
+        await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
+        // A is still ready with current chunks, but its old graph was built from version 1.
+        await rows.chunk(course.sourceId, 2);
+      } else if (change === "source_unlinked") {
+        await fixture.sql`DELETE FROM course_asset_memberships
+          WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${course.courseId}
+            AND asset_type='source' AND asset_id=${course.sourceId}`;
+      } else {
+        await fixture.sql`DELETE FROM opening_source_chunks WHERE id=${course.chunkId} AND source_id=${course.sourceId}`;
+        await rows.chunk(course.sourceId, 1);
+      }
+
+      const base = await readOpeningLearnerSnapshotBase(fixture.sql, fixture.scope);
+      expect(base.courses.find((row) => row.courseId === course.courseId))
+        .toMatchObject({ hasUsableMaterials: true, knowledgeSnapshot: null });
+      expect(await knowledge.get(fixture.scope, course.courseId)).toMatchObject({
+        snapshot: graph.snapshot, sourceVersions: { [course.sourceId]: 1 },
+      });
+      const after = await snapshots.read(fixture.scope, { date: day, timeZone });
+      expect(after.sources.courses.find((row) => row.courseId === course.courseId))
+        .toMatchObject({ hasUsableMaterials: true, knowledgeNodes: [] });
+      expect(after.snapshot.courses.find((row) => row.courseId === course.courseId))
+        .toMatchObject({ hasUsableMaterials: true, nextSkills: [] });
+      await expect(plans.acceptPlan(fixture.scope, {
+        draftId: first.id, expectedBaseVersion: first.baseVersion, clientKey: randomUUID(),
+        acceptSuggestedKeys: [first.suggestedTasks![0]!.key],
+      })).rejects.toMatchObject({ code: "CONFLICT", reason: "source_unavailable" });
+      expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+      expect(await fixture.sql`SELECT status FROM opening_plan_drafts WHERE id=${first.id}`)
+        .toEqual([{ status: "draft" }]);
+      expect(await fixture.sql`SELECT draft_id FROM opening_plan_acceptances WHERE draft_id=${first.id}`)
+        .toEqual([]);
+
+      const refreshed = await plans.getToday(fixture.scope, day);
+      const draft = refreshed.dailyDraft!;
+      expect(draft.id).not.toBe(first.id);
+      expect(refreshed.hasNewerSuggestion).toBeUndefined();
+      expect(draft.suggestedTasks ?? []).toEqual([]);
+      expect(draft.blocks).toEqual([]);
+      expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+    },
+  );
 
   it("keeps a 25-minute suggestion unscheduled when 40 free minutes are split into two 20-minute slots", async () => {
     const course = await seedCourse();

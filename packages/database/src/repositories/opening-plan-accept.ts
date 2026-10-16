@@ -4,6 +4,7 @@ import { suggestedTaskSchema, type AcceptPlanInput, type PlannedBlock, type Scop
 import { parseSuggestionKey } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
 
 /** One transaction owns selection, task creation and the accepted plan version. */
 export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPlanInput, now: Date) {
@@ -48,6 +49,14 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     const originalBlocks = (draft.blocks ?? []) as PlannedBlock[];
     const placed = new Set(originalBlocks.map(block => block.taskId));
     const selected = suggestions.filter(item => selection.includes(item.key) && placed.has(item.id) && !unplaced.has(item.id));
+    const savedMaterials = (draft.input_snapshot as { courseMaterialRevisions?: Record<string, string> } | null)?.courseMaterialRevisions;
+    if (selected.some(item => item.courseId !== null)) {
+      const current = new Map((await readOpeningLearnerSnapshotCourses(tx, scope)).map(course => [course.courseId, course.materialRevision]));
+      if (selected.some(item => item.courseId !== null && (!savedMaterials?.[item.courseId]
+        || savedMaterials[item.courseId] !== current.get(item.courseId)))) {
+        throw new OpeningPlanError("CONFLICT", "course materials changed since generation", "source_unavailable");
+      }
+    }
     const selectedIds = new Set(selected.map(item => item.id));
     const suggestionIds = new Set(suggestions.map(item => item.id));
     const blocks = originalBlocks.filter(block => !suggestionIds.has(block.taskId) || selectedIds.has(block.taskId));

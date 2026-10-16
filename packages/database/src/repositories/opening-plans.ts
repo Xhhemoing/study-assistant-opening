@@ -43,6 +43,9 @@ export type AdaptiveDraftInput = {
   strategyVersion: string;
   /** Hash of the learner snapshot sources the suggestions came from. */
   plannerInputRevision: string;
+  /** Present in production so a removed/archived course makes an open draft non-executable. */
+  availableCourseIds?: string[];
+  courseMaterialRevisions?: Record<string, string>;
 };
 
 export type AutoDraftBuild =
@@ -470,7 +473,14 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           const stored = (existingRows[0] as Record<string, unknown>).input_snapshot;
           const expired = existing.strategyVersion && existing.blocks.some(block =>
             Date.parse(block.start) < (options.now ?? new Date()).getTime());
-          if (!expired && autoDraftInputsUnchanged(stored, rebuilt)) {
+          const unavailableCourse = rebuilt.adaptive?.availableCourseIds !== undefined
+            && existing.suggestedTasks?.some(task => task.courseId !== null
+              && !rebuilt.adaptive!.availableCourseIds!.includes(task.courseId));
+          const savedMaterials = (stored as { courseMaterialRevisions?: Record<string, string> } | null)?.courseMaterialRevisions;
+          const materialsChanged = existing.suggestedTasks?.some(task => task.courseId !== null
+            && (!savedMaterials?.[task.courseId]
+              || savedMaterials[task.courseId] !== rebuilt.adaptive?.courseMaterialRevisions?.[task.courseId]));
+          if (!expired && !unavailableCourse && !materialsChanged && autoDraftInputsUnchanged(stored, rebuilt)) {
             // Learning moved but the draft is still executable: offer, never swap it under the learner.
             const newer = rebuilt.adaptive !== undefined && adaptiveSuggestionsChanged(stored, rebuilt.adaptive);
             if (!newer || !options.refreshSuggestions) {
@@ -525,6 +535,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           ...(adaptive ? {
             plannerInputRevision: adaptive.plannerInputRevision,
             suggestionKeys: adaptive.suggestedTasks.map((task) => task.key),
+            ...(adaptive.courseMaterialRevisions ? { courseMaterialRevisions: adaptive.courseMaterialRevisions } : {}),
           } : {}),
           ...(built.fallbackReason ? { adaptiveFallback: built.fallbackReason } : {}),
         };

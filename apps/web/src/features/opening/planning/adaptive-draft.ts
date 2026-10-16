@@ -15,6 +15,7 @@ export type AdaptiveDraftSnapshot = {
   snapshot: LearnerSnapshot;
   autonomy: PlanningAutonomy;
   plannerInputRevision: string;
+  courseMaterialRevisions?: Record<string, string>;
 };
 
 export type BuildAdaptiveDraftInput = {
@@ -59,7 +60,10 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   const own = rankForPlan({ tasks, suggestions: [], yesterdayAccepted, date, timeZone, now });
   const minutesById = new Map(tasks.map((task) => [task.id, task.minutes]));
   const committedMinutes = own.orderedTaskIds.reduce((sum, id) => sum + (minutesById.get(id) ?? 0), 0);
-  const { suggestions } = proposeAdaptiveTasks(input.adaptive.snapshot, {
+  // Production acceptance needs admissible course material. Filter before the
+  // suggestion/count budget so unavailable courses cannot crowd out usable ones.
+  const availableCourses = input.adaptive.snapshot.courses.filter(course => course.hasUsableMaterials);
+  const { suggestions } = proposeAdaptiveTasks({ ...input.adaptive.snapshot, courses: availableCourses }, {
     autonomy: input.adaptive.autonomy,
     capacityMinutes: freeMinutes(input.freeBlocks),
     committedMinutes,
@@ -89,6 +93,8 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
       reasons: ranked.reasons,
       strategyVersion: ADAPTIVE_STRATEGY_VERSION,
       plannerInputRevision: input.adaptive.plannerInputRevision,
+      availableCourseIds: availableCourses.map(course => course.courseId),
+      courseMaterialRevisions: input.adaptive.courseMaterialRevisions,
     },
   };
 }

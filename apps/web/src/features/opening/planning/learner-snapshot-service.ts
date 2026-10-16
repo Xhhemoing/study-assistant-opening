@@ -54,6 +54,8 @@ export type LearnerSnapshotRead = {
   autonomy: PlanningAutonomy;
   /** Changes whenever anything the planning rules read changes. */
   plannerInputRevision: string;
+  /** Internal admission fingerprints, rechecked before accepting a saved draft. */
+  courseMaterialRevisions?: Record<string, string>;
   metrics: { reads: number; durationMs: number };
 };
 
@@ -208,6 +210,8 @@ export function createLearnerSnapshotService(deps: LearnerSnapshotDeps) {
           dueCards: dueCards.status,
         },
         plannerInputRevision: learnerSnapshotRevision(sources),
+        courseMaterialRevisions: Object.fromEntries(base.courses.flatMap(course =>
+          course.materialRevision ? [[course.courseId, course.materialRevision]] : [])),
         metrics: { reads: 3 + base.courses.length, durationMs: Date.now() - started },
       };
     },

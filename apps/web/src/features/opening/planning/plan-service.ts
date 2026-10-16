@@ -202,7 +202,8 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
     try {
       const read = await adaptive.readSnapshot(scope, { date, timeZone });
-      return { snapshot: read.snapshot, autonomy: read.autonomy, plannerInputRevision: read.plannerInputRevision };
+      return { snapshot: read.snapshot, autonomy: read.autonomy, plannerInputRevision: read.plannerInputRevision,
+        courseMaterialRevisions: read.courseMaterialRevisions };
     } catch (error) {
       adaptive.onSnapshotFailure?.(error);
       return { fallbackReason: "snapshot_unavailable" };
