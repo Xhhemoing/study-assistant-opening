@@ -6,11 +6,15 @@ import {
   type TeachingActivity,
 } from "@aistudy/contracts";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { createOpeningTeachingActivitiesRepository } from "@aistudy/database";
+import { createOpeningTeachingActivitiesRepository, createOpeningPlanningSettingsRepository, createOpeningCourseReadySourcesRepository, readOpeningTeachingTaskFocus } from "@aistudy/database";
+import { loadFeatureSwitches } from "@aistudy/config";
+import { localDateKeyInZone } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
 import { teachingActivityGenerateStatusLabel } from "./today-activity";
+import { createSqlLearnerSnapshotService } from "../planning/learner-snapshot-runtime";
+import { teachingLearnerFocus } from "./learner-focus";
 
 /** UI label for a freshly created activity — never claims 已就绪 when cv is 0. */
 export function teachingCreateGenerateStatusLabel(
@@ -48,6 +52,30 @@ export function createOpeningTeachingActivityService(
     async create(scope: Scope, raw: unknown) {
       const input = teachingActivityCreateInputSchema.parse(raw);
       try {
+        // Always discard the client-owned derived field, including with the flag off.
+        if (input.goalJson && "learnerFocus" in input.goalJson) {
+          input.goalJson = { ...input.goalJson };
+          delete input.goalJson.learnerFocus;
+        }
+        if (loadFeatureSwitches(env).adaptivePlanning) {
+          let skillLabel = typeof input.createIntent.skillLabel === "string" ? input.createIntent.skillLabel.trim().slice(0, 200) || null : null;
+          if (input.createIntent.taskId !== undefined) {
+            const taskId = uuidSchema.parse(input.createIntent.taskId);
+            const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
+            if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
+            input.courseId = task.courseId;
+            input.intentSummary = task.title;
+            skillLabel = task.skillLabel;
+            if (task.courseId) input.sourceIds = await createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, task.courseId);
+          }
+          if (input.courseId) {
+            const settings = await createOpeningPlanningSettingsRepository(sql).get(scope);
+            const timeZone = settings.settings?.timeZone ?? "Asia/Shanghai";
+            const read = await createSqlLearnerSnapshotService(sql).read(scope, { date: localDateKeyInZone(new Date(), timeZone), timeZone });
+            const focus = teachingLearnerFocus(read, input.courseId, skillLabel, input.goalJson?.wantsFullExplanation === true);
+            if (focus) input.goalJson = { ...input.goalJson, learnerFocus: focus };
+          }
+        }
         return await repo.create(scope, input, { enqueueCompile: isTeachingCompilerEnabled(env) });
       } catch (error) {
         mapError(error);

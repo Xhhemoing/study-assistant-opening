@@ -48,6 +48,19 @@ const sampleDraft = draft({
   unscheduledTaskIds: [],
 });
 
+const suggestedDraft: PlanDraft = {
+  ...sampleDraft,
+  blocks: [...sampleDraft.blocks, { ...sampleDraft.blocks[0]!, taskId: "suggestion-b" }],
+  suggestedTasks: ["a", "b", "blocked"].map((key) => ({
+    key: `planner:2026-10-09:${key}`, id: key === "a" ? taskA : `suggestion-${key}`,
+    kind: "weak_skill", title: `巩固 ${key}`, minutes: 25, courseId: null,
+    skillLabel: key, reasonCode: "weak_skill", reason: "近期需要巩固",
+  })),
+  unscheduledTaskIds: ["suggestion-blocked"],
+};
+const keyA = suggestedDraft.suggestedTasks![0]!.key;
+const keyB = suggestedDraft.suggestedTasks![1]!.key;
+
 describe("dailyDraftSkippedCopy", () => {
   it("shows unplanned count when plan already accepted", () => {
     expect(dailyDraftSkippedCopy("accepted", 3)).toBe("有 3 项新任务未排入");
@@ -81,6 +94,7 @@ describe("createDailyDraftControllers", () => {
       draftId,
       expectedBaseVersion: 0,
       clientKey: "daily-draft-fixed-key",
+      acceptSuggestedKeys: [],
     });
     expect(proposePlan).not.toHaveBeenCalled();
 
@@ -96,6 +110,37 @@ describe("createDailyDraftControllers", () => {
     expect(adjusted).toEqual(proposed);
     // Adjust never auto-accepts.
     expect(acceptPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends only the normalized selected keys and keeps retries on the same intent key", async () => {
+    const acceptPlan = vi.fn().mockRejectedValueOnce(new Error("network lost")).mockResolvedValue(suggestedDraft);
+    let sequence = 0;
+    const controllers = createDailyDraftControllers(draftApi({ acceptPlan }), { date: sampleDraft.date, mintClientKey: () => `intent-key-${++sequence}` });
+    await expect(controllers.accept(suggestedDraft, [keyB, keyA, keyB, "unknown", suggestedDraft.suggestedTasks![2]!.key])).rejects.toThrow("network lost");
+    await controllers.accept(suggestedDraft, [keyA, keyB]);
+    expect(acceptPlan.mock.calls[0]![0]).toEqual(acceptPlan.mock.calls[1]![0]);
+    expect(acceptPlan.mock.calls[1]![0].acceptSuggestedKeys).toEqual([keyA, keyB]);
+
+    await controllers.accept(suggestedDraft, [keyA]);
+    expect(acceptPlan.mock.calls[2]![0].clientKey).not.toBe(acceptPlan.mock.calls[1]![0].clientKey);
+    await controllers.accept(suggestedDraft, []);
+    expect(acceptPlan.mock.calls[3]![0].acceptSuggestedKeys).toEqual([]);
+    await controllers.accept(suggestedDraft, [keyB, keyA]);
+    expect(acceptPlan.mock.calls[4]![0].clientKey).toBe(acceptPlan.mock.calls[0]![0].clientKey);
+    await controllers.accept({ ...suggestedDraft, baseVersion: 1 }, [keyA, keyB]);
+    expect(acceptPlan.mock.calls[5]![0].clientKey).not.toBe(acceptPlan.mock.calls[0]![0].clientKey);
+  });
+
+  it("coalesces two confirmations before the first response arrives", async () => {
+    let resolve!: (value: PlanDraft) => void;
+    const acceptPlan = vi.fn(() => new Promise<PlanDraft>((done) => { resolve = done; }));
+    const controllers = createDailyDraftControllers(draftApi({ acceptPlan }), { date: sampleDraft.date });
+    const first = controllers.accept(suggestedDraft, [keyA, keyB]);
+    const second = controllers.accept(suggestedDraft, [keyB, keyA]);
+    expect(acceptPlan).toHaveBeenCalledOnce();
+    expect(second).toBe(first);
+    resolve(suggestedDraft);
+    await first;
   });
 });
 
@@ -129,9 +174,38 @@ describe("reduceDailyDraftCard", () => {
     expect(next.draft).toEqual(nextDraft);
     expect(next.error).toBe("");
   });
+
+  it("keeps the exact selection on failure and preserves deselections across a refreshed draft", () => {
+    const selected = reduceDailyDraftCard({ draft: suggestedDraft, error: "" }, { type: "select", keys: [keyA] });
+    const failed = reduceDailyDraftCard(selected, { type: "action_fail", message: "请重新读取" });
+    expect(failed.selectedSuggestedKeys).toEqual([keyA]);
+    const refreshed = reduceDailyDraftCard(failed, { type: "hydrate", draft: { ...suggestedDraft, id: "replacement-draft" } });
+    expect(refreshed.selectedSuggestedKeys).toEqual([keyA]);
+    expect(refreshed.draft?.id).toBe("replacement-draft");
+  });
 });
 
 describe("DailyDraftCard", () => {
+  it("keeps adaptive controls hidden when the capability is off", () => {
+    const html = renderToStaticMarkup(createElement(DailyDraftCard, {
+      api: draftApi(), date: sampleDraft.date, dailyDraft: sampleDraft,
+      adaptivePlanning: false, hasNewerSuggestion: true, onRefreshSuggestions: vi.fn(),
+    }));
+    expect(html).not.toContain('type="checkbox"');
+    expect(html).not.toContain("安排与依据");
+    expect(html).not.toContain("有新建议");
+    expect(html).not.toContain("副驾驶");
+  });
+
+  it("shows only the next selected activity and its reason before expansion", () => {
+    const html = renderToStaticMarkup(createElement(DailyDraftCard, {
+      api: draftApi(), date: sampleDraft.date, dailyDraft: { ...suggestedDraft, strategyVersion: "adaptive-test" }, adaptivePlanning: true,
+    }));
+    expect(html).toContain("下一项：巩固 a");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("巩固 b");
+    expect(html).not.toContain("adaptive-test");
+  });
   it("never auto-accepts on mount and shows carry-over reason from draft", () => {
     const proposePlan = vi.fn();
     const acceptPlan = vi.fn();

@@ -50,6 +50,7 @@ const weak = () => snapshot([{ skillLabel: "矩阵乘法", status: "needs_review
 const read = (value: LearnerSnapshot, revision = "rev-1", autonomy: PlanningAutonomy = "copilot"): LearnerSnapshotRead => ({
   snapshot: value, sources: { date: day, timeZone: settings.timeZone!, courses: [], tasks: [], dueCardCount: 0 },
   dataStatus: { evidence: "available", goals: "available", dueCards: "available" },
+  courseMaterialRevisions: { [courseId]: "unchanged-fixture-materials" },
   autonomy, plannerInputRevision: revision, metrics: { reads: 0, durationMs: 0 },
 });
 

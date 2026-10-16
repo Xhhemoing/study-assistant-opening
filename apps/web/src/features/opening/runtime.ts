@@ -19,6 +19,7 @@ import { createOpeningObservationService } from "./learning/observation-service"
 import { createOpeningLearningReadService } from "./learning/read-service";
 import { createTutorService, type TutorService } from "./tutor/tutor-service";
 import { createOpeningPlanService } from "./planning/plan-service";
+import { createSqlLearnerSnapshotService } from "./planning/learner-snapshot-runtime";
 import {
   createEphemeralTutorService,
   EphemeralServiceError,
@@ -32,7 +33,7 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
-import { loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
@@ -78,7 +79,14 @@ export function getLearningReadService(sql: Sql) {
 }
 
 export function getPlanService(sql: import("postgres").Sql) {
-  return createOpeningPlanService(sql);
+  const snapshots = createSqlLearnerSnapshotService(sql);
+  return createOpeningPlanService(sql, {
+    adaptive: {
+      enabled: () => loadFeatureSwitches().adaptivePlanning,
+      readSnapshot: (scope, input) => snapshots.read(scope, input),
+      onSnapshotFailure: () => console.warn("Opening adaptive draft fell back to rule planning"),
+    },
+  });
 }
 
 type EphemeralConfig = {

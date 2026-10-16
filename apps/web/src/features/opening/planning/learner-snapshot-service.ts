@@ -20,6 +20,7 @@ import {
   type SnapshotTaskRow,
 } from "@aistudy/domain";
 import type { LearnerSnapshotBaseRows, LearnerSnapshotTaskRow } from "@aistudy/database";
+import { normalizeSkillLabelKey } from "../learning/skill-label-options";
 
 export type LearnerSnapshotReadSource = "evidence" | "goals" | "due_cards";
 
@@ -53,6 +54,8 @@ export type LearnerSnapshotRead = {
   autonomy: PlanningAutonomy;
   /** Changes whenever anything the planning rules read changes. */
   plannerInputRevision: string;
+  /** Internal admission fingerprints, rechecked before accepting a saved draft. */
+  courseMaterialRevisions?: Record<string, string>;
   metrics: { reads: number; durationMs: number };
 };
 
@@ -77,10 +80,24 @@ export function toSnapshotEvidence(
   evidence: CourseEvidence,
   now: Date,
 ): { summaries: SnapshotSkillSummary[]; observations: SnapshotObservation[] } {
-  const summaries = summarizeObservations(evidence.observations, now.toISOString(), {
+  // Reuse the earliest observed spelling. Labels are still display identities,
+  // but whitespace/case aliases must not become two separate daily suggestions.
+  const labels = new Map<string, string>();
+  const ordered = [...evidence.observations].sort((a, b) =>
+    (evidence.evidenceContexts[a.id]?.observation.submittedAt ?? Date.parse(a.submittedAt ?? a.occurredAt))
+    - (evidence.evidenceContexts[b.id]?.observation.submittedAt ?? Date.parse(b.submittedAt ?? b.occurredAt))
+    || a.id.localeCompare(b.id));
+  for (const row of ordered) {
+    const key = normalizeSkillLabelKey(row.skillLabel);
+    if (!labels.has(key)) labels.set(key, row.skillLabel);
+  }
+  const canonical = evidence.observations.map(row => ({
+    ...row, skillLabel: labels.get(normalizeSkillLabelKey(row.skillLabel))!,
+  }));
+  const summaries = summarizeObservations(canonical, now.toISOString(), {
     evidenceContexts: evidence.evidenceContexts,
   }).map((row) => ({ skillLabel: row.skillLabel, status: row.status, lastObservedAt: row.lastObservedAt }));
-  const observations = evidence.observations.map((row): SnapshotObservation => {
+  const observations = canonical.map((row): SnapshotObservation => {
     const input = evidence.evidenceContexts[row.id];
     const eligibility = evaluateEvidenceEligibility(
       input?.observation ?? {
@@ -167,7 +184,10 @@ export function createLearnerSnapshotService(deps: LearnerSnapshotDeps) {
         };
         try {
           const evidence = toSnapshotEvidence(await deps.readCourseEvidence(scope, course.courseId), now);
-          return { ...shared, evidenceStatus: "available", ...evidence };
+          const labels = new Map(evidence.observations.map(row => [normalizeSkillLabelKey(row.skillLabel), row.skillLabel]));
+          return { ...shared, evidenceStatus: "available", ...evidence,
+            knowledgeNodes: shared.knowledgeNodes.map(node => ({ ...node, title: labels.get(normalizeSkillLabelKey(node.title)) ?? node.title })),
+          };
         } catch (error) {
           deps.onReadFailure?.("evidence", error, course.courseId);
           return { ...shared, evidenceStatus: "unavailable", summaries: [], observations: [] };
@@ -190,6 +210,8 @@ export function createLearnerSnapshotService(deps: LearnerSnapshotDeps) {
           dueCards: dueCards.status,
         },
         plannerInputRevision: learnerSnapshotRevision(sources),
+        courseMaterialRevisions: Object.fromEntries(base.courses.flatMap(course =>
+          course.materialRevision ? [[course.courseId, course.materialRevision]] : [])),
         metrics: { reads: 3 + base.courses.length, durationMs: Date.now() - started },
       };
     },

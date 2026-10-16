@@ -1,16 +1,19 @@
 "use client";
 
-import type { PlanDraft, PlannedBlock, TaskItem } from "@aistudy/contracts";
-import { useEffect, useMemo, useState } from "react";
-import { OpeningApiError, type OpeningApi } from "../client/api";
+import type { PlanDraft, TaskItem } from "@aistudy/contracts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 import { canAcceptPlan } from "./plan-action";
 import { runSeedTodayPlan } from "./seed-today-plan";
+import { planAcceptFailure } from "./plan-accept-errors";
+import { AdaptiveDraftPreview } from "./adaptive-draft-preview";
+import { normalizeSuggestedSelection, reconcileSuggestedSelection, selectableSuggestedKeys } from "./daily-draft-selection";
 
 export type DailyDraftSkippedReason = "accepted" | "rejected" | "no_settings";
 
 export type DailyDraftControllers = {
-  accept: (draft: PlanDraft) => Promise<PlanDraft>;
+  accept: (draft: PlanDraft, selectedKeys?: readonly string[]) => Promise<PlanDraft>;
   reject: (draftId: string) => Promise<PlanDraft>;
   /** Re-propose only — never auto-accepts. Caller confirms separately. */
   adjust: () => Promise<PlanDraft>;
@@ -26,15 +29,26 @@ export function createDailyDraftControllers(
   const mint = options.mintClientKey ?? (() => (
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? `daily-draft-${crypto.randomUUID()}`
-      : `daily-draft-${Date.now()}`
+      : `daily-draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
   ));
+  const acceptKeys = new Map<string, string>();
+  const accepting = new Map<string, Promise<PlanDraft>>();
   return {
-    async accept(draft) {
-      return api.acceptPlan({
+    accept(draft, selectedKeys = []) {
+      const acceptSuggestedKeys = normalizeSuggestedSelection(draft, selectedKeys);
+      const identity = JSON.stringify([draft.id, draft.baseVersion, acceptSuggestedKeys]);
+      const inflight = accepting.get(identity);
+      if (inflight) return inflight;
+      let clientKey = acceptKeys.get(identity);
+      if (!clientKey) { clientKey = mint(); acceptKeys.set(identity, clientKey); }
+      const request = api.acceptPlan({
         draftId: draft.id,
         expectedBaseVersion: draft.baseVersion,
-        clientKey: mint(),
-      });
+        clientKey,
+        acceptSuggestedKeys,
+      }).finally(() => { accepting.delete(identity); });
+      accepting.set(identity, request);
+      return request;
     },
     async reject(draftId) {
       return api.rejectPlan(draftId);
@@ -62,6 +76,7 @@ export function dailyDraftSkippedCopy(
 export type DailyDraftCardModel = {
   draft: PlanDraft | null;
   error: string;
+  selectedSuggestedKeys?: readonly string[];
 };
 
 /** Pure reducer so failure paths never clear or invent draft state. */
@@ -73,6 +88,7 @@ export function reduceDailyDraftCard(
     | { type: "adjust_ok"; draft: PlanDraft }
     | { type: "action_fail"; message: string }
     | { type: "clear_error" }
+    | { type: "select"; keys: readonly string[] }
     | { type: "hydrate"; draft: PlanDraft | null },
 ): DailyDraftCardModel {
   switch (event.type) {
@@ -80,13 +96,18 @@ export function reduceDailyDraftCard(
     case "reject_ok":
       return { draft: null, error: "" };
     case "adjust_ok":
-      return { draft: event.draft, error: "" };
+    case "hydrate":
+      return {
+        draft: event.draft,
+        error: "",
+        selectedSuggestedKeys: reconcileSuggestedSelection(state.draft, state.selectedSuggestedKeys ?? selectableSuggestedKeys(state.draft), event.draft),
+      };
     case "action_fail":
-      return { draft: state.draft, error: event.message };
+      return { ...state, error: event.message };
     case "clear_error":
       return { ...state, error: "" };
-    case "hydrate":
-      return { draft: event.draft, error: "" };
+    case "select":
+      return state.draft ? { ...state, selectedSuggestedKeys: normalizeSuggestedSelection(state.draft, event.keys) } : state;
     default:
       return state;
   }
@@ -98,10 +119,6 @@ function timeLabel(value: string): string {
 
 function taskTitle(tasks: readonly TaskItem[], taskId: string): string {
   return tasks.find((task) => task.id === taskId)?.title ?? "学习任务";
-}
-
-function hasCarryOverReason(blocks: readonly PlannedBlock[]): boolean {
-  return blocks.some((block) => block.reason.includes("顺延自昨天"));
 }
 
 function seedDraft(dailyDraft: PlanDraft | null | undefined): PlanDraft | null {
@@ -117,6 +134,9 @@ export function DailyDraftCard({
   unplannedPendingCount,
   tasks = [],
   onChanged,
+  adaptivePlanning = false,
+  hasNewerSuggestion = false,
+  onRefreshSuggestions,
 }: {
   api: Pick<
     OpeningApi,
@@ -129,6 +149,9 @@ export function DailyDraftCard({
   unplannedPendingCount?: number;
   tasks?: readonly TaskItem[];
   onChanged?: () => void;
+  adaptivePlanning?: boolean;
+  hasNewerSuggestion?: boolean;
+  onRefreshSuggestions?: () => void | Promise<void>;
 }) {
   const controllers = useMemo(
     () => createDailyDraftControllers(api, { date }),
@@ -137,38 +160,56 @@ export function DailyDraftCard({
   const [model, setModel] = useState<DailyDraftCardModel>(() => ({
     draft: seedDraft(dailyDraft),
     error: "",
+    selectedSuggestedKeys: selectableSuggestedKeys(seedDraft(dailyDraft)),
   }));
   const [pending, setPending] = useState(false);
   const [seedError, setSeedError] = useState("");
+  const action = useRef<symbol | null>(null);
+  const scope = `${date}:${dailyDraft?.id ?? ""}:${dailyDraft?.baseVersion ?? ""}:${dailyDraft?.version ?? ""}:${dailyDraft?.status ?? ""}:${dailyDraftSkippedReason ?? ""}:${acceptedVersion}`;
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
+  const hydratedScope = useRef(scope);
 
   useEffect(() => {
-    if (pending) return;
+    const changed = hydratedScope.current !== scope;
+    hydratedScope.current = scope;
+    if (changed) { action.current = null; setPending(false); }
     if (dailyDraftSkippedReason != null) {
       setModel((prev) => (prev.draft == null && prev.error === "" ? prev : { draft: null, error: "" }));
       return;
     }
     const next = seedDraft(dailyDraft);
     setModel((prev) => {
-      if (prev.error !== "") return prev;
-      if (prev.draft?.id === next?.id) return prev;
+      if (!changed) return prev;
       return reduceDailyDraftCard(prev, { type: "hydrate", draft: next });
     });
-  }, [dailyDraft, dailyDraftSkippedReason, pending]);
+  }, [dailyDraft, dailyDraftSkippedReason, scope]);
+  useEffect(() => () => { action.current = null; }, []);
 
   const draft = model.draft;
+  const selectedKeys = model.selectedSuggestedKeys ?? selectableSuggestedKeys(draft);
   const stale = Boolean(draft && draft.baseVersion !== acceptedVersion);
+  function beginAction(): symbol | null {
+    if (action.current) return null;
+    const token = Symbol(); action.current = token; setPending(true);
+    return token;
+  }
+  function isCurrent(token: symbol): boolean { return action.current === token && currentScope.current === scope; }
+  function finishAction(token: symbol) { if (isCurrent(token)) { action.current = null; setPending(false); } }
 
   async function onSeedDefaultPlan() {
-    if (pending) return;
-    setPending(true);
+    const token = beginAction();
+    if (!token) return;
     setSeedError("");
     try {
       await runSeedTodayPlan(api, { target: { kind: "default" } });
+      if (!isCurrent(token)) return;
       onChanged?.();
     } catch (reason) {
+      if (!isCurrent(token)) return;
       setSeedError(reason instanceof Error ? reason.message : "用默认作息生成本日计划失败，请重试。");
     } finally {
-      setPending(false);
+      finishAction(token);
     }
   }
 
@@ -207,57 +248,77 @@ export function DailyDraftCard({
 
   async function onConfirm() {
     if (!draft || !canAcceptPlan({ pending, stale })) return;
-    setPending(true);
+    const token = beginAction();
+    if (!token) return;
     setModel((prev) => reduceDailyDraftCard(prev, { type: "clear_error" }));
     try {
-      await controllers.accept(draft);
+      await controllers.accept(draft, adaptivePlanning ? selectedKeys : []);
+      if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, { type: "accept_ok" }));
       onChanged?.();
     } catch (reason) {
+      if (!isCurrent(token)) return;
+      const failure = planAcceptFailure(reason);
       setModel((prev) => reduceDailyDraftCard(prev, {
         type: "action_fail",
-        message: reason instanceof OpeningApiError && reason.status === 409
-          ? "计划已变化，请重新读取后再确认；没有重复提交。"
-          : reason instanceof Error ? reason.message : "确认推荐草案失败",
+        message: failure.message,
       }));
+      if (failure.reread) onChanged?.();
     } finally {
-      setPending(false);
+      finishAction(token);
     }
   }
 
   async function onReject() {
     if (!draft || pending) return;
-    setPending(true);
+    const token = beginAction();
+    if (!token) return;
     setModel((prev) => reduceDailyDraftCard(prev, { type: "clear_error" }));
     try {
       await controllers.reject(draft.id);
+      if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, { type: "reject_ok" }));
       onChanged?.();
     } catch (reason) {
+      if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, {
         type: "action_fail",
         message: reason instanceof Error ? reason.message : "拒绝草案失败，草案已保留，请重试。",
       }));
     } finally {
-      setPending(false);
+      finishAction(token);
     }
   }
 
   async function onAdjust() {
     if (!draft || pending) return;
-    setPending(true);
+    const token = beginAction();
+    if (!token) return;
     setModel((prev) => reduceDailyDraftCard(prev, { type: "clear_error" }));
     try {
       const next = await controllers.adjust();
+      if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, { type: "adjust_ok", draft: next }));
     } catch (reason) {
+      if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, {
         type: "action_fail",
         message: reason instanceof Error ? reason.message : "重新提议失败，原草案已保留。",
       }));
     } finally {
-      setPending(false);
+      finishAction(token);
     }
+  }
+
+  async function refreshSuggestions() {
+    const refresh = adaptivePlanning ? onRefreshSuggestions ?? onChanged : onChanged;
+    if (!refresh) return;
+    const token = beginAction();
+    if (!token) return;
+    try { await refresh(); }
+    catch (reason) {
+      if (isCurrent(token)) setModel((prev) => reduceDailyDraftCard(prev, { type: "action_fail", message: reason instanceof Error ? reason.message : "读取新建议失败，原草案已保留。" }));
+    } finally { finishAction(token); }
   }
 
   return (
@@ -271,18 +332,19 @@ export function DailyDraftCard({
           基于待办、到期补测、课表空闲与昨日顺延生成；确认后才改变正式计划。
         </p>
       </div>
-      {hasCarryOverReason(draft.blocks) ? (
+      {adaptivePlanning && hasNewerSuggestion && onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>有新建议 · 点击更新</button> : null}
+      {draft.blocks.some((block) => draft.reasons?.[block.taskId]?.code === "carry_over") ? (
         <p className="text-[11px] leading-5 text-amber-900" role="status">含顺延自昨天的任务</p>
       ) : null}
-      <ul className="space-y-2 text-xs leading-5 text-zinc-700" aria-label="推荐安排">
+      {adaptivePlanning ? <AdaptiveDraftPreview draft={draft} tasks={tasks} selectedKeys={selectedKeys} disabled={pending} onSelectionChange={(keys) => { if (!action.current) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-zinc-700" aria-label="推荐安排">
         {draft.blocks.map((block) => (
           <li key={`${block.taskId}-${block.start}`}>
             <span className="font-medium text-zinc-900">{taskTitle(tasks, block.taskId)}</span>
             <p>{timeLabel(block.start)}–{timeLabel(block.end)}</p>
-            {block.reason ? <p className="text-zinc-500">{block.reason}</p> : null}
+            {(draft.reasons?.[block.taskId]?.label ?? block.reason) ? <p className="text-zinc-500">{draft.reasons?.[block.taskId]?.label ?? block.reason}</p> : null}
           </li>
         ))}
-      </ul>
+      </ul>}
       {draft.unscheduledTaskIds.length ? (
         <p className="text-xs text-amber-800">
           未安排 {draft.unscheduledTaskIds.length} 项；可确认后改用「按建议安排」或缩短时长。
@@ -291,7 +353,7 @@ export function DailyDraftCard({
       {stale ? (
         <p className="text-xs leading-5 text-amber-800">计划版本已变化。请拒绝旧草案或调整后重新确认。</p>
       ) : null}
-      {model.error ? <p className="text-xs leading-5 text-red-700" role="alert">{model.error}</p> : null}
+      {model.error ? <div className="space-y-2"><p className="text-xs leading-5 text-red-700" role="alert">{model.error}</p>{onChanged || onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>{adaptivePlanning && onRefreshSuggestions ? "刷新草案" : "重新读取"}</button> : null}</div> : null}
       <div className="flex flex-wrap gap-2">
         <button
           type="button"

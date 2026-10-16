@@ -4,6 +4,7 @@ import type { Scope } from "@aistudy/contracts";
 import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
+  readOpeningTeachingCompilerFocus,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
@@ -48,10 +49,12 @@ export function createCompileTeachingUnitWorkerDeps(
           models.call(scope, "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options }),
         buildProviderInput: async (scope, payload) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
+          const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
           return createCompilerProviderInput({
             loadChunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
+            ...focus,
           })(scope, payload);
         },
       }

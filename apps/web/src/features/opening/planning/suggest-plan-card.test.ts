@@ -120,6 +120,7 @@ describe("createSuggestPlanControllers", () => {
     expect(acceptPlan.mock.calls[0]![0]).toMatchObject({
       draftId: draftId,
       expectedBaseVersion: 0,
+      acceptSuggestedKeys: [],
     });
   });
 });

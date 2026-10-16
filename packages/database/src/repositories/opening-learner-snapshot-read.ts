@@ -1,5 +1,5 @@
 import type { Scope, TaskItem } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 
 /** One unarchived course with the planning facts that do not depend on evidence. */
 export type LearnerSnapshotCourseRow = {
@@ -7,7 +7,9 @@ export type LearnerSnapshotCourseRow = {
   title: string;
   /** At least one linked source is uploaded, parsed and not privacy-excluded. */
   hasUsableMaterials: boolean;
-  /** Raw stored knowledge snapshot (unvalidated JSONB); null when the course has none. */
+  /** Changes when linked, admissible source versions or their chunks change. */
+  materialRevision?: string;
+  /** Raw snapshot; null when any declared source is no longer admissible. */
   knowledgeSnapshot: unknown;
 };
 
@@ -32,38 +34,14 @@ export type LearnerSnapshotBaseRows = {
  */
 export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<LearnerSnapshotBaseRows> {
   return sql.begin("isolation level repeatable read read only", async (tx) => {
-    const courseRows = await tx`
-      SELECT c.id, c.title, k.snapshot AS knowledge_snapshot,
-        EXISTS (
-          SELECT 1 FROM course_asset_memberships m
-          JOIN opening_sources s ON s.id = m.asset_id AND s.workspace_id = m.workspace_id
-          WHERE m.course_id = c.id AND m.workspace_id = c.workspace_id AND m.asset_type = 'source'
-            AND s.upload_state = 'uploaded' AND s.parse_state = 'ready'
-            AND NOT EXISTS (
-              SELECT 1 FROM opening_privacy_exclusions e
-              WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
-            )
-        ) AS has_usable_materials
-      FROM courses c
-      JOIN workspaces w ON w.id = c.workspace_id
-      LEFT JOIN opening_course_knowledge k
-        ON k.course_id = c.id AND k.workspace_id = c.workspace_id AND k.owner_user_id = ${scope.ownerUserId}
-      WHERE c.workspace_id = ${scope.workspaceId}
-        AND w.owner_user_id = ${scope.ownerUserId}
-        AND c.archived_at IS NULL
-      ORDER BY c.created_at ASC, c.id ASC`;
+    const courses = await readOpeningLearnerSnapshotCourses(tx, scope);
     const taskRows = await tx`
       SELECT client_key, status, minutes, course_id, updated_at
       FROM opening_tasks
       WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
       ORDER BY created_at ASC, id ASC`;
     return {
-      courses: courseRows.map((row) => ({
-        courseId: String(row.id),
-        title: String(row.title),
-        hasUsableMaterials: Boolean(row.has_usable_materials),
-        knowledgeSnapshot: row.knowledge_snapshot ?? null,
-      })),
+      courses,
       tasks: taskRows.map((row) => ({
         clientKey: typeof row.client_key === "string" ? row.client_key : null,
         status: row.status as TaskItem["status"],
@@ -73,4 +51,51 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
       })),
     };
   }) as Promise<LearnerSnapshotBaseRows>;
+}
+
+/** Also read inside acceptance's workspace lock; material changes invalidate old suggestions. */
+export async function readOpeningLearnerSnapshotCourses(sql: Sql | TransactionSql, scope: Scope): Promise<LearnerSnapshotCourseRow[]> {
+  const rows = await sql`
+    WITH admitted AS (
+      SELECT m.course_id, s.id, s.version, jsonb_agg(chunk.id ORDER BY chunk.id) AS chunks
+      FROM course_asset_memberships m
+      JOIN opening_sources s ON s.id=m.asset_id AND s.workspace_id=m.workspace_id
+      JOIN opening_source_chunks chunk ON chunk.source_id=s.id AND chunk.source_version=s.version
+      WHERE m.workspace_id=${scope.workspaceId} AND m.asset_type='source'
+        AND s.upload_state='uploaded' AND s.parse_state='ready'
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+          WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+      GROUP BY m.course_id, s.id, s.version
+    )
+    SELECT c.id, c.title,
+      EXISTS (SELECT 1 FROM admitted a WHERE a.course_id=c.id) AS has_usable_materials,
+      (SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(a.id,a.version,a.chunks) ORDER BY a.id),'[]'::jsonb)::text)
+        FROM admitted a WHERE a.course_id=c.id) AS material_revision,
+      CASE WHEN jsonb_typeof(k.source_versions)='object' AND NOT EXISTS (
+        SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(k.source_versions)='object'
+          THEN k.source_versions ELSE '{}'::jsonb END) ref
+        WHERE NOT EXISTS (SELECT 1 FROM admitted a
+          WHERE a.course_id=c.id AND a.id::text=ref.key AND a.version::text=ref.value)
+      ) AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(
+          (CASE WHEN jsonb_typeof(k.snapshot->'nodes')='array' THEN k.snapshot->'nodes' ELSE '[]'::jsonb END) ||
+          (CASE WHEN jsonb_typeof(k.snapshot->'edges')='array' THEN k.snapshot->'edges' ELSE '[]'::jsonb END)
+        ) element
+        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(element->'evidenceChunkIds')='array'
+          THEN element->'evidenceChunkIds' ELSE '[]'::jsonb END) chunk(id)
+        WHERE NOT EXISTS (SELECT 1 FROM admitted a WHERE a.course_id=c.id AND a.chunks ? chunk.id
+          AND k.source_versions->>a.id::text=a.version::text)
+      ) THEN k.snapshot ELSE NULL END AS knowledge_snapshot
+    FROM courses c
+    JOIN workspaces w ON w.id=c.workspace_id AND w.owner_user_id=${scope.ownerUserId}
+    LEFT JOIN opening_course_knowledge k ON k.course_id=c.id AND k.workspace_id=c.workspace_id
+      AND k.owner_user_id=${scope.ownerUserId}
+    WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
+    ORDER BY c.created_at, c.id`;
+  // No course version covers membership, exclusions and chunk replacement. This
+  // compact fingerprint binds the saved draft to those mutable admission facts;
+  // primary keys/transaction locks alone cannot detect changes since generation.
+  return rows.map(row => ({ courseId: String(row.id), title: String(row.title),
+    hasUsableMaterials: Boolean(row.has_usable_materials), materialRevision: String(row.material_revision),
+    knowledgeSnapshot: row.knowledge_snapshot ?? null }));
 }

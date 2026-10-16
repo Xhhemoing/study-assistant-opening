@@ -15,6 +15,7 @@ export type AdaptiveDraftSnapshot = {
   snapshot: LearnerSnapshot;
   autonomy: PlanningAutonomy;
   plannerInputRevision: string;
+  courseMaterialRevisions?: Record<string, string>;
 };
 
 export type BuildAdaptiveDraftInput = {
@@ -59,7 +60,10 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   const own = rankForPlan({ tasks, suggestions: [], yesterdayAccepted, date, timeZone, now });
   const minutesById = new Map(tasks.map((task) => [task.id, task.minutes]));
   const committedMinutes = own.orderedTaskIds.reduce((sum, id) => sum + (minutesById.get(id) ?? 0), 0);
-  const { suggestions } = proposeAdaptiveTasks(input.adaptive.snapshot, {
+  // Production acceptance needs admissible course material. Filter before the
+  // suggestion/count budget so unavailable courses cannot crowd out usable ones.
+  const availableCourses = input.adaptive.snapshot.courses.filter(course => course.hasUsableMaterials);
+  const { suggestions } = proposeAdaptiveTasks({ ...input.adaptive.snapshot, courses: availableCourses }, {
     autonomy: input.adaptive.autonomy,
     capacityMinutes: freeMinutes(input.freeBlocks),
     committedMinutes,
@@ -71,7 +75,13 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   const ordered = ranked.orderedTaskIds
     .map((id) => byId.get(id))
     .filter((task): task is TaskItem => Boolean(task));
-  const planned = planDay(ordered, input.freeBlocks, input.planDayOptions(ranked.orderedTaskIds));
+  const options = input.planDayOptions(ranked.orderedTaskIds);
+  // Leave one minute to review and confirm. Otherwise a block starting at the
+  // instant of GET would already be expired by the subsequent accept request.
+  if (options.planningNow) {
+    options.planningNow = new Date(Math.ceil((Date.parse(options.planningNow) + 60_000) / 60_000) * 60_000).toISOString();
+  }
+  const planned = planDay(ordered, input.freeBlocks, options);
   return {
     blocks: planned.blocks.map((block) => {
       const reason = ranked.reasons[block.taskId];
@@ -83,6 +93,8 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
       reasons: ranked.reasons,
       strategyVersion: ADAPTIVE_STRATEGY_VERSION,
       plannerInputRevision: input.adaptive.plannerInputRevision,
+      availableCourseIds: availableCourses.map(course => course.courseId),
+      courseMaterialRevisions: input.adaptive.courseMaterialRevisions,
     },
   };
 }

@@ -48,3 +48,5 @@ export type {
   SnapshotSkillSummary,
   SnapshotTaskRow,
 } from "./snapshot-sources";
+export { assembleLearnerSnapshot } from "./assemble-snapshot";
+export { nextLearningStep } from "./next-learning-step";

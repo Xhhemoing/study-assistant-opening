@@ -30,6 +30,13 @@ beforeEach(() => {
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
+  it("discards client-supplied learner focus even when adaptive planning is off", async () => {
+    await createOpeningTeachingActivityService(sql, {}).create(scope, {
+      ...input, goalJson: { wantsFullExplanation: true, learnerFocus: { activityKind: "transfer_check" } },
+    });
+    expect(create).toHaveBeenCalledWith(scope, { ...input, goalJson: { wantsFullExplanation: true } }, { enqueueCompile: false });
+  });
+
   it("creates with enqueueCompile when the teaching compiler is on", async () => {
     await createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "1" }).create(scope, input);
     expect(create).toHaveBeenCalledWith(scope, input, { enqueueCompile: true });
