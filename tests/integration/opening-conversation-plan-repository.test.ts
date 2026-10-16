@@ -127,7 +127,7 @@ it("normalizes empty deadline notes and rejects notes beyond the task storage li
   await accept(draft);
   expect((await f.sql`SELECT due_text FROM opening_tasks WHERE candidate_id=${empty}`)[0]!.due_text).toBeNull();
   const oversized = await pending({ dueText: "字".repeat(201) });
-  await expect(propose(oversized)).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(propose(oversized, { expectedAcceptedVersion: 1 })).rejects.toMatchObject({ code: "VALIDATION" });
   expect(await f.sql`SELECT id FROM opening_plan_drafts WHERE propose_client_key=${`proposal:${oversized}`}`).toHaveLength(0);
 });
 

@@ -117,7 +117,7 @@ it("exports a privacy-safe goal without dangling evidence, retaining the online 
   const { validateOpeningRestore } = await import("@aistudy/domain");
   const learned = await learningAttemptFixture(f), attempt = await learned.start(), observation = await learned.submit(attempt);
   const repo = createOpeningAdaptivePrefsRepository(f.sql), value = milestone({ evidenceRefs: [{ kind: "observation", id: observation.id }, { kind: "attempt", id: attempt.id }] });
-  await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 0, goal: { ...goal, milestones: [value] } } });
+  const saved = await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 0, goal: { ...goal, milestones: [value] } } });
   const secondary = await import("./opening-backup-records-fixture").then(module => module.backupRows(f.sql, f.scope).source());
   // The session and answer still depend only on A. Only their parent activity names excluded B.
   await f.sql`UPDATE opening_teaching_activities SET source_ids=${[learned.sourceId, secondary]} WHERE id=(SELECT activity_id FROM opening_learning_sessions WHERE id=${learned.sessionId})`;
@@ -127,7 +127,7 @@ it("exports a privacy-safe goal without dangling evidence, retaining the online 
   expect(snapshot.tables.opening_learning_attempts.some(row => row.id === attempt.id)).toBe(false);
   expect(JSON.stringify(snapshot.tables.workspace_preferences)).not.toContain(observation.id);
   expect(JSON.stringify(snapshot.tables.workspace_preferences)).not.toContain(attempt.id);
-  expect((await repo.get(f.scope)).prefs.courseGoals[learned.courseId]?.milestones?.[0]?.evidenceRefs).toEqual(value.evidenceRefs);
+  expect((await repo.get(f.scope)).prefs.courseGoals).toEqual(saved.prefs.courseGoals);
   const archive = { format: "opening-backup", version: 1, workspaceId: f.scope.workspaceId, privacyEpoch: snapshot.privacyEpoch,
     deletionJournal: snapshot.deletionJournal, memoryDeletions: snapshot.memoryDeletions, tables: snapshot.tables,
     objects: snapshot.tables.opening_sources.map(source => ({ sourceId: String(source.id), sha256: String(source.sha256),
