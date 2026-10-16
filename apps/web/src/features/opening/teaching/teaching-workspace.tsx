@@ -296,12 +296,14 @@ export function TeachingWorkspace({
     () => ({
       ...liveActivity,
       contentVersion,
+      outlineTitle: typeof liveInit.generationConfig.extras?.focusItemTitle === "string"
+        ? liveInit.generationConfig.extras.focusItemTitle : undefined,
       onCourseAssociated: (next: TeachingActivity) => {
         setLiveActivity(next);
         onActivityUpdated?.(next);
       },
     }),
-    [liveActivity, contentVersion, onActivityUpdated],
+    [liveActivity, contentVersion, liveInit.generationConfig, onActivityUpdated],
   );
 
   const showBlockCommands = liveActivity.status !== "completed";

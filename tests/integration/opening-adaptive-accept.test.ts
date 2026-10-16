@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AcceptPlanInput, PlannedBlock, Scope, SuggestedTask, TaskItem } from "@aistudy/contracts";
-import { createOpeningPlansRepository, readOpeningLearnerSnapshotBase } from "@aistudy/database";
+import { createOpeningPlansRepository, createOpeningPlanningSettingsRepository, readOpeningLearnerSnapshotBase } from "@aistudy/database";
 import { ADAPTIVE_STRATEGY_VERSION, suggestionIdentity, suggestionKey } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -131,6 +131,33 @@ describe("adaptive draft acceptance", () => {
     }
     expect(saved.states).toEqual([expect.objectContaining({ accepted_version: 1, accepted_blocks: draft.blocks })]);
     expect(saved.receipts).toHaveLength(1);
+    expect(await repository().listTasks(fixture.scope)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: suggestions[1]!.id, suggestionKind: "review_cards" }),
+    ]));
+  });
+
+  async function saveConstraints(start = "08:00") {
+    return createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, {
+      weekOneMonday: "2026-10-19", periodTimes: { "1": { start: "09:00", end: "09:45" } },
+      dailyWindow: { start, end: "12:00" }, lunch: { start: "12:00", end: "13:00" },
+      dinner: { start: "17:30", end: "18:30" }, sleep: { start: "23:00", end: "07:00" }, timeZone: "Etc/UTC",
+    });
+  }
+
+  it("refuses a stale free slot after another tab saves a class, without needing a Today refresh", async () => {
+    await saveConstraints();
+    const item = suggestion(null), draft = await seedDraft({ suggestions: [item] });
+    await repository().replaceTimetable(fixture.scope, [{ courseName: "New class", weekday: 3, weeks: [1], startPeriod: 1, endPeriod: 1 }]);
+    await rejectsAtomically(acceptance(draft.id), { code: "CONFLICT", reason: "stale_version" });
+  });
+
+  it.each(["narrowed", "removed"] as const)("refuses an auto draft after availability is %s in another tab", async change => {
+    await saveConstraints();
+    const item = suggestion(null), draft = await seedDraft({ suggestions: [item] });
+    await fixture.sql`UPDATE opening_plan_drafts SET input_snapshot=input_snapshot || '{"autoDraft":true}'::jsonb WHERE id=${draft.id}`;
+    if (change === "removed") await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, null);
+    else await saveConstraints("10:00");
+    await rejectsAtomically(acceptance(draft.id), { code: "CONFLICT", reason: "stale_version" });
   });
 
   it("accepts an empty selection without creating suggestions and preserves the learner's own task", async () => {

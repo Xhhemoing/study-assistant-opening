@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateEvidenceEligibility } from "./evidence-eligibility";
+import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "./evidence-eligibility";
 import { observation, context, exposure, withHelp } from "./evidence-eligibility-fixtures";
 
 describe("evaluateEvidenceEligibility assistance", () => {
@@ -138,3 +138,45 @@ describe("evaluateEvidenceEligibility assistance", () => {
     expect(result.usableForDelayedCheck).toBe("no");
     expect(result.reasonCodes).toContain("prior_answer_exposure");
   });
+
+describe("resolved evidence assistance", () => {
+  it.each(["hinted", "revealed"] as const)("retains delivered %s after the declaration is revised to independent", level => {
+    expect(resolveEvidenceAssistance(observation, withHelp([{ ...exposure, level }]))).toBe(level);
+    expect(observation.assistance).toBe("independent");
+  });
+
+  it("keeps the strongest declared or established delivery regardless of exposure order", () => {
+    const history = [{ ...exposure, level: "revealed" as const }, exposure];
+    expect(resolveEvidenceAssistance(observation, withHelp(history))).toBe("revealed");
+    expect(resolveEvidenceAssistance(observation, withHelp([...history].reverse()))).toBe("revealed");
+    expect(resolveEvidenceAssistance({ ...observation, assistance: "revealed" }, withHelp([exposure]))).toBe("revealed");
+    expect(resolveEvidenceAssistance({ ...observation, assistance: "hinted" }, context)).toBe("hinted");
+  });
+
+  it.each([
+    ["post-submission feedback", { deliveredAt: 301 }],
+    ["feedback tied with submission", { deliveredAt: 300 }],
+    ["help before the attempt", { deliveredAt: 199 }],
+    ["another attempt", { attemptId: "other-attempt", deliveredAt: 100, level: "revealed" }],
+    ["another problem", { problemId: "other-problem" }],
+    ["undelivered help", { delivered: false }],
+    ["unknown delivery", { delivered: null }],
+    ["unknown delivery time", { deliveredAt: null }],
+    ["unknown attempt association", { attemptId: null }],
+    ["instruction", { kind: "instruction", level: "revealed" }],
+  ] as const)("does not upgrade from %s", (_name, patch) => {
+    expect(resolveEvidenceAssistance(observation, withHelp([{ ...exposure, ...patch }]))).toBe("independent");
+  });
+
+  it("leaves missing timing and help history unknown rather than reconstructing them", () => {
+    expect(resolveEvidenceAssistance({ ...observation, startedAt: null }, withHelp([exposure]))).toBe("independent");
+    expect(resolveEvidenceAssistance({ ...observation, submittedAt: null }, withHelp([exposure]))).toBe("independent");
+    expect(resolveEvidenceAssistance({ ...observation, assistance: "unknown" }, {})).toBe("unknown");
+  });
+
+  it("qualifies help before an actual revised answer while keeping original-answer feedback separate", () => {
+    const revisedContext = { ...context, helpHistory: { complete: true, answerRecordedAt: 500, exposures: [{ ...exposure, deliveredAt: 400 }] } };
+    expect(resolveEvidenceAssistance(observation, revisedContext)).toBe("hinted");
+    expect(resolveEvidenceAssistance(observation, withHelp([{ ...exposure, deliveredAt: 400 }]))).toBe("independent");
+  });
+});

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LearningAttempt, LearningObservation, PlanDraft, TeachingActivity } from "@aistudy/contracts";
-import { createOpeningAdaptivePrefsRepository, createOpeningPlanningSettingsRepository, createOpeningPlansRepository } from "@aistudy/database";
+import { createOpeningAdaptivePrefsRepository, createOpeningPlanningSettingsRepository, createOpeningPlansRepository, createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import { ADAPTIVE_STRATEGY_VERSION, addLocalDays, localDateKeyInZone } from "@aistudy/domain";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -131,6 +131,7 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(activityResponse.status).toBe(201);
   const activity = await activityResponse.json() as TeachingActivity;
   expect(activity).toMatchObject({ courseId: chosen.courseId, intentSummary: selected.title, sourceIds: [chosen.sourceId] });
+  expect(activity.learnerFocus).toMatchObject({ skillLabel: "fractions", activityKind: "targeted_explain", focusObservationId: chosen.observation.id });
   const rows = await fixture.sql`SELECT course_id, source_ids, goal_json FROM opening_teaching_activities
     WHERE id=${activity.id} AND workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
   expect(rows).toHaveLength(1);
@@ -146,4 +147,6 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(await activityReplay.json()).toMatchObject({ id: activity.id });
   expect(await fixture.sql`SELECT id FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId}
     AND kind='compile-teaching-unit' AND payload->>'activityId'=${activity.id}`).toHaveLength(0);
+  const reassociated = await createOpeningTeachingActivitiesRepository(fixture.sql).associateCourse(fixture.scope, activity.id, { courseId: unchosen.courseId });
+  expect(reassociated).not.toHaveProperty("learnerFocus");
 });

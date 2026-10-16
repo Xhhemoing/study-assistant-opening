@@ -19,6 +19,11 @@ export type {
 
 type Reasons = Set<EvidenceEligibilityReasonCode>;
 
+/** Effective current-attempt help; a self-report cannot erase an established delivery. */
+export function resolveEvidenceAssistance(observation: EvidenceObservation, context: EvidenceEligibilityContext) {
+  return evaluateAssistance(observation, context.helpHistory, new Set()).assistance;
+}
+
 function evaluateCorrectness(
   observation: EvidenceObservation,
   check: EvidenceEligibilityContext["referenceCheck"],

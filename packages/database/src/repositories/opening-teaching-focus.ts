@@ -2,13 +2,15 @@ import type { Sql } from "postgres";
 import { teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
+import { plannerSuggestionKind } from "./opening-task-fields";
 
 /** Task identity comes from the owner-scoped row, not createIntent/goalJson. */
 export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskId: string) {
-  const [task] = await sql`SELECT t.title, t.course_id, t.skill_label FROM opening_tasks t
+  const [task] = await sql`SELECT t.title, t.course_id, t.skill_label, t.origin, t.client_key FROM opening_tasks t
     JOIN workspaces w ON w.id=t.workspace_id AND w.owner_user_id=t.owner_user_id
     WHERE t.id=${taskId} AND t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId}`;
-  return task ? { title: String(task.title), courseId: task.course_id as string | null, skillLabel: task.skill_label as string | null } : null;
+  return task ? { title: String(task.title), courseId: task.course_id as string | null, skillLabel: task.skill_label as string | null,
+    suggestionKind: plannerSuggestionKind(task) } : null;
 }
 
 export type TeachingCompilerFocus = {

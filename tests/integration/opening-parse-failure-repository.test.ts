@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sourceRecordSchema } from "@aistudy/contracts";
-import { createOpeningJobRepository, createOpeningSourceRepository } from "@aistudy/database";
+import { OpeningProviderError, runBudgetedCall } from "@aistudy/ai";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningSourceRepository } from "@aistudy/database";
 import { runJob } from "../../apps/worker/src/runtime/run-job";
+import { scopeBudget } from "../../apps/worker/src/runtime/model-gateway";
+import { MediaValidationError } from "../../apps/worker/src/parsers/media-process";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
@@ -14,13 +17,13 @@ beforeEach(async () => {
 });
 afterAll(async () => { await fixture?.close(); });
 
-async function seed() {
+async function seed(kind: "parse" | "parse-media" = "parse") {
   const sourceId = randomUUID();
   await fixture.sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
     VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'broken.pdf', 'application/pdf', 44, ${"a".repeat(64)}, 0, 'uploaded', 'not_started')`;
   const repository = createOpeningJobRepository(fixture.sql);
   const job = await repository.createOnce(fixture.scope, {
-    key: randomUUID(), kind: "parse", payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0,
+    key: randomUUID(), kind, payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0,
   });
   return { sourceId, job, repository, sources: createOpeningSourceRepository(fixture.sql) };
 }
@@ -32,11 +35,46 @@ describe("parse failure source projection", () => {
     expect((await repository.get(fixture.scope, job.id)).state).toBe("failed");
     const record = sourceRecordSchema.parse(await sources.get(fixture.scope, sourceId));
     expect(record).toMatchObject({ uploadState: "uploaded", parseState: "failed", version: 0,
-      error: { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable: false } });
+      error: { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable: true } });
     expect(JSON.stringify(record.error)).not.toContain("private parser");
     expect(await runJob(repository, job.id, async () => { throw new Error("redelivery ran"); })).toBe(false);
     expect(await repository.finish(job.id, "failed", { error: "redelivery" })).toBe(false);
     expect(await sources.get(fixture.scope, sourceId)).toEqual(record);
+  });
+
+  it("allows a recoverable media failure to enter the manual retry path", async () => {
+    const { sourceId, job, repository, sources } = await seed("parse-media");
+    await runJob(repository, job.id, async () => { throw new Error("third conversion interrupted"); });
+    expect(await sources.get(fixture.scope, sourceId)).toMatchObject({ parseState: "failed", error: { retryable: true } });
+    await sources.retryParseWithJob(fixture.scope, sourceId, {
+      key: randomUUID(), payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0,
+    });
+    expect((await sources.get(fixture.scope, sourceId)).parseState).toBe("queued");
+  });
+
+  it("keeps invalid media failures non-retryable", async () => {
+    const { sourceId, job, repository, sources } = await seed("parse-media");
+    await runJob(repository, job.id, async () => { throw new MediaValidationError("invalid input"); });
+    expect(await sources.get(fixture.scope, sourceId)).toMatchObject({ parseState: "failed", error: { retryable: false } });
+  });
+
+  it.each(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"])("ends the source spinner after %s without releasing or resending the unknown call", async code => {
+    const { sourceId, job, repository, sources } = await seed("parse-media");
+    const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+    let calls = 0;
+    const handler = async () => runBudgetedCall({
+      budget: scopeBudget(budget, fixture.scope), provider: { complete: async () => { calls += 1; throw new OpeningProviderError(code, "provider response lost", true); } },
+      requestId: `transcribe:${job.id}:0`, purpose: "transcribe", reservedCents: 100, actualCents: () => 1,
+      input: { instruction: "transcribe", text: "audio", chunks: [], mode: "listen", maxOutputTokens: 100, mediaCapability: "text_only", imageParts: [] },
+    });
+    expect(await runJob(repository, job.id, handler)).toBe(true);
+    expect((await repository.get(fixture.scope, job.id)).state).toBe("outcome_unknown");
+    expect(await sources.get(fixture.scope, sourceId)).toMatchObject({ uploadState: "uploaded", parseState: "failed",
+      error: { code: "PARSE_OUTCOME_UNKNOWN", retryable: false } });
+    const [reservation] = await fixture.sql`SELECT state, outcome_unknown_at FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId}`;
+    expect(reservation).toMatchObject({ state: "reserved", outcome_unknown_at: expect.any(Date) });
+    expect(await runJob(repository, job.id, handler)).toBe(false);
+    expect(calls).toBe(1);
   });
 
   for (const change of ["version", "epoch", "ready", "unsupported", "excluded", "foreign workspace", "wrong owner"] as const) {

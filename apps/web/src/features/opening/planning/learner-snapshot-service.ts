@@ -8,6 +8,7 @@ import {
 import {
   evaluateEvidenceEligibility,
   localDateKeyInZone,
+  resolveEvidenceAssistance,
   summarizeObservations,
   type CourseEvidence,
   type LearnerSnapshot,
@@ -99,23 +100,22 @@ export function toSnapshotEvidence(
   }).map((row) => ({ skillLabel: row.skillLabel, status: row.status, lastObservedAt: row.lastObservedAt }));
   const observations = canonical.map((row): SnapshotObservation => {
     const input = evidence.evidenceContexts[row.id];
-    const eligibility = evaluateEvidenceEligibility(
-      input?.observation ?? {
-        courseId: row.courseId,
-        problemId: row.problemId,
-        assistance: row.assistance,
-        outcome: row.outcome,
-        verdictSource: row.verdictSource,
-      },
-      input?.context ?? {},
-    );
+    const captured = input?.observation ?? {
+      courseId: row.courseId,
+      problemId: row.problemId,
+      assistance: row.assistance,
+      outcome: row.outcome,
+      verdictSource: row.verdictSource,
+    };
+    const context = input?.context ?? {};
+    const eligibility = evaluateEvidenceEligibility(captured, context);
     // A revision keeps the original attempt time, as in summarizeObservations.
     const attemptedAt = input?.observation.submittedAt ?? Date.parse(row.submittedAt ?? row.occurredAt);
     return {
       id: row.id,
       skillLabel: row.skillLabel,
       attemptedAt: new Date(attemptedAt).toISOString(),
-      assistance: row.assistance,
+      assistance: resolveEvidenceAssistance(captured, context),
       verifiedCorrect: eligibility.verifiedCorrect,
       independentAttempt: eligibility.independentAttempt,
       problemId: row.problemId ?? null,
@@ -130,6 +130,7 @@ export function toSnapshotTaskRow(row: LearnerSnapshotTaskRow, timeZone: string)
     status: row.status,
     minutes: row.minutes,
     courseId: row.courseId,
+    ...(row.skillLabel ? { skillLabel: row.skillLabel } : {}),
     // No closed_at column: a closed task's last update is the close (reopen sets it pending).
     closedLocalDate: row.status === "pending" ? null : localDateKeyInZone(new Date(row.updatedAt), timeZone),
   };

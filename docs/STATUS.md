@@ -10,7 +10,7 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 功能主干 `623d829`：#49、#50、#53、#54、#55、#52、#56、#57 均已合入；#56/#57 最终提交完整 CI 已成功，合并后主干检查见 [CI 38877372290](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38877372290)。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
+- 发布主干 `8ff0741`：#49、#50、#53、#54、#55、#52、#56、#57、#58 均已合入；[发布主干完整 CI 38882210678](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38882210678) 全绿。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
 
 ## 进行中
 
@@ -21,10 +21,11 @@
 | 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
 | 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
 | Hermes 发布 | Codex 主对话 | [#58](https://github.com/Xhhemoing/study-assistant-opening/pull/58) | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、启动后崩溃检测、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
+| 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | `codex/learning-loop-audit` | 7类闭环/恢复缺陷已修，无migration；最终525测试文件/3905项通过，11跳过/1todo属真实使用占位；全量类型/lint/生产构建通过。用户已于2026-10-16授权发布此分支与创建PR；通过已连接GitHub应用上传同一已验证文件树，新增PG/handler及完整CI结果以PR为准。Hermes及实际验收未完成，B/C后置 |
 
 ## 下一步（按顺序）
 
-1. #56、#57 已合入，核对合并后主干 CI。恢复 Hermes 部署连接后先核实 SHA/迁移、备份，再以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。当前没有执行线上操作。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
+1. #56–#58 与发布主干 CI 已完成。用户已授权审计分支发布和创建PR，先验证新PG/handler场景及完整CI，再按门禁合入；恢复 Hermes 部署连接后核实 SHA/迁移、备份，以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。当前没有执行线上操作。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
 3. 先修复批次 A 自用反馈，再按 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 推进后续批次；教练自动接受仍不启用。
 4. 大问题方案：

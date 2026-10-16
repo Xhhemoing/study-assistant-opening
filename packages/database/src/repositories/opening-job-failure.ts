@@ -18,8 +18,9 @@ export async function releaseOpeningParseClaim(tx: Sql, payload: unknown): Promi
         WHERE j.state = 'running' AND j.kind IN ('parse', 'parse-media') AND j.payload->>'sourceId' = ${sourceId})`;
 }
 
-/** Commit the job failure and its source status together, under the privacy lock. */
-export async function failOpeningJob(sql: Sql, id: string, value: unknown): Promise<boolean> {
+/** Commit a terminal job error and its source status together, under the privacy lock. */
+export async function failOpeningJob(sql: Sql, id: string, value: unknown,
+  state: "failed" | "outcome_unknown" = "failed"): Promise<boolean> {
   return sql.begin(async (tx) => {
     // Match privacy deletion's workspace-first lock order. Never lock a job first.
     const workspaces = await tx<{ id: string; owner_user_id: string; privacy_epoch: number }[]>`
@@ -31,7 +32,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
     const jobs = await tx<{
       kind: string; owner_user_id: string; payload: unknown; privacy_epoch: number;
     }[]>`
-      UPDATE opening_jobs SET state = 'failed', result = ${tx.json(value as never)}, updated_at = now()
+      UPDATE opening_jobs SET state = ${state}, result = ${tx.json(value as never)}, updated_at = now()
       WHERE id = ${id} AND workspace_id = ${workspace.id} AND state = 'running'
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
@@ -62,9 +63,12 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown): Prom
     // Never replace ready/new-version/excluded state. Excluded rows receive a
     // terminal privacy error below so the inbox does not spin forever.
     const stale = Number(job.privacy_epoch) !== Number(workspace.privacy_epoch);
+    const retryable = value !== null && typeof value === "object" && "retryable" in value && value.retryable === true;
     const error = stale
       ? { code: "PARSE_STALE", message: "隐私设置已变化，解析结果已丢弃。", retryable: false }
-      : { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable: false };
+      : state === "outcome_unknown"
+        ? { code: "PARSE_OUTCOME_UNKNOWN", message: "转写结果尚未确认，为避免重复计费未重发；原件仍已保存。", retryable: false }
+        : { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable };
     if (stale) {
       await tx`
         UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()

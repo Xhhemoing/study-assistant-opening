@@ -15,13 +15,14 @@ export function evaluateAssistance(
   observation: EvidenceObservation,
   history: EvidenceEligibilityContext["helpHistory"],
   reasons: Reasons,
-): { independent: EvidenceEligibilityValue; priorAnswer: EvidenceEligibilityValue } {
+): { independent: EvidenceEligibilityValue; priorAnswer: EvidenceEligibilityValue; assistance: NonNullable<EvidenceObservation["assistance"]> } {
   const { startedAt, submittedAt } = observation;
   const answerRecordedAt = history?.answerRecordedAt === undefined ? submittedAt : history.answerRecordedAt;
   const timingKnown = knownTime(startedAt) && knownTime(submittedAt) && startedAt <= submittedAt
     && knownTime(answerRecordedAt) && submittedAt <= answerRecordedAt;
   let uncertain = !history?.complete || !timingKnown;
   let assisted = observation.assistance === "hinted" || observation.assistance === "revealed";
+  let assistance = observation.assistance ?? "unknown";
   let priorAnswer: EvidenceEligibilityValue = history?.complete ? "no" : "unknown";
   if (!history?.complete) reasons.add("help_history_incomplete");
   if (!timingKnown) reasons.add("attempt_timing_unknown");
@@ -62,6 +63,9 @@ export function evaluateAssistance(
       } else {
         assisted = true;
         reasons.add("help_before_submission");
+        // Keep the declared level unless this delivery has the full timing and
+        // association needed to establish a stronger current-attempt exposure.
+        if (timingKnown && (help.level === "revealed" || assistance !== "revealed")) assistance = help.level;
       }
     } else if (knownTime(startedAt) && help.deliveredAt < startedAt) {
       // A new attempt does not erase familiarity; it is distinct from help in this attempt.
@@ -73,7 +77,7 @@ export function evaluateAssistance(
       markUnknown("help_association_unknown");
     }
   }
-  return { independent: assisted ? "no" : uncertain ? "unknown" : "yes", priorAnswer };
+  return { independent: assisted ? "no" : uncertain ? "unknown" : "yes", priorAnswer, assistance };
 }
 
 export function evaluateDelayedCheck(

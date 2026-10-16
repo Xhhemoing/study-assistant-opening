@@ -50,3 +50,4 @@ export type {
 } from "./snapshot-sources";
 export { assembleLearnerSnapshot } from "./assemble-snapshot";
 export { nextLearningStep } from "./next-learning-step";
+export { normalizeSkillLabelKey } from "./skill-identity";

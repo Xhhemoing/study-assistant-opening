@@ -12,7 +12,7 @@ import {
   readOpeningCourseEvidence,
   readOpeningLearnerSnapshotBase,
 } from "@aistudy/database";
-import { localDateKeyInZone, type LearnerSnapshotSources } from "@aistudy/domain";
+import { assembleLearnerSnapshot, localDateKeyInZone, proposeAdaptiveTasks, suggestionIdentity, suggestionKey, type LearnerSnapshotSources } from "@aistudy/domain";
 import {
   createLearnerSnapshotService,
   type LearnerSnapshotDeps,
@@ -72,11 +72,11 @@ async function insertCourse(workspaceId: string, title: string): Promise<string>
   return id;
 }
 async function insertTask(workspaceId: string, ownerUserId: string, input: {
-  clientKey?: string; status: "pending" | "done" | "skipped"; minutes?: number; courseId?: string;
+  clientKey?: string; status: "pending" | "done" | "skipped"; minutes?: number; courseId?: string; skillLabel?: string;
 }) {
-  await fixture.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, status, client_key, course_id, origin)
+  await fixture.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, status, client_key, course_id, skill_label, origin)
     VALUES (${randomUUID()}, ${workspaceId}, ${ownerUserId}, 'task', ${input.minutes ?? 25}, ${input.status},
-      ${input.clientKey ?? null}, ${input.courseId ?? null}, ${input.clientKey ? "planner" : "manual"})`;
+      ${input.clientKey ?? null}, ${input.courseId ?? null}, ${input.skillLabel ?? null}, ${input.clientKey ? "planner" : "manual"})`;
 }
 
 describe("learner snapshot read", () => {
@@ -125,6 +125,34 @@ describe("learner snapshot read", () => {
 
     const course = (await read()).sources.courses.find((row) => row.courseId === f.courseId)!;
     expect(course.observations.map((row) => row.id)).toEqual([replaced.headObservationId]);
+  });
+
+  it.each([["replace", "done"], ["retract", "skipped"]] as const)("preserves a legacy %s spelling's %s task after the earliest observation changes", async (change, status) => {
+    const f = await learningAttemptFixture(fixture);
+    const first = await submitChecked(f, "incorrect");
+    const displayed = change === "retract" ? await submitChecked(f, "incorrect") : first;
+    const clientKey = suggestionKey(today(), suggestionIdentity("weak_skill", f.courseId, "fractions"));
+    await insertTask(fixture.scope.workspaceId, fixture.scope.ownerUserId, {
+      clientKey, courseId: f.courseId, skillLabel: "fractions", status,
+    });
+    await f.learning.reviseObservation(fixture.scope, {
+      rootObservationId: displayed.id, expectedHead: displayed.id, revisesObservationId: displayed.id,
+      reason: "Normalize the displayed skill spelling", clientKey: randomUUID(), revisionKind: "replace",
+      replacement: { answer: displayed.answer, outcome: displayed.outcome, assistance: displayed.assistance, skillLabel: "FRAC TIONS" },
+    });
+    if (change === "retract") await f.learning.reviseObservation(fixture.scope, {
+      rootObservationId: first.id, expectedHead: first.id, revisesObservationId: first.id,
+      reason: "Withdraw an incorrectly attributed earlier attempt", clientKey: randomUUID(), revisionKind: "retract",
+    });
+    const result = await read({ assembleSnapshot: assembleLearnerSnapshot });
+    expect(result.sources.tasks).toContainEqual(expect.objectContaining({ clientKey, skillLabel: "fractions", status }));
+    expect(result.snapshot.courses.find(row => row.courseId === f.courseId)?.skills).toMatchObject([
+      { skillLabel: "FRAC TIONS", status: "needs_review" },
+    ]);
+    expect(proposeAdaptiveTasks(result.snapshot, {
+      autonomy: "copilot", capacityMinutes: 180, committedMinutes: 0, pendingTasks: [], idFor: () => randomUUID(),
+    }).suggestions).toEqual([]);
+    expect((await fixture.sql`SELECT client_key FROM opening_tasks WHERE workspace_id=${fixture.scope.workspaceId}`)[0]!.client_key).toBe(clientKey);
   });
 
   it("reports planner tasks with their local close date and stays inside the workspace", async () => {
