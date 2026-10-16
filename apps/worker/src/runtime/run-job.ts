@@ -1,5 +1,5 @@
 import type { OpeningJobRecord } from "@aistudy/database";
-import { OpeningProviderError } from "@aistudy/ai";
+import { isBudgetReplayError, ledgerActionForProviderError, OpeningProviderError } from "@aistudy/ai";
 
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
 export type JobRepository = {
@@ -17,6 +17,25 @@ export function canClaimJob(status: string): boolean {
 
 export function isUnknownOutcome(error: unknown): boolean {
   return error instanceof OpeningProviderError && UNKNOWN_OUTCOME_CODES.has(error.code);
+}
+
+/** A manual parse retry may reuse saved chunks, but must not invite unknown model calls. */
+function canRetryParse(error: unknown): boolean {
+  if (isBudgetReplayError(error)) return error.disposition.kind === "released";
+  if (error instanceof OpeningProviderError) {
+    return error.retryable && ledgerActionForProviderError(error.code) === "release";
+  }
+  if (error instanceof TypeError || error instanceof RangeError) return false;
+  const details = error as { code?: unknown; retryable?: unknown } | null;
+  if (typeof details?.code === "string" && [
+    "MEDIA_VALIDATION", "CONFIGURATION", "UNSUPPORTED_SOURCE", "UNSUPPORTED_MIME",
+    "BOUNDS_EXCEEDED", "USAGE", "PRIVACY_EPOCH_MISMATCH", "BUDGET_CONFLICT",
+    "CONFLICT", "NOT_FOUND", "VALIDATION",
+  ].includes(details.code)) return false;
+  if (typeof details?.retryable === "boolean") return details.retryable;
+  // Ordinary download, filesystem or interrupted conversion errors can be retried
+  // explicitly. The adapter/ledger still owns the right to send each model call.
+  return true;
 }
 
 /**
@@ -51,6 +70,9 @@ export async function runJob(
     return repository.finish(job.id, "succeeded", result);
   } catch (error) {
     const state = isUnknownOutcome(error) ? "outcome_unknown" : "failed";
-    return repository.finish(job.id, state, { error: error instanceof Error ? error.message : "job failed" });
+    return repository.finish(job.id, state, {
+      error: error instanceof Error ? error.message : "job failed",
+      ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),
+    });
   }
 }

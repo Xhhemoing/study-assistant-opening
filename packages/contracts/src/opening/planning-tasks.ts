@@ -14,6 +14,7 @@ export const taskRetestProjectionSchema = z.object({
 
 /** Who put the task in the queue. `planner`/`agent` tasks only exist after the learner accepted a draft. */
 export const taskOriginSchema = z.enum(["manual", "course_seed", "retest", "planner", "agent"]);
+export const suggestionKindSchema = z.enum(["weak_skill", "review_cards", "new_skill", "course_pace"]);
 
 export const taskItemSchema = z.object({
   id: uuidSchema,
@@ -30,6 +31,8 @@ export const taskItemSchema = z.object({
   skillLabel: z.string().min(1).max(200).optional(),
   /** Omitted for `manual`. */
   origin: taskOriginSchema.optional(),
+  /** Read-only projection of a stored planner identity; selects the task's execution flow. */
+  suggestionKind: suggestionKindSchema.optional(),
   /** Planners must not place the task before this instant (deferral). */
   notBefore: isoDateTimeSchema.optional(),
 }).strict();

@@ -57,6 +57,8 @@ export type SnapshotTaskRow = {
   status: TaskItem["status"];
   minutes: number;
   courseId: string | null;
+  /** Stored display label lets legacy suggestion keys match whitespace/case aliases. */
+  skillLabel?: string | null;
   /** Local YYYY-MM-DD on which the task became done or skipped; null while pending. */
   closedLocalDate: string | null;
 };

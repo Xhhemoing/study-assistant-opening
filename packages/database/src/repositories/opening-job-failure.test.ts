@@ -91,6 +91,25 @@ describe("opening parse job failure projection", () => {
     expect(versionFenceValues(sourceUpdates[0]!)).toEqual([2, 2]);
   });
 
+  it("projects an unknown transcription as a terminal source error while preserving the unknown job", async () => {
+    const { sql, recorded } = fakeSql({ kind: "parse-media", payload: { sourceId: SOURCE, sourceVersion: 2 }, privacy_epoch: 7 });
+
+    await expect(failOpeningJob(sql, "job-media", { error: "private provider detail", retryable: true }, "outcome_unknown")).resolves.toBe(true);
+    expect(recorded.find(({ query }) => query.startsWith("UPDATE opening_jobs"))!.values).toContain("outcome_unknown");
+    const projection = lastFailureProjection(recorded);
+    expect(projection.values).toContainEqual({ code: "PARSE_OUTCOME_UNKNOWN",
+      message: "转写结果尚未确认，为避免重复计费未重发；原件仍已保存。", retryable: false });
+    expect(versionFenceValues(projection)).toEqual([2, 2]);
+    expect(JSON.stringify(projection.values)).not.toContain("private provider detail");
+  });
+
+  it.each([true, false])("preserves the worker's safe manual retry decision (%s)", async retryable => {
+    const { sql, recorded } = fakeSql({ kind: "parse-media", payload: { sourceId: SOURCE }, privacy_epoch: 7 });
+    await failOpeningJob(sql, "job-media", { error: "conversion interrupted", retryable });
+    expect(lastFailureProjection(recorded).values).toContainEqual({ code: "PARSE_FAILED",
+      message: "材料解析失败，原件仍已保存。", retryable });
+  });
+
   it("releases only its own running claim, after the failure projection", async () => {
     const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE, sourceVersion: 0 }, privacy_epoch: 7 });
 

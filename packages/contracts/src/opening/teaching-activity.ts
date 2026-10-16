@@ -48,45 +48,6 @@ export const teachingActivityCreateInputSchema = z
   })
   .strict();
 
-export const teachingActivitySchema = z
-  .object({
-    id: uuidSchema,
-    workspaceId: uuidSchema,
-    ownerUserId: uuidSchema,
-    courseId: uuidSchema.nullable(),
-    status: teachingActivityStatusSchema,
-    generateStatus: teachingActivityGenerateStatusSchema,
-    intentKind: teachingActivityIntentKindSchema,
-    intentSummary: z.string().min(1).max(2000),
-    sourceIds: z.array(uuidSchema).max(32),
-    pathVersion: z.number().int().positive(),
-    contentVersion: z.number().int().nonnegative(),
-    checkpointJson: z.record(z.string(), z.unknown()).optional(),
-    clientKey: z.string().min(8).max(200),
-    createdAt: isoDateTimeSchema,
-    updatedAt: isoDateTimeSchema,
-  })
-  .strict();
-
-export const teachingActivityAssociateCourseInputSchema = z
-  .object({
-    courseId: uuidSchema.nullable(),
-    expectedUpdatedAt: isoDateTimeSchema.optional(),
-  })
-  .strict();
-
-/**
- * Sketch for v2 observation adapters (formal writes still go through observation services).
- * activityId required; courseId optional and must match association rules when set.
- */
-export const activityObservationInputSketchSchema = z
-  .object({
-    activityId: uuidSchema,
-    sessionId: uuidSchema,
-    courseId: uuidSchema.nullable().optional(),
-  })
-  .strict();
-
 /** What the next teaching unit for a skill should do, chosen by rules before compilation. */
 export const learningActivityKindSchema = z.enum([
   "diagnose",
@@ -111,6 +72,47 @@ export const teachingLearnerFocusSchema = z
     /** Assistance on the latest observations, newest first. */
     recentAssistance: z.array(assistanceLevelSchema).max(3),
     strategyVersion: z.string().min(1).max(40),
+  })
+  .strict();
+
+export const teachingActivitySchema = z
+  .object({
+    id: uuidSchema,
+    workspaceId: uuidSchema,
+    ownerUserId: uuidSchema,
+    courseId: uuidSchema.nullable(),
+    status: teachingActivityStatusSchema,
+    generateStatus: teachingActivityGenerateStatusSchema,
+    intentKind: teachingActivityIntentKindSchema,
+    intentSummary: z.string().min(1).max(2000),
+    sourceIds: z.array(uuidSchema).max(32),
+    pathVersion: z.number().int().positive(),
+    contentVersion: z.number().int().nonnegative(),
+    checkpointJson: z.record(z.string(), z.unknown()).optional(),
+    /** Read-only, server-derived focus used to keep subsequent answers on the selected skill. */
+    learnerFocus: teachingLearnerFocusSchema.optional(),
+    clientKey: z.string().min(8).max(200),
+    createdAt: isoDateTimeSchema,
+    updatedAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const teachingActivityAssociateCourseInputSchema = z
+  .object({
+    courseId: uuidSchema.nullable(),
+    expectedUpdatedAt: isoDateTimeSchema.optional(),
+  })
+  .strict();
+
+/**
+ * Sketch for v2 observation adapters (formal writes still go through observation services).
+ * activityId required; courseId optional and must match association rules when set.
+ */
+export const activityObservationInputSketchSchema = z
+  .object({
+    activityId: uuidSchema,
+    sessionId: uuidSchema,
+    courseId: uuidSchema.nullable().optional(),
   })
   .strict();
 

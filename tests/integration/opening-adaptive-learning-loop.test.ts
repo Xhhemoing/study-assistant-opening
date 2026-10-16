@@ -84,6 +84,18 @@ function planningResult(draft: PlanDraft) {
 }
 
 describe("adaptive learning loop with real evidence", () => {
+  it("hides an existing draft when planning settings are removed and resumes after settings are restored", async () => {
+    const course = await seedCourse();
+    await submitVerifiedError(course);
+    const { plans } = services();
+    const before = (await plans.getToday(fixture.scope, day)).dailyDraft!;
+    expect(before.suggestedTasks).toHaveLength(1);
+    await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, null);
+    expect(await plans.getToday(fixture.scope, day)).toMatchObject({ dailyDraft: null, dailyDraftSkippedReason: "no_settings" });
+    await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, settings);
+    expect((await plans.getToday(fixture.scope, day)).dailyDraft!.suggestedTasks).toHaveLength(1);
+    expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
+  });
   it("turns a verified independent error into a weak-skill Today suggestion without creating a task", async () => {
     const course = await seedCourse();
     const wrong = await submitVerifiedError(course);

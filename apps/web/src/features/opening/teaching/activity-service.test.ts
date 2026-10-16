@@ -3,9 +3,13 @@ import type { Sql } from "postgres";
 
 const create = vi.hoisted(() => vi.fn());
 const requestCompile = vi.hoisted(() => vi.fn());
+const readTask = vi.hoisted(() => vi.fn());
+const readySources = vi.hoisted(() => vi.fn());
 
 vi.mock("@aistudy/database", () => ({
   createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, requestCompile })),
+  readOpeningTeachingTaskFocus: readTask,
+  createOpeningCourseReadySourcesRepository: vi.fn(() => ({ listReadySourceIdsForCourse: readySources })),
 }));
 
 import {
@@ -27,9 +31,28 @@ const sql = {} as Sql;
 beforeEach(() => {
   create.mockReset().mockResolvedValue({ id: activityId, generateStatus: "queued" });
   requestCompile.mockReset().mockResolvedValue({ activity: { id: activityId }, jobId: "job" });
+  readTask.mockReset();
+  readySources.mockReset().mockResolvedValue([activityId]);
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
+  it.each(["0", "1"])("does not compile a card-review task as an empty teaching activity with adaptive=%s", async flag => {
+    readTask.mockResolvedValue({ title: "Review cards", courseId: null, skillLabel: null, suggestionKind: "review_cards" });
+    await expect(createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: flag, OPENING_TEACHING_COMPILER_ENABLED: "1" }).create(scope, {
+      ...input, createIntent: { intentKind: "goal", source: "task", taskId: activityId },
+    })).rejects.toMatchObject({ code: "VALIDATION", status: 400 });
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("preserves the real task course and materials when adaptive planning is disabled", async () => {
+    readTask.mockResolvedValue({ title: "Real task", courseId: activityId, skillLabel: "Matrix rank" });
+    await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0" }).create(scope, {
+      ...input, sourceIds: [], createIntent: { source: "task", taskId: activityId },
+    });
+    expect(create).toHaveBeenCalledWith(scope, expect.objectContaining({
+      intentSummary: "Real task", courseId: activityId, sourceIds: [activityId],
+    }), { enqueueCompile: false });
+    expect(create.mock.calls[0]![1]).not.toHaveProperty("goalJson.learnerFocus");
+  });
   it("discards client-supplied learner focus even when adaptive planning is off", async () => {
     await createOpeningTeachingActivityService(sql, {}).create(scope, {
       ...input, goalJson: { wantsFullExplanation: true, learnerFocus: { activityKind: "transfer_check" } },

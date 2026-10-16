@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { OpeningProviderError } from "@aistudy/ai";
+import { BudgetReplayError, OpeningProviderError } from "@aistudy/ai";
 import { canClaimJob, isUnknownOutcome, runJob } from "./run-job";
 import type { OpeningJobRecord } from "@aistudy/database";
 import { jobQueueId } from "./queue";
 import { handlers, handlerForKind } from "./handlers";
+import { MediaValidationError } from "../parsers/media-process";
+import { BoundsExceededError } from "../parsers/docling-process";
+import { PrivacyEpochError } from "./privacy-guard";
 
 describe("opening worker runtime guards", () => {
   it("claims only queued or running jobs", () => {
@@ -127,6 +130,25 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     };
     expect(await runJob(repository, "job-1", async () => ({ parsed: true }))).toBe(true);
     expect(finished).toEqual(["succeeded"]);
+  });
+
+  it.each([
+    { error: new Error("third conversion interrupted"), state: "failed", retryable: true },
+    { error: new OpeningProviderError("PROVIDER_RATE_LIMIT", "rate limited", true), state: "failed", retryable: true },
+    { error: new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true), state: "outcome_unknown", retryable: false },
+    { error: new OpeningProviderError("PROVIDER_NETWORK", "connection lost", true), state: "outcome_unknown", retryable: false },
+    { error: new OpeningProviderError("PROVIDER_RESPONSE", "invalid response", true), state: "failed", retryable: false },
+    { error: new MediaValidationError("invalid media"), state: "failed", retryable: false },
+    { error: new BoundsExceededError("bounds exceeded"), state: "failed", retryable: false },
+    { error: new PrivacyEpochError("excluded"), state: "failed", retryable: false },
+    { error: new BudgetReplayError({ kind: "unknown", reservationId: "r1", pendingReconcileCents: 100, reconciled: false }), state: "failed", retryable: false },
+  ])("records honest parse retry metadata for $error.constructor.name ($retryable)", async ({ error, state, retryable }) => {
+    const finished: Array<{ state: string; value: unknown }> = [];
+    await runJob({
+      claim: async () => baseJob({ kind: "parse-media" }),
+      finish: async (_id, nextState, value) => { finished.push({ state: nextState, value }); return true; },
+    }, "job-1", async () => { throw error; });
+    expect(finished).toEqual([{ state, value: { error: error.message, retryable } }]);
   });
 });
 

@@ -57,17 +57,20 @@ export function createOpeningTeachingActivityService(
           input.goalJson = { ...input.goalJson };
           delete input.goalJson.learnerFocus;
         }
+        let skillLabel = typeof input.createIntent.skillLabel === "string" ? input.createIntent.skillLabel.trim().slice(0, 200) || null : null;
+        // Task identity and execution stay valid even when adaptive suggestions are rolled back.
+        if (input.createIntent.taskId !== undefined) {
+          const taskId = uuidSchema.parse(input.createIntent.taskId);
+          const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
+          if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
+          if (task.suggestionKind === "review_cards") throw new ApiError("VALIDATION", "请到卡片复习中开始这项任务", 400);
+          input.courseId = task.courseId;
+          input.intentSummary = task.title;
+          skillLabel = task.skillLabel;
+          input.sourceIds = task.courseId
+            ? await createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, task.courseId) : [];
+        }
         if (loadFeatureSwitches(env).adaptivePlanning) {
-          let skillLabel = typeof input.createIntent.skillLabel === "string" ? input.createIntent.skillLabel.trim().slice(0, 200) || null : null;
-          if (input.createIntent.taskId !== undefined) {
-            const taskId = uuidSchema.parse(input.createIntent.taskId);
-            const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
-            if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
-            input.courseId = task.courseId;
-            input.intentSummary = task.title;
-            skillLabel = task.skillLabel;
-            if (task.courseId) input.sourceIds = await createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, task.courseId);
-          }
           if (input.courseId) {
             const settings = await createOpeningPlanningSettingsRepository(sql).get(scope);
             const timeZone = settings.settings?.timeZone ?? "Asia/Shanghai";

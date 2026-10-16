@@ -474,6 +474,7 @@ export function compileCurrentActivity(input: CompileCurrentInput): CompileCurre
       extras: {
         outlineId: outline.outlineId,
         focusItemId,
+        focusItemTitle: focus.title,
         compiler: "teaching-compiler",
         contentSource: input.modelOutput ? "model" : "template",
         // intentionally no stub: true
