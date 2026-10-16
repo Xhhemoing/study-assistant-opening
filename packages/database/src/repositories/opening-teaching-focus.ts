@@ -61,8 +61,9 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   )) return {};
   const qualified = evaluateEvidenceEligibility(eligibility.observation, eligibility.context);
   if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return {};
-  const [problem] = observation.problemId ? await sql`SELECT stem_snapshot FROM opening_problem_refs
-    WHERE problem_id=${observation.problemId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
+  const [problem] = observation.problemId ? await sql`SELECT p.stem_snapshot FROM opening_problem_refs p
+    JOIN workspaces w ON w.id=p.workspace_id AND w.owner_user_id=${scope.ownerUserId}
+    WHERE p.problem_id=${observation.problemId} AND p.workspace_id=${scope.workspaceId}` : [];
   return { learnerFocus, ...(problem?.stem_snapshot ? {
     focusAttempt: { question: String(problem.stem_snapshot).slice(0, 2000), answer: observation.answer.slice(0, 4000) },
   } : {}) };
