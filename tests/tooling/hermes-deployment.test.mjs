@@ -49,6 +49,7 @@ printf 'npm %s\\n' "$*" >> "$MOCK_LOG"
 if [ "$1" = ci ] && [ "\${MOCK_FAIL:-}" = install ]; then exit 17; fi
 if [ "$1 $2" = 'run build' ]; then
   [ "\${MOCK_FAIL:-}" != build ] || exit 18
+  if [ "\${MOCK_FAIL:-}" = worker-during-build ]; then touch "$MOCK_WORKER_CRASHED"; fi
   mkdir -p apps/web/.next/static apps/web/.next/standalone/apps/web
   printf 'asset' > apps/web/.next/static/asset.js
   printf 'server' > apps/web/.next/standalone/apps/web/server.js
@@ -62,12 +63,16 @@ printf 'migrate\\n' >> "$MOCK_LOG"
 printf 'systemctl %s\\n' "$*" >> "$MOCK_LOG"
 case "$1" in
   is-active)
-    [ "\${!#}" != aistudy-worker.service ] || [ -f "$MOCK_WORKER_RESTARTED" ] || [ "$MOCK_WORKER" = active ]
+    if [ "\${!#}" = aistudy-worker.service ]; then
+      [ ! -f "$MOCK_WORKER_CRASHED" ] || exit 3
+      [ -f "$MOCK_WORKER_RESTARTED" ] || [ "$MOCK_WORKER" = active ]
+    fi
     ;;
   is-enabled) [ "$MOCK_WORKER" = enabled ] ;;
   restart)
     if [ "$2" = aistudy-worker.service ]; then
       [ "\${MOCK_FAIL:-}" != worker ] || exit 20
+      rm -f "$MOCK_WORKER_CRASHED"
       touch "$MOCK_WORKER_RESTARTED"
     fi
     ;;
@@ -76,6 +81,7 @@ esac
     curl: `
 printf 'health\\n' >> "$MOCK_LOG"
 [ "\${MOCK_FAIL:-}" != health ] || exit 22
+if [ "\${MOCK_FAIL:-}" = worker-after-start ]; then touch "$MOCK_WORKER_CRASHED"; fi
 printf '{"status":"ok"}'
 `,
     sleep: "exit 0\n",
@@ -100,6 +106,7 @@ printf '{"status":"ok"}'
           MOCK_LOG: log,
           MOCK_REMOTE_TMP: remoteTmp,
           MOCK_WORKER_RESTARTED: join(root, "worker-restarted"),
+          MOCK_WORKER_CRASHED: join(root, "worker-crashed"),
           MOCK_WORKER: "active",
           ...overrides,
           ...extra,
@@ -123,7 +130,7 @@ test("deploy restarts web and active worker, preserves flags, and records the ve
   assert.match(result.stdout, /部署完成/);
 });
 
-for (const [failure, status] of [["install", 17], ["build", 18], ["migrate", 19], ["worker", 20], ["health", 1]]) {
+for (const [failure, status] of [["install", 17], ["build", 18], ["migrate", 19], ["worker", 20], ["health", 1], ["worker-after-start", 1]]) {
   test(`${failure} failure stops deployment and preserves the last successful SHA`, (t) => {
     const f = fixture(t, { MOCK_FAIL: failure });
     const result = f.run();
@@ -139,6 +146,12 @@ for (const [failure, status] of [["install", 17], ["build", 18], ["migrate", 19]
 
 test("an enabled worker that is currently down is restarted", (t) => {
   const result = fixture(t, { MOCK_WORKER: "enabled" }).run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.log, /systemctl restart aistudy-worker.service/);
+});
+
+test("an active worker that crashes during the build is still restarted", (t) => {
+  const result = fixture(t, { MOCK_FAIL: "worker-during-build" }).run();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.log, /systemctl restart aistudy-worker.service/);
 });

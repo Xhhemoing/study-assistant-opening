@@ -18,6 +18,7 @@ DIR="${DIR:-/opt/aistudy}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 COMMIT="$(git rev-parse HEAD)"
 SHA="$(git rev-parse --short HEAD)"
+WORKER_REQUIRED=0
 if [ -z "${DEPLOY_REMOTE:-}" ]; then
   DEPLOY_REMOTE=origin
   if git remote get-url study-assistant-opening >/dev/null 2>&1; then
@@ -40,6 +41,16 @@ require_clean_push() {
   remote_sha="$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)"
   [ "$COMMIT" = "$remote_sha" ] || die "HEAD($SHA) 与 $DEPLOY_REMOTE/feat/opening-release 不一致；请先合并并同步已通过 CI 的发布主干"
   echo "==> 部署提交: $COMMIT ($BRANCH)"
+}
+
+read_worker_state() {
+  WORKER_REQUIRED="$(sshq "set -e
+    if systemctl is-active --quiet aistudy-worker.service || systemctl is-enabled --quiet aistudy-worker.service; then
+      printf 1
+    else
+      printf 0
+    fi")"
+  case "$WORKER_REQUIRED" in 0|1) ;; *) die "无法确认 worker 的发布前状态" ;; esac
 }
 
 sync_source() {
@@ -93,12 +104,8 @@ restart_services() {
       systemctl daemon-reload
       echo 'worker 服务已安装（disabled，需要时 systemctl enable --now aistudy-worker）'
     fi
-    restart_worker=0
-    if systemctl is-active --quiet aistudy-worker.service || systemctl is-enabled --quiet aistudy-worker.service; then
-      restart_worker=1
-    fi
     systemctl restart aistudy-web.service
-    if [ \"\$restart_worker\" = 1 ]; then
+    if [ '$WORKER_REQUIRED' = 1 ]; then
       systemctl restart aistudy-worker.service
       systemctl is-active --quiet aistudy-worker.service
     fi"
@@ -110,7 +117,12 @@ health() {
     for i in \$(seq 1 12); do
       sleep 2
       body=\$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
-      case \"\$body\" in *'\"status\":\"ok\"'*) echo \"\$body\"; exit 0;; esac
+      case \"\$body\" in *'\"status\":\"ok\"'*)
+        if [ '$WORKER_REQUIRED' = 1 ]; then
+          systemctl is-active --quiet aistudy-worker.service || { echo 'worker health check failed'; exit 1; }
+        fi
+        echo \"\$body\"; exit 0;;
+      esac
     done
     echo 'health check failed'; journalctl -u aistudy-web -n 15 --no-pager; exit 1"
   echo "==> 服务健康检查通过"
@@ -123,11 +135,11 @@ record_release() {
 }
 
 case "${1:-deploy}" in
-  deploy)   check_ssh; require_clean_push; sync_source; build_server; migrate_server; restart_services; health; record_release ;;
+  deploy)   check_ssh; require_clean_push; read_worker_state; sync_source; build_server; migrate_server; restart_services; health; record_release ;;
   sync)     check_ssh; require_clean_push; sync_source ;;
   build)    check_ssh; build_server ;;
   migrate)  check_ssh; migrate_server ;;
-  restart)  check_ssh; restart_services; health ;;
+  restart)  check_ssh; read_worker_state; restart_services; health ;;
   status)   check_ssh; sshq "set -e
     if [ -f '$DIR/.release-sha' ]; then cat '$DIR/.release-sha'; else echo '尚无成功部署 SHA 记录'; fi
     systemctl status aistudy-web.service --no-pager -l --lines=0

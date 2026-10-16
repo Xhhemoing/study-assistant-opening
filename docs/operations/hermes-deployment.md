@@ -46,7 +46,7 @@ bash infra/deploy/deploy-hermes.sh deploy
 `.env.production` 保留 → `npm ci` → `npm run build` → `db:migrate`
 （additive 可重放）→ 重启 web 与原来运行中或已启用的 worker → `/api/health` 等待
 `status:"ok"` → 将完整提交 SHA 写入 `/opt/aistudy/.release-sha`。
-禁用且未运行的 worker 保持关闭。远端通过 Bash 的 `pipefail` 执行，安装、构建、迁移或 worker 重启失败都会终止发布，不会因 `tail` 返回成功而继续。
+在上传前记录 worker 是否应运行，构建期间退出的 worker 仍会重启。禁用且未运行的 worker 保持关闭。web 健康检查通过后，再确认需要运行的 worker 仍 active，才写成功 SHA。远端通过 Bash 的 `pipefail` 执行，安装、构建、迁移或 worker 重启失败都会终止发布，不会因 `tail` 返回成功而继续。
 
 `status` 会显示最近成功部署的 SHA；旧部署没有该文件时会明确报告未记录。只执行 `restart`、`build` 或 `migrate` 不会改写这个记录。部署失败保留上次成功记录，它不证明失败后的进程仍在运行旧版本，须同时检查服务与构建状态。
 
