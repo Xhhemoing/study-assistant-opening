@@ -411,6 +411,9 @@ export {
   nextBlockIdAfter,
   buildStructuredRewriteBlocks,
   buildWhyAssist,
+  WHY_ASSIST_AVAILABLE,
+  WHY_ASSIST_UNAVAILABLE_SUMMARY,
+  resolveTeachingBlockFocus,
   createBranchFrame,
   draftsSurvivingBlockIds,
   type TeachingCommandCheckpointPatch,
@@ -418,6 +421,8 @@ export {
   type AssertCommandAllowedResult,
   type CommandLogReplayLookup,
   type LibraryBlockLike,
+  type TeachingBlockFocus,
+  type TeachingBlockFocusStatus,
 } from "./opening/teaching-commands";
 
 export {

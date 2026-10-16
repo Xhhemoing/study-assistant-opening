@@ -282,20 +282,79 @@ export function buildStructuredRewriteBlocks(
   });
 }
 
-/** Assist-only why projection (no body mutate). */
-export function buildWhyAssist(input: {
+/**
+ * M1 why is not model-backed. Do not fabricate English/UUID "explanations".
+ * UI should hide the Why control while this remains stub-only (`WHY_ASSIST_AVAILABLE`).
+ * If the command is still invoked, return honest Chinese copy without a block UUID.
+ */
+export const WHY_ASSIST_AVAILABLE = false;
+
+export const WHY_ASSIST_UNAVAILABLE_SUMMARY =
+  "暂无基于学习目标与授权材料的自动解释，不会编造说明。";
+
+/** Assist-only why projection (no body mutate). Stub-era: honest Chinese, no UUID. */
+export function buildWhyAssist(_input: {
   blockId: string;
   prompt?: string;
   blockType?: string;
 }): { kind: "why"; summary: string } {
-  const focus = input.prompt?.trim()
-    ? ` Focusing on: ${input.prompt.trim().slice(0, 400)}.`
-    : "";
-  const typeHint = input.blockType ? ` (${input.blockType})` : "";
   return {
     kind: "why",
-    summary: `Why this block${typeHint}: revisit the goal and evidence behind block ${input.blockId}.${focus}`,
+    summary: WHY_ASSIST_UNAVAILABLE_SUMMARY,
   };
+}
+
+export type TeachingBlockFocusStatus = "current" | "past" | "upcoming" | "skipped";
+
+export type TeachingBlockFocus = {
+  currentBlockId: string | null;
+  skippedBlockIds: readonly string[];
+  /** Status for every blockId in blockOrder. */
+  statusById: ReadonlyMap<string, TeachingBlockFocusStatus>;
+};
+
+/**
+ * Resolve which block the learner should focus on from checkpoint cursor + skips.
+ * Missing/invalid currentBlockId → first non-skipped block (else first block).
+ */
+export function resolveTeachingBlockFocus(
+  blockOrder: readonly { blockId: string }[],
+  checkpoint: Record<string, unknown> | null | undefined,
+): TeachingBlockFocus {
+  const skippedBlockIds = readSkippedBlockIds(checkpoint);
+  const skipped = new Set(skippedBlockIds);
+  const ids = blockOrder.map((b) => b.blockId);
+  const raw =
+    checkpoint && typeof checkpoint.currentBlockId === "string"
+      ? checkpoint.currentBlockId
+      : null;
+  let currentBlockId: string | null = null;
+  if (raw && ids.includes(raw) && !skipped.has(raw)) {
+    currentBlockId = raw;
+  } else {
+    currentBlockId = ids.find((id) => !skipped.has(id)) ?? ids[0] ?? null;
+  }
+
+  const currentIdx = currentBlockId ? ids.indexOf(currentBlockId) : -1;
+  const statusById = new Map<string, TeachingBlockFocusStatus>();
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i]!;
+    if (skipped.has(id)) {
+      statusById.set(id, "skipped");
+      continue;
+    }
+    if (id === currentBlockId) {
+      statusById.set(id, "current");
+      continue;
+    }
+    if (currentIdx >= 0 && i < currentIdx) {
+      statusById.set(id, "past");
+      continue;
+    }
+    statusById.set(id, "upcoming");
+  }
+
+  return { currentBlockId, skippedBlockIds, statusById };
 }
 
 export function createBranchFrame(input: {

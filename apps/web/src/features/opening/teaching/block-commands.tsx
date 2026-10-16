@@ -112,6 +112,8 @@ export type BlockCommandsBarViewProps = {
   conflict?: TeachingCommandConflict | null;
   assist?: TeachingCommandAssist | null;
   disabled?: boolean;
+  /** When false, hide Why (stub-only era). Default false. */
+  whyAvailable?: boolean;
   onCommand: (kind: TeachingCommandKind) => void;
   onReread?: () => void;
   rereadBusy?: boolean;
@@ -128,23 +130,33 @@ export function BlockCommandsBarView({
   conflict = null,
   assist = null,
   disabled = false,
+  whyAvailable = false,
   onCommand,
   onReread,
   rereadBusy = false,
 }: BlockCommandsBarViewProps) {
   const busy = busyKind != null || rereadBusy;
+  const visibleKinds = whyAvailable
+    ? TEACHING_COMMAND_KINDS
+    : TEACHING_COMMAND_KINDS.filter((kind) => kind !== "why");
+  const showAssist =
+    whyAvailable &&
+    Boolean(assist?.summary) &&
+    !/Why this block/i.test(assist?.summary ?? "") &&
+    !(assist?.summary?.includes(blockId) ?? false);
   return (
     <div
       className="mt-2 space-y-2"
       data-block-commands="true"
       data-block-id={blockId}
+      data-why-available={whyAvailable ? "true" : "false"}
     >
       <div
         className="flex flex-wrap gap-1"
         role="toolbar"
         aria-label="教学块命令"
       >
-        {TEACHING_COMMAND_KINDS.map((kind) => {
+        {visibleKinds.map((kind) => {
           const isReturn = kind === "return";
           const kindDisabled =
             disabled || busy || (isReturn && returnDisabled);
@@ -181,14 +193,14 @@ export function BlockCommandsBarView({
         {SKIP_HONESTY_COPY}
       </p>
 
-      {assist?.summary ? (
+      {showAssist ? (
         <div
           className={`rounded-lg px-3 py-2 text-xs leading-5 ${tone.success}`}
           role="status"
           data-command-assist="why"
         >
           <p className="mb-0.5 font-medium">说明（不改写正文）</p>
-          <p className="whitespace-pre-wrap">{assist.summary}</p>
+          <p className="whitespace-pre-wrap">{assist!.summary}</p>
         </div>
       ) : null}
 
@@ -247,6 +259,8 @@ export type BlockCommandsProps = {
   pathVersion?: number;
   returnDisabled: boolean;
   disabled?: boolean;
+  /** When false, hide Why control (default). */
+  whyAvailable?: boolean;
   api?: OpeningApi;
   onSuccess?: (result: TeachingCommandSuccess) => void;
   onConflict?: (conflict: TeachingCommandConflict) => void;
@@ -263,6 +277,7 @@ export function BlockCommands({
   pathVersion,
   returnDisabled,
   disabled = false,
+  whyAvailable = false,
   api: apiProp,
   onSuccess,
   onConflict,
@@ -279,6 +294,7 @@ export function BlockCommands({
     async (kind: TeachingCommandKind) => {
       if (busyKind) return;
       if (kind === "return" && returnDisabled) return;
+      if (kind === "why" && !whyAvailable) return;
       setBusyKind(kind);
       setError(null);
       setConflict(null);
@@ -329,6 +345,7 @@ export function BlockCommands({
       onSuccess,
       pathVersion,
       returnDisabled,
+      whyAvailable,
     ],
   );
 
@@ -355,6 +372,7 @@ export function BlockCommands({
         conflict={conflict}
         assist={assist}
         disabled={disabled}
+        whyAvailable={whyAvailable}
         onCommand={(kind) => void runCommand(kind)}
         onReread={onReread ? () => void handleReread() : undefined}
         rereadBusy={rereadBusy}

@@ -51,7 +51,7 @@ describe("command labels / conflict policy", () => {
 });
 
 describe("BlockCommandsBarView", () => {
-  it("renders all kinds, disables return when stack empty, skip honesty, no force overwrite", () => {
+  it("renders kinds (why hidden by default), disables return when stack empty, skip honesty, no force overwrite", () => {
     const onCommand = vi.fn();
     const conflict: TeachingCommandConflict = {
       ok: false,
@@ -71,13 +71,15 @@ describe("BlockCommandsBarView", () => {
       }),
     );
     expect(html).toContain('data-block-commands="true"');
-    for (const kind of TEACHING_COMMAND_KINDS) {
+    expect(html).toContain('data-why-available="false"');
+    expect(html).not.toContain('data-command-kind="why"');
+    for (const kind of TEACHING_COMMAND_KINDS.filter((k) => k !== "why")) {
       expect(html).toContain(`data-command-kind="${kind}"`);
     }
     expect(html).toContain("data-skip-honesty");
     expect(html).toContain(SKIP_HONESTY_COPY);
-    expect(html).toContain('data-command-assist="why"');
-    expect(html).toContain("不改写正文");
+    // Stub-era: why assist panel not shown when whyAvailable=false
+    expect(html).not.toContain('data-command-assist="why"');
     expect(html).toContain('data-command-conflict="stale_content_version"');
     expect(html).toContain("data-command-reread");
     expect(html).toContain("重新拉取教学内容");
@@ -87,6 +89,23 @@ describe("BlockCommandsBarView", () => {
     expect(html).not.toContain("LWW");
     // return button disabled when stack empty
     expect(html).toMatch(/data-command-kind="return"[^>]*disabled/);
+  });
+
+  it("does not surface English UUID why stub as 说明", () => {
+    const stub = `Why this block (text): revisit the goal and evidence behind block ${BID}.`;
+    const html = renderToStaticMarkup(
+      createElement(BlockCommandsBarView, {
+        blockId: BID,
+        returnDisabled: true,
+        whyAvailable: true,
+        assist: { kind: "why", summary: stub },
+        onCommand: () => undefined,
+      }),
+    );
+    expect(html).toContain('data-command-kind="why"');
+    expect(html).not.toContain('data-command-assist="why"');
+    expect(html).not.toContain(stub);
+    expect(html).not.toContain("Why this block");
   });
 
   it("enables return when stack not empty", () => {

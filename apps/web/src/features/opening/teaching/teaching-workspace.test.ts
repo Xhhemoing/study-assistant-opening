@@ -50,6 +50,7 @@ vi.mock("./resume-card", async () => {
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
+  formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
   TeachingContinueEntry,
   TeachingWorkspace,
@@ -61,6 +62,7 @@ const WID = "22222222-2222-4222-8222-222222222222";
 const OID = "33333333-3333-4333-8333-333333333333";
 const BID = "44444444-4444-4444-8444-444444444444";
 const BID2 = "55555555-5555-4555-8555-555555555555";
+const BID3 = "99999999-9999-4999-8999-999999999999";
 const DOC = "66666666-6666-4666-8666-666666666666";
 const UNIT = "77777777-7777-4777-8777-777777777777";
 const SPEC = "88888888-8888-4888-8888-888888888888";
@@ -92,7 +94,8 @@ function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecCl
     revisionNumber: 1,
     blockOrder: [
       { blockId: BID, position: 0, blockType: "text", role: "teach" },
-      { blockId: BID2, position: 1, blockType: "answer_key", role: "answer_key" },
+      { blockId: BID2, position: 1, blockType: "question", role: "prompt" },
+      { blockId: BID3, position: 2, blockType: "answer_key", role: "answer_key" },
     ],
     sourceRefs: [],
     goals: [{ goalId: "g1", statement: "理解矩阵秩" }],
@@ -112,10 +115,17 @@ function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecCl
       {
         blockId: BID2,
         position: 1,
+        blockType: "question",
+        role: "prompt",
+        content: { text: "写出一个秩为 2 的 3×3 矩阵例子。" },
+      },
+      {
+        blockId: BID3,
+        position: 2,
         blockType: "answer_key",
         role: "answer_key",
         content: null,
-        answerRef: { refId: BID2, revealState: "hidden" },
+        answerRef: { refId: BID3, revealState: "hidden" },
       },
     ],
     contentVersion: 1,
@@ -163,7 +173,14 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("data-teaching-workspace=\"true\"");
     expect(html).toContain("当前 AI 教学");
     expect(html).toContain("矩阵的秩");
-    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+    // No checkpoint: current + all upcoming blocks render (including 试一试).
+    expect(html).toContain('data-teaching-block-focus="current"');
+    expect(html).toContain('data-teaching-block-focus="upcoming"');
+    expect(html).toContain(`data-current-block-id="${BID}"`);
+    expect(html).toContain("试一试");
+    expect(html).toContain(`data-block-id="${BID2}"`);
+    expect(html).toContain(`data-block-id="${BID3}"`);
+    expect(html).not.toContain("data-teaching-past-collapsed");
     expect(html).toContain("提纲（按需展开）");
     expect(html).toContain("原材料 / 引用");
     expect(html).toContain("打开自由对话（次要）");
@@ -176,6 +193,63 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain('data-path-version="1"');
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
+  });
+
+  it("collapses past/skipped into details; keeps current + upcoming in the main list", () => {
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: activityReady,
+        clientInit: clientInit({
+          checkpointJson: {
+            currentBlockId: BID2,
+            skippedBlockIds: [BID],
+          },
+        }),
+      }),
+    );
+    expect(html).toContain(`data-current-block-id="${BID2}"`);
+    expect(html).toContain('data-teaching-block-focus="current"');
+    expect(html).toContain(`data-block-id="${BID2}"`);
+    expect(html).toContain("data-teaching-past-collapsed");
+    expect(html).toContain("<details");
+    expect(html).toContain("<summary");
+    expect(html).toContain("已学过或已跳过 1 块");
+    // Past/skipped content remains available inside the expandable section.
+    expect(html).toContain("矩阵的秩表示线性无关行的最大个数。");
+    expect(html).toContain('data-teaching-block-focus="skipped"');
+    // Later blocks stay in the main list.
+    expect(html).toContain('data-teaching-block-focus="upcoming"');
+    expect(html).toContain(`data-block-id="${BID3}"`);
+    expect(html).toContain("试一试");
+    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+  });
+
+  it("shows material title not bare UUID as the sole source label", () => {
+    const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const html = renderToStaticMarkup(
+      createElement(TeachingWorkspace, {
+        activity: { ...activityReady, sourceIds: [sourceId] },
+        clientInit: clientInit({
+          sourceRefs: [{ sourceId, version: 1, page: 2 }],
+        }),
+        sourceNameById: { [sourceId]: "gaoshu-limits.md" },
+      }),
+    );
+    expect(html).toContain("gaoshu-limits.md");
+    expect(html).toContain('data-source-ref="' + sourceId + '"');
+    // Full UUID must not be the sole visible label (title is primary).
+    expect(html).not.toMatch(new RegExp(`data-source-ref="${sourceId}"[^>]*>\\s*<span[^>]*>来源</span>`));
+    expect(html).not.toContain(`>${sourceId}<`);
+  });
+
+  it("formatTeachingSourceLabel never returns bare UUID as primary", () => {
+    const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const named = formatTeachingSourceLabel({ sourceId }, { [sourceId]: "极限讲义.md" });
+    expect(named.primary).toBe("极限讲义.md");
+    expect(named.secondary).toContain("6a80b8ed");
+    const unnamed = formatTeachingSourceLabel({ sourceId });
+    expect(unnamed.primary).toBe("未命名材料");
+    expect(unnamed.primary).not.toBe(sourceId);
   });
 
   it("shows 待核对 status when generateStatus is needs_check", () => {

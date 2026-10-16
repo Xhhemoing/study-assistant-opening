@@ -9,7 +9,12 @@ import type {
   TeachingActivity,
   TeachingCommandConflict,
   TeachingCommandSuccess,
+  TeachingSourceRef,
 } from "@aistudy/contracts";
+import {
+  WHY_ASSIST_AVAILABLE,
+  resolveTeachingBlockFocus,
+} from "@aistudy/domain";
 import { ui, tone } from "../design/ui";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { BlockRenderer } from "./block-renderer";
@@ -39,6 +44,11 @@ export type TeachingWorkspaceProps = {
   /** Optional OpeningApi inject (tests). */
   api?: OpeningApi;
   onActivityUpdated?: (activity: TeachingActivity) => void;
+  /**
+   * Optional sourceId → display name map (tests / parent inject).
+   * When omitted, workspace resolves names via api.listSources().
+   */
+  sourceNameById?: Record<string, string> | null;
 };
 
 /**
@@ -56,6 +66,38 @@ export function isTeachingWorkspaceContentUsable(
   if (!clientInit) return false;
   if (!Array.isArray(clientInit.blocks) || clientInit.blocks.length === 0) return false;
   return true;
+}
+
+/**
+ * Human-readable material label: title/filename when known; never bare UUID alone.
+ * Short id may appear as secondary.
+ */
+export function formatTeachingSourceLabel(
+  ref: Pick<TeachingSourceRef, "sourceId">,
+  nameById?: ReadonlyMap<string, string> | Record<string, string> | null,
+): { primary: string; secondary: string } {
+  const shortId = `${ref.sourceId.slice(0, 8)}…`;
+  let name: string | undefined;
+  if (nameById instanceof Map) {
+    name = nameById.get(ref.sourceId);
+  } else if (nameById && typeof nameById === "object") {
+    name = nameById[ref.sourceId];
+  }
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  if (trimmed && trimmed !== ref.sourceId) {
+    return { primary: trimmed, secondary: shortId };
+  }
+  return { primary: "未命名材料", secondary: shortId };
+}
+
+export function buildSourceNameMap(
+  sources: readonly { id: string; name: string }[],
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const s of sources) {
+    if (s.id && s.name) map[s.id] = s.name;
+  }
+  return map;
 }
 
 function ExpandSection({
@@ -102,6 +144,7 @@ export function TeachingWorkspace({
   timeZone = "Asia/Shanghai",
   api: apiProp,
   onActivityUpdated,
+  sourceNameById: sourceNameByIdProp = null,
 }: TeachingWorkspaceProps) {
   const api = apiProp ?? createOpeningApi();
   const [liveActivity, setLiveActivity] = useState(activity);
@@ -113,6 +156,7 @@ export function TeachingWorkspace({
   const [workspaceConflict, setWorkspaceConflict] =
     useState<TeachingCommandConflict | null>(null);
   const [rereadError, setRereadError] = useState<string | null>(null);
+  const [fetchedSourceNames, setFetchedSourceNames] = useState<Record<string, string>>({});
 
   // Sync when parent passes a new activity/init identity (e.g. today dashboard reload).
   useEffect(() => {
@@ -138,6 +182,64 @@ export function TeachingWorkspace({
     () => [...liveInit.blocks].sort((a, b) => a.position - b.position),
     [liveInit.blocks],
   );
+  const blockFocus = useMemo(
+    () => resolveTeachingBlockFocus(orderedBlocks, liveInit.checkpointJson ?? {}),
+    [orderedBlocks, liveInit.checkpointJson],
+  );
+  const sourceNameById = useMemo(() => {
+    if (sourceNameByIdProp && Object.keys(sourceNameByIdProp).length) {
+      return sourceNameByIdProp;
+    }
+    return fetchedSourceNames;
+  }, [sourceNameByIdProp, fetchedSourceNames]);
+
+  useEffect(() => {
+    if (sourceNameByIdProp && Object.keys(sourceNameByIdProp).length) return;
+    const ids = new Set<string>([
+      ...liveInit.sourceRefs.map((r) => r.sourceId),
+      ...(liveActivity.sourceIds ?? []),
+    ]);
+    if (!ids.size) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sources = await api.listSources();
+        if (cancelled) return;
+        setFetchedSourceNames(buildSourceNameMap(sources.filter((s) => ids.has(s.id))));
+      } catch {
+        // fail-soft: keep 未命名材料 labels
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, liveActivity.sourceIds, liveInit.sourceRefs, sourceNameByIdProp]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const el = document.querySelector('[data-teaching-block-focus="current"]');
+    if (el && "scrollIntoView" in el) {
+      (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [blockFocus.currentBlockId, pathVersion]);
+
+  const pastOrSkippedBlocks = useMemo(
+    () =>
+      orderedBlocks.filter((block) => {
+        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
+        return status === "past" || status === "skipped";
+      }),
+    [orderedBlocks, blockFocus],
+  );
+  const focusMainBlocks = useMemo(
+    () =>
+      orderedBlocks.filter((block) => {
+        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
+        return status === "current" || status === "upcoming";
+      }),
+    [orderedBlocks, blockFocus],
+  );
+
   const returnDisabled = isBranchStackEmpty(liveInit.checkpointJson ?? {});
   const generateTone =
     activity.generateStatus === "failed" || activity.generateStatus === "stale"
@@ -254,9 +356,72 @@ export function TeachingWorkspace({
       ) : null}
 
       {schemaOk ? (
-        <div className="mt-4 space-y-4" data-teaching-blocks="true">
-          {orderedBlocks.map((block) => (
-            <div key={block.blockId} className="space-y-1">
+        <div className="mt-4 space-y-4" data-teaching-blocks="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
+          {pastOrSkippedBlocks.length > 0 ? (
+            <details
+              className="rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2"
+              data-teaching-past-collapsed="true"
+            >
+              <summary className="cursor-pointer select-none text-[11px] leading-5 text-zinc-600">
+                已学过或已跳过 {pastOrSkippedBlocks.length} 块
+              </summary>
+              <div className="mt-3 space-y-4">
+                {pastOrSkippedBlocks.map((block) => {
+                  const status = blockFocus.statusById.get(block.blockId) ?? "past";
+                  return (
+                    <div
+                      key={block.blockId}
+                      className="space-y-1 opacity-90"
+                      data-teaching-block-focus={status}
+                      data-block-id={block.blockId}
+                    >
+                      <BlockRenderer
+                        block={block}
+                        schemaVersion={schemaVersion}
+                        sourceRefs={liveInit.sourceRefs}
+                        attemptContext={{ ...liveActivity, contentVersion, onCourseAssociated: (next) => { setLiveActivity(next); onActivityUpdated?.(next); } }}
+                      />
+                      {liveActivity.status !== "completed" ? <BlockCommands
+                        activityId={activity.id}
+                        blockId={block.blockId}
+                        contentVersion={contentVersion}
+                        pathVersion={pathVersion}
+                        returnDisabled={returnDisabled}
+                        whyAvailable={WHY_ASSIST_AVAILABLE}
+                        api={api}
+                        onSuccess={applySuccess}
+                        onConflict={handleConflict}
+                        onReread={async () => {
+                          try {
+                            await reread();
+                          } catch (err) {
+                            setRereadError(
+                              err instanceof Error ? err.message : "重新拉取失败",
+                            );
+                            throw err;
+                          }
+                        }}
+                      /> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          ) : null}
+          {focusMainBlocks.map((block) => {
+            const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
+            const isCurrent = status === "current";
+            return (
+            <div
+              key={block.blockId}
+              className={
+                isCurrent
+                  ? "space-y-1 rounded-lg ring-2 ring-emerald-500/55 ring-offset-2"
+                  : "space-y-1"
+              }
+              data-teaching-block-focus={status}
+              data-block-id={block.blockId}
+            >
               <BlockRenderer
                 block={block}
                 schemaVersion={schemaVersion}
@@ -269,6 +434,7 @@ export function TeachingWorkspace({
                 contentVersion={contentVersion}
                 pathVersion={pathVersion}
                 returnDisabled={returnDisabled}
+                whyAvailable={WHY_ASSIST_AVAILABLE}
                 api={api}
                 onSuccess={applySuccess}
                 onConflict={handleConflict}
@@ -284,7 +450,8 @@ export function TeachingWorkspace({
                 }}
               /> : null}
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
 
@@ -301,16 +468,19 @@ export function TeachingWorkspace({
           )}
         </ExpandSection>
 
-        <ExpandSection id="materials" title="原材料 / 引用（按需展开）">
+        <ExpandSection id="materials" title="原材料 / 引用（按需展开）" defaultOpen={liveInit.sourceRefs.length > 0}>
           {liveInit.sourceRefs.length ? (
             <ul className="space-y-1.5 text-xs leading-5 text-zinc-700">
-              {liveInit.sourceRefs.map((ref, i) => (
+              {liveInit.sourceRefs.map((ref, i) => {
+                const label = formatTeachingSourceLabel(ref, sourceNameById);
+                return (
                 <li
                   key={`${ref.sourceId}-${i}`}
                   className="rounded-md bg-zinc-50 px-2 py-1.5 ring-1 ring-zinc-900/5"
+                  data-source-ref={ref.sourceId}
                 >
-                  <span className="font-medium">来源</span>{" "}
-                  <span className="tabular-nums">{ref.sourceId.slice(0, 8)}…</span>
+                  <span className="font-medium">{label.primary}</span>{" "}
+                  <span className="tabular-nums text-zinc-500">{label.secondary}</span>
                   {ref.page != null ? <span className="ml-2">p.{ref.page}</span> : null}
                   {ref.chunkId ? (
                     <span className="ml-2 text-zinc-500">
@@ -318,7 +488,8 @@ export function TeachingWorkspace({
                     </span>
                   ) : null}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           ) : (
             <p className="text-[11px] text-zinc-500">暂无 sourceRefs。</p>
