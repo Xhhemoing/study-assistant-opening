@@ -80,7 +80,8 @@ export function formatTeachingSourceLabel(
   if (nameById instanceof Map) {
     name = nameById.get(ref.sourceId);
   } else if (nameById && typeof nameById === "object") {
-    name = nameById[ref.sourceId];
+    // `instanceof Map` does not narrow ReadonlyMap out of the union.
+    name = (nameById as Record<string, string>)[ref.sourceId];
   }
   const trimmed = typeof name === "string" ? name.trim() : "";
   if (trimmed && trimmed !== ref.sourceId) {
