@@ -140,6 +140,19 @@ describe("adaptive suggestions respect same-day decisions", () => {
     assert.equal(propose(input).length, 1);
   });
 
+  it("deduplicates pending aliases within their requirement while preserving another requirement", () => {
+    const input = snapshot({ dueCardCount: 0, courses: [course({ skills: ["R1", "R2"].map(requirementKey => (
+      { skillLabel: "ｌｉｎｅａｒalgebra", requirementKey, status: "needs_review", lastObservedAt: null, recentAssistance: [] }
+    )) })] });
+    const existing: TaskItem = { id: courseId, title: "R1 practice", minutes: 25, dueAt: null, priority: 1,
+      status: "pending", courseId, skillLabel: "Linear Algebra", requirementKey: "R1" };
+    assert.deepEqual(propose(input, { pendingTasks: [existing] }).map(row => row.requirementKey), ["R2"]);
+    assert.deepEqual(propose(input, { pendingTasks: [{ ...existing, courseId: undefined, skillLabel: undefined,
+      requirementKey: undefined, retest: { candidateId: courseId, activityId: courseId, courseId,
+        skillLabel: "LINEAR ALGEBRA", requirementKey: "R1", prompt: "practice", recommendedAt: null } }] })
+      .map(row => row.requirementKey), ["R2"]);
+  });
+
   it("is deterministic and does not mutate the snapshot", () => {
     const input = snapshot({ plannerHistory: skippedTwice(cardIdentity) });
     const before = JSON.stringify(input);

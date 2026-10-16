@@ -94,6 +94,7 @@ function mapTask(row: Record<string, unknown>): TaskItem {
       activityId,
       courseId: row.retest_course_id as string,
       skillLabel: row.retest_skill_label as string,
+      ...(typeof row.retest_requirement_key === "string" ? { requirementKey: row.retest_requirement_key } : {}),
       prompt,
       recommendedAt: row.retest_recommended_at
         ? new Date(row.retest_recommended_at as string | Date).toISOString()
@@ -147,6 +148,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           a.candidate_id AS retest_candidate_id,
           a.course_id AS retest_course_id,
           a.skill_label AS retest_skill_label,
+          a.requirement_key AS retest_requirement_key,
           a.recommended_at AS retest_recommended_at,
           COALESCE(j.result->'inputSnapshot'->>'prompt', j.payload->>'prompt') AS retest_prompt
         FROM opening_tasks t

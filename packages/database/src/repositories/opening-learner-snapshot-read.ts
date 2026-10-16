@@ -19,6 +19,7 @@ export type LearnerSnapshotTaskRow = {
   minutes: number;
   courseId: string | null;
   skillLabel?: string | null;
+  requirementKey?: string | null;
   /** Last change; for a closed task this is when it became done or skipped. */
   updatedAt: string;
 };
@@ -37,7 +38,7 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
   return sql.begin("isolation level repeatable read read only", async (tx) => {
     const courses = await readOpeningLearnerSnapshotCourses(tx, scope);
     const taskRows = await tx`
-      SELECT client_key, status, minutes, course_id, skill_label, updated_at
+      SELECT client_key, status, minutes, course_id, skill_label, requirement_key, updated_at
       FROM opening_tasks
       WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
       ORDER BY created_at ASC, id ASC`;
@@ -49,6 +50,7 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
         minutes: Number(row.minutes),
         courseId: typeof row.course_id === "string" ? row.course_id : null,
         skillLabel: typeof row.skill_label === "string" ? row.skill_label : null,
+        requirementKey: typeof row.requirement_key === "string" ? row.requirement_key : null,
         updatedAt: new Date(row.updated_at as string | Date).toISOString(),
       })),
     };

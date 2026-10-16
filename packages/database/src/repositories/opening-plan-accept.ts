@@ -91,15 +91,15 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
         if (!available.length) throw new OpeningPlanError("CONFLICT", "course material unavailable", "source_unavailable");
       }
       await tx`INSERT INTO opening_tasks
-        (id, workspace_id, owner_user_id, title, minutes, due_at, priority, status, version, client_key, course_id, skill_label, origin)
+        (id, workspace_id, owner_user_id, title, minutes, due_at, priority, status, version, client_key, course_id, skill_label, requirement_key, origin)
         VALUES (${item.id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${item.title}, ${item.minutes}, NULL, 0, 'pending', 1,
-          ${item.key}, ${item.courseId}, ${item.skillLabel}, 'planner')
+          ${item.key}, ${item.courseId}, ${item.skillLabel}, ${item.requirementKey ?? null}, 'planner')
         ON CONFLICT (workspace_id, owner_user_id, client_key) WHERE client_key IS NOT NULL DO NOTHING`;
-      const [task] = await tx`SELECT id, title, minutes, status, version, course_id, skill_label, origin FROM opening_tasks
+      const [task] = await tx`SELECT id, title, minutes, status, version, course_id, skill_label, requirement_key, origin FROM opening_tasks
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${item.key} FOR UPDATE`;
       if (!task || task.id !== item.id || task.status !== 'pending' || Number(task.version) !== 1
         || task.title !== item.title || Number(task.minutes) !== item.minutes || task.course_id !== item.courseId
-        || task.skill_label !== item.skillLabel || task.origin !== 'planner') {
+        || task.skill_label !== item.skillLabel || task.requirement_key !== (item.requirementKey ?? null) || task.origin !== 'planner') {
         throw new OpeningPlanError("CONFLICT", "suggested task already changed", "task_changed");
       }
     }

@@ -13,17 +13,22 @@ export type SnapshotDataStatus = "available" | "not_configured" | "unavailable";
 export type SnapshotObservation = {
   id: string;
   skillLabel: string;
+  requirementKey?: string | null;
+  itemVersionId?: string | null;
   /** Original attempt time (ISO); a revision keeps the attempt's time. */
   attemptedAt: string;
   assistance: Assistance;
   verifiedCorrect: EvidenceEligibilityValue;
   independentAttempt: EvidenceEligibilityValue;
+  /** Missing historical qualification never means current evidence. */
+  usableForCurrentVersion?: EvidenceEligibilityValue;
   problemId: string | null;
 };
 
 /** One summarizeObservations row over the course's full evidence (not the HTTP projection). */
 export type SnapshotSkillSummary = {
   skillLabel: string;
+  requirementKey?: string | null;
   status: SkillStatus;
   lastObservedAt: string | null;
 };
@@ -59,6 +64,7 @@ export type SnapshotTaskRow = {
   courseId: string | null;
   /** Stored display label lets legacy suggestion keys match whitespace/case aliases. */
   skillLabel?: string | null;
+  requirementKey?: string | null;
   /** Local YYYY-MM-DD on which the task became done or skipped; null while pending. */
   closedLocalDate: string | null;
 };

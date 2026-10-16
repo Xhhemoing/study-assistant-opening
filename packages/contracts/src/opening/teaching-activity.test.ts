@@ -101,6 +101,10 @@ it("accepts a server-built learner focus and rejects unknown kinds or extra fiel
     strategyVersion: "adaptive-1",
   };
   expect(teachingLearnerFocusSchema.parse(focus)).toEqual(focus);
+  expect(teachingLearnerFocusSchema.parse({ ...focus, requirementKey: "formula-application" }).requirementKey).toBe("formula-application");
+  expect(teachingLearnerFocusSchema.parse({ ...focus, requirementKey: null }).requirementKey).toBeNull();
+  expect(teachingLearnerFocusSchema.safeParse({ ...focus, requirementKey: "x".repeat(201) }).success).toBe(false);
+  expect(teachingLearnerFocusSchema.safeParse({ ...focus, requirementKey: 1 }).success).toBe(false);
   expect(teachingLearnerFocusSchema.safeParse({ ...focus, activityKind: "lecture" }).success).toBe(false);
   expect(teachingLearnerFocusSchema.safeParse({ ...focus, mastery: 0.9 }).success).toBe(false);
   expect(teachingLearnerFocusSchema.safeParse({ ...focus, recentAssistance: ["hinted", "hinted", "hinted", "hinted"] }).success).toBe(false);

@@ -140,6 +140,7 @@ export function suggestionsAsTasks(suggestions: readonly SuggestedTask[]): TaskI
     status: "pending" as const,
     ...(suggestion.courseId ? { courseId: suggestion.courseId } : {}),
     ...(suggestion.skillLabel ? { skillLabel: suggestion.skillLabel } : {}),
+    ...(suggestion.requirementKey !== undefined ? { requirementKey: suggestion.requirementKey } : {}),
     origin: "planner" as const,
   }));
 }

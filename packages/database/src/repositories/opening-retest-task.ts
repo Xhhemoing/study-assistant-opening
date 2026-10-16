@@ -319,7 +319,8 @@ async function insertRetestOrPlainTask(
       await nextWorkspaceLearningHistoryRevision(tx, scope);
       // The candidate (server-written) is the authority for the retest's course and skill.
       const tagged = await tx`UPDATE opening_tasks
-        SET origin = ${"retest"}, course_id = ${candidate.courseId}, skill_label = ${candidate.skillLabel}
+        SET origin = ${"retest"}, course_id = ${candidate.courseId}, skill_label = ${candidate.skillLabel},
+          requirement_key = ${candidate.requirementKey ?? null}
         WHERE id = ${task.id} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
         RETURNING *`;
       task = mapTask(tagged[0] as Record<string, unknown>);

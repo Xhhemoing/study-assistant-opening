@@ -17,7 +17,7 @@ const summary = (overrides: Partial<SnapshotSkillSummary> = {}): SnapshotSkillSu
 });
 const observation = (overrides: Partial<SnapshotObservation> = {}): SnapshotObservation => ({
   id: "attempt-1", skillLabel: "极限", attemptedAt: "2026-10-21T10:00:00Z",
-  assistance: "independent", verifiedCorrect: "yes", independentAttempt: "yes", problemId: "problem-1", ...overrides,
+  assistance: "independent", usableForCurrentVersion: "yes", verifiedCorrect: "yes", independentAttempt: "yes", problemId: "problem-1", ...overrides,
 });
 const task = (overrides: Partial<SnapshotTaskRow> = {}): SnapshotTaskRow => ({
   clientKey: null, status: "done", minutes: 25, courseId, closedLocalDate: "2026-10-21", ...overrides,
@@ -38,6 +38,36 @@ function freeze<T>(value: T): T {
 }
 
 describe("assembleLearnerSnapshot", () => {
+  it("keeps same-label requirements and unattributed history in separate evidence groups", () => {
+    const snapshot = assembleLearnerSnapshot(sources({ courses: [course({
+      summaries: [summary({ requirementKey: "calculate", status: "observed_independent" }),
+        summary({ requirementKey: "prove" }), summary({ requirementKey: null })],
+      observations: [observation({ requirementKey: "calculate" }),
+        observation({ id: "proof-error", requirementKey: "prove", verifiedCorrect: "no" }),
+        observation({ id: "legacy", requirementKey: null, assistance: "hinted" })],
+      knowledgeNodes: [{ id: "limit", title: "极限", prerequisiteIds: [] },
+        { id: "next", title: "连续", prerequisiteIds: ["limit"] }],
+    })] }));
+    expect(snapshot.courses[0]!.skills).toMatchObject([
+      { requirementKey: "calculate", status: "observed_independent", recentAssistance: ["independent"] },
+      { requirementKey: "prove", status: "needs_review", recentAssistance: ["independent"] },
+      { requirementKey: null, status: "needs_check", recentAssistance: ["hinted"] },
+    ]);
+    expect(snapshot.courses[0]!.nextSkills).toEqual([]);
+    expect(propose(snapshot)).toMatchObject([{ skillLabel: "极限", requirementKey: "prove" }]);
+  });
+
+  it.each(["no", "unknown", undefined] as const)("does not act on stale errors or help when current eligibility is %s", (usableForCurrentVersion) => {
+    const snapshot = assembleLearnerSnapshot(sources({ courses: [course({
+      summaries: [summary()], observations: [
+        observation({ usableForCurrentVersion, verifiedCorrect: "no", assistance: "revealed" }),
+        observation({ id: "other", usableForCurrentVersion, assistance: "hinted" }),
+      ],
+    })] }));
+    expect(snapshot.courses[0]!.skills[0]).toMatchObject({ status: "needs_check", recentAssistance: [] });
+    expect(propose(snapshot)).toEqual([]);
+  });
+
   it.each([
     { statuses: ["observed_independent", "needs_review", "needs_check"], expected: "needs_review" },
     { statuses: ["observed_independent", "observed_independent"], expected: "observed_independent" },
@@ -246,6 +276,29 @@ describe("assembleLearnerSnapshot", () => {
     // Persisted outgoing keys keep the current display spelling's original scheme.
     expect(result[0]!.key).toBe(suggestionKey(input.date, suggestionIdentity("weak_skill", courseId, "LINEARALGEBRA")));
     expect(propose(assembleLearnerSnapshot({ ...input, tasks: [...input.tasks, skipped("2026-10-18", "LinearAlgebra")] }))).toEqual([]);
+  });
+
+  it.each(["done", "skipped", "pending"] as const)("keeps an alias-matched %s task inside its own requirement", status => {
+    const clientKey = suggestionKey("2026-10-21", suggestionIdentity("weak_skill", courseId, "Linear Algebra", "R1"));
+    const input = sources({ courses: [course({ observations: [
+      observation({ skillLabel: "linearalgebra", requirementKey: "R1", verifiedCorrect: "no" }),
+      observation({ id: "r2", skillLabel: "ＬＩＮＥＡＲ ALGEBRA", requirementKey: "R2", verifiedCorrect: "no" }),
+    ] })], tasks: [task({ clientKey, skillLabel: "Linear Algebra", requirementKey: "R1", status })] });
+    expect(propose(assembleLearnerSnapshot(input))).toMatchObject([{ requirementKey: "R2", minutes: 25 }]);
+    expect(input.tasks[0]!.clientKey).toBe(clientKey);
+  });
+
+  it("reduces alias-matched skip history for one requirement without reducing another", () => {
+    const input = sources({ courses: [course({ observations: [
+      observation({ skillLabel: "linearalgebra", requirementKey: "R1", verifiedCorrect: "no" }),
+      observation({ id: "r2", skillLabel: "LINEAR ALGEBRA", requirementKey: "R2", verifiedCorrect: "no" }),
+    ] })], tasks: ["2026-10-20", "2026-10-19"].map(date => task({
+      clientKey: suggestionKey(date, suggestionIdentity("weak_skill", courseId, "Linear Algebra", "R1")),
+      skillLabel: "Linear Algebra", requirementKey: "R1", status: "skipped", closedLocalDate: date,
+    })) });
+    const result = propose(assembleLearnerSnapshot(input));
+    expect(result.find(row => row.requirementKey === "R1")).toMatchObject({ minutes: 13, reasonCode: "repeatedly_skipped" });
+    expect(result.find(row => row.requirementKey === "R2")).toMatchObject({ minutes: 25, reasonCode: "weak_skill" });
   });
 
   it("does not let an alias match cross a course or a different skill", () => {

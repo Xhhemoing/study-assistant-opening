@@ -35,6 +35,33 @@ const propose = (snap: LearnerSnapshot, overrides: Partial<Parameters<typeof pro
   proposeAdaptiveTasks(snap, { autonomy: "copilot", capacityMinutes: 180, committedMinutes: 0, pendingTasks: [], idFor, ...overrides }).suggestions;
 
 describe("proposeAdaptiveTasks", () => {
+  it("preserves legacy skip and pending deduplication only for an unambiguous requirement", () => {
+    const skill = { skillLabel: "极限", requirementKey: "R1", status: "needs_review" as const, lastObservedAt: null, recentAssistance: [] };
+    const base = snapshot({ courses: [course({ skills: [skill] })] });
+    const identity = suggestionIdentity("weak_skill", courseA, "极限");
+    expect(propose({ ...base, plannerHistory: [{ date: base.date, identity, status: "skipped" }] })).toEqual([]);
+    expect(propose(base, { pendingTasks: [task(1, { courseId: courseA, skillLabel: "极限" })] })).toEqual([]);
+    expect(propose({ ...base, plannerHistory: ["2026-10-20", "2026-10-19"].map(date => ({ date, identity, status: "skipped" as const })) }))
+      .toMatchObject([{ requirementKey: "R1", minutes: 13 }]);
+    const ambiguous = { ...base, courses: [course({ skills: [skill, { ...skill, requirementKey: "R2" }] })],
+      plannerHistory: [{ date: base.date, identity, status: "skipped" as const }] };
+    expect(propose(ambiguous)).toHaveLength(2);
+  });
+
+  it("keeps requirement-specific pending and skipped tasks from suppressing another target", () => {
+    const skills = ["calculate", "prove"].map(requirementKey => ({
+      skillLabel: "极限", requirementKey, status: "needs_review" as const, lastObservedAt: null, recentAssistance: [],
+    }));
+    const base = snapshot({ courses: [course({ skills })] });
+    const all = propose(base);
+    expect(all.map(row => row.requirementKey)).toEqual(["calculate", "prove"]);
+    expect(new Set(all.map(row => row.key)).size).toBe(2);
+    expect(propose(base, { pendingTasks: [task(1, { courseId: courseA, skillLabel: "极限", requirementKey: "calculate" })] }))
+      .toMatchObject([{ requirementKey: "prove" }]);
+    expect(propose({ ...base, plannerHistory: [{ date: base.date, status: "skipped", identity: suggestionIdentity("weak_skill", courseA, "极限", "calculate") }] }))
+      .toMatchObject([{ requirementKey: "prove" }]);
+  });
+
   it("proposes nothing in manual mode", () => {
     expect(propose(snapshot({ dueCardCount: 20, courses: [course({ nextSkills: ["导数"] })] }), { autonomy: "manual" })).toEqual([]);
   });

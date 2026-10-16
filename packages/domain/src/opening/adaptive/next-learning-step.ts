@@ -6,7 +6,9 @@ export function nextLearningStep(input: NextLearningStepInput): NextLearningStep
     return { activityKind: "full_explain", focusObservationId: null, reasonCode: "requested_full" };
   }
 
-  const latest = input.observations[0];
+  // Historical errors and help remain visible, but do not select current teaching.
+  const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
+  const latest = observations[0];
   if (!latest) {
     return { activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" };
   }
@@ -19,11 +21,11 @@ export function nextLearningStep(input: NextLearningStepInput): NextLearningStep
     };
   }
 
-  if (input.observations.every((observation) => observation.verifiedCorrect === "unknown")) {
+  if (observations.every((observation) => observation.verifiedCorrect === "unknown")) {
     return { activityKind: "diagnose", focusObservationId: null, reasonCode: "unverified_only" };
   }
 
-  const recent = input.observations.slice(0, 3);
+  const recent = observations.slice(0, 3);
   const assistedCount = recent.filter(
     (observation) => observation.assistance === "hinted" || observation.assistance === "revealed",
   ).length;

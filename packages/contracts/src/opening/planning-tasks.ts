@@ -8,6 +8,7 @@ export const taskRetestProjectionSchema = z.object({
   activityId: uuidSchema,
   courseId: uuidSchema,
   skillLabel: z.string().min(1).max(200),
+  requirementKey: z.string().max(200).nullable().optional(),
   prompt: z.string().min(1).max(4000),
   recommendedAt: isoDateTimeSchema.nullable(),
 }).strict();
@@ -29,6 +30,8 @@ export const taskItemSchema = z.object({
   /** Adaptive planning (0061); omitted when unset. */
   courseId: uuidSchema.optional(),
   skillLabel: z.string().min(1).max(200).optional(),
+  /** Server-owned target of accepted planner/retest tasks; absent on legacy tasks. */
+  requirementKey: z.string().max(200).nullable().optional(),
   /** Omitted for `manual`. */
   origin: taskOriginSchema.optional(),
   /** Read-only projection of a stored planner identity; selects the task's execution flow. */

@@ -29,6 +29,7 @@ export const openingTasks = pgTable("opening_tasks", {
   /** 0061: FK courses ON DELETE SET NULL; writers check workspace ownership. */
   courseId: uuid("course_id"),
   skillLabel: text("skill_label"),
+  requirementKey: text("requirement_key"),
   origin: text("origin").notNull().default("manual"),
   notBefore: timestamp("not_before", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
