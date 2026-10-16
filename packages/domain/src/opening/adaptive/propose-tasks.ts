@@ -112,13 +112,17 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
       .filter((task) => task.status === "pending" && taskCourseId(task) && taskSkillLabel(task))
       .map((task) => `${taskCourseId(task)}::${taskSkillLabel(task)}`),
   );
-  const pendingIdentities = new Set(
-    snapshot.plannerHistory.filter((entry) => entry.status === "pending").map((entry) => entry.identity),
+  // One task per identity per local day: do not revive a task the learner has
+  // already completed or skipped when a draft is recomputed later that day.
+  const unavailableIdentities = new Set(
+    snapshot.plannerHistory
+      .filter((entry) => entry.status === "pending" || entry.date === snapshot.date)
+      .map((entry) => entry.identity),
   );
   const out: Candidate[] = [];
   const push = (candidate: Omit<Candidate, "rank" | "urgency">, behind: boolean) => {
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel);
-    if (pendingIdentities.has(identity)) return;
+    if (unavailableIdentities.has(identity)) return;
     if (candidate.courseId && candidate.skillLabel && covered.has(`${candidate.courseId}::${candidate.skillLabel}`)) return;
     out.push({
       ...candidate,
@@ -215,7 +219,10 @@ export function proposeAdaptiveTasks(
     if (skippedDays >= 3) continue;
     let { minutes, reasonCode, reason } = candidate;
     if (skippedDays === 2) {
-      minutes = Math.max(MIN_SUGGESTION_MINUTES, Math.round(minutes / 2));
+      // Card reviews can start below the study-block minimum. Applying the
+      // 10-minute floor to them would increase, rather than reduce, the burden.
+      const minimum = candidate.kind === "review_cards" ? 1 : MIN_SUGGESTION_MINUTES;
+      minutes = Math.max(minimum, Math.round(minutes / 2));
       reasonCode = "repeatedly_skipped";
       reason = `连续两天跳过，缩短为 ${minutes} 分钟（${candidate.reason}）`;
     }
