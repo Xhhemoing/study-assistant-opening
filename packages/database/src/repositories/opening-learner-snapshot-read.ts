@@ -16,6 +16,7 @@ export type LearnerSnapshotCourseRow = {
 export type LearnerSnapshotTaskRow = {
   clientKey: string | null;
   status: TaskItem["status"];
+  closeSource?: "learner" | "system";
   minutes: number;
   courseId: string | null;
   skillLabel?: string | null;
@@ -38,7 +39,7 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
   return sql.begin("isolation level repeatable read read only", async (tx) => {
     const courses = await readOpeningLearnerSnapshotCourses(tx, scope);
     const taskRows = await tx`
-      SELECT client_key, status, minutes, course_id, skill_label, requirement_key, updated_at
+      SELECT client_key, status, close_source, minutes, course_id, skill_label, requirement_key, updated_at
       FROM opening_tasks
       WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
       ORDER BY created_at ASC, id ASC`;
@@ -47,6 +48,7 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
       tasks: taskRows.map((row) => ({
         clientKey: typeof row.client_key === "string" ? row.client_key : null,
         status: row.status as TaskItem["status"],
+        ...(row.close_source === "learner" || row.close_source === "system" ? { closeSource: row.close_source } : {}),
         minutes: Number(row.minutes),
         courseId: typeof row.course_id === "string" ? row.course_id : null,
         skillLabel: typeof row.skill_label === "string" ? row.skill_label : null,

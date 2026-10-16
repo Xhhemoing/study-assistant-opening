@@ -9,6 +9,8 @@ import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { ProviderSettingsPanel } from "./provider-settings-panel";
 import { QuickSetupPanel } from "./quick-setup-panel";
+import { createOpeningApi } from "../opening/client/api";
+import { LoopMetricsPanel } from "../opening/planning/loop-metrics-panel";
 import { PlanFeedbackPanel } from "../opening/planning/plan-feedback-panel";
 import {
   fetchWorkspacePreferences,
@@ -72,7 +74,7 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
         <QuickSetupPanel basePath={basePath} onConfigured={() => setModelRevision(current => current + 1)} />
         <AiSettingsPanel key={`ai-${modelRevision}`} />
         <ProviderSettingsPanel key={`providers-${modelRevision}`} />
-        {basePath === "/opening/settings" ? <PlanFeedbackPanel /> : null}
+        {basePath === "/opening/settings" ? <><PlanFeedbackPanel /><LoopMetricsPanel api={createOpeningApi()} /></> : null}
         {error ? (
           <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert">
             <p className="text-sm text-red-700">{error}</p>

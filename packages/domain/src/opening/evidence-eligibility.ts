@@ -28,7 +28,24 @@ function evaluateCorrectness(
   observation: EvidenceObservation,
   check: EvidenceEligibilityContext["referenceCheck"],
   reasons: Reasons,
+  automatic: EvidenceEligibilityContext["serverEvaluation"],
 ): EvidenceEligibilityValue {
+  if (observation.verdictSource === "deterministic") {
+    if (!automatic || automatic.evaluatorVersion !== "matrix-exact-v1" || automatic.specVersion !== "matrix-arithmetic-v1") {
+      reasons.add("server_evaluation_incomplete"); return "unknown";
+    }
+    if (!observation.observationId || automatic.observationId !== observation.observationId
+      || automatic.attemptId !== observation.attemptId || automatic.problemId !== observation.problemId
+      || automatic.itemVersionId !== observation.itemVersionId || automatic.requirementKey !== observation.requirementKey) {
+      reasons.add("server_evaluation_identity_mismatch"); return "unknown";
+    }
+    if (automatic.decision === "abstain") { reasons.add("server_evaluation_abstained"); return "unknown"; }
+    if (automatic.outcome !== observation.outcome || automatic.decision !== automatic.outcome) {
+      reasons.add("server_evaluation_outcome_conflict"); return "unknown";
+    }
+    reasons.add(automatic.outcome === "correct" ? "deterministic_correct" : "deterministic_incorrect");
+    return automatic.outcome === "correct" ? "yes" : "no";
+  }
   if (observation.verdictSource !== "reference_checked") {
     reasons.add("verification_source_untrusted");
     return "unknown";
@@ -113,7 +130,7 @@ export function evaluateEvidenceEligibility(
   const reasons: Reasons = new Set();
   const assistance = evaluateAssistance(observation, context.helpHistory, reasons);
   result.independentAttempt = assistance.independent;
-  result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons);
+  result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
   result.usableForDelayedCheck = evaluateDelayedCheck(
     observation,

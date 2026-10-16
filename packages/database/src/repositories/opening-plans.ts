@@ -60,7 +60,7 @@ export type EnsureAutoDraftOptions = {
 };
 
 
-function fingerprintHardBlocks(blocks: TimeBlock[]): string {
+export function fingerprintHardBlocks(blocks: TimeBlock[]): string {
   const hard = blocks
     .filter((b) => b.kind !== "free")
     .map((b) => `${b.kind}:${b.start}:${b.end}`)
@@ -119,7 +119,7 @@ function formatPlanDay(value: unknown): string {
   throw new OpeningPlanError("VALIDATION", `invalid plan day: ${raw}`);
 }
 
-function mapDraft(row: Record<string, unknown>): PlanDraft {
+export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
   const draft: PlanDraft = {
     id: row.id as string,
     date: formatPlanDay(row.day),
@@ -220,7 +220,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           await transitionRetestActivityForTask(tx, scope, taskId, { type: "skip", at: input.at });
         }
 
-        const updated = await tx`UPDATE opening_tasks SET status=${input.status}, version=version + 1, updated_at=now()
+        const updated = await tx`UPDATE opening_tasks SET status=${input.status}, close_source='learner', version=version + 1, updated_at=now()
           WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
           RETURNING *`;
         await recordOpeningPlanFeedback(tx, scope, updated[0] as Record<string, unknown>, input.status, input.feedback);
@@ -311,6 +311,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
 
     async upsertHardBlocks(scope: OpeningScope, day: string, blocks: TimeBlock[]): Promise<void> {
       await sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
         await tx`DELETE FROM opening_hard_blocks
           WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
             AND day = ${day}::date`;
@@ -371,7 +373,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           ${"draft"}, ${sql.json(input.blocks as never)}, ${sql.json(input.unscheduledTaskIds as never)},
           ${sql.json(snapshot as never)}, ${fp}, ${input.clientKey ?? null}
         ) RETURNING *`;
-      return mapDraft(rows[0] as Record<string, unknown>);
+      return mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
     },
 
     async rejectPlan(scope: OpeningScope, draftId: string): Promise<PlanDraft> {
@@ -381,11 +383,11 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           AND owner_user_id = ${scope.ownerUserId} AND status = 'draft'
         RETURNING *`;
       if (!rows.length) throw new OpeningPlanError("NOT_FOUND", "draft not found");
-      return mapDraft(rows[0] as Record<string, unknown>);
+      return mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
     },
 
     async acceptPlan(scope: OpeningScope, input: AcceptPlanInput): Promise<PlanDraft> {
-      return mapDraft(await acceptOpeningPlan(sql, scope, input, options.now?.() ?? new Date()));
+      return mapOpeningPlanDraft(await acceptOpeningPlan(sql, scope, input, options.now?.() ?? new Date()));
     },
 
     async findDraftByProposeClientKey(
@@ -402,7 +404,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         ORDER BY created_at DESC, id DESC
         LIMIT 1`;
       if (!rows.length) return null;
-      return mapDraft(rows[0] as Record<string, unknown>);
+      return mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
     },
 
     /**
@@ -458,7 +460,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         let supersede: string | null = null;
         let prebuilt: AutoDraftBuild | null = null;
         if (existingRows.length) {
-          const existing = mapDraft(existingRows[0] as Record<string, unknown>);
+          const existing = mapOpeningPlanDraft(existingRows[0] as Record<string, unknown>);
           if (existing.status === "rejected") {
             return {
               draft: null,
@@ -576,7 +578,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
             ${tx.json((adaptive?.reasons ?? {}) as never)}, ${adaptive?.strategyVersion ?? null}
           ) RETURNING *`;
         return {
-          draft: mapDraft(rows[0] as Record<string, unknown>),
+          draft: mapOpeningPlanDraft(rows[0] as Record<string, unknown>),
           skippedBecauseAccepted: false,
           dailyDraftSkippedReason: null,
         };

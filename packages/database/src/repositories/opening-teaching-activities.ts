@@ -193,6 +193,16 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     ): Promise<TeachingActivity> {
       return sql.begin(async (tx) => {
         await lockLearningOwner(tx, scope);
+        // Serializes with coach undo's workspace FOR UPDATE. A start request
+        // prepared before undo must not create an activity for a withdrawn task.
+        if (input.createIntent.source === "task" && typeof input.createIntent.taskId === "string") {
+          const withdrawn = await tx`SELECT 1 FROM opening_plan_acceptances a
+            JOIN opening_plan_drafts d ON d.id=a.draft_id AND d.workspace_id=a.workspace_id
+            WHERE a.workspace_id=${scope.workspaceId} AND d.owner_user_id=${scope.ownerUserId}
+              AND a.source='coach' AND a.undone_at IS NOT NULL
+              AND a.created_task_versions ? ${input.createIntent.taskId.toLowerCase()} LIMIT 1`;
+          if (withdrawn.length) throw learningError("CONFLICT", "该教练任务已撤销，请重新读取今日任务。");
+        }
         const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
         if (sourceIds.length) await admitLearningSources(tx, scope, sourceIds);
         if (input.courseId) {

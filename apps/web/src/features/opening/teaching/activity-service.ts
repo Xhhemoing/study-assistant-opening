@@ -62,6 +62,7 @@ export function createOpeningTeachingActivityService(
         // Task identity and execution stay valid even when adaptive suggestions are rolled back.
         if (input.createIntent.taskId !== undefined) {
           const taskId = uuidSchema.parse(input.createIntent.taskId);
+          input.createIntent = { ...input.createIntent, source: "task", taskId: taskId.toLowerCase() };
           const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
           if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
           if (task.suggestionKind === "review_cards") throw new ApiError("VALIDATION", "请到卡片复习中开始这项任务", 400);

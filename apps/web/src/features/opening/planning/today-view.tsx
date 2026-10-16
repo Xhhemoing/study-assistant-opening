@@ -9,6 +9,7 @@ import { canAcceptPlan } from "./plan-action";
 import { canProposePlan, planProposalIntent, type PlanProposalIntent } from "./plan-input";
 import { QuickAddTask } from "./quick-add-task";
 import { ActionDigest } from "./action-digest";
+import { LocalReplanCard } from "./local-replan-card";
 import { DailyDraftCard } from "./daily-draft-card";
 import { RetestProposals } from "./retest-proposals";
 import { TodayStudyTools } from "./today-study-tools";
@@ -22,6 +23,7 @@ import { TaskRowActions } from "./task-row-actions";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { AutonomySwitcher } from "./autonomy-switcher";
+import { CoachPlanControl } from "./coach-plan-control";
 import { planAcceptFailure } from "./plan-accept-errors";
 
 type SelectionSource = "focus" | "user";
@@ -109,6 +111,7 @@ export function TodayPlanView({
   const [freeStart, setFreeStart] = useState(""), [freeEnd, setFreeEnd] = useState("");
   const [planning, setPlanning] = useState(false), [all, setAll] = useState(false), [doneView, setDoneView] = useState(false);
   const [nowTick, setNowTick] = useState(() => new Date());
+  const [coachSettingsRevision, setCoachSettingsRevision] = useState(0);
   const refresh = useCallback(async (options?: { refreshSuggestions?: boolean }) => {
     const epoch = ++readEpoch.current;
     setLoadState("loading"); setError(""); setPlanWarning(""); setPlanState("loading");
@@ -190,7 +193,7 @@ export function TodayPlanView({
   const selectablePending = groups.confirmed.length + groups.dueRetests.length + groups.overdue.length + groups.other.length;
   const upcomingHint = upcomingRetestHint(queueTasks, nowTick, timeZone, groups.upcomingRetestCount);
   return <TaskPlanningTimeZoneContext.Provider value={timeZone}><section className="flex min-h-full flex-col bg-white" aria-label="今日计划">
-    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { void refresh({ refreshSuggestions: true }); }} /> : null}
+    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { setCoachSettingsRevision(value => value + 1); void refresh({ refreshSuggestions: true }); }} /> : null}
     <div className="border-b border-zinc-200/70 px-5 pb-3 pt-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-zinc-900">学习队列</h2><button type="button" aria-label="安排时间" aria-expanded={planning} aria-controls="opening-plan-editor" className={secondaryButtonClass} disabled={!plan || planState !== "ready" || loadState !== "ready"} onClick={() => setPlanning(!planning)}><CalendarDays size={15} aria-hidden /></button></div><p className="mt-1 text-xs text-zinc-500">{loadState === "ready" ? `当前可选 ${remaining.length} 项 · 预计 ${remaining.reduce((sum, task) => sum + task.minutes, 0)} 分钟` : loadState === "error" ? "任务读取失败" : "正在读取任务"}</p></div>
     {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
     {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4">
@@ -219,6 +222,8 @@ export function TodayPlanView({
       {hasLoadedTasks ? <ActionDigest api={api} onChanged={refresh} onAdjust={() => setPlanning(true)} /> : null}
     </div>
     {hasLoadedTasks && plan ? <fieldset disabled={pending || loadState !== "ready" || planState !== "ready"} className="min-w-0 disabled:opacity-60">
+      {adaptivePlanning && plan.replanOffer?.offer ? <LocalReplanCard key={`${date}:${plan.acceptedVersion}`} api={api} date={date} acceptedVersion={plan.acceptedVersion} blocks={plan.blocks} tasks={tasks} reason={plan.replanOffer.reason} dismissalKey={plan.replanOffer.dismissalKey} timeZone={timeZone} onChanged={refresh} /> : null}
+      {adaptivePlanning ? <CoachPlanControl date={date} draft={plan.dailyDraft ?? null} api={api} onChanged={refresh} settingsRevision={coachSettingsRevision} /> : null}
       <DailyDraftCard key={date} api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={refresh} adaptivePlanning={adaptivePlanning} hasNewerSuggestion={plan.hasNewerSuggestion} onRefreshSuggestions={() => refresh({ refreshSuggestions: true })} />
       <details className="mx-4 mt-4 rounded-xl border border-zinc-200 bg-white"><summary className="min-h-11 cursor-pointer px-3 py-3 text-xs font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">今日安排与进度</summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
     </fieldset> : null}

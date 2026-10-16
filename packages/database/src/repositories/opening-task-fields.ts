@@ -14,6 +14,7 @@ export function withTaskPlanningFields(task: TaskItem, row: Record<string, unkno
   const suggestionKind = plannerSuggestionKind(row);
   if (suggestionKind) out.suggestionKind = suggestionKind;
   if (row.not_before) out.notBefore = new Date(row.not_before as string | Date).toISOString();
+  if (row.close_source === "learner" || row.close_source === "system") out.closeSource = row.close_source;
   return out;
 }
 

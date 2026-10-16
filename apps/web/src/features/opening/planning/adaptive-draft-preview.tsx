@@ -1,10 +1,11 @@
 "use client";
 
-import type { PlanDraft, PlannedBlock, TaskItem } from "@aistudy/contracts";
+import type { PlanDraft, PlannedBlock, TaskFeedbackInput, TaskItem } from "@aistudy/contracts";
 import { ChevronDown } from "lucide-react";
 import { useState } from "react";
 import { secondaryButtonClass } from "../design/ui";
 import { selectableSuggestedKeys } from "./daily-draft-selection";
+import { SuggestionRejectionControl } from "./suggestion-rejection-control";
 
 type Props = {
   draft: PlanDraft;
@@ -12,6 +13,7 @@ type Props = {
   selectedKeys: readonly string[];
   disabled: boolean;
   onSelectionChange: (keys: string[]) => void;
+  onRejectSuggestion?: (key: string, reason?: TaskFeedbackInput["reason"]) => Promise<void>;
 };
 
 function titleFor(draft: PlanDraft, tasks: readonly TaskItem[], id: string): string {
@@ -35,9 +37,10 @@ const UNSCHEDULED_LABELS = {
   free_time_exhausted: "可用时间已排满",
 } as const;
 
-export function AdaptiveDraftDetails({ draft, tasks, selectedKeys, disabled, onSelectionChange }: Props) {
+export function AdaptiveDraftDetails({ draft, tasks, selectedKeys, disabled, onSelectionChange, onRejectSuggestion }: Props) {
   const selectable = new Set(selectableSuggestedKeys(draft));
   const suggestions = draft.suggestedTasks ?? [];
+  const rejected = new Set(draft.rejectedSuggestedKeys ?? []);
   function select(key: string, checked: boolean) {
     if (disabled || !selectable.has(key)) return;
     onSelectionChange(checked ? [...new Set([...selectedKeys, key])] : selectedKeys.filter((item) => item !== key));
@@ -53,17 +56,20 @@ export function AdaptiveDraftDetails({ draft, tasks, selectedKeys, disabled, onS
             <input type="checkbox" className="mt-1 h-4 w-4 accent-emerald-700" checked={checked} aria-checked={checked} disabled={disabled || !selectable.has(suggestion.key)} onChange={(event) => select(suggestion.key, event.target.checked)} />
             <span className="font-medium">{suggestion.title}</span>
           </label> : <p className="font-medium text-zinc-900">{titleFor(draft, tasks, block.taskId)}</p>}
-          <p>{timeLabel(block.start)}–{timeLabel(block.end)}{omitted ? " · 不会创建" : ""}</p>
+          <p>{timeLabel(block.start)}–{timeLabel(block.end)}{rejected.has(suggestion?.key ?? "") ? " · 已反馈不适合，今天不再推荐" : omitted ? " · 不会创建" : ""}</p>
           <p>{reasonFor(draft, block)}</p>
-          {suggestion && checked ? <button type="button" className="min-h-9 text-xs text-zinc-600 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" disabled={disabled} onClick={() => select(suggestion.key, false)}>不适合我</button> : null}
+          {suggestion && !rejected.has(suggestion.key) && onRejectSuggestion ? <SuggestionRejectionControl key={`${draft.id}:${draft.version}:${suggestion.key}`} disabled={disabled}
+            onConfirm={reason => onRejectSuggestion(suggestion.key, reason)} /> : null}
         </li>;
       })}
     </ul>
-    {suggestions.filter((suggestion) => !selectable.has(suggestion.key)).map((suggestion) => {
+    {suggestions.filter((suggestion) => !draft.blocks.some(block => block.taskId === suggestion.id)).map((suggestion) => {
       const reason = draft.unscheduled?.find((item) => item.taskId === suggestion.id)?.reason;
       return <div key={suggestion.key} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
         <label className="flex items-start gap-2"><input type="checkbox" className="mt-1 h-4 w-4" checked={false} aria-checked={false} disabled /><span>{suggestion.title}</span></label>
-        <p>今天放不下 · {reason ? UNSCHEDULED_LABELS[reason] : "暂未排入可用时段"}</p>
+        <p>{rejected.has(suggestion.key) ? "已反馈不适合，今天不再推荐" : `今天放不下 · ${reason ? UNSCHEDULED_LABELS[reason] : "暂未排入可用时段"}`}</p>
+        {!rejected.has(suggestion.key) && onRejectSuggestion ? <SuggestionRejectionControl key={`${draft.id}:${draft.version}:${suggestion.key}`} disabled={disabled}
+          onConfirm={feedbackReason => onRejectSuggestion(suggestion.key, feedbackReason)} /> : null}
       </div>;
     })}
     {draft.strategyVersion ? <p className="text-[11px] text-zinc-500">安排策略：{draft.strategyVersion}</p> : null}

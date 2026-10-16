@@ -2,10 +2,10 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll } from "@aistudy/database";
+  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createSourcePageImages } from "./runtime/source-page-images";
-import { loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createQueues } from "./runtime/queue";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
@@ -150,6 +150,9 @@ export async function main(): Promise<void> {
     memories: {
       listContext: (scope, now) => memory.listContext(scope, now),
     },
+    ...(loadFeatureSwitches().adaptivePlanning ? {
+      planningContext: { read: (scope: { workspaceId: string; ownerUserId: string }, now: Date) => readOpeningConversationPlanningContext(sql, scope, now) },
+    } : {}),
     learning: {
       insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),
     },

@@ -5,8 +5,9 @@ export function selectableSuggestedKeys(draft: PlanDraft | null): string[] {
   if (!draft) return [];
   const scheduled = new Set(draft.blocks.map((block) => block.taskId));
   const unscheduled = new Set([...draft.unscheduledTaskIds, ...(draft.unscheduled ?? []).map((item) => item.taskId)]);
+  const rejected = new Set(draft.rejectedSuggestedKeys ?? []);
   return (draft.suggestedTasks ?? [])
-    .filter((suggestion) => scheduled.has(suggestion.id) && !unscheduled.has(suggestion.id))
+    .filter((suggestion) => scheduled.has(suggestion.id) && !unscheduled.has(suggestion.id) && !rejected.has(suggestion.key))
     .map((suggestion) => suggestion.key);
 }
 

@@ -6,6 +6,7 @@ import {
   type ProviderInput,
   type SourceChunk,
   type TutorMode,
+  type ConversationPlanningContext,
 } from "@aistudy/contracts";
 import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext } from "@aistudy/ai";
 import {
@@ -16,6 +17,8 @@ import {
   PageCitationClarifyError,
   preferCitationsForPage,
   resolveStrategyTemplate,
+  conversationPlanningInstruction,
+  CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE,
 } from "@aistudy/domain";
 import type {
   ContextSourceRef,
@@ -71,6 +74,8 @@ export type TutorTurnDeps = {
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
   memories?: { listContext(scope: Scope, now: string): Promise<{ memories: MemoryItem[]; sourceRefs: ContextSourceRef[] }> };
+  /** Optional, feature-gated, read-only summary; failure leaves ordinary conversation available. */
+  planningContext?: { read(scope: Scope, now: Date): Promise<ConversationPlanningContext> };
   /** L01: record delivered help in the tutor completion transaction. */
   learning?: {
     insertHelpExposure(scope: Scope, exposure: {
@@ -163,7 +168,16 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         contextNow,
       );
       const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
-      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`;
+      let planningInstruction = "";
+      if (deps.planningContext) {
+        try {
+          planningInstruction = conversationPlanningInstruction(await deps.planningContext.read(scope, new Date(contextNow)));
+        } catch {
+          // This optional read cannot turn a DB outage into invented availability.
+          planningInstruction = CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE;
+        }
+      }
+      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`+planningInstruction;
       const tutorOperationId = `tutor:${claimed.id}`;
       // An unusable primary route may hand over to the user's fallback before anything is sent.
       let selected: ResolvedTaskModel | undefined;

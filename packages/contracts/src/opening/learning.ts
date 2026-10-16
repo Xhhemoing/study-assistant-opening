@@ -8,12 +8,14 @@ export const observationOutcomeSchema = z.enum([
   "unverified",
 ]);
 
-export const verdictSourceSchema = z.enum([
+/** Client reports cannot impersonate a server evaluator. */
+export const publicVerdictSourceSchema = z.enum([
   "self_report",
   "reference_checked",
   "model_suggestion",
   "unknown",
 ]);
+export const verdictSourceSchema = z.enum([...publicVerdictSourceSchema.options, "deterministic"]);
 
 export const assistanceLevelSchema = z.enum([
   "independent",
@@ -118,7 +120,7 @@ export const observationInputSchema = z
     assistance: assistanceLevelSchema,
     clientKey: z.string().min(8).max(200),
     /** Server policy input. Omitted requests stay self_report. */
-    verdictSource: verdictSourceSchema.optional(),
+    verdictSource: publicVerdictSourceSchema.optional(),
     referenceCheck: referenceCheckInputSchema.optional(),
     referenceSourceId: uuidSchema.nullable().optional(),
     /** Links a correction. Never an in-place rewrite of the parent row. */
@@ -171,7 +173,7 @@ export const learningSummarySchema = z
     /** HTTP responses may contain representative IDs; sampleCount remains the full count. */
     evidenceIds: z.array(uuidSchema).max(200),
     /** Distinguishes self-report, model suggestion, and reference-checked evidence. */
-    evidenceSources: z.array(verdictSourceSchema).max(4).optional(),
+    evidenceSources: z.array(verdictSourceSchema).max(5).optional(),
     sampleCount: z.number().int().nonnegative(),
     lastObservedAt: isoDateTimeSchema.nullable(),
     /** Latest original attempts within a known requirement; never a mastery claim. */

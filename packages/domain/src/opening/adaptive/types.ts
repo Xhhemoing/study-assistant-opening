@@ -33,6 +33,7 @@ export type PlannerHistoryEntry = {
   date: string;
   identity: string;
   status: TaskItem["status"];
+  closeSource?: "learner" | "system";
 };
 
 /** Everything the rules read about the learner for one local day. */

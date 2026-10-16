@@ -102,9 +102,9 @@ describe("adaptive planning data (L0)", () => {
   it("rejects a course from another workspace or an archived course", async () => {
     expect((await newTask({ courseId: await createCourse(other.scope) })).status).toBe(404);
     expect((await newTask({ courseId: await createCourse(owner.scope, true) })).status).toBe(404);
-    const [{ count }] = await sql`SELECT count(*)::int AS count FROM opening_tasks
+    const [row] = await sql`SELECT count(*)::int AS count FROM opening_tasks
       WHERE workspace_id = ${owner.scope.workspaceId}`;
-    expect(count).toBe(0);
+    expect(row?.count).toBe(0);
   });
 
   it("refuses server-assigned origins from the client", async () => {
@@ -205,5 +205,20 @@ describe("adaptive planning data (L0)", () => {
       ON CONFLICT (workspace_id) DO UPDATE SET adaptive_planning = EXCLUDED.adaptive_planning`;
     const read = await (await getPrefs(req("/api/opening/adaptive-planning", "GET", undefined, owner.cookie))).json();
     expect(read).toMatchObject({ prefs: { autonomy: "copilot" }, saved: true, invalidStoredPrefs: true });
+  });
+
+  it("requires milestone revisions and refuses client-forged confirmation history", async () => {
+    const courseId = await createCourse(owner.scope);
+    const milestone = { id: randomUUID(), title: "独立矩阵乘法", successCriteria: "隔天完成两道变式并说明维数", targetDate: null, evidenceRefs: [] };
+    const send = (courseGoal: unknown) => patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { courseGoal }, owner.cookie));
+    const base = { courseId, goal: { targetDate: null, weeklyMinutes: 120, milestones: [milestone] } };
+    expect((await send(base)).status).toBe(400);
+    expect((await send({ ...base, expectedRevision: 0, goal: { ...base.goal,
+      milestones: [{ ...milestone, history: [], confirmedAt: new Date().toISOString() }] } })).status).toBe(400);
+    const saved = await send({ ...base, expectedRevision: 0 });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ prefs: { courseGoals: { [courseId]: { revision: 1,
+      milestones: [{ status: "planned", confirmedAt: null, revision: 1 }] } } } });
+    expect((await send({ ...base, expectedRevision: 0 })).status).toBe(409);
   });
 });

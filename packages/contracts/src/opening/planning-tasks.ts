@@ -25,6 +25,8 @@ export const taskItemSchema = z.object({
   dueAt: isoDateTimeSchema.nullable(),
   priority: z.number().finite(),
   status: z.enum(["pending", "done", "skipped"]),
+  /** Server-owned closure attribution; historical absence remains unknown. */
+  closeSource: z.enum(["learner", "system"]).optional(),
   /** Present for retest-origin tasks; null/omitted for ordinary tasks. */
   retest: taskRetestProjectionSchema.nullable().optional(),
   /** Adaptive planning (0061); omitted when unset. */

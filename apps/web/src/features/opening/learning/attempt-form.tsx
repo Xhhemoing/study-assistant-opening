@@ -15,6 +15,7 @@ import {
   type DeliveredAssistance,
 } from "./reference-check";
 import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label-options";
+import { MatrixExerciseForm } from "./matrix-exercise-form";
 
 
 function readPracticeSkillPrefill(): string {
@@ -44,6 +45,7 @@ type Props = {
 /** A fresh attempt captures server identity/version before any answer or help. */
 export function LearningAttemptForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded }: Props) {
   const client = useMemo(() => createOpeningLearningClient(), []);
+  const [matrixMode, setMatrixMode] = useState(false);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [skillOptions, setSkillOptions] = useState<string[]>(skillLabelsProp ?? []);
   const [sourceId, setSourceId] = useState("");
@@ -224,10 +226,12 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
     repeatKey.current = null;
   }
 
+  if (matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} sources={sources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
   return (
     <div className="space-y-3 border-t border-zinc-200 pt-4">
       <h3 className="text-sm font-semibold text-zinc-800">记录一次练习</h3>
       <p className="text-xs text-zinc-500">选主题 → 作答 → 保存</p>
+      {!attempt && !retest ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-zinc-200 px-3 py-2 text-sm text-zinc-800">练习内置矩阵题（自动核算）</button> : null}
       {!attempt ? (
         <form onSubmit={start} className="space-y-3">
           <p className="text-xs leading-6 text-zinc-500" role="status">默认三步：选主题 → 作答 → 保存。辅导与材料选项按需展开。</p>

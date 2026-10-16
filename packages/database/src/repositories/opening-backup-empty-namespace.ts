@@ -97,6 +97,7 @@ export async function readOpeningRestoreNamespaceCounts(
     UNION ALL SELECT 'opening_memories', count(*)::int FROM opening_memories WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_privacy_exclusions', count(*)::int FROM opening_privacy_exclusions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_tasks', count(*)::int FROM opening_tasks WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_suggestion_feedback', count(*)::int FROM opening_suggestion_feedback WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_plan_feedback', count(*)::int FROM opening_plan_feedback WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_retest_activities', count(*)::int FROM opening_retest_activities WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_timetable_sessions', count(*)::int FROM opening_timetable_sessions WHERE workspace_id = ${id}

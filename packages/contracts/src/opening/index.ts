@@ -2,6 +2,7 @@ export {
   DOCLING_PINNED_VERSION,
   uuidSchema,
   isoDateTimeSchema,
+  calendarDateSchema,
   sha256HexSchema,
   scopeSchema,
   apiFailureSchema,
@@ -241,3 +242,15 @@ export * from "./teaching-content";
 export * from "./teaching-commands";
 export * from "./teaching-resume";
 export * from "./teaching-math-model";
+
+export * from "./matrix-evaluation";
+export * from "./loop-metrics";
+
+export * from "./local-replan";
+
+export * from "./conversation-plan";
+
+export * from "./coach-plans";
+export * from "./suggestion-feedback";
+
+export * from "./conversation-planning-context";

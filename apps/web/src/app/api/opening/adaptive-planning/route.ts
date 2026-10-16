@@ -11,7 +11,7 @@ async function handle(request: Request, write: boolean): Promise<Response> {
     const { sql, scope } = await requireOpeningScope(request);
     const repo = getAdaptivePrefsService(sql);
     response = Response.json(write
-      ? await repo.patch(scope, openingAdaptivePrefsPatchSchema.parse(await readOpeningJsonBody(request, 4_096)))
+      ? await repo.patch(scope, openingAdaptivePrefsPatchSchema.parse(await readOpeningJsonBody(request, 32_768)))
       : await repo.get(scope));
   } catch (error) {
     response = jsonError(mapDomainError(error));

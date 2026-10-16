@@ -78,6 +78,7 @@ export function toSnapshotTaskRow(row: LearnerSnapshotTaskRow, timeZone: string)
   return {
     clientKey: row.clientKey,
     status: row.status,
+    ...(row.closeSource ? { closeSource: row.closeSource } : {}),
     minutes: row.minutes,
     courseId: row.courseId,
     ...(row.skillLabel ? { skillLabel: row.skillLabel } : {}),

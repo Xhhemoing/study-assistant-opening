@@ -80,7 +80,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
   });
 
   it("APPLY_ORDER columns cover every durable table and exclude never-tables", () => {
-    expect(OPENING_RESTORE_APPLY_ORDER).toHaveLength(35);
+    expect(OPENING_RESTORE_APPLY_ORDER).toHaveLength(36);
     for (const table of OPENING_RESTORE_APPLY_ORDER) {
       expect(OPENING_RESTORE_ROW_COLUMNS[table].length).toBeGreaterThan(0);
       expect(["sessions", "opening_jobs", "opening_outbox", "opening_budget_reservations"]).not.toContain(table);

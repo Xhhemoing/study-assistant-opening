@@ -63,7 +63,8 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     const keepCheck = !editedAnswer && replacement?.referenceCheck === undefined
       && (replacement?.verdictSource === undefined || replacement.verdictSource === previous.verdictSource)
       && (replacement?.referenceSourceId === undefined || replacement.referenceSourceId === previous.referenceSourceId);
-    const verdictSource = replacement?.verdictSource ?? (replacement?.referenceCheck ? "reference_checked" : keepCheck ? previous.verdictSource : "self_report");
+    // Ordinary learner corrections never carry a server evaluator's authority to a new head.
+    const verdictSource = replacement?.verdictSource ?? (replacement?.referenceCheck ? "reference_checked" : keepCheck && previous.verdictSource !== "deterministic" ? previous.verdictSource : "self_report");
     const referenceSourceId = replacement?.referenceSourceId !== undefined ? replacement.referenceSourceId
       : replacement?.referenceCheck?.referenceSourceId ?? (keepCheck ? previous.referenceSourceId : null);
     if (replacement?.referenceCheck && (verdictSource !== "reference_checked" || referenceSourceId !== replacement.referenceCheck.referenceSourceId)) throw learningError("VALIDATION", "reference check source or verdict mismatch");

@@ -64,6 +64,7 @@ export const OPENING_RESTORE_APPLY_ORDER = [
   "opening_plan_state",
   "opening_plan_drafts",
   "opening_plan_acceptances",
+  "opening_suggestion_feedback",
 ] as const;
 
 function sameJournal(backup: OpeningBackup, current: readonly OpeningDeletionMark[]): boolean {

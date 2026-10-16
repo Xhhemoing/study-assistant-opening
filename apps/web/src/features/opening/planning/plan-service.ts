@@ -1,5 +1,7 @@
 import {
   acceptPlanInputSchema,
+  localReplanInputSchema,
+  type LocalReplanResult,
   openingPlanningSettingsSchema,
   taskCreateInputSchema,
   weekSessionSchema,
@@ -20,11 +22,16 @@ import {
   dailyDraftClientKey,
   deriveDayBlocks,
   planDay,
+  shouldOfferReplan,
+  withOpeningSuggestionFeedback,
+  type ReplanOffer,
   resolveLocalDayBounds,
   type PlanDayOptions,
 } from "@aistudy/domain";
 import {
   createOpeningPlansRepository,
+  proposeOpeningLocalPlan,
+  readOpeningSuppressedSuggestionIdentities,
   createOpeningPlanningSettingsRepository,
   OpeningPlanError,
   readOpeningPlanFeedbackSummary,
@@ -33,6 +40,7 @@ import {
 } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { loadFeatureSwitches } from "@aistudy/config";
 import { ApiError } from "../../auth/service";
 import { buildAdaptiveDraft, type AdaptiveDraftSnapshot } from "./adaptive-draft";
 import type { LearnerSnapshotRead } from "./learner-snapshot-service";
@@ -99,6 +107,7 @@ export type TodayPlanResult = {
    * still executable. The UI offers a refresh instead of replacing the draft on its own.
    */
   hasNewerSuggestion?: boolean;
+  replanOffer?: ReplanOffer & { dismissalKey?: string };
 };
 
 /** Workspace default when settings omit timeZone (aligned with planning-settings / DL7). */
@@ -222,7 +231,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     const clientKey = dailyDraftClientKey(date);
     const adaptive = await readAdaptiveSnapshot(scope, date);
 
-    return repo.ensureAutoDraft(
+    const result = await repo.ensureAutoDraft(
       scope,
       date,
       clientKey,
@@ -242,6 +251,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           const built = buildAdaptiveDraft({
             workspaceId: scope.workspaceId,
             adaptive,
+            suppressedSuggestionIdentities: await readOpeningSuppressedSuggestionIdentities(sql, scope, date),
             tasks,
             freeBlocks,
             yesterdayAccepted,
@@ -313,6 +323,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       },
       { refreshSuggestions: options.refreshSuggestions, now: clock() },
     );
+    if (result.draft?.suggestedTasks?.length && result.draft.origin !== "agent") {
+      result.draft = withOpeningSuggestionFeedback(result.draft, await readOpeningSuppressedSuggestionIdentities(sql, scope, date));
+    }
+    return result;
   }
 
   return {
@@ -393,7 +407,17 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         result.unplannedPendingCount = ensured.unplannedPendingCount;
       }
       if (ensured.hasNewerSuggestion) result.hasNewerSuggestion = true;
+      if (state?.acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
+        const offer = shouldOfferReplan({ acceptedBlocks: state.blocks, tasks: await repo.listTasks(scope), now: clock() });
+        result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${state.acceptedVersion}/${offer.reason}` };
+      }
       return result;
+    },
+
+    async proposeLocalReplan(scope: Scope, raw: unknown): Promise<LocalReplanResult> {
+      if (!loadFeatureSwitches().adaptivePlanning) throw new ApiError("NOT_FOUND", "局部重排尚未启用。", 404);
+      try { return await proposeOpeningLocalPlan(sql, scope, localReplanInputSchema.parse(raw), { now: clock() }); }
+      catch (error) { throw mapRepoError(error); }
     },
 
     async proposePlan(scope: Scope, raw: unknown): Promise<PlanDraft> {
@@ -452,8 +476,16 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       const allTasks = await repo.listTasks(scope);
       const wanted = new Set(body.taskIds);
       const tasks = allTasks.filter((task) => wanted.has(task.id));
-      if (tasks.length === 0) {
+      if (tasks.length !== wanted.size) {
         throw new OpeningPlanError("VALIDATION", "delta taskIds did not match any owned tasks");
+      }
+      const state = await repo.getToday(scope, body.date);
+      if (state?.acceptedVersion) {
+        const result = await proposeOpeningLocalPlan(sql, scope, { date: body.date,
+          expectedAcceptedVersion: state.acceptedVersion, clientKey: body.clientKey }, { now: clock(), taskIds: body.taskIds,
+          allowOtherDay: true, free: body.free });
+        if (result.kind === "no_change") throw new OpeningPlanError("VALIDATION", "剩余可用时间没有可安排的变化。");
+        return result.draft;
       }
       const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
       const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;

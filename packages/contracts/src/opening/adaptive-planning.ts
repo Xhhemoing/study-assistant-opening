@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { uuidSchema } from "./foundation";
+import { isoDateTimeSchema, uuidSchema } from "./foundation";
 
 /**
  * UX policy §3 intervention modes for the daily plan.
@@ -9,22 +9,69 @@ import { uuidSchema } from "./foundation";
  */
 export const planningAutonomySchema = z.enum(["manual", "copilot", "coach"]);
 
-const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value;
+}, "Invalid calendar date");
+
+export const courseMilestoneEvidenceRefSchema = z.object({
+  kind: z.enum(["attempt", "observation", "teaching_activity"]),
+  id: uuidSchema,
+}).strict();
+
+const milestoneDefinition = {
+  id: uuidSchema,
+  title: z.string().trim().min(1).max(120),
+  successCriteria: z.string().trim().min(1).max(500),
+  targetDate: localDateSchema.nullable(),
+  evidenceRefs: z.array(courseMilestoneEvidenceRefSchema).max(8),
+};
+
+const milestoneVersionSchema = z.object({
+  ...milestoneDefinition,
+  revision: z.number().int().positive(),
+  status: z.enum(["planned", "confirmed_by_learner"]),
+  confirmedAt: isoDateTimeSchema.nullable(),
+}).strict();
+
+/** Self-assessment only. No milestone status establishes independent mastery. */
+export const courseMilestoneSchema = milestoneVersionSchema.extend({
+  history: z.array(milestoneVersionSchema).max(50),
+}).strict();
+
+export const courseMilestoneUpdateSchema = z.object({
+  ...milestoneDefinition,
+  /** Confirmation is explicit and separate from changing the success criteria. */
+  confirm: z.boolean().optional(),
+}).strict();
 
 export const courseGoalSchema = z
   .object({
     /** Exam or deadline; null = no fixed date. */
     targetDate: localDateSchema.nullable(),
     weeklyMinutes: z.number().int().min(0).max(3000),
+    revision: z.number().int().nonnegative().optional(),
+    milestones: z.array(courseMilestoneSchema).max(8).optional(),
   })
   .strict();
+
+/** Public writes cannot supply stored revisions, history or confirmation timestamps. */
+export const courseGoalUpdateSchema = z.object({
+  targetDate: localDateSchema.nullable(),
+  weeklyMinutes: z.number().int().min(0).max(3000),
+  milestones: z.array(courseMilestoneUpdateSchema).max(8).optional(),
+}).strict();
 
 /** Stored in workspace_preferences.adaptive_planning, apart from semester settings. */
 export const openingAdaptivePrefsSchema = z
   .object({
     autonomy: planningAutonomySchema,
     coachBudgetMinutes: z.number().int().min(10).max(600),
+    /** Explicit automation opt-in; absent historical coach preferences remain advisory. */
+    coachAutoAcceptEnabled: z.boolean().optional(),
     courseGoals: z.record(uuidSchema, courseGoalSchema),
+    /** Server-owned monotonic revisions survive explicit goal removal. */
+    courseGoalRevisions: z.record(uuidSchema, z.number().int().nonnegative()).optional(),
   })
   .strict();
 
@@ -39,9 +86,21 @@ export const openingAdaptivePrefsPatchSchema = z
   .object({
     autonomy: planningAutonomySchema.optional(),
     coachBudgetMinutes: z.number().int().min(10).max(600).optional(),
+    coachAutoAcceptEnabled: z.boolean().optional(),
     courseGoal: z
-      .object({ courseId: uuidSchema, goal: courseGoalSchema.nullable() })
+      .object({
+        courseId: uuidSchema,
+        goal: courseGoalUpdateSchema.nullable(),
+        expectedRevision: z.number().int().nonnegative().optional(),
+      })
       .strict()
+      .superRefine((value, ctx) => {
+        if (value.goal?.milestones !== undefined && value.expectedRevision === undefined) {
+          ctx.addIssue({ code: "custom", path: ["expectedRevision"], message: "Milestone updates require the current goal revision" });
+        }
+        const ids = value.goal?.milestones?.map(item => item.id) ?? [];
+        if (new Set(ids).size !== ids.length) ctx.addIssue({ code: "custom", path: ["goal", "milestones"], message: "Milestone ids must be unique" });
+      })
       .optional(),
   })
   .strict();
@@ -56,6 +115,10 @@ export const openingAdaptivePrefsResponseSchema = z
 
 export type PlanningAutonomy = z.infer<typeof planningAutonomySchema>;
 export type CourseGoal = z.infer<typeof courseGoalSchema>;
+export type CourseGoalUpdate = z.infer<typeof courseGoalUpdateSchema>;
+export type CourseMilestone = z.infer<typeof courseMilestoneSchema>;
+export type CourseMilestoneUpdate = z.infer<typeof courseMilestoneUpdateSchema>;
+export type CourseMilestoneEvidenceRef = z.infer<typeof courseMilestoneEvidenceRefSchema>;
 export type OpeningAdaptivePrefs = z.infer<typeof openingAdaptivePrefsSchema>;
 export type OpeningAdaptivePrefsPatch = z.infer<typeof openingAdaptivePrefsPatchSchema>;
 export type OpeningAdaptivePrefsResponse = z.infer<typeof openingAdaptivePrefsResponseSchema>;

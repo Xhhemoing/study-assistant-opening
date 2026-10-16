@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
-import type { SourceChunk } from "@aistudy/contracts";
+import type { ConversationPlanningContext, SourceChunk } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
@@ -53,6 +53,28 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it("adds a bounded owned planning summary to the same budgeted tutor request", async () => {
+    const { deps, provider, budget } = setup();
+    const context: ConversationPlanningContext = { version: "conversation-planning-v1", asOf: "2026-10-16T10:00:00.000Z",
+      date: "2026-10-16", timeZone: "UTC", settings: "configured", acceptedVersion: 1,
+      courses: [{ alias: "c1", name: "矩阵" }], tasks: [], acceptedSlots: [], hardSlots: [],
+      learning: { status: "available", windowDays: 14, counts: { observations: 0, independentVerifiedCurrent: 0, unknownQualification: 0 } }, truncated: false };
+    const read = vi.fn(async () => context);
+    await createTutorTurnHandler({ ...deps, planningContext: { read } })(claimedJob.id);
+    expect(read).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }, expect.any(Date));
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain("<planning_context>");
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain("矩阵");
+    expect(budget.reserve).toHaveBeenCalledTimes(1); expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues ordinary conversation with an explicit unavailable summary after an optional read failure", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    await createTutorTurnHandler({ ...deps, planningContext: { read: vi.fn(async () => { throw new Error("read failed"); }) } })(claimedJob.id);
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain("当前学习与计划摘要暂时不可用");
+    expect(provider.complete.mock.calls[0]![0].instruction).not.toContain('"tasks":[]');
+    expect(tutorJobs.completeTurn).toHaveBeenCalled(); expect(tutorJobs.fail).not.toHaveBeenCalled();
+  });
 
   it("passes authorized version-pinned page images to a visual model and keeps citations", async () => {
     const { deps, provider, tutorJobs } = setup();

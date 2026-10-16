@@ -23,13 +23,13 @@
 | 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
 | Hermes 发布 | Codex 主对话 | [#58](https://github.com/Xhhemoing/study-assistant-opening/pull/58) | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、启动后崩溃检测、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
 | 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) | 7类闭环/恢复缺陷已修并合入 `e7a693b`；与 #59 整合后的主干完整 CI 38911719890 成功。Hermes与实际使用验收未完成 |
-| 学习反馈与剩余计划 S1/L8a | Astra 研究/独立评审，Codex 编写 | 本地 `codex/learning-feedback-loop` | 已编写任务反馈原子事件、可选原因、工作区明日推迟/取消、到期与提醒守卫、只读记录及备份恢复；含0067迁移（原样保留BKT 0066前置DDL）。本地相关582项、跨包类型/lint通过；全量单元/契约首轮3884通过，2项失败（迁移清单与本机PDF Python路径）均已单独修复/配置并复测通过，另11跳过/1todo。真实PG/handler/当前提交CI与用户浏览器验收待完成，未推送/合并/部署 |
+| 学习闭环剩余计划 S1–S7 | Astra 研究/独立评审，Codex 与隔离子代理编写 | [#62](https://github.com/Xhhemoing/study-assistant-opening/pull/62) / `codex/learning-feedback-loop` | 七个编码切片已实现并完成独立review修复；含0067–0069及原样保留0066。首批CI单元3886/数据库807通过，1个旧backup空表断言已修。整合提交CI与合并状态以#62检查记录为准；用户浏览器/部署/真实学习收益未验收 |
 
 ## 下一步（按顺序）
 
 1. #56–#60 已合入，最终主干 `cb5a68c`、完整CI 38911719890 成功。恢复 Hermes 部署连接后核实 SHA/迁移、备份；#59 含既有 0065 可空列迁移，运行新代码前先迁移。以 `OPENING_ADAPTIVE_PLANNING=0` 部署，用户决定何时开 1；当前尚未执行线上操作。回滚应用时保留 0065 可空列及已有要求归属。发布/验收见 `docs/operations/adaptive-copilot-release-checklist.md`。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
-3. 按用户本轮授权，由Astra研究、Codex编写，执行 `docs/plans/2026-10-16-learning-loop-remaining-plan.md`。当前S1/L8a待真实PG/CI后再集成；随后S2安全局部重排、S3完整三组指标、E1评价、阶段成果、教练与对话草案分批推进。I2/BKT共享字段由另一会话负责；合并前协调迁移编号，教练自动接受仍不启用。
+3. 按用户本轮授权，由Astra研究、Codex编写，执行 `docs/plans/2026-10-16-learning-loop-remaining-plan.md`。S1–S7已实现，完成当前整合提交真实PG/handler和完整CI后合并#62。I2/BKT共享字段由另一会话负责；合并前协调迁移编号，教练自动接受仍不启用。
 4. 大问题方案：
    - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。

@@ -1,3 +1,5 @@
+import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
+import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 /**
  * Opening-scoped restore apply executor (Q03).
@@ -16,6 +18,7 @@ import {
   OPENING_RESTORE_APPLY_ORDER,
   planOpeningRestoreApply,
   validateOpeningRestore,
+  validateBackupCourseMilestones,
   type OpeningBackup,
   type OpeningDeletionMark,
   type OpeningRestoreApplyPlan,
@@ -177,7 +180,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_learning_item_versions: [
     "id", "workspace_id", "owner_user_id", "course_id", "activity_id", "problem_id", "source_id", "source_version",
-    "physical_page", "chunk_id", "stem_snapshot", "artifact_kind", "created_at",
+    "physical_page", "chunk_id", "stem_snapshot", "artifact_kind", "evaluation_spec", "created_at",
   ],
   opening_learning_attempts: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "requirement_key",
@@ -205,7 +208,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "attempt_id", "item_version_id", "requirement_key", "started_at", "submitted_at", "recorded_at",
     "source_versions", "reference_check", "submitted_intent", "history_revision", "workspace_history_revision",
     "root_observation_id", "revises_observation_id", "revision_kind", "revision_reason", "actor_id",
-    "effective_head_id",
+    "effective_head_id", "server_evaluation",
   ],
   opening_skill_evidence: [
     "id", "workspace_id", "owner_user_id", "course_id", "node_id", "observation_id", "dimension", "created_at",
@@ -217,13 +220,17 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_privacy_exclusions: [
     "id", "workspace_id", "source_id", "memory_id", "deleted_at", "asset_deleted_at",
   ],
+  opening_suggestion_feedback: [
+    "id", "workspace_id", "owner_user_id", "draft_id", "day", "suggestion_key", "identity", "suggestion_kind",
+    "course_id", "requirement_key", "reason", "recorded_at", "client_key", "intent",
+  ],
   opening_plan_feedback: [
     "id", "workspace_id", "owner_user_id", "task_id", "task_version", "action", "reason",
     "origin", "requirement_key", "suggestion_kind", "not_before", "recorded_at",
   ],
   opening_tasks: [
     "id", "workspace_id", "owner_user_id", "title", "minutes", "due_at", "due_text", "priority",
-    "status", "version", "candidate_id", "client_key", "course_id", "skill_label", "requirement_key", "origin", "not_before",
+    "status", "version", "candidate_id", "client_key", "course_id", "skill_label", "requirement_key", "origin", "not_before", "close_source",
     "created_at", "updated_at",
   ],
   opening_retest_activities: [
@@ -250,6 +257,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_plan_acceptances: [
     "workspace_id", "client_key", "draft_id", "day", "accepted_version", "payload_hash", "created_at",
+    "source", "before_blocks", "created_task_versions", "undone_at", "undo_client_key", "undo_result_version", "undo_intent", "undo_result",
   ],
 };
 
@@ -269,6 +277,13 @@ const JSONB_COLUMNS = new Set([
   "opening_memories.source_turn_ids",
   "opening_learning_observations.source_versions",
   "opening_learning_observations.reference_check",
+  "opening_learning_observations.server_evaluation",
+  "opening_learning_item_versions.evaluation_spec",
+  "opening_suggestion_feedback.intent",
+  "opening_plan_acceptances.before_blocks",
+  "opening_plan_acceptances.created_task_versions",
+  "opening_plan_acceptances.undo_intent",
+  "opening_plan_acceptances.undo_result",
   "opening_learning_observations.submitted_intent",
   "opening_learning_attempts.source_versions",
   "opening_learning_attempts.create_intent",
@@ -309,6 +324,7 @@ function filterPayload(
   row: Record<string, unknown>,
   workspaceId: string,
 ): Record<string, unknown> | null {
+  row = normalizeOpeningImportedEvaluation(table, row);
   const allowed = OPENING_RESTORE_ROW_COLUMNS[table];
   const payload: Record<string, unknown> = {};
   for (const col of allowed) {
@@ -392,6 +408,18 @@ export async function executeOpeningRestoreApply(
     let pendingJobsCancelled = 0;
 
     await sql.begin(async (tx) => {
+      const linkedMilestones = (backup.tables.workspace_preferences as Record<string, unknown>[] | undefined)?.some(row => {
+        const parsed = openingAdaptivePrefsSchema.safeParse(row.adaptive_planning);
+        return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
+          [...milestone.history, milestone].some(version => version.evidenceRefs.length > 0)));
+      });
+      if (linkedMilestones) {
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+        if (!workspace) throw new Error("restore workspace owner is missing");
+        const linkErrors: string[] = [];
+        validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
+        if (linkErrors.length) throw new Error(linkErrors.join("; "));
+      }
       const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
       const emptyLive = evaluateOpeningRestoreEmptyNamespace(liveCounts);
       if (!emptyLive.ok) {

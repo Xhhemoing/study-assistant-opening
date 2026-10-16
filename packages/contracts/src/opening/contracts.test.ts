@@ -182,7 +182,7 @@ describe("F02 opening contracts", () => {
     expect(canBecomeObservedIndependent("independent", "correct")).toBe(true);
   });
 
-  it("keeps the four verdict sources distinct and optional on input", () => {
+  it("keeps reported sources distinct and reserves deterministic verdicts for the server", () => {
     for (const verdictSource of ["self_report", "reference_checked", "model_suggestion", "unknown"] as const) {
       const parsed = observationInputSchema.parse({
         sessionId: U, courseId: U2, skillLabel: "chain rule", sourceIds: [],
@@ -198,8 +198,10 @@ describe("F02 opening contracts", () => {
       answer: "42", outcome: "unverified", assistance: "unknown", clientKey: "obs-key-1",
     }).verdictSource).toBeUndefined();
     expect(verdictSourceSchema.options).toEqual([
-      "self_report", "reference_checked", "model_suggestion", "unknown",
+      "self_report", "reference_checked", "model_suggestion", "unknown", "deterministic",
     ]);
+    expect(observationInputSchema.safeParse({ sessionId: U, courseId: U2, skillLabel: "matrix", sourceIds: [],
+      answer: "[]", outcome: "correct", assistance: "independent", clientKey: "obs-key-1", verdictSource: "deterministic" }).success).toBe(false);
   });
 
   it("weekSession uses Monday-through-Sunday 1..7 consistently with timetable expansion", () => {
