@@ -24,7 +24,7 @@ vi.mock("../opening/capabilities/capabilities-provider", async (importOriginal) 
 
 const states: unknown[] = [];
 const effects: Array<() => unknown> = [];
-let cleanups: Array<() => void> = [];
+const cleanups: Array<() => void> = [];
 let stateIndex = 0;
 
 vi.mock("react", async (importOriginal) => ({
@@ -334,5 +334,91 @@ describe("CourseGoalForm save / clear / validation", () => {
     expect(
       findControl(tree, (el) => el.props.id === "course-goal-weekly-minutes")?.props.value,
     ).toBe("90");
+  });
+
+  it("hides editors and save after getAdaptivePrefs rejects", async () => {
+    const api = mockApi({
+      getAdaptivePrefs: vi.fn(async () => {
+        throw new Error("prefs unavailable");
+      }),
+    });
+
+    mount(api);
+    await flush();
+
+    const tree = rerender(api);
+    const html = renderToStaticMarkup(tree as ReactElement);
+    expect(html).toContain("prefs unavailable");
+    expect(html).toContain("重试");
+    expect(findControl(tree, (el) => el.props.id === "course-goal-target-date")).toBeUndefined();
+    expect(
+      findControl(tree, (el) => el.props.id === "course-goal-weekly-minutes"),
+    ).toBeUndefined();
+    const saveBtn = findAll(tree, (el) => el.type === "button").find(
+      (el) => buttonLabel(el).includes("保存") && !buttonLabel(el).includes("清除"),
+    );
+    expect(saveBtn).toBeUndefined();
+    expect(
+      findAll(tree, (el) => el.type === "button").find((el) => buttonLabel(el).includes("清除目标")),
+    ).toBeUndefined();
+  });
+
+  it("retry after load failure reloads prefs and shows editors", async () => {
+    let calls = 0;
+    const api = mockApi({
+      getAdaptivePrefs: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("prefs unavailable");
+        return {
+          prefs: {
+            autonomy: "copilot" as const,
+            coachBudgetMinutes: 60,
+            courseGoals: {
+              [COURSE_ID]: { targetDate: "2026-11-20", weeklyMinutes: 90 },
+            },
+          },
+          saved: true,
+          invalidStoredPrefs: false,
+        };
+      }),
+    });
+
+    mount(api);
+    await flush();
+
+    let tree = rerender(api);
+    const retryBtn = findAll(tree, (el) => el.type === "button").find((el) =>
+      buttonLabel(el).includes("重试"),
+    );
+    expect(retryBtn).toBeTruthy();
+    retryBtn!.props.onClick?.();
+    // Remount effects after reloadToken bump
+    tree = mount(api);
+    await flush();
+    tree = rerender(api);
+    expect(findControl(tree, (el) => el.props.id === "course-goal-target-date")?.props.value).toBe(
+      "2026-11-20",
+    );
+    expect(
+      findControl(tree, (el) => el.props.id === "course-goal-weekly-minutes")?.props.value,
+    ).toBe("90");
+    const saveBtn = findAll(tree, (el) => el.type === "button").find(
+      (el) => buttonLabel(el).includes("保存") && !buttonLabel(el).includes("清除"),
+    );
+    expect(saveBtn).toBeTruthy();
+  });
+
+  it("successful load shows date/minutes inputs and save", async () => {
+    const api = mockApi();
+    mount(api);
+    await flush();
+
+    const tree = rerender(api);
+    expect(findControl(tree, (el) => el.props.id === "course-goal-target-date")).toBeTruthy();
+    expect(findControl(tree, (el) => el.props.id === "course-goal-weekly-minutes")).toBeTruthy();
+    const saveBtn = findAll(tree, (el) => el.type === "button").find(
+      (el) => buttonLabel(el).includes("保存") && !buttonLabel(el).includes("清除"),
+    );
+    expect(saveBtn).toBeTruthy();
   });
 });

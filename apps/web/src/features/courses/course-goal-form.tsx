@@ -57,6 +57,7 @@ export function CourseGoalForm({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [hasGoal, setHasGoal] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -64,10 +65,12 @@ export function CourseGoalForm({
     let active = true;
     setLoading(true);
     setError("");
+    setLoadFailed(false);
     api
       .getAdaptivePrefs()
       .then((res) => {
         if (!active) return;
+        setLoadFailed(false);
         const existing = res.prefs.courseGoals[courseId];
         if (existing) {
           setTargetDate(existing.targetDate ?? "");
@@ -81,6 +84,7 @@ export function CourseGoalForm({
       })
       .catch((reason: unknown) => {
         if (active) {
+          setLoadFailed(true);
           setError(reason instanceof Error ? reason.message : "课程目标读取失败，请重试。");
         }
       })
@@ -164,6 +168,21 @@ export function CourseGoalForm({
         <p className="mt-3 text-xs text-zinc-500" role="status">
           正在读取课程目标…
         </p>
+      ) : loadFailed ? (
+        <div className="mt-3 space-y-2">
+          {error ? (
+            <p className="text-xs leading-5 text-red-700" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <button
+            type="button"
+            className={ui.quiet}
+            onClick={() => setReloadToken((v) => v + 1)}
+          >
+            重试
+          </button>
+        </div>
       ) : (
         <div className="mt-3 space-y-3">
           <div className="flex flex-wrap items-end gap-3">
@@ -238,27 +257,18 @@ export function CourseGoalForm({
               清除目标
             </button>
           </div>
+          {error ? (
+            <p className="text-xs leading-5 text-red-700" role="alert">
+              {error}
+            </p>
+          ) : null}
+          {message ? (
+            <p className="text-xs leading-6 text-zinc-600" role="status">
+              {message}
+            </p>
+          ) : null}
         </div>
       )}
-      {error ? (
-        <p className="mt-2 text-xs leading-5 text-red-700" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {message ? (
-        <p className="mt-2 text-xs leading-6 text-zinc-600" role="status">
-          {message}
-        </p>
-      ) : null}
-      {error && !loading ? (
-        <button
-          type="button"
-          className={`${ui.quiet} mt-1`}
-          onClick={() => setReloadToken((v) => v + 1)}
-        >
-          重试读取
-        </button>
-      ) : null}
     </section>
   );
 }
