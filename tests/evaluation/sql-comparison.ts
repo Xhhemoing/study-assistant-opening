@@ -151,11 +151,11 @@ async function storeFocus(
   course: Course,
   observationId: string | null,
   activityKind: TeachingLearnerFocus["activityKind"] = "targeted_explain",
-  requirementKey = "R2",
 ) {
-  // The extra requirement field is deliberate forward-compatible fixture data.
+  // Common persisted shape accepted by BOTH schemas. Requirement propagation is
+  // assessed separately through each version's actual task/activity services.
   const learnerFocus = {
-    skillLabel: "fractions", requirementKey, activityKind,
+    skillLabel: "fractions", activityKind,
     reasonCode: activityKind === "targeted_explain" ? "verified_error" : activityKind === "transfer_check" ? "independent" : "assistance_dependent",
     focusObservationId: observationId,
     recentAssistance: [activityKind === "reduced_help_practice" ? "hinted" : "independent"],
@@ -283,7 +283,7 @@ it("records every portable real-SQL A/B scenario without stopping on behavioral 
       const attempt = await course.start({ requirementKey: "R1" });
       if (activityKind === "reduced_help_practice") await course.help(attempt);
       await course.submit(attempt, { ...reference(course), assistance: activityKind === "reduced_help_practice" ? "hinted" : "independent" });
-      const activityId = await storeFocus(fixture, course, null, activityKind, "R1");
+      const activityId = await storeFocus(fixture, course, null, activityKind);
       const before = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
       await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
       await backupRows(fixture.sql, fixture.scope).chunk(course.sourceId, 2);
