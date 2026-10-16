@@ -79,6 +79,44 @@ describe("ledgerActionForProviderError", () => {
   });
 });
 
+describe("durable provider receipts", () => {
+  it("persists the response with its capped charge before settlement", async () => {
+    const b = fakeBudget();
+    const order: string[] = [];
+    const budget = { ...b.api, settle: async (...args: Parameters<typeof b.api.settle>) => {
+      order.push("settle"); return b.api.settle(...args);
+    } };
+    await runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output }, budget,
+      persistResult: async (actualOutput, receipt) => {
+        expect(actualOutput).toBe(output);
+        expect(receipt).toEqual({ reservationId: "res-1", settledCents: 120 });
+        order.push("persist");
+      },
+    });
+    expect(order).toEqual(["persist", "settle"]);
+  });
+
+  it("keeps a failed persistence unknown and never releases or settles it", async () => {
+    const b = fakeBudget();
+    await expect(runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output }, budget: b.api,
+      persistResult: async () => { throw new Error("storage failed"); },
+    })).rejects.toThrow("storage failed");
+    expect(b.repo.unknowns).toEqual(["res-1"]);
+    expect(b.repo.released).toEqual([]);
+    expect(b.repo.settled).toEqual([]);
+  });
+
+  it("persists usable output without inventing a price when usage is missing", async () => {
+    const b = fakeBudget();
+    await runBudgetedCall({ ...options, input: options.input as never,
+      provider: { complete: async () => ({ ...output, inputTokens: null }) }, budget: b.api,
+      persistResult: async (_, receipt) => { expect(receipt.settledCents).toBeNull(); },
+    });
+    expect(b.repo.unknowns).toEqual(["res-1"]);
+    expect(b.repo.settled).toEqual([]);
+  });
+});
+
 describe("settleCentsForActual", () => {
   it("caps overage to reserved and flags audit", () => {
     expect(settleCentsForActual(10, 999)).toEqual({ settledCents: 10, overage: true });

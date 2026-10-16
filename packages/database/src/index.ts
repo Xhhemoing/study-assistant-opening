@@ -207,3 +207,4 @@ export {
   type OpeningRestoreCliLiveDepsMissing,
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
+export { createOpeningTranscriptionCheckpointsRepository, type TranscriptionChunkIdentity, type TranscriptionChunkReceipt } from "./repositories/opening-transcription-checkpoints";

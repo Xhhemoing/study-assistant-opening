@@ -30,7 +30,7 @@ describe("workspace media transcription wiring", () => {
     expect(await wiring.resolveTranscribe!(scope, job, "source")).toBe(mocks.local);
     mocks.get.mockResolvedValue({ settings: { ...DEFAULT_OPENING_AI_SETTINGS, transcription: { engine: "model" } }, invalidStoredSettings: false });
     expect(await wiring.resolveTranscribe!(scope, job, "source")).toBe(adapter);
-    expect(mocks.model).toHaveBeenCalledWith({ scope, jobId: "job", gateway: mocks.gateway, budget: mocks.budget, beforeSend: expect.any(Function) });
+    expect(mocks.model).toHaveBeenCalledWith({ scope, jobId: "job", gateway: mocks.gateway, budget: mocks.budget, beforeSend: expect.any(Function), checkpoints: { load: expect.any(Function), save: expect.any(Function) } });
     await mocks.model.mock.calls[0]![0].beforeSend();
     expect(mocks.excluded).toHaveBeenCalledWith(scope, "source");
   });

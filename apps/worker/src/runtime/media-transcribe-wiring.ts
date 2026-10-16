@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { createOpeningAiSettingsRepository, type OpeningBudgetRepository, type OpeningJobRecord, type OpeningPrivacyRepository } from "@aistudy/database";
+import { createOpeningAiSettingsRepository, createOpeningTranscriptionCheckpointsRepository, type OpeningBudgetRepository, type OpeningJobRecord, type OpeningPrivacyRepository } from "@aistudy/database";
 import type { Scope } from "@aistudy/contracts";
 import type { ParseMediaDeps } from "../jobs/parse-media";
 import { createModelTranscribeAdapter } from "../parsers/model-transcribe-adapter";
@@ -14,6 +14,7 @@ export function createMediaTranscribeWorkerDeps(sql: Sql, shared: {
   const preferences = createOpeningAiSettingsRepository(sql);
   const gateway = createDbModelGateway(sql);
   const local = createPythonTranscribeAdapter();
+  const checkpoints = createOpeningTranscriptionCheckpointsRepository(sql);
   async function assertPrivacyCurrent(scope: Scope, job: OpeningJobRecord, sourceId: string) {
     const [epoch, excluded] = await Promise.all([
       shared.privacy.getWorkspaceEpoch(scope),
@@ -30,6 +31,11 @@ export function createMediaTranscribeWorkerDeps(sql: Sql, shared: {
       return createModelTranscribeAdapter({
         gateway, scope, budget: scopeBudget(shared.budget, scope), jobId: job.id,
         beforeSend: () => assertPrivacyCurrent(scope, job, sourceId),
+        checkpoints: {
+          load: chunk => checkpoints.recover(scope, { ...chunk, jobId: job.id, privacyEpoch: job.privacyEpoch }, shared.budget),
+          save: (chunk, output, receipt) => checkpoints.save(scope,
+            { ...chunk, jobId: job.id, privacyEpoch: job.privacyEpoch }, { output, ...receipt }),
+        },
       });
     },
   };
