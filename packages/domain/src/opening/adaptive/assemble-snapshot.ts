@@ -1,6 +1,7 @@
 import { addLocalDays } from "../daily-draft";
 import type { LearnerSnapshotSources, SnapshotCourseSource, SnapshotObservation, SnapshotSkillSummary } from "./snapshot-sources";
 import { parseSuggestionKey, type LearnerSnapshot, type SkillSignal, type SkillStatus } from "./types";
+import { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
 
 function newestObservationFirst(a: SnapshotObservation, b: SnapshotObservation): number {
   const time = Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt);
@@ -16,18 +17,20 @@ function summaryStatus(rows: readonly SnapshotSkillSummary[]): SkillStatus {
 
 function assembleSkills(course: SnapshotCourseSource): SkillSignal[] {
   const groups = new Map<string, { summaries: SnapshotSkillSummary[]; observations: SnapshotObservation[] }>();
-  const groupFor = (skillLabel: string) => {
-    let group = groups.get(skillLabel);
+  const groupFor = (row: { skillLabel: string; requirementKey?: string | null }) => {
+    const key = adaptiveSkillIdentity(row.skillLabel, row.requirementKey);
+    let group = groups.get(key);
     if (!group) {
       group = { summaries: [], observations: [] };
-      groups.set(skillLabel, group);
+      groups.set(key, group);
     }
     return group;
   };
-  for (const summary of course.summaries) groupFor(summary.skillLabel).summaries.push(summary);
-  for (const observation of course.observations) groupFor(observation.skillLabel).observations.push(observation);
+  for (const summary of course.summaries) groupFor(summary).summaries.push(summary);
+  for (const observation of course.observations) groupFor(observation).observations.push(observation);
 
-  return [...groups].map(([skillLabel, { summaries, observations }]) => {
+  return [...groups.values()].map(({ summaries, observations }) => {
+    const identity = summaries[0] ?? observations[0]!;
     observations.sort(newestObservationFirst);
     let lastObservedAt: string | null = null;
     for (const row of summaries) {
@@ -37,22 +40,31 @@ function assembleSkills(course: SnapshotCourseSource): SkillSignal[] {
       }
     }
     return {
-      skillLabel,
-      status: observations[0]?.verifiedCorrect === "no" ? "needs_review" : summaryStatus(summaries),
+      skillLabel: identity.skillLabel,
+      ...(identity.requirementKey !== undefined ? { requirementKey: identity.requirementKey } : {}),
+      status: observations[0]?.verifiedCorrect === "no" && observations[0].usableForCurrentVersion === "yes"
+        ? "needs_review" : summaryStatus(summaries),
       lastObservedAt,
-      recentAssistance: observations.slice(0, 3).map((row) => row.assistance),
+      recentAssistance: observations.filter(row => row.usableForCurrentVersion === "yes").slice(0, 3).map((row) => row.assistance),
     };
   });
 }
 
 function nextSkills(course: SnapshotCourseSource, skills: readonly SkillSignal[]): string[] {
   if (!course.hasUsableMaterials) return [];
-  const bySkill = new Map(skills.map((skill) => [skill.skillLabel, skill.status]));
+  const bySkill = new Map<string, SkillSignal[]>();
+  for (const skill of skills) {
+    const key = normalizeSkillLabelKey(skill.skillLabel);
+    const rows = bySkill.get(key) ?? [];
+    rows.push(skill);
+    bySkill.set(key, rows);
+  }
   const byNodeId = new Map(course.knowledgeNodes.map((node) => [node.id, node]));
   return course.knowledgeNodes.filter((node) =>
-    !bySkill.has(node.title) && node.prerequisiteIds.every((id) => {
+    !bySkill.has(normalizeSkillLabelKey(node.title)) && node.prerequisiteIds.every((id) => {
       const prerequisite = byNodeId.get(id);
-      return prerequisite !== undefined && bySkill.get(prerequisite.title) === "observed_independent";
+      const requirements = prerequisite && bySkill.get(normalizeSkillLabelKey(prerequisite.title));
+      return Boolean(requirements?.length && requirements.every(row => row.status === "observed_independent"));
     }),
   ).map((node) => node.title);
 }

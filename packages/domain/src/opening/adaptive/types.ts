@@ -1,13 +1,14 @@
 import type { CourseGoal, TaskItem } from "@aistudy/contracts";
 
 /** Rule set that produced a draft; stored on drafts and shown in the reason drawer. */
-export const ADAPTIVE_STRATEGY_VERSION = "adaptive-1";
+export const ADAPTIVE_STRATEGY_VERSION = "adaptive-2";
 
 export type SkillStatus = "unobserved" | "needs_check" | "observed_independent" | "needs_review";
 export type Assistance = "independent" | "hinted" | "revealed" | "unknown";
 
 export type SkillSignal = {
   skillLabel: string;
+  requirementKey?: string | null;
   status: SkillStatus;
   lastObservedAt: string | null;
   /** Assistance on the latest observations, newest first. */
@@ -55,8 +56,11 @@ export function stableHash(text: string): string {
 }
 
 /** Same suggestion across days (kind + course + skill); used for skip history. */
-export function suggestionIdentity(kind: string, courseId: string | null, skillLabel: string | null): string {
-  return `${kind}:${courseId ?? "none"}:${skillLabel === null ? "none" : stableHash(skillLabel)}`;
+export function suggestionIdentity(kind: string, courseId: string | null, skillLabel: string | null, requirementKey?: string | null): string {
+  const skill = skillLabel === null ? "none" : requirementKey == null
+    ? stableHash(skillLabel)
+    : `requirement-${stableHash(JSON.stringify([skillLabel, requirementKey]))}`;
+  return `${kind}:${courseId ?? "none"}:${skill}`;
 }
 
 /** Task clientKey of a suggestion; one per identity per local day. */
@@ -76,4 +80,8 @@ export function taskCourseId(task: TaskItem): string | null {
 
 export function taskSkillLabel(task: TaskItem): string | null {
   return task.skillLabel ?? task.retest?.skillLabel ?? null;
+}
+
+export function taskRequirementKey(task: TaskItem): string | null {
+  return task.requirementKey ?? task.retest?.requirementKey ?? null;
 }

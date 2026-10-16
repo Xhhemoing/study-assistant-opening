@@ -154,7 +154,7 @@ export async function readOpeningBackupTableRows(
     FROM opening_privacy_exclusions WHERE workspace_id = ${id} ORDER BY source_id`);
   tables.opening_tasks = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
-      candidate_id, client_key, course_id, skill_label, origin, not_before, created_at, updated_at
+      candidate_id, client_key, course_id, skill_label, requirement_key, origin, not_before, created_at, updated_at
     FROM opening_tasks WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,

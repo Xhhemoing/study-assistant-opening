@@ -1,7 +1,5 @@
-/** Collapse whitespace / full-width / case so near-duplicate skill names can be hinted. */
-export function normalizeSkillLabelKey(value: string): string {
-  return value.normalize("NFKC").trim().toLocaleLowerCase().replace(/\s+/gu, "");
-}
+import { normalizeSkillLabelKey } from "@aistudy/domain";
+export { normalizeSkillLabelKey };
 
 /** Unique skill labels from learning summary rows, preserving first-seen spelling. */
 export function collectSkillLabelOptions(

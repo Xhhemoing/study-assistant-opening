@@ -104,6 +104,7 @@ export const learningActivityKindSchema = z.enum([
 export const teachingLearnerFocusSchema = z
   .object({
     skillLabel: z.string().min(1).max(200),
+    requirementKey: z.string().max(200).nullable().optional(),
     activityKind: learningActivityKindSchema,
     reasonCode: z.string().min(1).max(40),
     /** The verified-incorrect attempt to explain against; null when there is none. */

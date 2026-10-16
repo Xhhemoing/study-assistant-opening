@@ -17,7 +17,7 @@ const summary = (overrides: Partial<SnapshotSkillSummary> = {}): SnapshotSkillSu
 });
 const observation = (overrides: Partial<SnapshotObservation> = {}): SnapshotObservation => ({
   id: "attempt-1", skillLabel: "极限", attemptedAt: "2026-10-21T10:00:00Z",
-  assistance: "independent", verifiedCorrect: "yes", independentAttempt: "yes", problemId: "problem-1", ...overrides,
+  assistance: "independent", usableForCurrentVersion: "yes", verifiedCorrect: "yes", independentAttempt: "yes", problemId: "problem-1", ...overrides,
 });
 const task = (overrides: Partial<SnapshotTaskRow> = {}): SnapshotTaskRow => ({
   clientKey: null, status: "done", minutes: 25, courseId, closedLocalDate: "2026-10-21", ...overrides,
@@ -38,6 +38,36 @@ function freeze<T>(value: T): T {
 }
 
 describe("assembleLearnerSnapshot", () => {
+  it("keeps same-label requirements and unattributed history in separate evidence groups", () => {
+    const snapshot = assembleLearnerSnapshot(sources({ courses: [course({
+      summaries: [summary({ requirementKey: "calculate", status: "observed_independent" }),
+        summary({ requirementKey: "prove" }), summary({ requirementKey: null })],
+      observations: [observation({ requirementKey: "calculate" }),
+        observation({ id: "proof-error", requirementKey: "prove", verifiedCorrect: "no" }),
+        observation({ id: "legacy", requirementKey: null, assistance: "hinted" })],
+      knowledgeNodes: [{ id: "limit", title: "极限", prerequisiteIds: [] },
+        { id: "next", title: "连续", prerequisiteIds: ["limit"] }],
+    })] }));
+    expect(snapshot.courses[0]!.skills).toMatchObject([
+      { requirementKey: "calculate", status: "observed_independent", recentAssistance: ["independent"] },
+      { requirementKey: "prove", status: "needs_review", recentAssistance: ["independent"] },
+      { requirementKey: null, status: "needs_check", recentAssistance: ["hinted"] },
+    ]);
+    expect(snapshot.courses[0]!.nextSkills).toEqual([]);
+    expect(propose(snapshot)).toMatchObject([{ skillLabel: "极限", requirementKey: "prove" }]);
+  });
+
+  it.each(["no", "unknown", undefined] as const)("does not act on stale errors or help when current eligibility is %s", (usableForCurrentVersion) => {
+    const snapshot = assembleLearnerSnapshot(sources({ courses: [course({
+      summaries: [summary()], observations: [
+        observation({ usableForCurrentVersion, verifiedCorrect: "no", assistance: "revealed" }),
+        observation({ id: "other", usableForCurrentVersion, assistance: "hinted" }),
+      ],
+    })] }));
+    expect(snapshot.courses[0]!.skills[0]).toMatchObject({ status: "needs_check", recentAssistance: [] });
+    expect(propose(snapshot)).toEqual([]);
+  });
+
   it.each([
     { statuses: ["observed_independent", "needs_review", "needs_check"], expected: "needs_review" },
     { statuses: ["observed_independent", "observed_independent"], expected: "observed_independent" },

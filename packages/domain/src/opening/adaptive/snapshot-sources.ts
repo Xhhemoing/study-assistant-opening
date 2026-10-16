@@ -13,17 +13,22 @@ export type SnapshotDataStatus = "available" | "not_configured" | "unavailable";
 export type SnapshotObservation = {
   id: string;
   skillLabel: string;
+  requirementKey?: string | null;
+  itemVersionId?: string | null;
   /** Original attempt time (ISO); a revision keeps the attempt's time. */
   attemptedAt: string;
   assistance: Assistance;
   verifiedCorrect: EvidenceEligibilityValue;
   independentAttempt: EvidenceEligibilityValue;
+  /** Missing historical qualification never means current evidence. */
+  usableForCurrentVersion?: EvidenceEligibilityValue;
   problemId: string | null;
 };
 
 /** One summarizeObservations row over the course's full evidence (not the HTTP projection). */
 export type SnapshotSkillSummary = {
   skillLabel: string;
+  requirementKey?: string | null;
   status: SkillStatus;
   lastObservedAt: string | null;
 };

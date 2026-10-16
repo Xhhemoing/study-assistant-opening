@@ -1,15 +1,18 @@
 /** Real SQL evidence → learner snapshot → Today draft; C3 acceptance is covered separately. */
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpeningPlanningSettings, PlanDraft } from "@aistudy/contracts";
+import type { OpeningPlanningSettings, PlanDraft, TeachingLearnerFocus } from "@aistudy/contracts";
 import {
   createOpeningAdaptivePrefsRepository,
   createOpeningKnowledgeRepository,
   createOpeningPlanningSettingsRepository,
   createOpeningPlansRepository,
   readOpeningLearnerSnapshotBase,
+  readOpeningTeachingCompilerFocus,
+  readOpeningTeachingTaskFocus,
 } from "@aistudy/database";
 import { ADAPTIVE_STRATEGY_VERSION, addLocalDays, suggestionIdentity, suggestionKey } from "@aistudy/domain";
+import { readOpeningCourseObservationHeads } from "../../packages/database/src/repositories/opening-learning-read";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createSqlLearnerSnapshotService } from "../../apps/web/src/features/opening/planning/learner-snapshot-runtime";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -48,11 +51,23 @@ async function seedCourse() {
   return course;
 }
 
-async function submitVerifiedError(course: AttemptFixture) {
-  return course.submit(await course.start(), {
+async function submitVerifiedError(course: AttemptFixture, requirementKey?: string) {
+  return course.submit(await course.start({ requirementKey }), {
     answer: "2", outcome: "incorrect", verdictSource: "reference_checked", referenceSourceId: course.sourceId,
     referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
   });
+}
+
+async function storeTeachingFocus(course: AttemptFixture, observationId: string | null, overrides: Partial<TeachingLearnerFocus> = {}) {
+  const learnerFocus: TeachingLearnerFocus = {
+    skillLabel: "fractions", activityKind: "targeted_explain", reasonCode: "verified_error",
+    focusObservationId: observationId, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION, ...overrides,
+  };
+  const [activity] = await fixture.sql`UPDATE opening_teaching_activities SET goal_json=${fixture.sql.json({ learnerFocus })}
+    WHERE id=(SELECT activity_id FROM opening_learning_sessions WHERE id=${course.sessionId})
+      AND workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}
+    RETURNING id`;
+  return { activityId: String(activity!.id), learnerFocus };
 }
 
 function services(enabled = true, clock = () => now) {
@@ -84,6 +99,117 @@ function planningResult(draft: PlanDraft) {
 }
 
 describe("adaptive learning loop with real evidence", () => {
+  it.each(["transfer_check", "reduced_help_practice"] as const)("rechecks current evidence for %s even without a focus observation", async (activityKind) => {
+    const course = await seedCourse();
+    const attempt = await course.start({ requirementKey: "R1" });
+    if (activityKind === "reduced_help_practice") await course.help(attempt);
+    await course.submit(attempt, { verdictSource: "reference_checked", referenceSourceId: course.sourceId,
+      assistance: activityKind === "reduced_help_practice" ? "hinted" : "independent",
+      referenceCheck: { referenceSourceId: course.sourceId, method: "Reference comparison", scope: "whole_answer" } });
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, null, { activityKind, requirementKey: "R1",
+      recentAssistance: [activityKind === "reduced_help_practice" ? "hinted" : "independent"] });
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({ learnerFocus });
+    await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
+    await backupRows(fixture.sql, fixture.scope).chunk(course.sourceId, 2);
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
+  });
+
+  it("reads the accepted task's requirement only inside its owner scope", async () => {
+    const course = await seedCourse();
+    const taskId = randomUUID();
+    await fixture.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, course_id, skill_label, requirement_key)
+      VALUES (${taskId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, 'Formula correction', 10,
+        ${course.courseId}, 'fractions', 'formula-application')`;
+    expect(await readOpeningTeachingTaskFocus(fixture.sql, fixture.scope, taskId)).toEqual({
+      title: "Formula correction", courseId: course.courseId, skillLabel: "fractions", requirementKey: "formula-application",
+    });
+    expect(await readOpeningTeachingTaskFocus(fixture.sql, fixture.otherScope, taskId)).toBeNull();
+    expect(await readOpeningTeachingTaskFocus(fixture.sql, {
+      workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.otherScope.ownerUserId,
+    }, taskId)).toBeNull();
+  });
+
+  it("compiles a current verified error only for the owning scope", async () => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course);
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id);
+
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
+      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+    });
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.otherScope, activityId)).toEqual({});
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, {
+      workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.otherScope.ownerUserId,
+    }, activityId)).toEqual({});
+  });
+
+  it.each([null, "formula-application"])("compiles a current error with matching requirement %s", async (requirementKey) => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course, requirementKey ?? undefined);
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id, { requirementKey });
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
+      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+    });
+  });
+
+  it("compiles a matching requirement when the observation uses a normalized skill alias", async () => {
+    const course = await seedCourse();
+    const alias = "  ＦＲＡＣＴＩＯＮＳ  ";
+    const session = await course.learning.createSession(fixture.scope, {
+      courseId: course.courseId, skillLabel: alias, sourceIds: [course.sourceId],
+    });
+    const wrong = await course.submit(await course.start({ sessionId: session.id, requirementKey: "formula-application" }), {
+      sessionId: session.id, skillLabel: alias, answer: "2", outcome: "incorrect",
+      verdictSource: "reference_checked", referenceSourceId: course.sourceId,
+      referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
+    });
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id, { requirementKey: "formula-application" });
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
+      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+    });
+  });
+
+  it.each([
+    { requirementKey: "different-requirement" },
+    { requirementKey: null },
+    { requirementKey: "formula-application", skillLabel: "different skill" },
+  ])("does not compile a current error outside the persisted requirement/skill focus %j", async (focus) => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course, "formula-application");
+    const { activityId } = await storeTeachingFocus(course, wrong.id, focus);
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
+  });
+
+  it.each([
+    { change: "changed_source_version", usableForCurrentVersion: "unknown", reason: "version_changed_needs_check" },
+    { change: "unavailable_historical_version", usableForCurrentVersion: "no", reason: "version_unavailable" },
+    { change: "unknown_captured_version", usableForCurrentVersion: "unknown", reason: "version_unknown" },
+  ] as const)("keeps $change evidence in history without compiling it as a current weakness", async ({ change, usableForCurrentVersion, reason }) => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course);
+    const { activityId } = await storeTeachingFocus(course, wrong.id);
+
+    if (change !== "unknown_captured_version") {
+      await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${course.sourceId}`;
+      // The course still has current usable material; only the captured evidence is stale.
+      await backupRows(fixture.sql, fixture.scope).chunk(course.sourceId, 2);
+    }
+    if (change === "unavailable_historical_version") {
+      await fixture.sql`UPDATE opening_source_versions SET availability='unavailable'
+        WHERE source_id=${course.sourceId} AND version=1 AND workspace_id=${fixture.scope.workspaceId}`;
+    } else if (change === "unknown_captured_version") {
+      // Legacy evidence may not identify the captured source version.
+      await fixture.sql`UPDATE opening_learning_observations SET source_versions=NULL WHERE id=${wrong.id}`;
+    }
+
+    const history = await readOpeningCourseObservationHeads(fixture.sql, fixture.scope, course.courseId);
+    expect(history).toEqual([expect.objectContaining({
+      id: wrong.id, answer: "2", outcome: "incorrect",
+      eligibility: expect.objectContaining({ verifiedCorrect: "no", usableForCurrentVersion, reasonCodes: expect.arrayContaining([reason]) }),
+    })]);
+    expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
+  });
+
   it("turns a verified independent error into a weak-skill Today suggestion without creating a task", async () => {
     const course = await seedCourse();
     const wrong = await submitVerifiedError(course);

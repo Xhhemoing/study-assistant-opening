@@ -8,6 +8,7 @@ export function withTaskPlanningFields(task: TaskItem, row: Record<string, unkno
   const out: TaskItem = { ...task };
   if (typeof row.course_id === "string") out.courseId = row.course_id;
   if (typeof row.skill_label === "string") out.skillLabel = row.skill_label;
+  if (typeof row.requirement_key === "string") out.requirementKey = row.requirement_key;
   if (typeof row.origin === "string" && row.origin !== "manual") out.origin = row.origin as TaskOrigin;
   if (row.not_before) out.notBefore = new Date(row.not_before as string | Date).toISOString();
   return out;

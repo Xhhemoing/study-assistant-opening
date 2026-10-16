@@ -100,6 +100,8 @@ export const suggestedTaskSchema = z
     minutes: z.number().int().positive().max(240),
     courseId: uuidSchema.nullable(),
     skillLabel: z.string().min(1).max(200).nullable(),
+    /** Captured target, preserved when the suggestion becomes a task. */
+    requirementKey: z.string().max(200).nullable().optional(),
     reasonCode: planReasonCodeSchema,
     reason: z.string().min(1).max(500),
   })

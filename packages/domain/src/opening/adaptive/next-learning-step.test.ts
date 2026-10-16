@@ -9,6 +9,7 @@ const observation = (overrides: Partial<SnapshotObservation> = {}): SnapshotObse
   assistance: "independent",
   verifiedCorrect: "yes",
   independentAttempt: "yes",
+  usableForCurrentVersion: "yes",
   problemId: "matrix-problem",
   ...overrides,
 });
@@ -21,6 +22,12 @@ const input = (overrides: Partial<NextLearningStepInput> = {}): NextLearningStep
 });
 
 describe("nextLearningStep", () => {
+  it.each(["no", "unknown", undefined] as const)("does not teach from an inapplicable error or help (%s)", (usableForCurrentVersion) => {
+    expect(nextLearningStep(input({ status: "observed_independent", observations: [
+      observation({ verifiedCorrect: "no", assistance: "revealed", usableForCurrentVersion }),
+    ] }))).toEqual({ activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" });
+  });
+
   it("honors a full explanation request even with a verified error and assisted attempts", () => {
     expect(nextLearningStep(input({
       wantsFullExplanation: true,

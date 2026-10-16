@@ -59,6 +59,7 @@ export function createOpeningTeachingActivityService(
         }
         if (loadFeatureSwitches(env).adaptivePlanning) {
           let skillLabel = typeof input.createIntent.skillLabel === "string" ? input.createIntent.skillLabel.trim().slice(0, 200) || null : null;
+          let requirementKey: string | undefined;
           if (input.createIntent.taskId !== undefined) {
             const taskId = uuidSchema.parse(input.createIntent.taskId);
             const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
@@ -66,13 +67,14 @@ export function createOpeningTeachingActivityService(
             input.courseId = task.courseId;
             input.intentSummary = task.title;
             skillLabel = task.skillLabel;
+            requirementKey = task.requirementKey ?? undefined;
             if (task.courseId) input.sourceIds = await createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, task.courseId);
           }
           if (input.courseId) {
             const settings = await createOpeningPlanningSettingsRepository(sql).get(scope);
             const timeZone = settings.settings?.timeZone ?? "Asia/Shanghai";
             const read = await createSqlLearnerSnapshotService(sql).read(scope, { date: localDateKeyInZone(new Date(), timeZone), timeZone });
-            const focus = teachingLearnerFocus(read, input.courseId, skillLabel, input.goalJson?.wantsFullExplanation === true);
+            const focus = teachingLearnerFocus(read, input.courseId, skillLabel, input.goalJson?.wantsFullExplanation === true, requirementKey);
             if (focus) input.goalJson = { ...input.goalJson, learnerFocus: focus };
           }
         }

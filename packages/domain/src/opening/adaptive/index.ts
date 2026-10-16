@@ -6,6 +6,7 @@ export {
   suggestionKey,
   taskCourseId,
   taskSkillLabel,
+  taskRequirementKey,
   type Assistance,
   type CourseSignal,
   type LearnerSnapshot,
@@ -50,3 +51,5 @@ export type {
 } from "./snapshot-sources";
 export { assembleLearnerSnapshot } from "./assemble-snapshot";
 export { nextLearningStep } from "./next-learning-step";
+export { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
+export { toSnapshotEvidence } from "./snapshot-evidence";
