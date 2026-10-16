@@ -17,11 +17,10 @@ import {
 } from "@aistudy/domain";
 import { ui, tone } from "../design/ui";
 import { createOpeningApi, type OpeningApi } from "../client/api";
-import { BlockRenderer } from "./block-renderer";
 import {
-  BlockCommands,
   isBranchStackEmpty,
 } from "./block-commands";
+import { TeachingBlockItem } from "./teaching-block-item";
 import {
   isKnownSchemaVersion,
   readSchemaVersion,
@@ -281,6 +280,31 @@ export function TeachingWorkspace({
     setWorkspaceConflict(null);
   }, [activity.id, api]);
 
+  const handleBlockReread = useCallback(async () => {
+    try {
+      await reread();
+    } catch (err) {
+      setRereadError(
+        err instanceof Error ? err.message : "重新拉取失败",
+      );
+      throw err;
+    }
+  }, [reread]);
+
+  const attemptContext = useMemo(
+    () => ({
+      ...liveActivity,
+      contentVersion,
+      onCourseAssociated: (next: TeachingActivity) => {
+        setLiveActivity(next);
+        onActivityUpdated?.(next);
+      },
+    }),
+    [liveActivity, contentVersion, onActivityUpdated],
+  );
+
+  const showBlockCommands = liveActivity.status !== "completed";
+
   return (
     <section
       className="flex h-full min-h-0 flex-col overflow-y-auto px-5 py-5"
@@ -369,40 +393,24 @@ export function TeachingWorkspace({
                 {pastOrSkippedBlocks.map((block) => {
                   const status = blockFocus.statusById.get(block.blockId) ?? "past";
                   return (
-                    <div
+                    <TeachingBlockItem
                       key={block.blockId}
-                      className="space-y-1 opacity-90"
-                      data-teaching-block-focus={status}
-                      data-block-id={block.blockId}
-                    >
-                      <BlockRenderer
-                        block={block}
-                        schemaVersion={schemaVersion}
-                        sourceRefs={liveInit.sourceRefs}
-                        attemptContext={{ ...liveActivity, contentVersion, onCourseAssociated: (next) => { setLiveActivity(next); onActivityUpdated?.(next); } }}
-                      />
-                      {liveActivity.status !== "completed" ? <BlockCommands
-                        activityId={activity.id}
-                        blockId={block.blockId}
-                        contentVersion={contentVersion}
-                        pathVersion={pathVersion}
-                        returnDisabled={returnDisabled}
-                        whyAvailable={WHY_ASSIST_AVAILABLE}
-                        api={api}
-                        onSuccess={applySuccess}
-                        onConflict={handleConflict}
-                        onReread={async () => {
-                          try {
-                            await reread();
-                          } catch (err) {
-                            setRereadError(
-                              err instanceof Error ? err.message : "重新拉取失败",
-                            );
-                            throw err;
-                          }
-                        }}
-                      /> : null}
-                    </div>
+                      block={block}
+                      focusStatus={status}
+                      schemaVersion={schemaVersion}
+                      sourceRefs={liveInit.sourceRefs}
+                      attemptContext={attemptContext}
+                      showCommands={showBlockCommands}
+                      activityId={activity.id}
+                      contentVersion={contentVersion}
+                      pathVersion={pathVersion}
+                      returnDisabled={returnDisabled}
+                      whyAvailable={WHY_ASSIST_AVAILABLE}
+                      api={api}
+                      onSuccess={applySuccess}
+                      onConflict={handleConflict}
+                      onReread={handleBlockReread}
+                    />
                   );
                 })}
               </div>
@@ -410,27 +418,16 @@ export function TeachingWorkspace({
           ) : null}
           {focusMainBlocks.map((block) => {
             const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
-            const isCurrent = status === "current";
             return (
-            <div
-              key={block.blockId}
-              className={
-                isCurrent
-                  ? "space-y-1 rounded-lg ring-2 ring-emerald-500/55 ring-offset-2"
-                  : "space-y-1"
-              }
-              data-teaching-block-focus={status}
-              data-block-id={block.blockId}
-            >
-              <BlockRenderer
+              <TeachingBlockItem
+                key={block.blockId}
                 block={block}
+                focusStatus={status}
                 schemaVersion={schemaVersion}
                 sourceRefs={liveInit.sourceRefs}
-                attemptContext={{ ...liveActivity, contentVersion, onCourseAssociated: (next) => { setLiveActivity(next); onActivityUpdated?.(next); } }}
-              />
-              {liveActivity.status !== "completed" ? <BlockCommands
+                attemptContext={attemptContext}
+                showCommands={showBlockCommands}
                 activityId={activity.id}
-                blockId={block.blockId}
                 contentVersion={contentVersion}
                 pathVersion={pathVersion}
                 returnDisabled={returnDisabled}
@@ -438,18 +435,8 @@ export function TeachingWorkspace({
                 api={api}
                 onSuccess={applySuccess}
                 onConflict={handleConflict}
-                onReread={async () => {
-                  try {
-                    await reread();
-                  } catch (err) {
-                    setRereadError(
-                      err instanceof Error ? err.message : "重新拉取失败",
-                    );
-                    throw err;
-                  }
-                }}
-              /> : null}
-            </div>
+                onReread={handleBlockReread}
+              />
             );
           })}
         </div>
