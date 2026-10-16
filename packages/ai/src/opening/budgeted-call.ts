@@ -123,6 +123,8 @@ export type BudgetedCallOptions = {
   purpose?: string;
   /** Optional persisted result reference stored on settle and replayed later. */
   resultRef?: string;
+  /** Save a recoverable response before settlement; failure keeps the spend unknown. */
+  persistResult?: (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null }) => Promise<void>;
   /**
    * Free-tier model: reserve at zero cost under this per-day request cap
    * (reservedCents must then be 0). Paid models leave it unset.
@@ -240,12 +242,22 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     }
     throw error;
   }
+  const settlement = output.inputTokens === null || output.outputTokens === null
+    ? null
+    : settleCentsForActual(options.reservedCents, options.actualCents(output));
+  try {
+    await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
+  } catch (error) {
+    // The provider already ran. Never release or retry it when durable storage failed.
+    await options.budget.markUnknown(reservation.id);
+    throw error;
+  }
   // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
   if (output.inputTokens === null || output.outputTokens === null) {
     await options.budget.markUnknown(reservation.id);
   } else {
     const actual = options.actualCents(output);
-    const { settledCents, overage } = settleCentsForActual(options.reservedCents, actual);
+    const { settledCents, overage } = settlement!;
     // Settlement failures must leave the reservation intact, never release it.
     await options.budget.settle(
       reservation.id,

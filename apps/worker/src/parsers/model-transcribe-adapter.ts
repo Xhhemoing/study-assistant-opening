@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { BudgetedRepository, ModelGateway } from "@aistudy/ai";
-import type { MediaSegment, Scope } from "@aistudy/contracts";
+import type { MediaSegment, Scope, ProviderOutput } from "@aistudy/contracts";
 import { buildExtractAudioArgv, createNodeMediaRunner, MediaValidationError, type MediaBinaryRunner } from "./media-process";
 import type { TranscribeAdapterInput } from "./transcribe-adapter";
 
@@ -55,6 +55,11 @@ export function createModelTranscribeAdapter(deps: {
   budget: BudgetedRepository;
   jobId: string;
   beforeSend?: () => Promise<void>;
+  checkpoints?: {
+    load(chunk: { index: number; offsetMs: number; durationMs: number; sourceId: string; sourceVersion: number }): Promise<ProviderOutput | null>;
+    save(chunk: { index: number; offsetMs: number; durationMs: number; sourceId: string; sourceVersion: number }, output: ProviderOutput,
+      receipt: { reservationId: string; settledCents: number | null }): Promise<void>;
+  };
   run?: MediaBinaryRunner;
   tempDir?: string;
 }) {
@@ -71,6 +76,15 @@ export function createModelTranscribeAdapter(deps: {
         signal.throwIfAborted();
         await deps.beforeSend?.();
         const durationMs = Math.min(CHUNK_DURATION_MS, input.durationMs - offsetMs);
+        const chunk = { index, offsetMs, durationMs, sourceId: input.sourceId ?? "00000000-0000-4000-8000-000000000000", sourceVersion: input.sourceVersion ?? 0 };
+        const recovered = await deps.checkpoints?.load(chunk);
+        if (recovered) {
+          for (const segment of parseSegments(recovered.text, durationMs)) {
+            segments.push({ ...segment, startMs: segment.startMs + offsetMs, endMs: segment.endMs + offsetMs,
+              sourceId: chunk.sourceId, sourceVersion: chunk.sourceVersion, frameChunkIds: [], quality: "needs_check" });
+          }
+          continue;
+        }
         const audioPath = path.join(base, `audio-${index}.wav`);
         const argv = buildExtractAudioArgv(input.path, audioPath);
         argv.splice(argv.indexOf("-i"), 0, "-ss", String(offsetMs / 1000));
@@ -86,6 +100,14 @@ export function createModelTranscribeAdapter(deps: {
         const output = await deps.gateway.call(deps.scope, "media.transcribe", {
           budget: deps.budget,
           operationId: `transcribe:${deps.jobId}:${index}`,
+          ...(deps.checkpoints ? {
+            resultRef: `transcribe:${deps.jobId}:${index}`,
+            persistResult: async (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null }) => {
+              parseSegments(output.text, durationMs);
+              await deps.beforeSend?.();
+              await deps.checkpoints!.save(chunk, output, receipt);
+            },
+          } : {}),
           input: {
             instruction: INSTRUCTION,
             text,

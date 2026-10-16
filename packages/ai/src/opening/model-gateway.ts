@@ -5,6 +5,7 @@ import {
   runBudgetedCall,
   type BudgetedProvider,
   type BudgetedRepository,
+  type BudgetedCallOptions,
 } from "./budgeted-call";
 import { OpeningModelRoutingError } from "./model-routing";
 import { modelTaskSpec, type ModelTaskKey } from "./model-tasks";
@@ -31,6 +32,7 @@ export type ModelGatewayCallOptions = {
   /** Durable ledger key: retries of one logical operation reuse one reservation. */
   operationId: string;
   resultRef?: string;
+  persistResult?: BudgetedCallOptions["persistResult"];
   /** Reservation floor for paid models, e.g. a configured per-call minimum. */
   minReservedCents?: number;
   signal?: AbortSignal;
@@ -126,6 +128,7 @@ export function createModelGateway(deps: {
           operationId,
           purpose: modelTaskSpec(task).purpose,
           ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+          ...(options.persistResult ? { persistResult: options.persistResult } : {}),
           reservedCents: terms.reservedCents,
           actualCents: terms.actualCents,
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
