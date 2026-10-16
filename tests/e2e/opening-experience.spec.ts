@@ -1,11 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
-import { resetE2eDatabase } from "./e2e-database";
 
 test.beforeAll(async () => {
-  // Reset only the guarded *_e2e database: ordinary cascading DELETE is
-  // intentionally rejected once a real note has append-only revisions.
-  resetE2eDatabase("UX");
   await seedOpeningOwner();
 });
 test.beforeEach(async ({ context, baseURL }) => { await loginOpeningOwner(context.request, baseURL!); });

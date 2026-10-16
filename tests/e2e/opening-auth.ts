@@ -1,5 +1,6 @@
 import { randomBytes, scrypt as scryptCb } from "node:crypto";
 import postgres from "postgres";
+import { resetE2eDatabase } from "./e2e-database";
 
 /**
  * E2E owner seeding for opening mode: public registration is disabled there,
@@ -38,12 +39,17 @@ async function hashPassword(password: string): Promise<string> {
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64url")}$${derived.toString("base64url")}`;
 }
 
+/**
+ * Fresh owner on an empty guarded *_e2e database. A cascading DELETE of the
+ * previous owner is rejected once an earlier spec saved a note (library
+ * revisions are append-only), so the database is truncated instead.
+ */
 export async function seedOpeningOwner(): Promise<void> {
   const url = process.env.E2E_DATABASE_URL;
   if (!url) throw new Error("E2E_DATABASE_URL is required to seed the opening owner");
+  resetE2eDatabase();
   const sql = postgres(url);
   try {
-    await sql`DELETE FROM users WHERE email = ${E2E_EMAIL}`;
     await sql`
       INSERT INTO users (id, email, display_name, password_hash)
       VALUES (
