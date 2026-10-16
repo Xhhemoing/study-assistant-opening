@@ -44,8 +44,8 @@ describe("resume-service surface (V2-14)", () => {
   });
 
   // T18: the resume surface must not invent a migration. 0058 is now taken by LAB-U01
-  // (0058_opening_turn_clarify.sql); anything else after 0057 would be a violation.
-  it("T18 no resume migration invented; only LAB-U01 0058 follows 0057", () => {
+  // (0058_opening_turn_clarify.sql); keep the known later migrations explicit.
+  it("T18 no resume migration invented among known migrations after 0057", () => {
     const migrDir = resolve(
       __dirname,
       "../../../../../../packages/database/src/migrations",
@@ -54,10 +54,12 @@ describe("resume-service surface (V2-14)", () => {
       .filter((f) => f.endsWith(".sql") && /^\d{4}_/.test(f))
       .sort();
     // PR-D: 0059_opening_budget_reconcile (budget ledger); PR-E: 0060_opening_retest_accept_key (retest accept key);
-    // 0061_opening_adaptive_planning (planning columns); 0062 model routing + card evidence columns; 0063 model quick setup idempotency; 0064 card source lineage. Only additions after PR-C's clarify migration; still no teaching/resume migration.
+    // 0061 planning; 0062 model routing + card evidence; 0063 quick setup idempotency;
+    // 0064 card source lineage; 0065 task requirement scope. Still no teaching/resume migration.
     expect(numbered.filter((f) => f >= "0058")).toEqual([
       "0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql",
       "0061_opening_adaptive_planning.sql", "0062_opening_model_routing_and_card_evidence.sql", "0063_opening_model_quick_setup.sql", "0064_card_source_lineage.sql",
+      "0065_opening_task_requirement.sql",
     ]);
     expect(numbered.some((f) => /resume/i.test(f))).toBe(false);
   });

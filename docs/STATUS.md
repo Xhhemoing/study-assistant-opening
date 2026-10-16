@@ -16,7 +16,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | `codex/adaptive-evolution-v3-isolated` | 基于 `8ff0741` 的独立 worktree；按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。148 项相关单元、contracts/domain/database/web 类型检查和定向 lint 通过；新增真实 SQL 回归待隔离 CI，未合并/部署。节点跨重建稳定身份与分项评分仍是后续切片 |
+| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | `codex/adaptive-evolution-v3-isolated` | 基于 `8ff0741` 的独立 worktree；按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。155 项相关单元、contracts/domain/database/web 类型检查和定向 lint 通过；新增真实 SQL 回归待隔离 CI，未合并/部署。节点跨重建稳定身份与分项评分仍是后续切片 |
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |

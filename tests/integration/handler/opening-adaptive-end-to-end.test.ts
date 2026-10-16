@@ -137,7 +137,7 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(rows[0]).toEqual({
     course_id: chosen.courseId, source_ids: [chosen.sourceId],
     goal_json: { learnerFocus: {
-      skillLabel: "fractions", activityKind: "targeted_explain", reasonCode: "verified_incorrect",
+      skillLabel: "fractions", requirementKey: null, activityKind: "targeted_explain", reasonCode: "verified_incorrect",
       focusObservationId: chosen.observation.id, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION,
     } },
   });
