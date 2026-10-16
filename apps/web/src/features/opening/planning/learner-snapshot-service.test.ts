@@ -85,6 +85,9 @@ describe("snapshot row mapping", () => {
     expect(toSnapshotTaskRow({ ...row, status: "done" }, "UTC").closedLocalDate).toBe("2026-10-14");
     expect(toSnapshotTaskRow({ ...row, status: "pending" }, "Asia/Shanghai").closedLocalDate).toBeNull();
     expect(toSnapshotTaskRow({ ...row, status: "done", skillLabel: "Linear Algebra" }, "UTC").skillLabel).toBe("Linear Algebra");
+    expect(toSnapshotTaskRow({ ...row, status: "done", requirementKey: null }, "UTC"))
+      .toEqual(toSnapshotTaskRow({ ...row, status: "done" }, "UTC"));
+    expect(toSnapshotTaskRow({ ...row, status: "done", requirementKey: "R1" }, "UTC").requirementKey).toBe("R1");
   });
 });
 
