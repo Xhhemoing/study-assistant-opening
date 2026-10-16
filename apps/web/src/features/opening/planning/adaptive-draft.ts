@@ -71,7 +71,13 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   const ordered = ranked.orderedTaskIds
     .map((id) => byId.get(id))
     .filter((task): task is TaskItem => Boolean(task));
-  const planned = planDay(ordered, input.freeBlocks, input.planDayOptions(ranked.orderedTaskIds));
+  const options = input.planDayOptions(ranked.orderedTaskIds);
+  // Leave one minute to review and confirm. Otherwise a block starting at the
+  // instant of GET would already be expired by the subsequent accept request.
+  if (options.planningNow) {
+    options.planningNow = new Date(Math.ceil((Date.parse(options.planningNow) + 60_000) / 60_000) * 60_000).toISOString();
+  }
+  const planned = planDay(ordered, input.freeBlocks, options);
   return {
     blocks: planned.blocks.map((block) => {
       const reason = ranked.reasons[block.taskId];

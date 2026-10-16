@@ -134,6 +134,7 @@ export function createSuggestPlanControllers(
         draftId: draft.id,
         expectedBaseVersion: draft.baseVersion,
         clientKey: mint(),
+        acceptSuggestedKeys: [],
       });
     },
     async reject(draftId) {

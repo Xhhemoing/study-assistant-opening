@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planDay } from "@aistudy/domain";
+import { OpeningPlanError } from "@aistudy/database";
 import type { TaskItem, TimeBlock } from "@aistudy/contracts";
 import {
   buildServerPlanDayOptions,
@@ -9,6 +10,11 @@ import {
 } from "./plan-service";
 
 const SH = "Asia/Shanghai";
+
+it("preserves the conflict reason through the service's HTTP error mapping", () => {
+  expect(mapRepoError(new OpeningPlanError("CONFLICT", "selection changed", "selection_mismatch")))
+    .toMatchObject({ code: "CONFLICT", status: 409, reason: "selection_mismatch" });
+});
 const day = "2026-10-09";
 const at = (clock: string) => `2026-10-09T${clock}:00.000Z`;
 

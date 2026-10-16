@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type {
+  AcceptPlanInput,
   PlanBlockReason,
   PlanDraft,
   PlanDraftOrigin,
@@ -20,6 +21,8 @@ import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { withTaskPlanningFields } from "./opening-task-fields";
+
+import { acceptOpeningPlan } from "./opening-plan-accept";
 
 export { OpeningPlanError };
 export type { OpeningPlanErrorCode } from "./opening-plan-error";
@@ -49,6 +52,7 @@ export type AutoDraftBuild =
 export type EnsureAutoDraftOptions = {
   /** Replace an open adaptive draft whose suggestions are out of date (learner asked to refresh). */
   refreshSuggestions?: boolean;
+  now?: Date;
 };
 
 
@@ -130,7 +134,7 @@ function mapDraft(row: Record<string, unknown>): PlanDraft {
   return draft;
 }
 
-export function createOpeningPlansRepository(sql: Sql) {
+export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
   return {
     async listTasks(scope: OpeningScope): Promise<TaskItem[]> {
       const rows = await sql`
@@ -362,95 +366,8 @@ export function createOpeningPlansRepository(sql: Sql) {
       return mapDraft(rows[0] as Record<string, unknown>);
     },
 
-    async acceptPlan(
-      scope: OpeningScope,
-      input: { draftId: string; expectedBaseVersion: number; clientKey: string },
-    ): Promise<PlanDraft> {
-      const payloadHash = createHash("sha256")
-        .update(JSON.stringify({ draftId: input.draftId, expectedBaseVersion: input.expectedBaseVersion }))
-        .digest("hex");
-
-      return sql.begin(async (tx) => {
-        const existing = await tx`
-          SELECT draft_id, payload_hash FROM opening_plan_acceptances
-          WHERE workspace_id = ${scope.workspaceId} AND client_key = ${input.clientKey}
-          FOR UPDATE`;
-        if (existing.length) {
-          const row = existing[0] as Record<string, unknown>;
-          if (String(row.payload_hash) !== payloadHash) {
-            throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
-          }
-          const drafts = await tx`SELECT * FROM opening_plan_drafts WHERE id = ${row.draft_id as string}`;
-          if (!drafts.length) throw new OpeningPlanError("NOT_FOUND", "accepted draft missing");
-          return mapDraft(drafts[0] as Record<string, unknown>);
-        }
-
-        const drafts = await tx`
-          SELECT * FROM opening_plan_drafts
-          WHERE id = ${input.draftId} AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
-        if (!drafts.length) throw new OpeningPlanError("NOT_FOUND", "draft not found");
-        const draft = drafts[0] as Record<string, unknown>;
-        if (draft.status !== "draft") {
-          throw new OpeningPlanError("CONFLICT", "draft is not open");
-        }
-        const day = String(draft.day);
-
-        await tx`SELECT workspace_id FROM opening_plan_state
-          WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date
-          FOR UPDATE`;
-        const stateRows = await tx`
-          SELECT accepted_version, hard_blocks_fingerprint FROM opening_plan_state
-          WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date`;
-        const acceptedVersion = stateRows.length
-          ? Number((stateRows[0] as Record<string, unknown>).accepted_version)
-          : 0;
-        const currentFp = stateRows.length
-          ? String((stateRows[0] as Record<string, unknown>).hard_blocks_fingerprint ?? "")
-          : "";
-
-        if (Number(draft.base_version) !== input.expectedBaseVersion) {
-          throw new OpeningPlanError("CONFLICT", "stale expectedBaseVersion");
-        }
-        if (acceptedVersion !== Number(draft.base_version)) {
-          throw new OpeningPlanError("CONFLICT", "stale draft baseVersion");
-        }
-        if (currentFp && currentFp !== String(draft.hard_blocks_fingerprint)) {
-          throw new OpeningPlanError("CONFLICT", "hard blocks changed; draft stale");
-        }
-
-        const nextVersion = acceptedVersion + 1;
-        const blocks = (draft.blocks as PlannedBlock[]) ?? [];
-        await tx`
-          INSERT INTO opening_plan_state (
-            workspace_id, day, accepted_version, accepted_blocks, hard_blocks_fingerprint
-          ) VALUES (
-            ${scope.workspaceId}, ${day}::date, ${nextVersion}, ${tx.json(blocks as never)},
-            ${String(draft.hard_blocks_fingerprint)}
-          )
-          ON CONFLICT (workspace_id, day) DO UPDATE SET
-            accepted_version = EXCLUDED.accepted_version,
-            accepted_blocks = EXCLUDED.accepted_blocks,
-            hard_blocks_fingerprint = EXCLUDED.hard_blocks_fingerprint,
-            updated_at = now()`;
-
-        const updated = await tx`
-          UPDATE opening_plan_drafts
-          SET status = 'accepted', version = ${nextVersion}, updated_at = now()
-          WHERE id = ${input.draftId}
-          RETURNING *`;
-
-        await tx`
-          INSERT INTO opening_plan_acceptances (
-            workspace_id, client_key, draft_id, day, accepted_version, payload_hash
-          ) VALUES (
-            ${scope.workspaceId}, ${input.clientKey}, ${input.draftId}, ${day}::date,
-            ${nextVersion}, ${payloadHash}
-          )`;
-
-        return mapDraft(updated[0] as Record<string, unknown>);
-      });
+    async acceptPlan(scope: OpeningScope, input: AcceptPlanInput): Promise<PlanDraft> {
+      return mapDraft(await acceptOpeningPlan(sql, scope, input, options.now?.() ?? new Date()));
     },
 
     async findDraftByProposeClientKey(
@@ -551,7 +468,9 @@ export function createOpeningPlansRepository(sql: Sql) {
             return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
           }
           const stored = (existingRows[0] as Record<string, unknown>).input_snapshot;
-          if (autoDraftInputsUnchanged(stored, rebuilt)) {
+          const expired = existing.strategyVersion && existing.blocks.some(block =>
+            Date.parse(block.start) < (options.now ?? new Date()).getTime());
+          if (!expired && autoDraftInputsUnchanged(stored, rebuilt)) {
             // Learning moved but the draft is still executable: offer, never swap it under the learner.
             const newer = rebuilt.adaptive !== undefined && adaptiveSuggestionsChanged(stored, rebuilt.adaptive);
             if (!newer || !options.refreshSuggestions) {

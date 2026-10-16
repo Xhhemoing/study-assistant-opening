@@ -48,6 +48,16 @@ function observer() {
 const plan = { date: "2026-10-10", acceptedVersion: 0, blocks: [], hardBlocks: [] };
 
 describe("today reads fail independently", () => {
+  it("keeps newer suggestions pending until an explicit refresh is requested", async () => {
+    const callbacks = observer();
+    const newer = { ...plan, hasNewerSuggestion: true };
+    const api = { listTasks: vi.fn().mockResolvedValue({ tasks: [] }), getToday: vi.fn().mockResolvedValue(newer) };
+    await readTodayData(api, plan.date, callbacks);
+    expect(api.getToday).toHaveBeenCalledExactlyOnceWith(plan.date);
+    expect(callbacks.plan).toHaveBeenCalledWith(newer);
+    await readTodayData(api, plan.date, callbacks, { refreshSuggestions: true });
+    expect(api.getToday).toHaveBeenLastCalledWith(plan.date, { refreshSuggestions: true });
+  });
   it("keeps tasks usable when the plan API fails and does not call optional reminders", async () => {
     const callbacks = observer();
     const tasks = [task("learn")];

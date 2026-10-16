@@ -173,7 +173,7 @@ export type OpeningPlanServiceOptions = {
 };
 
 export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanServiceOptions = {}) {
-  const repo: OpeningPlansRepository = createOpeningPlansRepository(sql);
+  const repo: OpeningPlansRepository = createOpeningPlansRepository(sql, { now: serviceOptions.now });
   const clock = () => serviceOptions.now?.() ?? new Date();
 
   async function resolveFreeBlocks(scope: Scope, date: string): Promise<TimeBlock[] | null> {
@@ -309,7 +309,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         const state = await repo.getToday(scope, date);
         return countUnplannedPending(tasks, state?.blocks ?? []);
       },
-      { refreshSuggestions: options.refreshSuggestions },
+      { refreshSuggestions: options.refreshSuggestions, now: clock() },
     );
   }
 
@@ -520,7 +520,8 @@ export function mapRepoError(error: unknown): Error {
   if (error instanceof OpeningPlanError) {
     if (error.code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
     if (error.code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
-    return new ApiError("CONFLICT", error.message, 409);
+    const conflict = new ApiError("CONFLICT", error.message, 409);
+    return error.reason ? Object.assign(conflict, { reason: error.reason }) : conflict;
   }
   // A unique violation that escaped the idempotent write path is a conflict, never a 500.
   if (isUniqueViolation(error)) return new ApiError("CONFLICT", "duplicate request conflicts with an existing record", 409);

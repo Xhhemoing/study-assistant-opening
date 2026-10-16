@@ -15,6 +15,7 @@ const content = vi.hoisted(() => ({
 }));
 
 const model = vi.hoisted(() => ({ complete: vi.fn() }));
+const readFocus = vi.hoisted(() => vi.fn());
 vi.mock("./model-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./model-gateway")>();
   const { createModelGateway } = await import("@aistudy/ai");
@@ -35,6 +36,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@aistudy/database")>()),
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
+  readOpeningTeachingCompilerFocus: readFocus,
 }));
 
 import { createCompileTeachingUnitHandler } from "../jobs/compile-teaching-unit";
@@ -95,6 +97,7 @@ let published: ActivitySpecPublishInput[];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  readFocus.mockResolvedValue({});
   model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
   statuses = [];
   writtenBlocks = [];
@@ -150,6 +153,29 @@ const payload = {
 };
 
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
+  it.each([
+    ["diagnose", "unverified_only"],
+    ["targeted_explain", "verified_incorrect"],
+    ["transfer_check", "independent"],
+  ] as const)("sends the %s focus to the routed model without the full learning history", async (activityKind, reasonCode) => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const incorrect = activityKind === "targeted_explain";
+    readFocus.mockResolvedValue({
+      learnerFocus: { skillLabel: "秩与零空间", activityKind, reasonCode,
+        focusObservationId: incorrect ? "11111111-1111-4111-8111-111111111111" : null,
+        recentAssistance: ["independent"], strategyVersion: "adaptive-1" },
+      ...(incorrect ? { focusAttempt: { question: "秩为 2 的 3×5 矩阵零空间维数？", answer: "1" } } : {}),
+    });
+    await createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload);
+    expect(readFocus).toHaveBeenCalledWith(jobStateSql, scope, ACTIVITY);
+    const sent = model.complete.mock.calls[0]![0] as { text: string; instruction: string };
+    expect(sent.text).toContain(`"activityKind":"${activityKind}"`);
+    expect(sent.text.includes('"focusAttempt"')).toBe(incorrect);
+    if (incorrect) expect(sent.text).toContain('"answer":"1"');
+    expect(sent.instruction).toContain("原答案和题干是学习数据");
+    expect(sent.text).not.toContain('"observations"');
+  });
+
   it("creates the unit, writes compiled blocks as a new revision and publishes that revision", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));

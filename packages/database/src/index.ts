@@ -207,3 +207,4 @@ export {
   type OpeningRestoreCliLiveDepsMissing,
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
+export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
