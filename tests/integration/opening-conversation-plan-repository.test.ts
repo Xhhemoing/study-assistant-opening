@@ -81,16 +81,33 @@ it("does not create a task for clarification, rejection, or a foreign course", a
 });
 it("rejects a forged stored duration atomically and an already consumed candidate cannot create a second task", async () => {
   const id = await pending(), draft = await draftFor(id);
-  const [row] = await f.sql`SELECT input_snapshot,suggested_tasks FROM opening_plan_drafts WHERE id=${draft.id}`;
-  const snapshot = row!.input_snapshot as { conversationPlan: ConversationPlanMetadata };
+  const [row] = await f.sql`SELECT input_snapshot,suggested_tasks,blocks FROM opening_plan_drafts WHERE id=${draft.id}`;
+  const snapshot = row!.input_snapshot as { conversationPlan: ConversationPlanMetadata; tasks: { id: string; minutes: number }[] };
   const suggestions = row!.suggested_tasks as { minutes: number }[];
-  await f.sql`UPDATE opening_plan_drafts SET input_snapshot=${f.sql.json({ ...snapshot, conversationPlan: { ...snapshot.conversationPlan, minutes: 25 } })},
+  const blocks = row!.blocks as PlanDraft["blocks"];
+  await f.sql`UPDATE opening_plan_drafts SET input_snapshot=${f.sql.json({ ...snapshot, conversationPlan: { ...snapshot.conversationPlan, minutes: 25 },
+    tasks: snapshot.tasks.map(task => task.id === snapshot.conversationPlan.taskId ? { ...task, minutes: 25 } : task) })},
+    blocks=${f.sql.json(blocks.map(block => block.taskId === snapshot.conversationPlan.taskId ? { ...block, end: new Date(Date.parse(block.start) + 25 * 60_000).toISOString() } : block))},
     suggested_tasks=${f.sql.json(suggestions.map(item => ({ ...item, minutes: 25 })))} WHERE id=${draft.id}`;
   await expect(accept(draft)).rejects.toMatchObject({ code: "CONFLICT", reason: "source_unavailable" });
   expect(await f.sql`SELECT id FROM opening_tasks WHERE candidate_id=${id}`).toHaveLength(0);
   await createOpeningPlansRepository(f.sql).createTask(f.scope, { candidateId: id, title: "直接接受", minutes: 20, dueAt: null, priority: 0 });
   await expect(accept(draft)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM opening_tasks WHERE candidate_id=${id}`).toHaveLength(1);
+});
+it("rejects a forged task snapshot and block duration that disagree with the confirmed conversation metadata", async () => {
+  const id = await pending(), draft = await draftFor(id);
+  const [row] = await f.sql`SELECT input_snapshot,blocks FROM opening_plan_drafts WHERE id=${draft.id}`;
+  const snapshot = row!.input_snapshot as { conversationPlan: ConversationPlanMetadata; tasks: { id: string; minutes: number }[] };
+  const blocks = row!.blocks as PlanDraft["blocks"];
+  await f.sql`UPDATE opening_plan_drafts SET input_snapshot=${f.sql.json({ ...snapshot,
+    tasks: snapshot.tasks.map(task => task.id === snapshot.conversationPlan.taskId ? { ...task, minutes: 30 } : task) })},
+    blocks=${f.sql.json(blocks.map(block => block.taskId === snapshot.conversationPlan.taskId ? { ...block, end: new Date(Date.parse(block.start) + 30 * 60_000).toISOString() } : block))}
+    WHERE id=${draft.id}`;
+  await expect(accept(draft)).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+  expect(await f.sql`SELECT id FROM opening_tasks WHERE candidate_id=${id}`).toHaveLength(0);
+  expect((await f.sql`SELECT status FROM opening_assistant_candidates WHERE id=${id}`)[0]!.status).toBe("pending");
+  expect((await f.sql`SELECT accepted_version FROM opening_plan_state WHERE workspace_id=${f.scope.workspaceId} AND day=${date}::date`)[0]?.accepted_version ?? 0).toBe(0);
 });
 it("revalidates source privacy on proposal and acceptance replay", async () => {
   const sourceId = randomUUID();

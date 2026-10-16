@@ -38,7 +38,8 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
   }
   if (input.draft.origin === "agent") {
     const conversation = conversationPlanMetadataSchema.safeParse((input.draft.input_snapshot as { conversationPlan?: unknown } | null)?.conversationPlan);
-    if (!conversation.success || !meta.data.preserveAll || fresh.length !== 1 || fresh[0]!.taskId !== conversation.data.taskId) return conflict("conversation plan may only append its confirmed candidate");
+    if (!conversation.success || !meta.data.preserveAll || fresh.length !== 1 || fresh[0]!.taskId !== conversation.data.taskId
+      || Date.parse(fresh[0]!.end) - Date.parse(fresh[0]!.start) !== conversation.data.minutes * 60_000) return conflict("conversation plan may only append its confirmed candidate");
   }
   if (fresh.some(block => Date.parse(block.start) < input.now.getTime())) return conflict("new slot has expired", "slot_expired");
   if (new Set(fresh.map(block => block.taskId)).size !== fresh.length) return conflict("duplicate new task block");
