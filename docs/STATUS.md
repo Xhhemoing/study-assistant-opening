@@ -10,7 +10,7 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 当前主干 `0e8072d`：#49、#50、#53、#54、#55、#52 均已合入；该提交 CI（含既有 Browser tests/Build）已成功。Hermes 的旧记录为 `8b500e6`；当前部署 SHA 与迁移状态尚未现场核实，不能据旧记录判断。
+- 功能主干 `623d829`：#49、#50、#53、#54、#55、#52、#56、#57 均已合入；#56/#57 最终提交完整 CI 已成功，合并后主干检查见 [CI 38877372290](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38877372290)。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
 
 ## 进行中
 
@@ -18,18 +18,19 @@
 |---|---|---|---|
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
-| 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | G1/G5–G9、C2/C3/C4 已实现；真实快照→勾选接受→学情主讲，相关单测/类型检查通过。数据库/handler/完整 CI 验证中；待用户浏览器验收。开关继续为 0。#46 仅移植同日去重代码与测试，原 PR 未变动 |
-| 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 主干 CI 已恢复。R9b 持久化分段回执，跨手动重试复用结果、补结算、阻止未知结果重发；免费模型 TTL 回执亦可恢复。无新增迁移；PR CI 验证中 |
+| 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
+| 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
+| Hermes 发布 | Codex 主对话 | `codex/hermes-release-safety` | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
 
 ## 下一步（按顺序）
 
-1. 评审 #56、#57 并等各自 CI 全绿，再由用户/Shipper 合入。Hermes 先核实 SHA/迁移、备份，再以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
+1. #56、#57 已合入，核对合并后主干 CI。恢复 Hermes 部署连接后先核实 SHA/迁移、备份，再以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。当前没有执行线上操作。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
 3. 先修复批次 A 自用反馈，再按 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 推进后续批次；教练自动接受仍不启用。
 4. 大问题方案：
    - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。
-   - C 安全（小，可与第 3 步并行）：`/api/opening/health` 无鉴权现场探测；`deploy-hermes.sh` 用保存的 root 密码且跳过主机指纹并改 sshd。
+   - C 安全（小，可与第 3 步并行）：`/api/opening/health` 无鉴权现场探测待有部署连接时核实；发布脚本已移除 root 密码回退与 sshd 自动修改。
 5. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
 6. 暂缓：E2 AI 判分、BKT 影子运行（先补技能身份与首次作答字段，见 R10）。
 

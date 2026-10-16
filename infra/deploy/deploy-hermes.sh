@@ -16,53 +16,44 @@ set -euo pipefail
 HOST="${HOST:-hermes}"
 DIR="${DIR:-/opt/aistudy}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+COMMIT="$(git rev-parse HEAD)"
 SHA="$(git rev-parse --short HEAD)"
+if [ -z "${DEPLOY_REMOTE:-}" ]; then
+  DEPLOY_REMOTE=origin
+  if git remote get-url study-assistant-opening >/dev/null 2>&1; then
+    DEPLOY_REMOTE=study-assistant-opening
+  fi
+fi
 
-sshq() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"; }
+sshq() {
+  ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
+    "$HOST" 'bash -o pipefail -s' <<< "$1"
+}
 die() { echo "[!] $*" >&2; exit 1; }
 
 check_ssh() {
-  if sshq true 2>/dev/null; then return 0; fi
-  repair_ssh_key || die "无法免密 SSH 到 $HOST（自动修复失败）。手动：ssh-copy-id -i ~/.ssh/id_ed25519.pub root@23.251.32.22（见 docs/operations/hermes-deployment.md）"
+  sshq true || die "无法通过已验证的 SSH 连接到 $HOST；请先配置可信主机指纹与密钥（见 docs/operations/hermes-deployment.md）"
 }
 
-# 免密失效时用本机保存的密码（%USERPROFILE%/.aistudy-deploy/hermes.secret，git 外）自动重装公钥。
-repair_ssh_key() {
-  local secret="$HOME/.aistudy-deploy/hermes.secret"
-  [ -f "$secret" ] || return 1
-  echo "==> 公钥登录失效，用保存的凭据自动重装公钥…"
-  python3 - "$secret" <<'PY' || return 1
-import sys, pathlib, paramiko
-secret = pathlib.Path(sys.argv[1]).read_text().strip()
-pub = pathlib.Path.home().joinpath(".ssh/id_ed25519.pub").read_text().strip()
-c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect("23.251.32.22", username="root", password=secret, timeout=15, look_for_keys=False, allow_agent=False)
-cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-       "grep -qF '%s' ~/.ssh/authorized_keys || echo '%s' >> ~/.ssh/authorized_keys; "
-       "grep -qE '^PubkeyAuthentication yes' /etc/ssh/sshd_config || "
-       "(sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config && sshd -t && systemctl reload sshd)" % (pub, pub))
-c.exec_command(cmd, timeout=15)[1].channel.recv_exit_status()
-c.close()
-PY
-  sleep 1; sshq true 2>/dev/null
-}
 require_clean_push() {
   local remote_sha
-  remote_sha="$(git ls-remote study-assistant-opening "refs/heads/$BRANCH" | cut -f1)"
-  [ "$(git rev-parse HEAD)" = "$remote_sha" ] || die "HEAD($SHA) 未推送到 study-assistant-opening/$BRANCH($remote_sha)，先 git push"
-  echo "==> 部署提交: $SHA ($BRANCH)"
+  remote_sha="$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)"
+  [ "$COMMIT" = "$remote_sha" ] || die "HEAD($SHA) 与 $DEPLOY_REMOTE/feat/opening-release 不一致；请先合并并同步已通过 CI 的发布主干"
+  echo "==> 部署提交: $COMMIT ($BRANCH)"
 }
 
 sync_source() {
   echo "==> 打包 HEAD 并上传（tar-over-ssh，不含 .git/node_modules/.next）"
   local archive="/tmp/aistudy-src-$SHA.tar.gz"
   git archive --format=tar.gz -o "$archive" HEAD
-  scp -q "$archive" "$HOST:/tmp/aistudy-src.tar.gz" && rm -f "$archive"
+  scp -q -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
+    "$archive" "$HOST:/tmp/aistudy-src.tar.gz"
+  rm -f "$archive"
   sshq "set -e
     mkdir -p $DIR
     # 保留服务器本地配置与运行期文件
     cp -f $DIR/.env.production /tmp/aistudy-env.production.keep 2>/dev/null || true
-    find $DIR -mindepth 1 -maxdepth 1 ! -name '.env.production' ! -name '.local' -exec rm -rf {} +
+    find $DIR -mindepth 1 -maxdepth 1 ! -name '.env.production' ! -name '.local' ! -name '.release-sha' -exec rm -rf {} +
     tar -xzf /tmp/aistudy-src.tar.gz -C $DIR
     cp -f /tmp/aistudy-env.production.keep $DIR/.env.production 2>/dev/null || true
     rm -f /tmp/aistudy-src.tar.gz /tmp/aistudy-env.production.keep
@@ -94,7 +85,7 @@ migrate_server() {
 }
 
 restart_services() {
-  echo "==> [server] 重启 aistudy-web（并安装 worker 服务，如尚未安装）"
+  echo "==> [server] 重启 web 与已启用或运行中的 worker"
   # worker 服务文件随仓库分发（infra/deploy/aistudy-worker.service），首次安装
   sshq "set -e
     if [ ! -f /etc/systemd/system/aistudy-worker.service ] && [ -f $DIR/infra/deploy/aistudy-worker.service ]; then
@@ -102,7 +93,15 @@ restart_services() {
       systemctl daemon-reload
       echo 'worker 服务已安装（disabled，需要时 systemctl enable --now aistudy-worker）'
     fi
-    systemctl restart aistudy-web.service"
+    restart_worker=0
+    if systemctl is-active --quiet aistudy-worker.service || systemctl is-enabled --quiet aistudy-worker.service; then
+      restart_worker=1
+    fi
+    systemctl restart aistudy-web.service
+    if [ \"\$restart_worker\" = 1 ]; then
+      systemctl restart aistudy-worker.service
+      systemctl is-active --quiet aistudy-worker.service
+    fi"
 }
 
 health() {
@@ -114,17 +113,26 @@ health() {
       case \"\$body\" in *'\"status\":\"ok\"'*) echo \"\$body\"; exit 0;; esac
     done
     echo 'health check failed'; journalctl -u aistudy-web -n 15 --no-pager; exit 1"
-  echo "==> 部署完成 ✅ $SHA"
+  echo "==> 服务健康检查通过"
+}
+
+record_release() {
+  sshq "set -e
+    printf '%s\\n' '$COMMIT' > '$DIR/.release-sha'"
+  echo "==> 部署完成 ✅ $COMMIT"
 }
 
 case "${1:-deploy}" in
-  deploy)   check_ssh; require_clean_push; sync_source; build_server; migrate_server; restart_services; health ;;
+  deploy)   check_ssh; require_clean_push; sync_source; build_server; migrate_server; restart_services; health; record_release ;;
   sync)     check_ssh; require_clean_push; sync_source ;;
   build)    check_ssh; build_server ;;
   migrate)  check_ssh; migrate_server ;;
   restart)  check_ssh; restart_services; health ;;
-  status)   check_ssh; sshq "systemctl status aistudy-web.service --no-pager -l | head -12; curl -fsS --max-time 5 http://127.0.0.1:18090/api/health"; echo ;;
+  status)   check_ssh; sshq "set -e
+    if [ -f '$DIR/.release-sha' ]; then cat '$DIR/.release-sha'; else echo '尚无成功部署 SHA 记录'; fi
+    systemctl status aistudy-web.service --no-pager -l --lines=0
+    curl -fsS --max-time 5 http://127.0.0.1:18090/api/health"; echo ;;
   logs)     check_ssh; sshq "journalctl -u aistudy-web -f -n 50 --no-pager" ;;
-  rollback) die "回退：在本地 git checkout <旧提交> 后执行 deploy（源码级部署天然可回退）；迁移按约定不回退" ;;
+  rollback) die "回退：在发布主干通过 revert PR 恢复已验证源码后执行 deploy；保留既有迁移与学习数据" ;;
   *) echo "用法: $0 [deploy|sync|build|migrate|restart|status|logs|rollback]" >&2; exit 2 ;;
 esac

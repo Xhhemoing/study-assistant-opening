@@ -1,6 +1,13 @@
 # 自适应副驾驶批次 A：发布与用户验收
 
-2026-10-16；基线 `feat/opening-release@0e8072d`。实现分为 [R9b #56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) 与 [闭环 #57](https://github.com/Xhhemoing/study-assistant-opening/pull/57)，互不依赖；没有新增 migration。本次未执行部署，`OPENING_ADAPTIVE_PLANNING` 保持 0。
+2026-10-16；基线 `feat/opening-release@0e8072d`。实现分为 [R9b #56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) 与 [闭环 #57](https://github.com/Xhhemoing/study-assistant-opening/pull/57)，互不依赖；没有新增 migration。两个 PR 已于 2026-10-16 合入，功能主干为 `623d829`。目标部署配置仍为 `OPENING_ADAPTIVE_PLANNING=0`，线上当前值尚未现场核实。
+
+## 本轮执行记录
+
+- 用户已授权推进并部署。#56 最终提交 `3d6d04f` 与 #57 最终提交 `293d6d2` 的完整 CI 均成功；两项顺序 squash 合并，合并结果与预演树一致。
+- 合并后主干的独立检查：[CI 38877372290](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38877372290)。PR 检查成功不替代该主干检查。
+- 当前执行环境没有 `hermes` SSH 别名、私钥或 SSH agent。直接连接 `23.251.32.22:22` 返回 `Network is unreachable`。没有可用的 Hermes 部署连接；尚未执行线上备份、同步、迁移、重启、开关修改或浏览器验收。
+- 发布脚本补齐 web/worker 重启、远端失败传播、发布主干校验及成功 SHA 记录；删除自动更改 SSH 认证的密码回退。隔离的模拟传输回归验证这些行为，不代表服务器部署成功。
 
 ## 发布清单（用户/Shipper）
 

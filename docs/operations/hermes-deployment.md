@@ -26,24 +26,33 @@ bash infra/deploy/deploy-hermes.sh sync|build|migrate|restart   # 单步执行
 
 - SSH 免密：本机公钥（`aistudy-hermes-sync`）已装入 `/root/.ssh/authorized_keys`；
   服务器 `sshd_config` 的 `PubkeyAuthentication` 已从 `no` 改为 `yes`（备份 `sshd_config.bak-*`）。
-- 部署前 HEAD 必须已推送到 `study-assistant-opening/feat/opening-release`
-  （脚本强制校验，保证「部署的就是仓库里的」）。
+- 以上是既有部署机的记录。新环境仍须配置 `hermes` 别名、可用密钥及经核实的主机指纹；脚本不会用保存的 root 密码修复登录、接受未知指纹或修改 sshd。
+- 部署前 HEAD 必须等于远端 `feat/opening-release`，并通过该提交的 CI。
+  脚本优先沿用 `study-assistant-opening` 远端，没有该别名时检查 `origin`；可用 `DEPLOY_REMOTE` 显式指定。已推送但未合并的特性分支不能部署。
+- 部署前按发布清单核实并备份线上源码、配置与数据库；脚本仍在原目录构建，不提供无停机切换或自动恢复备份。
 
 ## 日常发布
 
 ```bash
-git push study-assistant-opening feat/opening-release
+# 先通过 PR 合并并确认发布主干 CI，再在干净工作树同步
+git switch feat/opening-release
+git pull --ff-only origin feat/opening-release
 bash infra/deploy/deploy-hermes.sh deploy
+# 只有远端名称不同时：
+# DEPLOY_REMOTE=study-assistant-opening bash infra/deploy/deploy-hermes.sh deploy
 ```
 
 流程：打包 HEAD（不含 `.git`/`node_modules`/`.next`）→ 上传覆盖
 `.env.production` 保留 → `npm ci` → `npm run build` → `db:migrate`
-（additive 可重放）→ `systemctl restart aistudy-web` → `/api/health` 等待
-`status:"ok"`。
+（additive 可重放）→ 重启 web 与原来运行中或已启用的 worker → `/api/health` 等待
+`status:"ok"` → 将完整提交 SHA 写入 `/opt/aistudy/.release-sha`。
+禁用且未运行的 worker 保持关闭。远端通过 Bash 的 `pipefail` 执行，安装、构建、迁移或 worker 重启失败都会终止发布，不会因 `tail` 返回成功而继续。
+
+`status` 会显示最近成功部署的 SHA；旧部署没有该文件时会明确报告未记录。只执行 `restart`、`build` 或 `migrate` 不会改写这个记录。部署失败保留上次成功记录，它不证明失败后的进程仍在运行旧版本，须同时检查服务与构建状态。
 
 ## 回退
 
-源码级部署天然可回退：本地 `git checkout <旧提交>` → push → `deploy`。
+在 `feat/opening-release` 通过 revert PR 恢复上个已验证版本，CI 通过后同步并 `deploy`；不重写发布分支历史。紧急恢复使用发布前保留的已验证构建和配置，再核实 web/worker 健康。
 迁移按项目约定 additive、不回退；需停外部调用时把
 `OPENING_MODEL_DAILY_CAP_CENTS=0` 写入 `.env.production` 并 `restart`。
 
@@ -80,7 +89,7 @@ ssh root@23.251.32.22 'systemctl enable --now aistudy-worker'
 
 ## 排障
 
-- SSH 失败：`ssh-copy-id -i ~/.ssh/id_ed25519.pub root@23.251.32.22`。
+- SSH 失败：先检查网络、`hermes` 别名、密钥与已核实的主机指纹。由有权限的部署机配置公钥；脚本会直接停止，不自动改服务器认证设置。
 - `ssh -v` 卡在 `expecting SSH2_MSG_KEX_ECDH_REPLY` 后出现 Connection reset：部分网络上后量子（PQ）KEX 握手被截断。在 `~/.ssh/config` 的 `Host hermes` 下禁用有问题的 PQ KEX，例如：
   ```
   Host hermes
