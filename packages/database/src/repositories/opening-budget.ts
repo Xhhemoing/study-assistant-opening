@@ -443,7 +443,10 @@ export function createOpeningBudgetRepository(
           `;
           return mapReservation(rows[0] as Record<string, unknown>);
         }
-        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null && row.pendingReconcileCents > 0;
+        // Free-tier TTL reconciliation has no pending cents, but its receipt is
+        // still late. The unique late_receipt event below permits it only once.
+        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null
+          && (row.pendingReconcileCents > 0 || (row.reservedAmountCents === 0 && actualCents === 0));
         const lateAfterRelease = row.state === "released";
         if (!lateAfterReconcile && !lateAfterRelease) {
           // Normal completed row: duplicate receipt is rejected, never re-applied.

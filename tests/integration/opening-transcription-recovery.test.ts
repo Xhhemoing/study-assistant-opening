@@ -11,11 +11,12 @@ import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
 let dir: string;
+const freeTierModel = { id: 'transcription-free', providerId: 'test', modelName: 'audio-free', inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
 beforeAll(async () => { f = await createOpeningFixture(); dir = await mkdtemp(path.join(os.tmpdir(), "transcription-recovery-")); });
 beforeEach(async () => { await f.reset(); });
 afterAll(async () => { await f?.close(); if (dir) await rm(dir, { recursive: true, force: true }); });
 
-async function setup() {
+async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
   const sourceId = randomUUID();
   await f.sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
     VALUES (${sourceId}, ${f.scope.workspaceId}, 'audio.wav', 'audio/wav', 10, ${'a'.repeat(64)}, 1, 'uploaded', 'running')`;
@@ -38,7 +39,9 @@ async function setup() {
   const makeAdapter = (jobId: string) => createModelTranscribeAdapter({ scope: f.scope, jobId, tempDir: dir, run, budget: {
     ...bound, settle: async (...args) => { if (failSettlement) throw new Error('settlement connection lost'); return bound.settle(...args); },
   }, gateway: { call: async (_scope, _task, options: ModelGatewayCallOptions) => runBudgetedCall({
-    ...options, requestId: options.operationId, purpose: 'transcribe', provider: { complete: provider }, reservedCents: 100, actualCents: () => 1,
+    ...options, requestId: options.operationId, purpose: 'transcribe', provider: { complete: provider },
+    reservedCents: freeTier ? 0 : 100, actualCents: () => freeTier ? 0 : 1,
+    ...(freeTier ? { modelSnapshot: freeTierModel, requestCapPerDay: 10 } : {}),
   }) }, checkpoints: {
     load: chunk => repo.recover(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, budget),
     save: (chunk, output, receipt) => repo.save(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, { output, ...receipt }),
@@ -104,6 +107,37 @@ it('recovers a receipt saved before settlement crashed without another provider 
   expect(s.provider).toHaveBeenCalledTimes(1);
   const [row] = await f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
   expect(row).toEqual({ state: 'completed', amount_cents: 1, result_ref: `transcribe:${s.job.id}:0` });
+});
+
+it('recovers a free-tier receipt after TTL reconciliation and audits the late receipt only once', async () => {
+  const s = await setup({ freeTier: true }); s.setFailSettlement(true);
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  await expect(s.adapter(input, signal)).rejects.toThrow('settlement connection lost');
+  const [receipt] = await f.sql`SELECT result FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  expect(receipt!.result).toMatchObject({ settledCents: 0 });
+  await f.sql`UPDATE opening_budget_reservations SET created_at=now() - interval '31 minutes'
+    WHERE workspace_id=${f.scope.workspaceId} AND request_id=${key}`;
+  // Replaying reserve triggers the real lazy TTL reconcile without a new call.
+  const reconciled = await s.budget.reserve(f.scope, {
+    purpose: 'transcribe', requestId: key, amountCents: 0, modelSnapshot: freeTierModel, requestCapPerDay: 10,
+  });
+  expect(reconciled).toMatchObject({ state: 'completed', amountCents: 0, pendingReconcileCents: 0, resultRef: null, replayed: true });
+  expect(reconciled.reconciledAt).toBeInstanceOf(Date);
+  const retry = await s.manualRetry(); s.setFailSettlement(false); s.run.mockClear();
+  const result = await retry(input, signal);
+  expect(result).toHaveLength(1);
+  expect(await retry(input, signal)).toEqual(result);
+  expect(s.provider).toHaveBeenCalledTimes(1);
+  expect(s.run).not.toHaveBeenCalled();
+  const rows = await f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(rows).toEqual([{ state: 'completed', amount_cents: 0, result_ref: key }]);
+  await expect(s.budget.settle(f.scope, reconciled.id, 0, { resultRef: key })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  const events = await s.budget.listReconcileEvents(f.scope);
+  expect(events.filter(event => event.kind === 'ttl_reconciled')).toHaveLength(1);
+  expect(events.filter(event => event.kind === 'late_receipt')).toEqual([
+    expect.objectContaining({ reservationId: reconciled.id, amountBeforeCents: 0, amountAfterCents: 0, reportedActualCents: 0 }),
+  ]);
 });
 
 it('does not resend after a provider outcome is unknown and no receipt exists', async () => {
