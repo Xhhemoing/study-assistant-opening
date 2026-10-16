@@ -10,6 +10,7 @@ import { CourseAddMaterials } from "./course-add-materials";
 import { CourseSettingsPanel } from "./course-settings-panel";
 import { createCourseStateClient } from "./course-state-client";
 import { CourseStudyActions } from "./course-study-actions";
+import { CourseGoalForm } from "./course-goal-form";
 import { CourseKnowledge } from "../opening/knowledge/course-knowledge";
 import { MediaReader } from "../opening/sources/media-reader";
 
@@ -179,6 +180,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
     <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
       <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} />
+      {paths.openingActions ? <CourseGoalForm courseId={id} /> : null}
       <CourseLearningView courseId={id} />
       <CourseKnowledge courseId={id} />
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>
