@@ -46,6 +46,8 @@ describe("settings page split structure", () => {
     expect(html).toContain('id="intervention"');
     expect(html).toContain('data-testid="intervention-prefs"');
     expect(html).toContain('href="/opening/settings/connections"');
+    expect(html).toContain('href="/opening/settings/learning-test"');
+    expect(html).toContain("打开学习测试");
     expect(html).toContain("打开连接设置");
     expect(html).not.toContain('data-testid="dingtalk"');
     expect(html).toContain('data-testid="semester"');

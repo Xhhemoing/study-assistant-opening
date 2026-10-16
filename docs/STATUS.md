@@ -16,7 +16,8 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理；本轮整合由主对话完成 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。原 head 完整 CI 成功；用户已授权与 #60 合并，组合版本保留要求范围内的别名去重、已交付帮助与卡片/教学入口，新增交叉回归；组合 CI、合并状态以 PR 为准。尚未部署；稳定节点身份、分项评分和 BKT 影子仍属后续 |
+| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 已随 `cb5a68c` 合入；与 #60 组合后的主干完整 CI 38911719890 通过。迁移 0065；线上部署及用户验收待核实 |
+| BKT 真实使用测试插件 | Codex + 隔离子代理 | `codex/bkt-real-use-evaluation`（基于 `cb5a68c`） | 可启停的真实作答、预测插件、固定题库、客观评分、延迟复测、撤回与 JSON 导出；新增迁移 0066。96 项定向单元、相关包类型及 lint 通过；真实 SQL 集成待 PR CI。入口 `/opening/settings/learning-test`；未合并/部署，浏览器待用户验收，不能据此宣称学习效果提升 |
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
@@ -34,7 +35,7 @@
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。
    - C 安全（小，可与第 3 步并行）：`/api/opening/health` 无鉴权现场探测待有部署连接时核实；发布脚本已移除 root 密码回退与 sshd 自动修改。
 5. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
-6. 暂缓：E2 AI 判分、BKT 影子运行（先补技能身份与首次作答字段，见 R10）。
+6. 生产主教学链路的 E2 AI 判分与 BKT 接入仍需稳定技能映射；先使用隔离的真实学习测试插件收集可追溯数据，协议与限制见 `docs/quality/learning-measurement-plugin.md`。
 
 ## 负责人已定（2026-10-13）
 

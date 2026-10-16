@@ -209,3 +209,5 @@ export {
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
 export { createOpeningTranscriptionCheckpointsRepository, type TranscriptionChunkIdentity, type TranscriptionChunkReceipt } from "./repositories/opening-transcription-checkpoints";
+export * from "./schema/opening-measurement";
+export { createOpeningMeasurementRepository, type OpeningMeasurementRepository } from "./repositories/opening-measurement";
