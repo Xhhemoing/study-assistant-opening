@@ -64,7 +64,7 @@ export function interleaveCourses(items: readonly Ranked[]): Ranked[] {
 /**
  * Order for planDay's preferredOrder: deadlines (fixed, earliest first), due retests,
  * yesterday's carry-over, the learner's own pending tasks, then suggestions; courses
- * interleaved after the deadline group. Every id gets a structured reason.
+ * interleaved within each post-deadline band (never across bands). Every id gets a structured reason.
  */
 export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
   const { date, timeZone } = input;
@@ -114,7 +114,15 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
       reason: { code: suggestion.reasonCode, label: suggestion.reason },
     }));
 
-  const ordered = [...deadlines, ...interleaveCourses([...retests, ...carry, ...own, ...suggested])];
+  // Interleave only within each priority band so a lower-band course swap
+  // cannot jump ahead of a higher-band item (e.g. suggestion past a retest).
+  const ordered = [
+    ...deadlines,
+    ...interleaveCourses(retests),
+    ...interleaveCourses(carry),
+    ...interleaveCourses(own),
+    ...interleaveCourses(suggested),
+  ];
   return {
     orderedTaskIds: ordered.map((item) => item.id),
     reasons: Object.fromEntries(ordered.map((item) => [item.id, item.reason])),

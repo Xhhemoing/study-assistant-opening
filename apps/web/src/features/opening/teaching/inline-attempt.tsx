@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import type { LearningObservation, TeachingActivity, TeachingAnswerKey } from "@aistudy/contracts";
 import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { buildSelfCompareRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
+import { collectSkillLabelOptions, findSkillLabelReuseHint } from "../learning/skill-label-options";
 import { LearningProse } from "../assistant/learning-prose";
 import { ui } from "../design/ui";
 import { createTeachingActivityClient } from "./activity-client";
@@ -31,7 +32,8 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
   const api = useMemo(() => createOpeningApi(), []);
   const teaching = useMemo(() => createTeachingActivityClient(), []);
   const [answer, setAnswer] = useState(initialDraft?.answer ?? "");
-  const [skillLabel, setSkillLabel] = useState(initialDraft?.skillLabel ?? context.intentSummary.slice(0, 200));
+  const [skillLabel, setSkillLabel] = useState(initialDraft?.skillLabel ?? "");
+  const [skillOptions, setSkillOptions] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [recorded, setRecorded] = useState<LearningObservation | null>(null);
@@ -52,6 +54,18 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
     void client.listRevisionCourses().then((rows) => { if (active) setCourses(rows); }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "无法读取课程"); });
     return () => { active = false; };
   }, [client, context.courseId, context.status]);
+
+  useEffect(() => {
+    if (!context.courseId || context.status === "completed") return;
+    let active = true;
+    void client.getSummary(context.courseId).then((rows) => {
+      if (active) setSkillOptions(collectSkillLabelOptions(rows));
+    }).catch(() => { /* skill hints are optional */ });
+    return () => { active = false; };
+  }, [client, context.courseId, context.status]);
+
+  const skillReuseHint = findSkillLabelReuseHint(skillLabel, skillOptions);
+  const skillListId = useId();
 
   async function bindCourse() {
     if (!courseId || inFlight.current) return;
@@ -122,7 +136,9 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
       {!courses.length ? <p className="text-xs text-zinc-500">可先到课程页创建课程，再返回作答。</p> : null}
     </div> : null}
     {!recorded ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
-      <label className="block text-xs text-zinc-700">记录的技能<input className="mt-1 block w-full rounded-md border border-zinc-200 bg-white px-2 py-2" value={skillLabel} maxLength={200} disabled={pending || Boolean(submission.current)} onChange={(event) => { setSkillLabel(event.target.value); onDraftChange({ answer, skillLabel: event.target.value, prompt }); }} /></label>
+      <label className="block text-xs text-zinc-700">记录的技能<input className="mt-1 block w-full rounded-md border border-zinc-200 bg-white px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={pending || Boolean(submission.current)} onChange={(event) => { setSkillLabel(event.target.value); onDraftChange({ answer, skillLabel: event.target.value, prompt }); }} /></label>
+      <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
+      {skillReuseHint ? <p className="text-xs leading-6 text-amber-800" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-emerald-800 underline" onClick={() => { setSkillLabel(skillReuseHint); onDraftChange({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
       <label className="block text-xs text-zinc-700">我的原答案<textarea className="mt-1 min-h-24 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm" value={answer} maxLength={20_000} disabled={pending || Boolean(submission.current) || context.status === "completed"} onChange={(event) => { setAnswer(event.target.value); onDraftChange({ answer: event.target.value, skillLabel, prompt }); }} /></label>
       <button type="submit" className={ui.primary} disabled={pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : "提交原答案，再看参考"}</button>
     </form> : <div className="space-y-2">
