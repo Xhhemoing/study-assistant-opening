@@ -156,6 +156,12 @@ export async function readOpeningBackupTableRows(
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
       candidate_id, client_key, course_id, skill_label, requirement_key, origin, not_before, created_at, updated_at
     FROM opening_tasks WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
+  tables.opening_plan_feedback = asRows(await tx`
+    SELECT f.id, f.workspace_id, f.owner_user_id, f.task_id, f.task_version, f.action, f.reason,
+      f.origin, f.requirement_key, f.suggestion_kind, f.not_before, f.recorded_at
+    FROM opening_plan_feedback f
+    JOIN opening_tasks t ON t.id=f.task_id AND t.workspace_id=f.workspace_id AND t.owner_user_id=f.owner_user_id
+    WHERE f.workspace_id=${id} AND f.owner_user_id=${userId} ORDER BY f.id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,
       NULL::uuid AS candidate_id, task_id, status, result, version, snoozed_until, proposed_at, accepted_at, started_at,

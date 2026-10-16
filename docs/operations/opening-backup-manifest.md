@@ -146,6 +146,7 @@ Counts: migrations define **73** `CREATE TABLE` names (including `schema_migrati
 | `opening_memories` | 原始 | Includes `last_decision_client_key` |
 | `opening_privacy_exclusions` | 原始 | Deletion journal facts |
 | `opening_tasks` | 原始 | **Must include `client_key`** (quick-add idempotency) |
+| `opening_plan_feedback` | 原始 | 0067：任务操作与可选结构化原因；同 owner/workspace 的 task 引用、结果版本和服务器记录时间。旧包可无此表，不回填历史；不含题目/答案/聊天正文。 |
 | `opening_retest_activities` | 原始 | Retest lifecycle |
 | `opening_timetable_sessions` | 原始 | |
 | `opening_hard_blocks` | 原始 | |

@@ -229,6 +229,8 @@ export {
 
 export * from "./ai-settings";
 export * from "./planning-settings";
+export * from "./plan-feedback";
+export { taskFeedbackInputSchema, taskFeedbackReasonSchema, type TaskFeedbackInput } from "./planning-tasks";
 export * from "./adaptive-planning";
 export * from "./intervention-prefs";
 export * from "./model-providers";

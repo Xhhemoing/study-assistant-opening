@@ -43,6 +43,40 @@ afterAll(async () => {
 });
 
 describe("opening reminder repository (P03)", () => {
+  it.each([false, true])("suppresses a deferred task across due, enqueue and delivery checks until the boundary (retest=%s)", async linked => {
+    const plans = createOpeningPlansRepository(sql), reminders = createOpeningReminderRepository(sql);
+    const task = await plans.createTask(owner, { title: "Deferred reminder", minutes: 25, dueAt: pastDue, priority: 1, candidateId: null });
+    const courseId = randomUUID(), notBefore = "2026-09-15T00:00:00.000Z";
+    if (linked) {
+      await sql`INSERT INTO courses(id, workspace_id, title, slug) VALUES (${courseId}, ${owner.workspaceId}, 'Deferred retest', ${courseId})`;
+      const activities = createOpeningRetestActivityRepository(sql);
+      const activity = await activities.createProposed(owner, { cycleId: randomUUID(), candidateId: null,
+        taskId: task.id, courseId, skillLabel: "matrix", requirementKey: null, proposedAt: pastDue, recommendedAt: pastDue });
+      await activities.accept(owner, activity.activityId, task.id, pastDue);
+    }
+    try {
+      const [old] = await reminders.enqueue(owner, { taskId: task.id, expectedVersion: 1, clientKey: randomUUID(), channel: "in_app" }, later);
+      await sql`UPDATE opening_jobs SET state='running' WHERE id=${old!.id}`;
+      expect(await reminders.isCurrent(old!.id, later)).toBe(true);
+      await plans.deferTask(owner, task.id, { notBefore, expectedVersion: 1 });
+      expect((await reminders.list(owner, later)).reminders.some(item => item.taskId === task.id)).toBe(false);
+      expect(await reminders.enqueue(owner, { clientKey: randomUUID(), channel: "in_app" }, later)).toEqual([]);
+      await expect(reminders.enqueue(owner, { taskId: task.id, expectedVersion: 2, clientKey: randomUUID(), channel: "in_app" }, later)).rejects.toMatchObject({ code: "VALIDATION" });
+      expect(await reminders.isCurrent(old!.id, later)).toBe(false);
+      // A legacy occurrence may already carry the deferred task's current
+      // version. The time guard must reject it independently of version CAS.
+      await sql`UPDATE opening_jobs SET payload=jsonb_set(payload, '{taskVersion}', '2'::jsonb) WHERE id=${old!.id}`;
+      expect(await reminders.isCurrent(old!.id, later)).toBe(false);
+      await sql`UPDATE opening_jobs SET payload=jsonb_set(payload, '{taskVersion}', '1'::jsonb) WHERE id=${old!.id}`;
+      if (linked) expect(await createOpeningRetestActivityRepository(sql).listDue(owner, courseId, later.toISOString())).toEqual([]);
+      const boundary = new Date(notBefore);
+      const next = await reminders.enqueue(owner, { taskId: task.id, expectedVersion: 2, clientKey: randomUUID(), channel: "in_app" }, boundary);
+      expect(next).toMatchObject([{ taskId: task.id, taskVersion: 2 }]);
+      if (linked) expect(await createOpeningRetestActivityRepository(sql).listDue(owner, courseId, boundary.toISOString())).toHaveLength(1);
+      expect(await reminders.isCurrent(old!.id, boundary)).toBe(false);
+    } finally { if (linked) await sql`DELETE FROM courses WHERE id=${courseId}`; }
+  });
+
   it("selects one current owner task and preserves its idempotent job", async () => {
     const plans = createOpeningPlansRepository(sql);
     const reminders = createOpeningReminderRepository(sql);

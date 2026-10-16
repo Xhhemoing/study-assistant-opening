@@ -57,6 +57,7 @@ export const OPENING_RESTORE_APPLY_ORDER = [
   "opening_memories",
   "opening_privacy_exclusions",
   "opening_tasks",
+  "opening_plan_feedback",
   "opening_retest_activities",
   "opening_timetable_sessions",
   "opening_hard_blocks",

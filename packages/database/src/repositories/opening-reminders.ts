@@ -58,6 +58,7 @@ async function automaticReminderAllowed(
 
 function currentDueAt(task: Record<string, unknown> | undefined, activity: RetestActivity | undefined, now: Date): string | null {
   if (!task || task.status !== "pending") return null;
+  if (task.not_before && new Date(task.not_before as string | Date).getTime() > now.getTime()) return null;
   if (activity) {
     return isRetestActivityDue(activity, now)
       ? activity.times.scheduledStartAt ?? activity.times.recommendedAt : null;
@@ -95,7 +96,7 @@ export function createOpeningReminderRepository(sql: Sql) {
       const config = await readConfig(sql, scope);
       const configured = externalChannelConfigured(config);
       const tasks = await sql`
-        SELECT id, title, due_at, status, version FROM opening_tasks
+        SELECT id, title, due_at, status, version, not_before FROM opening_tasks
         WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
       const activities = await sql`SELECT * FROM opening_retest_activities
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -121,9 +122,7 @@ export function createOpeningReminderRepository(sql: Sql) {
         };
         if (ref.status !== "pending") continue;
         const activity = activityByTask.get(ref.id);
-        if (activity ? !isRetestActivityDue(activity, now) : !isQueueableDueTask(ref, now) || !dueAt) continue;
-        if (!dueAt && !activity) continue;
-        const effectiveDueAt = activity?.times.scheduledStartAt ?? activity?.times.recommendedAt ?? dueAt;
+        const effectiveDueAt = currentDueAt(task, activity, now);
         if (!effectiveDueAt) continue;
         const key = reminderIdempotencyKey({
           taskId: ref.id,
@@ -178,7 +177,7 @@ export function createOpeningReminderRepository(sql: Sql) {
       }
       const workspaceTimeZone = await readPlanningTimeZone(sql, scope);
       const tasks = await sql`
-        SELECT id, title, due_at, status, version FROM opening_tasks
+        SELECT id, title, due_at, status, version, not_before FROM opening_tasks
         WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
           AND (${explicit?.taskId ?? null}::uuid IS NULL OR id=${explicit?.taskId ?? null}::uuid)`;
       if (explicit && !tasks.length) throw new OpeningPlanError("NOT_FOUND", "task not found");
@@ -238,7 +237,7 @@ export function createOpeningReminderRepository(sql: Sql) {
             if (explicit) throw new OpeningPlanError("CONFLICT", "task activity changed");
             return null;
           }
-          const [currentTask] = await tx`SELECT id,title,due_at,status,version FROM opening_tasks
+          const [currentTask] = await tx`SELECT id,title,due_at,status,version,not_before FROM opening_tasks
             WHERE id=${ref.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
           if (!currentTask) {
             if (explicit) throw new OpeningPlanError("NOT_FOUND", "task not found");
@@ -305,7 +304,7 @@ export function createOpeningReminderRepository(sql: Sql) {
         const rows = await tx`SELECT j.payload, j.privacy_epoch, j.workspace_id AS job_workspace_id,
             j.owner_user_id AS job_owner_user_id,
             a.*, a.id AS activity_id, t.id AS task_id,
-            t.status AS task_status, t.version AS task_version, t.due_at
+            t.status AS task_status, t.version AS task_version, t.due_at, t.not_before
           FROM opening_jobs j
           LEFT JOIN opening_tasks t ON t.id::text = j.payload->>'taskId'
             AND t.workspace_id=j.workspace_id AND t.owner_user_id=j.owner_user_id
@@ -332,7 +331,7 @@ export function createOpeningReminderRepository(sql: Sql) {
           WHERE task_id=${payload.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         const currentActivity = currentActivities[0] ? mapOpeningRetestActivity(currentActivities[0] as Record<string, unknown>) : undefined;
         if (currentActivity?.activityId !== activity?.activityId || currentActivity?.courseId !== activity?.courseId) return false;
-        const [task] = await tx`SELECT id,title,due_at,status,version FROM opening_tasks
+        const [task] = await tx`SELECT id,title,due_at,status,version,not_before FROM opening_tasks
           WHERE id=${payload.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         return Number(task?.version) === payload.taskVersion && currentDueAt(task, currentActivity, now) === payload.dueAt;
       }) as Promise<boolean>;

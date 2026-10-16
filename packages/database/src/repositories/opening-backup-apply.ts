@@ -217,6 +217,10 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_privacy_exclusions: [
     "id", "workspace_id", "source_id", "memory_id", "deleted_at", "asset_deleted_at",
   ],
+  opening_plan_feedback: [
+    "id", "workspace_id", "owner_user_id", "task_id", "task_version", "action", "reason",
+    "origin", "requirement_key", "suggestion_kind", "not_before", "recorded_at",
+  ],
   opening_tasks: [
     "id", "workspace_id", "owner_user_id", "title", "minutes", "due_at", "due_text", "priority",
     "status", "version", "candidate_id", "client_key", "course_id", "skill_label", "requirement_key", "origin", "not_before",

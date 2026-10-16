@@ -96,16 +96,24 @@ export const taskCreateInputSchema = z.object({
 
 /** Explicit candidateRef clients receive review metadata; legacy responses remain flat. */
 export const taskCreateResultSchema = taskItemSchema.extend({ reviewResult: reviewResultSchema.optional() });
+/** Planning feedback only; never a scored answer or mastery observation. */
+export const taskFeedbackReasonSchema = z.enum([
+  "time_short", "too_hard", "too_easy", "not_relevant", "other", "prefer_not_say",
+]);
+export const taskFeedbackInputSchema = z.object({ reason: taskFeedbackReasonSchema }).strict();
 export const taskStatusUpdateInputSchema = z.object({
   status: z.enum(["done", "skipped"]),
   expectedVersion: z.number().int().positive(),
   at: isoDateTimeSchema,
+  feedback: taskFeedbackInputSchema.optional(),
 }).strict();
 /** Defer a pending task: planners skip it until `notBefore` (null clears the deferral). */
 export const taskDeferInputSchema = z.object({
   notBefore: isoDateTimeSchema.nullable(),
   expectedVersion: z.number().int().positive(),
+  feedback: taskFeedbackInputSchema.optional(),
 }).strict();
+export type TaskFeedbackInput = z.infer<typeof taskFeedbackInputSchema>;
 export type TaskCreateResult = z.infer<typeof taskCreateResultSchema>;
 export type TaskStatusUpdateInput = z.infer<typeof taskStatusUpdateInputSchema>;
 export type TaskDeferInput = z.infer<typeof taskDeferInputSchema>;

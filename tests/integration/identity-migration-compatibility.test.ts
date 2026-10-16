@@ -234,6 +234,7 @@ describe("identity migration compatibility", () => {
       "0063_opening_model_quick_setup.sql",
       "0064_card_source_lineage.sql",
       "0065_opening_task_requirement.sql",
+      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql",
     ]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
@@ -337,6 +338,7 @@ describe("identity migration compatibility", () => {
       "0063_opening_model_quick_setup.sql",
       "0064_card_source_lineage.sql",
       "0065_opening_task_requirement.sql",
+      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql",
     ]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -695,6 +697,7 @@ describe("identity migration compatibility", () => {
       "0063_opening_model_quick_setup.sql",
       "0064_card_source_lineage.sql",
       "0065_opening_task_requirement.sql",
+      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql",
     ]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations

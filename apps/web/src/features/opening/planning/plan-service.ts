@@ -27,6 +27,7 @@ import {
   createOpeningPlansRepository,
   createOpeningPlanningSettingsRepository,
   OpeningPlanError,
+  readOpeningPlanFeedbackSummary,
   type AutoDraftBuild,
   type OpeningPlansRepository,
 } from "@aistudy/database";
@@ -354,6 +355,12 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       } catch (error) {
         throw mapRepoError(error);
       }
+    },
+
+    getFeedbackSummary(scope: Scope, days: unknown = 7) {
+      const windowDays = z.coerce.number().int().min(1).max(90).parse(days);
+      const until = clock();
+      return readOpeningPlanFeedbackSummary(sql, scope, new Date(until.getTime() - windowDays * 86_400_000), until);
     },
 
     listTimetable(scope: Scope) {

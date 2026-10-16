@@ -38,6 +38,7 @@ import {
   taskCreateInputSchema,
   taskStatusUpdateInputSchema,
   taskDeferInputSchema,
+  planFeedbackSummarySchema,
   openingAdaptivePrefsPatchSchema,
   openingAdaptivePrefsResponseSchema,
   taskCreateResultSchema,
@@ -514,6 +515,11 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
       const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
       return todayPlanSchema.parse(body);
+    },
+
+    async getPlanFeedbackSummary(days = 7) {
+      const body = await request(`/api/opening/plans/feedback?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
+      return planFeedbackSummarySchema.parse(body);
     },
 
     async listTasks(): Promise<{ tasks: TaskItem[] }> {

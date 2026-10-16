@@ -10,25 +10,26 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 发布基线 `8ff0741`：#49、#50、#53、#54、#55、#52、#56、#57、#58 均已合入；[发布主干完整 CI 38882210678](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38882210678) 全绿；审计修复 [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) 已合入 `e7a693b`，其完整 CI 38894501910 成功。本轮与 #59 的组合检查及最终合并 SHA 以 PR 为准。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
+- 发布基线 `cb5a68c`：#59 与 #60 均已合入；[发布主干完整 CI 38911719890](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38911719890) 全绿，含数据库、handler、既有浏览器与构建。迁移末号0065。Hermes 当前部署 SHA、迁移与开关状态仍未现场核实。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理；本轮整合由主对话完成 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。原 head 完整 CI 成功；用户已授权与 #60 合并，组合版本保留要求范围内的别名去重、已交付帮助与卡片/教学入口，新增交叉回归；组合 CI、合并状态以 PR 为准。尚未部署；稳定节点身份、分项评分和 BKT 影子仍属后续 |
+| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 已与 #60 整合并合入 `cb5a68c`，完整主干 CI 38911719890 成功。按要求隔离快照/建议/任务/教学，保留已交付帮助与卡片入口，含0065可空列迁移；尚未部署。稳定节点身份、分项评分与BKT属后续 |
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
 | 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
 | Hermes 发布 | Codex 主对话 | [#58](https://github.com/Xhhemoing/study-assistant-opening/pull/58) | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、启动后崩溃检测、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
-| 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) | 7类闭环/恢复缺陷已修，无新增迁移；本地3905项通过，11跳过/1todo属真实使用占位；完整CI 38894501910全绿（含新PG/handler、既有浏览器和构建），已合入 e7a693b。与#59组合结果见该PR；Hermes及实际验收未完成，B/C后置 |
+| 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) | 7类闭环/恢复缺陷已修并合入 `e7a693b`；与 #59 整合后的主干完整 CI 38911719890 成功。Hermes与实际使用验收未完成 |
+| 学习反馈与剩余计划 S1/L8a | Astra 研究/独立评审，Codex 编写 | 本地 `codex/learning-feedback-loop` | 已编写任务反馈原子事件、可选原因、工作区明日推迟/取消、到期与提醒守卫、只读记录及备份恢复；含0067迁移（原样保留BKT 0066前置DDL）。本地相关582项、跨包类型/lint通过；全量单元/契约首轮3884通过，2项失败（迁移清单与本机PDF Python路径）均已单独修复/配置并复测通过，另11跳过/1todo。真实PG/handler/当前提交CI与用户浏览器验收待完成，未推送/合并/部署 |
 
 ## 下一步（按顺序）
 
-1. #56–#58 与审计 #60 已合入；本轮按用户授权整合 #59，最终组合 CI 与主干 SHA 以 PR 为准。恢复 Hermes 部署连接后核实 SHA/迁移、备份；#59 含既有 0065 可空列迁移，运行新代码前先迁移。以 `OPENING_ADAPTIVE_PLANNING=0` 部署，用户决定何时开 1；当前尚未执行线上操作。回滚应用时保留 0065 可空列及已有要求归属。发布/验收见 `docs/operations/adaptive-copilot-release-checklist.md`。
+1. #56–#60 已合入，最终主干 `cb5a68c`、完整CI 38911719890 成功。恢复 Hermes 部署连接后核实 SHA/迁移、备份；#59 含既有 0065 可空列迁移，运行新代码前先迁移。以 `OPENING_ADAPTIVE_PLANNING=0` 部署，用户决定何时开 1；当前尚未执行线上操作。回滚应用时保留 0065 可空列及已有要求归属。发布/验收见 `docs/operations/adaptive-copilot-release-checklist.md`。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
-3. 先修复批次 A 自用反馈，再按 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 推进后续批次；教练自动接受仍不启用。
+3. 按用户本轮授权，由Astra研究、Codex编写，执行 `docs/plans/2026-10-16-learning-loop-remaining-plan.md`。当前S1/L8a待真实PG/CI后再集成；随后S2安全局部重排、S3完整三组指标、E1评价、阶段成果、教练与对话草案分批推进。I2/BKT共享字段由另一会话负责；合并前协调迁移编号，教练自动接受仍不启用。
 4. 大问题方案：
    - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。

@@ -63,6 +63,8 @@ export * from "./repositories/opening-memory-replace";
 export * from "./repositories/opening-privacy";
 export * from "./repositories/opening-retests";
 export * from "./schema/opening-planning";
+export * from "./schema/opening-plan-feedback";
+export { readOpeningPlanFeedbackSummary } from "./repositories/opening-plan-feedback";
 export * from "./repositories/opening-plans";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";

@@ -2,13 +2,44 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { OpeningApiError } from "../client/api";
-import { createTaskStatusAttempt, createTaskStatusSession, taskStatusNotice, taskStatusVersionBlock } from "./task-status-action";
+import { createTaskStatusAttempt, createTaskStatusSession, taskDeferralUntilTomorrow, taskStatusNotice, taskStatusVersionBlock } from "./task-status-action";
 import { isRetestOriginTask, TaskStatusControl, TaskStatusPanel } from "./task-status-control";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
 const target = { taskId, expectedVersion: 3 };
 const at = new Date("2026-10-08T09:00:00.000Z");
 const updated = { id: taskId, version: 4, title: "复习矩阵", minutes: 25, dueAt: null, priority: 0, status: "done" as const };
+
+it.each([
+  ["2026-10-15T15:30:00Z", "Asia/Shanghai", "2026-10-15T16:00:00.000Z"],
+  ["2026-03-08T08:30:00Z", "America/Los_Angeles", "2026-03-09T07:00:00.000Z"],
+  ["2026-11-01T07:30:00Z", "America/Los_Angeles", "2026-11-02T08:00:00.000Z"],
+])("defers %s to the next calendar day in %s", (now, zone, expected) => {
+  expect(taskDeferralUntilTomorrow(new Date(now), zone)).toBe(expected);
+});
+
+it("shares the single-write guard across deferral and completion, retaining optional feedback", async () => {
+  let finish!: (value: typeof updated) => void;
+  const defer = vi.fn(() => new Promise<typeof updated>(resolve => { finish = resolve; }));
+  const update = vi.fn();
+  const session = createTaskStatusSession(update, target, defer);
+  const first = session.defer("2026-10-15T16:00:00.000Z", { reason: "time_short" });
+  expect(await session.confirm("done", at)).toBeNull();
+  expect(update).not.toHaveBeenCalled();
+  expect(defer).toHaveBeenCalledExactlyOnceWith(taskId, { notBefore: "2026-10-15T16:00:00.000Z", expectedVersion: 3, feedback: { reason: "time_short" } });
+  finish(updated);
+  expect(await first).toEqual({ kind: "updated", task: updated });
+  expect(await session.defer(null)).toBeNull();
+});
+
+it("does not replay an uncertain deferral as another action", async () => {
+  const defer = vi.fn().mockRejectedValue(new Error("connection lost")), update = vi.fn();
+  const session = createTaskStatusSession(update, target, defer);
+  expect(await session.defer("2026-10-15T16:00:00.000Z")).toEqual({ kind: "unknown" });
+  expect(await session.confirm("skipped", at)).toBeNull();
+  expect(update).not.toHaveBeenCalled();
+  expect(defer).toHaveBeenCalledTimes(1);
+});
 
 describe("createTaskStatusAttempt", () => {
   it("sends exactly one write for one displayed task version and never resubmits after success", async () => {

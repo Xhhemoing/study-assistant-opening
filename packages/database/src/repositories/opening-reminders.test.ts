@@ -10,10 +10,18 @@ const dueAt = "2026-09-28T00:00:00.000Z";
 const now = new Date("2026-09-30T04:00:00.000Z");
 const single = { clientKey: "single-due-request", channel: "in_app" as const, taskId, expectedVersion: 1 };
 
+it.each([false, true])("honors task deferral in list and explicit enqueue (linked=%s)", async linked => {
+  const notBefore = "2026-10-01T00:00:00.000Z";
+  const { repo } = fixture({ linked, notBefore });
+  expect((await repo.list(scope, now)).reminders.some(item => item.taskId === taskId)).toBe(false);
+  await expect(repo.enqueue(scope, single, now)).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(await repo.enqueue(scope, single, new Date(notBefore))).toMatchObject([{ taskId, taskVersion: 1 }]);
+});
+
 /** SQL is the external boundary. Lock and SQL semantics are covered by integration tests. */
-function fixture(options: { linked?: boolean; status?: string; version?: number; dueAt?: string; privacyEpoch?: number; config?: unknown } = {}) {
+function fixture(options: { linked?: boolean; status?: string; version?: number; dueAt?: string; privacyEpoch?: number; config?: unknown; notBefore?: string } = {}) {
   const tasks = [
-    { id: taskId, title: "Selected task", due_at: options.dueAt ?? dueAt, status: options.status ?? "pending", version: options.version ?? 1 },
+    { id: taskId, title: "Selected task", due_at: options.dueAt ?? dueAt, status: options.status ?? "pending", version: options.version ?? 1, not_before: options.notBefore },
     { id: otherTaskId, title: "Unrelated old task", due_at: dueAt, status: "pending", version: 1 },
   ];
   const activity = { id: "66666666-6666-4666-8666-666666666666", evidence_cycle_id: "77777777-7777-4777-8777-777777777777",
