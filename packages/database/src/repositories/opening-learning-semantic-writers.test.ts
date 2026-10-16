@@ -225,17 +225,20 @@ describe("learning semantic revision writers", () => {
 
   it.each([false, true])("task status updates count only linked activities (linked: %s)", async (linked) => {
     let row = task(), linkedActivity = activity();
+    let feedbackEvents = 0;
     const db = database((query, values) => {
       if (query.includes("FROM opening_retest_activities")) return linked ? [linkedActivity] : [];
       if (query.startsWith("SELECT * FROM opening_tasks")) return [row];
       if (query.startsWith("UPDATE opening_retest_activities")) { linkedActivity = persistedActivity(linkedActivity, values); return [linkedActivity]; }
       if (query.startsWith("UPDATE opening_tasks")) { row = task({ status: values[0], version: Number(row.version) + 1 }); return [row]; }
+      if (query.startsWith("INSERT INTO opening_plan_feedback")) { feedbackEvents += 1; return []; }
       throw new Error(query);
     });
     const repo = createOpeningPlansRepository(db.sql);
     await repo.updateTaskStatus(scope, taskId, { status: "skipped", expectedVersion: 1, at });
     await repo.updateTaskStatus(scope, taskId, { status: "skipped", expectedVersion: 2, at });
     expect(db.revision()).toBe(linked ? 1 : 0);
+    expect(feedbackEvents).toBe(1);
   });
 
   it("publishes a candidate/activity batch once and does not count suppressed proposals", async () => {

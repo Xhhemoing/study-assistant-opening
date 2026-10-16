@@ -8,6 +8,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOSED_CAPABILITIES, type OpeningCapabilities } from "@aistudy/config/public";
 import type { OpeningApi } from "../opening/client/api";
+import type { CourseGoal } from "@aistudy/contracts";
+import { CourseMilestones } from "./course-milestones";
 
 const capsState = vi.hoisted(() => ({ adaptivePlanning: true }));
 
@@ -33,6 +35,7 @@ vi.mock("react", async (importOriginal) => ({
     effects.push(effect);
   },
   useMemo: <T,>(factory: () => T) => factory(),
+  useRef: <T,>(initial: T) => ({ current: initial }),
   useState: (initial: unknown) => {
     const index = stateIndex++;
     if (states[index] === undefined) {
@@ -66,6 +69,7 @@ type ControlProps = {
   disabled?: boolean;
   onChange?: (event: { target: { value: string } }) => void;
   onClick?: () => void | Promise<void>;
+  onSaved?: (goal: CourseGoal) => void;
 };
 
 function findControl(
@@ -220,6 +224,48 @@ describe("CourseGoalForm capability gate", () => {
 });
 
 describe("CourseGoalForm save / clear / validation", () => {
+  it("keeps dirty base fields on their old revision after the milestones panel reloads", async () => {
+    const api = mockApi({ getAdaptivePrefs: vi.fn(async () => ({ prefs: { autonomy: "copilot" as const,
+      coachBudgetMinutes: 60, courseGoals: { [COURSE_ID]: { targetDate: null, weeklyMinutes: 120, revision: 1 } } },
+      saved: true, invalidStoredPrefs: false })) });
+    mount(api); await flush();
+    let tree = rerender(api);
+    findControl(tree, el => el.props.id === "course-goal-weekly-minutes")!.props.onChange!({ target: { value: "150" } });
+    tree = rerender(api);
+    findControl(tree, el => el.type === CourseMilestones)!.props.onSaved!({ targetDate: null, weeklyMinutes: 300, revision: 2 });
+    tree = rerender(api);
+    expect(findControl(tree, el => el.props.id === "course-goal-weekly-minutes")!.props.value).toBe("150");
+    const save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
+    await save.props.onClick!(); await flush();
+    expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID,
+      expectedRevision: 1, goal: { targetDate: null, weeklyMinutes: 150 } } });
+  });
+
+  it("synchronizes clean base fields and their revision from a refreshed milestone goal", async () => {
+    const api = mockApi({ getAdaptivePrefs: vi.fn(async () => ({ prefs: { autonomy: "copilot" as const,
+      coachBudgetMinutes: 60, courseGoals: { [COURSE_ID]: { targetDate: null, weeklyMinutes: 120, revision: 1 } } },
+      saved: true, invalidStoredPrefs: false })) });
+    mount(api); await flush();
+    let tree = rerender(api);
+    findControl(tree, el => el.type === CourseMilestones)!.props.onSaved!({ targetDate: "2026-12-01", weeklyMinutes: 300, revision: 2 });
+    tree = rerender(api);
+    expect(findControl(tree, el => el.props.id === "course-goal-weekly-minutes")!.props.value).toBe("300");
+    const save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
+    await save.props.onClick!(); await flush();
+    expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID,
+      expectedRevision: 2, goal: { targetDate: "2026-12-01", weeklyMinutes: 300 } } });
+  });
+
+  it("uses the deletion tombstone as the baseline after clearing and recreating", async () => {
+    const api = mockApi({ getAdaptivePrefs: vi.fn(async () => ({ prefs: { autonomy: "copilot" as const,
+      coachBudgetMinutes: 60, courseGoals: {}, courseGoalRevisions: { [COURSE_ID]: 8 } }, saved: true, invalidStoredPrefs: false })) });
+    mount(api); await flush();
+    const tree = rerender(api), save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
+    await save.props.onClick!(); await flush();
+    expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID, expectedRevision: 8,
+      goal: { targetDate: null, weeklyMinutes: 120 } } });
+  });
+
   it("saves with patch body matching form fields", async () => {
     const api = mockApi();
     mount(api);
@@ -245,6 +291,7 @@ describe("CourseGoalForm save / clear / validation", () => {
       courseGoal: {
         courseId: COURSE_ID,
         goal: { targetDate: "2026-12-01", weeklyMinutes: 210 },
+        expectedRevision: 0,
       },
     });
   });
@@ -276,7 +323,7 @@ describe("CourseGoalForm save / clear / validation", () => {
     await flush();
 
     expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({
-      courseGoal: { courseId: COURSE_ID, goal: null },
+      courseGoal: { courseId: COURSE_ID, goal: null, expectedRevision: 0 },
     });
   });
 

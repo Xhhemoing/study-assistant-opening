@@ -11,6 +11,7 @@ import {
   type SkillSignal,
 } from "./types";
 import { adaptiveSkillIdentity, normalizeSkillLabelKey, normalizedSuggestionIdentity } from "./skill-identity";
+import { suggestionFeedbackIdentity } from "./suggestion-feedback";
 
 export const MAX_DAILY_SUGGESTIONS = 3;
 /** Suggestions may fill at most this share of the day's free time, after committed tasks. */
@@ -40,6 +41,8 @@ export type ProposeAdaptiveTasksOptions = {
   /** Pre-assigns the task id for a suggestion key (deterministic in production). */
   idFor: (key: string) => string;
   maxSuggestions?: number;
+  /** Explicit same-day planning feedback. Does not imply a skill verdict or a skip. */
+  suppressedSuggestionIdentities?: readonly string[];
 };
 
 type Candidate = {
@@ -101,7 +104,7 @@ function consecutiveSkippedDays(snapshot: LearnerSnapshot, identities: readonly 
   for (let back = 1; back <= 7; back += 1) {
     const day = addLocalDays(snapshot.date, -back);
     const skipped = snapshot.plannerHistory.some(
-      (entry) => entry.date === day && identities.includes(entry.identity) && entry.status === "skipped",
+      (entry) => entry.date === day && identities.includes(entry.identity) && entry.status === "skipped" && entry.closeSource !== "system",
     );
     if (!skipped) break;
     days += 1;
@@ -236,7 +239,9 @@ export function proposeAdaptiveTasks(
   let budget = Math.max(0, Math.floor(options.capacityMinutes * SUGGESTION_CAPACITY_SHARE) - options.committedMinutes);
   const suggestions: SuggestedTask[] = [];
 
+  const suppressed = new Set(options.suppressedSuggestionIdentities ?? []);
   for (const candidate of collectCandidates(snapshot, options.pendingTasks).sort(compareCandidates)) {
+    if (suppressed.has(suggestionFeedbackIdentity(candidate))) continue;
     if (suggestions.length >= max) break;
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     const skippedDays = consecutiveSkippedDays(snapshot, candidate.comparisonIdentities);

@@ -26,6 +26,11 @@ const propose = (snap: LearnerSnapshot, options: Partial<Parameters<typeof propo
 
 // Fixtures are synthetic. No student records or provider calls are required.
 describe("adaptive suggestions respect workload feedback", () => {
+  it("keeps system undo in same-day dedupe but excludes it from repeated learner skips", () => {
+    const history = skippedTwice(cardIdentity).map(entry => ({ ...entry, closeSource: "system" as const }));
+    assert.equal(propose(snapshot({ plannerHistory: history }))[0]!.minutes, 5);
+    assert.deepEqual(propose(snapshot({ plannerHistory: [...history, { date, identity: cardIdentity, status: "skipped", closeSource: "system" }] })), []);
+  });
   for (const [cards, expected] of [[5, 3], [6, 3], [7, 4], [9, 5], [12, 6], [19, 10], [30, 15], [80, 15]] as const) {
     it(`reduces a ${cards}-card review to ${expected} minutes after two skips`, () => {
       const result = propose(snapshot({ dueCardCount: cards, plannerHistory: skippedTwice(cardIdentity) }));

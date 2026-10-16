@@ -41,20 +41,27 @@ export function evaluateAssistance(
     // V2-13: concept instruction must not elevate item assistance / prior answer.
     if ((help.kind ?? "hint") === "instruction") continue;
     const sameAttempt = help.attemptId === observation.attemptId;
+    const evaluationFeedback = help.kind === "evaluation_feedback" && help.sameQuestion === true;
     const otherProblem = Boolean(help.problemId && help.problemId !== observation.problemId);
-    if (otherProblem && !sameAttempt) continue;
+    if (otherProblem && !sameAttempt && !evaluationFeedback) continue;
     // Feedback after this answer was captured never changes its qualification.
     if (knownTime(help.deliveredAt) && knownTime(answerRecordedAt) && help.deliveredAt > answerRecordedAt) continue;
     if (help.delivered == null) {
       markUnknown("help_delivery_unknown");
       continue;
     }
-    if (!help.attemptId || !help.problemId || otherProblem) {
+    if (!help.attemptId || !help.problemId || (otherProblem && !evaluationFeedback)) {
       markUnknown("help_association_unknown");
       continue;
     }
     if (!knownTime(help.deliveredAt) || !knownTime(answerRecordedAt) || help.deliveredAt === answerRecordedAt) {
       markUnknown("help_order_unknown");
+      continue;
+    }
+    if (evaluationFeedback) {
+      assisted = true;
+      if (assistance !== "revealed") assistance = "hinted";
+      reasons.add("prior_evaluation_feedback");
       continue;
     }
     if (sameAttempt) {

@@ -1,3 +1,4 @@
+import { projectBackupCourseMilestoneReferences } from "@aistudy/domain";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
 import { retainCompleteObservationChains } from "./opening-backup-observation-chains";
 import type { TransactionSql } from "postgres";
@@ -49,6 +50,7 @@ export async function readOpeningBackupTableRows(
       a.checkpoint_json, a.client_key, a.create_intent, a.created_at, a.updated_at
     FROM opening_teaching_activities a
     WHERE a.workspace_id = ${id} AND a.owner_user_id = ${userId}
+      AND ${cleanUuidSources(tx, id, tx`a.source_ids`)}
     ORDER BY a.id`);
   tables.opening_teaching_units = asRows(await tx`
     SELECT u.id, u.workspace_id, u.owner_user_id, u.title, u.document_id, u.current_revision_number,
@@ -66,7 +68,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_learning_sessions = asRows(await tx`
     SELECT l.id, l.workspace_id, l.owner_user_id, l.course_id, l.activity_id, l.skill_label, l.source_ids, l.created_at
     FROM opening_learning_sessions l
-    WHERE l.workspace_id = ${id} AND l.owner_user_id = ${userId} AND ${cleanUuidSources(tx, id, tx`l.source_ids`)}
+    WHERE l.workspace_id = ${id} AND l.owner_user_id = ${userId} AND ${includedLearningSession(tx, id, userId, tx`l.id`)}
     ORDER BY l.id`);
   tables.opening_problem_refs = asRows(await tx`
     SELECT p.problem_id, p.workspace_id, p.session_id, p.source_id, p.source_version, p.physical_page,
@@ -80,7 +82,10 @@ export async function readOpeningBackupTableRows(
     FROM opening_help_exposures h
     JOIN opening_learning_sessions l ON l.id = h.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     WHERE h.workspace_id = ${id}
-      AND ${cleanUuidSources(tx, id, tx`l.source_ids`)}
+      AND ${includedLearningSession(tx, id, userId, tx`h.session_id`)}
+      AND (h.activity_id IS NULL OR EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity
+        WHERE backup_activity.id=h.activity_id AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
+          AND ${cleanUuidSources(tx,id,tx`backup_activity.source_ids`)}))
       AND (h.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`h.problem_id`, tx`h.session_id`)})
       AND ${includedTurn(tx, id, userId, tx`h.turn_id`)}
     ORDER BY h.id`);
@@ -90,7 +95,7 @@ export async function readOpeningBackupTableRows(
       o.source_turn_ids, o.verdict_source, o.reference_source_id, o.evidence_verdict,
       o.attempt_id, o.item_version_id, o.requirement_key, o.started_at, o.submitted_at, o.recorded_at,
       o.source_versions, o.reference_check, o.submitted_intent, o.history_revision, o.workspace_history_revision,
-      o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id
+      o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id,o.server_evaluation
     FROM opening_learning_observations o
     JOIN opening_learning_sessions l ON l.id = o.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     LEFT JOIN LATERAL (
@@ -103,6 +108,7 @@ export async function readOpeningBackupTableRows(
       LIMIT 1
     ) a ON true
     WHERE o.workspace_id = ${id} AND o.owner_user_id = ${userId}
+      AND ${includedLearningSession(tx, id, userId, tx`o.session_id`)}
       AND ${cleanUuidSources(tx, id, tx`l.source_ids`)}
       AND ${cleanUuidSources(tx, id, tx`o.source_ids`)}
       AND (o.reference_source_id IS NULL OR EXISTS (
@@ -154,8 +160,14 @@ export async function readOpeningBackupTableRows(
     FROM opening_privacy_exclusions WHERE workspace_id = ${id} ORDER BY source_id`);
   tables.opening_tasks = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
-      candidate_id, client_key, course_id, skill_label, requirement_key, origin, not_before, created_at, updated_at
+      candidate_id, client_key, course_id, skill_label, requirement_key, origin, not_before, close_source, created_at, updated_at
     FROM opening_tasks WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
+  tables.opening_plan_feedback = asRows(await tx`
+    SELECT f.id, f.workspace_id, f.owner_user_id, f.task_id, f.task_version, f.action, f.reason,
+      f.origin, f.requirement_key, f.suggestion_kind, f.not_before, f.recorded_at
+    FROM opening_plan_feedback f
+    JOIN opening_tasks t ON t.id=f.task_id AND t.workspace_id=f.workspace_id AND t.owner_user_id=f.owner_user_id
+    WHERE f.workspace_id=${id} AND f.owner_user_id=${userId} ORDER BY f.id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,
       NULL::uuid AS candidate_id, task_id, status, result, version, snoozed_until, proposed_at, accepted_at, started_at,
@@ -181,10 +193,17 @@ export async function readOpeningBackupTableRows(
       created_at, updated_at
     FROM opening_plan_drafts WHERE workspace_id = ${id} AND owner_user_id = ${userId} ORDER BY id`);
   tables.opening_plan_acceptances = asRows(await tx`
-    SELECT a.workspace_id, a.client_key, a.draft_id, a.day, a.accepted_version, a.payload_hash, a.created_at
+    SELECT a.workspace_id, a.client_key, a.draft_id, a.day, a.accepted_version, a.payload_hash, a.created_at, a.source, a.before_blocks, a.created_task_versions,
+      a.undone_at, a.undo_client_key, a.undo_result_version, a.undo_intent, a.undo_result
     FROM opening_plan_acceptances a
     JOIN opening_plan_drafts d ON d.id = a.draft_id AND d.workspace_id = ${id} AND d.owner_user_id = ${userId}
     WHERE a.workspace_id = ${id} ORDER BY a.client_key`);
+  tables.opening_suggestion_feedback = asRows(await tx`
+    SELECT f.id, f.workspace_id, f.owner_user_id, f.draft_id, f.day, f.suggestion_key, f.identity, f.suggestion_kind,
+      f.course_id, f.requirement_key, f.reason, f.recorded_at, f.client_key, f.intent
+    FROM opening_suggestion_feedback f JOIN opening_plan_drafts d ON d.id=f.draft_id
+      AND d.workspace_id=f.workspace_id AND d.owner_user_id=f.owner_user_id
+    WHERE f.workspace_id=${id} AND f.owner_user_id=${userId} ORDER BY f.id`);
   tables.opening_source_versions = asRows(await readOpeningBackupVersionRows(tx, { workspaceId: id, ownerUserId: userId }))
     .map(row => ({ ...row, bytes: row.bytes === null ? null : Number(row.bytes) }));
   tables.opening_workspace_history_revisions = asRows(await tx`
@@ -200,9 +219,13 @@ export async function readOpeningBackupTableRows(
     .map(row => ({ ...row, revision: Number(row.revision) }));
   tables.opening_learning_item_versions = asRows(await tx`
     SELECT v.id,v.workspace_id,v.owner_user_id,v.course_id,v.activity_id,v.problem_id,v.source_id,v.source_version,
-      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.created_at
+      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.evaluation_spec,v.created_at
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
-      AND ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)} ORDER BY v.id`);
+      AND ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)}
+      AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`NULL::uuid`)}
+      AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity WHERE backup_activity.id=v.activity_id
+        AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
+        AND ${cleanUuidSources(tx,id,tx`backup_activity.source_ids`)}) ORDER BY v.id`);
   tables.opening_learning_attempts = asRows(await tx`
     SELECT a.id,a.workspace_id,a.owner_user_id,a.session_id,a.course_id,a.activity_id,a.skill_label,a.requirement_key,
       a.problem_id,a.item_version_id,a.source_ids,a.source_versions,a.started_at,a.submitted_at,a.observation_id,
@@ -226,7 +249,8 @@ export async function readOpeningBackupTableRows(
   tables.opening_turns = tables.opening_turns.filter(row => row.attempt_id === null || attemptIds.has(row.attempt_id));
   const turnIds = new Set(tables.opening_turns.map(row => row.id));
   tables.opening_help_exposures = tables.opening_help_exposures.filter(row => turnIds.has(row.turn_id)
-    && (row.attempt_id === null || attemptIds.has(row.attempt_id)));
+    && (row.attempt_id === null || attemptIds.has(row.attempt_id))
+    && (row.item_version_id == null || itemIds.has(row.item_version_id)));
   tables.opening_learning_observations = tables.opening_learning_observations.filter(row => versionsIncluded(row.source_versions)
     && (row.reference_check == null || (typeof row.reference_check === "object"
       && typeof (row.reference_check as { referenceId?: unknown }).referenceId === "string"
@@ -241,6 +265,14 @@ export async function readOpeningBackupTableRows(
   const includedCandidateIds = new Set(tables.opening_assistant_candidates
     .map(row => typeof row.id === "string" ? row.id.toLowerCase() : null)
     .filter((value): value is string => value !== null));
+  tables.opening_plan_drafts = tables.opening_plan_drafts.filter(row => {
+    if (row.origin !== "agent") return true;
+    const metadata = (row.input_snapshot as { conversationPlan?: { candidateId?: unknown } } | null)?.conversationPlan;
+    return typeof metadata?.candidateId === "string" && includedCandidateIds.has(metadata.candidateId.toLowerCase());
+  });
+  const includedDraftIds = new Set(tables.opening_plan_drafts.map(row => row.id));
+  tables.opening_plan_acceptances = tables.opening_plan_acceptances.filter(row => includedDraftIds.has(row.draft_id));
+  tables.opening_suggestion_feedback = tables.opening_suggestion_feedback.filter(row => includedDraftIds.has(row.draft_id));
   tables.opening_tasks = tables.opening_tasks.map(row => ({
     ...row,
     candidate_id: typeof row.candidate_id === "string" && includedCandidateIds.has(row.candidate_id.toLowerCase())
@@ -251,11 +283,14 @@ export async function readOpeningBackupTableRows(
     && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
   const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
-  tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row =>
-    activityIds.has(row.activity_id));
+  const associatedUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+  tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => activityIds.has(row.activity_id));
+  const keptUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+  tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !associatedUnits.has(row.id) || keptUnits.has(row.id));
   tables.opening_skill_evidence = tables.opening_skill_evidence.filter(row =>
     completeObservationIds.has(row.observation_id));
   tables.opening_learning_activity_history_revisions = tables.opening_learning_activity_history_revisions.filter(row =>
     activityIds.has(row.activity_id));
+  tables.workspace_preferences = projectBackupCourseMilestoneReferences(tables);
   return tables;
 }

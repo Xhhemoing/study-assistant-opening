@@ -60,6 +60,7 @@ export type SnapshotTaskRow = {
   /** Planner suggestions use `planner:<date>:<identity>` (see suggestionKey). */
   clientKey: string | null;
   status: TaskItem["status"];
+  closeSource?: "learner" | "system";
   minutes: number;
   courseId: string | null;
   /** Stored display label lets legacy suggestion keys match whitespace/case aliases. */

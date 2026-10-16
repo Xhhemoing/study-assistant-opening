@@ -9,6 +9,7 @@ import { canAcceptPlan } from "./plan-action";
 import { canProposePlan, planProposalIntent, type PlanProposalIntent } from "./plan-input";
 import { QuickAddTask } from "./quick-add-task";
 import { ActionDigest } from "./action-digest";
+import { LocalReplanCard } from "./local-replan-card";
 import { DailyDraftCard } from "./daily-draft-card";
 import { RetestProposals } from "./retest-proposals";
 import { TodayStudyTools } from "./today-study-tools";
@@ -17,11 +18,12 @@ import { focusTodayTask, selectTodayTask, visibleTodayTasks } from "./today-task
 import type { StudyTask } from "./study-task";
 import { TodayPlanOverview } from "./today-overview";
 import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
-import { isRetestOriginTask, TaskStatusControl } from "./task-status-control";
+import { isRetestOriginTask, TaskPlanningTimeZoneContext, TaskStatusControl } from "./task-status-control";
 import { TaskRowActions } from "./task-row-actions";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { AutonomySwitcher } from "./autonomy-switcher";
+import { CoachPlanControl } from "./coach-plan-control";
 import { planAcceptFailure } from "./plan-accept-errors";
 
 type SelectionSource = "focus" | "user";
@@ -109,6 +111,7 @@ export function TodayPlanView({
   const [freeStart, setFreeStart] = useState(""), [freeEnd, setFreeEnd] = useState("");
   const [planning, setPlanning] = useState(false), [all, setAll] = useState(false), [doneView, setDoneView] = useState(false);
   const [nowTick, setNowTick] = useState(() => new Date());
+  const [coachSettingsRevision, setCoachSettingsRevision] = useState(0);
   const refresh = useCallback(async (options?: { refreshSuggestions?: boolean }) => {
     const epoch = ++readEpoch.current;
     setLoadState("loading"); setError(""); setPlanWarning(""); setPlanState("loading");
@@ -189,8 +192,8 @@ export function TodayPlanView({
   const skippedCount = done.length - completedCount;
   const selectablePending = groups.confirmed.length + groups.dueRetests.length + groups.overdue.length + groups.other.length;
   const upcomingHint = upcomingRetestHint(queueTasks, nowTick, timeZone, groups.upcomingRetestCount);
-  return <section className="flex min-h-full flex-col bg-white" aria-label="今日计划">
-    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { void refresh({ refreshSuggestions: true }); }} /> : null}
+  return <TaskPlanningTimeZoneContext.Provider value={timeZone}><section className="flex min-h-full flex-col bg-white" aria-label="今日计划">
+    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { setCoachSettingsRevision(value => value + 1); void refresh({ refreshSuggestions: true }); }} /> : null}
     <div className="border-b border-zinc-200/70 px-5 pb-3 pt-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-zinc-900">学习队列</h2><button type="button" aria-label="安排时间" aria-expanded={planning} aria-controls="opening-plan-editor" className={secondaryButtonClass} disabled={!plan || planState !== "ready" || loadState !== "ready"} onClick={() => setPlanning(!planning)}><CalendarDays size={15} aria-hidden /></button></div><p className="mt-1 text-xs text-zinc-500">{loadState === "ready" ? `当前可选 ${remaining.length} 项 · 预计 ${remaining.reduce((sum, task) => sum + task.minutes, 0)} 分钟` : loadState === "error" ? "任务读取失败" : "正在读取任务"}</p></div>
     {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
     {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4">
@@ -219,12 +222,14 @@ export function TodayPlanView({
       {hasLoadedTasks ? <ActionDigest api={api} onChanged={refresh} onAdjust={() => setPlanning(true)} /> : null}
     </div>
     {hasLoadedTasks && plan ? <fieldset disabled={pending || loadState !== "ready" || planState !== "ready"} className="min-w-0 disabled:opacity-60">
+      {adaptivePlanning && plan.replanOffer?.offer ? <LocalReplanCard key={`${date}:${plan.acceptedVersion}`} api={api} date={date} acceptedVersion={plan.acceptedVersion} blocks={plan.blocks} tasks={tasks} reason={plan.replanOffer.reason} dismissalKey={plan.replanOffer.dismissalKey} timeZone={timeZone} onChanged={refresh} /> : null}
+      {adaptivePlanning ? <CoachPlanControl date={date} draft={plan.dailyDraft ?? null} api={api} onChanged={refresh} settingsRevision={coachSettingsRevision} /> : null}
       <DailyDraftCard key={date} api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={refresh} adaptivePlanning={adaptivePlanning} hasNewerSuggestion={plan.hasNewerSuggestion} onRefreshSuggestions={() => refresh({ refreshSuggestions: true })} />
       <details className="mx-4 mt-4 rounded-xl border border-zinc-200 bg-white"><summary className="min-h-11 cursor-pointer px-3 py-3 text-xs font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">今日安排与进度</summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
     </fieldset> : null}
     {hasLoadedTasks ? <TodayStudyTools key={date} disabled={pending || loadState !== "ready" || planState !== "ready"} api={api} date={date} plan={plan} tasks={tasks} onChanged={refresh} /> : null}
     <div className="mt-auto px-4 pb-4 pt-6" />
-  </section>;
+  </section></TaskPlanningTimeZoneContext.Provider>;
 }
 
 export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSelect, plan, api }: {
@@ -234,7 +239,7 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
   selectedId?: string;
   onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null;
-  api?: Pick<OpeningApi, "updateTaskStatus">;
+  api?: Pick<OpeningApi, "updateTaskStatus"> & Partial<Pick<OpeningApi, "deferTask">>;
 }) {
   if (state === "loading") return <p className="px-4 py-5 text-xs text-zinc-500" role="status">正在加载任务…</p>;
   if (state === "error") return <p className="px-4 py-5 text-xs text-red-700">任务暂时无法读取，请重试。</p>;
@@ -244,10 +249,17 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
     { key: "overdue" as const, tasks: groups.overdue },
     { key: "other" as const, tasks: groups.other },
   ].filter((section) => section.tasks.length > 0);
-  if (!sections.length) {
+  if (!sections.length && !groups.deferred.length) {
     return <div className="px-4 py-6"><p className="text-sm text-zinc-700">暂无待完成任务。</p><p className="mt-2 text-xs leading-6 text-zinc-500">继续探索或整理笔记，无需先创建任务。也可用上方快速添加。</p></div>;
   }
   return <div className="space-y-3" aria-label="分组学习队列">
+    {groups.deferred.length ? <details className="mx-4 rounded-lg border border-zinc-200 p-3">
+      <summary className="cursor-pointer text-xs text-zinc-600">已推迟 {groups.deferred.length} 项</summary>
+      <ul className="mt-3 space-y-3">{groups.deferred.map(task => <li key={task.id}>
+        <p className="mb-2 text-xs text-zinc-700">{task.title}</p>
+        {api ? <TaskStatusControl task={task} api={api} disabled={false} /> : null}
+      </li>)}</ul>
+    </details> : null}
     {sections.map((section) => (
       <div key={section.key}>
         <h3 className="px-4 pb-1 text-[11px] font-semibold text-zinc-500">{QUEUE_GROUP_LABELS[section.key]} · {section.tasks.length}</h3>
@@ -260,7 +272,7 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
 export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect, plan, showAll = false, doneView = false, api }: {
   tasks: TodayTasks; state: TaskLoadState; focusTaskId?: string; selectedId?: string; onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   plan?: Awaited<ReturnType<OpeningApi["getToday"]>> | null; showAll?: boolean; doneView?: boolean;
-  api?: Pick<OpeningApi, "updateTaskStatus">;
+  api?: Pick<OpeningApi, "updateTaskStatus"> & Partial<Pick<OpeningApi, "deferTask">>;
 }) {
   const focusRef = useCallback((element: HTMLLIElement | null) => focusTodayTask(element, focusTaskId), [focusTaskId]);
   if (state === "loading") return <p className="px-4 py-5 text-xs text-zinc-500" role="status">正在加载任务…</p>;

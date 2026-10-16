@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
-import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility } from "@aistudy/domain";
+import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
+import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
   opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null } = {}) {
@@ -37,7 +38,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   const attempt = attemptRows[0];
   if (input.attemptId && (!attempt || attempt.session_id !== input.sessionId || attempt.course_id !== input.courseId)) throw learningError("VALIDATION", "attempt is outside this session");
   if (attempt && input.problemId && input.problemId !== attempt.problem_id) throw learningError("VALIDATION", "attempt problem mismatch");
-  if (attempt) await admitLearningSources(tx, scope, attempt.source_ids as string[]);
+  const attemptSources = attempt ? await admitLearningSources(tx, scope, attempt.source_ids as string[]) : sources;
   const retestActivities = input.retestId ? await tx`SELECT id, candidate_id, course_id, skill_label, requirement_key, task_id, status,
     not_before_at, recommended_at, scheduled_start_at
     FROM opening_retest_activities
@@ -83,6 +84,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     return qualify(mapLearningObservation(existing[0]));
   }
   if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
+  const matrixEvaluation = await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
   if ((attempt?.create_intent as { teachingBlock?: unknown } | undefined)?.teachingBlock) {
     const activities = await tx`SELECT status,content_version FROM opening_teaching_activities
       WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -103,18 +105,27 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   }
   const problemId = attempt ? attempt.problem_id as string | null : input.problemId ?? null;
   const itemVersionId = attempt?.item_version_id as string | null ?? null;
-  const referenceCheck = input.referenceCheck ? { attemptId: input.attemptId ?? null, problemId, itemVersionId,
+  const referenceCheck = !matrixEvaluation && input.referenceCheck ? { attemptId: input.attemptId ?? null, problemId, itemVersionId,
     referenceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope,
     checkerId: scope.ownerUserId, outcome: input.outcome } : null;
   const sourceVersions = attempt?.source_versions ?? (input.problemId ? null : Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)])));
   const revision = await nextLearningHistoryRevision(tx, scope, input.courseId), id = randomUUID();
+  const serverEvaluation = matrixEvaluation ? {
+    observationId: id, attemptId: String(attempt!.id), problemId: String(problemId), itemVersionId: String(itemVersionId),
+    requirementKey: String(attempt!.requirement_key), evaluatorVersion: matrixEvaluation.evaluatorVersion,
+    specVersion: "matrix-arithmetic-v1", decision: matrixEvaluation.decision, outcome: matrixEvaluation.outcome,
+    reasonCodes: matrixEvaluation.reasonCodes, evaluatedAt: submittedAt,
+  } : null;
+  const effectiveOutcome = matrixEvaluation?.outcome ?? input.outcome;
+  const effectiveAssistance = matrixEvaluation?.priorFeedback ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
+  const effectiveVerdictSource = matrixEvaluation ? "deterministic" : verdictSource;
   const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
   const activityId = String(session.activity_id);
   const rows = await tx`INSERT INTO opening_learning_observations
     (id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
-     source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
-     VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${activityId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${input.outcome},${input.assistance},${input.clientKey},${submittedAt},
-     ${opts.sourceTurnIds ?? []},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
+     source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,server_evaluation,submitted_intent,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
+     VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${activityId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${effectiveOutcome},${effectiveAssistance},${input.clientKey},${submittedAt},
+     ${opts.sourceTurnIds ?? []},${effectiveVerdictSource},${matrixEvaluation ? null : referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${serverEvaluation ? tx.json(serverEvaluation) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
     ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
   if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
   if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;
@@ -126,7 +137,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
       const tasks = await tx`SELECT id, status FROM opening_tasks
         WHERE id=${activity.task_id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
       await transitionRetestActivityForTask(tx, scope, activity.task_id, {
-        type: "complete", at: submittedAt, result: input.outcome, hasObservation: true,
+        type: "complete", at: submittedAt, result: effectiveOutcome, hasObservation: true,
       });
       if (tasks.length && (tasks[0] as { status: string }).status !== "done") {
         await tx`UPDATE opening_tasks SET status='done', version=version + 1, updated_at=now()

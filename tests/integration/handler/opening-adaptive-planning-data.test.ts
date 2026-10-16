@@ -5,6 +5,7 @@ import type { Scope } from "@aistudy/contracts";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { GET as listTasks, POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { PATCH as patchTask } from "../../../apps/web/src/app/api/opening/tasks/[id]/route";
+import { GET as getFeedback } from "../../../apps/web/src/app/api/opening/plans/feedback/route";
 import { GET as getPrefs, PATCH as patchPrefs } from "../../../apps/web/src/app/api/opening/adaptive-planning/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -101,9 +102,9 @@ describe("adaptive planning data (L0)", () => {
   it("rejects a course from another workspace or an archived course", async () => {
     expect((await newTask({ courseId: await createCourse(other.scope) })).status).toBe(404);
     expect((await newTask({ courseId: await createCourse(owner.scope, true) })).status).toBe(404);
-    const [{ count }] = await sql`SELECT count(*)::int AS count FROM opening_tasks
+    const [row] = await sql`SELECT count(*)::int AS count FROM opening_tasks
       WHERE workspace_id = ${owner.scope.workspaceId}`;
-    expect(count).toBe(0);
+    expect(row?.count).toBe(0);
   });
 
   it("refuses server-assigned origins from the client", async () => {
@@ -144,6 +145,35 @@ describe("adaptive planning data (L0)", () => {
     expect(cross.status).toBe(404);
   });
 
+  it("saves optional reasons through PATCH and rejects forged metadata without a mutation", async () => {
+    const created = await newTask(), id = created.body.id as string;
+    const path = `/api/opening/tasks/${id}`;
+    for (const feedback of [{ reason: "correct" }, { reason: "other", origin: "planner" }, { reason: "other", text: "private" }]) {
+      const response = await patchTask(req(path, "PATCH", { status: "skipped", expectedVersion: 1,
+        at: new Date().toISOString(), feedback }, owner.cookie), params(id));
+      expect(response.status).toBe(400);
+    }
+    const response = await patchTask(req(path, "PATCH", { status: "skipped", expectedVersion: 1,
+      at: new Date().toISOString(), feedback: { reason: "too_hard" } }, owner.cookie), params(id));
+    expect(response.status).toBe(200);
+    expect(await sql`SELECT action, reason, origin, task_version FROM opening_plan_feedback WHERE task_id=${id}`)
+      .toEqual([{ action: "skipped", reason: "too_hard", origin: "manual", task_version: 2 }]);
+  });
+
+  it("authenticates and bounds the read-only feedback window with no model or plan writes", async () => {
+    const anonymous = await getFeedback(req("/api/opening/plans/feedback", "GET", undefined, ""));
+    expect(anonymous.status).toBe(401);
+    for (const days of [0, 91, "NaN", 1.5]) {
+      expect((await getFeedback(req(`/api/opening/plans/feedback?days=${days}`, "GET", undefined, owner.cookie))).status).toBe(400);
+    }
+    const response = await getFeedback(req("/api/opening/plans/feedback?days=7", "GET", undefined, owner.cookie));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ actions: { done: 0, skipped: 0, deferred: 0, resumed: 0 },
+      reasons: { eligible: 0, coverage: null }, historicalActions: "unknown" });
+    expect(await sql`SELECT id FROM opening_plan_drafts WHERE workspace_id=${owner.scope.workspaceId}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM opening_plan_feedback WHERE workspace_id=${owner.scope.workspaceId}`).toHaveLength(0);
+  });
+
   it("reads default prefs, merges patches and removes a course goal", async () => {
     const initial = await (await getPrefs(req("/api/opening/adaptive-planning", "GET", undefined, owner.cookie))).json();
     expect(initial).toEqual({
@@ -175,5 +205,20 @@ describe("adaptive planning data (L0)", () => {
       ON CONFLICT (workspace_id) DO UPDATE SET adaptive_planning = EXCLUDED.adaptive_planning`;
     const read = await (await getPrefs(req("/api/opening/adaptive-planning", "GET", undefined, owner.cookie))).json();
     expect(read).toMatchObject({ prefs: { autonomy: "copilot" }, saved: true, invalidStoredPrefs: true });
+  });
+
+  it("requires milestone revisions and refuses client-forged confirmation history", async () => {
+    const courseId = await createCourse(owner.scope);
+    const milestone = { id: randomUUID(), title: "独立矩阵乘法", successCriteria: "隔天完成两道变式并说明维数", targetDate: null, evidenceRefs: [] };
+    const send = (courseGoal: unknown) => patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { courseGoal }, owner.cookie));
+    const base = { courseId, goal: { targetDate: null, weeklyMinutes: 120, milestones: [milestone] } };
+    expect((await send(base)).status).toBe(400);
+    expect((await send({ ...base, expectedRevision: 0, goal: { ...base.goal,
+      milestones: [{ ...milestone, history: [], confirmedAt: new Date().toISOString() }] } })).status).toBe(400);
+    const saved = await send({ ...base, expectedRevision: 0 });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ prefs: { courseGoals: { [courseId]: { revision: 1,
+      milestones: [{ status: "planned", confirmedAt: null, revision: 1 }] } } } });
+    expect((await send({ ...base, expectedRevision: 0 })).status).toBe(409);
   });
 });

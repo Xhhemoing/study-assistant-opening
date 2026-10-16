@@ -54,7 +54,7 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(34);
+    expect(Object.keys(snapshot.tables)).toHaveLength(36);
     expect(sql.calls.some((call) => /(?:FROM|JOIN)\s+(?:opening_tutor_jobs|opening_jobs|opening_outbox|opening_budget_reservations|sessions)(?:\s|$)/.test(call.query))).toBe(false);
   });
 

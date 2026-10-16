@@ -41,6 +41,7 @@ import { DailyDraftCard } from "./daily-draft-card";
 import { AdaptiveDraftDetails, AdaptiveDraftPreview } from "./adaptive-draft-preview";
 import { AutonomySwitcher } from "./autonomy-switcher";
 import { OpeningApiError } from "../client/api";
+import { SuggestionRejectionControl } from "./suggestion-rejection-control";
 
 type Element = ReactElement<Record<string, unknown>>;
 function elements(node: ReactNode): Element[] {
@@ -81,6 +82,51 @@ function api() {
 beforeEach(() => { hooks.values = []; hooks.cursor = 0; hooks.effects = []; });
 
 describe("daily draft interactions", () => {
+  it("records explicit feedback once and removes a persisted rejected key from the acceptance selection", async () => {
+    const client = { ...api(), submitSuggestionFeedback: vi.fn() };
+    let resolve!: (value: { feedbackId: string; draft: PlanDraft }) => void;
+    client.submitSuggestionFeedback.mockReturnValue(new Promise(done => { resolve = done; }));
+    const component = () => DailyDraftCard({ api: client, date: sample.date, dailyDraft: sample, adaptivePlanning: true });
+    preview(render(component)).onSelectionChange(["suggestion-a"]);
+    expect(client.submitSuggestionFeedback).not.toHaveBeenCalled();
+    const handler = preview(render(component)).onRejectSuggestion!;
+    void handler("suggestion-a", "too_hard"); void handler("suggestion-a", "too_hard");
+    expect(client.submitSuggestionFeedback).toHaveBeenCalledOnce();
+    expect(client.submitSuggestionFeedback.mock.calls[0]![0]).toMatchObject({ draftId: sample.id, expectedDraftVersion: 1,
+      suggestionKey: "suggestion-a", reason: "too_hard" });
+    expect(button(render(component), "正在处理…").props.disabled).toBe(true);
+    resolve({ feedbackId: "receipt", draft: { ...sample, version: 2, rejectedSuggestedKeys: ["suggestion-a"] } }); await settle();
+    expect(preview(render(component)).draft.version).toBe(2);
+    expect(preview(render(component)).selectedKeys).toEqual([]);
+    click(button(render(component), "确认")); await settle();
+    expect(client.acceptPlan.mock.calls[0]![0].acceptSuggestedKeys).toEqual([]);
+  });
+
+  it("blocks writes after uncertain feedback until a real reread and reuses the same intent key", async () => {
+    const client = { ...api(), submitSuggestionFeedback: vi.fn().mockRejectedValue(new TypeError("network lost")) };
+    const onRefreshSuggestions = vi.fn().mockResolvedValue(undefined);
+    const component = () => DailyDraftCard({ api: client, date: sample.date, dailyDraft: sample, adaptivePlanning: true, onRefreshSuggestions });
+    await preview(render(component)).onRejectSuggestion!("suggestion-a"); await settle();
+    expect(button(render(component), "确认").props.disabled).toBe(true);
+    await preview(render(component)).onRejectSuggestion!("suggestion-a");
+    expect(client.submitSuggestionFeedback).toHaveBeenCalledOnce();
+    click(button(render(component), "刷新草案")); await settle();
+    await preview(render(component)).onRejectSuggestion!("suggestion-a"); await settle();
+    expect(client.submitSuggestionFeedback).toHaveBeenCalledTimes(2);
+    expect(client.submitSuggestionFeedback.mock.calls[1]![0]).toEqual(client.submitSuggestionFeedback.mock.calls[0]![0]);
+  });
+
+  it("discards feedback responses after a different draft has arrived", async () => {
+    const client = { ...api(), submitSuggestionFeedback: vi.fn() };
+    let resolve!: (value: { feedbackId: string; draft: PlanDraft }) => void;
+    client.submitSuggestionFeedback.mockReturnValue(new Promise(done => { resolve = done; }));
+    const props = { api: client, date: sample.date, dailyDraft: sample, adaptivePlanning: true };
+    const component = () => DailyDraftCard(props);
+    void preview(render(component)).onRejectSuggestion!("suggestion-a");
+    props.dailyDraft = { ...sample, id: "new-draft", version: 4 }; render(component); render(component);
+    resolve({ feedbackId: "receipt", draft: { ...sample, version: 2, rejectedSuggestedKeys: ["suggestion-a"] } }); await settle();
+    expect(preview(render(component)).draft.id).toBe("new-draft");
+  });
   it("submits the checked suggestions once even when confirm is clicked twice before rerender", async () => {
     const client = api();
     let resolve!: (draft: PlanDraft) => void;
@@ -167,6 +213,18 @@ describe("daily draft interactions", () => {
   });
 });
 
+it("does not send feedback when the optional reason panel is merely opened then cancelled", async () => {
+  const onConfirm = vi.fn().mockResolvedValue(undefined);
+  const component = () => SuggestionRejectionControl({ disabled: false, onConfirm });
+  click(button(render(component), "不适合我"));
+  expect(text(render(component))).toContain("今天不再推荐");
+  click(button(render(component), "取消"));
+  expect(onConfirm).not.toHaveBeenCalled();
+  click(button(render(component), "不适合我"));
+  click(button(render(component), "确认反馈")); await settle();
+  expect(onConfirm).toHaveBeenCalledExactlyOnceWith(undefined);
+});
+
 describe("arrangement mode", () => {
   const result: OpeningAdaptivePrefsResponse = { prefs: { autonomy: "copilot", coachBudgetMinutes: 60, courseGoals: {} }, saved: true, invalidStoredPrefs: false };
   it("saves manual mode once and refreshes only after persistence succeeds", async () => {
@@ -183,14 +241,28 @@ describe("arrangement mode", () => {
     expect(button(render(component), "手工").props["aria-pressed"]).toBe(true);
   });
 
-  it("preserves an existing coach preference without offering new automation", async () => {
+  it("keeps a historical coach preference advisory until explicit opt-in", async () => {
     const client = { getAdaptivePrefs: vi.fn().mockResolvedValue({ ...result, prefs: { ...result.prefs, autonomy: "coach" } }), patchAdaptivePrefs: vi.fn() };
     const component = () => AutonomySwitcher({ api: client, onChanged: vi.fn() });
     render(component); await settle();
     const tree = render(component);
     expect(text(tree)).toContain("仍需逐次确认");
-    expect(elements(tree).filter((item) => item.type === "button").map(text)).toEqual(["手工", "副驾驶"]);
+    expect(elements(tree).filter((item) => item.type === "button").map(text)).toEqual(["手工", "副驾驶", "启用教练"]);
     expect(client.patchAdaptivePrefs).not.toHaveBeenCalled();
+  });
+
+  it("enables coach only after an explicit click with the visible time budget, once", async () => {
+    const client = { getAdaptivePrefs: vi.fn().mockResolvedValue(result), patchAdaptivePrefs: vi.fn().mockResolvedValue({
+      ...result, prefs: { ...result.prefs, autonomy: "coach", coachBudgetMinutes: 45, coachAutoAcceptEnabled: true },
+    }) };
+    const onChanged = vi.fn();
+    const component = () => AutonomySwitcher({ api: client, onChanged });
+    render(component); await settle();
+    const input = elements(render(component)).find(node => node.type === "input")!;
+    (input.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: "45" } });
+    const enable = button(render(component), "启用教练"); click(enable); click(enable); await settle();
+    expect(client.patchAdaptivePrefs).toHaveBeenCalledExactlyOnceWith({ autonomy: "coach", coachBudgetMinutes: 45, coachAutoAcceptEnabled: true });
+    expect(onChanged).toHaveBeenCalledOnce();
   });
 
   it("keeps the saved mode and does not refresh when saving fails", async () => {

@@ -9,6 +9,10 @@ import { ObservationRevisionFields } from "./observation-revision-fields";
 import { currentHistoryRecord, observationRevisionCommand, observationRevisionDraft, observationRevisionFailure, reloadObservationRevisionEditor, type ObservationRevisionEditor } from "./observation-revision-model";
 
 const outcomeLabels = { correct: "自报正确", incorrect: "自报错误", unverified: "未核验" };
+function outcomeLabel(record: LearningObservation): string {
+  return record.serverEvaluation ? record.serverEvaluation.decision === "correct" ? "自动核算正确"
+    : record.serverEvaluation.decision === "incorrect" ? "自动核算有误" : "自动核算拒判" : outcomeLabels[record.outcome];
+}
 const helpLabels = { independent: "自报独立", hinted: "使用过提示", revealed: "看过讲解", unknown: "帮助情况未知" };
 const buttonClass = "border-b border-zinc-200 px-2 py-2 text-sm text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700";
 
@@ -91,7 +95,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
   return <article className="space-y-3 rounded-lg border border-zinc-200 p-4">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h4 className="text-sm font-medium text-zinc-800">{current.skillLabel}</h4>
-      <span className="text-xs text-zinc-500">{current.revisionKind === "retract" ? "已撤回 · 不计入当前证据" : `${outcomeLabels[current.outcome]} · ${helpLabels[current.assistance]}`}</span>
+      <span className="text-xs text-zinc-500">{current.revisionKind === "retract" ? "已撤回 · 不计入当前证据" : `${outcomeLabel(current)} · ${helpLabels[current.assistance]}`}</span>
     </div>
     <p className="whitespace-pre-wrap break-words text-sm text-zinc-800">{current.answer || "（未填写回答）"}</p>
     <p className="text-xs text-zinc-500">原观察时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
@@ -103,7 +107,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
     </div>
     {historyOpen && history ? <ol className="space-y-3 border-l border-zinc-200 pl-4" aria-label="观察修订历史">{history.revisions.map((item, index) => <li key={item.id} className="space-y-1 text-xs text-zinc-500">
       <p className="font-medium text-zinc-800">版本 {index + 1} · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前版本" : " · 历史版本（不重复计数）"}</p>
-      <p>{item.skillLabel} · {outcomeLabels[item.outcome]} · {helpLabels[item.assistance]}{item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
+      <p>{item.skillLabel} · {outcomeLabel(item)} · {helpLabels[item.assistance]}{item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
       <p className="whitespace-pre-wrap break-words">{item.answer || "（未填写回答）"}</p>
       {item.revisionReason ? <p className="whitespace-pre-wrap break-words">原因：{item.revisionReason}</p> : null}
       <p>记录时间：{new Date(item.recordedAt ?? item.occurredAt).toLocaleString("zh-CN")}</p>

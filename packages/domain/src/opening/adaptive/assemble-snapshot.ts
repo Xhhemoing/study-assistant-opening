@@ -86,7 +86,8 @@ export function assembleLearnerSnapshot(sources: LearnerSnapshotSources): Learne
     }
     const suggestion = task.clientKey === null ? null : parseSuggestionKey(task.clientKey);
     if (suggestion && suggestion.date >= historyStart && suggestion.date <= sources.date) {
-      plannerHistory.push({ ...suggestion, identity: plannerHistoryIdentity(suggestion.identity, task.skillLabel, task.requirementKey), status: task.status });
+      plannerHistory.push({ ...suggestion, identity: plannerHistoryIdentity(suggestion.identity, task.skillLabel, task.requirementKey), status: task.status,
+        ...(task.closeSource ? { closeSource: task.closeSource } : {}) });
     }
   }
 

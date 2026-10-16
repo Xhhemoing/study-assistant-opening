@@ -53,3 +53,9 @@ export { assembleLearnerSnapshot } from "./assemble-snapshot";
 export { nextLearningStep } from "./next-learning-step";
 export { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
 export { toSnapshotEvidence } from "./snapshot-evidence";
+
+export * from "./loop-metrics";
+
+export * from "./local-replan";
+
+export * from "./suggestion-feedback";

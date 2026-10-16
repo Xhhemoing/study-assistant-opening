@@ -1,4 +1,7 @@
 import { validateOpeningBackupCards } from "./backup-cards";
+import { validateBackupCourseMilestones } from "./backup-course-milestones";
+import { validateBackupPlanControl } from "./backup-plan-control";
+import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
@@ -53,12 +56,12 @@ const TABLE_ALLOWLIST = [
   "opening_assistant_candidates",
   "opening_memories",
   "opening_privacy_exclusions",
-  "opening_tasks", "opening_retest_activities",
+  "opening_tasks", "opening_plan_feedback", "opening_retest_activities",
   "opening_timetable_sessions",
   "opening_hard_blocks",
   "opening_plan_state",
   "opening_plan_drafts",
-  "opening_plan_acceptances",
+  "opening_plan_acceptances", "opening_suggestion_feedback",
 ] as const;
 
 function validateWorkspaceHistory(
@@ -365,6 +368,9 @@ export function validateOpeningRestore(
   }
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);
+  validateBackupPlanFeedback(tables, errors);
+  validateBackupPlanControl(tables, errors);
+  validateBackupCourseMilestones(tables, errors);
   validateBackupLearningState(tables, errors);
   validateOpeningBackupCards(tables, errors);
   for (const object of backup.objects as OpeningBackupObject[]) {

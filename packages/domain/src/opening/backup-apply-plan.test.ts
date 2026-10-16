@@ -11,8 +11,8 @@ const tables = [
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
-  "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances",
+  "opening_privacy_exclusions", "opening_tasks", "opening_plan_feedback", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
+  "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
   "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
 ] as const;
 
@@ -112,7 +112,7 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    expect(new Set(names).size).toBe(34);
+    expect(new Set(names).size).toBe(36);
     expect(names.indexOf("opening_sources")).toBeLessThan(names.indexOf("opening_source_chunks"));
     expect(names.indexOf("opening_conversations")).toBeLessThan(names.indexOf("opening_turns"));
     expect(names.indexOf("opening_turns")).toBeLessThan(names.indexOf("opening_assistant_candidates"));

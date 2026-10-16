@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { CourseGoal, OpeningAdaptivePrefsPatch } from "@aistudy/contracts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CourseGoal, CourseGoalUpdate, OpeningAdaptivePrefsPatch } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../opening/client/api";
 import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 import { ui } from "../opening/design/ui";
+import { CourseMilestones } from "./course-milestones";
 
 const WEEKLY_MIN = 0;
 const WEEKLY_MAX = 3000;
@@ -35,9 +36,10 @@ export function parseWeeklyMinutes(raw: string): { ok: true; value: number } | {
 
 export function buildCourseGoalPatch(
   courseId: string,
-  goal: CourseGoal | null,
+  goal: CourseGoalUpdate | null,
+  expectedRevision?: number,
 ): OpeningAdaptivePrefsPatch {
-  return { courseGoal: { courseId, goal } };
+  return { courseGoal: { courseId, goal, ...(expectedRevision === undefined ? {} : { expectedRevision }) } };
 }
 
 export function CourseGoalForm({
@@ -59,6 +61,12 @@ export function CourseGoalForm({
   const [hasGoal, setHasGoal] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [storedGoal, setStoredGoal] = useState<CourseGoal | null>(null);
+  const [baseRevision, setBaseRevision] = useState(0);
+  const [mustReload, setMustReload] = useState(false);
+  const scopeRef = useRef(courseId);
+  scopeRef.current = courseId;
+  const saving = useRef(false);
 
   useEffect(() => {
     if (!adaptivePlanning) return;
@@ -72,6 +80,9 @@ export function CourseGoalForm({
         if (!active) return;
         setLoadFailed(false);
         const existing = res.prefs.courseGoals[courseId];
+        setStoredGoal(existing ?? null);
+        setBaseRevision(res.prefs.courseGoalRevisions?.[courseId] ?? existing?.revision ?? 0);
+        setMustReload(false);
         if (existing) {
           setTargetDate(existing.targetDate ?? "");
           setWeeklyMinutes(String(existing.weeklyMinutes));
@@ -102,7 +113,7 @@ export function CourseGoalForm({
     Boolean(targetDate) && /^\d{4}-\d{2}-\d{2}$/.test(targetDate) && targetDate < todayLocalDate();
 
   async function save() {
-    if (busy) return;
+    if (busy || saving.current || mustReload) return;
     setError("");
     setMessage("");
     const parsed = parseWeeklyMinutes(weeklyMinutes);
@@ -120,32 +131,60 @@ export function CourseGoalForm({
       weeklyMinutes: parsed.value,
     };
     setBusy(true);
+    saving.current = true;
     try {
-      await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, goal));
+      const result = await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, goal, baseRevision));
+      if (scopeRef.current !== courseId) return;
+      const fresh = result.prefs.courseGoals[courseId] ?? null;
+      setStoredGoal(fresh);
+      setBaseRevision(result.prefs.courseGoalRevisions?.[courseId] ?? fresh?.revision ?? 0);
       setHasGoal(true);
       setMessage("课程目标已保存。");
     } catch (reason) {
+      if (scopeRef.current !== courseId) return;
+      setMustReload(true);
       setError(reason instanceof Error ? reason.message : "课程目标保存失败，请重试。");
     } finally {
-      setBusy(false);
+      saving.current = false;
+      if (scopeRef.current === courseId) setBusy(false);
     }
   }
 
   async function clearGoal() {
-    if (busy) return;
+    if (busy || saving.current || mustReload) return;
     setError("");
     setMessage("");
     setBusy(true);
+    saving.current = true;
     try {
-      await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, null));
+      const result = await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, null, baseRevision));
+      if (scopeRef.current !== courseId) return;
+      setStoredGoal(null);
+      setBaseRevision(result.prefs.courseGoalRevisions?.[courseId] ?? 0);
       setTargetDate("");
       setWeeklyMinutes("120");
       setHasGoal(false);
       setMessage("已清除课程目标。");
     } catch (reason) {
+      if (scopeRef.current !== courseId) return;
+      setMustReload(true);
       setError(reason instanceof Error ? reason.message : "清除课程目标失败，请重试。");
     } finally {
-      setBusy(false);
+      saving.current = false;
+      if (scopeRef.current === courseId) setBusy(false);
+    }
+  }
+
+  function syncMilestones(fresh: CourseGoal) {
+    // Unsaved base fields retain their original OCC baseline. A child reload must
+    // never bless old input values with a newer version read in another panel.
+    const baseIsClean = targetDate === (storedGoal?.targetDate ?? "")
+      && weeklyMinutes === String(storedGoal?.weeklyMinutes ?? 120);
+    setStoredGoal(fresh);
+    if (baseIsClean) {
+      setTargetDate(fresh.targetDate ?? "");
+      setWeeklyMinutes(String(fresh.weeklyMinutes));
+      setBaseRevision(fresh.revision ?? 0);
     }
   }
 
@@ -194,7 +233,7 @@ export function CourseGoalForm({
                   type="date"
                   className={ui.input}
                   value={targetDate}
-                  disabled={busy}
+                  disabled={busy || mustReload}
                   onChange={(event) => {
                     setTargetDate(event.target.value);
                     setMessage("");
@@ -204,7 +243,7 @@ export function CourseGoalForm({
                   <button
                     type="button"
                     className={ui.quiet}
-                    disabled={busy}
+                    disabled={busy || mustReload}
                     onClick={() => {
                       setTargetDate("");
                       setMessage("");
@@ -226,7 +265,7 @@ export function CourseGoalForm({
                 step={1}
                 className={ui.input}
                 value={weeklyMinutes}
-                disabled={busy}
+                disabled={busy || mustReload}
                 onChange={(event) => {
                   setWeeklyMinutes(event.target.value);
                   setMessage("");
@@ -243,7 +282,7 @@ export function CourseGoalForm({
             <button
               type="button"
               className={ui.secondary}
-              disabled={busy}
+              disabled={busy || mustReload}
               onClick={() => void save()}
             >
               {busy ? "保存中…" : "保存"}
@@ -251,7 +290,7 @@ export function CourseGoalForm({
             <button
               type="button"
               className={ui.quiet}
-              disabled={busy}
+              disabled={busy || mustReload}
               onClick={() => void clearGoal()}
             >
               清除目标
@@ -267,6 +306,9 @@ export function CourseGoalForm({
               {message}
             </p>
           ) : null}
+          {mustReload ? <button type="button" className={ui.secondary} disabled={busy} onClick={() => setReloadToken(value => value + 1)}>重新读取课程目标</button> : null}
+          {storedGoal ? <CourseMilestones key={courseId} courseId={courseId} goal={storedGoal} api={api}
+            onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-zinc-500">保存课程目标后，可添加阶段成果与成功标准。</p>}
         </div>
       )}
     </section>

@@ -31,5 +31,9 @@ export function includedLearningSession(tx: Tx, id: string, userId: string, sess
     WHERE backup_session.id = ${session} AND backup_session.workspace_id = ${id}
       AND backup_session.owner_user_id = ${userId}
       AND ${cleanUuidSources(tx, id, tx`backup_session.source_ids`)}
+      AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity
+        WHERE backup_activity.id=backup_session.activity_id AND backup_activity.workspace_id=${id}
+          AND backup_activity.owner_user_id=${userId}
+          AND ${cleanUuidSources(tx, id, tx`backup_activity.source_ids`)})
   )`;
 }

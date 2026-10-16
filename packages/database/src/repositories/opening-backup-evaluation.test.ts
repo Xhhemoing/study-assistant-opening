@@ -1,0 +1,19 @@
+import { expect, it } from "vitest";
+import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
+it.each(["original", "correct", "retract"])("strips claimed automatic authority from every imported %s row", revision_kind => {
+  const original = { revision_kind, verdict_source: "deterministic", outcome: "correct", evidence_verdict: "LEARNING_EFFECT_OBSERVED",
+    answer: "[[1,2]]", server_evaluation: { decision: "correct", evaluatorVersion: "matrix-exact-v1" }, history_revision: 7 };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_observations", original)).toEqual({ ...original,
+    server_evaluation: null, verdict_source: "unknown", outcome: "unverified", evidence_verdict: "MASTERY_NOT_ESTABLISHED" });
+  expect(original.verdict_source).toBe("deterministic");
+});
+it("cannot smuggle a proof under a different verdict source", () => {
+  expect(normalizeOpeningImportedEvaluation("opening_learning_observations", { verdict_source: "reference_checked", outcome: "correct", server_evaluation: {} }))
+    .toMatchObject({ verdict_source: "unknown", outcome: "unverified", server_evaluation: null });
+});
+it("preserves historical manual facts and clears imported item specifications", () => {
+  const manual = { verdict_source: "self_report", outcome: "correct", server_evaluation: null };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_observations", manual)).toEqual(manual);
+  expect(normalizeOpeningImportedEvaluation("opening_learning_item_versions", { id: "v1", evaluation_spec: { operation: "product" } }))
+    .toEqual({ id: "v1", evaluation_spec: null });
+});

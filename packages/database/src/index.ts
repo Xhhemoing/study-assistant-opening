@@ -63,6 +63,8 @@ export * from "./repositories/opening-memory-replace";
 export * from "./repositories/opening-privacy";
 export * from "./repositories/opening-retests";
 export * from "./schema/opening-planning";
+export * from "./schema/opening-plan-feedback";
+export { readOpeningPlanFeedbackSummary } from "./repositories/opening-plan-feedback";
 export * from "./repositories/opening-plans";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
@@ -209,3 +211,17 @@ export {
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
 export { createOpeningTranscriptionCheckpointsRepository, type TranscriptionChunkIdentity, type TranscriptionChunkReceipt } from "./repositories/opening-transcription-checkpoints";
+
+export { readOpeningLoopMetrics } from "./repositories/opening-loop-metrics";
+
+export { proposeOpeningLocalPlan, type LocalPlanOptions, type LocalPlanAdditional } from "./repositories/opening-local-replan";
+
+export * from "./repositories/opening-conversation-plan";
+export * from "./repositories/opening-suggestion-feedback";
+
+export * from "./schema/opening-suggestion-feedback";
+
+export { acceptOpeningPlan } from "./repositories/opening-plan-accept";
+export * from "./repositories/opening-coach-plans";
+
+export * from "./repositories/opening-conversation-planning-context";

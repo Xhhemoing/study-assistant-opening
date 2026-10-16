@@ -1,6 +1,6 @@
 "use client";
 
-import type { PlanDraft, TaskItem } from "@aistudy/contracts";
+import type { PlanDraft, SuggestionFeedbackInput, SuggestionFeedbackResult, TaskFeedbackInput, TaskItem } from "@aistudy/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
@@ -141,7 +141,7 @@ export function DailyDraftCard({
   api: Pick<
     OpeningApi,
     "proposePlan" | "acceptPlan" | "rejectPlan" | "getPlanningSettings" | "putPlanningSettings" | "createTask"
-  >;
+  > & { submitSuggestionFeedback?: (input: SuggestionFeedbackInput) => Promise<SuggestionFeedbackResult> };
   date: string;
   acceptedVersion?: number;
   dailyDraft?: PlanDraft | null;
@@ -164,6 +164,8 @@ export function DailyDraftCard({
   }));
   const [pending, setPending] = useState(false);
   const [seedError, setSeedError] = useState("");
+  const [feedbackBlocked, setFeedbackBlocked] = useState(false);
+  const feedbackKeys = useRef(new Map<string, string>());
   const action = useRef<symbol | null>(null);
   const scope = `${date}:${dailyDraft?.id ?? ""}:${dailyDraft?.baseVersion ?? ""}:${dailyDraft?.version ?? ""}:${dailyDraft?.status ?? ""}:${dailyDraftSkippedReason ?? ""}:${acceptedVersion}`;
   const currentScope = useRef(scope);
@@ -173,7 +175,7 @@ export function DailyDraftCard({
   useEffect(() => {
     const changed = hydratedScope.current !== scope;
     hydratedScope.current = scope;
-    if (changed) { action.current = null; setPending(false); }
+    if (changed) { action.current = null; setPending(false); setFeedbackBlocked(false); }
     if (dailyDraftSkippedReason != null) {
       setModel((prev) => (prev.draft == null && prev.error === "" ? prev : { draft: null, error: "" }));
       return;
@@ -189,8 +191,8 @@ export function DailyDraftCard({
   const draft = model.draft;
   const selectedKeys = model.selectedSuggestedKeys ?? selectableSuggestedKeys(draft);
   const stale = Boolean(draft && draft.baseVersion !== acceptedVersion);
-  function beginAction(): symbol | null {
-    if (action.current) return null;
+  function beginAction(readOnly = false): symbol | null {
+    if (action.current || (feedbackBlocked && !readOnly)) return null;
     const token = Symbol(); action.current = token; setPending(true);
     return token;
   }
@@ -310,12 +312,32 @@ export function DailyDraftCard({
     }
   }
 
+  async function rejectSuggestion(suggestionKey: string, reason?: TaskFeedbackInput["reason"]) {
+    if (!draft || !api.submitSuggestionFeedback) return;
+    const token = beginAction();
+    if (!token) return;
+    const identity = JSON.stringify([draft.id, draft.version, suggestionKey, reason ?? null]);
+    let clientKey = feedbackKeys.current.get(identity);
+    if (!clientKey) { clientKey = `suggestion-feedback:${crypto.randomUUID()}`; feedbackKeys.current.set(identity, clientKey); }
+    try {
+      const result = await api.submitSuggestionFeedback({ draftId: draft.id, expectedDraftVersion: draft.version,
+        suggestionKey, clientKey, ...(reason ? { reason } : {}) });
+      if (!isCurrent(token)) return;
+      setModel(prev => reduceDailyDraftCard(prev, { type: "adjust_ok", draft: result.draft }));
+      onChanged?.();
+    } catch {
+      if (!isCurrent(token)) return;
+      setFeedbackBlocked(true);
+      setModel(prev => reduceDailyDraftCard(prev, { type: "action_fail", message: "反馈结果尚未确认或草案已变化，请先重新读取；不会自动重试。" }));
+    } finally { finishAction(token); }
+  }
+
   async function refreshSuggestions() {
     const refresh = adaptivePlanning ? onRefreshSuggestions ?? onChanged : onChanged;
     if (!refresh) return;
-    const token = beginAction();
+    const token = beginAction(true);
     if (!token) return;
-    try { await refresh(); }
+    try { await refresh(); if (isCurrent(token)) setFeedbackBlocked(false); }
     catch (reason) {
       if (isCurrent(token)) setModel((prev) => reduceDailyDraftCard(prev, { type: "action_fail", message: reason instanceof Error ? reason.message : "读取新建议失败，原草案已保留。" }));
     } finally { finishAction(token); }
@@ -336,7 +358,9 @@ export function DailyDraftCard({
       {draft.blocks.some((block) => draft.reasons?.[block.taskId]?.code === "carry_over") ? (
         <p className="text-[11px] leading-5 text-amber-900" role="status">含顺延自昨天的任务</p>
       ) : null}
-      {adaptivePlanning ? <AdaptiveDraftPreview draft={draft} tasks={tasks} selectedKeys={selectedKeys} disabled={pending} onSelectionChange={(keys) => { if (!action.current) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-zinc-700" aria-label="推荐安排">
+      {adaptivePlanning ? <AdaptiveDraftPreview draft={draft} tasks={tasks} selectedKeys={selectedKeys} disabled={pending || feedbackBlocked}
+        onRejectSuggestion={api.submitSuggestionFeedback && draft.origin !== "agent" ? rejectSuggestion : undefined}
+        onSelectionChange={(keys) => { if (!action.current && !feedbackBlocked) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-zinc-700" aria-label="推荐安排">
         {draft.blocks.map((block) => (
           <li key={`${block.taskId}-${block.start}`}>
             <span className="font-medium text-zinc-900">{taskTitle(tasks, block.taskId)}</span>
@@ -358,7 +382,7 @@ export function DailyDraftCard({
         <button
           type="button"
           className={buttonClass}
-          disabled={!canAcceptPlan({ pending, stale })}
+          disabled={feedbackBlocked || !canAcceptPlan({ pending, stale })}
           onClick={() => void onConfirm()}
         >
           {pending ? "正在处理…" : "确认"}
@@ -366,7 +390,7 @@ export function DailyDraftCard({
         <button
           type="button"
           className={secondaryButtonClass}
-          disabled={pending}
+          disabled={pending || feedbackBlocked}
           onClick={() => void onAdjust()}
         >
           调整
@@ -374,7 +398,7 @@ export function DailyDraftCard({
         <button
           type="button"
           className={secondaryButtonClass}
-          disabled={pending}
+          disabled={pending || feedbackBlocked}
           onClick={() => void onReject()}
         >
           拒绝

@@ -16,6 +16,16 @@ function task(partial: Partial<TodayQueueTask> & Pick<TodayQueueTask, "id" | "ti
 describe("groupTodayQueue", () => {
   const shanghai = "Asia/Shanghai";
 
+  it("keeps deferred tasks out of today's automatic selection even if they have accepted blocks", () => {
+    const deferred = task({ id: "11111111-1111-4111-8111-111111111111", title: "明天", notBefore: "2026-10-09T16:00:00.000Z" });
+    const blocks = [{ taskId: deferred.id, start: "2026-10-09T01:00:00.000Z", end: "2026-10-09T01:25:00.000Z", reason: "plan" }];
+    const groups = groupTodayQueue([deferred], blocks, new Date("2026-10-09T04:00:00.000Z"), shanghai);
+    expect(groups.deferred).toEqual([deferred]);
+    expect(groups.confirmed).toEqual([]);
+    expect(groups.other).toEqual([]);
+    expect(groupTodayQueue([deferred], [], new Date(deferred.notBefore!), shanghai).other).toEqual([deferred]);
+  });
+
   it("places pending tasks from today's accepted blocks into confirmed", () => {
     const blocks: PlannedBlock[] = [
       {
