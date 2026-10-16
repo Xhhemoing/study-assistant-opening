@@ -139,6 +139,7 @@ export {
   ensureCourseContinueActivity,
   type OpeningTeachingActivitiesRepository,
 } from "./repositories/opening-teaching-activities";
+export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
 
 export {
   createOpeningTeachingCommandsRepository,
@@ -207,4 +208,3 @@ export {
   type OpeningRestoreCliLiveDepsMissing,
   planOpeningRestoreApply,
 } from "./repositories/opening-backup";
-export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
