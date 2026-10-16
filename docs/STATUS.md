@@ -10,22 +10,23 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 功能主干 `623d829`：#49、#50、#53、#54、#55、#52、#56、#57 均已合入；#56/#57 最终提交完整 CI 已成功，合并后主干检查见 [CI 38877372290](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38877372290)。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
+- 发布基线 `8ff0741`：#49、#50、#53、#54、#55、#52、#56、#57、#58 均已合入；[发布主干完整 CI 38882210678](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38882210678) 全绿；审计修复 [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) 已合入 `e7a693b`，其完整 CI 38894501910 成功。本轮与 #59 的组合检查及最终合并 SHA 以 PR 为准。Hermes 的旧记录为 `8b500e6`；当前环境无法连接服务器，部署 SHA、迁移与开关状态尚未现场核实。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) · `codex/adaptive-evolution-v3-isolated` | 基于 `8ff0741` 的独立 worktree；按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。155 项定向单元、相关类型检查和 lint 通过；真实 SQL 正例暴露的题目归属查询已修复，完整 CI 结果见 PR。未合并/部署；节点跨重建稳定身份与分项评分仍是后续切片 |
+| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理；本轮整合由主对话完成 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 按要求隔离快照/建议/任务/教学，编译前重验资格；新增 nullable 迁移 0065。原 head 完整 CI 成功；用户已授权与 #60 合并，组合版本保留要求范围内的别名去重、已交付帮助与卡片/教学入口，新增交叉回归；组合 CI、合并状态以 PR 为准。尚未部署；稳定节点身份、分项评分和 BKT 影子仍属后续 |
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
 | 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
 | 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
 | Hermes 发布 | Codex 主对话 | [#58](https://github.com/Xhhemoing/study-assistant-opening/pull/58) | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、启动后崩溃检测、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
+| 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) | 7类闭环/恢复缺陷已修，无新增迁移；本地3905项通过，11跳过/1todo属真实使用占位；完整CI 38894501910全绿（含新PG/handler、既有浏览器和构建），已合入 e7a693b。与#59组合结果见该PR；Hermes及实际验收未完成，B/C后置 |
 
 ## 下一步（按顺序）
 
-1. #56、#57 已合入，核对合并后主干 CI。恢复 Hermes 部署连接后先核实 SHA/迁移、备份，再以 `OPENING_ADAPTIVE_PLANNING=0` 部署；用户决定何时开 1。当前没有执行线上操作。发布/回滚及验收见 `docs/operations/adaptive-copilot-release-checklist.md`。`claude/keen-carson-ls19ie` 的独立提交不随此次整体合入。
+1. #56–#58 与审计 #60 已合入；本轮按用户授权整合 #59，最终组合 CI 与主干 SHA 以 PR 为准。恢复 Hermes 部署连接后核实 SHA/迁移、备份；#59 含既有 0065 可空列迁移，运行新代码前先迁移。以 `OPENING_ADAPTIVE_PLANNING=0` 部署，用户决定何时开 1；当前尚未执行线上操作。回滚应用时保留 0065 可空列及已有要求归属。发布/验收见 `docs/operations/adaptive-copilot-release-checklist.md`。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
 3. 先修复批次 A 自用反馈，再按 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 推进后续批次；教练自动接受仍不启用。
 4. 大问题方案：

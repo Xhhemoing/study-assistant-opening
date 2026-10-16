@@ -2,10 +2,11 @@ import type { Sql } from "postgres";
 import { teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
+import { plannerSuggestionKind } from "./opening-task-fields";
 
 /** Task identity comes from the owner-scoped row, not createIntent/goalJson. */
 export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskId: string) {
-  const [task] = await sql`SELECT t.title, t.course_id, t.skill_label,
+  const [task] = await sql`SELECT t.title, t.course_id, t.skill_label, t.origin, t.client_key,
       COALESCE(t.requirement_key, r.requirement_key) AS requirement_key FROM opening_tasks t
     JOIN workspaces w ON w.id=t.workspace_id AND w.owner_user_id=t.owner_user_id
     LEFT JOIN opening_retest_activities r ON r.task_id=t.id AND r.workspace_id=t.workspace_id AND r.owner_user_id=t.owner_user_id
@@ -13,6 +14,7 @@ export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskI
   return task ? {
     title: String(task.title), courseId: task.course_id as string | null,
     skillLabel: task.skill_label as string | null, requirementKey: task.requirement_key as string | null,
+    suggestionKind: plannerSuggestionKind(task),
   } : null;
 }
 

@@ -5,6 +5,7 @@ import { parseSuggestionKey } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
+import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 
 /** One transaction owns selection, task creation and the accepted plan version. */
 export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPlanInput, now: Date) {
@@ -63,6 +64,8 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     if (draft.strategy_version && blocks.some(block => Date.parse(block.start) < now.getTime())) {
       throw new OpeningPlanError("CONFLICT", "a planned slot has expired", "slot_expired");
     }
+    await assertOpeningPlanConstraints(tx, scope, day, blocks,
+      (draft.input_snapshot as { autoDraft?: boolean } | null)?.autoDraft === true);
     const taskIds = [...new Set(blocks.filter(block => !suggestionIds.has(block.taskId)).map(block => block.taskId))];
     if (taskIds.length) {
       const tasks = await tx`SELECT id, version, status FROM opening_tasks

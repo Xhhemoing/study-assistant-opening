@@ -7,6 +7,7 @@ import type {
   TeachingActivityAssociateCourseInput,
   TeachingActivityCreateInput,
 } from "@aistudy/contracts";
+import { teachingLearnerFocusSchema } from "@aistudy/contracts";
 import {
   admitLearningSources,
   learningError,
@@ -15,6 +16,8 @@ import {
 } from "./opening-learning-facts";
 
 function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
+  const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
+  const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -28,6 +31,7 @@ function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
     pathVersion: Number(row.path_version),
     contentVersion: Number(row.content_version),
     checkpointJson: (row.checkpoint_json ?? undefined) as TeachingActivity["checkpointJson"],
+    ...(focus.success ? { learnerFocus: focus.data } : {}),
     clientKey: String(row.client_key),
     createdAt: learningIso(row.created_at)!,
     updatedAt: learningIso(row.updated_at)!,
@@ -292,7 +296,10 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         }
         const updated = await tx`
           UPDATE opening_teaching_activities
-          SET course_id = ${input.courseId}, updated_at = now()
+          SET course_id = ${input.courseId},
+            goal_json = CASE WHEN course_id IS DISTINCT FROM ${input.courseId}::uuid
+              THEN goal_json - 'learnerFocus' ELSE goal_json END,
+            updated_at = now()
           WHERE id = ${activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}

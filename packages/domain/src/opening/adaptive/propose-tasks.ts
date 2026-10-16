@@ -10,7 +10,7 @@ import {
   type LearnerSnapshot,
   type SkillSignal,
 } from "./types";
-import { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
+import { adaptiveSkillIdentity, normalizeSkillLabelKey, normalizedSuggestionIdentity } from "./skill-identity";
 
 export const MAX_DAILY_SUGGESTIONS = 3;
 /** Suggestions may fill at most this share of the day's free time, after committed tasks. */
@@ -47,7 +47,7 @@ type Candidate = {
   courseId: string | null;
   skillLabel: string | null;
   requirementKey?: string | null;
-  legacyIdentity?: string;
+  comparisonIdentities: readonly string[];
   title: string;
   minutes: number;
   reasonCode: PlanReasonCode;
@@ -96,12 +96,12 @@ function courseUrgency(snapshot: LearnerSnapshot): Map<string, number> {
 }
 
 /** Consecutive earlier days on which this suggestion was created and then skipped. */
-function consecutiveSkippedDays(snapshot: LearnerSnapshot, identity: string, legacyIdentity?: string): number {
+function consecutiveSkippedDays(snapshot: LearnerSnapshot, identities: readonly string[]): number {
   let days = 0;
   for (let back = 1; back <= 7; back += 1) {
     const day = addLocalDays(snapshot.date, -back);
     const skipped = snapshot.plannerHistory.some(
-      (entry) => entry.date === day && (entry.identity === identity || entry.identity === legacyIdentity) && entry.status === "skipped",
+      (entry) => entry.date === day && identities.includes(entry.identity) && entry.status === "skipped",
     );
     if (!skipped) break;
     days += 1;
@@ -114,7 +114,7 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
   const covered = new Set(
     pendingTasks
       .filter((task) => task.status === "pending" && taskCourseId(task) && taskSkillLabel(task))
-      .map((task) => JSON.stringify([taskCourseId(task), adaptiveSkillIdentity(taskSkillLabel(task)!, taskRequirementKey(task))])),
+      .map((task) => JSON.stringify([taskCourseId(task), adaptiveSkillIdentity(normalizeSkillLabelKey(taskSkillLabel(task)!), taskRequirementKey(task))])),
   );
   // One task per identity per local day: do not revive a task the learner has
   // already completed or skipped when a draft is recomputed later that day.
@@ -124,8 +124,10 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
       .map((entry) => entry.identity),
   );
   const out: Candidate[] = [];
-  const push = (candidate: Omit<Candidate, "rank" | "urgency">, behind: boolean) => {
+  const seen = new Set<string>();
+  const push = (candidate: Omit<Candidate, "rank" | "urgency" | "comparisonIdentities">, behind: boolean) => {
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
+    const comparable = normalizedSuggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     // Upgrade old label-only history only when there is one unambiguous target.
     const matchingSkills = candidate.requirementKey != null && candidate.skillLabel !== null
       ? snapshot.courses.find(course => course.courseId === candidate.courseId)?.skills.filter(skill =>
@@ -133,16 +135,19 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
       : [];
     const legacyIdentity = matchingSkills.length === 1
       ? suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel) : undefined;
-    if (unavailableIdentities.has(identity) || (legacyIdentity && unavailableIdentities.has(legacyIdentity))) return;
+    const comparisonIdentities = [identity, comparable, ...(legacyIdentity ? [legacyIdentity,
+      normalizedSuggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel)] : [])];
+    if (comparisonIdentities.some(key => unavailableIdentities.has(key)) || seen.has(comparable)) return;
     if (candidate.courseId && candidate.skillLabel && covered.has(JSON.stringify([
-      candidate.courseId, adaptiveSkillIdentity(candidate.skillLabel, candidate.requirementKey),
+      candidate.courseId, adaptiveSkillIdentity(normalizeSkillLabelKey(candidate.skillLabel), candidate.requirementKey),
     ]))) return;
     if (legacyIdentity && candidate.courseId && candidate.skillLabel && covered.has(JSON.stringify([
-      candidate.courseId, adaptiveSkillIdentity(candidate.skillLabel, null),
+      candidate.courseId, adaptiveSkillIdentity(normalizeSkillLabelKey(candidate.skillLabel), null),
     ]))) return;
+    seen.add(comparable);
     out.push({
       ...candidate,
-      legacyIdentity,
+      comparisonIdentities,
       rank: KIND_PRIORITY[candidate.kind] - (behind ? BEHIND_BOOST : 0),
       urgency: candidate.courseId ? urgency.get(candidate.courseId) ?? Number.MAX_SAFE_INTEGER : -1,
     });
@@ -234,7 +239,7 @@ export function proposeAdaptiveTasks(
   for (const candidate of collectCandidates(snapshot, options.pendingTasks).sort(compareCandidates)) {
     if (suggestions.length >= max) break;
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
-    const skippedDays = consecutiveSkippedDays(snapshot, identity, candidate.legacyIdentity);
+    const skippedDays = consecutiveSkippedDays(snapshot, candidate.comparisonIdentities);
     if (skippedDays >= 3) continue;
     let { minutes, reasonCode, reason } = candidate;
     if (skippedDays === 2) {

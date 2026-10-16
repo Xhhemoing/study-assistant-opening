@@ -1,7 +1,7 @@
 import { addLocalDays } from "../daily-draft";
 import type { LearnerSnapshotSources, SnapshotCourseSource, SnapshotObservation, SnapshotSkillSummary } from "./snapshot-sources";
 import { parseSuggestionKey, type LearnerSnapshot, type SkillSignal, type SkillStatus } from "./types";
-import { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
+import { adaptiveSkillIdentity, normalizeSkillLabelKey, plannerHistoryIdentity } from "./skill-identity";
 
 function newestObservationFirst(a: SnapshotObservation, b: SnapshotObservation): number {
   const time = Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt);
@@ -86,7 +86,7 @@ export function assembleLearnerSnapshot(sources: LearnerSnapshotSources): Learne
     }
     const suggestion = task.clientKey === null ? null : parseSuggestionKey(task.clientKey);
     if (suggestion && suggestion.date >= historyStart && suggestion.date <= sources.date) {
-      plannerHistory.push({ ...suggestion, status: task.status });
+      plannerHistory.push({ ...suggestion, identity: plannerHistoryIdentity(suggestion.identity, task.skillLabel, task.requirementKey), status: task.status });
     }
   }
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { suggestionKindSchema } from "./planning-tasks";
 
 export const weekSessionSchema = z
   .object({
@@ -31,6 +32,7 @@ export const timeBlockSchema = z
   .strict();
 
 export {
+  suggestionKindSchema,
   taskItemSchema,
   taskOriginSchema,
   taskRetestProjectionSchema,
@@ -87,8 +89,6 @@ export const planBlockReasonSchema = z
   .strict();
 
 /** Tasks the planner proposes; they are created only when the learner accepts the draft. */
-export const suggestionKindSchema = z.enum(["weak_skill", "review_cards", "new_skill", "course_pace"]);
-
 export const suggestedTaskSchema = z
   .object({
     /** Becomes the task clientKey on accept. */

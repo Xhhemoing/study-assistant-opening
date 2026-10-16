@@ -266,6 +266,9 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
 
     async replaceTimetable(scope: OpeningScope, sessions: WeekSession[]): Promise<WeekSession[]> {
       await sql.begin(async (tx) => {
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
         await tx`DELETE FROM opening_timetable_sessions
           WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
         for (const s of sessions) {
@@ -470,7 +473,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           // Accepted plans never reach here (acceptedVersion / status checks above).
           const rebuilt = await build();
           if (rebuilt.kind === "skip") {
-            return { draft: existing, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
+            return { draft: null, skippedBecauseAccepted: false, dailyDraftSkippedReason: rebuilt.reason };
           }
           const stored = (existingRows[0] as Record<string, unknown>).input_snapshot;
           const expired = existing.strategyVersion && existing.blocks.some(block =>

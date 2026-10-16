@@ -18,4 +18,18 @@ describe("task teaching action", () => {
       expect(html).toBe("");
     }
   });
+  it("opens an accepted card-review suggestion in the card queue without creating teaching", () => {
+    const start = vi.fn();
+    const row = { ...task, origin: "planner" as const, suggestionKind: "review_cards" as const };
+    const html = renderToStaticMarkup(createElement(TaskLearningActionContext.Provider, { value: { start, busy: false } }, createElement(TaskRowActions, { task: row })));
+    expect(html).toContain('href="/opening/cards"');
+    expect(html).toContain("开始卡片复习");
+    expect(html).not.toContain("开始任务主讲");
+    expect(start).not.toHaveBeenCalled();
+  });
+  it("keeps card reviews available when the teaching workspace is disabled", () => {
+    const row = { ...task, origin: "planner" as const, suggestionKind: "review_cards" as const };
+    const html = renderToStaticMarkup(createElement(TaskRowActions, { task: row }));
+    expect(html).toContain('href="/opening/cards"');
+  });
 });

@@ -1,4 +1,4 @@
-import { evaluateEvidenceEligibility } from "../evidence-eligibility";
+import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "../evidence-eligibility";
 import { summarizeObservations, type CourseEvidence } from "../learning-summary";
 import type { SnapshotObservation, SnapshotSkillSummary } from "./snapshot-sources";
 import { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
@@ -27,16 +27,15 @@ export function toSnapshotEvidence(
   }).map((row) => ({ skillLabel: row.skillLabel, requirementKey: row.requirementKey, status: row.status, lastObservedAt: row.lastObservedAt }));
   const observations = canonical.map((row): SnapshotObservation => {
     const input = evidence.evidenceContexts[row.id];
-    const eligibility = evaluateEvidenceEligibility(
-      input?.observation ?? {
-        courseId: row.courseId,
-        problemId: row.problemId,
-        assistance: row.assistance,
-        outcome: row.outcome,
-        verdictSource: row.verdictSource,
-      },
-      input?.context ?? {},
-    );
+    const captured = input?.observation ?? {
+      courseId: row.courseId,
+      problemId: row.problemId,
+      assistance: row.assistance,
+      outcome: row.outcome,
+      verdictSource: row.verdictSource,
+    };
+    const context = input?.context ?? {};
+    const eligibility = evaluateEvidenceEligibility(captured, context);
     // A revision keeps the original attempt time, as in summarizeObservations.
     const attemptedAt = input?.observation.submittedAt ?? Date.parse(row.submittedAt ?? row.occurredAt);
     return {
@@ -45,7 +44,7 @@ export function toSnapshotEvidence(
       requirementKey: input?.observation.requirementKey ?? null,
       itemVersionId: input?.observation.itemVersionId ?? null,
       attemptedAt: new Date(attemptedAt).toISOString(),
-      assistance: row.assistance,
+      assistance: resolveEvidenceAssistance(captured, context),
       verifiedCorrect: eligibility.verifiedCorrect,
       independentAttempt: eligibility.independentAttempt,
       usableForCurrentVersion: eligibility.usableForCurrentVersion,

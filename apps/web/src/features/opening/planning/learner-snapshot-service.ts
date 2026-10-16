@@ -80,6 +80,8 @@ export function toSnapshotTaskRow(row: LearnerSnapshotTaskRow, timeZone: string)
     status: row.status,
     minutes: row.minutes,
     courseId: row.courseId,
+    ...(row.skillLabel ? { skillLabel: row.skillLabel } : {}),
+    ...(row.requirementKey !== undefined ? { requirementKey: row.requirementKey } : {}),
     // No closed_at column: a closed task's last update is the close (reopen sets it pending).
     closedLocalDate: row.status === "pending" ? null : localDateKeyInZone(new Date(row.updatedAt), timeZone),
   };

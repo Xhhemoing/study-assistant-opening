@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
-import type { LearnerSnapshotSources } from "@aistudy/domain";
+import { nextLearningStep, type CourseEvidence, type EvidenceHelpExposure, type LearnerSnapshotSources } from "@aistudy/domain";
 import {
   createLearnerSnapshotService,
+  toSnapshotEvidence,
   toSnapshotKnowledgeNodes,
   toSnapshotTaskRow,
   type LearnerSnapshotDeps,
@@ -83,5 +84,50 @@ describe("snapshot row mapping", () => {
     expect(toSnapshotTaskRow({ ...row, status: "done" }, "Asia/Shanghai").closedLocalDate).toBe("2026-10-15");
     expect(toSnapshotTaskRow({ ...row, status: "done" }, "UTC").closedLocalDate).toBe("2026-10-14");
     expect(toSnapshotTaskRow({ ...row, status: "pending" }, "Asia/Shanghai").closedLocalDate).toBeNull();
+    expect(toSnapshotTaskRow({ ...row, status: "done", skillLabel: "Linear Algebra" }, "UTC").skillLabel).toBe("Linear Algebra");
+  });
+});
+
+describe("snapshot assistance qualification", () => {
+  const at = "2026-10-16T08:00:00.000Z";
+  const submittedAt = Date.parse(at);
+  const exposure: EvidenceHelpExposure = { attemptId: "attempt", problemId: "problem", level: "hinted", kind: "hint", delivered: true, deliveredAt: submittedAt - 30_000 };
+  const evidence = (exposures: readonly EvidenceHelpExposure[]): CourseEvidence => ({
+    observations: [{ id: "revised-head", workspaceId: scope.workspaceId, sessionId: "session", courseId, skillLabel: "Linear Algebra",
+      sourceIds: [], sourceTurnIds: [], answer: "1", outcome: "correct", assistance: "independent", clientKey: "revised-observation",
+      occurredAt: at, submittedAt: at, verdictSource: "reference_checked", referenceSourceId: "reference", evidenceVerdict: "MASTERY_NOT_ESTABLISHED", problemId: "problem" }],
+    evidenceContexts: { "revised-head": {
+      observation: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", courseId, requirementKey: "requirement",
+        startedAt: submittedAt - 60_000, submittedAt, assistance: "independent", outcome: "correct", verdictSource: "reference_checked" },
+      context: { helpHistory: { complete: true, exposures }, version: { applicability: "exact", currentItemVersionId: "version" },
+        referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", referenceId: "reference", method: "compare", scope: "whole_answer", checkerId: "owner", outcome: "correct" } },
+    } },
+  });
+
+  it.each(["hinted", "revealed"] as const)("keeps delivered %s in the next learning decision after self-report is revised to independent", level => {
+    const input = evidence([{ ...exposure, level }]);
+    const result = toSnapshotEvidence(input, new Date(at));
+    expect(result.observations[0]).toMatchObject({ assistance: level, verifiedCorrect: "yes", independentAttempt: "no" });
+    expect(nextLearningStep({ status: result.summaries[0]!.status, observations: result.observations, wantsFullExplanation: false })).toMatchObject({
+      activityKind: "reduced_help_practice", reasonCode: "assistance_dependent",
+    });
+    expect(input.observations[0]!.assistance).toBe("independent");
+  });
+
+  it.each([
+    ["post-submission reference", { deliveredAt: submittedAt + 1 }],
+    ["another attempt", { attemptId: "other-attempt", deliveredAt: submittedAt - 90_000, level: "revealed" }],
+    ["undelivered hint", { delivered: false }],
+    ["instruction", { kind: "instruction", level: "revealed" }],
+  ] as const)("does not make %s a current-attempt hint", (_name, patch) => {
+    const result = toSnapshotEvidence(evidence([{ ...exposure, ...patch }]), new Date(at));
+    expect(result.observations[0]!.assistance).toBe("independent");
+  });
+
+  it("retains a declared help level when legacy evidence has no server context", () => {
+    const input = evidence([]);
+    input.evidenceContexts = {};
+    input.observations[0]!.assistance = "revealed";
+    expect(toSnapshotEvidence(input, new Date(at)).observations[0]!.assistance).toBe("revealed");
   });
 });

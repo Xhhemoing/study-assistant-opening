@@ -80,6 +80,27 @@ describe("inline teaching attempt", () => {
     expect(findSkillLabelReuseHint("矩阵秩", ["矩阵秩"])).toBeNull();
   });
 
+  it("prefills the server-selected skill so the next answer stays in the same learning loop", () => {
+    const html = renderToStaticMarkup(createElement(InlineAttempt, {
+      blockId: id, prompt: identity.prompt,
+      context: { id, courseId: id, sourceIds: [id], contentVersion: 3,
+        intentSummary: "巩固练习", status: "active", onCourseAssociated: vi.fn(),
+        learnerFocus: { skillLabel: "矩阵秩", activityKind: "targeted_explain", reasonCode: "verified_incorrect",
+          focusObservationId: id, recentAssistance: ["independent"], strategyVersion: "adaptive-1" } },
+    }));
+    expect(html).toContain('value="矩阵秩"');
+    expect(html).not.toContain('value="巩固练习"');
+  });
+
+  it("uses the current outline title when there is no selected learning skill", () => {
+    const html = renderToStaticMarkup(createElement(InlineAttempt, {
+      blockId: id, prompt: identity.prompt,
+      context: { id, courseId: id, sourceIds: [id], contentVersion: 3,
+        intentSummary: "今日主题学习", status: "active", onCourseAssociated: vi.fn(), outlineTitle: "矩阵秩" },
+    }));
+    expect(html).toContain('value="矩阵秩"');
+  });
+
   it("uses one in-flight submission and reuses its identity and client key after an unknown result", async () => {
     const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue({ id }), submitAttempt: vi.fn().mockRejectedValueOnce(new Error("reply lost")).mockResolvedValue({ id }) };
     const session = createInlineAttemptSubmission(identity, client);

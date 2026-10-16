@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
+import { suggestionIdentity, suggestionKey } from "@aistudy/domain";
 import {
   createOpeningAdaptivePrefsRepository,
   createOpeningPlanningSettingsRepository,
@@ -70,6 +71,23 @@ function services() {
 }
 
 describe("adaptive requirement identity across the learning loop", () => {
+  it.each(["R1", "R2"])("matches stored task aliases only inside requirement %s", async requirementKey => {
+    const course = await seedRequirementEvidence();
+    const taskId = randomUUID();
+    const storedLabel = " ＦＲＡＣＴＩＯＮＳ ";
+    const clientKey = suggestionKey(day, suggestionIdentity("weak_skill", course.courseId, storedLabel, requirementKey));
+    await fixture.sql`INSERT INTO opening_tasks
+      (id,workspace_id,owner_user_id,title,minutes,status,course_id,skill_label,requirement_key,client_key,origin)
+      VALUES (${taskId},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},'Completed practice',25,'done',
+        ${course.courseId},${storedLabel},${requirementKey},${clientKey},'planner')`;
+    const { snapshots, plans } = services();
+    const read = await snapshots.read(fixture.scope, { date: day, timeZone });
+    expect(read.sources.tasks).toContainEqual(expect.objectContaining({ clientKey, skillLabel: storedLabel, requirementKey }));
+    const suggestions = (await plans.getToday(fixture.scope, day)).dailyDraft?.suggestedTasks ?? [];
+    expect(suggestions.map(row => row.requirementKey)).toEqual(requirementKey === "R1" ? ["R2"] : []);
+    expect(await fixture.sql`SELECT client_key FROM opening_tasks WHERE id=${taskId}`).toEqual([{ client_key: clientKey }]);
+  });
+
   it("keeps same-label requirements separate through snapshot, suggestion, acceptance, and teaching focus", async () => {
     const course = await seedRequirementEvidence();
     const { snapshots, plans, activities } = services();
