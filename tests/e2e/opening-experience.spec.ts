@@ -1,13 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
-import { resetE2eDatabase } from "../../scripts/db-reset-e2e";
 
 test.beforeAll(async () => {
-  const url = process.env.E2E_DATABASE_URL;
-  if (!url) throw new Error("E2E_DATABASE_URL is required for the isolated UX suite");
-  // Reset only the guarded *_e2e database: ordinary cascading DELETE is
-  // intentionally rejected once a real note has append-only revisions.
-  await resetE2eDatabase(url);
   await seedOpeningOwner();
 });
 test.beforeEach(async ({ context, baseURL }) => { await loginOpeningOwner(context.request, baseURL!); });

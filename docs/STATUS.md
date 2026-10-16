@@ -16,15 +16,16 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已修复并通过非浏览器检查，待合入 `feat/opening-release`；R9、R10 待做。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
+| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
 | 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
-| 自适应排程 L2–L8（按学习情况出建议、教练自动确认/撤销、Today 档位、课程目标、闭环指标） | Claude（L2/L3）→ GPT/Grok（L4/L6/L8） | — | 只有 L0/L1 在主干；`OPENING_ADAPTIVE_PLANNING` 保持 0；本地 WIP `bd201d7` 如仍在请先推送 |
+| 自适应副驾驶闭环批次 A | Grok：G1–G11；Claude：K0、C0–C4、R9b 与收尾 Z | #52 = K0 + C0 修复 + C1 + C2 接线（待合）；#49、#50 待 squash；#53（G4）返工中（lint + 读取失败可覆盖目标）；#54（G10）可合；#46（G1）hold | #52 合入后派 G5、G6；#50 合入后 G11。G5 合入后 Claude 接 C2 运行时与端到端测试，再 C3；#54 合入后 R9b。`OPENING_ADAPTIVE_PLANNING` 保持 0（C3 前开 1 会导致含建议的草案无法接受）。卡片见 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md` 第 5–7 节 |
+| 主干 CI `Browser tests` 失败 | Claude（C0） | 修复在 #52 | 根因：两个 e2e spec 静态 import 了用 `import.meta` 的 `scripts/db-reset-e2e.ts`，Playwright 按 CommonJS 加载失败（自 `544304e` 起）。已改为子进程重置；这两个 spec 此前从未在 CI 跑过，修复后的首轮结果才是真实结果 |
 
 ## 下一步（按顺序）
 
 1. 合入评审修复（`claude/keen-carson-ls19ie` 快进到 `feat/opening-release`），再部署 Hermes：备份 → `db:migrate`（0061–0064）→ `OPENING_TEACHING_COMPILER_ENABLED=1`、`OPENING_ADAPTIVE_PLANNING=0` → 换新 Lant key → 确认 Hermes 能访问 `generativelanguage.googleapis.com` 后再配 Gemini。
 2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
-3. 自适应排程 L2–L8，让每日计划随学习证据变化。
+3. 自适应副驾驶闭环批次 A（见 `docs/plans/2026-10-15-adaptive-copilot-final-plan.md`），让每日计划和主讲随学习证据变化。
 4. 大问题方案：
    - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
    - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。

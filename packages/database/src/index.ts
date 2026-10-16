@@ -84,6 +84,7 @@ export * from "./repositories/opening-retest-activities";
 export * from "./repositories/opening-learning-evidence-context";
 export * from "./repositories/opening-learning-attempts";
 export * from "./repositories/opening-learning-read";
+export * from "./repositories/opening-learner-snapshot-read";
 export {
   mapLearningObservation,
   probeLearningSourcesAvailability,

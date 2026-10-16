@@ -264,6 +264,35 @@ describe("openingApi integration helpers", () => {
     } satisfies Partial<OpeningApiError>);
   });
 
+  it("exposes a plan-accept conflict reason on OpeningApiError", async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ acceptSuggestedKeys: ["planner:2026-10-15:weak_skill:x:y"] });
+      return jsonResponse({ error: { code: "CONFLICT", message: "stale", reason: "stale_version" } }, 409);
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(
+      api.acceptPlan({
+        draftId: U,
+        expectedBaseVersion: 1,
+        clientKey: "accept-plan-abcdefgh",
+        acceptSuggestedKeys: ["planner:2026-10-15:weak_skill:x:y"],
+      }),
+    ).rejects.toMatchObject({ name: "OpeningApiError", status: 409, code: "CONFLICT", reason: "stale_version" });
+  });
+
+  it("keeps hasNewerSuggestion on the Today read", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ date: "2026-10-15", acceptedVersion: 0, blocks: [], hardBlocks: [], hasNewerSuggestion: true }),
+    );
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.getToday("2026-10-15")).resolves.toMatchObject({ hasNewerSuggestion: true });
+    await api.getToday("2026-10-15", { refreshSuggestions: true });
+    expect(fetchImpl.mock.calls.map((call) => String((call as unknown[])[0]))).toEqual([
+      "/api/opening/today?date=2026-10-15",
+      "/api/opening/today?date=2026-10-15&refresh=suggestions",
+    ]);
+  });
+
   it("builds same-origin download href without MinIO hosts", () => {
     const href = sourceDownloadHref(S, 0);
     expect(href).toBe(`/api/opening/sources/${S}/download?version=0`);

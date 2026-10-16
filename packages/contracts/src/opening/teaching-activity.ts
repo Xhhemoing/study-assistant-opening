@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { assistanceLevelSchema } from "./learning";
 
 export const teachingActivityIntentKindSchema = z.enum([
   "material",
@@ -86,11 +87,40 @@ export const activityObservationInputSketchSchema = z
   })
   .strict();
 
+/** What the next teaching unit for a skill should do, chosen by rules before compilation. */
+export const learningActivityKindSchema = z.enum([
+  "diagnose",
+  "targeted_explain",
+  "reduced_help_practice",
+  "transfer_check",
+  "full_explain",
+]);
+
+/**
+ * Server-built learner context for one activity, stored as `goalJson.learnerFocus`.
+ * Built from the learner snapshot only; a client-supplied value is never trusted.
+ * The compiler receives these fields, not the learner's whole history.
+ */
+export const teachingLearnerFocusSchema = z
+  .object({
+    skillLabel: z.string().min(1).max(200),
+    activityKind: learningActivityKindSchema,
+    reasonCode: z.string().min(1).max(40),
+    /** The verified-incorrect attempt to explain against; null when there is none. */
+    focusObservationId: uuidSchema.nullable(),
+    /** Assistance on the latest observations, newest first. */
+    recentAssistance: z.array(assistanceLevelSchema).max(3),
+    strategyVersion: z.string().min(1).max(40),
+  })
+  .strict();
+
 export type TeachingActivityIntentKind = z.infer<typeof teachingActivityIntentKindSchema>;
 export type TeachingActivityStatus = z.infer<typeof teachingActivityStatusSchema>;
 export type TeachingActivityGenerateStatus = z.infer<typeof teachingActivityGenerateStatusSchema>;
 export type TeachingActivityCreateInput = z.infer<typeof teachingActivityCreateInputSchema>;
 export type TeachingActivity = z.infer<typeof teachingActivitySchema>;
+export type LearningActivityKind = z.infer<typeof learningActivityKindSchema>;
+export type TeachingLearnerFocus = z.infer<typeof teachingLearnerFocusSchema>;
 export type TeachingActivityAssociateCourseInput = z.infer<
   typeof teachingActivityAssociateCourseInputSchema
 >;

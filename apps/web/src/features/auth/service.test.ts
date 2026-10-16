@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { OpeningPlanError } from "@aistudy/database";
 import {
   RETEST_SUBMIT_TOO_EARLY_CODE,
   RETEST_SUBMIT_TOO_EARLY_MESSAGE,
@@ -51,5 +52,22 @@ describe("mapDomainError RetestSubmitTooEarlyError (DL11)", () => {
         reason: "scheduled_or_recommended",
       },
     });
+  });
+});
+
+describe("mapDomainError OpeningPlanError", () => {
+  it("returns the accept conflict reason with a 409", async () => {
+    const response = jsonError(mapDomainError(new OpeningPlanError("CONFLICT", "plan moved on", "stale_version")));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "CONFLICT", message: "plan moved on", reason: "stale_version" },
+    });
+  });
+
+  it("keeps plain plan errors without a reason", async () => {
+    const response = jsonError(mapDomainError(new OpeningPlanError("CONFLICT", "draft is not open")));
+    await expect(response.json()).resolves.toEqual({ error: { code: "CONFLICT", message: "draft is not open" } });
+    expect(mapDomainError(new OpeningPlanError("NOT_FOUND", "draft not found")).status).toBe(404);
+    expect(mapDomainError(new OpeningPlanError("VALIDATION", "bad date")).status).toBe(400);
   });
 });

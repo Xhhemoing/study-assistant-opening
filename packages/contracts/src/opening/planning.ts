@@ -136,6 +136,23 @@ export const acceptPlanInputSchema = z
   })
   .strict();
 
+/**
+ * Why accepting a stored draft was refused (409 body `reason`). Each one is recoverable:
+ * the learner refreshes or reselects instead of retyping anything.
+ */
+export const planAcceptConflictReasonSchema = z.enum([
+  /** The day's plan moved on since the draft was read. */
+  "stale_version",
+  /** A referenced task was completed, skipped or edited. */
+  "task_changed",
+  /** A suggestion's course was archived or its material is no longer admissible. */
+  "source_unavailable",
+  /** A block would now start in the past. */
+  "slot_expired",
+  /** The same clientKey was replayed with a different suggestion selection. */
+  "selection_mismatch",
+]);
+
 /** Undo the coach's automatic confirmation for a day. */
 export const planUndoInputSchema = z
   .object({
@@ -241,6 +258,7 @@ export type TimeBlock = z.infer<typeof timeBlockSchema>;
 export type PlannedBlock = z.infer<typeof plannedBlockSchema>;
 export type PlanDraft = z.infer<typeof planDraftSchema>;
 export type AcceptPlanInput = z.infer<typeof acceptPlanInputSchema>;
+export type PlanAcceptConflictReason = z.infer<typeof planAcceptConflictReasonSchema>;
 export type PlanReasonCode = z.infer<typeof planReasonCodeSchema>;
 export type PlanBlockReason = z.infer<typeof planBlockReasonSchema>;
 export type SuggestionKind = z.infer<typeof suggestionKindSchema>;
