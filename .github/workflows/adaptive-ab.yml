@@ -1,0 +1,86 @@
+name: Adaptive version comparison
+
+on:
+  push:
+    branches: [codex/adaptive-usability-ab]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: compare-${{ matrix.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: old
+            sha: 8ff07412ecc8bb0b251a5015a070d42debf76209
+          - version: new
+            sha: de81eca241cfebd8cf058a44960a50403955a50f
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aistudy
+          POSTGRES_PASSWORD: aistudy
+          POSTGRES_DB: aistudy_opening_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U aistudy -d aistudy_opening_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      AB_VERSION: ${{ matrix.version }}
+      AB_SOURCE_SHA: ${{ matrix.sha }}
+      AB_REVISION: ${{ matrix.sha }}
+      AB_PERF_BATCHES: "1"
+      AB_PERF_ITERATIONS: "10"
+      OPENING_TEST_DB: "1"
+      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test
+      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test
+      AUTH_SECRET: ab-test-secret-at-least-32-characters
+      AUTH_COOKIE_NAME: aistudy_session
+      SESSION_COOKIE_SECURE: "false"
+      SESSION_TTL_SECONDS: "3600"
+      PUBLIC_BASE_URL: http://localhost:3000
+      REDIS_URL: redis://127.0.0.1:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: aistudy
+      S3_ACCESS_KEY_ID: ab-unused
+      S3_SECRET_ACCESS_KEY: ab-unused
+      S3_FORCE_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: harness
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          path: target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: target/package-lock.json
+      - name: Copy identical evaluation scenarios
+        run: |
+          cp harness/tests/evaluation/domain-comparison.ts target/packages/domain/src/opening/adaptive/version-comparison.test.ts
+          cp harness/tests/evaluation/sql-comparison.ts target/tests/integration/adaptive-ab-comparison.test.ts
+          git -C target rev-parse HEAD
+          sha256sum target/package-lock.json harness/tests/evaluation/*.ts
+      - name: Install locked dependencies
+        working-directory: target
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Same-data domain scenarios
+        continue-on-error: true
+        working-directory: target
+        run: npx vitest run --project unit packages/domain/src/opening/adaptive/version-comparison.test.ts
+      - name: Real PostgreSQL application scenarios
+        working-directory: target
+        run: npx vitest run --project integration tests/integration/adaptive-ab-comparison.test.ts
