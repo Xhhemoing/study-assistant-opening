@@ -17,12 +17,15 @@ export function Inspector({ open, onClose, children, title = "学习上下文", 
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    return () => { if (previous?.isConnected) previous.focus(); };
-  }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    if (!wide && !dialog.current?.open) dialog.current?.showModal();
+    const node = dialog.current;
+    // Capture the modal node before React can unmount it (open→false or wide→true).
+    // Closing clears top-layer inert even when no dialog[open] remains in the DOM.
+    if (!wide && node && !node.open) node.showModal();
     heading.current?.focus();
+    return () => {
+      node?.close();
+      if (previous?.isConnected) previous.focus();
+    };
   }, [open, wide]);
   if (!open) return null;
   const body = <><header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-200 px-4">

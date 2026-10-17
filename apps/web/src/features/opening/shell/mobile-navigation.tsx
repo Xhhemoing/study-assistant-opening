@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardCheck, Layers2, Library, Link2, MessageCircle, MoreHorizontal, Notebook, Sun, X } from "lucide-react";
-import Link from "next/link";
+import { ShellNavLink } from "./shell-nav-link";
 import { useEffect, useRef, useState } from "react";
 import { ui } from "../design/ui";
 import { navigationIsActive, openingNavigation } from "./navigation";
@@ -38,7 +38,7 @@ export function OpeningMobileNavigation({ pathname, pendingCount }: { pathname: 
       {items.filter(item => item.group === "core").map(item => {
         const Icon = icons[item.icon];
         const active = navigationIsActive(item.href, pathname);
-        return <Link key={item.href} href={item.href} aria-current={active ? "page" : undefined} className={`${mobileLink} ${active ? activeClass : inactiveClass}`}><Icon size={18} aria-hidden="true" /><span>{item.label}</span></Link>;
+        return <ShellNavLink key={item.href} href={item.href} aria-current={active ? "page" : undefined} className={`${mobileLink} ${active ? activeClass : inactiveClass}`}><Icon size={18} aria-hidden="true" /><span>{item.label}</span></ShellNavLink>;
       })}
       <button type="button" className={`${mobileLink} ${moreActive ? activeClass : inactiveClass}`} aria-haspopup="dialog" aria-controls="opening-mobile-more" aria-expanded={moreOpen} aria-current={moreActive ? "page" : undefined} onClick={() => { if (!dialog.current?.open) dialog.current?.showModal(); setMoreOpen(true); }}><MoreHorizontal size={18} aria-hidden="true" /><span>更多</span></button>
     </nav>
@@ -48,7 +48,7 @@ export function OpeningMobileNavigation({ pathname, pendingCount }: { pathname: 
         <nav aria-label="更多学习工具" className="space-y-1">{moreItems.map(item => {
           const Icon = icons[item.icon];
           const active = navigationIsActive(item.href, pathname);
-          return <Link key={item.href} href={item.href} aria-current={active ? "page" : undefined} onClick={closeMore} className={`flex min-h-12 items-center gap-3 rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 ${active ? activeClass : inactiveClass}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.icon === "review" && pendingCount !== null && pendingCount > 0 ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</Link>;
+          return <ShellNavLink key={item.href} href={item.href} aria-current={active ? "page" : undefined} onClick={closeMore} className={`flex min-h-12 items-center gap-3 rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 ${active ? activeClass : inactiveClass}`}><Icon size={18} aria-hidden="true" /><span className="flex-1">{item.label}</span>{item.icon === "review" && pendingCount !== null && pendingCount > 0 ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</ShellNavLink>;
         })}</nav>
       </div>
     </dialog>
