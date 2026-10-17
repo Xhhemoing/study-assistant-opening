@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadEnv, EnvValidationError } from "./env";
+import { loadEnv, loadOpeningUploadQuota, EnvValidationError } from "./env";
 import { loadOpeningTutorConfig } from "./opening-model";
 
 describe("loadEnv", () => {
@@ -35,6 +35,26 @@ describe("loadEnv", () => {
       loadEnv({ ...valid, NODE_ENV: "production", SESSION_COOKIE_SECURE: "false" })
         .sessionCookieSecure,
     ).toBe(false);
+  });
+
+  it("trusts no client IP header by default and validates an explicit header name", () => {
+    expect(loadEnv(valid).authTrustedIpHeader).toBeUndefined();
+    expect(loadEnv({ ...valid, AUTH_TRUSTED_IP_HEADER: " X-Real-IP " }).authTrustedIpHeader).toBe("X-Real-IP");
+    for (const header of ["x-real-ip, forwarded", "x-real-ip\r\ninjected: yes"]) {
+      expect(() => loadEnv({ ...valid, AUTH_TRUSTED_IP_HEADER: header })).toThrow(EnvValidationError);
+    }
+  });
+
+  it("defaults and validates workspace upload reservation limits", () => {
+    expect(loadOpeningUploadQuota({})).toEqual({ maxBytes: 2 * 1024 ** 3, maxObjects: 200 });
+    expect(loadOpeningUploadQuota({ OPENING_UPLOAD_MAX_WORKSPACE_BYTES: "1024", OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS: "2" }))
+      .toEqual({ maxBytes: 1024, maxObjects: 2 });
+    for (const name of ["OPENING_UPLOAD_MAX_WORKSPACE_BYTES", "OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS"]) {
+      for (const value of ["0", "-1", "1.5", "10tail", "Infinity", "9007199254740992"]) {
+        expect(() => loadOpeningUploadQuota({ [name]: value })).toThrow(EnvValidationError);
+        expect(() => loadEnv({ ...valid, [name]: value })).toThrow(EnvValidationError);
+      }
+    }
   });
 
   it("disables paid calls by default and validates a configured daily cap and prices", () => {

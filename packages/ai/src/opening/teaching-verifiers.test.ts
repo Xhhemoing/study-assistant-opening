@@ -3,6 +3,7 @@ import type { ActivitySpecPublishInput, SourceChunk } from "@aistudy/contracts";
 import { mayPublishVerified } from "@aistudy/domain";
 import { assembleTeachingEvidencePack } from "./teaching-evidence";
 import {
+  createTeachingValidationAfterPublish,
   detectAuthoritySpoof,
   isTeachingValidationEnabled,
   scanInjectionRisks,
@@ -301,7 +302,7 @@ describe("teaching-verifiers", () => {
     expect(r.reason).toMatch(/rejected proof|upvote|spoof/i);
   });
 
-  it("happy path: supported claims + tools → verified", async () => {
+  it("cited claims remain a discussion draft without independent factual review", async () => {
     const pack = packWithSupport();
     const report = await verifyTeachingContent({
       activityId: ACT,
@@ -311,7 +312,7 @@ describe("teaching-verifiers", () => {
           id: BLOCK,
           type: "text",
           role: "teach",
-          content: { text: "nullspace basis vectors for matrix A" },
+          content: { text: "nullspace basis vectors for matrix A", citedChunkIds: [CHUNK] },
         },
       ],
       pack,
@@ -327,12 +328,89 @@ describe("teaching-verifiers", () => {
         checkFormula: async () => ({ ok: true }),
       },
     });
-    // no latex → tool skipped; still fact pass
+    // Even an exact source match only establishes a link to material.
     expect(report.structurePassed).toBe(true);
-    expect(report.factPassed).toBe(true);
-    expect(report.nextVerificationStatus).toBe("verified");
-    expect(mayPublishVerified(report)).toBe(true);
-    expect(report.presentation.kind).toBe("authoritative");
+    expect(report.factPassed).toBe(false);
+    expect(report.nextVerificationStatus).toBe("needs_check");
+    expect(mayPublishVerified(report)).toBe(false);
+    expect(report.presentation.kind).toBe("discussion_draft");
+    expect(report.presentation.allowsFormalScoring).toBe(false);
+  });
+
+  it("a shared Chinese bigram cannot turn an unrelated false claim into verified teaching", async () => {
+    const pack = packWithSupport("矩阵乘法要求列数与行数相同，我们可以按行乘列计算。");
+    const report = await verifyTeachingContent({
+      activityId: ACT,
+      publishInput: basePublish(),
+      blocks: [{
+        id: BLOCK, type: "text", role: "teach",
+        content: {
+          text: "分部积分公式是∫u dv = uv + ∫v du，因此可以直接相加。",
+          citedChunkIds: [CHUNK],
+        },
+      }],
+      pack,
+      keyClaims: [],
+    });
+    expect(report.factPassed).toBe(false);
+    expect(report.nextVerificationStatus).toBe("needs_check");
+    expect(report.presentation.allowsFormalScoring).toBe(false);
+  });
+
+  it("post-publish validation keeps an exact material match pending independent review", async () => {
+    const verify = createTeachingValidationAfterPublish({
+      loadChunks: async () => [chunk(CHUNK, "nullspace basis vectors for matrix A")],
+      loadBlocks: async () => [{
+        id: BLOCK, type: "text", role: "teach",
+        content: { text: "nullspace basis vectors for matrix A", citedChunkIds: [CHUNK] },
+      }],
+    });
+    const result = await verify({ workspaceId: "workspace", ownerUserId: "owner" }, {
+      activityId: ACT,
+      publishInput: basePublish(),
+      providerOutput: null,
+    });
+    expect(result?.nextVerificationStatus).toBe("needs_check");
+    expect(result?.nextGenerateStatus).toBeUndefined();
+    expect(result?.report.presentation.allowsFormalScoring).toBe(false);
+  });
+
+  it("caller-supplied claims cannot hide an unsupported server-side answer key", async () => {
+    const report = await verifyTeachingContent({
+      activityId: ACT,
+      publishInput: basePublish(),
+      blocks: [{
+        id: BLOCK, type: "answer_key", role: "answer_key",
+        content: { answer: "an unsupported answer", hidden: true },
+      }],
+      pack: packWithSupport(),
+      keyClaims: [{
+        claimId: "given", text: "nullspace basis vectors for matrix A",
+        citedChunkIds: [CHUNK], isCoreConclusion: true,
+      }],
+    });
+    expect(report.layers.find((layer) => layer.layer === "claim_support")).toMatchObject({
+      outcome: "fail",
+      details: { coreFails: [expect.objectContaining({ claimId: `auto:${BLOCK}` })] },
+    });
+    expect(report.presentation.allowsFormalScoring).toBe(false);
+  });
+
+  it("a formula without a configured checker is unknown, not silently skipped", async () => {
+    const report = await verifyTeachingContent({
+      activityId: ACT,
+      publishInput: basePublish(),
+      blocks: [{
+        id: BLOCK, type: "formula", role: "teach",
+        content: { latex: "A x = 0", citedChunkIds: [CHUNK] },
+      }],
+      pack: packWithSupport(),
+      keyClaims: [],
+    });
+    expect(report.layers.find((layer) => layer.layer === "claim_support")?.outcome).toBe("unknown");
+    expect(report.layers.find((layer) => layer.layer === "tool_result")?.outcome).toBe("unknown");
+    expect(report.nextVerificationStatus).toBe("needs_check");
+    expect(report.presentation.allowsFormalScoring).toBe(false);
   });
 
   it("C8: verifyTutorTurnOutput denies incomplete stream actions", () => {

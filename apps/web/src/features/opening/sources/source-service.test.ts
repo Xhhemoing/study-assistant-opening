@@ -68,6 +68,9 @@ function makeFakeSql() {
       const row = sources.get(id);
       return row && row.workspace_id === workspaceId ? [row] : [];
     }
+    if (query.startsWith("WITH quota_objects AS")) {
+      return [{ bytes: [...sources.values()].reduce((sum, row) => sum + Number(row.bytes), 0), objects: sources.size }];
+    }
     if (query.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
     if (query.startsWith("SELECT id, privacy_epoch FROM workspaces")) return [{ id: values[0], privacy_epoch: 7 }];
     if (query.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
@@ -169,6 +172,18 @@ function makeFakeStorage() {
       objects.set(to, object);
     },
     putObject,
+    putObjectStream: async (key, body) => {
+      const reader = body.getReader();
+      const chunks: Uint8Array[] = [];
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        await putObject(key, Buffer.concat(chunks));
+      } finally { reader.releaseLock(); }
+    },
     deleteObject: async (key) => {
       objects.delete(key);
     },
@@ -534,6 +549,72 @@ describe("opening signed upload service", () => {
     expect(has(`staging/${ticket.source.id}`)).toBe(true);
   });
 
+  it("streams a verified upload and preserves the existing completion checks", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(pdfBytes.subarray(0, 4)); controller.enqueue(pdfBytes.subarray(4)); controller.close(); } });
+    await svc.putStagingStream(principal, ticket.source.id, { contentType: "application/pdf; charset=binary", body });
+    expect(has(`staging/${ticket.source.id}`)).toBe(true);
+    expect((await svc.completeUpload(principal, ticket.source.id)).uploadState).toBe("uploaded");
+  });
+
+  it("rejects stream hash mismatch before storing an object", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: "a".repeat(64) });
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(pdfBytes); controller.close(); } });
+    await expect(svc.putStagingStream(principal, ticket.source.id, { contentType: "application/pdf", body })).rejects.toThrow(/sha256/);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
+  it("keeps another workspace's streaming target invisible", async () => {
+    const { svc } = setup();
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    await expect(svc.putStagingStream(otherPrincipal, ticket.source.id, { contentType: "application/pdf", body })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancels the body when the pending upload lease has expired", async () => {
+    const sql = makeFakeSql();
+    const { storage, has } = makeFakeStorage();
+    let currentTime = new Date();
+    const svc = createOpeningSourceService(sql, storage, { now: () => currentTime });
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    currentTime = new Date(currentTime.getTime() + 16 * 60_000);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    await expect(svc.putStagingStream(principal, ticket.source.id, { contentType: "application/pdf", body })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(cancelled).toBe(true);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
+  it("aborts a cancelled request without storing an object", async () => {
+    const { svc, has } = setup();
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    const abort = new AbortController();
+    abort.abort();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    await expect(svc.putStagingStream(principal, ticket.source.id, { contentType: "application/pdf", body, signal: abort.signal })).rejects.toThrow(/取消/);
+    expect(cancelled).toBe(true);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
+  it("cancels an in-progress body when its signed lease runs out", async () => {
+    const sql = makeFakeSql();
+    const { storage, has } = makeFakeStorage();
+    const currentTime = new Date("2030-01-01T00:00:00Z");
+    const svc = createOpeningSourceService(sql, storage, { now: () => currentTime });
+    const ticket = await svc.beginUpload(principal, { name: "a.pdf", mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    sql.sources.get(ticket.source.id)!.upload_url_expires_at = new Date(currentTime.getTime() + 20);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    await expect(svc.putStagingStream(principal, ticket.source.id, { contentType: "application/pdf", body })).rejects.toThrow(/过期/);
+    expect(cancelled).toBe(true);
+    expect(has(`staging/${ticket.source.id}`)).toBe(false);
+  });
+
   it("putStaging accepts Content-Type with parameters when the base mime matches", async () => {
     const { svc, has } = setup();
     const ticket = await svc.beginUpload(principal, {
@@ -666,6 +747,19 @@ describe("opening signed upload service", () => {
     });
     expect(download.contentDisposition).toContain("inline");
     expect(download.contentDisposition).toContain("a.pdf");
+  });
+
+  it.each(["高数讲义.pdf", "O'Brien (1).pdf", "\ud800.pdf"])("downloads %s with a valid ASCII header and encoded Unicode filename", async (name) => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, { name, mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const download = await svc.getDownloadStream(principal, ticket.source.id);
+    const headers = new Headers({ "Content-Disposition": download.contentDisposition });
+    expect(headers.get("Content-Disposition")).toMatch(/^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''/);
+    const encoded = download.contentDisposition.split("filename*=UTF-8''")[1]!;
+    expect(decodeURIComponent(encoded)).toBe(new TextDecoder().decode(new TextEncoder().encode(name)));
+    expect(encoded).not.toMatch(/[!'()*]/);
   });
 
   it("reissueUploadTicket refreshes the same-origin staging lease for pending only", async () => {

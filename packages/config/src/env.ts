@@ -12,7 +12,24 @@ export class EnvValidationError extends Error {
   }
 }
 
+const quotaInteger = (fallback: string) => z.string().trim().regex(/^\d+$/, "must be a positive safe integer")
+  .default(fallback).transform(Number).refine(value => Number.isSafeInteger(value) && value > 0, "must be a positive safe integer");
+const openingUploadQuotaFields = {
+  OPENING_UPLOAD_MAX_WORKSPACE_BYTES: quotaInteger("2147483648"),
+  OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS: quotaInteger("200"),
+};
+const openingUploadQuotaSchema = z.object(openingUploadQuotaFields);
+export type OpeningUploadQuota = { maxBytes: number; maxObjects: number };
+
+/** Server-side admission limits; independent of infrastructure credentials. */
+export function loadOpeningUploadQuota(source: NodeJS.ProcessEnv = process.env): OpeningUploadQuota {
+  const parsed = openingUploadQuotaSchema.safeParse(source);
+  if (!parsed.success) throw new EnvValidationError(parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`));
+  return { maxBytes: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_BYTES, maxObjects: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS };
+}
+
 const envSchema = z.object({
+  ...openingUploadQuotaFields,
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   REDIS_URL: z.string().min(1, "REDIS_URL is required"),
@@ -27,6 +44,7 @@ const envSchema = z.object({
   SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   SESSION_TTL_SECONDS: z.string().optional().default("604800").transform((v) => Number.parseInt(v, 10)).refine((n) => Number.isFinite(n) && n >= 60, { message: "SESSION_TTL_SECONDS must be an integer >= 60" }),
   AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
+  AUTH_TRUSTED_IP_HEADER: z.string().trim().regex(/^$|^[A-Za-z0-9][A-Za-z0-9-]*$/, "AUTH_TRUSTED_IP_HEADER must be a single HTTP header name").optional().transform((value) => value || undefined),
 
 });
 
@@ -39,6 +57,7 @@ export type AppEnv = {
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
+  authTrustedIpHeader?: string;
   openingModel: ReturnType<typeof loadOpeningModel>;
   s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean };
   toPublicSummary: () => { nodeEnv: "development" | "test" | "production"; publicBaseUrl: string; databaseConfigured: boolean; redisConfigured: boolean; storageConfigured: boolean; authConfigured: boolean };
@@ -62,6 +81,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sessionCookieSecure: data.SESSION_COOKIE_SECURE === undefined ? data.NODE_ENV === "production" : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
+    authTrustedIpHeader: data.AUTH_TRUSTED_IP_HEADER,
     openingModel: catalog ? {
       baseUrl: defaultModel?.baseUrl ?? "https://api.openai.com/v1", apiKey: defaultModel?.apiKey ?? "",
       name: defaultModel?.modelName ?? "unconfigured", dailyCapCents: catalog.dailyCapCents,

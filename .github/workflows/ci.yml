@@ -76,6 +76,7 @@ jobs:
           --health-retries 15
 
     env:
+      HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_TEST_DB: "1"
       OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test
@@ -117,35 +118,41 @@ jobs:
           cache-dependency-path: services/parser/requirements-lock.txt
 
       - name: Install parser dependencies
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
+          set -euo pipefail
           python -m venv .local/docling-venv
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $env:PARSER_PYTHON -m pip install -r services/parser/requirements-lock.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $env:PARSER_PYTHON -m pip check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$PARSER_PYTHON" -m pip install -r services/parser/requirements-lock.txt
+          "$PARSER_PYTHON" -m pip check
+
+      - name: Cache parser models
+        uses: actions/cache@v4
+        with:
+          path: .local/hf-home
+          key: ${{ runner.os }}-parser-models-${{ hashFiles('services/parser/model-manifest.json', 'services/parser/requirements-lock.txt') }}
 
       - name: Prepare parser model cache
-        shell: pwsh
+        shell: bash
         working-directory: services/parser
         run: |
-          $ErrorActionPreference = 'Stop'
-          & $env:PARSER_PYTHON -m opening_parser.prepare_models
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $env:PARSER_PYTHON -m opening_parser --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          "$PARSER_PYTHON" -m opening_parser.prepare_models
+          "$PARSER_PYTHON" -m opening_parser --check
 
       - name: Python parser tests
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          & $env:PARSER_PYTHON -m pytest services/parser/tests -q
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          "$PARSER_PYTHON" -m pytest services/parser/tests -q
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
@@ -159,22 +166,34 @@ jobs:
       - name: Plan and tooling checks
         run: |
           node scripts/validate-opening-plan.mjs
-          node --test tests/tooling/*.test.mjs
+          node --test tests/tooling/*.test.mjs scripts/opening-local-check.test.mjs
 
-      - name: Unit and contract tests
-        run: npm test -- --project unit --project contract
+      - name: Unit, contract and pipeline tests
+        run: npm test -- --project unit --project contract --project notion-pipeline
 
       - name: Technology spike tests
         run: npm test -- --project '@aistudy/spike-*'
 
       - name: Integration tests
-        run: npm run test:integration
+        run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
 
       - name: Route handler tests
-        run: npm run test:handler
+        run: npm run test:handler -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/handler.json
 
       - name: Browser tests
         run: npm run test:browser
 
       - name: Build
         run: npm run build
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-reports/
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7

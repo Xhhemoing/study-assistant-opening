@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SourceChunk, TeachingLearnerFocus } from "@aistudy/contracts";
 import { ALLOWED_TEACHING_BLOCK_TYPES, type TeachingOutline } from "@aistudy/domain";
 import { assembleTeachingEvidencePack } from "./teaching-evidence";
+import { verifyTeachingContent } from "./teaching-verifiers";
 import {
   buildCompileProviderInput,
   compileCurrentActivity,
@@ -419,6 +420,56 @@ describe("teaching-compiler", () => {
     expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
     await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))
       .rejects.toBeInstanceOf(TeachingCompileOutputError);
+  });
+
+  it("mixed mathematical teaching keeps provenance and cannot become a formal scoring source automatically", async () => {
+    const pack = assembleTeachingEvidencePack({
+      chunks: [chunk("c1", "The nullspace is the solution set of A x = 0.")],
+      query: "nullspace",
+      maxCharacters: 4000,
+    });
+    const outline = mapFixtureOutline(0);
+    const compiled = compileCurrentActivity({
+      outline,
+      focusItemId: outline.focusItemId,
+      pack,
+      teachingUnitId: UNIT,
+      expectedContentVersion: 0,
+      revisionNumber: 1,
+      newBlockId: stableBlockId,
+      modelOutput: parseCompileModelOutput(JSON.stringify({ blocks: [
+        { type: "text", text: "The nullspace is the solution set of A x = 0.", citedChunkIds: ["c1"] },
+        { type: "formula", text: "A x = 0", citedChunkIds: ["c1"] },
+        { type: "example", text: "For the identity matrix, x = 0.", citedChunkIds: ["c1"] },
+        { type: "answer_key", text: "A x = 0", citedChunkIds: ["c1"] },
+      ] }), new Set(["c1"])),
+    });
+    expect(compiled.libraryBlocks.find((block) => block.type === "formula")?.content)
+      .toEqual({ latex: "A x = 0", citedChunkIds: ["c1"] });
+    expect(compiled.libraryBlocks.find((block) => block.type === "answer_key")?.content)
+      .toEqual({ answer: "A x = 0", hidden: true, citedChunkIds: ["c1"] });
+
+    const input = {
+      activityId: ACTIVITY,
+      publishInput: compiled.publishInput,
+      blocks: compiled.libraryBlocks,
+      pack,
+      keyClaims: [],
+    };
+    const noTool = await verifyTeachingContent(input);
+    expect(noTool.layers.find((layer) => layer.layer === "tool_result")?.outcome).toBe("unknown");
+    expect(noTool.layers.find((layer) => layer.layer === "claim_support")?.outcome).toBe("unknown");
+    expect(noTool.nextVerificationStatus).toBe("needs_check");
+
+    const checked: string[] = [];
+    const withTool = await verifyTeachingContent({
+      ...input,
+      tools: { checkFormula: async (latex) => { checked.push(latex); return { ok: true }; } },
+    });
+    expect(checked).toEqual(["A x = 0"]);
+    expect(withTool.layers.find((layer) => layer.layer === "tool_result")?.outcome).toBe("pass");
+    expect(withTool.nextVerificationStatus).toBe("needs_check");
+    expect(withTool.presentation.allowsFormalScoring).toBe(false);
   });
 
   it("C10 helper: createCompilerBuildPublishInput yields non-empty blockOrder without stub", async () => {

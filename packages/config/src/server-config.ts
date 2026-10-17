@@ -142,7 +142,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
-  const openingRelease = read("OPENING_RELEASE", false);
+  const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");

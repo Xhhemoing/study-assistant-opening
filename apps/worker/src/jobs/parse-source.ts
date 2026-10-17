@@ -1,3 +1,4 @@
+import { openingJobScope } from "@aistudy/database";
 import { createWriteStream } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -24,7 +25,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
   return async (job: OpeningJobRecord, payload: unknown) => {
     const sourceId = (payload as { sourceId?: unknown }).sourceId;
     if (typeof sourceId !== "string") throw new Error("parse payload missing sourceId");
-    const scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const scope = openingJobScope(job);
     const source = await deps.sources.get(scope, sourceId);
     if (source.uploadState !== "uploaded") throw new Error("source is not uploaded");
     if (source.mime === "text/markdown" || source.mime === "text/plain" || source.mime === "text/html") {

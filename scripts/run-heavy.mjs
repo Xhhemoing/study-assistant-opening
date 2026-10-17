@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Cross-platform entry for heavy validation tasks.
-// POSIX: delegate to run-heavy.sh (flock + nice/ionice/taskset) unchanged.
+// POSIX: delegate to run-heavy.sh (flock + nice/ionice/taskset).
 // Windows (or HERMES_HEAVY_LOCK_IMPL=node): take the same machine-wide slot with the
 // portable directory lock in heavy-lock.mjs, then run the command.
+// HERMES_HEAVY_ENABLED=0 skips local host controls, for isolated CI runners.
 // In both cases the wrapper forwards SIGINT/SIGTERM/SIGHUP to the whole child tree
 // and releases the slot when the child exits.
 import { spawn, spawnSync } from "node:child_process";
@@ -33,9 +34,13 @@ async function run() {
     console.error("usage: node scripts/run-heavy.mjs <command> [args...]");
     process.exit(64);
   }
-  const useNodeLock = process.platform === "win32" || process.env.HERMES_HEAVY_LOCK_IMPL === "node";
+  const enabled = process.env.HERMES_HEAVY_ENABLED !== "0";
+  const useNodeLock = enabled && (process.platform === "win32" || process.env.HERMES_HEAVY_LOCK_IMPL === "node");
   let release = () => {};
   const env = { ...process.env };
+  // Nested orchestrators (notably typecheck.mjs) must not re-enter this wrapper
+  // even when there is intentionally no lock to acquire in CI.
+  if (!enabled) env.HERMES_HEAVY_LOCK_HELD = "1";
   if (useNodeLock && process.env.HERMES_HEAVY_LOCK_HELD !== "1") {
     try {
       release = await acquireHeavyLock({
@@ -53,7 +58,7 @@ async function run() {
   }
   const detached = process.platform !== "win32";
   let child;
-  if (!useNodeLock) {
+  if (enabled && !useNodeLock) {
     child = spawn("bash", [fileURLToPath(new URL("./run-heavy.sh", import.meta.url)), ...args], { stdio: "inherit", env, detached });
   } else if (process.platform === "win32" && args[0] !== process.execPath) {
     child = spawn(windowsCommand(args), { stdio: "inherit", shell: true, env });

@@ -158,6 +158,58 @@ describe("native backup round-trip", () => {
     expect(leftover).toHaveLength(0);
   });
 
+  it.each(["blocks", "revisions", "memberships", "relations"] as const)("rejects forged %s pointing at another workspace without mutating the victim", async (collection) => {
+    const victim = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Victim", passwordHash: "unused" });
+    const attacker = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Attacker", passwordHash: "unused" });
+    const seeded = await seedWorkspace(victim.workspace.id, victim.user.id);
+    const victimPackage = await backups.exportWorkspace({ workspaceId: victim.workspace.id, ownerUserId: victim.user.id });
+    const packed = await backups.exportWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id });
+    packed.records[collection] = [{ ...victimPackage.records[collection][0]!, id: randomUUID() }];
+    await expect(backups.restoreWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id,
+      packed, conflictPolicy: "skip" })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect((await library.getDocument({ workspaceId: victim.workspace.id, documentId: seeded.documentId })).title).toBe("导数笔记");
+    const [count] = await sql`SELECT count(*)::integer AS count FROM library_revisions WHERE document_id=${seeded.documentId}`;
+    expect(count!.count).toBe(victimPackage.counts.revisions);
+    const [attackerCount] = await sql`SELECT count(*)::integer AS count FROM library_blocks WHERE workspace_id=${attacker.workspace.id}`;
+    expect(attackerCount!.count).toBe(0);
+  });
+
+  it.each(["skip", "reject"] as const)("does not disclose foreign id conflicts through %s results", async conflictPolicy => {
+    const victim = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Victim", passwordHash: "unused" });
+    const attacker = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Attacker", passwordHash: "unused" });
+    const document = await library.createDocument({ workspaceId: victim.workspace.id, title: "private", lifecycle: "scratch",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "private victim content" } }] });
+    const packed = await backups.exportWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id });
+    packed.records.documents = [{ id: document.id, title: "forged", lifecycle: "scratch", schemaVersion: 1, currentRevisionNumber: 1, openingProvenance: null }];
+    await expect(backups.restoreWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id, packed, conflictPolicy }))
+      .rejects.toMatchObject({ code: "VALIDATION", message: "Backup records conflict with the target workspace or contain invalid references" });
+    expect(await library.getDocument({ workspaceId: victim.workspace.id, documentId: document.id })).toEqual(document);
+    const [attackerCount] = await sql`SELECT count(*)::integer AS count FROM library_documents WHERE workspace_id=${attacker.workspace.id}`;
+    expect(attackerCount!.count).toBe(0);
+  });
+
+  it("preserves legitimate broken links and historical learning identities", async () => {
+    const owner = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "History", passwordHash: "unused" });
+    const seeded = await seedWorkspace(owner.workspace.id, owner.user.id);
+    // Removing a block is a supported edit; its existing relation remains broken.
+    await sql`DELETE FROM library_blocks WHERE id=${seeded.blockId}`;
+    const historicalContentId = randomUUID();
+    const historicalPointId = randomUUID();
+    await events.append({ workspaceId: owner.workspace.id, ownerUserId: owner.user.id,
+      type: "attempt", idempotencyKey: `history-${randomUUID()}`, occurredAt: "2026-08-15T03:00:00.000Z",
+      contentId: historicalContentId, contentVersion: 1, syllabusPointId: historicalPointId,
+      payload: { answer: "1", correct: true, assisted: false, durationMs: 1000,
+        hintCount: 0, confidence: 3, errorCause: null, abilitySlice: "recognition" } });
+    const packed = await backups.exportWorkspace({ workspaceId: owner.workspace.id, ownerUserId: owner.user.id });
+    await wipeLearningData();
+    const restored = await backups.restoreWorkspace({ workspaceId: owner.workspace.id, ownerUserId: owner.user.id, packed, conflictPolicy: "reject" });
+    expect(restored.applied.relations).toBe(1);
+    const [event] = await sql`SELECT content_id,syllabus_point_id FROM learning_events
+      WHERE workspace_id=${owner.workspace.id} AND type='attempt'`;
+    expect(event).toMatchObject({ content_id: historicalContentId, syllabus_point_id: historicalPointId });
+    expect(await sql`SELECT id FROM library_blocks WHERE id=${seeded.blockId}`).toHaveLength(0);
+  });
+
   async function wipeLearningData() {
     await sql`TRUNCATE
       learning_events, card_review_states, cards,

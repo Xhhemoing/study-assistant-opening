@@ -67,7 +67,7 @@ export function planNativeRestore(input: {
       if (input.conflictPolicy === "reject") {
         throw new NativeBackupError(
           "ID_CONFLICT",
-          `Existing ${collection} id ${record.id} would be overwritten`,
+          `Existing ${collection} records would be overwritten`,
         );
       }
       skipped[countKey(collection)] += 1;

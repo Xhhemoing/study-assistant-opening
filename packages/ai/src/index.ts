@@ -5,6 +5,7 @@ export {
   OpeningProviderError,
   type OpeningProviderOptions,
 } from "./opening/provider";
+export { assertOpeningProviderEndpoint, OpeningProviderEndpointError } from "./opening/provider-network";
 export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
 export {
   actualCentsForOutput,

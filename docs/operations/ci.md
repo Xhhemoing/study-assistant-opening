@@ -31,13 +31,23 @@ Triggers:
 | Install | `npm ci` | Uses lockfile; cache via setup-node |
 | Lint | `npm run lint` | ESLint flat config |
 | Typecheck | `npm run typecheck` | packages + web + worker |
-| Plan/tooling | `node scripts/validate-opening-plan.mjs` and `node --test tests/tooling/*.test.mjs` | Includes migration reservation conflicts |
-| Unit/contract | `npm test -- --project unit --project contract` | Only these named projects |
+| Plan/tooling | `node scripts/validate-opening-plan.mjs` and `node --test tests/tooling/*.test.mjs scripts/opening-local-check.test.mjs` | Includes migration reservation conflicts and local readiness behavior |
+| Unit/contract/pipeline | `npm test -- --project unit --project contract --project notion-pipeline` | Includes `.test.tsx` unit tests and pipeline tests |
 | Technology spikes | `npm test -- --project '@aistudy/spike-*'` | Spike projects run separately; integration/handler suites are not repeated |
 | Integration | `npm run test:integration` | DB/Redis/storage probes |
 | Route handlers | `npm run test:handler` | HTTP handler behavior against isolated services |
 | Browser E2E | `npm run test:browser` | Real production web server and Playwright Chromium |
 | Build | `npm run build` | worker typecheck + Next production build |
+
+The isolated CI job sets `HERMES_HEAVY_ENABLED=0` to bypass local host locks and
+CPU/IO scheduling controls. Vitest uses at most four workers in CI; integration
+and handler files remain serial because they share database fixtures. Local
+checks retain one Vitest worker and the shared-host protections by default.
+
+Playwright browsers and parser model files are cached using the lockfile and
+model manifest as cache keys. Install and model preparation/check commands still
+run on cache hits. A failed job uploads any available `test-results` and
+`playwright-report` files for seven days.
 
 ## Service containers
 
@@ -126,11 +136,12 @@ Playwright Chromium plus an isolated E2E database whose name ends in `_e2e`.
 The existing CI browser step remains required. Neither a scoped check nor a
 full local run replaces the remote CI result for the current commit.
 
-`run-heavy.sh` uses `flock`, `nice`, `ionice`, and `taskset` only when each tool
+By default, `run-heavy.sh` uses `flock`, `nice`, `ionice`, and `taskset` only when each tool
 is available. On Windows Git Bash or minimal containers, unavailable host
 scheduling controls produce one warning and the requested command still runs;
 its exit code is preserved. This fallback removes a portability blocker but
-does not provide cross-process serialization.
+does not provide cross-process serialization. Set `HERMES_HEAVY_ENABLED=0` only
+when the caller has an isolated environment and does not need those host controls.
 
 ### Authoritative merge gate
 

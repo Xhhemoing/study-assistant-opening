@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OpeningPlanError } from "@aistudy/database";
 import {
   RETEST_SUBMIT_TOO_EARLY_CODE,
   RETEST_SUBMIT_TOO_EARLY_MESSAGE,
   RetestSubmitTooEarlyError,
 } from "@aistudy/domain";
-import { jsonError, mapDomainError, sessionCookieHeader, type AuthRuntime } from "./service";
+import { ApiError, jsonError, mapDomainError, sessionCookieHeader, type AuthRuntime } from "./service";
 
 function runtime(sessionCookieSecure: boolean): AuthRuntime {
   return {
@@ -69,5 +69,23 @@ describe("mapDomainError OpeningPlanError", () => {
     await expect(response.json()).resolves.toEqual({ error: { code: "CONFLICT", message: "draft is not open" } });
     expect(mapDomainError(new OpeningPlanError("NOT_FOUND", "draft not found")).status).toBe(404);
     expect(mapDomainError(new OpeningPlanError("VALIDATION", "bad date")).status).toBe(400);
+  });
+});
+
+describe("unexpected HTTP errors", () => {
+  it("does not expose internal messages or credentials", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = jsonError(mapDomainError(Object.assign(new Error("postgres://owner:secret@internal/users"), { code: "secret-code" })));
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "INTERNAL_ERROR", message: "服务暂时无法处理请求，请稍后重试。" } });
+      expect(log).toHaveBeenCalledWith("HTTP_UNHANDLED_ERROR", { type: "Error", code: "UNKNOWN" });
+    } finally { log.mockRestore(); }
+  });
+
+  it("returns the limiter cooldown through Retry-After", () => {
+    const response = jsonError(new ApiError("RATE_LIMITED", "稍后重试", 429, 42));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("42");
   });
 });

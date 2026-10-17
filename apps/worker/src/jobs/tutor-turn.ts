@@ -38,6 +38,7 @@ import {
   type ResolvedTaskModel,
 } from "@aistudy/ai";
 import { chunksAtSnapshots } from "./tutor-chunks";
+import { withJobHeartbeat } from "../runtime/lifecycle";
 import {
   isBudgetReplayError,
   runBudgetedCall,
@@ -109,6 +110,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
   return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean; replayed?: boolean }> {
     const claimed = await deps.tutorJobs.claim(tutorJobId);
     if (!claimed) return { skipped: true };
+    return withJobHeartbeat(
+      () => claimed.claimToken ? deps.tutorJobs.heartbeat(claimed.id, claimed.claimToken) : Promise.resolve(),
+      async () => {
     const scope = {
       workspaceId: claimed.workspaceId,
       ownerUserId: claimed.ownerUserId ?? "",
@@ -250,7 +254,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           const persisted = ref ? await deps.tutorJobs.loadReplayedTurn(scope, ref) : null;
           if (
             persisted && persisted.id === claimed.assistantTurnId && persisted.status === "complete"
-            && await deps.tutorJobs.completeFromReplay(scope, claimed.id, persisted.id)
+            && await deps.tutorJobs.completeFromReplay(scope, claimed.id, persisted.id, claimed.claimToken)
           ) {
             return { skipped: false, replayed: true };
           }
@@ -258,6 +262,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             scope,
             claimed.id,
             "budget replay: provider call already settled but its result is not persisted; not re-sending",
+            claimed.claimToken,
           );
           return { skipped: false, replayed: true };
         }
@@ -315,6 +320,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         })),
         ...(helpExposure ? { helpExposure } : {}),
         expectedPrivacyEpoch: jobEpoch ?? undefined,
+        claimToken: claimed.claimToken,
       });
       return { skipped: false };
     } catch (error) {
@@ -325,18 +331,20 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         // Replay of an unknown / in-flight ledger key: never fake success or re-send.
         (isBudgetReplayError(error) && (error.code === "BUDGET_OUTCOME_UNKNOWN" || error.code === "BUDGET_EXECUTION_CLAIMED"));
       if (unknownOutcome) {
-        await deps.tutorJobs.markUnknown(scope, claimed.id, "provider outcome unknown; usage reconciliation pending");
+        await deps.tutorJobs.markUnknown(scope, claimed.id, "provider outcome unknown; usage reconciliation pending", claimed.claimToken);
       } else if (error instanceof PageCitationClarifyError) {
         // LAB-A01/U01: a page refusal fails the job with a Clarify route; the
         // repository ends the assistant turn as 'clarify'.
         await deps.tutorJobs.fail(scope, claimed.id, error.message, {
           code: error.code,
           nextAction: error.nextAction,
-        });
+        }, claimed.claimToken);
       } else {
-        await deps.tutorJobs.fail(scope, claimed.id, message);
+        await deps.tutorJobs.fail(scope, claimed.id, message, undefined, claimed.claimToken);
       }
       throw error;
     }
+      },
+    );
   };
 }

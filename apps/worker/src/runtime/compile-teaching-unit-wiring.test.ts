@@ -222,20 +222,21 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(sent.outputFormat).toBe("json");
     expect(sent.text).toContain("学习意图：秩与零空间");
     expect(sent.text).toContain(CHUNK);
-    // Formula provenance is preserved without pretending that it proves correctness.
+    // Preserve formula provenance without treating a citation as a correctness check.
     expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hidden: true });
+    expect(answerKey.content).not.toHaveProperty("citedChunkIds");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
   });
 
-  it("with validation on, blocks quoting cited evidence verify and the activity reaches ready", async () => {
+  it("validation publishes cited teaching as a draft without upgrading the unchecked answer key", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
-    // An uncited formula is an unchecked claim (no formula tool), so the verified path has none.
+    // Even with no formula to check, quoting material cannot verify a generated answer key.
     model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input, { formula: false }));
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
     const result = await run(job, payload);
@@ -243,9 +244,18 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     const teach = writtenBlocks.find((b) => b.type === "text")!;
     expect(teach.content.citedChunkIds).toEqual([CHUNK]);
     expect(content.readRevision).toHaveBeenCalledWith(scope, DOC, 2);
-    expect(result).toMatchObject({ generateStatus: "ready", verificationStatus: "verified" });
-    expect(statuses).toEqual(["generating", "needs_check", "ready"]);
-    expect(published.map((p) => p.verificationStatus)).toEqual(["needs_check", "verified"]);
+    expect(result).toMatchObject({
+      generateStatus: "needs_check", verificationStatus: "structure_ok",
+      validationReport: {
+        structurePassed: true, factPassed: false,
+        presentation: { kind: "discussion_draft", allowsFormalScoring: false },
+      },
+    });
+    expect(statuses).toEqual(["generating", "needs_check"]);
+    expect(published.map((p) => p.verificationStatus)).toEqual(["needs_check", "structure_ok"]);
+    // The published graph and learner prompt remain available for studying.
+    expect(published[1]?.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((block) => block.id));
+    expect(writtenBlocks.find((block) => block.type === "prompt")?.content.text).toContain("零空间维数是多少");
   });
 
   it("without materials the result stays needs_check — never ready without checked content", async () => {

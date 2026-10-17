@@ -67,9 +67,13 @@ undefined/
 # 部署凭据只存仓库外（%USERPROFILE%/.aistudy-deploy/）
 .aistudy-deploy/
 *.secret
+infra/docker/opening.env
 
 # Box-local Linux dependency binaries/data (agent desktop preview stack)
 .local-linux/
 
 # Disposable local Postgres data for PR-K (do not commit)
 .pg-prk/
+
+# CI diagnostic reports
+test-reports/

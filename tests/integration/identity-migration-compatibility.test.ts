@@ -1,13 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyMigrations,
   createSqlClient,
   getIdentityDatabaseFingerprint,
   prepareIdentityOwnerMappings,
+  type ApplyMigrationsOptions,
+  type MigrationResult,
 } from "@aistudy/database";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -18,10 +21,42 @@ const fixturePath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../fixtures/migrations/legacy-0001-0002.sql",
 );
+// This suite tests the 0002 → 0003 → 0004 identity boundary, independently of
+// later feature migrations. Copy the real historical SQL, never a stub.
+const identityMigrationIds = ["0001_library.sql", "0002_courses.sql", "0003_identity.sql", "0004_identity_repair.sql"];
+const migrationsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../packages/database/src/migrations");
 
 describe("identity migration compatibility", () => {
   const sql = createSqlClient(databaseUrl, { max: 1 });
   const schemas: string[] = [];
+  let migrationsDir: string;
+
+  beforeAll(async () => {
+    migrationsDir = await mkdtemp(path.join(tmpdir(), "aistudy-identity-migrations-"));
+    await Promise.all(identityMigrationIds.map(id => copyFile(path.join(migrationsRoot, id), path.join(migrationsDir, id))));
+  });
+
+  function applyIdentityMigrations(options: Omit<ApplyMigrationsOptions, "migrationsDir"> = {}) {
+    return applyMigrations(sql, { ...options, migrationsDir });
+  }
+
+  async function assertVerifiedIdentityMigrations(result: MigrationResult, alreadyApplied: string[]) {
+    const newlyApplied = identityMigrationIds.filter(id => !alreadyApplied.includes(id));
+    expect(result.applied).toEqual(newlyApplied);
+    expect(result.alreadyApplied).toEqual(alreadyApplied);
+    const registry = await sql<{ id: string; checksum: string | null; verification_state: string }[]>`
+      SELECT id, checksum, verification_state FROM schema_migrations ORDER BY id
+    `;
+    expect(registry.map(row => row.id)).toEqual(identityMigrationIds);
+    for (const id of newlyApplied) {
+      const body = await readFile(path.join(migrationsRoot, id), "utf8");
+      expect(registry.find(row => row.id === id)).toEqual({
+        id, checksum: createHash("sha256").update(body).digest("hex"), verification_state: "verified",
+      });
+    }
+    // A repeat must preserve the verified checksums and apply no migration.
+    expect(await applyIdentityMigrations()).toEqual({ applied: [], alreadyApplied: identityMigrationIds });
+  }
 
   async function createLegacySchema() {
     const schema = `identity_compat_${randomUUID().replaceAll("-", "")}`;
@@ -52,6 +87,7 @@ describe("identity migration compatibility", () => {
       await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
     await sql.end({ timeout: 5 });
+    if (migrationsDir) await rm(migrationsDir, { recursive: true, force: true });
   });
 
   it("blocks before legacy identity migration can delete orphan workspace assets", async () => {
@@ -110,7 +146,7 @@ describe("identity migration compatibility", () => {
       )
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "IDENTITY_ORPHAN_WORKSPACES",
       workspaces: [
         expect.objectContaining({
@@ -168,74 +204,9 @@ describe("identity migration compatibility", () => {
       INSERT INTO workspaces (id, owner_user_id) VALUES (${workspaceId}, ${ownerId})
     `;
 
-    const result = await applyMigrations(sql);
+    const result = await applyIdentityMigrations();
 
-    expect(result.applied).toEqual([
-      "0003_identity.sql",
-      "0004_identity_repair.sql",
-      "0005_workspace_preferences.sql",
-      "0006_wiki_link_relation_source.sql",
-      "0007_search_indexes.sql",
-      "0008_explorations.sql",
-      "0009_promotions.sql",
-      "0010_revision_proposals.sql",
-      "0011_goals.sql",
-      "0012_learning_events.sql",
-      "0013_cards.sql",
-      "0014_learning_event_delete_guard.sql",
-      "0015_practice_content.sql",
-      "0016_opening_sources.sql",
-      "0017_opening_conversations.sql",
-      "0018_opening_jobs_outbox_budget.sql",
-      "0019_opening_learning.sql",
-      "0020_opening_source_chunks.sql",
-      "0021_opening_assistant_candidates.sql",
-      "0022_opening_memory_privacy.sql",
-      "0023_opening_memory_privacy_epoch.sql",
-      "0024_opening_planning.sql",
-      "0025_opening_turn_intent_snapshot.sql",
-      "0026_opening_turn_outcome_unknown.sql",
-      "0027_opening_assistant_task_acceptance.sql",
-      "0028_opening_learning_attempts.sql",
-      "0029_opening_observation_revisions.sql",
-      "0030_opening_retest_activities.sql",
-      "0031_opening_learning_preferences.sql",
-      "0032_opening_learning_activation.sql",
-      "0033_opening_context_provenance.sql",
-      "0034_opening_source_actions.sql",
-      "0035_opening_note_provenance.sql",
-      "0036_opening_ai_settings.sql",
-      "0037_opening_learning_history_snapshot.sql",
-      "0038_opening_learning_eligibility.sql",
-      "0039_opening_memory_revisions.sql",
-      "0040_opening_timetable_weekday.sql",
-      "0041_opening_connections.sql",
-      "0042_opening_connection_lifecycle.sql",
-      "0043_opening_model_providers.sql",
-      "0044_opening_turn_strategy.sql",
-      "0045_opening_imports.sql",
-      "0046_opening_task_client_key.sql",
-      "0047_opening_planning_settings.sql",
-      "0048_opening_knowledge.sql",
-      "0049_opening_skill_evidence.sql",
-      "0050_opening_parse_media_job.sql",
-      "0051_opening_extract_study_actions_job.sql",
-      "0052_opening_action_digest_decisions.sql",
-      "0053_opening_teaching_activities.sql",
-      "0054_opening_teaching_content.sql",
-      "0055_opening_compile_teaching_unit_job.sql",
-      "0056_opening_intervention_settings.sql",
-      "0057_opening_help_exposure_kind.sql",
-      "0058_opening_turn_clarify.sql",
-      "0059_opening_budget_reconcile.sql",
-      "0060_opening_retest_accept_key.sql",
-      "0061_opening_adaptive_planning.sql",
-      "0062_opening_model_routing_and_card_evidence.sql",
-      "0063_opening_model_quick_setup.sql",
-      "0064_card_source_lineage.sql",
-      "0065_opening_task_requirement.sql",
-      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql", "0070_opening_exam_sprint.sql", "0071_opening_exam_integration.sql", "0072_opening_exam_forecast_reviews.sql",
-    ]);
+    await assertVerifiedIdentityMigrations(result, ["0001_library.sql", "0002_courses.sql"]);
     const workspaces = await sql<{ id: string; owner_user_id: string }[]>`
       SELECT id, owner_user_id FROM workspaces
     `;
@@ -253,7 +224,7 @@ describe("identity migration compatibility", () => {
       VALUES (${workspaceId}, ${legacyOwnerId})
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "IDENTITY_ORPHAN_WORKSPACES",
     });
     const fingerprint = await getIdentityDatabaseFingerprint(sql);
@@ -272,74 +243,9 @@ describe("identity migration compatibility", () => {
       )
     `;
 
-    const result = await applyMigrations(sql);
+    const result = await applyIdentityMigrations();
 
-    expect(result.applied).toEqual([
-      "0003_identity.sql",
-      "0004_identity_repair.sql",
-      "0005_workspace_preferences.sql",
-      "0006_wiki_link_relation_source.sql",
-      "0007_search_indexes.sql",
-      "0008_explorations.sql",
-      "0009_promotions.sql",
-      "0010_revision_proposals.sql",
-      "0011_goals.sql",
-      "0012_learning_events.sql",
-      "0013_cards.sql",
-      "0014_learning_event_delete_guard.sql",
-      "0015_practice_content.sql",
-      "0016_opening_sources.sql",
-      "0017_opening_conversations.sql",
-      "0018_opening_jobs_outbox_budget.sql",
-      "0019_opening_learning.sql",
-      "0020_opening_source_chunks.sql",
-      "0021_opening_assistant_candidates.sql",
-      "0022_opening_memory_privacy.sql",
-      "0023_opening_memory_privacy_epoch.sql",
-      "0024_opening_planning.sql",
-      "0025_opening_turn_intent_snapshot.sql",
-      "0026_opening_turn_outcome_unknown.sql",
-      "0027_opening_assistant_task_acceptance.sql",
-      "0028_opening_learning_attempts.sql",
-      "0029_opening_observation_revisions.sql",
-      "0030_opening_retest_activities.sql",
-      "0031_opening_learning_preferences.sql",
-      "0032_opening_learning_activation.sql",
-      "0033_opening_context_provenance.sql",
-      "0034_opening_source_actions.sql",
-      "0035_opening_note_provenance.sql",
-      "0036_opening_ai_settings.sql",
-      "0037_opening_learning_history_snapshot.sql",
-      "0038_opening_learning_eligibility.sql",
-      "0039_opening_memory_revisions.sql",
-      "0040_opening_timetable_weekday.sql",
-      "0041_opening_connections.sql",
-      "0042_opening_connection_lifecycle.sql",
-      "0043_opening_model_providers.sql",
-      "0044_opening_turn_strategy.sql",
-      "0045_opening_imports.sql",
-      "0046_opening_task_client_key.sql",
-      "0047_opening_planning_settings.sql",
-      "0048_opening_knowledge.sql",
-      "0049_opening_skill_evidence.sql",
-      "0050_opening_parse_media_job.sql",
-      "0051_opening_extract_study_actions_job.sql",
-      "0052_opening_action_digest_decisions.sql",
-      "0053_opening_teaching_activities.sql",
-      "0054_opening_teaching_content.sql",
-      "0055_opening_compile_teaching_unit_job.sql",
-      "0056_opening_intervention_settings.sql",
-      "0057_opening_help_exposure_kind.sql",
-      "0058_opening_turn_clarify.sql",
-      "0059_opening_budget_reconcile.sql",
-      "0060_opening_retest_accept_key.sql",
-      "0061_opening_adaptive_planning.sql",
-      "0062_opening_model_routing_and_card_evidence.sql",
-      "0063_opening_model_quick_setup.sql",
-      "0064_card_source_lineage.sql",
-      "0065_opening_task_requirement.sql",
-      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql", "0070_opening_exam_sprint.sql", "0071_opening_exam_integration.sql", "0072_opening_exam_forecast_reviews.sql",
-    ]);
+    await assertVerifiedIdentityMigrations(result, ["0001_library.sql", "0002_courses.sql"]);
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
     `;
@@ -360,7 +266,7 @@ describe("identity migration compatibility", () => {
       INSERT INTO workspaces (id, owner_user_id)
       VALUES (${workspaceId}, ${legacyOwnerId})
     `;
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "IDENTITY_ORPHAN_WORKSPACES",
     });
     await sql`
@@ -378,7 +284,7 @@ describe("identity migration compatibility", () => {
       )
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "IDENTITY_ORPHAN_WORKSPACES",
     });
     const [workspace] = await sql<{ owner_user_id: string }[]>`
@@ -416,7 +322,7 @@ describe("identity migration compatibility", () => {
       )
     `;
 
-    await applyMigrations(sql);
+    await applyIdentityMigrations();
 
     const [workspace] = await sql<{ owner_user_id: string }[]>`
       SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}
@@ -466,18 +372,18 @@ describe("identity migration compatibility", () => {
       VALUES (${documentId}, ${workspaceId}, 'Unmapped legacy note', 'confirmed')
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "MIGRATION_LEGACY_0003_ATTESTATION_REQUIRED",
     });
     const invalidAttestation = await legacy0003Attestation();
     invalidAttestation.databaseFingerprint = "sha256:wrong-database";
     await expect(
-      applyMigrations(sql, { legacy0003Attestation: invalidAttestation }),
+      applyIdentityMigrations({ legacy0003Attestation: invalidAttestation }),
     ).rejects.toMatchObject({
       code: "MIGRATION_LEGACY_0003_ATTESTATION_REQUIRED",
     });
     await expect(
-      applyMigrations(sql, { legacy0003Attestation: await legacy0003Attestation() }),
+      applyIdentityMigrations({ legacy0003Attestation: await legacy0003Attestation() }),
     ).rejects.toMatchObject({
       code: "IDENTITY_ORPHAN_WORKSPACES",
       workspaces: [
@@ -553,7 +459,7 @@ describe("identity migration compatibility", () => {
       INSERT INTO schema_migrations (id) VALUES ('0003_identity.sql')
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "MIGRATION_LEGACY_0003_ATTESTATION_REQUIRED",
     });
 
@@ -627,78 +533,14 @@ describe("identity migration compatibility", () => {
       INSERT INTO schema_migrations (id) VALUES ('0003_identity.sql')
     `;
 
-    await expect(applyMigrations(sql)).rejects.toMatchObject({
+    await expect(applyIdentityMigrations()).rejects.toMatchObject({
       code: "MIGRATION_LEGACY_0003_ATTESTATION_REQUIRED",
     });
-    const result = await applyMigrations(sql, {
+    const result = await applyIdentityMigrations({
       legacy0003Attestation: await legacy0003Attestation(),
     });
 
-    expect(result.applied).toEqual([
-      "0004_identity_repair.sql",
-      "0005_workspace_preferences.sql",
-      "0006_wiki_link_relation_source.sql",
-      "0007_search_indexes.sql",
-      "0008_explorations.sql",
-      "0009_promotions.sql",
-      "0010_revision_proposals.sql",
-      "0011_goals.sql",
-      "0012_learning_events.sql",
-      "0013_cards.sql",
-      "0014_learning_event_delete_guard.sql",
-      "0015_practice_content.sql",
-      "0016_opening_sources.sql",
-      "0017_opening_conversations.sql",
-      "0018_opening_jobs_outbox_budget.sql",
-      "0019_opening_learning.sql",
-      "0020_opening_source_chunks.sql",
-      "0021_opening_assistant_candidates.sql",
-      "0022_opening_memory_privacy.sql",
-      "0023_opening_memory_privacy_epoch.sql",
-      "0024_opening_planning.sql",
-      "0025_opening_turn_intent_snapshot.sql",
-      "0026_opening_turn_outcome_unknown.sql",
-      "0027_opening_assistant_task_acceptance.sql",
-      "0028_opening_learning_attempts.sql",
-      "0029_opening_observation_revisions.sql",
-      "0030_opening_retest_activities.sql",
-      "0031_opening_learning_preferences.sql",
-      "0032_opening_learning_activation.sql",
-      "0033_opening_context_provenance.sql",
-      "0034_opening_source_actions.sql",
-      "0035_opening_note_provenance.sql",
-      "0036_opening_ai_settings.sql",
-      "0037_opening_learning_history_snapshot.sql",
-      "0038_opening_learning_eligibility.sql",
-      "0039_opening_memory_revisions.sql",
-      "0040_opening_timetable_weekday.sql",
-      "0041_opening_connections.sql",
-      "0042_opening_connection_lifecycle.sql",
-      "0043_opening_model_providers.sql",
-      "0044_opening_turn_strategy.sql",
-      "0045_opening_imports.sql",
-      "0046_opening_task_client_key.sql",
-      "0047_opening_planning_settings.sql",
-      "0048_opening_knowledge.sql",
-      "0049_opening_skill_evidence.sql",
-      "0050_opening_parse_media_job.sql",
-      "0051_opening_extract_study_actions_job.sql",
-      "0052_opening_action_digest_decisions.sql",
-      "0053_opening_teaching_activities.sql",
-      "0054_opening_teaching_content.sql",
-      "0055_opening_compile_teaching_unit_job.sql",
-      "0056_opening_intervention_settings.sql",
-      "0057_opening_help_exposure_kind.sql",
-      "0058_opening_turn_clarify.sql",
-      "0059_opening_budget_reconcile.sql",
-      "0060_opening_retest_accept_key.sql",
-      "0061_opening_adaptive_planning.sql",
-      "0062_opening_model_routing_and_card_evidence.sql",
-      "0063_opening_model_quick_setup.sql",
-      "0064_card_source_lineage.sql",
-      "0065_opening_task_requirement.sql",
-      "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql", "0070_opening_exam_sprint.sql", "0071_opening_exam_integration.sql", "0072_opening_exam_forecast_reviews.sql",
-    ]);
+    await assertVerifiedIdentityMigrations(result, ["0001_library.sql", "0002_courses.sql", "0003_identity.sql"]);
     const [attestation] = await sql<{ operator: string }[]>`
       SELECT operator FROM migration_attestations
       WHERE migration_id = '0003_identity.sql'

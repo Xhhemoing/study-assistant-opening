@@ -188,6 +188,8 @@ describe("reminder database and Redis delivery", () => {
     const pending = (await events(f.reminder.id)).find(event => event.state === "pending")!;
     const availableAt = String(pending.payload.availableAt);
     expect(Date.parse(availableAt)).toBeGreaterThan(now.getTime());
+    await fixture.sql`UPDATE opening_outbox SET updated_at = now() - interval '2 minutes'
+      WHERE job_id = ${f.reminder.id} AND state = 'published'`;
     const laterDispatch = vi.spyOn(Date, "now").mockReturnValue(Date.parse(availableAt) - 1000);
     try { expect(await dispatch()).toBe(1); } finally { laterDispatch.mockRestore(); }
     const id = `${jobQueueId(fixture.scope.workspaceId, f.reminder.id)}-event-${pending.id}`;

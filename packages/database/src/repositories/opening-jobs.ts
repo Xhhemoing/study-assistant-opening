@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
 import { failOpeningJob, releaseOpeningParseClaim } from "./opening-job-failure";
 import type { OpeningScope } from "./opening-sources";
+import { dispatchOpeningOutbox } from "./opening-job-dispatch";
 
 export type OpeningJobErrorCode = "NOT_FOUND" | "CONFLICT";
 
@@ -25,6 +27,7 @@ export type OpeningJobRecord = {
   result: unknown;
   state: string;
   privacyEpoch: number;
+  claimToken?: string;
 };
 
 export type CreateOpeningJobInput = {
@@ -53,10 +56,12 @@ export type OpeningJobRepository = {
     limit?: number,
   ): Promise<number>;
   claim(id: string): Promise<OpeningJobRecord | null>;
+  heartbeat(id: string, claimToken: string): Promise<boolean>;
+  recoverExpired(limit?: number): Promise<number>;
   sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
   /** Workspace privacy epoch (M02); defaults to 0 if column absent / row missing. */
   workspacePrivacyEpoch(workspaceId: string): Promise<number>;
-  finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
+  finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown, claimToken?: string): Promise<boolean>;
   /**
    * Cancel a queued/running opening job (V2-07). For compile-teaching-unit,
    * also fences activity generate_status queued|generating → cancelled.
@@ -75,11 +80,12 @@ function mapJob(row: Record<string, unknown>): OpeningJobRecord {
     result: row.result ?? null,
     state: row.state as string,
     privacyEpoch: Number(row.privacy_epoch),
+    ...(typeof row.claim_token === "string" ? { claimToken: row.claim_token } : {}),
   };
 }
 
 function samePayload(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return isDeepStrictEqual(a, b);
 }
 
 export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
@@ -114,25 +120,7 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       return mapJob(rows[0] as Record<string, unknown>);
     },
     async dispatchPending(enqueue, limit = 50) {
-      return sql.begin(async (tx) => {
-        const rows = await tx`
-          SELECT id, workspace_id, job_id, payload FROM opening_outbox
-          WHERE state = 'pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT ${limit}
-        `;
-        let dispatched = 0;
-        for (const row of rows as Array<Record<string, unknown>>) {
-          const item = { id: row.id as string, workspaceId: row.workspace_id as string, jobId: row.job_id as string, payload: row.payload };
-          try {
-            await enqueue(item);
-            await tx`UPDATE opening_outbox SET state = 'published', updated_at = now() WHERE id = ${item.id}`;
-            dispatched += 1;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "enqueue failed";
-            await tx`UPDATE opening_outbox SET state = 'failed', payload = ${tx.json({ ...item.payload as Record<string, unknown>, error: message } as never)}, updated_at = now() WHERE id = ${item.id}`;
-          }
-        }
-        return dispatched;
-      });
+      return dispatchOpeningOutbox(sql, enqueue, limit);
     },
     async sourcePrivacyEpoch(sourceId, workspaceId) {
       const rows = await sql`
@@ -151,41 +139,62 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       return Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0);
     },
     async claim(id) {
-      // updated_at is the heartbeat. Long handlers must periodically touch it;
-      // only jobs stale for five minutes are eligible for takeover.
-      const rows = await sql`
-        UPDATE opening_jobs SET state = 'running', updated_at = now()
-        WHERE id = ${id}
-          AND (state = 'queued' OR (state = 'running' AND updated_at < now() - interval '5 minutes'))
-        RETURNING *
-      `;
-      if (!rows.length) return null;
-      const job = mapJob(rows[0] as Record<string, unknown>);
-      // Honest source status: parse / parse-media claim → source running (G7).
-      // Keep version fence; never overwrite ready/failed/unsupported.
-      if (job.kind === "parse" || job.kind === "parse-media") {
-        const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
-        const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
-        if (sourceId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
-          const rawVersion = payload && "sourceVersion" in payload ? payload.sourceVersion : null;
-          const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
-          await sql`
-            UPDATE opening_sources s SET parse_state = 'running', updated_at = now()
-            WHERE s.id = ${sourceId} AND s.workspace_id = ${job.workspaceId}
-              AND s.upload_state = 'uploaded'
-              AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
-              AND s.parse_state IN ('not_started', 'queued', 'running')`;
+      return sql.begin(async (tx) => {
+        await tx`SELECT w.id FROM workspaces w JOIN opening_jobs j ON j.workspace_id = w.id
+          WHERE j.id = ${id} FOR SHARE OF w`;
+        // Never take over an execution with an unknown external outcome. The
+        // recovery sweep ends stale running jobs instead of executing them twice.
+        const rows = await tx`
+          UPDATE opening_jobs SET state = 'running', claim_token = ${randomUUID()}, updated_at = now()
+          WHERE id = ${id} AND state = 'queued'
+          RETURNING *
+        `;
+        if (!rows.length) return null;
+        const job = mapJob(rows[0] as Record<string, unknown>);
+        // Honest source status: parse / parse-media claim → source running (G7).
+        // Keep version fence; never overwrite ready/failed/unsupported.
+        if (job.kind === "parse" || job.kind === "parse-media") {
+          const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
+          const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
+          if (sourceId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
+            const rawVersion = payload && "sourceVersion" in payload ? payload.sourceVersion : null;
+            const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
+            await tx`
+              UPDATE opening_sources s SET parse_state = 'running', updated_at = now()
+              WHERE s.id = ${sourceId} AND s.workspace_id = ${job.workspaceId}
+                AND s.upload_state = 'uploaded'
+                AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
+                AND s.parse_state IN ('not_started', 'queued', 'running')`;
+          }
         }
-      }
-      return job;
+        return job;
+      });
     },
-    async finish(id, state, value) {
-      if (state === "failed" || state === "outcome_unknown") return failOpeningJob(sql, id, value, state);
+    async heartbeat(id, claimToken) {
+      const rows = await sql`UPDATE opening_jobs SET updated_at = now()
+        WHERE id = ${id} AND state = 'running' AND claim_token = ${claimToken} RETURNING id`;
+      return rows.length > 0;
+    },
+    async recoverExpired(limit = 50) {
+      const rows = await sql`SELECT id, now() - interval '5 minutes' AS stale_before FROM opening_jobs
+        WHERE state = 'running' AND updated_at < now() - interval '5 minutes'
+        ORDER BY updated_at LIMIT ${limit}`;
+      let recovered = 0;
+      for (const row of rows) {
+        if (await failOpeningJob(sql, row.id, {
+          error: "worker execution interrupted; outcome requires reconciliation", retryable: false,
+        }, "outcome_unknown", { staleBefore: row.stale_before as Date })) recovered += 1;
+      }
+      return recovered;
+    },
+    async finish(id, state, value, claimToken) {
+      if (state === "failed" || state === "outcome_unknown") return failOpeningJob(sql, id, value, state, { claimToken: claimToken ?? null });
       const rows = await sql`
         UPDATE opening_jobs SET state = ${state},
           result = ${sql.json(value as never)},
           updated_at = now()
-        WHERE id = ${id} AND state = 'running' RETURNING id
+        WHERE id = ${id} AND state = 'running'
+          AND claim_token IS NOT DISTINCT FROM ${claimToken ?? null}::uuid RETURNING id
       `;
       return rows.length > 0;
     },

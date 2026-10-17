@@ -4,18 +4,24 @@ import { uuidSchema } from "./foundation";
 /** Stable model ids are UUIDs; they must also satisfy the shared model id regex. */
 const modelIdSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
 
-/** HTTPS for remote endpoints; plain HTTP only for loopback development endpoints. */
-export function isOpeningProviderBaseUrl(value: string): boolean {
+/** Normalize equivalent endpoint spellings before comparing credential destinations. */
+export function normalizeOpeningProviderBaseUrl(value: string): string {
+  return new URL(value.trim()).href.replace(/\/+$/, "");
+}
+
+/** URL syntax only. The provider transport also validates the actual connection IP. */
+export function isOpeningProviderBaseUrl(value: string, options: { allowLocal?: boolean } = {}): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.username || url.password || url.search || url.hash) return false;
   if (url.protocol === "https:") return url.hostname.length > 0;
   if (url.protocol !== "http:") return false;
-  return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname.toLowerCase());
+  return options.allowLocal === true && ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname.toLowerCase());
 }
 
-const providerBaseUrlSchema = z.string().trim().max(2048).refine(isOpeningProviderBaseUrl,
-  "baseUrl 必须是 https 地址（本机开发可用 http://localhost）且不含用户信息、查询或片段");
+const providerBaseUrlSchema = z.string().trim().max(2048).refine(value => isOpeningProviderBaseUrl(value, { allowLocal: true }),
+  "baseUrl 必须是 https 地址（本机开发可用 http://localhost）且不含用户信息、查询或片段")
+  .transform(normalizeOpeningProviderBaseUrl);
 
 export const openingProviderInputSchema = z.object({
   label: z.string().trim().min(1).max(120),

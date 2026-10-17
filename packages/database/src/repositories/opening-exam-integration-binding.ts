@@ -9,6 +9,7 @@ import type { TransactionSql } from "postgres";
 import { z } from "zod";
 import { learningError } from "./opening-learning-facts";
 import { readCurrentExamNodeIds } from "./opening-exam-skill-identity";
+import { reserveOpeningSourceQuota, type OpeningSourceQuota } from "./opening-source-quota";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -67,6 +68,7 @@ async function mapMaterials(tx: TransactionSql, scope: Scope, pack: ExamPack, in
 /** Whitelist public lesson fields. The question pool is never serialized into the course material. */
 async function createPublicPackSource(
   tx: TransactionSql, scope: Scope, pack: ExamPack, courseId: string, now: string, writePublicSource?: ExamPublicSourceWriter,
+  quota?: OpeningSourceQuota,
 ) {
   const sourceId = randomUUID();
   const sections = [
@@ -74,11 +76,15 @@ async function createPublicPackSource(
     ...pack.lessons.map(lesson => ({ lessonId: lesson.id, title: lesson.title,
       text: `${lesson.title}\n\n${lesson.summary}\n\n${lesson.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n例题讲解\n${lesson.workedExample}\n\n易错点\n${lesson.pitfalls.join("\n")}` })),
   ];
-  const body = sections.map(section => section.text).join("\n\n");
-  const bytes = Buffer.byteLength(body, "utf8"), digest = createHash("sha256").update(body).digest("hex");
+  const body = Buffer.from(sections.map(section => section.text).join("\n\n"), "utf8");
+  const bytes = body.byteLength, digest = createHash("sha256").update(body).digest("hex");
+  // The caller already holds the workspace lock before material/source locks.
+  // Keep the quota reservation and metadata INSERT in that same transaction,
+  // and reject before creating any object-storage side effects.
+  await reserveOpeningSourceQuota(tx, scope, bytes, quota);
   // Production supplies the object writer. Await it before declaring a source
   // uploaded/ready so ordinary downloads, backups and re-parsing share the same original.
-  await writePublicSource?.({ sourceId, version: 0, mime: "text/plain", body: Buffer.from(body, "utf8") });
+  await writePublicSource?.({ sourceId, version: 0, mime: "text/plain", body });
   await tx`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state,created_at,updated_at)
     VALUES(${sourceId},${scope.workspaceId},${`${pack.title} · 公开串讲`.slice(0, 180)},'text/plain',${bytes},${digest},0,'uploaded','ready',${now},${now})`;
   await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
@@ -102,6 +108,7 @@ async function createPublicPackSource(
 export async function ensureExamCourseBinding(
   tx: TransactionSql, scope: Scope, pack: ExamPack, input: ExamBindInput, now: string,
   existing?: ExamCourseBinding, writePublicSource?: ExamPublicSourceWriter,
+  quota?: OpeningSourceQuota,
 ): Promise<ExamCourseBinding> {
   await assertCourseAndMilestone(tx, scope, input);
   if (input.expectedPackVersion !== pack.version) throw conflict("冲刺题包版本已变化，请刷新后重试");
@@ -156,7 +163,7 @@ export async function ensureExamCourseBinding(
     throw conflict("请映射全部技能，或明确允许为缺少的技能建立知识节点");
   }
   const materials = await mapMaterials(tx, scope, pack, input, now);
-  const { sourceId, lessonChunks } = await createPublicPackSource(tx, scope, pack, input.courseId, now, writePublicSource);
+  const { sourceId, lessonChunks } = await createPublicPackSource(tx, scope, pack, input.courseId, now, writePublicSource, quota);
   const added: KnowledgeSnapshot["nodes"] = [];
   const skills: ExamSkillBinding[] = skillIds.map(skillId => {
     let nodeId = explicit.get(skillId);

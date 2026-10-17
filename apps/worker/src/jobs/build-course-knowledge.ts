@@ -1,3 +1,4 @@
+import { openingJobScope } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import type {
   KnowledgeEdge,
@@ -206,7 +207,7 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
   ): Promise<{ version: number; snapshot: KnowledgeSnapshot }> {
     const body = payload as BuildCourseKnowledgePayload;
     if (!body || typeof body.courseId !== "string") throw new Error("build-course-knowledge payload missing courseId");
-    const scope: Scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const scope = openingJobScope(job);
     const current = await deps.get(scope, body.courseId);
     const expectedVersion = current?.version ?? 0;
     const chunks = await deps.listAuthorizedChunks(scope, body.courseId);

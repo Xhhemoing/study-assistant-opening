@@ -6,6 +6,7 @@ import {
   type MediaSegmentCorrectionResult,
   type MediaSegmentsResponse,
 } from "@aistudy/contracts";
+import { loadOpeningUploadQuota } from "@aistudy/config";
 import {
   OpeningS3,
   createOpeningJobRepository,
@@ -13,6 +14,7 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceChunksRepository,
   createOpeningSourceRepository,
+  reserveOpeningSourceQuota,
   type OpeningKnowledgeRepository,
   type OpeningStorage,
 } from "@aistudy/database";
@@ -165,7 +167,8 @@ export function createOpeningMediaSegmentsService(
   storage: OpeningStorage = defaultOpeningStorage(),
   deps: OpeningMediaSegmentsServiceDeps = {},
 ) {
-  const sources = deps.sources ?? createOpeningSourceRepository(sql);
+  const quota = loadOpeningUploadQuota();
+  const sources = deps.sources ?? createOpeningSourceRepository(sql, { quota });
   const chunks = createOpeningSourceChunksRepository(sql);
   const jobs = deps.jobs ?? createOpeningJobRepository(sql);
   const privacy = deps.privacy ?? createOpeningPrivacyRepository(sql);
@@ -243,6 +246,7 @@ export function createOpeningMediaSegmentsService(
             validated,
           })
         : await sql.begin(async (tx) => {
+            await reserveOpeningSourceQuota(tx, scope, source.bytes, quota);
             const rows = await tx`
               SELECT id, version, bytes, sha256, upload_state
               FROM opening_sources
@@ -251,10 +255,15 @@ export function createOpeningMediaSegmentsService(
             `;
             const row = rows[0] as Record<string, unknown> | undefined;
             if (!row) throw new Error("source not found");
-            if (Number(row.version) !== input.expectedVersion || row.upload_state !== "uploaded") {
+            if (Number(row.version) !== input.expectedVersion || Number(row.bytes) !== source.bytes || row.upload_state !== "uploaded") {
               throw new Error("CONFLICT: source version mismatch");
             }
             const newVersion = Number(row.version) + 1;
+            // Legacy restores can have only the current source row. Capture its
+            // existing object before the row moves to the next version.
+            await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+              VALUES(${source.id},${input.expectedVersion},${scope.workspaceId},${Number(row.bytes)},${String(row.sha256)},'available')
+              ON CONFLICT(source_id,version) DO NOTHING`;
 
             const prior = await tx`
               SELECT page, slide_label, start_ms, end_ms, text, image_object_key
@@ -369,7 +378,7 @@ export function createOpeningMediaSegmentsService(
           await jobs.finish(claimed.id, "succeeded", {
             ...payload,
             claimsVisualUnderstanding: false,
-          });
+          }, claimed.claimToken);
         }
       }
       return { jobId: job.id };

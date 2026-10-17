@@ -32,6 +32,7 @@ export type RemindPayload = {
 };
 
 export type RemindRecord = {
+  claimToken?: string;
   receiptId: string | null;
   outcome: RemindPayload["outcome"];
   state: "succeeded" | "failed" | "outcome_unknown" | "queued";
@@ -53,12 +54,13 @@ export type RemindHandlerDeps = {
   resolveTimeZone?: (job: OpeningJobRecord) => string | Promise<string>;
   recipientId?: () => string | null;
   externalConfig?: (job: OpeningJobRecord) => ExternalReminderConfig | null | Promise<ExternalReminderConfig | null>;
-  isCurrent?: (jobId: string, now: Date) => Promise<boolean>;
+  isCurrent?: (jobId: string, now: Date, claimToken?: string) => Promise<boolean>;
 };
 
 export function createRemindHandler(deps: RemindHandlerDeps) {
   return async function processRemind(job: OpeningJobRecord, payload: unknown) {
     const body = payload as RemindPayload;
+    const record = (input: RemindRecord) => deps.record(job.id, { ...input, ...(job.claimToken ? { claimToken: job.claimToken } : {}) });
     if (body.outcome === "unknown" || body.receiptId) {
       return {
         status: reminderDeliveryState({
@@ -72,15 +74,15 @@ export function createRemindHandler(deps: RemindHandlerDeps) {
         channel: body.channel,
       };
     }
-    const current = await deps.isCurrent?.(job.id, deps.now?.() ?? new Date());
+    const current = await deps.isCurrent?.(job.id, deps.now?.() ?? new Date(), job.claimToken);
     if (current === false) {
-      await deps.record(job.id, { receiptId: null, outcome: null, state: "succeeded", suppressed: true });
+      await record({ receiptId: null, outcome: null, state: "succeeded", suppressed: true });
       return { status: "due" as const, receiptId: null, outcome: null, channel: body.channel, suppressed: true };
     }
     const liveConfig = body.channel === "in_app" ? null : await deps.externalConfig?.(job) ?? null;
     const configured = body.channel === "in_app" || body.configured && externalChannelConfigured(liveConfig);
     if (body.channel === "in_app" || !configured) {
-      await deps.record(job.id, { receiptId: null, outcome: null, state: "succeeded", ...(!configured ? { suppressed: true } : {}) });
+      await record({ receiptId: null, outcome: null, state: "succeeded", ...(!configured ? { suppressed: true } : {}) });
       return {
         status: reminderDeliveryState({
           channel: body.channel,
@@ -97,7 +99,7 @@ export function createRemindHandler(deps: RemindHandlerDeps) {
     const now = deps.now?.() ?? new Date();
     const timeZone = await resolveRemindTimeZone(deps, job, body);
     if (isWithinQuietHours(now, quiet, timeZone)) {
-      await deps.record(job.id, { receiptId: null, outcome: "quiet", state: "queued",
+      await record({ receiptId: null, outcome: "quiet", state: "queued",
         availableAt: nextQuietCheck(now, quiet!, timeZone) });
       return { status: "due" as const, receiptId: null, outcome: "quiet" as const, channel: body.channel };
     }
@@ -111,12 +113,12 @@ export function createRemindHandler(deps: RemindHandlerDeps) {
       idempotencyKey: job.key,
     }, new AbortController().signal);
     if ("receiptId" in sent) {
-      await deps.record(job.id, { receiptId: sent.receiptId, outcome: "acknowledged", state: "succeeded" });
+      await record({ receiptId: sent.receiptId, outcome: "acknowledged", state: "succeeded" });
       return { status: "sent" as const, receiptId: sent.receiptId, outcome: "acknowledged" as const, channel: body.channel };
     }
     const outcome = sent.error === "rate_limited" ? "rate_limited" as const : sent.error === "unknown" ? "unknown" as const : "rejected" as const;
     const state = outcome === "unknown" ? "outcome_unknown" as const : "failed" as const;
-    await deps.record(job.id, { receiptId: null, outcome, state });
+    await record({ receiptId: null, outcome, state });
     return {
       status: reminderDeliveryState({ channel: body.channel, configured: true, receiptId: null, outcome }),
       receiptId: null,

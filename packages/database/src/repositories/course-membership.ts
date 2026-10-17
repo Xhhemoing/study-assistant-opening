@@ -630,7 +630,7 @@ export function createCourseMembershipRepository(
       const rows = await sql`
         SELECT m.*, c.title AS course_title, c.slug AS course_slug
         FROM course_asset_memberships m
-        INNER JOIN courses c ON c.id = m.course_id
+        INNER JOIN courses c ON c.id = m.course_id AND c.workspace_id = m.workspace_id
         WHERE m.workspace_id = ${input.workspaceId}
           AND m.asset_type = ${input.assetType}
           AND m.asset_id = ${input.assetId}

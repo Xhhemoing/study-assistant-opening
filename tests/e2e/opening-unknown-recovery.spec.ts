@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures";
 import type { TurnInput, TurnRecord } from "@aistudy/contracts";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 

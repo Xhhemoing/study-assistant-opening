@@ -1,12 +1,22 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { LearningProse, PlainTextFallback, proseUrlTransform } from "./learning-prose";
+import { LearningProse, PlainTextFallback, proseUrlTransform, sameLearningProseContent } from "./learning-prose";
 import { MessageList } from "./message-list";
 
 const render = (text: string) => renderToStaticMarkup(createElement(LearningProse, { text }));
 
 describe("LearningProse", () => {
+  it("reuses unchanged prose while invalidating changed text, citation destinations or labels", () => {
+    const previous = { text: "结论[1]", citationLinks: [{ href: "/source/a", label: "讲义一" }] };
+    expect(sameLearningProseContent(previous, { ...previous, citationLinks: previous.citationLinks.map(link => ({ ...link })) })).toBe(true);
+    expect(sameLearningProseContent({ text: "无引用" }, { text: "无引用", citationLinks: [] })).toBe(true);
+    expect(sameLearningProseContent(previous, { ...previous, text: "新结论[1]" })).toBe(false);
+    expect(sameLearningProseContent(previous, { ...previous, citationLinks: [] })).toBe(false);
+    expect(sameLearningProseContent(previous, { ...previous, citationLinks: [{ href: "/source/b", label: "讲义一" }] })).toBe(false);
+    expect(sameLearningProseContent(previous, { ...previous, citationLinks: [{ href: "/source/a", label: "新标题" }] })).toBe(false);
+  });
+
   it("renders lists, tables and code from Markdown", () => {
     const html = render("要点：\n\n- 第一\n- 第二\n\n| 量 | 值 |\n|---|---|\n| a | 1 |\n\n```ts\nconst x = 1;\n```");
     expect(html).toMatch(/<li[^>]*>第一<\/li>/);

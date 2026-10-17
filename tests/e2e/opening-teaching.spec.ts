@@ -4,7 +4,7 @@
  * Requires both OPENING_TEACHING_LOOP and OPENING_TEACHING_WORKSPACE for UI trial.
  * real_model = not_run (never claim green from fixture-only path).
  */
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 
 const dualFlagsOn =

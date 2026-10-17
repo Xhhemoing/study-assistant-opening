@@ -105,16 +105,16 @@ describe("parse failure source projection", () => {
 
   it("does not project failure after cancellation wins the job compare-and-set", async () => {
     const { sourceId, job, repository, sources } = await seed();
-    await repository.claim(job.id);
+    const claimed = await repository.claim(job.id);
     await fixture.sql`UPDATE opening_jobs SET state = 'cancelled' WHERE id = ${job.id}`;
-    expect(await repository.finish(job.id, "failed", { error: "late failure" })).toBe(false);
+    expect(await repository.finish(job.id, "failed", { error: "late failure" }, claimed!.claimToken)).toBe(false);
     expect((await sources.get(fixture.scope, sourceId)).parseState).toBe("not_started");
     expect((await repository.get(fixture.scope, job.id)).state).toBe("cancelled");
   });
 
   it("waits for an in-flight privacy epoch change before projecting source failure", async () => {
     const { sourceId, job, repository, sources } = await seed();
-    await repository.claim(job.id);
+    const claimed = await repository.claim(job.id);
     const gate = openRaceSession();
     const writer = openRaceSession();
     const observer = openRaceSession();
@@ -123,7 +123,7 @@ describe("parse failure source projection", () => {
       await Promise.all([gate.ready, writer.ready, observer.ready]);
       await gate.sql.begin(async (tx) => {
         await tx`UPDATE workspaces SET privacy_epoch = 1 WHERE id = ${fixture.scope.workspaceId}`;
-        pending = track(createOpeningJobRepository(writer.sql).finish(job.id, "failed", { error: "conversion failed" }));
+        pending = track(createOpeningJobRepository(writer.sql).finish(job.id, "failed", { error: "conversion failed" }, claimed!.claimToken));
         await waitUntilBlocked(observer.sql, writer.pid, gate.pid, "parse failure", /FOR UPDATE OF w/);
       });
       expect(await pending).toBe(true);
@@ -139,8 +139,8 @@ describe("parse failure source projection", () => {
   it("rejects malformed source identifiers without rolling back the failed job", async () => {
     const { job, repository } = await seed();
     await fixture.sql`UPDATE opening_jobs SET payload = ${fixture.sql.json({ sourceId: "not-a-uuid" })} WHERE id = ${job.id}`;
-    await repository.claim(job.id);
-    expect(await repository.finish(job.id, "failed", { error: "invalid payload" })).toBe(true);
+    const claimed = await repository.claim(job.id);
+    expect(await repository.finish(job.id, "failed", { error: "invalid payload" }, claimed!.claimToken)).toBe(true);
     expect((await repository.get(fixture.scope, job.id)).state).toBe("failed");
   });
 });

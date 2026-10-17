@@ -74,6 +74,15 @@ describe("model provider handlers", () => {
     const settingsText = await (await readSettings(req("GET"))).text();
     expect(settingsText).not.toContain(providerKey);
   });
+  it("rejects endpoint edits that would reuse the stored credential", async () => {
+    const { provider } = await createProviderWithKey();
+    const rejected = await updateProvider(req("PUT", { baseUrl: "https://new.example/v1" }), idContext(provider.id));
+    expect(rejected.status).toBe(409);
+    expect(JSON.stringify(await rejected.json())).not.toContain(providerKey);
+    const updated = await updateProvider(req("PUT", { baseUrl: "https://new.example/v1", apiKey: "replacement-key" }), idContext(provider.id));
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ baseUrl: "https://new.example/v1", apiKeyHint: "-key" });
+  });
   it("exposes workspace models through the merged ai-settings catalog", async () => {
     const { model } = await createProviderWithKey();
     const data = await (await readSettings(req("GET"))).json();

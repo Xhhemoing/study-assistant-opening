@@ -4,12 +4,14 @@ import { CredentialVaultError, insertModel, insertProvider, lockModelProviderOwn
 import type { Sql } from "postgres";
 import { ApiError } from "../auth/service";
 import { readAiSettings, validateBudgetFields } from "./ai-settings-service";
+import { assertProviderEndpointAllowed } from "./provider-endpoint-policy";
 
 /** All writes share the owner lock and one transaction; retries never create another provider. */
 export async function quickSetupModel(sql: Sql, scope: Scope, raw: unknown) {
   const parsed = openingModelQuickSetupInputSchema.safeParse(raw);
   if (!parsed.success) throw new ApiError("VALIDATION", "请填写有效的模型信息，并确认预算或每日免费请求上限。", 422);
   const input = parsed.data;
+  assertProviderEndpointAllowed(input.baseUrl);
   try {
     await sql.begin(async tx => {
       await lockModelProviderOwner(tx, scope);

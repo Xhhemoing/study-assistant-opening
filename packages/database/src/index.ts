@@ -28,6 +28,7 @@ export * from "./migration-preflight";
 export * from "./schema/opening-sources";
 export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
+export { reserveOpeningSourceQuota } from "./repositories/opening-source-quota";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
 export {
   listReadySourceIdsForCourse,
@@ -228,6 +229,7 @@ export * from "./repositories/opening-conversation-planning-context";
 
 export * from "./schema/opening-measurement";
 export { createOpeningMeasurementRepository, type OpeningMeasurementRepository } from "./repositories/opening-measurement";
+export { openingJobScope, lockOpeningJobExecution, type OpeningJobScope } from "./repositories/opening-job-execution";
 
 export * from "./schema/opening-exam-sprint";
 export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, type OpeningExamSprintRepository, type OpeningExamSprintExport } from "./repositories/opening-exam-sprint";

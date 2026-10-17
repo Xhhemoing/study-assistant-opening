@@ -90,12 +90,14 @@ export function buildReadinessReport({ env = process.env, checks }) {
   };
 }
 
-/** Same truthy parsing as apps/web isOpeningRelease; registration is closed only then. */
+/** Match product registration policy, including production's closed default. */
 export function registrationCheck(env = process.env) {
   const raw = env.OPENING_RELEASE?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes"
-    ? { ok: true, detail: "OPENING_RELEASE closes registration (expect registration 403)" }
-    : { ok: false, detail: "OPENING_RELEASE is not enabled; registration stays open (no registration 403)" };
+  const explicitlyOpen = raw === "0" || raw === "false" || raw === "no";
+  const closed = !explicitlyOpen && (env.NODE_ENV === "production" || raw === "1" || raw === "true" || raw === "yes");
+  return closed
+    ? { ok: true, detail: "Registration is closed by OPENING_RELEASE or the production default (expect registration 403)" }
+    : { ok: false, detail: "Registration stays open in this configuration (no registration 403)" };
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   type RestoreCollection,
 } from "@aistudy/domain";
 import { asRecords, COLLECTION_TABLES, pickColumns } from "./backup-map";
+import { assertRestoreReferences } from "./backup-references";
 
 const COLUMNS: Record<RestoreCollection, Record<string, string>> = {
   courses: {
@@ -107,16 +108,23 @@ const STATE_COLS = {
 export async function loadExistingIds(
   sql: Sql,
   packed: NativeBackupPackage,
+  workspaceId: string,
 ): Promise<ExistingBackupIds> {
   const existing: ExistingBackupIds = {};
   for (const collection of RESTORE_TOPOLOGY) {
-    const ids = asRecords(packed.records[collection]).map((row) => row.id);
+    const records = packed.records[collection];
+    const ids = asRecords(records).map((row) => row.id);
+    if (ids.length !== records.length || ids.some(id => !uuidSchema.safeParse(id).success)
+      || new Set(ids).size !== ids.length) {
+      throw new BackupRestoreError("VALIDATION", "Backup contains invalid or duplicate record identities");
+    }
     if (ids.length === 0) {
       existing[collection] = [];
       continue;
     }
     const rows = await sql<{ id: string }[]>`
-      SELECT id FROM ${sql(COLLECTION_TABLES[collection])} WHERE id IN ${sql(ids)}
+      SELECT id FROM ${sql(COLLECTION_TABLES[collection])}
+      WHERE workspace_id=${workspaceId} AND id IN ${sql(ids)}
     `;
     existing[collection] = rows.map((row) => row.id);
   }
@@ -124,6 +132,7 @@ export async function loadExistingIds(
 }
 
 export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promise<void> {
+  await assertRestoreReferences(tx, plan);
   for (const step of plan.steps) {
     if (step.collection === "cards") {
       for (const card of step.records) {

@@ -128,6 +128,12 @@ describe("startup validation", () => {
 describe("capabilities", () => {
   const sw = (env: Record<string, string>) => loadFeatureSwitches(env);
 
+  it("closes production registration unless explicitly opened", () => {
+    expect(resolveCapabilities(sw({ NODE_ENV: "production" }), null).registrationOpen).toBe(false);
+    expect(resolveCapabilities(sw({ NODE_ENV: "production", OPENING_RELEASE: "0" }), null).registrationOpen).toBe(true);
+    expect(resolveCapabilities(sw({ NODE_ENV: "development" }), null).registrationOpen).toBe(true);
+  });
+
   it("anonymous users never get the loop", () => {
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }), null).teachingLoop).toEqual({ api: false, ui: false });
   });

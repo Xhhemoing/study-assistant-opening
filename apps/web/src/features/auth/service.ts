@@ -217,17 +217,22 @@ export type ApiErrorCode =
   | "VALIDATION"
   | "CONFLICT"
   | "INVALID_CREDENTIALS"
-  | "CONFIGURATION";
+  | "CONFIGURATION"
+  | "RATE_LIMITED"
+  | "SERVICE_UNAVAILABLE"
+  | "INTERNAL_ERROR";
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number;
+  readonly retryAfterSeconds?: number;
 
-  constructor(code: ApiErrorCode, message: string, status: number) {
+  constructor(code: ApiErrorCode, message: string, status: number, retryAfterSeconds?: number) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -247,7 +252,11 @@ export function jsonError(error: ApiError): Response {
   if (typeof extra.businessCode === "string") body.businessCode = extra.businessCode;
   if (typeof extra.earliestAt === "string") body.earliestAt = extra.earliestAt;
   if (typeof extra.reason === "string") body.reason = extra.reason;
-  return Response.json({ error: body }, { status: error.status });
+  const headers = new Headers();
+  if (error.retryAfterSeconds !== undefined) {
+    headers.set("Retry-After", String(error.retryAfterSeconds));
+  }
+  return Response.json({ error: body }, { status: error.status, headers });
 }
 
 export function mapDomainError(error: unknown): ApiError {
@@ -338,8 +347,6 @@ export function mapDomainError(error: unknown): ApiError {
   ) {
     return new ApiError("VALIDATION", "Invalid request body", 400);
   }
-  const message =
-    error instanceof Error ? error.message : "Unexpected error";
   if (error instanceof OpeningPlanError) {
     if (error.code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
     if (error.code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
@@ -364,7 +371,15 @@ export function mapDomainError(error: unknown): ApiError {
     if (code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
     if (code === "CONFLICT") return new ApiError("CONFLICT", error.message, 409);
   }
-  return new ApiError("VALIDATION", message, 500);
+  // Unexpected driver/provider errors can contain SQL, internal URLs or secrets.
+  const errorType = error instanceof TypeError ? "TypeError"
+    : error instanceof RangeError ? "RangeError"
+      : error instanceof Error ? "Error" : "NonError";
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  const safeCode = typeof code === "string" && ["23505", "23503", "42P01", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"].includes(code) ? code : "UNKNOWN";
+  // Log only fixed classifications, never message/stack or request content.
+  console.error("HTTP_UNHANDLED_ERROR", { type: errorType, code: safeCode });
+  return new ApiError("INTERNAL_ERROR", "服务暂时无法处理请求，请稍后重试。", 500);
 }
 
 export async function registerUser(

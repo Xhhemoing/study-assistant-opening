@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 function userInput(label: string) {
   return {

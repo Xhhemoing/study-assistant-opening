@@ -1,7 +1,7 @@
 import "server-only";
 import { createOpeningBudgetRepository, createOpeningExamSprintRepository, createOpeningExamIntegrationRepository,
   createOpeningExamForecastRepository, createOpeningExamReviewsRepository } from "@aistudy/database";
-import { loadOpeningModelCatalog } from "@aistudy/config";
+import { loadOpeningModelCatalog, loadOpeningUploadQuota } from "@aistudy/config";
 import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import type { Sql } from "postgres";
 import { createDbModelGateway, scopeBudget } from "../../../../../worker/src/runtime/model-gateway";
@@ -13,6 +13,7 @@ export const getExamSprintService = (sql: Sql) => createOpeningExamSprintReposit
 export const getExamIntegrationService = (sql: Sql) => {
   const storage = openingPageStorage();
   return createOpeningExamIntegrationRepository(sql, EXAM_SPRINT_PACK, {
+    quota: loadOpeningUploadQuota(),
     writePublicSource: source => storage.putObject(storage.finalKey(source.sourceId, source.version), source.body, { mime: source.mime }),
   });
 };

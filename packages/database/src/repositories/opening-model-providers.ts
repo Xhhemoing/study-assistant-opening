@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
+import { normalizeOpeningProviderBaseUrl } from "@aistudy/contracts";
 import {
   CredentialVaultError, decryptWorkspaceSecret, encryptWorkspaceSecret,
 } from "../storage/opening-credential-vault";
@@ -202,7 +203,11 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
         await lockOwner(tx, scope);
         const provider = await ownedProvider(tx, scope, id);
         const label = input.label ?? String(provider.label);
-        const baseUrl = input.baseUrl ?? String(provider.base_url);
+        const baseUrl = normalizeOpeningProviderBaseUrl(input.baseUrl ?? String(provider.base_url));
+        if (baseUrl !== normalizeOpeningProviderBaseUrl(String(provider.base_url)) && input.apiKey === undefined) {
+          const [credential] = await tx`SELECT provider_id FROM opening_model_provider_credentials WHERE provider_id=${id}`;
+          if (credential) throw new OpeningModelProviderError("CONFLICT", "更改接口地址时请同时填写该地址的 API 密钥，旧密钥不会发送到新地址。");
+        }
         if (input.label !== undefined || input.baseUrl !== undefined) {
           const [clash] = await tx`SELECT id FROM opening_model_providers
             WHERE workspace_id=${scope.workspaceId} AND label=${label} AND id<>${id}`;

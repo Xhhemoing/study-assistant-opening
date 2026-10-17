@@ -1,5 +1,6 @@
 import type { LearningPreferences, RetestCandidate, Scope } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
+import { openingJobScope } from "@aistudy/database";
 import { buildRetestCandidates, summarizeObservations, DEFAULT_RETEST_BATCH_LIMIT, type CourseEvidence, type RetestEvidenceIdentity } from "@aistudy/domain";
 
 export type RetestCandidateDeps = {
@@ -29,7 +30,7 @@ export function createRetestCandidateHandler(deps: RetestCandidateDeps) {
   ): Promise<{ candidates: RetestCandidate[] }> {
     const body = payload as RetestCandidatePayload;
     if (!body || typeof body.courseId !== "string") throw new Error("retest payload missing courseId");
-    const scope: Scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const scope = openingJobScope(job);
     if (deps.readLearningPreferences && !(await deps.readLearningPreferences(scope, body.courseId)).retestSuggestionsEnabled) {
       return { candidates: [] };
     }

@@ -20,7 +20,8 @@ export async function releaseOpeningParseClaim(tx: Sql, payload: unknown): Promi
 
 /** Commit a terminal job error and its source status together, under the privacy lock. */
 export async function failOpeningJob(sql: Sql, id: string, value: unknown,
-  state: "failed" | "outcome_unknown" = "failed"): Promise<boolean> {
+  state: "failed" | "outcome_unknown" = "failed",
+  options: { claimToken?: string | null; staleBefore?: Date; expectedState?: "queued" | "running" } = {}): Promise<boolean> {
   return sql.begin(async (tx) => {
     // Match privacy deletion's workspace-first lock order. Never lock a job first.
     const workspaces = await tx<{ id: string; owner_user_id: string; privacy_epoch: number }[]>`
@@ -33,7 +34,9 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
       kind: string; owner_user_id: string; payload: unknown; privacy_epoch: number;
     }[]>`
       UPDATE opening_jobs SET state = ${state}, result = ${tx.json(value as never)}, updated_at = now()
-      WHERE id = ${id} AND workspace_id = ${workspace.id} AND state = 'running'
+      WHERE id = ${id} AND workspace_id = ${workspace.id} AND state = ${options.expectedState ?? "running"}
+        AND (${!Object.hasOwn(options, "claimToken")} OR claim_token IS NOT DISTINCT FROM ${options.claimToken ?? null}::uuid)
+        AND (${options.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${options.staleBefore ?? null}::timestamptz)
       RETURNING kind, owner_user_id, payload, privacy_epoch`;
     const job = jobs[0];
     if (!job) {
@@ -44,6 +47,15 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
         await releaseOpeningParseClaim(tx, ended.payload);
       }
       return false;
+    }
+    if (job.kind === "compile-teaching-unit" && job.payload && typeof job.payload === "object") {
+      const payload = job.payload as Record<string, unknown>;
+      if (typeof payload.activityId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(payload.activityId)
+        && typeof payload.expectedContentVersion === "number" && Number.isInteger(payload.expectedContentVersion)) {
+        await tx`UPDATE opening_teaching_activities SET generate_status = 'failed', updated_at = now()
+          WHERE id = ${payload.activityId} AND workspace_id = ${workspace.id} AND owner_user_id = ${job.owner_user_id}
+            AND content_version = ${payload.expectedContentVersion} AND generate_status IN ('queued', 'generating')`;
+      }
     }
     if (job.kind !== "parse" && job.kind !== "parse-media") return true;
     if (job.owner_user_id !== workspace.owner_user_id) {

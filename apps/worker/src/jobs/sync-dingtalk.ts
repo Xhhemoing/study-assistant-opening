@@ -1,4 +1,4 @@
-import { loadWorkerEnv } from "@aistudy/config";
+import { loadOpeningUploadQuota, loadWorkerEnv } from "@aistudy/config";
 import {
   createOpeningConnectionsRepository,
   createOpeningImportsRepository,
@@ -118,7 +118,7 @@ export async function checkDingTalk(
 export function createSyncDingTalkHandler(sql = createSqlClient(loadWorkerEnv().databaseUrl)) {
   const connections = createOpeningConnectionsRepository(sql);
   const imports = createOpeningImportsRepository(sql);
-  const sources = createOpeningSourceRepository(sql);
+  const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const privacy = createOpeningPrivacyRepository(sql);
   return async function syncDingTalkJob(input: { connectionId: string }): Promise<SyncDingTalkResult> {
     const [row] = await sql`

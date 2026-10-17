@@ -9,6 +9,7 @@ import {
 import type { Sql } from "postgres";
 import type { RevisionBlockSnapshot } from "../schema/library";
 import { wrapLikePattern } from "../search-pattern";
+import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 
 function normalizeSearchText(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
@@ -122,6 +123,7 @@ export type LibraryRepository = {
 
   createDocument(input: {
     workspaceId: string;
+    jobScope?: OpeningJobScope;
     title: string;
     lifecycle?: AssetLifecycle;
     blocks: BlockInput[];
@@ -153,6 +155,7 @@ export type LibraryRepository = {
 
   updateDocument(input: {
     workspaceId: string;
+    jobScope?: OpeningJobScope;
     documentId: string;
     expectedRevisionNumber: number;
     title?: string;
@@ -602,6 +605,9 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async createDocument(input) {
+      if (input.jobScope && input.jobScope.workspaceId !== input.workspaceId) {
+        throw new LibraryError("CONFLICT", "job execution workspace differs from document workspace");
+      }
       await ensureWorkspace(input.workspaceId);
       const lifecycle = input.lifecycle ?? "scratch";
       assertLifecycle(lifecycle);
@@ -613,6 +619,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       assertUuid(documentId, "documentId");
 
       await sql.begin(async (tx) => {
+        if (input.jobScope) await lockOpeningJobExecution(tx, input.jobScope);
         await tx`
           INSERT INTO library_documents (
             id, workspace_id, title, lifecycle, schema_version, current_revision_number
@@ -736,6 +743,9 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async updateDocument(input) {
+      if (input.jobScope && input.jobScope.workspaceId !== input.workspaceId) {
+        throw new LibraryError("CONFLICT", "job execution workspace differs from document workspace");
+      }
       await ensureWorkspace(input.workspaceId);
       if (!Number.isInteger(input.expectedRevisionNumber) || input.expectedRevisionNumber <= 0) {
         throw new LibraryError(
@@ -746,6 +756,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       const blocks = normalizeBlocks(input.blocks);
 
       await sql.begin(async (tx) => {
+        if (input.jobScope) await lockOpeningJobExecution(tx, input.jobScope);
         const rows = await tx`
           SELECT *
           FROM library_documents

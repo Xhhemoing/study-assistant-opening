@@ -38,6 +38,7 @@ function transactionalSql(handler: (query: string) => unknown[]) {
     if (!Object.hasOwn(parts, "raw")) return parts;
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: W }]);
+    if (query.startsWith("WITH quota_objects AS")) return Promise.resolve([{ bytes: "0", objects: "0" }]);
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return Promise.resolve([]);
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return Promise.resolve([{ revision }]);
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) return Promise.resolve([{ revision: ++revision }]);

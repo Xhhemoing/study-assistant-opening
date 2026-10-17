@@ -13,6 +13,22 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 describe("openingApi (RU-07 client)", () => {
+  it("forwards abort signals through conversation recovery and job polling reads", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(init?.signal).toBe(controller.signal);
+      if (url.endsWith("/resume")) return jsonResponse({ conversationId: U, courseId: null, sourceIds: [], boundedHistory: [], historyTruncated: false });
+      if (url.endsWith("/turns")) return jsonResponse([]);
+      return jsonResponse({ id: U, status: "running", error: null, updatedAt: ISO });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await api.resumeConversation(U, controller.signal);
+    await api.listTurns(U, controller.signal);
+    await api.getPendingJob(U, controller.signal);
+    await api.getJob(U, controller.signal);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
   it("lists conversations at GET /api/opening/conversations", async () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe("/api/opening/conversations");

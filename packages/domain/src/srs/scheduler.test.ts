@@ -45,6 +45,22 @@ describe("srs scheduler srs-1", () => {
     expect(s.ease).toBe(1.3);
   });
 
+  it.each(["hard", "good"] as const)("%s keeps increasing daily intervals even at minimum ease", (grade) => {
+    let state = { ...createInitialState("c", NOW), ease: 1.3, intervalDays: 1 };
+    for (let repetition = 0; repetition < 6; repetition += 1) {
+      const now = new Date(state.dueAt);
+      const previousInterval = state.intervalDays;
+      state = scheduleReview(state, grade, now);
+      expect(state.intervalDays).toBeGreaterThan(previousInterval);
+      expect(Date.parse(state.dueAt) - now.getTime()).toBe(state.intervalDays * DAY);
+    }
+    // A lapse still returns to the existing short relearning step.
+    const now = new Date(state.dueAt);
+    const lapsed = scheduleReview(state, "again", now);
+    expect(lapsed.intervalDays).toBe(0);
+    expect(Date.parse(lapsed.dueAt) - now.getTime()).toBe(10 * 60 * 1000);
+  });
+
   it("deterministic + versioned", () => {
     expect(scheduleReview(createInitialState("c", NOW), "hard", NOW)).toEqual(
       scheduleReview(createInitialState("c", NOW), "hard", NOW),

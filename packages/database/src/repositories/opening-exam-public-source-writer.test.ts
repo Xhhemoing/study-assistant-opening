@@ -18,7 +18,7 @@ const pack: ExamPack = {
     difficulty: "foundation", prompt: "SEALED-PROMPT", options: [{ id: "a", label: "SEALED-OPTION" }, { id: "b", label: "Other" }],
     answer: "a", explanation: "SEALED-ANSWER", hint: "SEALED-HINT", estimatedMinutes: 2 }], sourceItems: [], weekPlan: [],
 };
-function transaction() {
+function transaction(usage = { bytes: "0", objects: "0" }) {
   const queries: Array<{ query: string; values: unknown[] }> = [];
   let graph: KnowledgeSnapshot | undefined;
   const query = (parts: TemplateStringsArray, ...values: unknown[]) => {
@@ -27,6 +27,8 @@ function transaction() {
     if (text === "g.course_id=?") return { query: text, values };
     queries.push({ query: text, values });
     if (text.startsWith("SELECT c.id FROM courses")) return [{ id: courseId }];
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("WITH quota_objects AS")) return [usage];
     if (text.startsWith("SELECT owner_user_id")) return [];
     if (text.startsWith("SELECT snapshot FROM opening_course_knowledge")) return graph ? [{ snapshot: graph }] : [];
     if (text.startsWith("SELECT g.course_id,(node->>'id')::uuid AS node_id")) {
@@ -47,12 +49,16 @@ describe("public source original writer", () => {
     const { tx, queries } = transaction();
     const write = vi.fn<ExamPublicSourceWriter>(async source => {
       expect(queries.some(item => item.query.startsWith("INSERT INTO opening_sources"))).toBe(false);
+      expect(queries.find(item => item.query.startsWith("SELECT id FROM workspaces")))
+        .toMatchObject({ query: expect.stringContaining("FOR NO KEY UPDATE"), values: [scope.workspaceId, scope.ownerUserId] });
+      expect(queries.some(item => item.query.startsWith("WITH quota_objects AS"))).toBe(true);
       expect(source).toMatchObject({ version: 0, mime: "text/plain" });
       expect(Buffer.from(source.body).toString("utf8")).not.toContain("SEALED");
     });
     const binding = await ensureExamCourseBinding(tx, scope, pack, input, now, undefined, write);
     expect(write).toHaveBeenCalledTimes(1);
     const original = write.mock.calls[0]![0];
+    expect(original.body.byteLength).toBeGreaterThan(Buffer.from(original.body).toString("utf8").length);
     expect(original.sourceId).toBe(binding.packSourceId);
     const metadata = queries.find(item => item.query.startsWith("INSERT INTO opening_sources"))!;
     expect(metadata.values[3]).toBe(original.body.byteLength);
@@ -67,8 +73,10 @@ describe("public source original writer", () => {
     expect(queries.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
   });
   it("does not rewrite the original when updating an already committed binding", async () => {
-    const { tx, queries } = transaction(), write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
+    const usage = { bytes: "0", objects: "0" };
+    const { tx, queries } = transaction(usage), write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
     const binding = await ensureExamCourseBinding(tx, scope, pack, input, now, undefined, write);
+    Object.assign(usage, { bytes: "2147483648", objects: "200" });
     const afterCreate = queries.length;
     expect(await ensureExamCourseBinding(tx, scope, pack, { ...input, clientKey: "update-source" }, now, binding, write)).toEqual(binding);
     expect(write).toHaveBeenCalledTimes(1);
@@ -77,6 +85,7 @@ describe("public source original writer", () => {
       .toEqual([scope.workspaceId, scope.ownerUserId, courseId]);
     expect(updates.find(item => item.query.startsWith("SELECT g.course_id,(node->>'id')::uuid AS node_id"))?.values)
       .toEqual([scope.workspaceId, scope.ownerUserId, { query: "g.course_id=?", values: [courseId] }]);
+    expect(updates.some(item => item.query.startsWith("WITH quota_objects AS"))).toBe(false);
     expect(updates.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
   });
   it("does not rewrite the original or reassign a still-current skill to another supported node", async () => {
@@ -89,5 +98,28 @@ describe("public source original writer", () => {
     }, now, binding, write)).rejects.toMatchObject({ code: "CONFLICT", message: "原技能仍有效，不能将其历史证据改贴到其他节点" });
     expect(write).toHaveBeenCalledTimes(1);
     expect(queries.slice(afterCreate).some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
+  });
+  it("admits the exact UTF-8 byte limit and rejects one byte less before storage writes", async () => {
+    const reference = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
+    await ensureExamCourseBinding(transaction().tx, scope, pack, input, now, undefined, reference);
+    const bytes = reference.mock.calls[0]![0].body.byteLength;
+    const usage = { bytes: "7", objects: "1" };
+    const write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
+    await ensureExamCourseBinding(transaction(usage).tx, scope, pack, input, now, undefined, write,
+      { maxBytes: bytes + 7, maxObjects: 2 });
+    expect(write).toHaveBeenCalledTimes(1);
+    const rejected = transaction(usage), blockedWrite = vi.fn<ExamPublicSourceWriter>();
+    await expect(ensureExamCourseBinding(rejected.tx, scope, pack, input, now, undefined, blockedWrite,
+      { maxBytes: bytes + 6, maxObjects: 2 })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(blockedWrite).not.toHaveBeenCalled();
+    expect(rejected.queries.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
+  });
+  it("rejects a full object allowance before storage or source metadata writes", async () => {
+    const { tx, queries } = transaction({ bytes: "1", objects: "2" });
+    const write = vi.fn<ExamPublicSourceWriter>();
+    await expect(ensureExamCourseBinding(tx, scope, pack, input, now, undefined, write,
+      { maxBytes: 1_000_000, maxObjects: 2 })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(write).not.toHaveBeenCalled();
+    expect(queries.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
   });
 });

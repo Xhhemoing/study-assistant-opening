@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(),
   getStagingPutTarget: vi.fn(),
-  putStaging: vi.fn(),
+  putStagingStream: vi.fn(),
 }));
 
 vi.mock("../../../../../../features/opening/runtime", () => ({
@@ -13,7 +13,7 @@ vi.mock("../../../../../../features/opening/runtime", () => ({
 vi.mock("../../../../../../features/opening/sources/source-service", () => ({
   createOpeningSourceService: () => ({
     getStagingPutTarget: mocks.getStagingPutTarget,
-    putStaging: mocks.putStaging,
+    putStagingStream: mocks.putStagingStream,
   }),
 }));
 
@@ -48,7 +48,7 @@ beforeEach(() => {
     bytes: 4,
     mime: "application/pdf",
   });
-  mocks.putStaging.mockResolvedValue({ ok: true });
+  mocks.putStagingStream.mockResolvedValue({ ok: true });
 });
 
 describe("PUT /api/opening/sources/:id/staging", () => {
@@ -59,10 +59,28 @@ describe("PUT /api/opening/sources/:id/staging", () => {
     });
     expect(response.status).toBe(204);
     expect(mocks.getStagingPutTarget).toHaveBeenCalledWith(principal, SOURCE_ID);
-    expect(mocks.putStaging).toHaveBeenCalledWith(principal, SOURCE_ID, {
+    expect(mocks.putStagingStream).toHaveBeenCalledWith(principal, SOURCE_ID, {
       contentType: "application/pdf",
-      bytes: body,
+      body: expect.any(ReadableStream),
+      signal: expect.any(AbortSignal),
     });
+  });
+
+  it("passes the original unread stream through when Content-Length is absent", async () => {
+    const request = putRequest(new Uint8Array([1, 2, 3, 4]));
+    request.headers.delete("content-length");
+    mocks.putStagingStream.mockImplementationOnce(async (_principal, _id, input) => {
+      expect(input.body).toBe(request.body);
+      expect(request.bodyUsed).toBe(false);
+      return { ok: true };
+    });
+    expect((await PUT(request, { params: Promise.resolve({ id: SOURCE_ID }) })).status).toBe(204);
+  });
+
+  it.each(["3", "invalid"])("rejects invalid or incomplete declared length %s before starting storage", async (length) => {
+    const response = await PUT(putRequest(new Uint8Array([1, 2, 3, 4]), { "content-length": length }), { params: Promise.resolve({ id: SOURCE_ID }) });
+    expect(response.status).toBe(400);
+    expect(mocks.putStagingStream).not.toHaveBeenCalled();
   });
 
   it("rejects declared Content-Length above the expected bytes with 413", async () => {
@@ -72,11 +90,11 @@ describe("PUT /api/opening/sources/:id/staging", () => {
       { params: Promise.resolve({ id: SOURCE_ID }) },
     );
     expect(response.status).toBe(413);
-    expect(mocks.putStaging).not.toHaveBeenCalled();
+    expect(mocks.putStagingStream).not.toHaveBeenCalled();
   });
 
   it("maps UploadPolicyError to 400", async () => {
-    mocks.putStaging.mockRejectedValue(new UploadPolicyError("request mime mismatch"));
+    mocks.putStagingStream.mockRejectedValue(new UploadPolicyError("request mime mismatch"));
     const response = await PUT(putRequest(new Uint8Array([1, 2, 3, 4])), {
       params: Promise.resolve({ id: SOURCE_ID }),
     });
@@ -97,7 +115,7 @@ describe("PUT /api/opening/sources/:id/staging", () => {
   });
 
   it("maps storage failures to 503", async () => {
-    mocks.putStaging.mockRejectedValue(
+    mocks.putStagingStream.mockRejectedValue(
       new OpeningStorageError("UNAVAILABLE", "storage service unavailable"),
     );
     const response = await PUT(putRequest(new Uint8Array([1, 2, 3, 4])), {
@@ -114,6 +132,6 @@ describe("PUT /api/opening/sources/:id/staging", () => {
       params: Promise.resolve({ id: SOURCE_ID }),
     });
     expect(response.status).toBe(401);
-    expect(mocks.putStaging).not.toHaveBeenCalled();
+    expect(mocks.putStagingStream).not.toHaveBeenCalled();
   });
 });

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflowPath = path.join(root, ".github/workflows/ci.yml");
-const runHeavyPath = path.join(root, "scripts/run-heavy.sh");
+const runHeavyPath = path.join(root, "scripts/run-heavy.mjs");
 
 function fail(message) {
   console.error(`verify:ci FAILED: ${message}`);
@@ -21,20 +21,15 @@ if (!existsSync(workflowPath)) {
   fail("missing .github/workflows/ci.yml");
 }
 if (!existsSync(runHeavyPath)) {
-  fail("missing scripts/run-heavy.sh");
+  fail("missing scripts/run-heavy.mjs");
 }
 
 const yaml = readFileSync(workflowPath, "utf8");
-const runHeavy = readFileSync(runHeavyPath, "utf8");
-for (const [fragment, message] of [
-  [/command -v flock/, "run-heavy.sh must probe flock before using it"],
-  [/command -v taskset/, "run-heavy.sh must probe taskset before using it"],
-  [/exec\s+"\$\{run\[@\]\}"/, "run-heavy.sh must exec the final command array"],
-]) {
-  if (!fragment.test(runHeavy)) {
-    fail(message);
-  }
-}
+const runner = spawnSync(process.execPath, ["--test", path.join(root, "tests/tooling/run-heavy.test.mjs")], {
+  cwd: root,
+  stdio: "inherit",
+});
+if (runner.status !== 0) fail("heavy-task runner behavior checks failed");
 const required = [
   "npm ci",
   "npm run lint",

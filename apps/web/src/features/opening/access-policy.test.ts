@@ -23,6 +23,15 @@ describe("isOpeningRelease", () => {
     expect(isOpeningRelease({ OPENING_RELEASE: "0" })).toBe(false);
     expect(isOpeningRelease({})).toBe(false);
   });
+
+  it("closes production registration by default and requires an explicit false value", () => {
+    expect(isOpeningRelease({ NODE_ENV: "production" })).toBe(true);
+    expect(isOpeningRelease({ NODE_ENV: "production", OPENING_RELEASE: "" })).toBe(true);
+    expect(isOpeningRelease({ NODE_ENV: "production", OPENING_RELEASE: "typo" })).toBe(true);
+    for (const value of ["0", "false", "no"]) {
+      expect(isOpeningRelease({ NODE_ENV: "production", OPENING_RELEASE: value })).toBe(false);
+    }
+  });
 });
 
 describe("cookie-auth origin", () => {

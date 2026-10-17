@@ -6,6 +6,10 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./model-routing": {
+      "types": "./src/model-routing.ts",
+      "default": "./src/model-routing.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

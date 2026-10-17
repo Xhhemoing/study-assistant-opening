@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Sql } from "postgres";
 import { mediaSegmentCorrectionInputSchema, mediaSegmentSchema } from "@aistudy/contracts";
 import { validateMediaSegments } from "../../../../../worker/src/parsers/media-segments";
 import {
@@ -247,5 +248,58 @@ describe("applyCorrections → K01 markNeedsCheckForSources + enqueueRebuild", (
     expect(createOnce).toHaveBeenCalledOnce();
     expect(claim).toHaveBeenCalledOnce();
     expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("reserves the version copy under the workspace lock before touching S3 (full=%s)", async full => {
+    vi.stubEnv("OPENING_UPLOAD_MAX_WORKSPACE_BYTES", "10");
+    vi.stubEnv("OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS", "2");
+    let transaction = false;
+    let workspaceLocked = false;
+    let checked = false;
+    const writes: string[] = [];
+    const sql = ((parts: TemplateStringsArray) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      expect(transaction).toBe(true);
+      if (query.startsWith("SELECT id FROM workspaces")) { workspaceLocked = true; return [{ id: scope.workspaceId }]; }
+      if (query.startsWith("WITH quota_objects AS")) {
+        expect(workspaceLocked).toBe(true);
+        checked = true;
+        return [{ bytes: full ? "7" : "6", objects: "1" }];
+      }
+      if (query.startsWith("SELECT id, version, bytes")) {
+        expect(workspaceLocked && checked).toBe(true);
+        return [{ id: sourceId, version: 1, bytes: 4, sha256: "a".repeat(64), upload_state: "uploaded" }];
+      }
+      if (query.startsWith("SELECT page")) return [];
+      writes.push(query);
+      return [];
+    }) as unknown as Sql;
+    sql.begin = (async (run: (tx: Sql) => Promise<unknown>) => {
+      transaction = true;
+      try { return await run(sql); } finally { transaction = false; }
+    }) as Sql["begin"];
+    const copyObject = vi.fn(async () => { expect(transaction && workspaceLocked && checked).toBe(true); });
+    const markNeedsCheckForSources = vi.fn(async () => ({ updated: 0, courseIds: [] }));
+    const service = createOpeningMediaSegmentsService(sql, {
+      finalKey: (id: string, version: number) => `opening/sources/${id}/v${version}`, copyObject,
+    } as never, {
+      sources: { get: async () => ({ id: sourceId, version: 1, bytes: 4, uploadState: "uploaded" }) as never },
+      privacy: { getWorkspaceEpoch: async () => 0 },
+      knowledge: { markNeedsCheckForSources, enqueueRebuild: vi.fn() },
+      jobs: { createOnce: async () => ({ id: jobId, state: "queued" }) as never,
+        claim: async () => ({ id: jobId, state: "running" }) as never, finish: async () => true },
+    });
+    try {
+      if (full) {
+        await expect(service.applyCorrections(principal, sourceId, correctionBody)).rejects.toMatchObject({ code: "CONFLICT" });
+        expect(copyObject).not.toHaveBeenCalled();
+        expect(writes).toEqual([]);
+        expect(markNeedsCheckForSources).not.toHaveBeenCalled();
+      } else {
+        await expect(service.applyCorrections(principal, sourceId, correctionBody)).resolves.toEqual({ jobId });
+        expect(copyObject).toHaveBeenCalledOnce();
+        expect(writes.some(query => query.startsWith("INSERT INTO opening_source_versions"))).toBe(true);
+      }
+    } finally { vi.unstubAllEnvs(); }
   });
 });

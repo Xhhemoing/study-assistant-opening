@@ -6,39 +6,7 @@ export async function readOpeningJsonBody(
   request: Request,
   maxBytes = OPENING_JSON_BODY_MAX_BYTES,
 ): Promise<unknown> {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null) {
-    const declaredBytes = Number(contentLength);
-    if (Number.isInteger(declaredBytes) && declaredBytes > maxBytes) {
-      throw new ApiError("VALIDATION", "请求体过大", 413);
-    }
-  }
-
-  if (!request.body) return request.json();
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        throw new ApiError("VALIDATION", "请求体过大", 413);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
+  const bytes = await readOpeningRawBody(request, maxBytes);
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
@@ -51,6 +19,8 @@ export async function readOpeningRawBody(
   if (contentLength !== null) {
     const declaredBytes = Number(contentLength);
     if (Number.isInteger(declaredBytes) && declaredBytes > maxBytes) {
+      // Cancel without waiting for the sender to finish uploading the body.
+      void request.body?.cancel().catch(() => undefined);
       throw new ApiError("VALIDATION", "请求体过大", 413);
     }
   }
@@ -68,6 +38,7 @@ export async function readOpeningRawBody(
       if (done) break;
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
+        void reader.cancel().catch(() => undefined);
         throw new ApiError("VALIDATION", "请求体过大", 413);
       }
       chunks.push(value);

@@ -45,8 +45,8 @@ describe("tutor job recovery repository", () => {
     const { conversationId, append } = await seedConversation();
     const saved = await append();
     const jobs = createOpeningTutorJobsRepository(fixture.sql);
-    await jobs.claim(saved.jobId);
-    await jobs.markUnknown(fixture.scope, saved.jobId, "provider outcome unknown; usage reconciliation pending");
+    const claimed = await jobs.claim(saved.jobId);
+    await jobs.markUnknown(fixture.scope, saved.jobId, "provider outcome unknown; usage reconciliation pending", claimed!.claimToken);
     const persisted = await jobs.get(fixture.scope, saved.jobId);
 
     expect(await jobs.findPendingForConversation(fixture.scope, conversationId)).toEqual({
@@ -117,8 +117,8 @@ describe("tutor job recovery repository", () => {
     const { conversationId, append } = await seedConversation();
     const saved = await append();
     const jobs = createOpeningTutorJobsRepository(fixture.sql);
-    await jobs.claim(saved.jobId);
-    await jobs.markUnknown(fixture.scope, saved.jobId, "provider timeout");
+    const claimed = await jobs.claim(saved.jobId);
+    await jobs.markUnknown(fixture.scope, saved.jobId, "provider timeout", claimed!.claimToken);
 
     expect(await jobs.findPendingForConversation(fixture.otherScope, conversationId)).toBeNull();
     expect(await jobs.findPendingForConversation({ ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId }, conversationId)).toBeNull();

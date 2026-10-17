@@ -9,6 +9,7 @@ import type { Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../auth/service";
+import { assertProviderEndpointAllowed } from "./provider-endpoint-policy";
 
 function mapped(error: unknown): never {
   // Vault misconfiguration is a server problem; it must never surface as a client error.
@@ -23,10 +24,10 @@ function mapped(error: unknown): never {
   throw error;
 }
 
-function parseOrUnprocessable(schema: z.ZodTypeAny, raw: unknown, message: string) {
+function parseOrUnprocessable<T>(schema: z.ZodType<T>, raw: unknown, message: string): T {
   const parsed = schema.safeParse(raw);
   if (!parsed.success) throw new ApiError("VALIDATION", message, 422);
-  return parsed.data as never;
+  return parsed.data;
 }
 
 export function createProviderConfigService(sql: Sql) {
@@ -38,11 +39,13 @@ export function createProviderConfigService(sql: Sql) {
     },
     async createProvider(scope: Scope, raw: unknown) {
       const input = parseOrUnprocessable(openingProviderInputSchema, raw, "服务商配置格式无效。");
+      assertProviderEndpointAllowed(input.baseUrl);
       try { return await repo.createProvider(scope, input); } catch (error) { return mapped(error); }
     },
     async updateProvider(scope: Scope, rawId: string, raw: unknown) {
       const id = parseOrUnprocessable(uuidSchema, rawId, "服务商不存在。");
       const input = parseOrUnprocessable(openingProviderUpdateSchema, raw, "服务商更新内容无效。");
+      if (input.baseUrl !== undefined) assertProviderEndpointAllowed(input.baseUrl);
       try { return await repo.updateProvider(scope, id, input); } catch (error) { return mapped(error); }
     },
     async deleteProvider(scope: Scope, rawId: string) {

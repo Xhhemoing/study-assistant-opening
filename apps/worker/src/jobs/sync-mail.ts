@@ -10,7 +10,7 @@ import {
 } from "@aistudy/database";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { ImapFlow } from "imapflow";
-import { loadWorkerEnv } from "@aistudy/config";
+import { loadOpeningUploadQuota, loadWorkerEnv } from "@aistudy/config";
 import { syncMailbox, type ImapSyncDeps } from "../connectors/imap-sync";
 
 export type SyncMailInput = {
@@ -44,7 +44,7 @@ export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().data
   const connections = createOpeningConnectionsRepository(sql);
   const imports = createOpeningImportsRepository(sql);
   const privacy = createOpeningPrivacyRepository(sql);
-  const sources = createOpeningSourceRepository(sql);
+  const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const storage = new OpeningS3(loadWorkerEnv().s3);
 
   return async function syncMail(input: SyncMailInput): Promise<SyncMailResult> {

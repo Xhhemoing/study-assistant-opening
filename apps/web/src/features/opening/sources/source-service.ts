@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { loadOpeningUploadQuota } from "@aistudy/config";
 import {
   createOpeningSourceRepository,
   createOpeningSourceActionsRepository,
@@ -12,7 +13,7 @@ import {
 } from "@aistudy/database";
 import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
 import type { Sql } from "postgres";
-import { validateStoredUpload, UploadPolicyError } from "./upload-policy";
+import { validatedUploadStream, validateStoredUpload, UploadPolicyError } from "./upload-policy";
 import { isPreviewableMime } from "./preview-mime";
 import type { Principal } from "../../../lib/authorization";
 import { assertAuthorized, boundWorkspaceId } from "../../../lib/authorization";
@@ -37,9 +38,12 @@ function stagingUploadUrl(sourceId: string): string {
 function contentDispositionHeader(filename: string, kind: "attachment" | "inline"): string {
   const fallback = Array.from(filename).map((ch) => {
     const code = ch.charCodeAt(0);
-    return code === 34 || code === 13 || code === 10 ? "_" : ch;
+    return code < 32 || code > 126 || ch === '"' || ch === "\\" || ch === ";" ? "_" : ch;
   }).join("") || "download";
-  const encoded = encodeURIComponent(filename);
+  // Header values must be byte strings. Keep Unicode only in RFC 5987's
+  // percent-encoded parameter, and replace unpaired UTF-16 surrogates safely.
+  const unicodeFilename = new TextDecoder().decode(new TextEncoder().encode(filename));
+  const encoded = encodeURIComponent(unicodeFilename).replace(/[!'()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
   return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
@@ -60,7 +64,7 @@ export function resolveDownloadDisposition(
 
 
 export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = new OpeningS3({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: process.env.S3_REGION ?? "us-east-1", bucket: process.env.S3_BUCKET ?? "aistudy", accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin", secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin", forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false" }), options: { now?: () => Date } = {}) {
-  const sources: OpeningSourceRepository = createOpeningSourceRepository(sql);
+  const sources: OpeningSourceRepository = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota(), now: options.now });
   const actions = createOpeningSourceActionsRepository(sql);
   const privacy = createOpeningPrivacyRepository(sql);
   const now = options.now ?? (() => new Date());
@@ -80,17 +84,53 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
      * Same-origin staging PUT target metadata (bytes/mime) for request size guards.
      * Rejects missing / wrong-owner / non-pending sources as NOT_FOUND.
      */
-    async getStagingPutTarget(p: Principal, id: string): Promise<{ bytes: number; mime: string }> {
+    async getStagingPutTarget(p: Principal, id: string): Promise<{ bytes: number; mime: string; expiresAt: string }> {
       auth(p, "source.create");
-      const source = await sources.get(scopeOf(p), id);
-      if (source.uploadState !== "pending") {
-        throw new OpeningSourceError("NOT_FOUND", "source is not pending");
+      const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), id);
+      return { bytes: source.bytes, mime: source.mime, expiresAt };
+    },
+    async putStagingStream(
+      p: Principal,
+      id: string,
+      input: { contentType: string; body: ReadableStream<Uint8Array>; signal?: AbortSignal },
+    ): Promise<{ ok: true }> {
+      let signal: AbortSignal | undefined;
+      let uploadAbort: AbortController | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const cancelUpload = () => uploadAbort?.abort();
+      try {
+        auth(p, "source.create");
+        const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), id);
+        const requestMime = normalizeMime(input.contentType);
+        if (!requestMime || requestMime !== normalizeMime(source.mime)) {
+          throw new UploadPolicyError(`request mime ${requestMime || "(missing)"} != expected ${source.mime}`);
+        }
+        const remaining = new Date(expiresAt).getTime() - now().getTime();
+        if (remaining <= 0) throw new UploadPolicyError("上传凭证已过期，请重试上传。");
+        uploadAbort = new AbortController();
+        signal = uploadAbort.signal;
+        if (input.signal?.aborted) cancelUpload();
+        else input.signal?.addEventListener("abort", cancelUpload, { once: true });
+        deadline = setTimeout(cancelUpload, Math.min(STAGING_UPLOAD_LEASE_MS, remaining));
+        deadline.unref();
+        const body = validatedUploadStream(input.body, source, signal);
+        await storage.putObjectStream(storage.stagingKey(id), body, { mime: source.mime, bytes: source.bytes, signal });
+      } catch (error) {
+        // Also close the sender on ownership/MIME/expired-lease failures before
+        // storage started; the HTTP route and internal callers share this path.
+        void input.body.cancel().catch(() => undefined);
+        if (error instanceof UploadPolicyError) throw error;
+        if (signal?.aborted) throw new UploadPolicyError("上传已取消或凭证已过期，请重试上传。");
+        throw error;
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        input.signal?.removeEventListener("abort", cancelUpload);
       }
-      return { bytes: source.bytes, mime: source.mime };
+      return { ok: true };
     },
     /**
-     * Buffer the browser/server body into staging object storage (same-origin PUT).
-     * Content-Type and byte length must match the beginUpload record exactly.
+     * Compatibility for server imports that already hold bounded bytes.
+     * Browser PUTs use putStagingStream; size and MIME still match the ticket.
      */
     async putStaging(
       p: Principal,

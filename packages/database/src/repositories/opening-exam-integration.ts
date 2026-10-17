@@ -10,9 +10,12 @@ import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { ensureExamCourseBinding, type ExamPublicSourceWriter } from "./opening-exam-integration-binding";
 import { lockExamCourse, parseExamBinding, readExamBinding, readExamEligibleAttemptIds } from "./opening-exam-integration-facts";
+import type { OpeningSourceQuota } from "./opening-source-quota";
+
+type ExamIntegrationOptions = { writePublicSource?: ExamPublicSourceWriter; quota?: OpeningSourceQuota };
 
 async function owner(tx: TransactionSql, scope: Scope, write: boolean) {
-  const rows = write ? await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`
+  const rows = write ? await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR NO KEY UPDATE`
     : await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
   if (!rows.length) throw learningError("NOT_FOUND", "工作区不存在");
 }
@@ -66,7 +69,7 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
 }
 
 export function createOpeningExamIntegrationRepository(
-  sql: Sql, pack: ExamPack, options: { writePublicSource?: ExamPublicSourceWriter } = {},
+  sql: Sql, pack: ExamPack, options: ExamIntegrationOptions = {},
 ) {
   return {
     async read(scope: Scope): Promise<ExamIntegrationOverview> {
@@ -90,7 +93,7 @@ export function createOpeningExamIntegrationRepository(
         const intent = { action: "bind", ...input };
         if (await commandReplay(tx, sprintId, input.clientKey, intent)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
         const existing = await readExamBinding(tx, sprintId);
-        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined, options.writePublicSource);
+        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined, options.writePublicSource, options.quota);
         await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding,updated_at)
           VALUES(${sprintId},${binding.courseId},${tx.json(binding as never)},${now}) ON CONFLICT(sprint_id)
           DO UPDATE SET binding=EXCLUDED.binding,updated_at=EXCLUDED.updated_at`;

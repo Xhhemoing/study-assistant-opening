@@ -10,8 +10,11 @@ import { requireOpeningScope } from "../../../../../features/opening/runtime";
 import { createOpeningSourceService } from "../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../features/opening/sources/upload-policy";
 import { isOpeningDataError } from "../../../../../features/opening/server/data-services";
+import { readOpeningRawBody } from "../../../../../features/opening/request-body";
 
 const EMAIL_MAX_BYTES = 25 * 1024 * 1024;
+// One .eml part plus bounded MIME headers, filename and multipart delimiters.
+const EMAIL_REQUEST_MAX_BYTES = EMAIL_MAX_BYTES + 64 * 1024;
 
 type EmailImportSourceService = Pick<
   ReturnType<typeof createOpeningSourceService>,
@@ -31,9 +34,15 @@ function basename(value: string): string {
 }
 
 async function readEmailImportRequest(request: Request) {
+  // Bound actual bytes before the multipart parser allocates File/FormData.
+  // A missing or forged Content-Length cannot bypass the streaming limit.
+  const raw = await readOpeningRawBody(request, EMAIL_REQUEST_MAX_BYTES);
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  const bounded = new Request(request.url, { method: "POST", headers, body: raw });
   let form: FormData;
   try {
-    form = await request.formData();
+    form = await bounded.formData();
   } catch {
     throw new ApiError("VALIDATION", "multipart form body is required", 400);
   }
@@ -82,6 +91,7 @@ export async function POST(request: Request): Promise<Response> {
       { status: 201 },
     );
   } catch (error) {
+    void request.body?.cancel().catch(() => undefined);
     if (isOpeningDataError(error, "source")) {
       const status =
         error.code === "NOT_FOUND" ? 404 : error.code === "CONFLICT" ? 409 : 400;

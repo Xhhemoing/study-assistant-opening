@@ -1,10 +1,26 @@
-import type { Queue } from "bullmq";
+import type { JobsOptions, Queue } from "bullmq";
 import {
   createOpeningJobRepository,
   createOpeningTutorJobsRepository,
   type OpeningOutboxRecord,
 } from "@aistudy/database";
 import { jobQueueId } from "./queue";
+
+const retention = {
+  removeOnComplete: { age: 86_400, count: 1_000 },
+  removeOnFail: { age: 7 * 86_400, count: 5_000 },
+};
+
+/** A retained terminal transport entry must not strand a queued DB job. */
+async function enqueue(queue: Queue, name: string, payload: unknown, options: JobsOptions & { jobId: string }): Promise<void> {
+  const existing = await queue.getJob(options.jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "failed" || state === "completed") await existing.retry(state);
+    if (state !== "unknown") return;
+  }
+  await queue.add(name, payload, options);
+}
 
 export type DispatchDependencies = {
   repository: ReturnType<typeof createOpeningJobRepository>;
@@ -24,14 +40,11 @@ export async function dispatchPending(deps: DispatchDependencies): Promise<numbe
       if (!Number.isFinite(availableAt)) throw new Error("invalid reminder availability time");
       delay = Math.max(0, availableAt - Date.now());
     }
-    await queue.add(outbox.jobId, outbox.payload, {
-      jobId: payload.kind === "remind"
-        ? `${jobQueueId(outbox.workspaceId, outbox.jobId)}-event-${outbox.id}`
-        : jobQueueId(outbox.workspaceId, outbox.jobId),
+    await enqueue(queue, outbox.jobId, outbox.payload, {
+      jobId: `${jobQueueId(outbox.workspaceId, outbox.jobId)}-event-${outbox.id}`,
       attempts: 2,
       backoff: { type: "exponential", delay: 1000 },
-      removeOnComplete: false,
-      removeOnFail: false,
+      ...retention,
       ...(kind === "remind" ? { delay } : {}),
     });
   }, deps.limit);
@@ -53,12 +66,11 @@ export async function dispatchTutorTurns(deps: TutorDispatchDependencies): Promi
   const queue = deps.queues.tutor;
   if (!queue) throw new Error("tutor queue is not configured");
   for (const job of jobs) {
-    await queue.add(job.id, { jobId: job.id }, {
+    await enqueue(queue, job.id, { jobId: job.id }, {
       jobId: `tutor-${job.workspaceId}-${job.id}`,
       attempts: 2,
       backoff: { type: "exponential", delay: 1000 },
-      removeOnComplete: false,
-      removeOnFail: false,
+      ...retention,
     });
   }
   return jobs.length;

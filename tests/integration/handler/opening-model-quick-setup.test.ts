@@ -6,6 +6,7 @@ import { POST as quickSetup } from "../../../apps/web/src/app/api/opening/model-
 import { POST as probe } from "../../../apps/web/src/app/api/opening/model-providers/[id]/models/[modelId]/probe/route";
 import { PUT as saveSettings } from "../../../apps/web/src/app/api/opening/ai-settings/route";
 import { POST as createModel } from "../../../apps/web/src/app/api/opening/model-providers/[id]/models/route";
+import * as providerNetwork from "../../../packages/ai/src/opening/provider-network";
 
 let f: OpeningFixture;
 let runtime: ReturnType<typeof createAuthRuntime>;
@@ -124,7 +125,8 @@ describe("atomic model quick setup", () => {
   it("probes the selected owned model through the ledger, without exposing provider errors", async () => {
     const data = await (await quickSetup(req(input))).json();
     const model = data.models.find((item: { id: string }) => item.id === data.settings.defaultModelId);
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }], usage: { prompt_tokens: 4, completion_tokens: 4 } }), { status: 200 }));
+    // Production uses the DNS-pinned Node transport, independently of global fetch.
+    const fetchMock = vi.spyOn(providerNetwork, "fetchOpeningProvider").mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }], usage: { prompt_tokens: 4, completion_tokens: 4 } }), { status: 200 }));
     const response = await probe(req({ clientKey: "probe-success-1" }), { params: Promise.resolve({ id: model.providerId, modelId: model.id }) });
     expect(await response.json()).toEqual({ ok: true, message: "本次请求成功。" });
     expect(fetchMock).toHaveBeenCalledTimes(1);

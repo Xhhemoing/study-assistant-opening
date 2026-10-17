@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { seedCapabilityAccount } from "./opening-capability-fixture";
 
 test.describe("opening capabilities (U04)", () => {

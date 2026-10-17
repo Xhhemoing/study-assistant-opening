@@ -13,6 +13,7 @@ describe("opening job privacy snapshot", () => {
       queries.push(query);
       return Promise.resolve([{ privacy_epoch: 7 }]);
     }) as unknown as Sql;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
     const repo = createOpeningJobRepository(sql);
 
     await expect(repo.sourcePrivacyEpoch(SOURCE, WORKSPACE)).resolves.toBe(7);
@@ -26,6 +27,7 @@ describe("opening job claim projects parse running", () => {
     const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
       recorded.push({ query, values });
+      if (query.startsWith("SELECT w.id FROM workspaces")) return Promise.resolve([{ id: WORKSPACE }]);
       if (query.startsWith("UPDATE opening_jobs SET state = 'running'")) {
         return Promise.resolve([{
           id: "job-1",
@@ -42,6 +44,7 @@ describe("opening job claim projects parse running", () => {
       if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as Sql;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
     const repo = createOpeningJobRepository(sql);
 
     const claimed = await repo.claim("job-1");
@@ -59,6 +62,7 @@ describe("opening job claim projects parse running", () => {
     const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
       recorded.push({ query, values });
+      if (query.startsWith("SELECT w.id FROM workspaces")) return Promise.resolve([{ id: WORKSPACE }]);
       if (query.startsWith("UPDATE opening_jobs SET state = 'running'")) {
         return Promise.resolve([{
           id: "job-m",
@@ -75,6 +79,7 @@ describe("opening job claim projects parse running", () => {
       if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as Sql;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
     const repo = createOpeningJobRepository(sql);
 
     await expect(repo.claim("job-m")).resolves.toMatchObject({ kind: "parse-media", state: "running" });
@@ -87,9 +92,11 @@ describe("opening job claim projects parse running", () => {
     const sql = ((parts: TemplateStringsArray) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
       recorded.push({ query });
+      if (query.startsWith("SELECT w.id FROM workspaces")) return Promise.resolve([{ id: WORKSPACE }]);
       if (query.startsWith("UPDATE opening_jobs SET state = 'running'")) return Promise.resolve([]);
       throw new Error(`unexpected query: ${query}`);
     }) as unknown as Sql;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
     const repo = createOpeningJobRepository(sql);
 
     await expect(repo.claim("missing")).resolves.toBeNull();

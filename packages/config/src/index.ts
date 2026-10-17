@@ -8,7 +8,7 @@ export function getNodeEnv(
   return "development";
 }
 
-export { EnvValidationError, loadEnv, type AppEnv } from "./env";
+export { EnvValidationError, loadEnv, loadOpeningUploadQuota, type AppEnv, type OpeningUploadQuota } from "./env";
 export { loadOpeningModel, loadOpeningTutorConfig } from "./opening-model";
 export {
   assertOpeningTestDatabase,

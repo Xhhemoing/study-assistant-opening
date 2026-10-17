@@ -78,10 +78,11 @@ describe("backup routes authorization", () => {
     expect((await restoreBackup(request("/api/backups/restore", "POST"))).status).toBe(401);
 
     const cookie = await user("owner");
-    await createDocument(request("/api/documents", "POST", cookie, {
+    const created = await createDocument(request("/api/documents", "POST", cookie, {
       title: "导数笔记",
       blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "极限" } }],
     }));
+    expect(created.status).toBe(201);
     const exported = await exportBackup(
       request("/api/backups/export", "POST", cookie, { workspaceId: randomUUID() }),
     );
@@ -89,6 +90,14 @@ describe("backup routes authorization", () => {
     const body = await exported.json() as { format: string; package: NativeBackupPackage };
     expect(body.format).toBe("aistudy-native");
     expect(body.package.counts.documents).toBe(1);
+
+    const conflicted = await restoreBackup(request("/api/backups/restore", "POST", cookie, {
+      workspaceId: randomUUID(),
+      conflictPolicy: "reject",
+      package: body.package,
+    }));
+    expect(conflicted.status).toBe(409);
+    expect(await conflicted.json()).toMatchObject({ error: { code: "CONFLICT" } });
 
     const restored = await restoreBackup(request("/api/backups/restore", "POST", cookie, {
       workspaceId: randomUUID(),
@@ -101,32 +110,41 @@ describe("backup routes authorization", () => {
     expect(result.skipped.documents).toBe(1);
   });
 
-  it("rejects writing another workspace and never overwrites conflicting ids", async () => {
+  it("rejects foreign ids identically for both conflict policies without changing either workspace", async () => {
     const owner = await user("owner");
     const other = await user("other");
-    await createDocument(request("/api/documents", "POST", owner, {
+    const created = await createDocument(request("/api/documents", "POST", owner, {
       title: "私有笔记",
       blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "secret" } }],
     }));
+    expect(created.status).toBe(201);
     const exported = await exportBackup(request("/api/backups/export", "POST", owner, {}));
+    expect(exported.status).toBe(200);
     const body = await exported.json() as { package: NativeBackupPackage };
+    expect(body.package.counts).toMatchObject({ documents: 1, blocks: 1 });
+    const empty = await exportBackup(request("/api/backups/export", "POST", other, {}));
+    expect(empty.status).toBe(200);
+    const beforeOther = await empty.json() as { package: NativeBackupPackage };
+    expect(beforeOther.package.counts).toMatchObject({ documents: 0, blocks: 0, revisions: 0 });
 
-    const denied = await restoreBackup(request("/api/backups/restore", "POST", other, {
-      workspaceId: body.package.sourceWorkspaceId,
-      conflictPolicy: "reject",
-      package: body.package,
-    }));
-    expect(denied.status).toBe(409);
-
-    const skipped = await restoreBackup(request("/api/backups/restore", "POST", other, {
-      workspaceId: body.package.sourceWorkspaceId,
-      conflictPolicy: "skip",
-      package: body.package,
-    }));
-    expect(skipped.status).toBe(200);
-    const original = await sql<{ title: string }[]>`
-      SELECT title FROM library_documents WHERE id = ${body.package.records.documents[0]!.id as string}
-    `;
-    expect(original[0]?.title).toBe("私有笔记");
+    for (const conflictPolicy of ["reject", "skip"] as const) {
+      const denied = await restoreBackup(request("/api/backups/restore", "POST", other, {
+        workspaceId: body.package.sourceWorkspaceId,
+        conflictPolicy,
+        package: body.package,
+      }));
+      // Foreign identities must not disclose an existence conflict or turn
+      // `skip` into permission to import references owned by another workspace.
+      expect(denied.status).toBe(400);
+      expect(await denied.json()).toEqual({ error: {
+        code: "VALIDATION", message: "Backup records conflict with the target workspace or contain invalid references",
+      } });
+      const ownerAfter = await exportBackup(request("/api/backups/export", "POST", owner, {}));
+      const otherAfter = await exportBackup(request("/api/backups/export", "POST", other, {}));
+      expect(ownerAfter.status).toBe(200);
+      expect(otherAfter.status).toBe(200);
+      expect(await ownerAfter.json()).toEqual(body);
+      expect(await otherAfter.json()).toEqual(beforeOther);
+    }
   });
 });

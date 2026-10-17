@@ -3,7 +3,7 @@
 import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
 import type { Citation } from "@aistudy/contracts";
 import { ArtifactView } from "@aistudy/jingwei/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { artifactsForMessages, openingCapabilities, openingRenderers } from "../jingwei-host";
 import { snippetSaveAvailability, type SelectedExcerpt } from "./save-snippet";
@@ -49,7 +49,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export const MessageList = memo(function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -124,4 +124,4 @@ export function MessageList({ messages, historyTruncated, currentVersions = {}, 
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
     </li>; })}</ul>}
   </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-zinc-900 px-4 text-xs font-medium text-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
-}
+});

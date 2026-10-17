@@ -249,28 +249,28 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
         .parse(body);
     },
 
-    async resumeConversation(id: string): Promise<ConversationResume> {
+    async resumeConversation(id: string, signal?: AbortSignal): Promise<ConversationResume> {
       const body = await request(
         `/api/opening/conversations/${id}/resume`,
-        { method: "GET" },
+        { method: "GET", signal },
         fetchImpl,
       );
       return conversationResumeSchema.parse(body);
     },
 
-    async listTurns(conversationId: string): Promise<TurnRecord[]> {
+    async listTurns(conversationId: string, signal?: AbortSignal): Promise<TurnRecord[]> {
       const body = await request(
         `/api/opening/conversations/${conversationId}/turns`,
-        { method: "GET" },
+        { method: "GET", signal },
         fetchImpl,
       );
       return turnListSchema.parse(body);
     },
 
-    async getJob(jobId: string): Promise<JobStatusResponse> {
+    async getJob(jobId: string, signal?: AbortSignal): Promise<JobStatusResponse> {
       const body = await request(
         `/api/opening/jobs/${jobId}`,
-        { method: "GET" },
+        { method: "GET", signal },
         fetchImpl,
       );
       return jobStatusResponseSchema.parse(body);
@@ -281,10 +281,10 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       return jobStatusResponseSchema.parse(body);
     },
 
-    async getPendingJob(conversationId: string): Promise<JobStatusResponse | null> {
+    async getPendingJob(conversationId: string, signal?: AbortSignal): Promise<JobStatusResponse | null> {
       const body = await request(
         `/api/opening/conversations/${conversationId}/pending-job`,
-        { method: "GET" },
+        { method: "GET", signal },
         fetchImpl,
       );
       return jobStatusResponseSchema.nullable().parse(body);

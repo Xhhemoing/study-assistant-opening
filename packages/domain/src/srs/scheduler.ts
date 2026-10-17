@@ -28,10 +28,10 @@ export function scheduleReview(state: ReviewState, grade: ReviewGrade, now: Date
     dueInMs = 10 * 60 * 1000;
   } else if (grade === "hard") {
     ease = Math.max(MIN_EASE, ease - 0.15);
-    intervalDays = intervalDays < 1 ? 1 : Math.round(intervalDays * 1.2);
+    intervalDays = intervalDays < 1 ? 1 : Math.max(intervalDays + 1, Math.round(intervalDays * 1.2));
     dueInMs = intervalDays * DAY_MS;
   } else if (grade === "good") {
-    intervalDays = intervalDays < 1 ? 1 : Math.round(intervalDays * ease);
+    intervalDays = intervalDays < 1 ? 1 : Math.max(intervalDays + 1, Math.round(intervalDays * ease));
     dueInMs = intervalDays * DAY_MS;
   } else {
     ease += 0.15;

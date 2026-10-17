@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { loadParserConfig, type ParserConfig } from "./parser-config";
 import type { ParseDocument, ParsedPage, ParserRunner } from "./types";
+import { createParserSubprocessEnv } from "./subprocess-env";
 
 export class UnsupportedMimeError extends Error { readonly code = "UNSUPPORTED_MIME"; }
 export class BoundsExceededError extends Error { readonly code = "BOUNDS_EXCEEDED"; }
@@ -41,7 +42,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
 
 export function createNodeRunner({ pythonExecutable, cwd }: ParserConfig = loadParserConfig()): ParserRunner {
   return (argv, signal) => new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+    const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true, env: createParserSubprocessEnv("python") });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { if (Buffer.byteLength(stdout) < 2 * 1024 * 1024) stdout += chunk.toString(); });

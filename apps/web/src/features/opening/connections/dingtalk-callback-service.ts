@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { loadOpeningUploadQuota } from "@aistudy/config";
 import {
   importIdentitySchema,
   sourceMimeSchema,
@@ -211,7 +212,7 @@ export async function receiveDingTalkCallback(
     }
   }
 
-  const sources = createOpeningSourceRepository(deps.sql);
+  const sources = createOpeningSourceRepository(deps.sql, { quota: loadOpeningUploadQuota() });
   const imports = createOpeningImportsRepository(deps.sql);
   const privacy = createOpeningPrivacyRepository(deps.sql);
   const connections = createOpeningConnectionsRepository(deps.sql);

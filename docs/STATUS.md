@@ -10,14 +10,15 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 发布基线 `cb5a68c`：#59 与 #60 均已合入；[发布主干完整 CI 38911719890](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/38911719890) 全绿，含数据库、handler、既有浏览器与构建。迁移末号0065。Hermes 当前部署 SHA、迁移与开关状态仍未现场核实。
+- 发布分支已按顺序合入 #65（`b70ae56`）及 #64（`40a4be7`），两者最新 head 的完整 CI 均通过，迁移末号0072；加固 #66 使用0073，最终整合提交仍须完整 CI。Hermes 当前部署 SHA、迁移与开关状态未现场核实。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| Math I 考前冲刺与课程证据集成 | Codex + 独立身份/存储复核 | [#64](https://github.com/Xhhemoing/study-assistant-opening/pull/64) · `codex/exam-sprint` | 课程绑定、唯一正式尝试与现有观察链、帮助审计、模拟交卷、公开原文与人工核对已实现；保留0070–0072。已整合#65的v3低信任自核；本轮补精确技能身份复用、退役UUID防复活、图谱引用CAS、材料失效时资格/摘要/BKT和导师flags实时失效，以及显式重关联。相关单元、DB/worker/web类型及独审通过，最新flags补丁28项定向单元通过；新增真实PG来源失效/锁竞争/当前head回归待新head完整CI，原head绿灯不能替代。尚未合并、部署或用户浏览器验收。见[统一数据关联](product/exam-sprint.md#统一数据关联) |
-| 目标驱动框架与首批规划/教学改进 | Codex + 独立交叉审查 | [#65](https://github.com/Xhhemoing/study-assistant-opening/pull/65) · `codex/goal-driven-learning` | 目标策略/教学接线、答案自身引用、自核self_report/v3资格与曝光保留已实现，无DDL。旧head20259bc全量单元/契约通过，PG发现10项旧权威夹具/断言，现改用真实matrix判分正例及低信任反例，并修正消费者context读取与前置要求身份；关联单元、类型/lint通过，最新head完整PG/handler/浏览器/构建待CI。可信同label跨requirement现由domain测试覆盖，尚无现成生产模板供可信PG正例，不伪造权威补齐。尚未合并、部署或用户浏览器验收 |
+| 深度审计按板块复核与修复 | Codex + 独立交叉审查 | [#66](https://github.com/Xhhemoing/study-assistant-opening/pull/66) · `codex/audit-hardening` | 已同步实际合并的#65/#64；0073保留0070–0072，公开原文接入统一配额，迁移前停旧worker并取消待重启；跨协议回退legacy持久暂停worker，返回降级，部署/身份故障注入检查通过。整合真实PG已通过；队列spike监听竞态已修并通过隔离真实Redis。最终提交完整CI须以#66当前检查为准，不能用旧head代替。生产部署、可信代理、分支保护及用户验收未完成，详见[审议与欠项](operations/audit-remediation.md) |
+| Math I 考前冲刺与课程证据集成 | Codex + 独立身份/存储复核 | [#64](https://github.com/Xhhemoing/study-assistant-opening/pull/64) · `codex/exam-sprint` | 已在#65后合入40a4be7；head5cbfa7d的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050725855)通过，含真实PG、handler、浏览器及构建。稳定技能UUID、退役保护、引用CAS、实时资格/摘要/BKT/导师flags及显式重关联通过独审和回归，保留0070–0072。公开原文配额随#66整合。尚未部署或用户验收；见[统一数据关联](product/exam-sprint.md#统一数据关联) |
+| 目标驱动框架与首批规划/教学改进 | Codex + 独立交叉审查 | [#65](https://github.com/Xhhemoing/study-assistant-opening/pull/65) · `codex/goal-driven-learning` | 已合入b70ae56；headf12c5df的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050710975)通过，含真实PG、handler、浏览器及构建。目标策略/编译接线、答案自身引用、self_report/v3资格与曝光保留已实现，无DDL。可信同label跨requirement已有domain回归，生产模板尚无可信PG正例；不伪造权威记录。尚未部署或用户验收 |
 | BKT 算法与真实使用测试插件 | Codex + Astra 独立评审 | [#61](https://github.com/Xhhemoing/study-assistant-opening/pull/61) · `codex/bkt-real-use-evaluation` | 以主干 `9c7c86e` 整合并保留 S1–S7 与 0066–0069；Astra 数学复核通过，修复迟到复测 72h 间隔与归档只读入口，补真实 pg_dump 恢复验收。109 项定向单元、4 包类型和相关 lint 通过；完整 CI/合并结果见 #61。默认未报名，部署、用户浏览器与真实学习效果待验收 |
 | 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 已与 #60 整合并合入 `cb5a68c`，完整主干 CI 38911719890 成功。按要求隔离快照/建议/任务/教学，保留已交付帮助与卡片入口，含0065可空列迁移；尚未部署。稳定节点身份、分项评分与BKT属后续 |
 | 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |

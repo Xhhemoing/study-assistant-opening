@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { loadParserConfig } from "./parser-config";
+import { createParserSubprocessEnv } from "./subprocess-env";
 
 type PageRequest = { sourceId: string; physicalPage: number };
 export type PdfPageImage = { sourceId: string; physicalPage: number; mediaType: "image/png"; data: string };
 export async function renderPdfPageImages(bytes: Uint8Array, requests: readonly PageRequest[], config = loadParserConfig()): Promise<PdfPageImage[]> {
   if (requests.length < 1 || requests.length > 3 || requests.some(item => !Number.isInteger(item.physicalPage) || item.physicalPage < 1)) throw new Error("invalid PDF page selection");
-  const child = spawn(config.pythonExecutable, ["-m", "opening_parser.render_pages", JSON.stringify(requests.map(item => item.physicalPage))], { cwd: config.cwd, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", HF_HUB_OFFLINE: "1" } });
+  const child = spawn(config.pythonExecutable, ["-m", "opening_parser.render_pages", JSON.stringify(requests.map(item => item.physicalPage))], { cwd: config.cwd, windowsHide: true, env: createParserSubprocessEnv("python") });
   const output: Buffer[] = [], errors: Buffer[] = [];
   child.stdout.on("data", chunk => output.push(Buffer.from(chunk)));
   child.stderr.on("data", chunk => errors.push(Buffer.from(chunk)));
