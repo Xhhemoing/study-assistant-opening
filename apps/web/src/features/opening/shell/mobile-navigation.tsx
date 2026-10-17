@@ -1,12 +1,12 @@
 "use client";
 
-import { ClipboardCheck, Layers2, Library, Link2, MessageCircle, MoreHorizontal, Notebook, Sun, X } from "lucide-react";
+import { ClipboardCheck, Layers2, Library, Link2, MessageCircle, MoreHorizontal, Notebook, Sun, Timer, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ui } from "../design/ui";
 import { navigationIsActive, openingNavigation } from "./navigation";
 
-const icons = { today: Sun, assistant: MessageCircle, library: Library, courses: Notebook, cards: Layers2, review: ClipboardCheck, connections: Link2 };
+const icons = { today: Sun, assistant: MessageCircle, library: Library, courses: Notebook, cards: Layers2, sprint: Timer, review: ClipboardCheck, connections: Link2 };
 const mobileLink = "flex min-h-12 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50";
 const activeClass = "bg-emerald-50 font-semibold text-emerald-900";
 const inactiveClass = "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900";

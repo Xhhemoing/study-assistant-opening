@@ -14,6 +14,10 @@
       "types": "./src/portability/native/index.ts",
       "default": "./src/portability/native/index.ts"
     },
+    "./exam-sprint-catalog": {
+      "types": "./src/opening/exam-sprint/catalog.ts",
+      "default": "./src/opening/exam-sprint/catalog.ts"
+    },
     "./measurement-catalog": {
       "types": "./src/opening/measurement/catalog.ts",
       "default": "./src/opening/measurement/catalog.ts"

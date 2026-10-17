@@ -491,3 +491,4 @@ export { validateBackupCourseMilestones, projectBackupCourseMilestoneReferences 
 export * from "./opening/conversation-planning-context";
 
 export * from "./opening/measurement";
+export * from "./opening/exam-sprint/engine";
