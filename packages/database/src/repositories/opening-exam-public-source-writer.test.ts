@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { TransactionSql } from "postgres";
-import type { ExamBindInput, ExamPack } from "@aistudy/contracts";
+import type { ExamBindInput, ExamPack, KnowledgeSnapshot } from "@aistudy/contracts";
 import { ensureExamCourseBinding, type ExamPublicSourceWriter } from "./opening-exam-integration-binding";
 
 const courseId = "00000000-0000-4000-8000-000000000001";
@@ -20,11 +20,22 @@ const pack: ExamPack = {
 };
 function transaction() {
   const queries: Array<{ query: string; values: unknown[] }> = [];
-  const query = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+  let graph: KnowledgeSnapshot | undefined;
+  const query = (parts: TemplateStringsArray, ...values: unknown[]) => {
     const text = parts.join("?").replace(/\s+/g, " ").trim();
+    // Nested postgres tags compose a fragment instead of executing a query.
+    if (text === "g.course_id=?") return { query: text, values };
     queries.push({ query: text, values });
     if (text.startsWith("SELECT c.id FROM courses")) return [{ id: courseId }];
     if (text.startsWith("SELECT owner_user_id")) return [];
+    if (text.startsWith("SELECT snapshot FROM opening_course_knowledge")) return graph ? [{ snapshot: graph }] : [];
+    if (text.startsWith("SELECT g.course_id,(node->>'id')::uuid AS node_id")) {
+      // Materials in this writer fixture are ready; SQL availability and owner
+      // authorization have their own repository integration coverage.
+      return (graph?.nodes ?? []).filter(node => node.courseId === courseId && node.status === "supported" && node.evidenceChunkIds.length > 0)
+        .map(node => ({ course_id: courseId, node_id: node.id }));
+    }
+    if (text.startsWith("INSERT INTO opening_course_knowledge")) graph = values[4] as KnowledgeSnapshot;
     if (text.startsWith("INSERT INTO")) return [];
     throw new Error(`Unexpected query: ${text}`);
   };
@@ -56,9 +67,27 @@ describe("public source original writer", () => {
     expect(queries.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
   });
   it("does not rewrite the original when updating an already committed binding", async () => {
-    const { tx } = transaction(), write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
+    const { tx, queries } = transaction(), write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
     const binding = await ensureExamCourseBinding(tx, scope, pack, input, now, undefined, write);
+    const afterCreate = queries.length;
     expect(await ensureExamCourseBinding(tx, scope, pack, { ...input, clientKey: "update-source" }, now, binding, write)).toEqual(binding);
     expect(write).toHaveBeenCalledTimes(1);
+    const updates = queries.slice(afterCreate);
+    expect(updates.find(item => item.query.startsWith("SELECT snapshot FROM opening_course_knowledge"))?.values)
+      .toEqual([scope.workspaceId, scope.ownerUserId, courseId]);
+    expect(updates.find(item => item.query.startsWith("SELECT g.course_id,(node->>'id')::uuid AS node_id"))?.values)
+      .toEqual([scope.workspaceId, scope.ownerUserId, { query: "g.course_id=?", values: [courseId] }]);
+    expect(updates.some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
+  });
+  it("does not rewrite the original or reassign a still-current skill to another supported node", async () => {
+    const { tx, queries } = transaction(), write = vi.fn<ExamPublicSourceWriter>().mockResolvedValue(undefined);
+    const twoSkills = { ...pack, questions: [...pack.questions, { ...pack.questions[0]!, id: "second-question", skillId: "second-skill" }] };
+    const binding = await ensureExamCourseBinding(tx, scope, twoSkills, input, now, undefined, write);
+    const afterCreate = queries.length;
+    await expect(ensureExamCourseBinding(tx, scope, twoSkills, { ...input, clientKey: "reassign-source",
+      skills: [{ skillId: "skill", nodeId: binding.skills[1]!.nodeId }],
+    }, now, binding, write)).rejects.toMatchObject({ code: "CONFLICT", message: "原技能仍有效，不能将其历史证据改贴到其他节点" });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(queries.slice(afterCreate).some(item => item.query.startsWith("INSERT INTO"))).toBe(false);
   });
 });

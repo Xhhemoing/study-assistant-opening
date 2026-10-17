@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningRetestActivityRepository } from "@aistudy/database";
+import { createOpeningRetestActivityRepository, readOpeningCourseLearningSummary, readOpeningObservationHistory } from "@aistudy/database";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
@@ -15,7 +15,7 @@ beforeEach(async () => {
 });
 afterAll(async () => { await fixture?.close(); });
 
-it("updates opening_retest_activities.result after self-compare revision", async () => {
+it("updates the retest's reported result after self-comparison without awarding verified success", async () => {
   const f = await learningAttemptFixture(fixture);
   const candidateId = randomUUID(), taskId = randomUUID(), activityId = randomUUID();
   await fixture.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, state, privacy_epoch)
@@ -44,23 +44,46 @@ it("updates opening_retest_activities.result after self-compare revision", async
       referenceCheck: { referenceSourceId: f.sourceId, method: "learner_self_compare 第1页", scope: "whole_answer" },
     },
   });
-  expect(revised.observation?.eligibility?.verifiedCorrect).toBe("yes");
+  expect(revised.observation).toMatchObject({
+    verdictSource: "self_report", outcome: "correct",
+    eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown" },
+  });
+  expect(revised.observation?.eligibility?.reasonCodes).toContain("learner_reference_compare");
   const [after] = await fixture.sql`SELECT status, result FROM opening_retest_activities WHERE id=${activityId}`;
+  // This mirrors the learner's reported outcome; canonical consumers qualify it separately.
   expect(after).toEqual({ status: "completed", result: "correct" });
+  const summary = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 20 });
+  expect(summary.status).toBe("ready");
+  expect(summary.groups).toEqual([expect.objectContaining({
+    identity: { courseId: f.courseId, skillLabel: "fractions", requirementKey: null }, sampleCount: 1,
+    independentVerifiedCurrentCount: 0, latestIndependentVerifiedCurrentCount: 0, unverifiedCount: 1,
+  })]);
 });
 
-it("treats a later attempt on the same problem after reference check as prior revealed", async () => {
+it("retains prior reference exposure for a later independent attempt even after withdrawing the checked record", async () => {
   const f = await learningAttemptFixture(fixture);
   const firstAttempt = await f.start();
   const first = await f.submit(firstAttempt, {
     outcome: "correct", verdictSource: "reference_checked", referenceSourceId: f.sourceId,
     referenceCheck: { referenceSourceId: f.sourceId, method: "learner_self_compare", scope: "whole_answer" },
   });
-  expect(first.eligibility.verifiedCorrect).toBe("yes");
+  expect(first).toMatchObject({ verdictSource: "self_report", eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown" } });
+  expect(first.eligibility.reasonCodes).toContain("learner_reference_compare");
+  const withdrawn = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+    rootObservationId: first.id, revisesObservationId: first.id, expectedHead: first.id,
+    revisionKind: "retract", reason: "Withdraw the self-reported result", clientKey: randomUUID(),
+  });
+  expect(withdrawn.observation).toBeNull();
+  const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, first.id);
+  expect(history.headObservationId).toBe(withdrawn.headObservationId);
+  expect(history.revisions.map(row => row.id)).toEqual([first.id, withdrawn.headObservationId]);
+  expect(history.revisions[0]?.referenceCheck).toEqual(first.referenceCheck);
+  expect(history.revisions[0]?.eligibility?.verifiedCorrect).toBe("unknown");
 
   const secondAttempt = await f.attempts.create(fixture.scope, {
     sessionId: f.sessionId, clientKey: randomUUID(), problemId: firstAttempt.problemId!,
   });
+  expect(Date.parse(secondAttempt.startedAt)).toBeGreaterThanOrEqual(Date.parse(first.recordedAt!));
   const second = await f.submit(secondAttempt, { outcome: "correct", verdictSource: "reference_checked", referenceSourceId: f.sourceId,
     referenceCheck: { referenceSourceId: f.sourceId, method: "learner_self_compare", scope: "whole_answer" } });
   const facts = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, second);
@@ -78,5 +101,6 @@ it("treats a later attempt on the same problem after reference check as prior re
   });
   expect(eligibility.reasonCodes).toContain("prior_answer_exposure");
   expect(eligibility.independentAttempt).toBe("yes");
+  expect(eligibility.verifiedCorrect).toBe("unknown");
   expect(eligibility.usableForDelayedCheck).toBe("no");
 });
