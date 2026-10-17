@@ -120,16 +120,14 @@ export async function readOpeningLearningEvidenceContexts(
     const entries = feedbackByCatalogue.get(key) ?? [];
     entries.push(row); feedbackByCatalogue.set(key, entries);
   }
-  // Same-problem prior reference checks count as revealed answer exposure for later attempts.
+  // Reference comparisons expose answers even when low-trust or subsequently revised.
+  // Read immutable events, not only current heads: corrections cannot erase exposure.
   const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id, o.verdict_source,
       o.submitted_at, o.recorded_at
     FROM opening_learning_observations o
-    JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
-      AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
-      AND COALESCE(root.effective_head_id,root.id)=o.id
     WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
       AND o.problem_id =ANY(${problemIds}::uuid[])
-      AND o.verdict_source='reference_checked'
+      AND (o.verdict_source='reference_checked' OR o.reference_check IS NOT NULL)
       AND o.attempt_id IS NOT NULL
       AND (o.revision_kind IS DISTINCT FROM 'retract')` : [];
   const priorsByProblem = new Map<string, Row[]>();
@@ -153,22 +151,24 @@ export async function readOpeningLearningEvidenceContexts(
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []),
     ].map(row => [String(row.id), row])).values()];
-    const startedMs = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
-    if (record.problemId && Number.isFinite(startedMs)) {
+    if (record.problemId) {
       for (const prior of priorsByProblem.get(record.problemId) ?? []) {
         if (String(prior.id) === record.id) continue;
         if (record.attemptId && prior.attempt_id === record.attemptId) continue;
         if (record.itemVersionId && prior.item_version_id && String(prior.item_version_id) !== record.itemVersionId) continue;
-        const checkedAt = prior.submitted_at ?? prior.recorded_at;
+        // A check revision retains the original submission time. Its exposure
+        // happened when the check was recorded, not at that earlier submission.
+        const checkedAt = prior.recorded_at;
         const checkedMs = checkedAt ? new Date(checkedAt as string | Date).getTime() : Number.NaN;
-        if (!Number.isFinite(checkedMs) || checkedMs >= startedMs) continue;
+        // Keep concurrent checks too. The domain distinguishes prior exposure,
+        // help during this answer and checks delivered after its capture time.
         history.push({
           id: `prior-reference:${prior.id}`,
           attempt_id: prior.attempt_id,
           problem_id: prior.problem_id,
           level: "revealed", kind: "solution",
           delivered: true,
-          delivered_at: checkedAt,
+          delivered_at: Number.isFinite(checkedMs) ? checkedAt : null,
           history_revision: 0,
         });
       }
@@ -188,6 +188,9 @@ export async function readOpeningLearningEvidenceContexts(
     };
     const context: EvidenceEligibilityContext = {
       serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
+      // Every existing manual-check write is learner-owned. Persisted JSON and
+      // historical checker ids cannot grant independent-review authority.
+      referenceCheckAuthority: "learner",
       helpHistory: { complete: Boolean(record.attemptId), exposures: history.map(row => ({
         attemptId: row.attempt_id as string | null, problemId: row.problem_id as string | null,
         level: row.level as "hinted" | "revealed",

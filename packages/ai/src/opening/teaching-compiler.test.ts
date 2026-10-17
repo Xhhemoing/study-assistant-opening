@@ -1,14 +1,15 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import type { SourceChunk } from "@aistudy/contracts";
+import { describe, expect, it, vi } from "vitest";
+import type { SourceChunk, TeachingLearnerFocus } from "@aistudy/contracts";
 import { ALLOWED_TEACHING_BLOCK_TYPES, type TeachingOutline } from "@aistudy/domain";
 import { assembleTeachingEvidencePack } from "./teaching-evidence";
 import {
   buildCompileProviderInput,
   compileCurrentActivity,
   createCompilerBuildPublishInput,
+  createCompilerProviderInput,
   parseCompileModelOutput,
   TeachingCompileOutputError,
   projectClientSafeLibraryBlocks,
@@ -26,6 +27,55 @@ const UNIT = "00000000-0000-4000-8000-0000000000u1";
 const SRC_A = "00000000-0000-4000-8000-0000000000aa";
 const SRC_B = "00000000-0000-4000-8000-0000000000bb";
 const SRC_HELD = "00000000-0000-4000-8000-0000000000dd";
+
+describe("goal-driven teaching provider context", () => {
+  const focus: TeachingLearnerFocus = { skillLabel: "分部积分", requirementKey: "integration",
+    activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null, recentAssistance: [], strategyVersion: "adaptive-goal-1",
+    goalContext: { mode: "exam", reasonCode: "deadline_near", targetDate: "2026-10-20", daysRemaining: 3, priority: 4, prerequisiteBudgetMinutes: 5 },
+    prerequisiteRepair: { nodeId: SRC_A, targetNodeId: SRC_B, skillLabel: "求导", returnToSkillLabel: "分部积分", maxMinutes: 5,
+      reason: "有效作答仍有错误", stopCondition: "自行完成求导关键一步后回到分部积分" },
+  };
+
+  it("keeps the prerequisite prelude bounded and the scored prompt on the original target", async () => {
+    const provider = await createCompilerProviderInput({ learnerFocus: focus, intentSummary: "分部积分练习" })({}, {
+      activityId: ACTIVITY, expectedContentVersion: 0,
+    });
+    expect(provider.text).toContain(JSON.stringify(focus));
+    expect(provider.instruction).toContain("exam 模式");
+    expect(provider.instruction).toContain("最多按 maxMinutes 分钟设计");
+    expect(provider.instruction).toContain("前置说明不创建 prompt 或 answer_key");
+    expect(provider.instruction).toContain("正式 prompt 和紧随的 answer_key 必须检验原 skillLabel/requirementKey");
+    expect(provider.instruction).toContain("不得把前置讲解或自检的作答归为原目标技能证据");
+  });
+
+  it("adapts understanding guidance without changing requested activity or inferring prerequisite failure", async () => {
+    const { prerequisiteRepair: _repair, ...base } = focus;
+    const provider = await createCompilerProviderInput({ learnerFocus: { ...base, activityKind: "full_explain",
+      goalContext: { ...focus.goalContext!, mode: "understand", reasonCode: "selected_understand", prerequisiteBudgetMinutes: 10 } } })({}, {
+      activityId: ACTIVITY, expectedContentVersion: 0,
+    });
+    expect(provider.instruction).toContain("understand 模式");
+    expect(provider.instruction).toContain("缺少前置证据不代表学生不会");
+    expect(provider.text).toContain('"activityKind":"full_explain"');
+    expect(provider.text).not.toContain('"prerequisiteRepair"');
+  });
+
+  it("rejects a second prerequisite quiz before writing blocks attributed to the original skill", async () => {
+    const writeLibraryBlocks = vi.fn();
+    const publish = createCompilerBuildPublishInput({ learnerFocus: focus, writeLibraryBlocks, requireModelOutput: true });
+    const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 };
+    const target = [{ type: "prompt", text: "完成分部积分" }, { type: "answer_key", text: "完整积分步骤" }];
+    await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
+      { type: "text", text: "先提醒必要的求导规则，再回到分部积分。" },
+      { type: "prompt", text: "先完成求导小题" }, { type: "answer_key", text: "导数" }, ...target,
+    ] }) })).rejects.toThrow("one original-target prompt");
+    expect(writeLibraryBlocks).not.toHaveBeenCalled();
+    await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
+      { type: "text", text: "先提醒必要的求导规则，再回到分部积分。" }, ...target,
+    ] }) })).resolves.toMatchObject({ activityId: ACTIVITY });
+    expect(writeLibraryBlocks).toHaveBeenCalledOnce();
+  });
+});
 
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
   activities: Array<{
@@ -359,12 +409,12 @@ describe("teaching-compiler", () => {
         { type: "text", text: "零空间是 $Ax=0$ 的解集。", citedChunkIds: ["c1"] },
         { type: "steps", text: "1. 写出方程\n2. 化简" },
         { type: "prompt", text: "求零空间维数？" },
-        { type: "answer_key", text: "n − rank" },
+        { type: "answer_key", text: "n − rank", citedChunkIds: ["c1"] },
       ] }),
     });
     expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key"]);
     expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
-    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true } });
+    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true, citedChunkIds: ["c1"] } });
     expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
     expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
     await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))

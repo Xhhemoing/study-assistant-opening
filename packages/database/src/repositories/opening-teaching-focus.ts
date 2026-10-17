@@ -1,8 +1,9 @@
 import type { Sql } from "postgres";
-import { teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
+import { knowledgeSnapshotSchema, teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
+import { evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { plannerSuggestionKind } from "./opening-task-fields";
+import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
 
 /** Task identity comes from the owner-scoped row, not createIntent/goalJson. */
 export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskId: string) {
@@ -41,6 +42,37 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
   } };
 }
 
+/** A goal is the activity's policy snapshot; expired answer evidence must not erase it. */
+function withoutCurrentEvidence(focus: TeachingLearnerFocus): TeachingCompilerFocus {
+  if (!focus.goalContext) return {};
+  const { prerequisiteRepair: _repair, ...base } = focus;
+  return { learnerFocus: { ...base, activityKind: "diagnose", reasonCode: "no_evidence",
+    focusObservationId: null, recentAssistance: [] } };
+}
+
+async function recheckPrerequisite(
+  sql: Sql, scope: Scope, courseId: string | null, focus: TeachingLearnerFocus, evidence?: CourseEvidence,
+): Promise<TeachingLearnerFocus> {
+  if (!focus.prerequisiteRepair) return focus;
+  const { prerequisiteRepair: previous, ...base } = focus;
+  if (!courseId || !focus.goalContext || !evidence || focus.activityKind === "transfer_check") return base;
+  // Reuse the planner's source-version, privacy and membership qualification.
+  // The raw knowledge repository also returns historical graphs, which cannot
+  // authorize a current teaching detour after a material is replaced/unlinked.
+  const current = await readOpeningLearnerSnapshotCourses(sql, scope);
+  const graph = knowledgeSnapshotSchema.safeParse(current.find(course => course.courseId === courseId)?.knowledgeSnapshot);
+  if (!graph.success) return base;
+  const now = new Date();
+  const candidate = selectPrerequisiteRepair({ targetSkillLabel: focus.skillLabel,
+    knowledgeNodes: toSupportedKnowledgeNodes(graph.data), observations: toSnapshotEvidence(evidence, now).observations,
+    goalContext: focus.goalContext, now });
+  // Rebuilds may replace node IDs. Never attach an old detour to a new graph.
+  if (!candidate || candidate.nodeId !== previous.nodeId || candidate.targetNodeId !== previous.targetNodeId
+    || normalizeSkillLabelKey(candidate.skillLabel) !== normalizeSkillLabelKey(previous.skillLabel)
+    || normalizeSkillLabelKey(candidate.returnToSkillLabel) !== normalizeSkillLabelKey(previous.returnToSkillLabel)) return base;
+  return { ...base, prerequisiteRepair: candidate };
+}
+
 /** Only the chosen effective observation's question and answer may enter the prompt. */
 export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, activityId: string): Promise<TeachingCompilerFocus> {
   const [activity] = await sql`SELECT a.goal_json, a.course_id FROM opening_teaching_activities a
@@ -48,21 +80,28 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
     WHERE a.id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
   const parsed = teachingLearnerFocusSchema.safeParse(activity?.goal_json?.learnerFocus);
   if (!parsed.success) return {};
-  const learnerFocus = parsed.data;
+  const courseId = activity?.course_id ? String(activity.course_id) : null;
+  const storedFocus = parsed.data;
+  const needsEvidence = Boolean(storedFocus.prerequisiteRepair || storedFocus.focusObservationId
+    || (storedFocus.activityKind !== "full_explain" && storedFocus.activityKind !== "diagnose"));
+  const evidence = needsEvidence && courseId ? await readOpeningCourseEvidence(sql, scope, courseId) : undefined;
+  const learnerFocus = await recheckPrerequisite(sql, scope, courseId, storedFocus, evidence);
   if (!learnerFocus.focusObservationId && (learnerFocus.activityKind === "full_explain" || learnerFocus.activityKind === "diagnose")) return { learnerFocus };
-  if (!activity?.course_id) return {};
-  const evidence = await readOpeningCourseEvidence(sql, scope, String(activity.course_id));
-  if (!learnerFocus.focusObservationId) return recheckDerivedFocus(learnerFocus, evidence);
+  if (!evidence) return withoutCurrentEvidence(learnerFocus);
+  if (!learnerFocus.focusObservationId) {
+    const checked = recheckDerivedFocus(learnerFocus, evidence);
+    return checked.learnerFocus ? checked : withoutCurrentEvidence(learnerFocus);
+  }
   const observation = evidence.observations.find(row => row.id === learnerFocus.focusObservationId);
   const eligibility = observation && evidence.evidenceContexts[observation.id];
   // Historical correctness alone cannot qualify an answer for the current material.
-  if (!observation || !eligibility) return {};
+  if (!observation || !eligibility) return withoutCurrentEvidence(learnerFocus);
   if (learnerFocus.requirementKey !== undefined && (
     learnerFocus.requirementKey !== (observation.requirementKey ?? null) ||
     normalizeSkillLabelKey(learnerFocus.skillLabel) !== normalizeSkillLabelKey(observation.skillLabel)
-  )) return {};
+  )) return withoutCurrentEvidence(learnerFocus);
   const qualified = evaluateEvidenceEligibility(eligibility.observation, eligibility.context);
-  if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return {};
+  if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return withoutCurrentEvidence(learnerFocus);
   const [problem] = observation.problemId ? await sql`SELECT p.stem_snapshot FROM opening_problem_refs p
     JOIN workspaces w ON w.id=p.workspace_id AND w.owner_user_id=${scope.ownerUserId}
     WHERE p.problem_id=${observation.problemId} AND p.workspace_id=${scope.workspaceId}` : [];

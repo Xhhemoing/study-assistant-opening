@@ -13,6 +13,8 @@ const REASON_LABELS: Record<string, string> = {
   prior_answer_exposure: "历史上已有同题答案曝光记录",
   prior_evaluation_feedback: "本次作答前已有同一道内置题的核算反馈",
   verification_source_untrusted: "自报或模型建议尚未构成参考核验",
+  learner_reference_compare: "学习者自对照参考，尚未经独立评分",
+  reference_check_authority_unknown: "无法确认参考核对的独立评分来源",
   server_evaluation_incomplete: "缺少服务器评价记录或不支持该评价版本",
   server_evaluation_identity_mismatch: "服务器评价与本次题目、要求或记录不一致",
   server_evaluation_outcome_conflict: "服务器评价与记录结果不一致",

@@ -36,9 +36,11 @@ export function mergeCourseGoal(current: CourseGoal | undefined, input: CourseGo
   }
   if (milestones.length > 8) throw new OpeningPlanError("VALIDATION", "每个课程最多保留8个阶段成果。");
   const result: CourseGoal = { targetDate: input.targetDate, weeklyMinutes: input.weeklyMinutes,
+    ...(input.learningMode !== undefined || current?.learningMode !== undefined ? { learningMode: input.learningMode ?? current!.learningMode } : {}),
+    ...(input.priority !== undefined || current?.priority !== undefined ? { priority: input.priority ?? current!.priority } : {}),
     ...(milestones.length ? { milestones } : current?.milestones !== undefined || input.milestones !== undefined ? { milestones: [] } : {}) };
-  // Keep the historical response shape until the versioned milestone feature is used.
-  if (current?.revision !== undefined || input.milestones !== undefined || expectedRevision !== undefined) result.revision = revision + 1;
+  // Keep the historical response shape until versioned milestones or goal policy are used.
+  if (current?.revision !== undefined || input.milestones !== undefined || input.learningMode !== undefined || input.priority !== undefined || expectedRevision !== undefined) result.revision = revision + 1;
   return result;
 }
 

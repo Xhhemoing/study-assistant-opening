@@ -47,12 +47,12 @@ async function seedActivity() {
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'学习小结',${courseId})`;
   const sourceId = await backupRows(f.sql, f.scope).source();
-  await backupRows(f.sql, f.scope).chunk(sourceId);
+  const chunkId = await backupRows(f.sql, f.scope).chunk(sourceId);
   const taskId = randomUUID();
   const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
     clientKey: `task:${taskId}`, intentKind: "goal", intentSummary: "核对矩阵练习", courseId, sourceIds: [sourceId], createIntent: { taskId },
   });
-  return { activity, courseId, sourceId, taskId };
+  return { activity, courseId, sourceId, chunkId, taskId };
 }
 
 describe("starting again after a completed activity (R1)", () => {
@@ -120,14 +120,14 @@ describe("teaching inline attempts and answer gates", () => {
     const content = createOpeningTeachingContentRepository(f.sql);
     const unit = await content.createUnit(f.scope, { title: "内联作答讲义", blocks: [
       { id: question, type: "prompt", content: { text: "求单位矩阵的秩" } },
-      { id: answer, type: "answer_key", content: { text: "受保护的参考答案：秩为2" } },
+      { id: answer, type: "answer_key", content: { text: "受保护的参考答案：秩为2", citedChunkIds: [seeded.chunkId] } },
       { id: otherQuestion, type: "prompt", content: { text: "求零矩阵的秩" } },
       { id: otherAnswer, type: "answer_key", content: { text: "另一题参考答案：秩为0" } },
     ] });
     await content.publishActivitySpec(f.scope, { activityId: seeded.activity.id, teachingUnitId: unit.id, expectedVersion: 0,
       revisionNumber: unit.currentRevisionNumber, expectedRevisionNumber: unit.currentRevisionNumber,
       blockOrder: [question, answer, otherQuestion, otherAnswer].map((blockId, position) => ({ blockId, position, blockType: position % 2 ? "answer_key" : "prompt", role: position % 2 ? "answer_key" as const : "prompt" as const })),
-      sourceRefs: [{ sourceId: seeded.sourceId, version: 1 }],
+      sourceRefs: [{ sourceId: seeded.sourceId, chunkId: seeded.chunkId, version: 1 }],
     });
     return { ...seeded, question, otherQuestion, unit };
   }
@@ -159,7 +159,8 @@ describe("teaching inline attempts and answer gates", () => {
     const compared = await reviseObservation(req("POST", revision));
     expect(compared.status).toBe(201);
     const checked = await compared.json();
-    expect(checked.observation).toMatchObject({ outcome: "incorrect", verdictSource: "reference_checked", answer: "我的原答案：1" });
+    expect(checked.observation).toMatchObject({ outcome: "incorrect", verdictSource: "self_report", answer: "我的原答案：1",
+      eligibility: { verifiedCorrect: "unknown" } });
     const [job] = await f.sql`SELECT id FROM opening_jobs WHERE kind='retest' AND payload->>'observationId'=${observation.id}`;
     expect(job).toBeTruthy();
     const summary = await (await getSummary(req("GET"), context(activity.id))).json();
@@ -190,6 +191,22 @@ describe("teaching inline attempts and answer gates", () => {
     return { session, attempt, submission };
   }
 
+  it("does not attribute an uncited answer to another block's material reference", async () => {
+    const seeded = await seedQuestion();
+    const session = await createOpeningLearningRepository(f.sql).createSession(f.scope, {
+      activityId: seeded.activity.id, courseId: seeded.courseId, skillLabel: "矩阵秩", sourceIds: [seeded.sourceId],
+    });
+    const attempt = await createOpeningLearningAttemptRepository(f.sql).create(f.scope, {
+      sessionId: session.id, clientKey: randomUUID(), teachingBlock: { blockId: seeded.otherQuestion, contentVersion: 1 },
+    });
+    await createOpeningAttemptService(f.sql).submit(f.scope, attempt.id, {
+      clientKey: randomUUID(), answer: "0", outcome: "unverified", assistance: "independent",
+    });
+    const answer = await getAnswerKey(answerRequest(seeded.activity.id, seeded.otherQuestion, attempt.id), context(seeded.activity.id));
+    expect(answer.status).toBe(200);
+    expect(await answer.json()).toEqual({ answer: "另一题参考答案：秩为0", referenceSourceId: null });
+  });
+
   it("rejects changed material versions instead of attributing an old teaching answer to the new material", async () => {
     const seeded = await seedQuestion();
     const { session, attempt, submission } = await openAttempt(seeded);
@@ -211,8 +228,8 @@ describe("teaching inline attempts and answer gates", () => {
     const revision = await content.readRevision(f.scope, spec.documentId, spec.revisionNumber);
     const rewritten = await content.writeUnitBlocks(f.scope, seeded.unit.id, revision.blocks.map((block) => ({ id: block.id, type: block.type, content: block.type === "answer_key" ? { text: "新版参考答案" } : block.content })));
     const holder = await openRaceSession().ready, reader = await openRaceSession().ready, publisher = await openRaceSession().ready;
-    let release = () => undefined;
-    let opened = () => undefined;
+    let release: () => void = () => undefined;
+    let opened: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const locked = new Promise<void>((resolve) => { opened = resolve; });
     const holding = track(holder.sql.begin(async (tx) => { await tx`SELECT id FROM opening_sources WHERE id=${seeded.sourceId} FOR UPDATE`; opened(); await gate; }));
@@ -255,7 +272,7 @@ describe("teaching inline attempts and answer gates", () => {
     const seeded = await seedQuestion();
     const { attempt, submission } = await openAttempt(seeded);
     const holder = await openRaceSession().ready, writer = await openRaceSession().ready, completer = await openRaceSession().ready;
-    let release = () => undefined, opened = () => undefined;
+    let release: () => void = () => undefined, opened: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const locked = new Promise<void>((resolve) => { opened = resolve; });
     const holding = track(holder.sql.begin(async (tx) => {

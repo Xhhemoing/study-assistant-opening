@@ -1,7 +1,8 @@
-import type { PlanBlockReason, PlannedBlock, SuggestedTask, TaskItem } from "@aistudy/contracts";
+import type { CourseGoal, PlanBlockReason, PlannedBlock, SuggestedTask, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone } from "../daily-draft";
 import { taskNotBeforeAt } from "../day-planner";
 import { taskCourseId } from "./types";
+import { goalPlanningPriority, goalPlanningReason, resolveGoalLearningContext } from "./goal-policy";
 
 export type RankForPlanInput = {
   tasks: readonly TaskItem[];
@@ -11,6 +12,7 @@ export type RankForPlanInput = {
   date: string;
   timeZone: string;
   now: Date;
+  courseGoals?: Readonly<Record<string, CourseGoal>>;
 };
 
 export type RankForPlanResult = {
@@ -62,14 +64,16 @@ export function interleaveCourses(items: readonly Ranked[]): Ranked[] {
 }
 
 /**
- * Order for planDay's preferredOrder: deadlines (fixed, earliest first), due retests,
- * yesterday's carry-over, the learner's own pending tasks, then suggestions; courses
- * interleaved within each post-deadline band (never across bands). Every id gets a structured reason.
+ * Confirmed deadlines remain first. Explicit goal priorities and imminent targets
+ * can bring tasks/suggestions ahead of ordinary work, without forced course swaps.
+ * Without an active priority, due retests, carry-over, own tasks and suggestions
+ * retain their existing order. Every id gets a structured reason.
  */
 export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
   const { date, timeZone } = input;
   const pending = input.tasks.filter((task) => task.status === "pending" && !deferredPastDay(task, date, timeZone));
   const byId = new Map(pending.map((task) => [task.id, task]));
+  const existingTaskIds = new Set(input.tasks.map(task => task.id));
   const placed = new Set<string>();
   const take = (task: TaskItem, reason: PlanBlockReason): Ranked => {
     placed.add(task.id);
@@ -107,21 +111,32 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     }));
 
   const suggested: Ranked[] = input.suggestions
-    .filter((suggestion) => !byId.has(suggestion.id))
+    .filter((suggestion) => !existingTaskIds.has(suggestion.id))
     .map((suggestion) => ({
       id: suggestion.id,
       courseId: suggestion.courseId,
       reason: { code: suggestion.reasonCode, label: suggestion.reason },
     }));
 
-  // Interleave only within each priority band so a lower-band course swap
-  // cannot jump ahead of a higher-band item (e.g. suggestion past a retest).
+  const contextFor = (item: Ranked) => resolveGoalLearningContext(
+    item.courseId ? input.courseGoals?.[item.courseId] ?? null : null, date,
+  );
+  const priorityFor = (item: Ranked) => goalPlanningPriority(contextFor(item));
+  const promoted = [...retests, ...carry, ...own, ...suggested]
+    .filter(item => priorityFor(item) > 0)
+    .sort((a, b) => priorityFor(b) - priorityFor(a))
+    .map(item => ({ ...item, reason: {
+      code: "goal_priority" as const,
+      label: `${goalPlanningReason(contextFor(item))}；${item.reason.label}`.slice(0, 500),
+    } }));
+  const ordinary = (items: Ranked[]) => interleaveCourses(items.filter(item => priorityFor(item) === 0));
   const ordered = [
     ...deadlines,
-    ...interleaveCourses(retests),
-    ...interleaveCourses(carry),
-    ...interleaveCourses(own),
-    ...interleaveCourses(suggested),
+    ...promoted,
+    ...ordinary(retests),
+    ...ordinary(carry),
+    ...ordinary(own),
+    ...ordinary(suggested),
   ];
   return {
     orderedTaskIds: ordered.map((item) => item.id),

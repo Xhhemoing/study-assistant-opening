@@ -77,6 +77,7 @@ export const planReasonCodeSchema = z.enum([
   "retest_due",
   "carry_over",
   "pending_task",
+  "goal_priority",
   "weak_skill",
   "review_cards",
   "new_skill",

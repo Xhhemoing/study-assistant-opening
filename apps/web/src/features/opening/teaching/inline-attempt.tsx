@@ -134,7 +134,7 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
       const history = await client.getObservationHistory(recorded.id);
       const head = history.revisions.find((row) => row.id === history.headObservationId);
       if (!head || head.revisionKind === "retract") { setUnavailable(true); setError("这条作答记录已撤回，无法继续核对。"); return; }
-      setRecorded(head); setChecked(head.verdictSource === "reference_checked");
+      setRecorded(head); setChecked(Boolean(head.referenceCheck));
       setRereadNeeded(false); revision.current = null;
     } catch (reason) {
       const failure = referenceCheckFailure(reason); setError(failure.message);
@@ -162,7 +162,7 @@ function InlineAttemptForm({ blockId, prompt, context, initialDraft, onDraftChan
       {!checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
       {answerKey?.answer && !answerKey.referenceSourceId ? <p className="text-xs text-zinc-600">参考答案没有关联可核验材料，本次保留为未核对。</p> : null}
-      {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? "已记录你对照参考后的正确判断。" : recorded.outcome === "incorrect" ? "已记录需要复查，后续可安排复测。" : "已保留未核对记录。"}</p> : null}
+      {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? "已保存你自对照后的正确判断，仍未经独立评分。" : recorded.outcome === "incorrect" ? "已记录需要复查，后续可安排复测。" : "已保留未核对记录。"}</p> : null}
     </div>}
     {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
   </div>;

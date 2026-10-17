@@ -224,6 +224,24 @@ describe("CourseGoalForm capability gate", () => {
 });
 
 describe("CourseGoalForm save / clear / validation", () => {
+  it("saves the selected learning strategy and priority without losing the revision", async () => {
+    const api = mockApi({ getAdaptivePrefs: vi.fn(async () => ({ prefs: { autonomy: "copilot" as const,
+      coachBudgetMinutes: 60, courseGoals: { [COURSE_ID]: { targetDate: null, weeklyMinutes: 120, revision: 4,
+        learningMode: "understand" as const, priority: 1 } } }, saved: true, invalidStoredPrefs: false })) });
+    mount(api); await flush();
+    let tree = rerender(api);
+    expect(findControl(tree, el => el.props.id === "course-goal-learning-mode")!.props.value).toBe("understand");
+    findControl(tree, el => el.props.id === "course-goal-learning-mode")!.props.onChange!({ target: { value: "exam" } });
+    findControl(tree, el => el.props.id === "course-goal-priority")!.props.onChange!({ target: { value: "5" } });
+    tree = rerender(api);
+    findControl(tree, el => el.type === CourseMilestones)!.props.onSaved!({ targetDate: null, weeklyMinutes: 120,
+      learningMode: "understand", priority: 1, revision: 5 });
+    tree = rerender(api);
+    const save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
+    await save.props.onClick!(); await flush();
+    expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID, expectedRevision: 4,
+      goal: { targetDate: null, weeklyMinutes: 120, learningMode: "exam", priority: 5 } } });
+  });
   it("keeps dirty base fields on their old revision after the milestones panel reloads", async () => {
     const api = mockApi({ getAdaptivePrefs: vi.fn(async () => ({ prefs: { autonomy: "copilot" as const,
       coachBudgetMinutes: 60, courseGoals: { [COURSE_ID]: { targetDate: null, weeklyMinutes: 120, revision: 1 } } },
@@ -238,7 +256,7 @@ describe("CourseGoalForm save / clear / validation", () => {
     const save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
     await save.props.onClick!(); await flush();
     expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID,
-      expectedRevision: 1, goal: { targetDate: null, weeklyMinutes: 150 } } });
+      expectedRevision: 1, goal: { targetDate: null, weeklyMinutes: 150, learningMode: "auto", priority: 0 } } });
   });
 
   it("synchronizes clean base fields and their revision from a refreshed milestone goal", async () => {
@@ -253,7 +271,7 @@ describe("CourseGoalForm save / clear / validation", () => {
     const save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
     await save.props.onClick!(); await flush();
     expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID,
-      expectedRevision: 2, goal: { targetDate: "2026-12-01", weeklyMinutes: 300 } } });
+      expectedRevision: 2, goal: { targetDate: "2026-12-01", weeklyMinutes: 300, learningMode: "auto", priority: 0 } } });
   });
 
   it("uses the deletion tombstone as the baseline after clearing and recreating", async () => {
@@ -263,7 +281,7 @@ describe("CourseGoalForm save / clear / validation", () => {
     const tree = rerender(api), save = findAll(tree, el => el.type === "button").find(el => buttonLabel(el).includes("保存"))!;
     await save.props.onClick!(); await flush();
     expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({ courseGoal: { courseId: COURSE_ID, expectedRevision: 8,
-      goal: { targetDate: null, weeklyMinutes: 120 } } });
+      goal: { targetDate: null, weeklyMinutes: 120, learningMode: "auto", priority: 0 } } });
   });
 
   it("saves with patch body matching form fields", async () => {
@@ -290,7 +308,7 @@ describe("CourseGoalForm save / clear / validation", () => {
     expect(api.patchAdaptivePrefs).toHaveBeenCalledWith({
       courseGoal: {
         courseId: COURSE_ID,
-        goal: { targetDate: "2026-12-01", weeklyMinutes: 210 },
+        goal: { targetDate: "2026-12-01", weeklyMinutes: 210, learningMode: "auto", priority: 0 },
         expectedRevision: 0,
       },
     });

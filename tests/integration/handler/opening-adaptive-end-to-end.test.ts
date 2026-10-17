@@ -12,7 +12,7 @@ import { GET as getToday } from "../../../apps/web/src/app/api/opening/today/rou
 import { POST as acceptPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/accept/route";
 import { POST as createActivity } from "../../../apps/web/src/app/api/opening/teaching-activities/route";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
-import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
+import { matrixAttemptFixture, matrixRequirement, matrixSkill } from "../opening-matrix-attempt-fixture";
 
 let fixture: OpeningFixture;
 let runtime: ReturnType<typeof createAuthRuntime>;
@@ -59,26 +59,24 @@ function request(path: string, body?: unknown) {
 const context = (id: string) => ({ params: Promise.resolve({ id }) });
 
 async function recordVerifiedError() {
-  const course = await learningAttemptFixture(fixture);
+  const course = await matrixAttemptFixture(fixture);
   await fixture.sql`INSERT INTO course_asset_memberships
     (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
     VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   const started = await createAttempt(request("/attempts", {
     sessionId: course.sessionId, clientKey: randomUUID(),
-    problem: { sourceId: course.sourceId, chunkId: course.chunkId, physicalPage: 1,
-      stemSnapshot: "1/2 + 1/2?", artifactKind: "reference_item" },
+    matrixExercise: { sourceId: course.sourceId, exerciseKey: "dimensions", variant: 0 },
   }));
   expect(started.status).toBe(201);
   const attempt = await started.json() as LearningAttempt;
   const submitted = await submitAttempt(request(`/attempts/${attempt.id}/submit`, {
-    clientKey: randomUUID(), answer: "2", outcome: "incorrect", assistance: "independent",
-    verdictSource: "reference_checked", referenceSourceId: course.sourceId,
-    referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
+    clientKey: randomUUID(), answer: "[3,2]", outcome: "correct", assistance: "independent", verdictSource: "self_report",
   }), context(attempt.id));
   expect(submitted.status).toBe(201);
   const observation = await submitted.json() as LearningObservation;
   expect(observation).toMatchObject({
-    attemptId: attempt.id, courseId: course.courseId, skillLabel: "fractions",
+    attemptId: attempt.id, courseId: course.courseId, skillLabel: matrixSkill,
+    outcome: "incorrect", verdictSource: "deterministic", requirementKey: matrixRequirement,
     eligibility: { verifiedCorrect: "no", independentAttempt: "yes" },
   });
   return { ...course, observation };
@@ -96,7 +94,7 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(draft.suggestedTasks).toHaveLength(2);
   const selected = draft.suggestedTasks!.find((item) => item.courseId === chosen.courseId)!;
   const other = draft.suggestedTasks!.find((item) => item.courseId === unchosen.courseId)!;
-  expect(selected).toMatchObject({ kind: "weak_skill", skillLabel: "fractions" });
+  expect(selected).toMatchObject({ kind: "weak_skill", skillLabel: matrixSkill });
   expect(draft.blocks.map((block) => block.taskId)).toEqual(expect.arrayContaining([selected.id, other.id]));
   expect(await repo.listTasks(fixture.scope)).toEqual([]);
 
@@ -107,7 +105,7 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(accepted).toMatchObject({ id: draft.id, status: "accepted" });
   expect(accepted.blocks.map((block) => block.taskId)).toEqual([selected.id]);
   expect(await repo.listTasks(fixture.scope)).toEqual([
-    expect.objectContaining({ id: selected.id, courseId: chosen.courseId, skillLabel: "fractions", status: "pending", origin: "planner" }),
+    expect.objectContaining({ id: selected.id, courseId: chosen.courseId, skillLabel: matrixSkill, status: "pending", origin: "planner" }),
   ]);
   const replay = await acceptPlan(request(`/plans/${draft.id}/accept`, acceptBody), context(draft.id));
   expect(replay.status).toBe(200);
@@ -131,15 +129,16 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(activityResponse.status).toBe(201);
   const activity = await activityResponse.json() as TeachingActivity;
   expect(activity).toMatchObject({ courseId: chosen.courseId, intentSummary: selected.title, sourceIds: [chosen.sourceId] });
-  expect(activity.learnerFocus).toMatchObject({ skillLabel: "fractions", activityKind: "targeted_explain", focusObservationId: chosen.observation.id });
+  expect(activity.learnerFocus).toMatchObject({ skillLabel: matrixSkill, activityKind: "targeted_explain", focusObservationId: chosen.observation.id });
   const rows = await fixture.sql`SELECT course_id, source_ids, goal_json FROM opening_teaching_activities
     WHERE id=${activity.id} AND workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
   expect(rows).toHaveLength(1);
   expect(rows[0]).toEqual({
     course_id: chosen.courseId, source_ids: [chosen.sourceId],
     goal_json: { learnerFocus: {
-      skillLabel: "fractions", requirementKey: null, activityKind: "targeted_explain", reasonCode: "verified_incorrect",
+      skillLabel: matrixSkill, requirementKey: matrixRequirement, activityKind: "targeted_explain", reasonCode: "verified_incorrect",
       focusObservationId: chosen.observation.id, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION,
+      goalContext: { mode: "understand", targetDate: null, daysRemaining: null, priority: 0, prerequisiteBudgetMinutes: 10, reasonCode: "long_term" },
     } },
   });
   const activityReplay = await createActivity(request("/teaching-activities", activityBody));

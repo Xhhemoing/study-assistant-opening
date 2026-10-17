@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { summarizeObservations } from "@aistudy/domain";
 import type { LearningSummary } from "@aistudy/contracts";
-import { courseEvidence, learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+import { courseEvidence, learningObservation, qualifiedInput } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 import { CourseLearningRecords, CourseSummaryNotice } from "./course-view";
 import { emptyCourseSummary } from "./course-summary-state";
 
@@ -23,12 +23,29 @@ describe("course learning records", () => {
   it("keeps source, eligibility and paginated history behind progressive disclosure", () => {
     const html = renderToStaticMarkup(createElement(CourseLearningRecords, { ...props, state: "ready" }));
     expect(html).toContain("fractions");
-    expect(html).toContain("记录为参考核对（资格另列）");
+    expect(html).toContain("历史参考核对记录（独立评分资格另列）");
     expect(html).toContain("本次独立作答");
     expect(html).toContain("有依据的参考核验");
     expect(html).toContain("按固定快照翻阅");
     expect(html).toContain("刷新历史（新快照）");
     expect(html).not.toContain(" open=");
+  });
+
+  it("keeps a learner reference comparison visible without presenting independently verified success", () => {
+    const compared = courseEvidence({
+      ...qualifiedInput,
+      observation: { ...qualifiedInput.observation, verdictSource: "self_report" },
+      context: { ...qualifiedInput.context, referenceCheckAuthority: "learner",
+        referenceCheck: { ...qualifiedInput.context.referenceCheck!, method: "learner_self_compare" } },
+    });
+    compared.observations[0]!.verdictSource = "self_report";
+    const comparedSummary = summarizeObservations(compared.observations, learningObservation.occurredAt, { evidenceContexts: compared.evidenceContexts });
+    const html = renderToStaticMarkup(createElement(CourseLearningRecords, { ...props, state: "ready", summary: comparedSummary }));
+    expect(comparedSummary[0]?.evidenceEligibility[0]?.eligibility.verifiedCorrect).toBe("unknown");
+    expect(html).toContain("证据来源：自报");
+    expect(html).toContain("学习者自对照参考，尚未经独立评分");
+    expect(html).toContain("待核验");
+    expect(html).not.toContain("最近观察到独立完成");
   });
 
   it("keeps missing qualification information pending even when a summary exists", () => {

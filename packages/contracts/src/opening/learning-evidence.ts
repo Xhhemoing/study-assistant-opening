@@ -9,7 +9,7 @@ export const evidenceEligibilitySchema = z.object({
   usableForCurrentVersion: z.enum(["yes", "no", "unknown"]),
   usableForDelayedCheck: z.enum(["yes", "no", "unknown"]),
   reasonCodes: z.array(z.string().min(1)),
-  policyVersion: z.literal("opening-evidence-v1"),
+  policyVersion: z.enum(["opening-evidence-v1", "opening-evidence-v2", "opening-evidence-v3"]),
 }).strict();
 export const referenceCheckInputSchema = z.object({
   referenceSourceId: uuidSchema,

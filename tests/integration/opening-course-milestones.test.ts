@@ -18,6 +18,28 @@ beforeEach(async () => {
 afterAll(async () => { await f?.close(); });
 
 describe("owned course milestones", () => {
+  it("persists goal policy through legacy and milestone edits with revision protection", async () => {
+    const learned = await learningAttemptFixture(f), repo = createOpeningAdaptivePrefsRepository(f.sql);
+    await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 0,
+      goal: { ...goal, learningMode: "exam", priority: 5 } } });
+    await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId,
+      goal: { ...goal, weeklyMinutes: 180 } } });
+    const value = milestone();
+    await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 2,
+      goal: { ...goal, weeklyMinutes: 180, milestones: [value] } } });
+    expect((await repo.get(f.scope)).prefs.courseGoals[learned.courseId]).toMatchObject({
+      revision: 3, learningMode: "exam", priority: 5, weeklyMinutes: 180, milestones: [{ id: value.id }],
+    });
+    expect((await repo.get(f.otherScope)).prefs.courseGoals).toEqual({});
+    await expect(repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 2,
+      goal: { ...goal, learningMode: "understand", priority: 1 } } })).rejects.toMatchObject({ code: "CONFLICT" });
+    await repo.patch(f.scope, { courseGoal: { courseId: learned.courseId, expectedRevision: 3,
+      goal: { ...goal, learningMode: "auto", priority: 0 } } });
+    expect((await repo.get(f.scope)).prefs.courseGoals[learned.courseId]).toMatchObject({
+      revision: 4, learningMode: "auto", priority: 0, milestones: [{ id: value.id }],
+    });
+  });
+
   it("persists outcome standards, learner confirmation and history without changing learning facts", async () => {
     const learned = await learningAttemptFixture(f), attempt = await learned.start(), observation = await learned.submit(attempt);
     const repo = createOpeningAdaptivePrefsRepository(f.sql);

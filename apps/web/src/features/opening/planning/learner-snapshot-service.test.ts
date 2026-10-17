@@ -79,6 +79,24 @@ describe("snapshot row mapping", () => {
     expect(toSnapshotKnowledgeNodes(null)).toEqual([]);
   });
 
+  it("uses only supported skills and supported edges, without treating missing evidence as mastery", () => {
+    const a = "44444444-4444-4444-8444-444444444444", b = "55555555-5555-4555-8555-555555555555";
+    const c = "66666666-6666-4666-8666-666666666666", chapter = "77777777-7777-4777-8777-777777777777";
+    const base = { courseId, label: "skill", kind: "concept", status: "supported", evidenceChunkIds: [] };
+    const edge = { to: b, kind: "prerequisite", status: "supported", evidenceChunkIds: [] };
+    const graph = { courseId, version: 1,
+      nodes: [{ ...base, id: a }, { ...base, id: b }, { ...base, id: c, status: "suggested" }, { ...base, id: chapter, kind: "chapter" }],
+      edges: [{ ...edge, from: a }, { ...edge, from: c }, { ...edge, from: chapter }],
+    };
+    expect(toSnapshotKnowledgeNodes(graph)).toEqual([
+      { id: a, title: "skill", prerequisiteIds: [] }, { id: b, title: "skill", prerequisiteIds: [a] },
+    ]);
+    for (const status of ["suggested", "needs_check"]) {
+      expect(toSnapshotKnowledgeNodes({ ...graph, edges: [{ ...edge, from: a, status }] })[1]?.prerequisiteIds).toEqual([]);
+    }
+    expect(toSnapshotKnowledgeNodes({ ...graph, nodes: graph.nodes.map(node => ({ ...node, status: "needs_check" })) })).toEqual([]);
+  });
+
   it("dates a closed task in the workspace zone and leaves pending tasks open", () => {
     const row = { clientKey: null, minutes: 25, courseId: null, updatedAt: "2026-10-14T17:30:00.000Z" };
     expect(toSnapshotTaskRow({ ...row, status: "done" }, "Asia/Shanghai").closedLocalDate).toBe("2026-10-15");
@@ -98,21 +116,23 @@ describe("snapshot assistance qualification", () => {
   const evidence = (exposures: readonly EvidenceHelpExposure[]): CourseEvidence => ({
     observations: [{ id: "revised-head", workspaceId: scope.workspaceId, sessionId: "session", courseId, skillLabel: "Linear Algebra",
       sourceIds: [], sourceTurnIds: [], answer: "1", outcome: "correct", assistance: "independent", clientKey: "revised-observation",
-      occurredAt: at, submittedAt: at, verdictSource: "reference_checked", referenceSourceId: "reference", evidenceVerdict: "MASTERY_NOT_ESTABLISHED", problemId: "problem" }],
+      occurredAt: at, submittedAt: at, verdictSource: "self_report", referenceSourceId: "reference", evidenceVerdict: "MASTERY_NOT_ESTABLISHED", problemId: "problem" }],
     evidenceContexts: { "revised-head": {
       observation: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", courseId, requirementKey: "requirement",
-        startedAt: submittedAt - 60_000, submittedAt, assistance: "independent", outcome: "correct", verdictSource: "reference_checked" },
+        startedAt: submittedAt - 60_000, submittedAt, assistance: "independent", outcome: "correct", verdictSource: "self_report" },
       context: { helpHistory: { complete: true, exposures }, version: { applicability: "exact", currentItemVersionId: "version" },
-        referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", referenceId: "reference", method: "compare", scope: "whole_answer", checkerId: "owner", outcome: "correct" } },
+        referenceCheckAuthority: "learner",
+        referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", referenceId: "reference", method: "learner_self_compare", scope: "whole_answer", checkerId: "owner", outcome: "correct" } },
     } },
   });
 
-  it.each(["hinted", "revealed"] as const)("keeps delivered %s in the next learning decision after self-report is revised to independent", level => {
+  it.each(["hinted", "revealed"] as const)("keeps delivered %s after a self-comparison revision and still requires diagnosis", level => {
     const input = evidence([{ ...exposure, level }]);
     const result = toSnapshotEvidence(input, new Date(at));
-    expect(result.observations[0]).toMatchObject({ assistance: level, verifiedCorrect: "yes", independentAttempt: "no" });
+    expect(result.observations[0]).toMatchObject({ assistance: level, verifiedCorrect: "unknown", independentAttempt: "no" });
+    expect(result.summaries[0]?.status).toBe("needs_check");
     expect(nextLearningStep({ status: result.summaries[0]!.status, observations: result.observations, wantsFullExplanation: false })).toMatchObject({
-      activityKind: "reduced_help_practice", reasonCode: "assistance_dependent",
+      activityKind: "diagnose", reasonCode: "unverified_only",
     });
     expect(input.observations[0]!.assistance).toBe("independent");
   });

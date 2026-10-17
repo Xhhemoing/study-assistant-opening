@@ -59,6 +59,10 @@ it("counts feedback received between the starts and submissions of overlapping a
 it("cannot erase received feedback by retracting the source observation and revising a repeated answer", async () => {
   const f = await matrixFixture(), first = await f.start(), original = await f.submit(first.id);
   const repeated = await f.start(), answer = await f.submit(repeated.id);
+  expect(original).toMatchObject({ verdictSource: "deterministic", serverEvaluation: { decision: "correct" },
+    eligibility: { independentAttempt: "yes", verifiedCorrect: "yes" } });
+  expect(answer).toMatchObject({ verdictSource: "deterministic", serverEvaluation: { decision: "correct" },
+    eligibility: { independentAttempt: "no", verifiedCorrect: "yes" } });
   await reviseOpeningLearningObservation(fixture.sql, fixture.scope, { rootObservationId: original.id, revisesObservationId: original.id,
     expectedHead: original.id, clientKey: randomUUID(), revisionKind: "retract", reason: "撤回本次结果" });
   const corrected = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
@@ -68,8 +72,12 @@ it("cannot erase received feedback by retracting the source observation and revi
       referenceCheck: { referenceSourceId: f.sourceId, method: "逐项对照参考计算", scope: "whole_answer" } },
   });
   expect(corrected.observation?.serverEvaluation).toBeUndefined();
-  expect(corrected.observation).toMatchObject({ verdictSource: "reference_checked", eligibility: {
-    independentAttempt: "no", verifiedCorrect: "yes", reasonCodes: expect.arrayContaining(["prior_evaluation_feedback"]),
+  expect(corrected.observation).toMatchObject({ verdictSource: "self_report", referenceCheck: {
+    referenceId: f.sourceId, checkerId: fixture.scope.ownerUserId, scope: "whole_answer",
+  }, eligibility: {
+    independentAttempt: "no", verifiedCorrect: "unknown", reasonCodes: expect.arrayContaining([
+      "prior_evaluation_feedback", "learner_reference_compare", "verification_source_untrusted",
+    ]),
   } });
 });
 it("recognizes the same catalogue question after changing its material association or source version", async () => {
