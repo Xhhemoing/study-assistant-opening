@@ -67,4 +67,32 @@ describe("manual reference provenance and exposure", () => {
       item_version_id: id(8), verdict_source: "self_report", submitted_at: time(1), recorded_at: null }]), scope, observation);
     expect(evaluateEvidenceEligibility(facts.observation, facts.context).independentAttempt).toBe("unknown");
   });
+
+  it("keeps another attempt's reference comparison during this answer unresolved", async () => {
+    const facts = await readOpeningLearningEvidenceContext(database([{ id: id(20), attempt_id: id(21), problem_id: id(7),
+      item_version_id: id(8), verdict_source: "self_report", submitted_at: time(1), recorded_at: time(5) }]), scope, {
+      ...observation, startedAt: time(3), submittedAt: time(6),
+    });
+    expect(facts.context.helpHistory?.exposures[0]?.deliveredAt).toBe(Date.parse(time(5)));
+    const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
+    expect(eligibility.independentAttempt).toBe("unknown");
+    expect(eligibility.reasonCodes).toContain("help_association_unknown");
+  });
+
+  it("does not backdate another attempt's post-submission comparison into this answer", async () => {
+    const facts = await readOpeningLearningEvidenceContext(database([{ id: id(20), attempt_id: id(21), problem_id: id(7),
+      item_version_id: id(8), verdict_source: "self_report", submitted_at: time(1), recorded_at: time(5) }]), scope, observation);
+    expect(facts.context.helpHistory?.exposures[0]?.deliveredAt).toBe(Date.parse(time(5)));
+    const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
+    expect(eligibility.independentAttempt).toBe("yes");
+    expect(eligibility.reasonCodes).not.toContain("prior_answer_exposure");
+    expect(eligibility.reasonCodes).not.toContain("help_association_unknown");
+  });
+
+  it("does not turn a later self-comparison of this attempt into help before its own submission", async () => {
+    const facts = await readOpeningLearningEvidenceContext(database([{ id: id(20), attempt_id: observation.attemptId, problem_id: id(7),
+      item_version_id: id(8), verdict_source: "self_report", submitted_at: time(1), recorded_at: time(5) }]), scope, observation);
+    expect(facts.context.helpHistory?.exposures).toEqual([]);
+    expect(evaluateEvidenceEligibility(facts.observation, facts.context).independentAttempt).toBe("yes");
+  });
 });

@@ -27,7 +27,7 @@ const capturedFacts = (record: LearningObservation) => ({
   startedAt: record.startedAt, submittedAt: record.submittedAt, occurredAt: record.occurredAt, sourceVersions: record.sourceVersions,
 });
 
-it("retains low-trust reference exposure after later corrections without backdating it to submission", async () => {
+it("retains concurrent low-trust reference exposure after later corrections at the actual check time", async () => {
   const f = await learningAttemptFixture(fixture), first = await f.start();
   const original = await f.submit(first);
   const beforeCheck = await f.attempts.create(fixture.scope, { sessionId: f.sessionId, problemId: first.problemId, clientKey: randomUUID() });
@@ -41,7 +41,8 @@ it("retains low-trust reference exposure after later corrections without backdat
     submitted_at=${checked.recordedAt!}::timestamptz-interval '2 minutes'
     WHERE id IN (${original.id},${checked.id})`;
   const before = await f.submit(beforeCheck);
-  expect(before.eligibility.independentAttempt).toBe("yes");
+  expect(before.eligibility.independentAttempt).toBe("unknown");
+  expect(before.eligibility.reasonCodes).toContain("help_association_unknown");
   expect(before.eligibility.reasonCodes).not.toContain("prior_answer_exposure");
   const afterCheck = await f.attempts.create(fixture.scope, { sessionId: f.sessionId, problemId: first.problemId, clientKey: randomUUID() });
   const removed = await replace(checked, { answer: "changed after comparing", outcome: "unverified" });
@@ -51,6 +52,24 @@ it("retains low-trust reference exposure after later corrections without backdat
   expect(after.eligibility.verifiedCorrect).toBe("unknown");
   const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
   expect(history.revisions.find(row => row.id === checked.id)?.referenceCheck).toEqual(checked.referenceCheck);
+});
+
+it("does not backdate a later comparison into an already submitted attempt or its own checked answer", async () => {
+  const f = await learningAttemptFixture(fixture), first = await f.start();
+  const original = await f.submit(first);
+  const second = await f.attempts.create(fixture.scope, { sessionId: f.sessionId, problemId: first.problemId, clientKey: randomUUID() });
+  const completed = await f.submit(second);
+  const checked = await replace(original, { referenceCheck: referenceCheck(f.sourceId), verdictSource: "reference_checked" });
+  expect(checked.eligibility?.independentAttempt).toBe("yes");
+  // Keep a strict boundary even when repository timestamps share one millisecond.
+  await fixture.sql`UPDATE opening_learning_observations
+    SET recorded_at=${completed.submittedAt!}::timestamptz+interval '1 minute' WHERE id=${checked.id}`;
+  const facts = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, completed);
+  expect(facts.context.helpHistory?.exposures.some(row => row.attemptId === first.id && row.deliveredAt! > Date.parse(completed.submittedAt!))).toBe(true);
+  const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
+  expect(eligibility.independentAttempt).toBe("yes");
+  expect(eligibility.reasonCodes).not.toContain("prior_answer_exposure");
+  expect(eligibility.reasonCodes).not.toContain("help_association_unknown");
 });
 
 it.each(["hinted", "revealed"] as const)("does not qualify an answer corrected after delivered %s help as independent", async level => {

@@ -116,21 +116,23 @@ describe("snapshot assistance qualification", () => {
   const evidence = (exposures: readonly EvidenceHelpExposure[]): CourseEvidence => ({
     observations: [{ id: "revised-head", workspaceId: scope.workspaceId, sessionId: "session", courseId, skillLabel: "Linear Algebra",
       sourceIds: [], sourceTurnIds: [], answer: "1", outcome: "correct", assistance: "independent", clientKey: "revised-observation",
-      occurredAt: at, submittedAt: at, verdictSource: "reference_checked", referenceSourceId: "reference", evidenceVerdict: "MASTERY_NOT_ESTABLISHED", problemId: "problem" }],
+      occurredAt: at, submittedAt: at, verdictSource: "self_report", referenceSourceId: "reference", evidenceVerdict: "MASTERY_NOT_ESTABLISHED", problemId: "problem" }],
     evidenceContexts: { "revised-head": {
       observation: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", courseId, requirementKey: "requirement",
-        startedAt: submittedAt - 60_000, submittedAt, assistance: "independent", outcome: "correct", verdictSource: "reference_checked" },
+        startedAt: submittedAt - 60_000, submittedAt, assistance: "independent", outcome: "correct", verdictSource: "self_report" },
       context: { helpHistory: { complete: true, exposures }, version: { applicability: "exact", currentItemVersionId: "version" },
-        referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", referenceId: "reference", method: "compare", scope: "whole_answer", checkerId: "owner", outcome: "correct" } },
+        referenceCheckAuthority: "learner",
+        referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "version", referenceId: "reference", method: "learner_self_compare", scope: "whole_answer", checkerId: "owner", outcome: "correct" } },
     } },
   });
 
-  it.each(["hinted", "revealed"] as const)("keeps delivered %s in the next learning decision after self-report is revised to independent", level => {
+  it.each(["hinted", "revealed"] as const)("keeps delivered %s after a self-comparison revision and still requires diagnosis", level => {
     const input = evidence([{ ...exposure, level }]);
     const result = toSnapshotEvidence(input, new Date(at));
-    expect(result.observations[0]).toMatchObject({ assistance: level, verifiedCorrect: "yes", independentAttempt: "no" });
+    expect(result.observations[0]).toMatchObject({ assistance: level, verifiedCorrect: "unknown", independentAttempt: "no" });
+    expect(result.summaries[0]?.status).toBe("needs_check");
     expect(nextLearningStep({ status: result.summaries[0]!.status, observations: result.observations, wantsFullExplanation: false })).toMatchObject({
-      activityKind: "reduced_help_practice", reasonCode: "assistance_dependent",
+      activityKind: "diagnose", reasonCode: "unverified_only",
     });
     expect(input.observations[0]!.assistance).toBe("independent");
   });

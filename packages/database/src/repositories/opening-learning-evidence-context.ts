@@ -151,8 +151,7 @@ export async function readOpeningLearningEvidenceContexts(
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []),
     ].map(row => [String(row.id), row])).values()];
-    const startedMs = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
-    if (record.problemId && Number.isFinite(startedMs)) {
+    if (record.problemId) {
       for (const prior of priorsByProblem.get(record.problemId) ?? []) {
         if (String(prior.id) === record.id) continue;
         if (record.attemptId && prior.attempt_id === record.attemptId) continue;
@@ -161,7 +160,8 @@ export async function readOpeningLearningEvidenceContexts(
         // happened when the check was recorded, not at that earlier submission.
         const checkedAt = prior.recorded_at;
         const checkedMs = checkedAt ? new Date(checkedAt as string | Date).getTime() : Number.NaN;
-        if (Number.isFinite(checkedMs) && checkedMs > startedMs) continue;
+        // Keep concurrent checks too. The domain distinguishes prior exposure,
+        // help during this answer and checks delivered after its capture time.
         history.push({
           id: `prior-reference:${prior.id}`,
           attempt_id: prior.attempt_id,
