@@ -1,12 +1,24 @@
-import { Queue, Worker } from "bullmq";
+import { randomUUID } from "node:crypto";
+import { Queue, QueueEvents, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
+async function cleanQueue(worker: Worker, events: QueueEvents, queue: Queue) {
+  const closed = await Promise.allSettled([worker.close(), events.close()]);
+  try {
+    await queue.obliterate({ force: true });
+  } finally {
+    await queue.close();
+  }
+  const failures = closed.filter(result => result.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Queue cleanup failed");
+}
+
 describe("BullMQ idempotent job id", () => {
   const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
-  const queueName = `spike-idempotency-${Date.now()}`;
+  const queueName = `spike-idempotency-${randomUUID()}`;
 
   afterAll(async () => {
     await connection.quit();
@@ -26,39 +38,26 @@ describe("BullMQ idempotent job id", () => {
     );
 
     const queue = new Queue(queueName, { connection });
+    // QueueEvents duplicates this client for its independent blocking stream.
+    const events = new QueueEvents(queueName, { connection });
 
     try {
-      await queue.add("recompute", { userId: "u1" }, { jobId });
-      await queue.add("recompute", { userId: "u1" }, { jobId });
-
-      const completed = await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error("job did not complete in time")),
-          10000,
-        );
-        worker.on("completed", async () => {
-          // allow a short window for a potential duplicate run
-          setTimeout(() => {
-            clearTimeout(timer);
-            resolve();
-          }, 500);
-        });
-        worker.on("failed", (_job, err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-      });
-
-      expect(completed).toBeUndefined();
+      await Promise.all([queue.waitUntilReady(), worker.waitUntilReady(), events.waitUntilReady()]);
+      const job = await queue.add("recompute", { userId: "u1" }, { jobId });
+      const duplicate = await queue.add("recompute", { userId: "u1" }, { jobId });
+      expect(duplicate.id).toBe(job.id);
+      // This also reads the persisted result if completion preceded the waiter.
+      expect(await job.waitUntilFinished(events, 10000)).toEqual({ ok: true });
+      await worker.pause(); // Wait for active work to finish before checking all states.
+      expect(await duplicate.waitUntilFinished(events, 10000)).toEqual({ ok: true });
       expect(executions).toBe(1);
 
       const counts = await queue.getJobCounts("completed", "waiting", "active");
       expect(counts.completed).toBe(1);
-      expect(counts.waiting + counts.active).toBe(0);
+      expect(counts.waiting).toBe(0);
+      expect(counts.active).toBe(0);
     } finally {
-      await worker.close();
-      await queue.obliterate({ force: true });
-      await queue.close();
+      await cleanQueue(worker, events, queue);
     }
   });
 });
