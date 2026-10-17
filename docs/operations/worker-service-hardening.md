@@ -46,6 +46,8 @@ bash "$helper" --restore --state-dir "$transition"
 
 `--restore` 只恢复这两份 worker 配置并执行 `daemon-reload`，不会改变服务启用状态，也不会恢复数据库或重置未知作业。发布调用方先停止需要切换的 worker、回退代码指针、还原 web 配置，再调用此接口，并按发布前状态恢复服务、检查健康。provision 写配置或 reload 失败时也会尝试恢复自身配置，同时保留失败退出码。新用户与新 cache 保留不影响回退，旧 venv/cache 始终仍在。
 
+跨执行协议回退另由发布脚本约束：尝试启动过带 claim-token 的 worker 后，不能自动启用会接管陈旧 running 的 legacy worker。发布脚本会保留 root 私有暂停记录，并安装 `90-aistudy-protocol-guard.conf` 的 `ConditionPathExists=!<暂停记录>`，阻止直接启动和开机自动启动；helper 不删除该 drop-in 或暂停记录。Web 恢复与 worker 暂停会明确报告为降级，发布工具 `restart/status` 返回 3。首次迁移失败且新 worker 从未尝试启动时仍可恢复原服务；新协议之间正常回退。完整处理及管理员对账步骤见 [hermes-deployment.md](hermes-deployment.md)。
+
 ## 本地验证
 
 `node --test tests/tooling/provision-worker.test.mjs` 执行 Python 标准库行为测试，覆盖配置不执行、身份创建、只读产物、缓存与 symlink、重复执行、快照、失败还原及首次安装回退。测试使用临时目录并模拟账户与 systemd 命令，不修改本机用户或服务；生产权限、SSH 与模型可用性仍需现场确认。
