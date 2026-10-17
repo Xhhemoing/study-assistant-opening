@@ -70,10 +70,11 @@ it("rejects referenceCheck that changes the answer and accepts same-answer self-
   expect(ok.status).toBe(201);
   const body = await ok.json();
   expect(body.observation).toMatchObject({
-    answer: original.answer, verdictSource: "reference_checked",
+    answer: original.answer, verdictSource: "self_report",
     referenceCheck: expect.objectContaining({ method: "learner_self_compare 第3页", scope: "whole_answer" }),
   });
-  expect(body.observation.eligibility.verifiedCorrect).toBe("yes");
+  expect(body.observation.eligibility.verifiedCorrect).toBe("unknown");
+  expect(body.observation.eligibility.reasonCodes).toContain("learner_reference_compare");
 });
 
 it("rejects a reference source outside the session", async () => {

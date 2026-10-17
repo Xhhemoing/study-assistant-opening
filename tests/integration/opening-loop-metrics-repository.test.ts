@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { createOpeningPlansRepository } from "@aistudy/database";
 import { readOpeningLoopMetrics } from "../../packages/database/src/repositories/opening-loop-metrics";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
-import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
 
 let fixture: OpeningFixture;
 beforeEach(async () => { fixture = await createOpeningFixture(); });
@@ -47,22 +47,50 @@ it("hand-counts creation cohorts, separates zero-cost TTL from actual receipts a
   await expect(readOpeningLoopMetrics(sql, { ...scope, ownerUserId: otherScope.ownerUserId }, { now })).rejects.toMatchObject({ code: "NOT_FOUND" });
 });
 
-it("reads current qualified heads directly, includes checked errors and excludes current privacy sources without summary repair", async () => {
-  const course = await learningAttemptFixture(fixture);
-  const attempt = await course.start({ requirementKey: "addition" });
-  const observation = await course.submit(attempt, { answer: "2", outcome: "incorrect", verdictSource: "reference_checked",
-    referenceSourceId: course.sourceId, referenceCheck: { referenceSourceId: course.sourceId, method: "reference comparison", scope: "whole_answer" } });
+it.each([
+  { answer: "[2,3]", outcome: "correct", correctCount: 1 },
+  { answer: "[3,2]", outcome: "incorrect", correctCount: 0 },
+] as const)("reads a real server-scored $outcome head and excludes current privacy sources without summary repair", async ({ answer, outcome, correctCount }) => {
+  const course = await matrixAttemptFixture(fixture);
+  const observation = await course.submit(await course.start(), { answer });
+  expect(observation).toMatchObject({ verdictSource: "deterministic", outcome,
+    eligibility: { independentAttempt: "yes", verifiedCorrect: correctCount ? "yes" : "no", usableForCurrentVersion: "yes" } });
   const clock = new Date(Date.now() + 1000);
   const before = await fixture.sql`SELECT * FROM opening_learning_eligibility WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY root_observation_id`;
   const initial = await readOpeningLoopMetrics(fixture.sql, fixture.scope, { now: clock });
   expect(initial.groups.learning.find(m => m.id === "learning.independent_check_coverage")).toMatchObject({ value: 1, numerator: 1, denominator: 1 });
-  expect(initial.groups.learning.find(m => m.id === "learning.checked_correct")).toMatchObject({ value: 0, numerator: 0, denominator: 1 });
+  expect(initial.groups.learning.find(m => m.id === "learning.deterministic_correct"))
+    .toMatchObject({ value: correctCount, numerator: correctCount, denominator: 1 });
+  expect(initial.groups.learning.find(m => m.id === "learning.checked_correct"))
+    .toMatchObject({ value: null, numerator: 0, denominator: 0 });
   await fixture.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${fixture.scope.workspaceId},${course.sourceId})`;
   const excluded = await readOpeningLoopMetrics(fixture.sql, fixture.scope, { now: clock });
   expect(excluded.groups.learning.find(m => m.id === "learning.independent_check_coverage")).toMatchObject({ value: null, denominator: 0,
     excludedReasonCounts: { privacy_excluded: 1 } });
   expect(await fixture.sql`SELECT * FROM opening_learning_eligibility WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY root_observation_id`).toEqual(before);
   expect((await fixture.sql`SELECT id FROM opening_learning_observations WHERE id=${observation.id}`)).toHaveLength(1);
+});
+
+it("retains assisted and version-changed attempts in coverage denominators while counting only qualified success and error", async () => {
+  const current = await matrixAttemptFixture(fixture);
+  await current.submit(await current.start(), { answer: "[3,2]" });
+  await current.submit(await current.start());
+  const assisted = await current.start();
+  await current.help(assisted);
+  await current.submit(assisted);
+  const changed = await matrixAttemptFixture(fixture);
+  await changed.submit(await changed.start());
+  await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${changed.sourceId}`;
+  const before = await fixture.sql`SELECT * FROM opening_learning_eligibility WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY root_observation_id`;
+  const report = await readOpeningLoopMetrics(fixture.sql, fixture.scope, { now: new Date(Date.now() + 1000) });
+  expect(report.groups.learning.find(m => m.id === "learning.independent_check_coverage"))
+    .toMatchObject({ value: 0.5, numerator: 2, denominator: 4,
+      excludedReasonCounts: { help_before_submission: 1, version_changed_needs_check: 1 } });
+  expect(report.groups.learning.find(m => m.id === "learning.deterministic_correct"))
+    .toMatchObject({ value: 0.5, numerator: 1, denominator: 2 });
+  expect(report.groups.learning.find(m => m.id === "learning.qualification_unknown"))
+    .toMatchObject({ value: 0.25, numerator: 1, denominator: 4 });
+  expect(await fixture.sql`SELECT * FROM opening_learning_eligibility WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY root_observation_id`).toEqual(before);
 });
 
 it("counts task feedback as real actions with optional reasons and does not infer historic completion rates", async () => {
