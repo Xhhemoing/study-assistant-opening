@@ -79,6 +79,8 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
           <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#intervention">介入偏好</a>
           <span aria-hidden="true">·</span>
+          <Link className={navLinkClass} href="/opening/settings/learning-test">学习测试</Link>
+          <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href={`${basePath}/advanced`}>高级</Link>
           <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>开启 AI 每日额度</Link>
@@ -150,6 +152,16 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
                 </button>
               </>
             ) : null}
+          </div>
+        </section>
+
+        <section className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="learning-test-heading">
+          <div>
+            <h2 className="text-sm font-medium text-zinc-900" id="learning-test-heading">学习测试</h2>
+            <p className="mt-1 text-xs leading-6 text-zinc-500">自愿参加小单元练习与延迟复测，用真实作答检查学习判断是否准确。</p>
+          </div>
+          <div>
+            <Link className={ui.secondary} href="/opening/settings/learning-test">打开学习测试</Link>
           </div>
         </section>
 

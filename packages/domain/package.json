@@ -13,6 +13,10 @@
     "./native": {
       "types": "./src/portability/native/index.ts",
       "default": "./src/portability/native/index.ts"
+    },
+    "./measurement-catalog": {
+      "types": "./src/opening/measurement/catalog.ts",
+      "default": "./src/opening/measurement/catalog.ts"
     }
   },
   "scripts": {
