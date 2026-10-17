@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { MediaSegment } from "@aistudy/contracts";
 import { validateMediaSegments } from "./media-segments";
+import { createParserSubprocessEnv } from "./subprocess-env";
 
 /** Hard limits for opening video uploads (contracts / capability-interfaces). */
 export const MEDIA_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
@@ -142,7 +143,7 @@ export function createNodeMediaRunner(paths: { ffprobePath?: string; ffmpegPath?
         windowsHide: true,
         // Never use a shell — argv must remain literal.
         shell: false,
-        env: { ...process.env, AV_LOG_FORCE_NOCOLOR: "1" },
+        env: createParserSubprocessEnv("media"),
       });
       let stdout = "";
       let stderr = "";

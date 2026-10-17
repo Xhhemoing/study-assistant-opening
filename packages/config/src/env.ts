@@ -12,7 +12,24 @@ export class EnvValidationError extends Error {
   }
 }
 
+const quotaInteger = (fallback: string) => z.string().trim().regex(/^\d+$/, "must be a positive safe integer")
+  .default(fallback).transform(Number).refine(value => Number.isSafeInteger(value) && value > 0, "must be a positive safe integer");
+const openingUploadQuotaFields = {
+  OPENING_UPLOAD_MAX_WORKSPACE_BYTES: quotaInteger("2147483648"),
+  OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS: quotaInteger("200"),
+};
+const openingUploadQuotaSchema = z.object(openingUploadQuotaFields);
+export type OpeningUploadQuota = { maxBytes: number; maxObjects: number };
+
+/** Server-side admission limits; independent of infrastructure credentials. */
+export function loadOpeningUploadQuota(source: NodeJS.ProcessEnv = process.env): OpeningUploadQuota {
+  const parsed = openingUploadQuotaSchema.safeParse(source);
+  if (!parsed.success) throw new EnvValidationError(parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`));
+  return { maxBytes: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_BYTES, maxObjects: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS };
+}
+
 const envSchema = z.object({
+  ...openingUploadQuotaFields,
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   REDIS_URL: z.string().min(1, "REDIS_URL is required"),

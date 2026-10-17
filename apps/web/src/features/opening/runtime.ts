@@ -33,7 +33,7 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
-import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 
@@ -114,7 +114,7 @@ export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
     envCapCents: catalog?.dailyCapCents ?? 100_000,
     pricingConfigured: Boolean(catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
-  const sources = createOpeningSourceRepository(sql);
+  const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const chunks = createOpeningSourceChunksRepository(sql);
   const privacySnapshot = (scope: EphemeralScope) => sql.begin("isolation level repeatable read read only", async tx => {
     const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;

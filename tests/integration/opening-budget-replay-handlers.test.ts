@@ -1,7 +1,7 @@
 /**
- * PR-D: completed-key replay in tutor-turn and compile-teaching-unit loads the
- * persisted result through resultRef — no provider call, no new charge.
- * Real Postgres ledger; tutor path uses the real tutor-jobs repository.
+ * Durable tutor redelivery and interrupted-writeback safety, plus teaching
+ * completed-key replay. Real Postgres ledger and tutor-jobs repository; no
+ * terminal/running tutor job is reset to queued to manufacture a retry entry.
  */
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -51,18 +51,16 @@ function tutor(tutorJobsOverride?: Partial<ReturnType<typeof createOpeningTutorJ
 async function newTurn() {
   const conversations = createOpeningConversationRepository(f.sql);
   const c = await conversations.create(f.scope, { title: "replay", courseId: null });
-  return conversations.appendSavedTurn({
-    scope: f.scope, conversationId: c.id, text: "explain", sourceIds: [], mode: "explain",
+  const input = {
+    scope: f.scope, conversationId: c.id, text: "explain", sourceIds: [], mode: "explain" as const,
     clientKey: randomUUID(), learningSessionId: null, currentPage: null, chunkId: null,
-  });
-}
-/** Make the job reclaimable (stale running), as after a worker crash/redelivery. */
-async function makeReclaimable(jobId: string) {
-  await f.sql`UPDATE opening_tutor_jobs SET status='running', updated_at = now() - interval '10 minutes' WHERE id=${jobId}`;
+  };
+  const saved = await conversations.appendSavedTurn(input);
+  return { ...saved, replaySubmission: () => conversations.appendSavedTurn(input) };
 }
 
-describe("tutor-turn completed replay", () => {
-  it("loads the persisted assistant turn via resultRef: no provider call, no new charge, job succeeds", async () => {
+describe("tutor-turn redelivery and interrupted writeback", () => {
+  it("replays the saved submission and reads its persisted result without reclaiming a completed job", async () => {
     const t = await newTurn();
     const first = tutor();
     await first.run(t.jobId);
@@ -70,9 +68,13 @@ describe("tutor-turn completed replay", () => {
     const before = await ledger();
     const ref = await f.sql`SELECT result_ref FROM opening_budget_reservations WHERE request_id=${`tutor:${t.jobId}`}`;
     expect(ref[0]!.result_ref).toBe(`opening_turn:${t.assistantTurnId}`);
-    await makeReclaimable(t.jobId);
+    expect(await t.replaySubmission()).toEqual({ turnId: t.turnId, jobId: t.jobId, assistantTurnId: t.assistantTurnId });
+    const repo = createOpeningTutorJobsRepository(f.sql);
+    expect(await repo.loadReplayedTurn(f.scope, String(ref[0]!.result_ref))).toEqual({
+      id: t.assistantTurnId, status: "complete", text: "persisted answer",
+    });
     const second = tutor();
-    await expect(second.run(t.jobId)).resolves.toEqual({ skipped: false, replayed: true });
+    await expect(second.run(t.jobId)).resolves.toEqual({ skipped: true });
     expect(second.provider.complete).not.toHaveBeenCalled();
     const after = await ledger();
     expect(after).toEqual(before);
@@ -80,26 +82,78 @@ describe("tutor-turn completed replay", () => {
     const turn = await f.sql`SELECT status, text FROM opening_turns WHERE id=${t.assistantTurnId}`;
     expect(job[0]!.status).toBe("succeeded");
     expect(turn[0]).toEqual({ status: "complete", text: "persisted answer" });
-    record("tutor-turn completed replay (result persisted)", 2, 1, after, "loaded opening_turn via resultRef; job succeeded");
+    record("tutor-turn completed submission redelivery", 2, 1, after, "read persisted opening_turn; succeeded job was not reclaimed");
   });
 
-  it("result settled but not persisted: no re-send, no new charge, job outcome_unknown (never fake success)", async () => {
+  it("does not reclaim stale running work; recovery preserves settled spend and fences late writeback", async () => {
+    const t = await newTurn();
+    const repo = createOpeningTutorJobsRepository(f.sql);
+    let pauseWriteback!: () => void;
+    let resumeWriteback!: () => void;
+    const atWriteback = new Promise<void>((resolve) => { pauseWriteback = resolve; });
+    const resumed = new Promise<void>((resolve) => { resumeWriteback = resolve; });
+    // The real handler claims queued work and settles the call. Pause only at
+    // the write boundary, modeling a worker lost after settlement, before SQL.
+    const first = tutor({ completeTurn: async (input) => {
+      pauseWriteback();
+      await resumed;
+      await repo.completeTurn(input);
+    } });
+    const inFlight = first.run(t.jobId);
+    try {
+      await Promise.race([atWriteback, inFlight.then(() => { throw new Error("handler did not reach writeback"); })]);
+      expect(first.provider.complete).toHaveBeenCalledTimes(1);
+      const before = await ledger();
+      const ref = await f.sql`SELECT state, result_ref FROM opening_budget_reservations WHERE request_id=${`tutor:${t.jobId}`}`;
+      expect(ref[0]).toEqual({ state: "completed", result_ref: `opening_turn:${t.assistantTurnId}` });
+      const aged = await f.sql`UPDATE opening_tutor_jobs SET updated_at = now() - interval '10 minutes'
+        WHERE id=${t.jobId} AND status='running' RETURNING claim_token`;
+      expect(aged).toHaveLength(1);
+      expect(aged[0]!.claim_token).toEqual(expect.any(String));
+      const second = tutor();
+      await expect(second.run(t.jobId)).resolves.toEqual({ skipped: true });
+      expect(await repo.recoverExpired()).toBe(1);
+      await expect(second.run(t.jobId)).resolves.toEqual({ skipped: true });
+      expect(await t.replaySubmission()).toEqual({ turnId: t.turnId, jobId: t.jobId, assistantTurnId: t.assistantTurnId });
+      expect(await repo.get(f.scope, t.jobId)).toMatchObject({ status: "outcome_unknown" });
+      const turn = await repo.loadReplayedTurn(f.scope, `opening_turn:${t.assistantTurnId}`);
+      expect(turn?.status).toBe("outcome_unknown");
+      expect(second.provider.complete).not.toHaveBeenCalled();
+      expect(await ledger()).toEqual(before);
+
+      resumeWriteback();
+      await inFlight;
+      expect(await repo.get(f.scope, t.jobId)).toMatchObject({ status: "outcome_unknown" });
+      expect(await repo.loadReplayedTurn(f.scope, `opening_turn:${t.assistantTurnId}`)).toEqual(turn);
+      const after = await ledger();
+      expect(after).toEqual(before);
+      record("tutor-turn settled before interrupted writeback", 3, 1, after, "stale running skipped; recovered outcome_unknown; late write fenced; no re-send");
+    } finally {
+      resumeWriteback();
+      await inFlight;
+    }
+  });
+
+  it("keeps a thrown writeback failure terminal instead of inventing a recoverable retry", async () => {
     const t = await newTurn();
     const first = tutor({ completeTurn: async () => { throw new Error("write-back failed"); } });
     await expect(first.run(t.jobId)).rejects.toThrow("write-back failed");
     const before = await ledger();
-    await makeReclaimable(t.jobId);
+    const repo = createOpeningTutorJobsRepository(f.sql);
+    expect(await repo.get(f.scope, t.jobId)).toMatchObject({ status: "failed" });
+    expect(await repo.recoverExpired()).toBe(0);
+    expect(await t.replaySubmission()).toEqual({ turnId: t.turnId, jobId: t.jobId, assistantTurnId: t.assistantTurnId });
     const second = tutor();
-    await expect(second.run(t.jobId)).resolves.toEqual({ skipped: false, replayed: true });
+    await expect(second.run(t.jobId)).resolves.toEqual({ skipped: true });
     expect(first.provider.complete).toHaveBeenCalledTimes(1);
     expect(second.provider.complete).not.toHaveBeenCalled();
     const after = await ledger();
     expect(after).toEqual(before);
     const job = await f.sql`SELECT status FROM opening_tutor_jobs WHERE id=${t.jobId}`;
     const turn = await f.sql`SELECT status FROM opening_turns WHERE id=${t.assistantTurnId}`;
-    expect(job[0]!.status).toBe("outcome_unknown");
+    expect(job[0]!.status).toBe("failed");
     expect(turn[0]!.status).not.toBe("complete");
-    record("tutor-turn completed replay (result missing)", 2, 1, after, "job outcome_unknown; no re-send");
+    record("tutor-turn settled writeback failure", 2, 1, after, "failed job remains terminal; settled result unavailable; no re-send");
   });
 
   it("loadReplayedTurn is scope-bound", async () => {

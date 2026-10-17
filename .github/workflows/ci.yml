@@ -175,10 +175,10 @@ jobs:
         run: npm test -- --project '@aistudy/spike-*'
 
       - name: Integration tests
-        run: npm run test:integration
+        run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
 
       - name: Route handler tests
-        run: npm run test:handler
+        run: npm run test:handler -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/handler.json
 
       - name: Browser tests
         run: npm run test:browser
@@ -186,12 +186,13 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Upload browser failure artifacts
+      - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ci-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            test-reports/
             playwright-report/
             test-results/
           if-no-files-found: ignore

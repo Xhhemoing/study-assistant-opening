@@ -74,3 +74,6 @@ infra/docker/opening.env
 
 # Disposable local Postgres data for PR-K (do not commit)
 .pg-prk/
+
+# CI diagnostic reports
+test-reports/

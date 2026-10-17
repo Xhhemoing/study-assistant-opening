@@ -177,11 +177,15 @@ describe("native backup round-trip", () => {
   it.each(["skip", "reject"] as const)("does not disclose foreign id conflicts through %s results", async conflictPolicy => {
     const victim = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Victim", passwordHash: "unused" });
     const attacker = await identity.createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Attacker", passwordHash: "unused" });
-    const document = await library.createDocument({ workspaceId: victim.workspace.id, title: "private", lifecycle: "scratch", blocks: [] });
+    const document = await library.createDocument({ workspaceId: victim.workspace.id, title: "private", lifecycle: "scratch",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "private victim content" } }] });
     const packed = await backups.exportWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id });
     packed.records.documents = [{ id: document.id, title: "forged", lifecycle: "scratch", schemaVersion: 1, currentRevisionNumber: 1, openingProvenance: null }];
     await expect(backups.restoreWorkspace({ workspaceId: attacker.workspace.id, ownerUserId: attacker.user.id, packed, conflictPolicy }))
       .rejects.toMatchObject({ code: "VALIDATION", message: "Backup records conflict with the target workspace or contain invalid references" });
+    expect(await library.getDocument({ workspaceId: victim.workspace.id, documentId: document.id })).toEqual(document);
+    const [attackerCount] = await sql`SELECT count(*)::integer AS count FROM library_documents WHERE workspace_id=${attacker.workspace.id}`;
+    expect(attackerCount!.count).toBe(0);
   });
 
   it("preserves legitimate broken links and historical learning identities", async () => {

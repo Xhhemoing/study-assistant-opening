@@ -28,6 +28,7 @@ export * from "./migration-preflight";
 export * from "./schema/opening-sources";
 export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
+export { reserveOpeningSourceQuota } from "./repositories/opening-source-quota";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
 export {
   listReadySourceIdsForCourse,

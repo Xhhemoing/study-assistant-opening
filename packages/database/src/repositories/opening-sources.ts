@@ -5,20 +5,16 @@ import type { OpeningJobRecord } from "./opening-jobs";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
+import { DEFAULT_OPENING_SOURCE_QUOTA, reserveOpeningSourceQuota, type OpeningSourceQuota } from "./opening-source-quota";
+import { OpeningSourceError } from "./opening-source-errors";
 
-export type OpeningSourceErrorCode =
-  | "NOT_FOUND"
-  | "VALIDATION"
-  | "CONFLICT";
+export type { OpeningSourceQuota } from "./opening-source-quota";
+export { OpeningSourceError, type OpeningSourceErrorCode } from "./opening-source-errors";
 
-export class OpeningSourceError extends Error {
-  readonly code: OpeningSourceErrorCode;
-  constructor(code: OpeningSourceErrorCode, message: string) {
-    super(message);
-    this.name = "OpeningSourceError";
-    this.code = code;
-  }
-}
+export type OpeningSourceRepositoryOptions = {
+  quota?: OpeningSourceQuota;
+  now?: () => Date;
+};
 
 export type OpeningScope = OpeningJobScope;
 
@@ -52,6 +48,7 @@ export type SweepExpiredPendingUploadsOptions = {
 export type OpeningSourceRepository = {
   create(scope: OpeningScope, input: UploadInput): Promise<SourceRecord>;
   get(scope: OpeningScope, id: string): Promise<SourceRecord>;
+  getPendingUpload(scope: OpeningScope, id: string): Promise<{ source: SourceRecord; expiresAt: string }>;
   issueUploadTicket(scope: OpeningScope, id: string, sign: (source: SourceRecord) => Promise<Omit<UploadTicket, "source">>): Promise<UploadTicket>;
   /** Marks pending → uploaded after validateStoredUpload at the boundary. */
   complete(
@@ -197,21 +194,26 @@ export async function sweepExpiredPendingUploadsAll(
   return sweepExpiredPendingUploadsQuery(sql, {}, options);
 }
 
-export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository {
+export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRepositoryOptions = {}): OpeningSourceRepository {
+  const quota = options.quota ?? DEFAULT_OPENING_SOURCE_QUOTA;
+  const now = options.now ?? (() => new Date());
   return {
     async create(scope, input) {
-      const id = randomUUID();
-      const rows = await sql`
-        INSERT INTO opening_sources (
-          id, workspace_id, name, mime, bytes, sha256, version,
-          upload_state, parse_state, error
-        ) VALUES (
-          ${id}, ${scope.workspaceId}, ${input.name}, ${input.mime}, ${input.bytes},
-          ${input.sha256}, 0, 'pending', 'not_started', NULL
-        )
-        RETURNING *
-      `;
-      return mapSource(rows[0] as Record<string, unknown>);
+      return sql.begin(async tx => {
+        await reserveOpeningSourceQuota(tx, scope, input.bytes, quota);
+        const id = randomUUID();
+        const rows = await tx`
+          INSERT INTO opening_sources (
+            id, workspace_id, name, mime, bytes, sha256, version,
+            upload_state, parse_state, error
+          ) VALUES (
+            ${id}, ${scope.workspaceId}, ${input.name}, ${input.mime}, ${input.bytes},
+            ${input.sha256}, 0, 'pending', 'not_started', NULL
+          )
+          RETURNING *
+        `;
+        return mapSource(rows[0] as Record<string, unknown>);
+      });
     },
 
     async get(scope, id) {
@@ -224,6 +226,20 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
         throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
       }
       return mapSource(rows[0] as Record<string, unknown>);
+    },
+
+    async getPendingUpload(scope, id) {
+      const rows = await sql`SELECT * FROM opening_sources
+        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='pending'
+          AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId})
+        LIMIT 1`;
+      if (!rows.length || rows[0]!.upload_state !== "pending") throw new OpeningSourceError("NOT_FOUND", "Pending upload not found");
+      const row = rows[0]!;
+      const expires = row.upload_url_expires_at == null
+        ? new Date(row.created_at as string | Date).getTime() + PENDING_UPLOAD_TTL_FALLBACK_MS
+        : new Date(row.upload_url_expires_at as string | Date).getTime();
+      if (!Number.isFinite(expires) || expires <= now().getTime()) throw new OpeningSourceError("CONFLICT", "Upload lease has expired");
+      return { source: mapSource(row), expiresAt: new Date(expires).toISOString() };
     },
 
     async issueUploadTicket(scope, id, sign) {
@@ -350,6 +366,7 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
     async createWithParseJob(scope, input) {
       const kind = input.kind ?? "parse";
       return sql.begin(async (tx) => {
+        await reserveOpeningSourceQuota(tx, scope, input.source.bytes, quota);
         const sourceId = randomUUID();
         const sourceRows = await tx`
           INSERT INTO opening_sources (

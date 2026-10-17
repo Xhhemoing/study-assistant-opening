@@ -34,6 +34,8 @@ describe("tutor turn handler", () => {
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
+      loadReplayedTurn: vi.fn(async (_scope: unknown, _ref: string): Promise<{ id: string; status: string; text: string } | null> => null),
+      completeFromReplay: vi.fn(async () => false),
       fail: vi.fn(async () => undefined),
       claimExecution: async () => true, markUnknown: vi.fn(async () => undefined),
     };
@@ -44,7 +46,7 @@ describe("tutor turn handler", () => {
         : overrides.chunks ?? (sourceId === secondSourceId ? [chunkC] : [chunkA, chunkB])),
     };
     const budget = {
-      reserve: vi.fn(async () => ({ id: "res-1" })),
+      reserve: vi.fn(async (): Promise<{ id: string; state?: string; resultRef?: string | null }> => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
       claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
@@ -53,6 +55,43 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  // These doubles represent a claim already granted by the repository. They
+  // cover the defensive settled-ledger branch, not a public retry/requeue API.
+  it("reads a completed resultRef only after an authorized claim, without sending or settling again", async () => {
+    const claimToken = "00000000-0000-4000-8000-000000000008";
+    const { deps, tutorJobs, budget, provider } = setup({ claim: { ...claimedJob, claimToken } });
+    const resultRef = `opening_turn:${claimedJob.assistantTurnId}`;
+    budget.reserve.mockResolvedValueOnce({ id: "res-1", state: "completed", resultRef });
+    tutorJobs.loadReplayedTurn.mockResolvedValueOnce({ id: claimedJob.assistantTurnId, status: "complete", text: "persisted answer" });
+    tutorJobs.completeFromReplay.mockResolvedValueOnce(true);
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).resolves.toEqual({ skipped: false, replayed: true });
+
+    expect(tutorJobs.loadReplayedTurn).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId }, resultRef);
+    expect(tutorJobs.completeFromReplay).toHaveBeenCalledWith(expect.anything(), claimedJob.id, claimedJob.assistantTurnId, claimToken);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.settle).not.toHaveBeenCalled();
+    expect(budget.release).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+  });
+
+  it("marks an authorized claim unknown when its settled resultRef has no complete persisted answer", async () => {
+    const claimToken = "00000000-0000-4000-8000-000000000008";
+    const { deps, tutorJobs, budget, provider } = setup({ claim: { ...claimedJob, claimToken } });
+    budget.reserve.mockResolvedValueOnce({ id: "res-1", state: "completed", resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
+    tutorJobs.loadReplayedTurn.mockResolvedValueOnce({ id: claimedJob.assistantTurnId, status: "pending", text: "" });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).resolves.toEqual({ skipped: false, replayed: true });
+
+    expect(tutorJobs.markUnknown).toHaveBeenCalledWith(expect.anything(), claimedJob.id, expect.stringContaining("not re-sending"), claimToken);
+    expect(tutorJobs.completeFromReplay).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.settle).not.toHaveBeenCalled();
+    expect(budget.release).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
 
   it("adds a bounded owned planning summary to the same budgeted tutor request", async () => {
     const { deps, provider, budget } = setup();
@@ -141,20 +180,26 @@ describe("tutor turn handler", () => {
     expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", 2, { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
   });
 
-  it("BC1: same tutor job retries reuse one ledger reservation (operationId)", async () => {
+  it("BC1: the same tutor operation keeps one unknown reservation and never re-sends", async () => {
     // Fake ledger mirrors opening-budget idempotency by requestId (operationId key).
-    const reservations: { requestId: string; id: string }[] = [];
+    const reservations: { requestId: string; id: string; state: "reserved"; outcomeUnknownAt: Date | null }[] = [];
     const budget = {
       reserve: vi.fn(async (_scope: unknown, input: { requestId: string }) => {
         const hit = reservations.find((r) => r.requestId === input.requestId);
-        if (hit) return { id: hit.id };
+        if (hit) return hit;
         const id = `res-${reservations.length + 1}`;
-        reservations.push({ requestId: input.requestId, id });
-        return { id };
+        const fresh = { requestId: input.requestId, id, state: "reserved" as const, outcomeUnknownAt: null };
+        reservations.push(fresh);
+        return fresh;
       }),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
+      claimExecution: async () => true,
+      markUnknown: vi.fn(async (_scope: unknown, reservationId: string) => {
+        const reservation = reservations.find((r) => r.id === reservationId)!;
+        reservation.outcomeUnknownAt = new Date();
+        return {};
+      }),
     };
     const { deps, tutorJobs } = setup({
       provider: async () => {
@@ -168,16 +213,18 @@ describe("tutor turn handler", () => {
       expect.anything(),
       expect.objectContaining({ requestId: `tutor:${claimedJob.id}` }),
     );
-    // Second attempt of the same durable job: claim again, reuse reserve key.
+    // Even if a claim double grants another invocation, the real ledger's
+    // unknown disposition must block a second send under the same key.
     tutorJobs.claim.mockResolvedValueOnce(claimedJob);
     budget.settle.mockClear();
     const okProvider = { complete: vi.fn(async () => ({ text: "retry ok", citedChunkIds: [chunkA.id], requestId: null, candidates: [], inputTokens: 10, outputTokens: 5 })) };
     deps.provider = okProvider;
-    await createTutorTurnHandler(deps)(claimedJob.id);
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN" });
     expect(reservations).toHaveLength(1);
     expect(reservations[0]!.requestId).toBe(`tutor:${claimedJob.id}`);
-    expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
-    expect(okProvider.complete).toHaveBeenCalledOnce();
+    expect(budget.settle).not.toHaveBeenCalled();
+    expect(budget.release).not.toHaveBeenCalled();
+    expect(okProvider.complete).not.toHaveBeenCalled();
   });
 
   it("routes a page-citation Clarify refusal to fail(..., {code, nextAction}) (LAB-A01/U01)", async () => {

@@ -5,7 +5,7 @@ import { createOpeningBudgetRepository, createOpeningJobRepository, createOpenin
   createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createSourcePageImages } from "./runtime/source-page-images";
-import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createProducerRedisConnection, createQueues } from "./runtime/queue";
 import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
@@ -83,7 +83,7 @@ export async function main(): Promise<void> {
   const privacyRepo = createOpeningPrivacyRepository(sql);
   const learning = createOpeningLearningRepository(sql);
   const retests = createOpeningRetestRepository(sql);
-  const sources = createOpeningSourceRepository(sql);
+  const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3(env.s3);
   const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir });

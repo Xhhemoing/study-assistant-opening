@@ -1,6 +1,5 @@
 import { jsonError, mapDomainError } from "../../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../../features/opening/runtime";
-import { readOpeningRawBody } from "../../../../../../features/opening/request-body";
 import { createOpeningSourceService } from "../../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../../features/opening/sources/upload-policy";
 import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
@@ -11,7 +10,7 @@ function storageError(error: unknown): Response | undefined {
   if (error instanceof UploadPolicyError) {
     return Response.json(
       { error: { code: error.code, message: error.message } },
-      { status: 400 },
+      { status: error.status },
     );
   }
   if (isOpeningDataError(error, "storage")) {
@@ -23,7 +22,7 @@ function storageError(error: unknown): Response | undefined {
   return undefined;
 }
 
-/** Same-origin staging PUT: cookie auth + body → OpeningS3.putObject(stagingKey). */
+/** Same-origin authenticated staging PUT with bounded multipart backpressure. */
 export async function PUT(request: Request, context: Params): Promise<Response> {
   try {
     const { principal, sql } = await requireOpeningScope(request);
@@ -34,19 +33,17 @@ export async function PUT(request: Request, context: Params): Promise<Response> 
     const contentLength = request.headers.get("content-length");
     if (contentLength !== null) {
       const declared = Number(contentLength);
-      if (Number.isInteger(declared) && declared > target.bytes) {
-        return Response.json(
-          { error: { code: "VALIDATION", message: "请求体过大" } },
-          { status: 413 },
-        );
-      }
+      if (!/^\d+$/.test(contentLength) || !Number.isSafeInteger(declared)) throw new UploadPolicyError("Invalid Content-Length");
+      if (declared > target.bytes) throw new UploadPolicyError("请求体过大", 413);
+      if (declared < target.bytes) throw new UploadPolicyError("request bytes do not match upload ticket");
     }
 
-    const body = await readOpeningRawBody(request, target.bytes);
+    if (!request.body) throw new UploadPolicyError("upload body is required");
     const contentType = request.headers.get("content-type") ?? "";
-    await service.putStaging(principal, id, { contentType, bytes: body });
+    await service.putStagingStream(principal, id, { contentType, body: request.body, signal: request.signal });
     return new Response(null, { status: 204 });
   } catch (error) {
+    void request.body?.cancel().catch(() => undefined);
     return storageError(error) ?? jsonError(mapDomainError(error));
   }
 }
