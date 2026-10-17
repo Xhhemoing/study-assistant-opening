@@ -247,7 +247,11 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         const block = revision.blocks.find((row) => row.id === following.blockId);
         const body = block?.content;
         const answer = body && [body.text, body.markdown, body.answer, body.solution].find((value): value is string => typeof value === "string");
-        const reference = spec.sourceRefs.find((ref) => ref.version != null && Number.isInteger(Number(ref.version)) && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
+        const ownCitations = new Set(Array.isArray(body?.citedChunkIds)
+          ? body.citedChunkIds.filter((id): id is string => typeof id === "string") : []);
+        const reference = spec.sourceRefs.find((ref) => ref.chunkId && ownCitations.has(ref.chunkId)
+          && ref.version != null && Number.isInteger(Number(ref.version))
+          && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
         return { answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null };
       });
     },

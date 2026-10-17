@@ -16,7 +16,7 @@ import { readOpeningCourseObservationHeads } from "../../packages/database/src/r
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createSqlLearnerSnapshotService } from "../../apps/web/src/features/opening/planning/learner-snapshot-runtime";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
-import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture, matrixRequirement } from "./opening-matrix-attempt-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { teachingLearnerFocus } from "../../apps/web/src/features/opening/teaching/learner-focus";
 
@@ -42,26 +42,25 @@ beforeEach(async () => {
 });
 afterEach(async () => { await fixture?.close(); });
 
-type AttemptFixture = Awaited<ReturnType<typeof learningAttemptFixture>>;
+type AttemptFixture = Awaited<ReturnType<typeof matrixAttemptFixture>>;
 
 async function seedCourse() {
-  const course = await learningAttemptFixture(fixture);
+  const course = await matrixAttemptFixture(fixture);
   await fixture.sql`INSERT INTO course_asset_memberships
     (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
     VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   return course;
 }
 
-async function submitVerifiedError(course: AttemptFixture, requirementKey?: string) {
-  return course.submit(await course.start({ requirementKey }), {
-    answer: "2", outcome: "incorrect", verdictSource: "reference_checked", referenceSourceId: course.sourceId,
-    referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
+async function submitVerifiedError(course: AttemptFixture) {
+  return course.submit(await course.start(), {
+    answer: "[1,1]", outcome: "unverified",
   });
 }
 
 async function storeTeachingFocus(course: AttemptFixture, observationId: string | null, overrides: Partial<TeachingLearnerFocus> = {}) {
   const learnerFocus: TeachingLearnerFocus = {
-    skillLabel: "fractions", activityKind: "targeted_explain", reasonCode: "verified_error",
+    skillLabel: "矩阵维数", requirementKey: matrixRequirement, activityKind: "targeted_explain", reasonCode: "verified_error",
     focusObservationId: observationId, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION, ...overrides,
   };
   const [activity] = await fixture.sql`UPDATE opening_teaching_activities SET goal_json=${fixture.sql.json({ learnerFocus })}
@@ -82,12 +81,12 @@ function services(enabled = true, clock = () => now) {
 }
 
 async function seedPlannerTask(courseId: string, date: string, status: "done" | "skipped" | "pending") {
-  const identity = suggestionIdentity("weak_skill", courseId, "fractions");
+  const identity = suggestionIdentity("weak_skill", courseId, "矩阵维数", matrixRequirement);
   const clientKey = suggestionKey(date, identity);
   await fixture.sql`INSERT INTO opening_tasks
-    (id, workspace_id, owner_user_id, title, minutes, status, client_key, course_id, skill_label, origin)
+    (id, workspace_id, owner_user_id, title, minutes, status, client_key, course_id, skill_label, requirement_key, origin)
     VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, 'Existing practice',
-      25, ${status}, ${clientKey}, ${courseId}, 'fractions', 'planner')`;
+      25, ${status}, ${clientKey}, ${courseId}, '矩阵维数', ${matrixRequirement}, 'planner')`;
   return identity;
 }
 
@@ -107,7 +106,7 @@ describe("adaptive learning loop with real evidence", () => {
     const knowledge = createOpeningKnowledgeRepository(fixture.sql);
     const graph = await knowledge.replace(fixture.scope, course.courseId, { expectedVersion: 0,
       sourceVersions: { [course.sourceId]: 1 }, snapshot: { courseId: course.courseId, version: 0,
-        nodes: [{ id: nodeId, courseId: course.courseId, label: "fractions", kind: "concept", status: "supported", evidenceChunkIds: [course.chunkId] },
+        nodes: [{ id: nodeId, courseId: course.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [course.chunkId] },
           { id: targetNodeId, courseId: course.courseId, label: "integration", kind: "procedure", status: "supported", evidenceChunkIds: [course.chunkId] }],
         edges: [{ from: nodeId, to: targetNodeId, kind: "prerequisite", status: "supported", evidenceChunkIds: [course.chunkId] }],
       } });
@@ -155,12 +154,10 @@ describe("adaptive learning loop with real evidence", () => {
 
   it.each(["transfer_check", "reduced_help_practice"] as const)("rechecks current evidence for %s even without a focus observation", async (activityKind) => {
     const course = await seedCourse();
-    const attempt = await course.start({ requirementKey: "R1" });
+    const attempt = await course.start();
     if (activityKind === "reduced_help_practice") await course.help(attempt);
-    await course.submit(attempt, { verdictSource: "reference_checked", referenceSourceId: course.sourceId,
-      assistance: activityKind === "reduced_help_practice" ? "hinted" : "independent",
-      referenceCheck: { referenceSourceId: course.sourceId, method: "Reference comparison", scope: "whole_answer" } });
-    const { activityId, learnerFocus } = await storeTeachingFocus(course, null, { activityKind, requirementKey: "R1",
+    await course.submit(attempt, { assistance: activityKind === "reduced_help_practice" ? "hinted" : "independent" });
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, null, { activityKind, requirementKey: matrixRequirement,
       recentAssistance: [activityKind === "reduced_help_practice" ? "hinted" : "independent"] });
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({ learnerFocus });
     await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
@@ -173,9 +170,9 @@ describe("adaptive learning loop with real evidence", () => {
     const taskId = randomUUID();
     await fixture.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, course_id, skill_label, requirement_key)
       VALUES (${taskId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, 'Formula correction', 10,
-        ${course.courseId}, 'fractions', 'formula-application')`;
+        ${course.courseId}, '矩阵维数', ${matrixRequirement})`;
     expect(await readOpeningTeachingTaskFocus(fixture.sql, fixture.scope, taskId)).toEqual({
-      title: "Formula correction", courseId: course.courseId, skillLabel: "fractions", requirementKey: "formula-application",
+      title: "Formula correction", courseId: course.courseId, skillLabel: "矩阵维数", requirementKey: matrixRequirement,
     });
     expect(await readOpeningTeachingTaskFocus(fixture.sql, fixture.otherScope, taskId)).toBeNull();
     expect(await readOpeningTeachingTaskFocus(fixture.sql, {
@@ -189,7 +186,7 @@ describe("adaptive learning loop with real evidence", () => {
     const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id);
 
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
-      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+      learnerFocus, focusAttempt: { question: expect.any(String), answer: "[1,1]" },
     });
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.otherScope, activityId)).toEqual({});
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, {
@@ -197,39 +194,36 @@ describe("adaptive learning loop with real evidence", () => {
     }, activityId)).toEqual({});
   });
 
-  it.each([null, "formula-application"])("compiles a current error with matching requirement %s", async (requirementKey) => {
+  it.each([null, matrixRequirement])("requires a matching canonical requirement before compiling an error (%s)", async (requirementKey) => {
     const course = await seedCourse();
-    const wrong = await submitVerifiedError(course, requirementKey ?? undefined);
+    const wrong = await submitVerifiedError(course);
     const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id, { requirementKey });
+    if (requirementKey === null) {
+      expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
+      return;
+    }
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
-      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+      learnerFocus, focusAttempt: { question: expect.any(String), answer: "[1,1]" },
     });
   });
 
-  it("compiles a matching requirement when the observation uses a normalized skill alias", async () => {
+  it("compiles a canonical observation when the stored focus uses a normalized skill alias", async () => {
     const course = await seedCourse();
-    const alias = "  ＦＲＡＣＴＩＯＮＳ  ";
-    const session = await course.learning.createSession(fixture.scope, {
-      courseId: course.courseId, skillLabel: alias, sourceIds: [course.sourceId],
-    });
-    const wrong = await course.submit(await course.start({ sessionId: session.id, requirementKey: "formula-application" }), {
-      sessionId: session.id, skillLabel: alias, answer: "2", outcome: "incorrect",
-      verdictSource: "reference_checked", referenceSourceId: course.sourceId,
-      referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
-    });
-    const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id, { requirementKey: "formula-application" });
+    const alias = "  矩阵维数  ";
+    const wrong = await submitVerifiedError(course);
+    const { activityId, learnerFocus } = await storeTeachingFocus(course, wrong.id, { skillLabel: alias });
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({
-      learnerFocus, focusAttempt: { question: "1/2 + 1/2?", answer: "2" },
+      learnerFocus, focusAttempt: { question: expect.any(String), answer: "[1,1]" },
     });
   });
 
   it.each([
     { requirementKey: "different-requirement" },
     { requirementKey: null },
-    { requirementKey: "formula-application", skillLabel: "different skill" },
+    { requirementKey: matrixRequirement, skillLabel: "different skill" },
   ])("does not compile a current error outside the persisted requirement/skill focus %j", async (focus) => {
     const course = await seedCourse();
-    const wrong = await submitVerifiedError(course, "formula-application");
+    const wrong = await submitVerifiedError(course);
     const { activityId } = await storeTeachingFocus(course, wrong.id, focus);
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
   });
@@ -258,7 +252,7 @@ describe("adaptive learning loop with real evidence", () => {
 
     const history = await readOpeningCourseObservationHeads(fixture.sql, fixture.scope, course.courseId);
     expect(history).toEqual([expect.objectContaining({
-      id: wrong.id, answer: "2", outcome: "incorrect",
+      id: wrong.id, answer: "[1,1]", outcome: "incorrect",
       eligibility: expect.objectContaining({ verifiedCorrect: "no", usableForCurrentVersion, reasonCodes: expect.arrayContaining([reason]) }),
     })]);
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId)).toEqual({});
@@ -285,16 +279,16 @@ describe("adaptive learning loop with real evidence", () => {
     expect(read.sources.courses.find((row) => row.courseId === course.courseId)).toMatchObject({
       evidenceStatus: "available", hasUsableMaterials: true,
       observations: [expect.objectContaining({ id: wrong.id, verifiedCorrect: "no", independentAttempt: "yes" })],
-      summaries: [expect.objectContaining({ skillLabel: "fractions", status: "needs_check" })],
+      summaries: [expect.objectContaining({ skillLabel: "矩阵维数", status: "needs_check" })],
     });
     expect(read.snapshot.courses.find((row) => row.courseId === course.courseId)?.skills).toEqual([
-      expect.objectContaining({ skillLabel: "fractions", status: "needs_review", recentAssistance: ["independent"] }),
+      expect.objectContaining({ skillLabel: "矩阵维数", status: "needs_review", recentAssistance: ["independent"] }),
     ]);
 
     const draft = (await plans.getToday(fixture.scope, day)).dailyDraft!;
     expect(draft.strategyVersion).toBe(ADAPTIVE_STRATEGY_VERSION);
     expect(draft.suggestedTasks).toEqual([
-      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "fractions" }),
+      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "矩阵维数" }),
     ]);
     const suggestion = draft.suggestedTasks![0]!;
     expect(draft.reasons?.[suggestion.id]).toMatchObject({ code: "weak_skill" });
@@ -304,7 +298,7 @@ describe("adaptive learning loop with real evidence", () => {
 
   it("does not treat unverified independent answers as wrong or invent a weak-skill suggestion", async () => {
     const course = await seedCourse();
-    const unverified = await course.submit(await course.start());
+    const unverified = await course.submit(await course.start(), { answer: "I think the answer is one" });
     const { snapshots, plans } = services();
     const read = await snapshots.read(fixture.scope, { date: day, timeZone });
     expect(read.sources.courses[0]!.observations).toEqual([
@@ -317,33 +311,34 @@ describe("adaptive learning loop with real evidence", () => {
     expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
   });
 
-  it("combines whitespace and case aliases into one skill and one suggestion from all observations", async () => {
+  it("combines whitespace aliases into one skill and one suggestion from all observations", async () => {
     const course = await seedCourse();
-    const first = await submitVerifiedError(course);
-    const alias = "  FRACTIONS  ";
-    const session = await course.learning.createSession(fixture.scope, {
-      courseId: course.courseId, skillLabel: alias, sourceIds: [course.sourceId],
+    const alias = "矩 阵维数";
+    const original = await submitVerifiedError(course);
+    const revised = await course.learning.reviseObservation(fixture.scope, {
+      rootObservationId: original.id, expectedHead: original.id, revisesObservationId: original.id,
+      clientKey: randomUUID(), revisionKind: "replace", reason: "Use the normalized alias",
+      replacement: { answer: original.answer, outcome: original.outcome, assistance: original.assistance, skillLabel: alias },
     });
-    const second = await course.submit(await course.start({ sessionId: session.id }), {
-      sessionId: session.id, skillLabel: alias, answer: "2", outcome: "incorrect",
-      verdictSource: "reference_checked", referenceSourceId: course.sourceId,
-      referenceCheck: { referenceSourceId: course.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
-    });
+    const first = revised.observation!;
+    expect(first.eligibility?.verifiedCorrect).toBe("unknown");
+    // A fresh, canonical question supplies the current objective error.
+    const second = await submitVerifiedError(course);
     const { snapshots, plans } = services();
     const read = await snapshots.read(fixture.scope, { date: day, timeZone });
     const evidence = read.sources.courses.find((row) => row.courseId === course.courseId)!;
     expect(evidence.observations).toHaveLength(2);
     expect(evidence.observations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: first.id, skillLabel: "fractions" }),
-      expect.objectContaining({ id: second.id, skillLabel: "fractions" }),
+      expect.objectContaining({ id: first.id, skillLabel: alias }),
+      expect.objectContaining({ id: second.id, skillLabel: alias }),
     ]));
-    expect(evidence.summaries).toEqual([expect.objectContaining({ skillLabel: "fractions", status: "needs_check" })]);
+    expect(evidence.summaries).toEqual([expect.objectContaining({ skillLabel: alias, status: "needs_check" })]);
     expect(read.snapshot.courses.find((row) => row.courseId === course.courseId)?.skills).toEqual([
-      expect.objectContaining({ skillLabel: "fractions", status: "needs_review", recentAssistance: ["independent", "independent"] }),
+      expect.objectContaining({ skillLabel: alias, status: "needs_review", recentAssistance: ["independent", "independent"] }),
     ]);
     const draft = (await plans.getToday(fixture.scope, day)).dailyDraft!;
     expect(draft.suggestedTasks).toEqual([
-      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "fractions" }),
+      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: alias }),
     ]);
     expect(draft.blocks).toHaveLength(1);
     expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
@@ -429,7 +424,7 @@ describe("adaptive learning loop with real evidence", () => {
     const refreshed = await plans.getToday(fixture.scope, day, { refreshSuggestions: true });
     expect(refreshed.dailyDraft!.id).not.toBe(first.id);
     expect(refreshed.dailyDraft!.suggestedTasks).toEqual([
-      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "fractions" }),
+      expect.objectContaining({ kind: "weak_skill", courseId: course.courseId, skillLabel: "矩阵维数" }),
     ]);
     expect(refreshed.hasNewerSuggestion).toBeUndefined();
     const rows = await fixture.sql`SELECT id FROM opening_plan_drafts
@@ -558,7 +553,7 @@ describe("adaptive learning loop with real evidence", () => {
       await fixture.sql`INSERT INTO course_asset_memberships
         (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
         VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${secondSourceId}, 'core', 1, 'course')`;
-      const skillLabel = "Equivalent fractions";
+      const skillLabel = "Equivalent 矩阵维数";
       const nodeId = randomUUID();
       const knowledge = createOpeningKnowledgeRepository(fixture.sql);
       const graph = await knowledge.replace(fixture.scope, course.courseId, {
@@ -627,17 +622,30 @@ describe("adaptive learning loop with real evidence", () => {
     },
   );
 
-  it("keeps a 25-minute suggestion unscheduled when 40 free minutes are split into two 20-minute slots", async () => {
+  it.each(["understand", "exam"] as const)("respects continuous free slots instead of pooling fragments in %s mode", async learningMode => {
     const course = await seedCourse();
     await submitVerifiedError(course);
+    await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
+      courseGoal: { courseId: course.courseId, goal: { targetDate: null, weeklyMinutes: 0, learningMode } },
+    });
     await createOpeningPlanningSettingsRepository(fixture.sql).set(fixture.scope, {
       ...settings, dailyWindow: { start: "08:00", end: "09:00" }, lunch: { start: "08:20", end: "08:40" },
     });
     const draft = (await services().plans.getToday(fixture.scope, day)).dailyDraft!;
-    expect(draft.suggestedTasks).toEqual([expect.objectContaining({ kind: "weak_skill", minutes: 25 })]);
-    const suggestion = draft.suggestedTasks![0]!;
-    expect(draft.blocks).toEqual([]);
-    expect(draft.unscheduledTaskIds).toEqual([suggestion.id]);
+    if (learningMode === "understand") {
+      // A 25-minute block cannot use the sum of two separate free slots.
+      expect(draft.suggestedTasks ?? []).toEqual([]);
+      expect(draft.blocks).toEqual([]);
+    } else {
+      // Exam work may shorten; the confirmation buffer leaves the first slot
+      // below 20 minutes, so this block must fit wholly in the second slot.
+      expect(draft.suggestedTasks).toEqual([expect.objectContaining({ kind: "weak_skill", minutes: 20 })]);
+      expect(draft.blocks).toEqual([expect.objectContaining({
+        taskId: draft.suggestedTasks![0]!.id,
+        start: `${day}T00:40:00.000Z`, end: `${day}T01:00:00.000Z`,
+      })]);
+    }
+    expect(draft.unscheduledTaskIds).toEqual([]);
     expect(await createOpeningPlansRepository(fixture.sql).listTasks(fixture.scope)).toEqual([]);
   });
 

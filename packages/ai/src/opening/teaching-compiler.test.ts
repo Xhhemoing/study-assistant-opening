@@ -409,12 +409,12 @@ describe("teaching-compiler", () => {
         { type: "text", text: "零空间是 $Ax=0$ 的解集。", citedChunkIds: ["c1"] },
         { type: "steps", text: "1. 写出方程\n2. 化简" },
         { type: "prompt", text: "求零空间维数？" },
-        { type: "answer_key", text: "n − rank" },
+        { type: "answer_key", text: "n − rank", citedChunkIds: ["c1"] },
       ] }),
     });
     expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key"]);
     expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
-    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true } });
+    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true, citedChunkIds: ["c1"] } });
     expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
     expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
     await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))

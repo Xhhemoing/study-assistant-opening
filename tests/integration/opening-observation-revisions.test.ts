@@ -66,7 +66,7 @@ it("moves attribution in one root, advances both courses, retains original help 
   await revise(replace(original.id, { expectedHead: changed.headObservationId, revisesObservationId: changed.headObservationId, replacement: { answer: "3", outcome: "unverified", assistance: "independent", courseId: f.courseId } }));
   expect((await revise(input)).headObservationId).toBe(changed.headObservationId);
 });
-it("does not inherit correctness verification for an edited answer; explicit new checking remains server attributed", async () => {
+it("does not inherit correctness verification for an edited answer; new learner checking remains a self-report", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start(), { verdictSource: "reference_checked", referenceSourceId: f.sourceId,
     referenceCheck: { referenceSourceId: f.sourceId, method: "Compare every step", scope: "whole_answer" } });
   const first = await revise(replace(original.id, { replacement: { answer: "changed", outcome: "correct", assistance: "independent" } }));
@@ -75,7 +75,8 @@ it("does not inherit correctness verification for an edited answer; explicit new
     replacement: { answer: "changed", outcome: "correct", assistance: "independent", verdictSource: "reference_checked", referenceSourceId: f.sourceId,
       referenceCheck: { referenceSourceId: f.sourceId, method: "Compare corrected answer to reference", scope: "whole_answer" } } }));
   expect(checked.observation?.referenceCheck?.checkerId).toBe(fixture.scope.ownerUserId);
-  expect(checked.observation?.eligibility?.verifiedCorrect).toBe("yes");
+  expect(checked.observation?.verdictSource).toBe("self_report");
+  expect(checked.observation?.eligibility?.verifiedCorrect).toBe("unknown");
 });
 it("rejects excluded evidence and another owner's course even on correction", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start()), foreign = randomUUID();
@@ -110,11 +111,11 @@ it("revises a restored legacy row with absent root/head metadata", async () => {
 it("preserves a documented check when equal verdict/reference values are explicitly resubmitted", async () => {
   const f=await learningAttemptFixture(fixture), original=await f.submit(await f.start(),{ verdictSource:"reference_checked",referenceSourceId:f.sourceId,
     referenceCheck:{referenceSourceId:f.sourceId,method:"Checked every line",scope:"whole_answer"} });
-  expect(original.eligibility.verifiedCorrect).toBe("yes");
+  expect(original.eligibility.verifiedCorrect).toBe("unknown");
   const corrected=await revise(replace(original.id,{replacement:{answer:original.answer,outcome:original.outcome,assistance:original.assistance,
     verdictSource:original.verdictSource,referenceSourceId:original.referenceSourceId,skillLabel:"More precise label"}}));
   expect(corrected.observation?.referenceCheck).toEqual(original.referenceCheck);
-  expect(corrected.observation?.eligibility?.verifiedCorrect).toBe("yes");
+  expect(corrected.observation?.eligibility?.verifiedCorrect).toBe("unknown");
   const changed=await revise(replace(original.id,{revisesObservationId:corrected.headObservationId,expectedHead:corrected.headObservationId,
     replacement:{answer:"a different answer",outcome:original.outcome,assistance:original.assistance,verdictSource:original.verdictSource,referenceSourceId:original.referenceSourceId}}));
   expect(changed.observation?.referenceCheck).toBeNull();expect(changed.observation?.eligibility?.verifiedCorrect).toBe("unknown");

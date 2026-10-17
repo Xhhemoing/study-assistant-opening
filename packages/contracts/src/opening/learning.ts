@@ -8,7 +8,7 @@ export const observationOutcomeSchema = z.enum([
   "unverified",
 ]);
 
-/** Client reports cannot impersonate a server evaluator. */
+/** Legacy reference_checked input is accepted for compatibility, then stored as a learner self-report. */
 export const publicVerdictSourceSchema = z.enum([
   "self_report",
   "reference_checked",

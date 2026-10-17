@@ -78,6 +78,27 @@ describe("teaching content helpers (T1/T6/T7 unit)", () => {
 });
 
 describe("opening teaching content repository (unit)", () => {
+  it.each([{ citations: [] }, { citations: ["a-different-chunk"] }, { citations: ["answer-chunk"] }])("attributes a revealed answer only to its own citations $citations", async ({ citations }) => {
+    const sourceId = "ffffffff-ffff-4fff-8fff-fffffffffff1";
+    const { sql } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [{ content_version: 1, source_ids: [sourceId] }];
+      if (query.includes("FROM opening_sources")) return [{ id: sourceId, version: 1 }];
+      if (query.includes("FROM opening_learning_attempts")) return [{ submitted_at: now,
+        create_intent: { teachingBlock: { blockId: blockTeach, contentVersion: 1 } }, source_versions: { [sourceId]: 1 } }];
+      if (query.includes("FROM opening_teaching_activity_specs")) return [{ document_id: documentId, revision_number: 1, version: 1,
+        block_order: [{ ...blockOrder[0], blockType: "prompt", role: "prompt" }, blockOrder[1]],
+        source_refs: [{ sourceId, chunkId: "answer-chunk", version: 1 }] }];
+      if (query.includes("FROM library_revisions")) return [{ blocks: [
+        { id: blockTeach, content: { text: "A cited lesson", citedChunkIds: ["answer-chunk"] } },
+        { id: blockKey, content: { answer: "A generated answer", citedChunkIds: citations } },
+      ] }];
+      return [];
+    });
+    const answer = await createOpeningTeachingContentRepository(sql).getSubmittedAnswerKey(scope, activityId, blockTeach, "attempt");
+    expect(answer).toEqual({ answer: "A generated answer", referenceSourceId: citations.includes("answer-chunk") ? sourceId : null });
+  });
+
   it("T2 publishActivitySpec CAS: stale expectedVersion → CONFLICT", async () => {
     const { sql } = db((query) => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];

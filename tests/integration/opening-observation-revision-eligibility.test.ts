@@ -27,6 +27,32 @@ const capturedFacts = (record: LearningObservation) => ({
   startedAt: record.startedAt, submittedAt: record.submittedAt, occurredAt: record.occurredAt, sourceVersions: record.sourceVersions,
 });
 
+it("retains low-trust reference exposure after later corrections without backdating it to submission", async () => {
+  const f = await learningAttemptFixture(fixture), first = await f.start();
+  const original = await f.submit(first);
+  const beforeCheck = await f.attempts.create(fixture.scope, { sessionId: f.sessionId, problemId: first.problemId, clientKey: randomUUID() });
+  const checked = await replace(original, { referenceCheck: referenceCheck(f.sourceId), verdictSource: "reference_checked" });
+  expect(checked).toMatchObject({ verdictSource: "self_report", eligibility: { verifiedCorrect: "unknown" } });
+  // Explicit fixture times make the ordering deterministic without sleeps.
+  await fixture.sql`UPDATE opening_learning_attempts SET started_at=${checked.recordedAt!}::timestamptz-interval '1 minute' WHERE id=${beforeCheck.id}`;
+  await fixture.sql`UPDATE opening_learning_attempts SET started_at=${checked.recordedAt!}::timestamptz-interval '3 minutes',
+    submitted_at=${checked.recordedAt!}::timestamptz-interval '2 minutes' WHERE id=${first.id}`;
+  await fixture.sql`UPDATE opening_learning_observations SET started_at=${checked.recordedAt!}::timestamptz-interval '3 minutes',
+    submitted_at=${checked.recordedAt!}::timestamptz-interval '2 minutes'
+    WHERE id IN (${original.id},${checked.id})`;
+  const before = await f.submit(beforeCheck);
+  expect(before.eligibility.independentAttempt).toBe("yes");
+  expect(before.eligibility.reasonCodes).not.toContain("prior_answer_exposure");
+  const afterCheck = await f.attempts.create(fixture.scope, { sessionId: f.sessionId, problemId: first.problemId, clientKey: randomUUID() });
+  const removed = await replace(checked, { answer: "changed after comparing", outcome: "unverified" });
+  expect(removed.referenceCheck).toBeNull();
+  const after = await f.submit(afterCheck);
+  expect(after.eligibility.reasonCodes).toContain("prior_answer_exposure");
+  expect(after.eligibility.verifiedCorrect).toBe("unknown");
+  const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
+  expect(history.revisions.find(row => row.id === checked.id)?.referenceCheck).toEqual(checked.referenceCheck);
+});
+
 it.each(["hinted", "revealed"] as const)("does not qualify an answer corrected after delivered %s help as independent", async level => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   const original = await f.submit(attempt, { answer: "2", outcome: "incorrect" });
@@ -36,7 +62,7 @@ it.each(["hinted", "revealed"] as const)("does not qualify an answer corrected a
   expect(Date.parse(delivered.deliveredAt!)).toBeGreaterThan(Date.parse(original.submittedAt!));
   expect(Date.parse(corrected.recordedAt!)).toBeGreaterThan(Date.parse(delivered.deliveredAt!));
   expect(corrected).toMatchObject(capturedFacts(original));
-  expect(corrected.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes", usableForCurrentVersion: "yes", usableForDelayedCheck: "no" });
+  expect(corrected.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown", usableForCurrentVersion: "yes", usableForDelayedCheck: "no" });
   expect(corrected.eligibility?.reasonCodes).toContain("help_before_submission");
   expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE session_id=${f.sessionId}`).toHaveLength(1);
   const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
@@ -58,7 +84,7 @@ it("keeps original answer qualification and captured sources when attribution mo
   const facts = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, relabeled);
   expect(relabeled).toMatchObject(capturedFacts(original));
   expect(facts.context.version?.applicability).toBe("changed_needs_check");
-  expect(relabeled.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "unknown" });
+  expect(relabeled.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "unknown", usableForCurrentVersion: "unknown" });
   expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE session_id=${f.sessionId}`).toHaveLength(1);
 });
 
@@ -69,7 +95,7 @@ it("does not treat an outcome or reference-check correction as a new answer", as
   const checked = await replace(original, { outcome: "correct", referenceCheck: referenceCheck(f.sourceId) });
   expect(checked.answer).toBe(original.answer);
   expect(checked).toMatchObject(capturedFacts(original));
-  expect(checked.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+  expect(checked.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "unknown" });
   const facts = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, checked);
   expect(facts.observation.submittedAt).toBe(Date.parse(original.submittedAt!));
 });

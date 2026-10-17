@@ -44,6 +44,8 @@ export interface EvidenceHelpExposure {
 
 export interface EvidenceEligibilityContext {
   serverEvaluation?: ServerEvaluation | null;
+  /** Assembled by the server, never read from user-provided reference-check JSON. */
+  referenceCheckAuthority?: "learner" | "independent_review" | null;
   helpHistory?: {
     /** Covers this attempt and historical answer exposure for the same problem. */
     complete: boolean;
@@ -92,6 +94,8 @@ export type EvidenceEligibilityReasonCode =
   | "prior_answer_exposure"
   | "prior_evaluation_feedback"
   | "verification_source_untrusted"
+  | "learner_reference_compare"
+  | "reference_check_authority_unknown"
   | "server_evaluation_incomplete"
   | "server_evaluation_identity_mismatch"
   | "server_evaluation_outcome_conflict"
@@ -127,5 +131,5 @@ export interface EvidenceEligibility {
   usableForCurrentVersion: EvidenceEligibilityValue;
   usableForDelayedCheck: EvidenceEligibilityValue;
   reasonCodes: EvidenceEligibilityReasonCode[];
-  policyVersion: "opening-evidence-v1";
+  policyVersion: "opening-evidence-v1" | "opening-evidence-v2" | "opening-evidence-v3";
 }

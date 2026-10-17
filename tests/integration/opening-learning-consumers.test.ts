@@ -6,6 +6,7 @@ import { createOpeningLearningReadService } from "../../apps/web/src/features/op
 import { createRetestCandidateHandler } from "../../apps/worker/src/jobs/retest-candidate";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture, matrixSkill } from "./opening-matrix-attempt-fixture";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
@@ -14,20 +15,19 @@ afterAll(async () => { await fixture?.close(); });
 
 describe("opening course evidence consumers", () => {
   it("reads the persisted facts and shares write/read/worker qualifications", async () => {
-    const f = await learningAttemptFixture(fixture);
+    const f = await matrixAttemptFixture(fixture);
     const attempt = await f.start();
-    const observation = await f.submit(attempt, { verdictSource: "reference_checked", referenceSourceId: f.sourceId,
-      referenceCheck: { referenceSourceId: f.sourceId, method: "Compare each answer step", scope: "whole_answer" } });
+    const observation = await f.submit(attempt);
     const readCourseEvidence = () => readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId);
     const evidence = await readCourseEvidence();
-    expect(evidence.observations[0]).toMatchObject({ attemptId: attempt.id, itemVersionId: attempt.itemVersionId, sourceVersions: attempt.sourceVersions, outcome: "correct" });
+    expect(evidence.observations[0]).toMatchObject({ attemptId: attempt.id, itemVersionId: attempt.itemVersionId, sourceVersions: attempt.sourceVersions, outcome: "correct", verdictSource: "deterministic" });
     const read = createOpeningLearningReadService({ readCourseObservationHeads: async () => [], assertOwnedCourse: (scope, id) => f.learning.assertOwnedCourse(scope, id), readCourseEvidence });
     const summary = await read.summarizeLearning(fixture.scope, f.courseId);
     expect(summary[0]?.evidenceEligibility?.[0]?.eligibility).toEqual(observation.eligibility);
     expect(summary[0]?.status).toBe("observed_independent");
     const worker = createRetestCandidateHandler({ readCourseEvidence, listDueRetests: async () => [], saveCandidates: async (_scope, candidates) => candidates });
     const job = { id: randomUUID(), ...fixture.scope, key: "shared-evidence", kind: "retest", state: "running", privacyEpoch: 0, payload: {}, result: null };
-    expect((await worker(job, { courseId: f.courseId, promptsBySkill: { fractions: "Try another fractions problem" } })).candidates).toEqual([]);
+    expect((await worker(job, { courseId: f.courseId, promptsBySkill: { [matrixSkill]: "Try another matrix problem" } })).candidates).toEqual([]);
     await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
     const changed = await read.summarizeLearning(fixture.scope, f.courseId);
     expect(changed[0]?.status).toBe("needs_check");

@@ -222,8 +222,10 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(sent.outputFormat).toBe("json");
     expect(sent.text).toContain("学习意图：秩与零空间");
     expect(sent.text).toContain(CHUNK);
-    // Formulas cannot be text-matched against evidence, so they never carry a citation.
-    expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({ latex: "\\operatorname{rank}(A) + \\dim N(A) = n" });
+    // Formula provenance is preserved without pretending that it proves correctness.
+    expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({
+      latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
+    });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hidden: true });
     expect(result).toMatchObject({ generateStatus: "needs_check" });

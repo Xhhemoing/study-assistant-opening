@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { createOpeningRetestActivityRepository, readOpeningCourseLearningSummary } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 afterAll(async () => {
@@ -54,10 +55,10 @@ it("includes visible native activity-only groups and pins due evaluation to the 
   expect(page.groups[0]).toMatchObject({sampleCount:0,lastObservedAt:null,latestAttemptAt:null,representatives:[],openChecks:{acceptedCount:1,inProgressCount:0,dueCount:1}});
 });
 it("counts every historical outcome before limiting displayed representatives", async () => {
-  const f=await learningAttemptFixture(fixture);
-  const checked={verdictSource:"reference_checked",referenceSourceId:f.sourceId,referenceCheck:{referenceSourceId:f.sourceId,method:"manual_reference",scope:"whole_answer"}};
-  for(let index=0;index<24;index++) await f.submit(await f.start({requirementKey:"addition"}),{...checked,outcome:index<5?"incorrect":"correct"});
+  const f=await matrixAttemptFixture(fixture);
+  // Nine distinct questions; repeats retain deterministic correctness but expose prior feedback.
+  for(let index=0;index<24;index++) await f.submit(await f.start(),{answer:index<5?"[1,1]":"[2,3]"});
   const page=await readOpeningCourseLearningSummary(fixture.sql,fixture.scope,{courseId:f.courseId,limit:10});
-  expect(page.groups[0]).toMatchObject({sampleCount:24,historicalIncorrectCount:5,independentVerifiedCurrentCount:19,latestIndependentVerifiedCurrentCount:1});
+  expect(page.groups[0]).toMatchObject({sampleCount:24,historicalIncorrectCount:5,independentVerifiedCurrentCount:4,latestIndependentVerifiedCurrentCount:0});
   expect(page.groups[0]?.representatives).toHaveLength(20);
 });

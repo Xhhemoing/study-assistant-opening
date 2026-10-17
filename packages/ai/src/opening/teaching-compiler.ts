@@ -113,10 +113,10 @@ function blocksFromModel(blocks: CompileModelBlock[], newBlockId: () => string):
     switch (block.type) {
       case "answer_key":
         // Server-side only; never projected to client init while hidden.
-        return { id, type: "answer_key", role: "answer_key", content: { answer: block.text, hidden: true } };
+        return { id, type: "answer_key", role: "answer_key", content: { answer: block.text, hidden: true, ...cite } };
       case "formula":
-        // A formula cannot be text-matched against evidence, so it carries no citation (as the template).
-        return { id, type: "formula", role: "teach", content: { latex: block.text } };
+        // Preserve provenance; a citation is not a mathematical correctness check.
+        return { id, type: "formula", role: "teach", content: { latex: block.text, ...cite } };
       case "steps":
         return {
           id, type: "steps", role: "teach",

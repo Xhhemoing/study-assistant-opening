@@ -22,7 +22,7 @@ const STATUS_LABEL: Record<LearningSummary["status"], string> = {
 };
 const SOURCE_LABEL: Record<string, string> = {
   self_report: "自报",
-  reference_checked: "记录为参考核对（资格另列）",
+  reference_checked: "历史参考核对记录（独立评分资格另列）",
   deterministic: "内置题精确核算（资格另列）",
   model_suggestion: "模型建议",
   unknown: "未知",

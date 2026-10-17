@@ -45,7 +45,7 @@ it("repairs exact source and policy dependencies without advancing the semantic 
   await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${observation.id}`;
   const rebuilt = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
   expect(rebuilt.status).toBe("ready");
-  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v1");
+  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v3");
   expect(rebuilt.groups[0]?.representatives[0]?.eligibility.usableForDelayedCheck).toBe("unknown");
 });
 it("automatically repairs bounded batches before exposing complete group statistics", async () => {
@@ -67,4 +67,22 @@ it("automatically repairs bounded batches before exposing complete group statist
   await fixture.sql`DELETE FROM opening_learning_sessions WHERE id=${f.sessionId}`;
   expect(await fixture.sql`SELECT 1 FROM opening_learning_eligibility WHERE workspace_id=${fixture.scope.workspaceId}
     AND root_observation_id=${original.id}`).toHaveLength(0);
+});
+
+it.each(["opening-evidence-v1", "opening-evidence-v2"])("invalidates %s manual-check authority without rewriting the historical fact", async oldPolicy => {
+  const f = await learningAttemptFixture(fixture), observation = await f.submit(await f.start({ requirementKey: "manual-history" }), {
+    verdictSource: "reference_checked", referenceSourceId: f.sourceId,
+    referenceCheck: { referenceSourceId: f.sourceId, method: "Claimed completed review", scope: "whole_answer" },
+  });
+  // Seed the exact historical bug: a public owner check and its old positive projection.
+  await fixture.sql`UPDATE opening_learning_observations SET verdict_source='reference_checked' WHERE id=${observation.id}`;
+  await fixture.sql`UPDATE opening_learning_eligibility SET policy_version=${oldPolicy},verified_correct='yes',
+    independent_attempt='yes',usable_for_current_version='yes' WHERE root_observation_id=${observation.id}`;
+  const before = await openingEligibilityStateQuery(fixture.sql, fixture.scope, { rootIds: [observation.id] });
+  expect(before[0]?.fresh).toBe(false);
+  const page = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
+  expect(page.groups[0]).toMatchObject({ independentVerifiedCurrentCount: 0, unverifiedCount: 1 });
+  expect(page.groups[0]?.representatives[0]?.eligibility).toMatchObject({ verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3" });
+  const [historical] = await fixture.sql`SELECT verdict_source,answer,reference_check FROM opening_learning_observations WHERE id=${observation.id}`;
+  expect(historical).toMatchObject({ verdict_source: "reference_checked", answer: observation.answer, reference_check: observation.referenceCheck });
 });

@@ -54,7 +54,7 @@ describe("evaluateEvidenceEligibility correctness", () => {
   });
 });
 
-  it("treats learner_self_compare whole_answer reference checks as verified and independent when otherwise complete", () => {
+  it("keeps learner_self_compare whole_answer checks unverified while preserving attempt independence", () => {
     const result = evaluateEvidenceEligibility(observation, {
       ...context,
       referenceCheck: {
@@ -63,9 +63,9 @@ describe("evaluateEvidenceEligibility correctness", () => {
         scope: "whole_answer",
       },
     });
-    expect(result.verifiedCorrect).toBe("yes");
+    expect(result.verifiedCorrect).toBe("unknown");
     expect(result.independentAttempt).toBe("yes");
-    expect(result.reasonCodes).toContain("reference_checked_correct");
+    expect(result.reasonCodes).toContain("learner_reference_compare");
   });
 
   it("keeps learner_self_compare partial scope unverified", () => {
@@ -81,11 +81,28 @@ describe("evaluateEvidenceEligibility correctness", () => {
     expect(result.reasonCodes).toContain("reference_check_scope_incomplete");
   });
 
-  it("marks self_report as verification_source_untrusted", () => {
+  it("labels self_report with reference metadata as a learner comparison", () => {
     const result = evaluateEvidenceEligibility(
       { ...observation, verdictSource: "self_report" },
       context,
     );
     expect(result.verifiedCorrect).toBe("unknown");
-    expect(result.reasonCodes).toContain("verification_source_untrusted");
+    expect(result.reasonCodes).toContain("learner_reference_compare");
+  });
+
+  it("does not trust complete historical reference metadata without independent-review authority", () => {
+    const result = evaluateEvidenceEligibility(observation, { ...context, referenceCheckAuthority: undefined });
+    expect(result.verifiedCorrect).toBe("unknown");
+    expect(result.reasonCodes).toContain("reference_check_authority_unknown");
+    expect(result.policyVersion).toBe("opening-evidence-v3");
+  });
+
+  it.each(["Compared every step", "已由另一名教师核对", "trusted_review"])("cannot upgrade a learner check by claiming method %s", method => {
+    const result = evaluateEvidenceEligibility(observation, {
+      ...context, referenceCheckAuthority: "learner",
+      referenceCheck: { ...context.referenceCheck!, method, checkerId: "a-different-user" },
+    });
+    expect(result.independentAttempt).toBe("yes");
+    expect(result.verifiedCorrect).toBe("unknown");
+    expect(result.usableForDelayedCheck).toBe("unknown");
   });
