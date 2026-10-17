@@ -212,6 +212,48 @@ describe("course-bound exam sprint canonical bridge", () => {
     expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
   });
 
+  it.each(["privacy", "version", "deleted"] as const)("completes mock hand-in with unavailable evidence after source %s", async reason => {
+    const bound = await bind(), view = await start("mock-a"), submitted = await answer(view);
+    const original = await linkFor(view.currentAttempt!.id), sourceId = bound.binding!.packSourceId;
+    expect(original).toMatchObject({ publication: "pending_mock", observation_id: null, submitted_answer: "a" });
+    const capturedAt = iso(original.captured_at);
+    if (reason === "privacy") {
+      await createOpeningPrivacyRepository(f.sql).recordExclusions(f.sql, f.scope, {
+        sourceIds: [sourceId], memoryId: randomUUID(), deletedAt: new Date(),
+      });
+    } else if (reason === "version") {
+      await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${sourceId} AND workspace_id=${f.scope.workspaceId}`;
+    } else {
+      // Chunks cascade; captured item versions and binding identities retain the deleted source id.
+      await f.sql`DELETE FROM opening_sources WHERE id=${sourceId} AND workspace_id=${f.scope.workspaceId}`;
+    }
+    const command = { action: "finish" as const, clientKey: key(), runId: submitted.activeRun!.id };
+    const finished = await sprint.act(f.scope, command);
+    expect(finished.activeRun).toBeNull();
+    expect(finished.state.runs[0]!.completedAt).not.toBeNull();
+    expect(finished.attempts[0]).toMatchObject({ answer: "a", answeredAt: capturedAt });
+    expect(finished.skills[0]?.status).toBe("untested");
+    const retained = await linkFor(view.currentAttempt!.id);
+    expect(retained).toMatchObject({ publication: "pending_mock", observation_id: null, submitted_answer: "a" });
+    expect(iso(retained.captured_at)).toBe(capturedAt);
+    expect(await createOpeningLearningAttemptRepository(f.sql).get(f.scope, String(retained.learning_attempt_id)))
+      .toMatchObject({ submittedAt: null, observationId: null });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+    const integrated = await integration.read(f.scope);
+    expect(integrated.links[0]).toMatchObject({ publication: "unavailable", observationId: null });
+    expect(integrated.bkt.eligible).toBe(0);
+    const receipts = await f.sql`SELECT id FROM opening_exam_sprint_commands ORDER BY id`;
+    const replay = await sprint.act(f.scope, command);
+    expect(replay.activeRun).toBeNull();
+    expect(replay.state.runs[0]!.completedAt).toBe(finished.state.runs[0]!.completedAt);
+    expect(await f.sql`SELECT id FROM opening_exam_sprint_commands ORDER BY id`).toEqual(receipts);
+    const exported = await sprint.export(f.scope);
+    expect(exported.integration.links[0]).toMatchObject({ publication: "unavailable", observationId: null });
+    expect(exported.integration.bkt.eligible).toBe(0);
+    expect(exported.attempts[0]).toMatchObject({ answer: "a", answeredAt: capturedAt });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+  });
+
   it("rejects reusing an exam problem identity through the ordinary attempt creation API", async () => {
     await bind();
     const view = await start(), link = await linkFor(view.currentAttempt!.id), before = await factsCount();

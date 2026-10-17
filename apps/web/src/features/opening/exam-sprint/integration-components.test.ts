@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { BktPanel } from "./bkt-panel";
 import { ForecastResults } from "./forecast-panel";
+import { integrationSchema } from "./client-schemas";
 import { EvidenceLinks } from "./integration-panel";
 import { WeekPlan } from "./learning-plan";
 import { WorkReviewPanel, WorkReviewResult, matchingWorkReview, type WorkReviewContext } from "./work-review-panel";
@@ -69,6 +70,17 @@ describe("exam integration evidence presentation", () => {
     expect(html).toContain("等待模拟交卷");
     expect(html).toContain("已关联 0 次");
     expect(html).not.toContain("回答正确");
+  });
+
+  it("accepts unavailable source evidence and never counts it as waiting for completion", () => {
+    const state = { ...integration, links: [{ examAttemptId: "mock-a1", learningAttemptId: "learning-1", observationId: null, nodeId: "node-1", requirementKey: "r-1", publication: "unavailable" as const }] };
+    const parsed = integrationSchema.parse(state);
+    expect(parsed.links[0].publication).toBe("unavailable");
+    const html = renderToStaticMarkup(createElement(EvidenceLinks, { integration: parsed }));
+    expect(html).toContain("已结束，来源不可用，未计入正式证据");
+    expect(html).toContain("已关联 0 次 · 未提交/未作答 0 次 · 来源不可用 1 次");
+    expect(html).not.toContain("等待模拟交卷");
+    expect(html).not.toContain("尚无作答记录");
   });
 
   it("keeps a positive AI work review as an unaccepted candidate", () => {

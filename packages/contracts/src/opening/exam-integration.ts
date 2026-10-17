@@ -22,7 +22,7 @@ export const examBindInputSchema = z.object({
 export type ExamBindInput = z.infer<typeof examBindInputSchema>;
 export type ExamCanonicalLink = {
   examAttemptId: string; learningAttemptId: string; observationId: string | null;
-  nodeId: string; requirementKey: string; publication: "pending_mock" | "published" | "pending_answer";
+  nodeId: string; requirementKey: string; publication: "pending_mock" | "published" | "pending_answer" | "unavailable";
 };
 export type ExamBktReport = {
   calibrated: false; eligible: number; excluded: number; bktBrier: number | null; baselineBrier: number | null;

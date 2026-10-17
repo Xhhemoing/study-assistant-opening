@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import {
   examBindInputSchema, examSourceMappingInputSchema, openingAdaptivePrefsSchema,
-  type ExamBindInput, type ExamIntegrationOverview, type ExamPack, type ExamSourceMappingInput, type Scope,
+  type ExamBindInput, type ExamCanonicalLink, type ExamIntegrationOverview, type ExamPack, type ExamSourceMappingInput, type Scope,
 } from "@aistudy/contracts";
 import { createExamSprintState, reportExamBkt } from "@aistudy/domain";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -45,9 +45,13 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
   const goal = binding && parsed.success ? parsed.data.courseGoals[binding.courseId] : null;
   const eligible = row && binding ? await readExamEligibleAttemptIds(tx, scope, String(row.id), snapshot.state) : [];
   return {
-    binding, links: links.map(link => ({ examAttemptId: String(link.exam_attempt_id), learningAttemptId: String(link.learning_attempt_id),
-      observationId: link.observation_id as string | null, nodeId: String(link.node_id), requirementKey: String(link.requirement_key),
-      publication: link.publication as "pending_answer" | "pending_mock" | "published" })),
+    binding, links: links.map(link => {
+      const attempt = snapshot.state.attempts.find(item => item.id === link.exam_attempt_id);
+      const completed = attempt?.answeredAt != null && snapshot.state.runs.some(run => run.id === attempt.runId && run.completedAt !== null);
+      return { examAttemptId: String(link.exam_attempt_id), learningAttemptId: String(link.learning_attempt_id),
+        observationId: link.observation_id as string | null, nodeId: String(link.node_id), requirementKey: String(link.requirement_key),
+        publication: completed && link.publication !== "published" ? "unavailable" : link.publication as ExamCanonicalLink["publication"] };
+    }),
     bkt: reportExamBkt(snapshot.state, snapshot.pack, eligible),
     courseGoal: binding && goal ? { targetDate: goal.targetDate, weeklyMinutes: goal.weeklyMinutes,
       milestoneTitle: goal.milestones?.find(milestone => milestone.id === binding.milestoneId)?.title ?? null } : null,

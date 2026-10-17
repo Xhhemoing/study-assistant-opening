@@ -69,6 +69,20 @@ async function help(tx: TransactionSql, scope: Scope, sprintId: string, pack: Ex
   await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [binding.packSourceId] });
 }
 
+/** Finishing a sealed run must remain possible when its captured sources become unusable. */
+async function mockSourcesAvailable(tx: TransactionSql, scope: Scope, attempt: Record<string, unknown>): Promise<boolean> {
+  const sourceIds = attempt.source_ids as string[], versions = attempt.source_versions as Record<string, number> | null;
+  if (!sourceIds.length || sourceIds.some(id => !Number.isInteger(versions?.[id]))) {
+    throw learningError("CONFLICT", "冲刺作答的材料版本记录无法校验");
+  }
+  const sources = await tx`SELECT s.id,s.version,s.upload_state,s.parse_state,v.availability,
+    EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id) AS excluded
+    FROM opening_sources s JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=s.version
+    WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${sourceIds}::uuid[]) FOR SHARE OF s,v`;
+  return sources.length === sourceIds.length && sources.every(source => source.upload_state === "uploaded" && source.parse_state === "ready"
+    && source.availability === "available" && source.excluded === false && Number(source.version) === versions![String(source.id)]);
+}
+
 async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state: ExamSprintState, attempt: ExamAttempt) {
   const [row] = await tx`SELECT l.id AS link_id,l.publication,l.node_id,l.first_family_exposure,a.*
     FROM opening_exam_attempt_links l JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
@@ -76,10 +90,16 @@ async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state
       AND a.owner_user_id=${scope.ownerUserId} FOR UPDATE OF a,l`;
   if (!row || row.publication === "published" || attempt.answer === null || attempt.answeredAt === null) return;
   const run = state.runs.find(item => item.id === attempt.runId)!;
-  const sealed = (run.mode === "mock-a" || run.mode === "mock-b") && run.completedAt === null;
+  const mock = run.mode === "mock-a" || run.mode === "mock-b", sealed = mock && run.completedAt === null;
   await tx`UPDATE opening_exam_attempt_links SET submitted_answer=${attempt.answer},captured_at=${attempt.answeredAt},
-    publication=${sealed ? "pending_mock" : "pending_answer"} WHERE id=${String(row.link_id)}`;
+    publication=${mock ? "pending_mock" : "pending_answer"} WHERE id=${String(row.link_id)}`;
   if (sealed) return;
+  if (mock && !await mockSourcesAvailable(tx, scope, row)) {
+    // Keep the captured answer and pending audit link. No observation or eligibility is invented.
+    await tx`UPDATE opening_teaching_activities SET status='completed',updated_at=clock_timestamp()
+      WHERE id=${String(row.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    return;
+  }
   const assistance = attempt.help.some(item => item.kind === "solution") ? "revealed"
     : attempt.help.length ? "hinted" : row.first_family_exposure === true ? "independent" : "unknown";
   const observation = await insertOpeningLearningObservationInTx(tx, scope, {

@@ -42,7 +42,7 @@ export const overviewSchema: z.ZodType<ExamSprintOverview> = z.object({
 
 export const integrationSchema: z.ZodType<ExamIntegrationOverview> = z.object({
   binding: z.object({ courseId: z.string(), milestoneId: z.string().nullable(), packSourceId: z.string(), boundAt: z.string(), skills: z.array(z.object({ skillId: z.string(), nodeId: z.string(), requirementKey: z.string() })), materials: z.array(z.object({ sourceTitle: z.string(), sourceId: z.string(), sourceVersion: z.number() })) }).nullable(),
-  links: z.array(z.object({ examAttemptId: z.string(), learningAttemptId: z.string(), observationId: z.string().nullable(), nodeId: z.string(), requirementKey: z.string(), publication: z.enum(["pending_mock", "published", "pending_answer"]) })),
+  links: z.array(z.object({ examAttemptId: z.string(), learningAttemptId: z.string(), observationId: z.string().nullable(), nodeId: z.string(), requirementKey: z.string(), publication: z.enum(["pending_mock", "published", "pending_answer", "unavailable"]) })),
   bkt: z.object({ calibrated: z.literal(false), eligible: z.number(), excluded: z.number(), bktBrier: z.number().nullable(), baselineBrier: z.number().nullable(), skills: z.array(z.object({ skillId: z.string(), eligible: z.number(), nextCorrectProbability: z.number().nullable() })), message: z.string() }),
   courseGoal: z.object({ targetDate: z.string().nullable(), weeklyMinutes: z.number().nullable(), milestoneTitle: z.string().nullable() }).nullable(),
   sourceMappings: z.array(z.object({ sourceItemId: z.string(), skillIds: z.array(z.string()), nodeIds: z.array(z.string()), sourceId: z.string().nullable(), sourceVersion: z.number().nullable(), physicalPage: z.number().nullable() })),

@@ -49,6 +49,11 @@ export async function readExamEvidenceState(tx: TransactionSql, scope: Scope, sp
   const contexts = await readOpeningLearningEvidenceContexts(tx, scope, rows.map(mapLearningObservation));
   const bktEligibleAttemptIds: string[] = [];
   const ruleEvidence: Record<string, { usable: boolean; correct: boolean | null; independent: boolean; assisted: boolean }> = {};
+  const unpublished = await tx`SELECT l.exam_attempt_id FROM opening_exam_attempt_links l
+    JOIN opening_exam_sprints s ON s.id=l.sprint_id
+    WHERE l.sprint_id=${sprintId} AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+      AND l.publication<>'published'`;
+  for (const link of unpublished) ruleEvidence[String(link.exam_attempt_id)] = { usable: false, correct: null, independent: false, assisted: false };
   for (const row of rows) {
     const attemptId = String(row.exam_attempt_id), attempt = state.attempts.find(item => item.id === attemptId), facts = contexts[String(row.id)];
     if (!attempt || !facts) continue;
