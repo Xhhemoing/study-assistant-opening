@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { TeachingActivity } from "@aistudy/contracts";
 import { ui, tone } from "../design/ui";
+import { TeachingGoalGuidance } from "./goal-guidance";
 import {
   formatActivityUpdatedAt,
   teachingActivityContentHonesty,
@@ -39,6 +40,7 @@ export function TeachingActivityPanel({
         当前教学活动
       </h2>
       <p className="mt-2 break-words text-sm leading-6 text-zinc-700">{activity.intentSummary}</p>
+      <TeachingGoalGuidance focus={activity.learnerFocus} />
       <dl className="mt-4 grid gap-2 text-xs leading-5 text-zinc-600 sm:grid-cols-2">
         <div>
           <dt className="text-zinc-400">状态</dt>

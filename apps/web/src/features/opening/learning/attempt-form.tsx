@@ -343,7 +343,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
         <div className="space-y-3" role="status">
           <p className="text-sm text-zinc-800">
             已保存原答案。自报结果：{OUTCOME_LABEL[recorded.outcome]}
-            {recorded.verdictSource === "reference_checked" ? " · 自对照参考" : "（尚未完成参考核对）"}。
+            {recorded.referenceCheck ? " · 自对照参考（尚未经独立评分）" : "（尚未完成参考核对）"}。
           </p>
           <p className="text-xs text-zinc-500">自报正确不等于已核验正确；原始答案与资格分开保留。不显示掌握或稳固。</p>
           {recorded.eligibility ? <LearningEvidenceEligibilityDetails eligibility={recorded.eligibility} /> : <p className="text-xs text-zinc-500">资格待核验。</p>}

@@ -11,6 +11,7 @@ describe("workspace navigation", () => {
       "/opening/library",
       "/opening/courses",
       "/opening/cards",
+      "/opening/sprint",
       "/opening/review",
       "/opening/settings/connections",
     ]);
@@ -22,6 +23,7 @@ describe("workspace navigation", () => {
     ]);
     expect(openingNavigation().filter(item => item.group === "more").map(item => item.href)).toEqual([
       "/opening/cards",
+      "/opening/sprint",
       "/opening/review",
       "/opening/settings/connections",
     ]);

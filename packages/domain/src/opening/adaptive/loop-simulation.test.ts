@@ -186,7 +186,7 @@ describe("adaptive learning loop — 7-day simulation (copilot)", () => {
   });
 
   it("gives every ordered item a reason and keeps the strategy version", () => {
-    expect(ADAPTIVE_STRATEGY_VERSION).toBe("adaptive-2");
+    expect(ADAPTIVE_STRATEGY_VERSION).toBe("adaptive-goal-1");
     for (const day of days) {
       for (const taskId of day.orderedTaskIds) expect(day.reasons[taskId]?.label.length).toBeGreaterThan(0);
     }

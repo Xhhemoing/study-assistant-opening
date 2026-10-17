@@ -7,6 +7,7 @@ import { createRetestCandidateHandler } from "../../apps/worker/src/jobs/retest-
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture, matrixSkill } from "./opening-matrix-attempt-fixture";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
@@ -30,9 +31,8 @@ async function proposals(courseId: string) {
 }
 
 it.each(["course", "skill", "retract"] as const)("does not use revised accepted evidence to mark an unaffected observation due (%s)", async (change) => {
-  const f = await learningAttemptFixture(fixture), repo = createOpeningRetestRepository(fixture.sql);
-  const checked = { verdictSource: "reference_checked", referenceSourceId: f.sourceId, referenceCheck: { referenceSourceId: f.sourceId, method: "Compare each answer step", scope: "whole_answer" } };
-  const initial = await f.submit(await f.start(), checked), unaffected = await f.submit(await f.start(), checked);
+  const f = await matrixAttemptFixture(fixture), repo = createOpeningRetestRepository(fixture.sql);
+  const initial = await f.submit(await f.start()), unaffected = await f.submit(await f.start());
   const accepted = retest(initial);
   await repo.saveCandidates(fixture.scope, [accepted]);
   await repo.accept(fixture.scope, accepted.id, "accept-measurement-before-correction");
@@ -49,7 +49,7 @@ it.each(["course", "skill", "retract"] as const)("does not use revised accepted 
   expect(dueRetests).toEqual([]);
   expect(await repo.listAcceptedSkillLabels(fixture.scope, f.courseId)).toEqual([]);
   const evidence = await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId);
-  expect(summarizeObservations(evidence.observations, new Date().toISOString(), { evidenceContexts: evidence.evidenceContexts, dueRetests }).find((row) => row.skillLabel === "fractions"))
+  expect(summarizeObservations(evidence.observations, new Date().toISOString(), { evidenceContexts: evidence.evidenceContexts, dueRetests }).find((row) => row.skillLabel === matrixSkill))
     .toMatchObject({ status: "observed_independent", sampleCount: 1, evidenceIds: [unaffected.id] });
   expect(await proposals(f.courseId)).toEqual([]);
   expect((await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${accepted.id}`)[0]?.payload).toMatchObject({ accepted: true, evidenceChanged: true });

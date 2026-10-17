@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createRulesSkillStateEstimator, summarizeObservations, toSkillEvidence } from "@aistudy/domain";
+import { createRulesSkillStateEstimator, evaluateEvidenceEligibility, summarizeObservations, toSkillEvidence } from "@aistudy/domain";
 import { readOpeningLearningEvidenceContext } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
@@ -23,17 +23,29 @@ describe("database evidence to skill estimator", () => {
     expect(evidence).toMatchObject({
       observationId: inserted.id, courseId: f.courseId, skillLabel: "fractions", requirementKey: attempt.requirementKey,
       itemVersionId: attempt.itemVersionId, firstAttempt: null,
-      outcome: "correct", assistance: "independent", verdictSource: "reference_checked", occurredAt: record.occurredAt,
+      outcome: "correct", assistance: "independent", verdictSource: "self_report", occurredAt: record.occurredAt,
     });
     for (const key of ["observationId", "courseId", "skillLabel", "requirementKey", "itemVersionId", "firstAttempt", "outcome", "assistance", "verdictSource", "occurredAt"] as const) {
       expect(Object.hasOwn(evidence, key)).toBe(true);
       expect(evidence[key]).not.toBeUndefined();
     }
     expect(evidence.record).toEqual(record);
+    expect(evidence.eligibilityInput).toBe(input);
     expect(evidence.eligibilityInput?.observation.attemptId).toBe(attempt.id);
+    expect(evidence.eligibilityInput?.context.referenceCheck).toEqual(record.referenceCheck);
     expect(evidence.eligibilityInput?.context.referenceCheck?.checkerId).toBe(fixture.scope.ownerUserId);
+    expect(evidence.eligibilityInput?.context.referenceCheckAuthority).toBe("learner");
+    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({
+      independentAttempt: "yes", usableForCurrentVersion: "yes", verifiedCorrect: "unknown", usableForDelayedCheck: "unknown", reasonCodes: expect.arrayContaining([
+        "verification_source_untrusted", "learner_reference_compare",
+      ]),
+    });
     const evaluatedAt = new Date().toISOString();
-    expect(createRulesSkillStateEstimator({ evaluatedAt }).estimate([evidence]).state)
+    const estimate = createRulesSkillStateEstimator({ evaluatedAt }).estimate([evidence]);
+    expect(estimate).toMatchObject({ state: "needs_check", reasons: expect.arrayContaining([
+      "verification_source_untrusted", "learner_reference_compare",
+    ]) });
+    expect(estimate.state)
       .toBe(summarizeObservations([record], evaluatedAt, { evidenceContexts: { [record.id]: input } })[0]!.status);
   });
 });

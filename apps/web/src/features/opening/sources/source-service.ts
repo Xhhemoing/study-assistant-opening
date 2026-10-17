@@ -4,6 +4,7 @@ import {
   createOpeningSourceRepository,
   createOpeningSourceActionsRepository,
   createOpeningPrivacyRepository,
+  readOpeningExamPublicSource,
   OpeningSourceError,
   OpeningS3,
   magicMatchesMime,
@@ -234,8 +235,15 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
-      const key = storage.finalKey(id, requested);
-      const object = await storage.getObjectStream(key);
+      const publicSource = source.mime === "text/plain" && requested === 0
+        ? await readOpeningExamPublicSource(sql, scopeOf(p), id, requested) : null;
+      const object = publicSource ? {
+        body: new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(new TextEncoder().encode(publicSource.text));
+          controller.close();
+        } }),
+        contentType: "text/plain", contentLength: publicSource.bytes,
+      } : await storage.getObjectStream(storage.finalKey(id, requested));
       const contentType = source.mime || object.contentType;
       const disposition = resolveDownloadDisposition(contentType, options?.disposition ?? "attachment");
       return {

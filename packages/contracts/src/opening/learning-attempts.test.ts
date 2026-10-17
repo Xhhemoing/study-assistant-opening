@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema } from "./learning-attempts";
+import { evidenceEligibilitySchema } from "./learning-evidence";
 const sessionId = "11111111-1111-4111-8111-111111111111";
 it("allows an unlinked server-issued attempt without inventing a problem", () => {
   expect(learningAttemptCreateInputSchema.parse({ sessionId, clientKey: "start-001" })).toEqual({ sessionId, clientKey: "start-001" });
@@ -12,6 +13,18 @@ it("rejects client submitted server time and qualification", () => {
   expect(learningAttemptSubmitInputSchema.safeParse(input).success).toBe(true);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, submittedAt: "2026-09-28T00:00:00Z" }).success).toBe(false);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, eligibility: { verifiedCorrect: "yes" } }).success).toBe(false);
+});
+it("allows learner comparison metadata while rejecting claimed review authority", () => {
+  const input = { clientKey: "compare-001", answer: "1", outcome: "correct", assistance: "independent", verdictSource: "self_report",
+    referenceCheck: { referenceSourceId: sessionId, method: "learner_self_compare", scope: "whole_answer" } };
+  expect(learningAttemptSubmitInputSchema.safeParse(input).success).toBe(true);
+  expect(learningAttemptSubmitInputSchema.safeParse({ ...input, referenceCheck: { ...input.referenceCheck, authority: "independent_review" } }).success).toBe(false);
+  expect(learningAttemptSubmitInputSchema.safeParse({ ...input, referenceCheckAuthority: "independent_review" }).success).toBe(false);
+});
+it.each(["opening-evidence-v1", "opening-evidence-v2", "opening-evidence-v3"])("reads captured policy %s without upgrading it", policyVersion => {
+  const input = { independentAttempt: "yes", verifiedCorrect: "unknown", usableForCurrentVersion: "yes",
+    usableForDelayedCheck: "unknown", reasonCodes: [], policyVersion };
+  expect(evidenceEligibilitySchema.parse(input)).toEqual(input);
 });
 it("accepts a pinned teaching block and rejects invalid versions", () => {
   const input = { sessionId, clientKey: "teaching-001", teachingBlock: { blockId: sessionId, contentVersion: 1 } };

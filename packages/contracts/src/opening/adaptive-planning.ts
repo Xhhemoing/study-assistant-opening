@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { goalLearningModeSchema } from "./goal-learning";
 
 /**
  * UX policy §3 intervention modes for the daily plan.
@@ -50,6 +51,8 @@ export const courseGoalSchema = z
     /** Exam or deadline; null = no fixed date. */
     targetDate: localDateSchema.nullable(),
     weeklyMinutes: z.number().int().min(0).max(3000),
+    learningMode: goalLearningModeSchema.optional(),
+    priority: z.number().int().min(0).max(5).optional(),
     revision: z.number().int().nonnegative().optional(),
     milestones: z.array(courseMilestoneSchema).max(8).optional(),
   })
@@ -59,6 +62,8 @@ export const courseGoalSchema = z
 export const courseGoalUpdateSchema = z.object({
   targetDate: localDateSchema.nullable(),
   weeklyMinutes: z.number().int().min(0).max(3000),
+  learningMode: goalLearningModeSchema.optional(),
+  priority: z.number().int().min(0).max(5).optional(),
   milestones: z.array(courseMilestoneUpdateSchema).max(8).optional(),
 }).strict();
 

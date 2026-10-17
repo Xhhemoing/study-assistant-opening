@@ -34,6 +34,7 @@ import {
 import { PreferenceControls } from "./preference-controls";
 import { ResumeCard, type LocalUnsentDraft } from "./resume-card";
 import { ActivityEndControl } from "./activity-end-control";
+import { TeachingGoalGuidance } from "./goal-guidance";
 
 export type TeachingWorkspaceProps = {
   activity: TeachingActivity;
@@ -338,6 +339,8 @@ export function TeachingWorkspace({
           </span>
         </div>
       </header>
+
+      <TeachingGoalGuidance focus={liveActivity.learnerFocus} />
 
       {activity.generateStatus === "needs_check" ? (
         <div

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { KnowledgeSnapshot } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
+  createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   createOpeningSkillEvidenceRepository,
   type OpeningLearningRepository,
@@ -15,6 +16,7 @@ import {
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
 
 let f: OpeningFixture;
 let learning: OpeningLearningRepository;
@@ -45,6 +47,8 @@ async function seedCourseWithKnowledge() {
   const rows = backupRows(f.sql, f.scope);
   const sourceId = await rows.source();
   const chunkId = await rows.chunk(sourceId);
+  await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${sourceId}`;
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${f.scope.workspaceId}, 'Adaptive loop', ${courseId})`;
@@ -93,17 +97,20 @@ async function seedCourseWithKnowledge() {
 
 describe("opening adaptive loop (K02 Data)", () => {
   it("links SkillEvidence on L01 observation when nodeId+dimension are provided", async () => {
-    const { courseId, sourceId } = await seedCourseWithKnowledge();
+    const { courseId, sourceId, chunkId } = await seedCourseWithKnowledge();
     const session = await learning.createSession(f.scope, {
       courseId,
       skillLabel: "functions",
       sourceIds: [sourceId],
     });
+    const attempt = await createOpeningLearningAttemptRepository(f.sql).create(f.scope, { sessionId: session.id, clientKey: randomUUID(),
+      problem: { sourceId, chunkId, physicalPage: 1, stemSnapshot: "What is f(x)?", artifactKind: "reference_item" } });
     const obs = await learning.insertObservation(f.scope, {
       sessionId: session.id,
       courseId,
       skillLabel: "functions",
       sourceIds: [sourceId],
+      attemptId: attempt.id, problemId: attempt.problemId,
       answer: "f(x)=x",
       outcome: "correct",
       assistance: "hinted",
@@ -161,59 +168,29 @@ describe("opening adaptive loop (K02 Data)", () => {
     expect(again.id).toBe(links[0]!.id);
   });
 
-  it("marks checked independent when eligibility says yes (Data flag helper)", async () => {
-    const { courseId, sourceId } = await seedCourseWithKnowledge();
-    const session = await learning.createSession(f.scope, {
-      courseId,
-      skillLabel: "functions",
-      sourceIds: [sourceId],
-    });
-    const obs = await learning.insertObservation(
-      f.scope,
-      {
-        sessionId: session.id,
-        courseId,
-        skillLabel: "functions",
-        sourceIds: [sourceId],
-        answer: "transfer ok",
-        outcome: "correct",
-        assistance: "independent",
-        clientKey: "adaptive-independent-1",
-        problemId: randomUUID(),
-        nodeId: nodeA,
-        dimension: "transfer",
-      },
-      { verdictSource: "reference_checked", referenceSourceId: sourceId },
-    );
-
-    // Seed eligibility head so Data flag helper can see checked-independent evidence.
-    // (Full attempt/help pipeline remains L01/DL6; L02 worker append is AI-owned.)
-    await f.sql`
-      INSERT INTO opening_learning_eligibility (
-        workspace_id, owner_user_id, root_observation_id, head_observation_id,
-        head_revision, input_revision, policy_version, help_revision, item_matches,
-        source_states, privacy_source_ids,
-        independent_attempt, verified_correct, usable_for_current_version, usable_for_delayed_check,
-        reason_codes, version_applicability
-      ) VALUES (
-        ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${obs.id}, ${obs.id},
-        1, 1, 'test', 0, true,
-        ${f.sql.json([])}, ${[]},
-        'yes', 'yes', 'yes', 'unknown',
-        ${[]}, 'exact'
-      )
-      ON CONFLICT (workspace_id, owner_user_id, root_observation_id) DO UPDATE SET
-        independent_attempt = 'yes',
-        verified_correct = 'yes',
-        usable_for_current_version = 'yes',
-        head_observation_id = EXCLUDED.head_observation_id`;
-
+  it("marks checked independent only from a real current server-scored attempt", async () => {
+    const matrix = await matrixAttemptFixture(f);
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES(${f.scope.workspaceId},${matrix.courseId},'source',${matrix.sourceId},'core','private')`;
+    await createOpeningKnowledgeRepository(f.sql).replace(f.scope, matrix.courseId, { expectedVersion: 0,
+      sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: matrix.courseId, version: 1, edges: [],
+        nodes: [{ id: nodeA, courseId: matrix.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
+    const obs = await matrix.submit(await matrix.start());
+    await evidence.link(f.scope, { nodeId: nodeA, observationId: obs.id, courseId: matrix.courseId, dimension: "transfer" });
     const flags = await evidence.flagsForNode(f.scope, nodeA);
     expect(flags.hasCheckedIndependent).toBe(true);
     expect(flags.hasAssistance).toBe(false);
     const byNode = await evidence.listByNode(f.scope, nodeA);
     expect(byNode).toHaveLength(1);
     expect(byNode[0]!.dimension).toBe("transfer");
+    const revised = await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: obs.id,
+      expectedHead: obs.id, revisionKind: "replace", reason: "Learner review", clientKey: randomUUID(),
+      replacement: { answer: "[2,3]", outcome: "correct", assistance: "hinted", verdictSource: "self_report" } });
+    expect((await evidence.flagsForNode(f.scope, nodeA))).toMatchObject({ hasCheckedIndependent: false, hasAssistance: true });
+    await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: revised.headObservationId,
+      expectedHead: revised.headObservationId, revisionKind: "retract", reason: "Withdraw record", clientKey: randomUUID() });
+    expect(await evidence.flagsForNode(f.scope, nodeA)).toEqual({ nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+    expect(await evidence.listByNode(f.scope, nodeA)).toHaveLength(1);
   });
 
   it("does not pollute a sibling knowledge node (cross-skill isolation)", async () => {

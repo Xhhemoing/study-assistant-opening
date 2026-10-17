@@ -118,6 +118,7 @@ export async function main(): Promise<void> {
   const knowledge = createOpeningKnowledgeRepository(sql);
   const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
     listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
+    listReferencedNodeIds: (scope, courseId) => knowledge.listReferencedNodeIds(scope, courseId),
     get: (scope, courseId) => knowledge.get(scope, courseId),
     replace: (scope, courseId, input) => knowledge.replace(scope, courseId, input),
     // Own task route and ledger entry; retries of one job reuse one reservation.

@@ -67,6 +67,7 @@ describe("Opening mobile navigation", () => {
     const moreDialog = findControl(tree, control => control.type === "dialog");
     const dialogHtml = renderToStaticMarkup(moreDialog);
     expect(dialogHtml).toContain('/opening/cards');
+    expect(dialogHtml).toContain('/opening/sprint');
     expect(dialogHtml).toContain('/opening/review');
     expect(dialogHtml).toContain('/opening/settings/connections');
   });

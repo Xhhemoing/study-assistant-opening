@@ -6,8 +6,8 @@ import {
   type SourceChunk,
   type Scope,
 } from "@aistudy/contracts";
-import { validateKnowledgeSnapshot } from "@aistudy/domain";
-import type { Sql } from "postgres";
+import { sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
+import type { Sql, TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
 
 export type OpeningKnowledgeErrorCode = "NOT_FOUND" | "VALIDATION" | "CONFLICT";
@@ -31,6 +31,8 @@ export type OpeningKnowledgeRecord = {
 
 export type ReplaceKnowledgeInput = {
   expectedVersion: number;
+  /** Automatic rebuilds pin references observed before reconciliation; manual edits omit this. */
+  expectedReferencedNodeIds?: readonly string[];
   snapshot: KnowledgeSnapshot;
   sourceVersions: Record<string, number>;
 };
@@ -75,9 +77,23 @@ async function assertOwnedCourse(sql: Sql, scope: Scope, courseId: string): Prom
   if (!rows.length) throw new OpeningKnowledgeError("NOT_FOUND", "course not found");
 }
 
+/** Includes historical links: deletion must never make a referenced UUID reusable. */
+async function referencedNodeIds(db: Sql | TransactionSql, scope: Scope, courseId: string): Promise<string[]> {
+  const rows = await db`SELECT node_id FROM opening_skill_evidence
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+    UNION SELECT (skill->>'nodeId')::uuid AS node_id FROM opening_exam_bindings b
+    JOIN opening_exam_sprints s ON s.id=b.sprint_id,
+    LATERAL jsonb_array_elements(b.binding->'skills') skill
+    WHERE b.course_id=${courseId} AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+    UNION SELECT l.node_id FROM opening_exam_attempt_links l
+    JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
+    WHERE a.course_id=${courseId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
+  return rows.map(row => String(row.node_id));
+}
+
 /** Evidence chunks must belong to course-linked, uploaded sources in this workspace. */
 async function assertAuthorizedChunkRefs(
-  tx: Sql,
+  tx: TransactionSql,
   scope: Scope,
   courseId: string,
   snapshot: KnowledgeSnapshot,
@@ -100,6 +116,7 @@ async function assertAuthorizedChunkRefs(
     SELECT c.id, c.source_id, c.source_version
     FROM opening_source_chunks c
     JOIN opening_sources s ON s.id = c.source_id
+    JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=c.source_version
     JOIN course_asset_memberships m
       ON m.workspace_id = s.workspace_id
       AND m.asset_type = 'source'
@@ -107,6 +124,10 @@ async function assertAuthorizedChunkRefs(
       AND m.course_id = ${courseId}
     WHERE s.workspace_id = ${scope.workspaceId}
       AND s.upload_state = 'uploaded'
+      AND s.parse_state = 'ready'
+      AND c.source_version = s.version
+      AND v.availability = 'available'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
       AND c.id IN ${tx(chunkIds)}
     FOR SHARE`;
 
@@ -139,6 +160,10 @@ async function assertAuthorizedChunkRefs(
 
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
+    async listReferencedNodeIds(scope: Scope, courseId: string): Promise<string[]> {
+      await assertOwnedCourse(sql, scope, courseId);
+      return referencedNodeIds(sql, scope, courseId);
+    },
     async get(scope: Scope, courseId: string): Promise<OpeningKnowledgeRecord | null> {
       await assertOwnedCourse(sql, scope, courseId);
       const rows = await sql`
@@ -168,6 +193,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         SELECT c.*, m.course_id
         FROM opening_source_chunks c
         JOIN opening_sources s ON s.id = c.source_id
+        JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=c.source_version
         JOIN course_asset_memberships m
           ON m.workspace_id = s.workspace_id
           AND m.asset_type = 'source'
@@ -177,6 +203,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           AND s.upload_state = 'uploaded'
           AND s.parse_state = 'ready'
           AND c.source_version = s.version
+          AND v.availability = 'available'
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
           AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         ORDER BY c.source_id, c.page NULLS LAST, c.created_at`;
       return rows.map((row) => {
@@ -237,6 +265,19 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
         if (currentVersion !== input.expectedVersion) {
           throw new OpeningKnowledgeError("CONFLICT", "stale knowledge version");
+        }
+
+        const previous = current ? mapRecord(current) : null;
+        const referenced = new Set(await referencedNodeIds(tx, scope, courseId));
+        if (input.expectedReferencedNodeIds && (referenced.size !== new Set(input.expectedReferencedNodeIds).size
+          || input.expectedReferencedNodeIds.some(id => !referenced.has(id)))) {
+          throw new OpeningKnowledgeError("CONFLICT", "课程技能引用已变化，请重新生成知识图谱");
+        }
+        for (const node of draft.nodes) {
+          const existing = previous?.snapshot.nodes.find(item => item.id === node.id);
+          if ((!existing && referenced.has(node.id)) || (existing && !sameKnowledgeNodeIdentity(existing, node))) {
+            throw new OpeningKnowledgeError("CONFLICT", "知识节点身份已退役或内容已变化，请创建新节点身份；历史学习证据不会转给新技能。");
+          }
         }
 
         await assertAuthorizedChunkRefs(tx, scope, courseId, draft, sourceVersions);

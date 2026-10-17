@@ -3,21 +3,22 @@ import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
 import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance } from "@aistudy/domain";
-import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
 import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
+import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null } = {}) {
+  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number> } = {}) {
   return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
 export async function insertOpeningLearningObservationInTx(tx: TransactionSql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null } = {}) {
+  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number> } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
@@ -25,10 +26,11 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (input.sourceIds.some((id) => !(session.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "observation source is outside the session");
   await lockLearningHistory(tx, scope, input.courseId);
   const sources = await admitLearningSources(tx, scope, input.sourceIds);
-  const verdictSource = opts.verdictSource ?? input.verdictSource ?? "self_report";
+  const submittedVerdictSource = opts.verdictSource ?? input.verdictSource ?? "self_report";
+  const verdictSource = learnerVerdictSource(submittedVerdictSource);
   const referenceSourceId = opts.referenceSourceId ?? input.referenceSourceId ?? input.referenceCheck?.referenceSourceId ?? null;
-  if (input.referenceCheck && verdictSource !== "reference_checked") throw learningError("VALIDATION", "reference check requires an explicit reference_checked verdict");
-  if (verdictSource === "reference_checked") {
+  if (input.referenceCheck && verdictSource !== "self_report") throw learningError("VALIDATION", "learner reference checks require a self_report verdict");
+  if (input.referenceCheck || submittedVerdictSource === "reference_checked") {
     if (!referenceSourceId || !(session.source_ids as string[]).includes(referenceSourceId)) throw learningError("VALIDATION", "reference source is not bound to this session");
     if (input.referenceCheck && input.referenceCheck.referenceSourceId !== referenceSourceId) throw learningError("VALIDATION", "reference check source mismatch");
     await admitLearningSources(tx, scope, [referenceSourceId]);
@@ -59,7 +61,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   }
   const intent = { sessionId: input.sessionId, courseId: input.courseId, skillLabel: input.skillLabel, sourceIds: [...new Set(input.sourceIds)].sort(),
     attemptId: input.attemptId ?? null, problemId: input.problemId ?? null, retestId: (retestActivity?.id as string | undefined) ?? null,
-    answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource, referenceSourceId,
+    answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource: submittedVerdictSource, referenceSourceId,
     referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
     ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
   const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
@@ -84,7 +86,9 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     return qualify(mapLearningObservation(existing[0]));
   }
   if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
-  const matrixEvaluation = await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
+  const examEvaluation = await evaluateOpeningExamAttempt(tx, scope, attempt, input.answer, attemptSources, opts.examSprintPublication === true);
+  const matrixEvaluation = examEvaluation ? null : await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
+  const controlledEvaluation = examEvaluation ?? (matrixEvaluation ? { ...matrixEvaluation, specVersion: "matrix-arithmetic-v1" as const } : null);
   if ((attempt?.create_intent as { teachingBlock?: unknown } | undefined)?.teachingBlock) {
     const activities = await tx`SELECT status,content_version FROM opening_teaching_activities
       WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -93,7 +97,8 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     if (Number(activities[0].content_version) !== pinned) throw learningError("CONFLICT", "teaching content changed before answer submission");
   }
   const nowRows = await tx`SELECT clock_timestamp() AS at`;
-  const submittedAt = learningIso(nowRows[0]!.at)!;
+  const recordedAt = learningIso(nowRows[0]!.at)!;
+  const submittedAt = examEvaluation?.capturedSubmittedAt ?? recordedAt;
   // DL11: authoritative earliest-allowed gate for any retest-linked observation submit
   // (attempt submit and direct observation POST). Idempotent clientKey hits return above.
   if (retestActivity) {
@@ -105,27 +110,27 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   }
   const problemId = attempt ? attempt.problem_id as string | null : input.problemId ?? null;
   const itemVersionId = attempt?.item_version_id as string | null ?? null;
-  const referenceCheck = !matrixEvaluation && input.referenceCheck ? { attemptId: input.attemptId ?? null, problemId, itemVersionId,
+  const referenceCheck = !controlledEvaluation && input.referenceCheck ? { attemptId: input.attemptId ?? null, problemId, itemVersionId,
     referenceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope,
     checkerId: scope.ownerUserId, outcome: input.outcome } : null;
-  const sourceVersions = attempt?.source_versions ?? (input.problemId ? null : Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)])));
+  const sourceVersions = attempt?.source_versions ?? opts.capturedSourceVersions ?? (input.problemId ? null : Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)])));
   const revision = await nextLearningHistoryRevision(tx, scope, input.courseId), id = randomUUID();
-  const serverEvaluation = matrixEvaluation ? {
+  const serverEvaluation = controlledEvaluation ? {
     observationId: id, attemptId: String(attempt!.id), problemId: String(problemId), itemVersionId: String(itemVersionId),
-    requirementKey: String(attempt!.requirement_key), evaluatorVersion: matrixEvaluation.evaluatorVersion,
-    specVersion: "matrix-arithmetic-v1", decision: matrixEvaluation.decision, outcome: matrixEvaluation.outcome,
-    reasonCodes: matrixEvaluation.reasonCodes, evaluatedAt: submittedAt,
+    requirementKey: String(attempt!.requirement_key), evaluatorVersion: controlledEvaluation.evaluatorVersion,
+    specVersion: controlledEvaluation.specVersion, decision: controlledEvaluation.decision, outcome: controlledEvaluation.outcome,
+    reasonCodes: controlledEvaluation.reasonCodes, evaluatedAt: recordedAt,
   } : null;
-  const effectiveOutcome = matrixEvaluation?.outcome ?? input.outcome;
+  const effectiveOutcome = controlledEvaluation?.outcome ?? input.outcome;
   const effectiveAssistance = matrixEvaluation?.priorFeedback ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
-  const effectiveVerdictSource = matrixEvaluation ? "deterministic" : verdictSource;
+  const effectiveVerdictSource = controlledEvaluation ? "deterministic" : verdictSource;
   const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
   const activityId = String(session.activity_id);
   const rows = await tx`INSERT INTO opening_learning_observations
     (id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
      source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,server_evaluation,submitted_intent,history_revision,workspace_history_revision,root_observation_id,effective_head_id,revision_kind,actor_id)
      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${input.sessionId},${input.courseId},${activityId},${input.skillLabel},${input.sourceIds},${problemId},${(retestActivity?.id as string | undefined) ?? null},${input.answer},${effectiveOutcome},${effectiveAssistance},${input.clientKey},${submittedAt},
-     ${opts.sourceTurnIds ?? []},${effectiveVerdictSource},${matrixEvaluation ? null : referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${submittedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${serverEvaluation ? tx.json(serverEvaluation) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
+     ${opts.sourceTurnIds ?? []},${effectiveVerdictSource},${controlledEvaluation ? null : referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? opts.requirementKey ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${recordedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${serverEvaluation ? tx.json(serverEvaluation) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
     ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
   if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
   if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;

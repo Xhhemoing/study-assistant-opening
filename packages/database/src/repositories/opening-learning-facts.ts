@@ -6,6 +6,9 @@ export function learningError(code: "NOT_FOUND" | "VALIDATION" | "CONFLICT", mes
   return Object.assign(new Error(message), { code });
 }
 export const learningIso = (value: unknown): string | null => value == null ? null : new Date(value as string | Date).toISOString();
+/** Public manual checks retain their reference metadata without claiming independent grading. */
+export const learnerVerdictSource = (source: LearningObservation["verdictSource"]): LearningObservation["verdictSource"] =>
+  source === "reference_checked" ? "self_report" : source;
 /** Lock before any owner/course/root/activity/task lock; readers never lock this row. */
 export async function lockWorkspaceLearningHistory(tx: TransactionSql, scope: Scope): Promise<void> {
   const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;

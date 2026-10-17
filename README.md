@@ -4,6 +4,8 @@ AIstudy 是面向长期学习与短期备考的学习平台。目标学习、自
 
 ## 产品原则
 
+- 目标学习兼顾长期能力与短期考试；教学按偏好调整，时间紧张时优先练习与必要补缺。
+
 - 界面优先展示当前状态、关键数据和下一步行动，原因与证据按需展开。
 - 用户可以从学习目标、材料、自由探索或笔记开始，无需先创建课程。
 - 课程可以承载多个阶段目标；学习安排兼顾时间窗口、用户偏好和能力要求。
@@ -14,6 +16,7 @@ AIstudy 是面向长期学习与短期备考的学习平台。目标学习、自
 
 当前开发主线为 `feat/opening-release`。已合入内容、进行中的切片、部署情况和验收限制统一记录在 [项目状态看板](docs/STATUS.md)；历史计划和局部测试记录不代表当前版本已部署或完成产品验收。
 
+- [目标驱动学习框架](docs/plans/2026-10-17-goal-driven-learning-framework.md)
 - [产品规格](docs/product/PRD.md) · [场景预设与学习策略](docs/product/SCENARIOS.md)
 - [界面信息层级与 AI 交互规则](docs/product/UX_AND_AI_POLICY.md)
 - [系统架构](docs/architecture/ARCHITECTURE.md) · [数据模型与预测系统](docs/architecture/DATA_MODEL_AND_PREDICTION.md)

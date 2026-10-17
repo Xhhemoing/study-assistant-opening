@@ -247,7 +247,17 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         const block = revision.blocks.find((row) => row.id === following.blockId);
         const body = block?.content;
         const answer = body && [body.text, body.markdown, body.answer, body.solution].find((value): value is string => typeof value === "string");
-        const reference = spec.sourceRefs.find((ref) => ref.version != null && Number.isInteger(Number(ref.version)) && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
+        const ownCitations = new Set(Array.isArray(body?.citedChunkIds)
+          ? body.citedChunkIds.filter((id): id is string => typeof id === "string") : []);
+        const candidates = spec.sourceRefs.filter((ref) => ref.chunkId && ownCitations.has(ref.chunkId)
+          && ref.version != null && Number.isInteger(Number(ref.version))
+          && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
+        const chunks = candidates.length ? await tx`SELECT c.id,c.source_id,c.source_version FROM opening_source_chunks c
+          JOIN opening_sources s ON s.id=c.source_id
+          WHERE s.workspace_id=${scope.workspaceId} AND c.id::text=ANY(${candidates.map(ref => ref.chunkId!)}::text[])
+          FOR SHARE OF c,s` : [];
+        const reference = candidates.find(ref => chunks.some(chunk => String(chunk.id) === ref.chunkId
+          && String(chunk.source_id) === ref.sourceId && Number(chunk.source_version) === Number(ref.version)));
         return { answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null };
       });
     },

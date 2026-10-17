@@ -9,7 +9,7 @@ import type {
   SourceChunk,
 } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
-import { validateKnowledgeSnapshot } from "@aistudy/domain";
+import { sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
 
 type Scope = { workspaceId: string; ownerUserId: string };
 
@@ -28,6 +28,8 @@ export type BuildCourseKnowledgePayload = {
 
 export type BuildCourseKnowledgeDeps = {
   listAuthorizedChunks(scope: Scope, courseId: string): Promise<AuthorizedChunk[]>;
+  /** Explicit course bindings and existing evidence keep their original node definition. */
+  listReferencedNodeIds?(scope: Scope, courseId: string): Promise<string[]>;
   /** Data repo get — null when none (expectedVersion 0). */
   get(
     scope: Scope,
@@ -41,6 +43,7 @@ export type BuildCourseKnowledgeDeps = {
     courseId: string,
     input: {
       expectedVersion: number;
+      expectedReferencedNodeIds?: readonly string[];
       snapshot: KnowledgeSnapshot;
       sourceVersions: Record<string, number>;
     },
@@ -85,6 +88,8 @@ export function reconcileExtractedSnapshot(
   version: number,
   extracted: ExtractedGraph,
   authorized: AuthorizedChunk[],
+  previous?: KnowledgeSnapshot,
+  referencedNodeIds: readonly string[] = [],
 ): KnowledgeSnapshot {
   const byId = new Map(authorized.map((chunk) => [chunk.id, chunk]));
   const allowed = new Set(authorized.filter((chunk) => chunk.courseId === courseId).map((chunk) => chunk.id));
@@ -105,6 +110,32 @@ export function reconcileExtractedSnapshot(
       evidenceChunkIds,
       status,
     });
+  }
+
+  // Automatic reuse requires one exact, evidence-anchored definition on each
+  // side. A shared/nearby label, ambiguous duplicate, changed evidence or split
+  // is never permission to attach old learning evidence to a new concept.
+  const old = previous?.courseId === courseId ? previous.nodes : [];
+  const generated = [...nodes];
+  for (const node of generated) {
+    if (!node.evidenceChunkIds.length) continue;
+    const matches = old.filter(candidate => sameKnowledgeNodeIdentity(candidate, node));
+    if (matches.length !== 1 || generated.filter(candidate => sameKnowledgeNodeIdentity(candidate, node)).length !== 1) continue;
+    const originalId = node.id;
+    node.id = matches[0]!.id;
+    if (matches[0]!.status === "needs_check") node.status = "needs_check";
+    for (const [label, id] of labelToId) if (id === originalId) labelToId.set(label, node.id);
+  }
+  // Model omission cannot delete an explicitly referenced identity. Retain its
+  // original definition only while all its immutable chunks remain authorized.
+  // A node explicitly removed from the current snapshot is never resurrected.
+  for (const id of referencedNodeIds) {
+    if (nodes.some(node => node.id === id)) continue;
+    const node = old.find(candidate => candidate.id === id);
+    if (node && node.evidenceChunkIds.every(chunkId => allowed.has(chunkId))) {
+      const reinterpreted = generated.some(candidate => candidate.evidenceChunkIds.some(chunkId => node.evidenceChunkIds.includes(chunkId)));
+      nodes.push({ ...structuredClone(node), ...(reinterpreted ? { status: "needs_check" as const } : {}) });
+    }
   }
 
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -191,11 +222,14 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
           }
           return defaultExtract(provider, chunks);
         })();
-    const draft = reconcileExtractedSnapshot(body.courseId, expectedVersion + 1, extracted, chunks);
+    const referenced = await deps.listReferencedNodeIds?.(scope, body.courseId) ?? [];
+    const draft = reconcileExtractedSnapshot(body.courseId, expectedVersion + 1, extracted, chunks, current?.snapshot, referenced);
     const validated = (deps.validateSnapshot ?? validateKnowledgeSnapshot)(draft);
-    const sourceVersions = sourceVersionsFromChunks(chunks);
+    const used = new Set([...validated.nodes, ...validated.edges].flatMap(item => item.evidenceChunkIds));
+    const sourceVersions = sourceVersionsFromChunks(chunks.filter(chunk => used.has(chunk.id)));
     return deps.replace(scope, body.courseId, {
       expectedVersion,
+      ...(deps.listReferencedNodeIds ? { expectedReferencedNodeIds: referenced } : {}),
       snapshot: validated,
       sourceVersions,
     });

@@ -7,6 +7,13 @@ const goal = { targetDate: null, weeklyMinutes: 120 };
 const patch = (changes: object, expectedRevision?: number) => ({ courseGoal: { courseId: id, goal: { ...goal, ...changes }, ...(expectedRevision === undefined ? {} : { expectedRevision }) } });
 
 describe("versioned course milestones", () => {
+  it("accepts execution preferences while rejecting unknown modes and invalid priorities", () => {
+    expect(courseGoalSchema.parse({ ...goal, learningMode: "exam", priority: 5 })).toMatchObject({ learningMode: "exam", priority: 5 });
+    expect(openingAdaptivePrefsPatchSchema.safeParse(patch({ learningMode: "understand", priority: 0 }, 0)).success).toBe(true);
+    for (const values of [{ learningMode: "automatic-pass" }, { priority: -1 }, { priority: 6 }, { priority: 1.5 }]) {
+      expect(openingAdaptivePrefsPatchSchema.safeParse(patch(values, 0)).success).toBe(false);
+    }
+  });
   it("keeps legacy goals and goal patches exactly compatible", () => {
     expect(courseGoalSchema.parse(goal)).toEqual(goal);
     expect(openingAdaptivePrefsPatchSchema.parse(patch({}))).toEqual(patch({}));

@@ -121,7 +121,10 @@ if [[ "$1 $2" == 'run build' ]]; then
  printf asset > apps/web/.next/static/asset.js
  printf server > apps/web/.next/standalone/apps/web/server.js
 fi`,
-    npx: `printf 'migrate current=%s\\n' "$(readlink -f "$CURRENT_LINK")" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != migrate ]] || exit 19`,
+    npx: `
+printf 'migrate current=%s\\n' "$(readlink -f "$CURRENT_LINK")" >> "$MOCK_LOG"
+if systemctl is-active --quiet aistudy-worker.service; then printf 'refused migration with active worker\\n' >> "$MOCK_LOG"; exit 35; fi
+[[ "\${MOCK_FAIL:-}" != migrate ]] || exit 19`,
     pg_dump: `printf 'pg_dump\\n' >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup ]] || exit 25; printf dump > "\${!#}"`,
     pg_restore: `printf 'pg_restore %s\\n' "$1" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup-list ]] || exit 26`,
     df: `if [[ "\${MOCK_FAIL:-}" == disk ]]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nmock 100 99 1 99%% /\\n'; else exec /bin/df "$@"; fi`,
@@ -203,7 +206,7 @@ test("deploy prepares a separate release, verifies a retained PG backup, and ato
   assert.match(result.stdout, /部署完成/);
 });
 
-for (const failure of ["install", "build", "parser", "backup", "backup-list", "migrate", "disk"]) {
+for (const failure of ["install", "build", "parser", "backup", "backup-list", "disk"]) {
   test(`${failure} fails before activation and preserves the running release`, t => {
     const f = fixture(t, { MOCK_FAIL: failure });
     const result = f.run();
@@ -212,9 +215,40 @@ for (const failure of ["install", "build", "parser", "backup", "backup-list", "m
     assert.equal(readlinkSync(f.current), f.server);
     assert.doesNotMatch(result.log, /systemctl restart/);
     assert.equal(readFileSync(join(f.systemd, "aistudy-web.service.d/50-aistudy-release.conf"), "utf8"), "old-web-override\n");
-    if (failure === "migrate") assert(readdirSync(f.backups).some(name => name.endsWith(".dump")));
   });
 }
+
+test("deployment quiesces the old worker after backup and before the write-protocol migration", t => {
+  const f = fixture(t);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  const backup = result.log.indexOf("pg_restore --list");
+  const snapshot = result.log.indexOf("worker --snapshot");
+  const stop = result.log.indexOf("systemctl stop aistudy-worker.service");
+  const migration = result.log.indexOf("migrate current=");
+  const restart = result.log.indexOf("systemctl restart aistudy-worker.service");
+  assert(backup >= 0 && backup < snapshot && snapshot < stop && stop < migration && migration < restart, result.log);
+  assert.doesNotMatch(result.log, /refused migration with active worker/);
+});
+
+test("migration failure restores the original worker and configuration while retaining the old pointer and backup", t => {
+  const f = fixture(t, { MOCK_FAIL: "migrate" });
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assertLegacyIntact(f);
+  assert.equal(readlinkSync(f.current), f.server);
+  assert(result.log.indexOf("systemctl stop aistudy-worker.service") < result.log.indexOf("migrate current="), result.log);
+  assert(result.log.indexOf("migrate current=") < result.log.indexOf("systemctl restart aistudy-worker.service"), result.log);
+  assert.match(result.log, /worker --restore/);
+  assert.doesNotMatch(result.log, /worker provision/);
+  assert.match(result.stderr, /Previous release restored/);
+  assert.equal(readFileSync(join(f.systemd, "aistudy-worker.service"), "utf8"), "old-worker-unit\n");
+  assert.equal(readFileSync(join(f.workerConfig, "worker-runtime.env"), "utf8"), "old-runtime-env\n");
+  assert.equal(readFileSync(join(f.systemd, "aistudy-web.service.d/50-aistudy-release.conf"), "utf8"), "old-web-override\n");
+  assert(!existsSync(f.env.MOCK_STOPPED));
+  assert(existsSync(f.env.MOCK_RESTARTED));
+  assert(readdirSync(f.backups).some(name => name.endsWith(".dump")));
+});
 
 for (const failure of ["provision", "worker", "health", "worker-after-start", "identity"]) {
   test(`${failure} failure restores the previous pointer and both service configurations`, t => {

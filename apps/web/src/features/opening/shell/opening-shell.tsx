@@ -1,7 +1,7 @@
 "use client";
 
 import { AppShell, getWorkspaceEntry, SIDEBAR_COLLAPSED_STORAGE_KEY } from "@aistudy/ui";
-import { ClipboardCheck, Focus, Layers2, Library, Link2, Maximize2, MessageCircle, Notebook, Sun } from "lucide-react";
+import { ClipboardCheck, Focus, Layers2, Library, Link2, Maximize2, MessageCircle, Notebook, Sun, Timer } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
@@ -17,6 +17,7 @@ const icons = {
   library: Library,
   courses: Notebook,
   cards: Layers2,
+  sprint: Timer,
   review: ClipboardCheck,
   connections: Link2,
 };

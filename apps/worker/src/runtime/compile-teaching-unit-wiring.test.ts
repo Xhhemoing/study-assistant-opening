@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActivitySpecPublishInput, SourceChunk } from "@aistudy/contracts";
+import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
 
 const activities = vi.hoisted(() => ({
@@ -153,6 +153,30 @@ const payload = {
 };
 
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
+  it("enforces the persisted prerequisite prompt boundary at actual publication even after revalidation removes the prelude", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const learnerFocus: TeachingLearnerFocus = { skillLabel: "秩与零空间", activityKind: "diagnose", reasonCode: "no_evidence",
+      focusObservationId: null, recentAssistance: [], strategyVersion: "adaptive-goal-1",
+      goalContext: { mode: "exam", reasonCode: "selected_exam", targetDate: null, daysRemaining: null, priority: 0, prerequisiteBudgetMinutes: 5 },
+      prerequisiteRepair: { nodeId: SOURCE, targetNodeId: CHUNK, skillLabel: "线性方程组", returnToSkillLabel: "秩与零空间", maxMinutes: 5,
+        reason: "近期错误", stopCondition: "关键步骤完成后返回原题" },
+    };
+    activities.get.mockResolvedValue({ id: ACTIVITY, intentSummary: "秩与零空间", intentKind: "material", generateStatus: "queued", learnerFocus });
+    const { prerequisiteRepair: _repair, ...current } = learnerFocus;
+    readFocus.mockResolvedValue({ learnerFocus: current });
+    model.complete.mockImplementation(async (input: { text: string }) => {
+      const answer = modelAnswer(input);
+      const parsed = JSON.parse(answer.text);
+      parsed.blocks.splice(1, 0, { type: "prompt", text: "先做一道线性方程组题" }, { type: "answer_key", text: "前置题答案" });
+      return { ...answer, text: JSON.stringify(parsed) };
+    });
+    const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
+    await expect(run(job, payload)).rejects.toThrow("one original-target prompt");
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
+    expect(published).toEqual([]);
+    expect(statuses).toEqual(["generating", "failed"]);
+  });
+
   it.each([
     ["diagnose", "unverified_only"],
     ["targeted_explain", "verified_incorrect"],
@@ -204,6 +228,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hidden: true });
+    expect(answerKey.content).not.toHaveProperty("citedChunkIds");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
   });

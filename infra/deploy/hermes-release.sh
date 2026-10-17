@@ -204,13 +204,17 @@ else
   BACKUP="$BACKUPS/$(basename -- "$RELEASE").dump"
   node "$RELEASE/infra/deploy/hermes-db.mjs" backup "$CONFIG" "$BACKUP"
   printf '%s\n' "$BACKUP" > "$TRANSITION/database-backup"
-  node "$RELEASE/infra/deploy/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
-  touch "$TRANSITION/migration-succeeded"
-  printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
   [[ -f "$WORKER_HELPER" ]] || fail 'Release worker provisioning helper is missing.'
   snapshot_configuration "$TRANSITION"
   RECOVERY_REQUIRED=1
+  # Claim-token fencing changes the worker write protocol. Drain/stop the old
+  # process before migrating so unfenced code cannot write across the transition.
+  if systemctl is-active --quiet aistudy-worker.service; then systemctl stop aistudy-worker.service; fi
+  if systemctl is-active --quiet aistudy-worker.service; then fail 'Old worker remained active; migration was not started.'; fi
+  node "$RELEASE/infra/deploy/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
+  touch "$TRANSITION/migration-succeeded"
+  printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python"

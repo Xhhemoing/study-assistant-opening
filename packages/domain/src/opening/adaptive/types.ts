@@ -1,7 +1,7 @@
 import type { CourseGoal, TaskItem } from "@aistudy/contracts";
 
 /** Rule set that produced a draft; stored on drafts and shown in the reason drawer. */
-export const ADAPTIVE_STRATEGY_VERSION = "adaptive-2";
+export const ADAPTIVE_STRATEGY_VERSION = "adaptive-goal-1";
 
 export type SkillStatus = "unobserved" | "needs_check" | "observed_independent" | "needs_review";
 export type Assistance = "independent" | "hinted" | "revealed" | "unknown";

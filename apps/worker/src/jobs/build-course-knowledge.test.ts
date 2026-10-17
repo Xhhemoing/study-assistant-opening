@@ -94,6 +94,33 @@ describe("reconcileExtractedSnapshot", () => {
     expect(snapshot.nodes[0]!.evidenceChunkIds).toEqual([]);
     expect(snapshot.nodes[0]!.status).toBe("suggested");
   });
+  it("reuses only an unambiguous exact definition anchored to the same immutable evidence", () => {
+    const extracted = { nodes: [{ label: "函数", kind: "concept" as const, evidenceChunkIds: [chunkId], status: "supported" as const }], edges: [] };
+    const first = reconcileExtractedSnapshot(courseId, 1, extracted, [chunk()]);
+    const rebuilt = reconcileExtractedSnapshot(courseId, 2, extracted, [chunk()], first);
+    expect(rebuilt.nodes[0]!.id).toBe(first.nodes[0]!.id);
+    const renamed = reconcileExtractedSnapshot(courseId, 2, { ...extracted, nodes: [{ ...extracted.nodes[0]!, label: "函数的新定义" }] }, [chunk()], first);
+    expect(renamed.nodes[0]!.id).not.toBe(first.nodes[0]!.id);
+    const changed = reconcileExtractedSnapshot(courseId, 2, { ...extracted, nodes: [{ ...extracted.nodes[0]!, evidenceChunkIds: [foreignChunkId] }] },
+      [chunk({ id: foreignChunkId, sourceVersion: 2 })], first);
+    expect(changed.nodes[0]!.id).not.toBe(first.nodes[0]!.id);
+    const split = reconcileExtractedSnapshot(courseId, 2, { ...extracted, nodes: [extracted.nodes[0]!, extracted.nodes[0]!] }, [chunk()], first);
+    expect(split.nodes.some(node => node.id === first.nodes[0]!.id)).toBe(false);
+    const retainedSplit = reconcileExtractedSnapshot(courseId, 2, { ...extracted, nodes: [extracted.nodes[0]!, extracted.nodes[0]!] }, [chunk()], first, [first.nodes[0]!.id]);
+    expect(retainedSplit.nodes.find(node => node.id === first.nodes[0]!.id)?.status).toBe("needs_check");
+    expect(reconcileExtractedSnapshot(courseId, 3, extracted, [chunk()], {
+      ...retainedSplit, nodes: retainedSplit.nodes.filter(node => node.id === first.nodes[0]!.id),
+    }).nodes[0]!.status).toBe("needs_check");
+  });
+
+  it("retains referenced original definitions on model omission without reviving deleted or unavailable identities", () => {
+    const first = reconcileExtractedSnapshot(courseId, 1, { nodes: [{ label: "函数", kind: "concept", evidenceChunkIds: [chunkId] }], edges: [] }, [chunk()]);
+    const id = first.nodes[0]!.id;
+    const rebuilt = reconcileExtractedSnapshot(courseId, 2, { nodes: [], edges: [] }, [chunk()], first, [id]);
+    expect(rebuilt.nodes).toEqual(first.nodes);
+    expect(reconcileExtractedSnapshot(courseId, 2, { nodes: [], edges: [] }, [], first, [id]).nodes).toEqual([]);
+    expect(reconcileExtractedSnapshot(courseId, 3, { nodes: [], edges: [] }, [chunk()], { ...first, nodes: [] }, [id]).nodes).toEqual([]);
+  });
 });
 
 describe("sourceVersionsFromChunks", () => {
@@ -107,6 +134,21 @@ describe("sourceVersionsFromChunks", () => {
 });
 
 describe("createBuildCourseKnowledgeHandler", () => {
+  it("keeps referenced identities when a real rebuild omits their nodes and pins only used sources", async () => {
+    const current = reconcileExtractedSnapshot(courseId, 1, { nodes: [{ label: "函数", kind: "concept", evidenceChunkIds: [chunkId] }], edges: [] }, [chunk()]);
+    const referenced = vi.fn(async () => [current.nodes[0]!.id]);
+    const replace = vi.fn(async (_scope, _course, input) => ({ version: 2, snapshot: input.snapshot }));
+    const handler = createBuildCourseKnowledgeHandler({
+      get: async () => ({ version: 1, snapshot: current, sourceVersions: { [sourceId]: 1 } }),
+      listAuthorizedChunks: async () => [chunk(), chunk({ id: foreignChunkId, sourceId: "unused-source" })],
+      listReferencedNodeIds: referenced, extractGraph: async () => ({ nodes: [], edges: [] }), replace,
+      validateSnapshot: value => value,
+    });
+    expect((await handler(job, { courseId })).snapshot.nodes).toEqual(current.nodes);
+    expect(referenced).toHaveBeenCalledWith({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }, courseId);
+    expect(replace.mock.calls[0]![2].sourceVersions).toEqual({ [sourceId]: 1 });
+    expect(replace.mock.calls[0]![2].expectedReferencedNodeIds).toEqual([current.nodes[0]!.id]);
+  });
   it("reads current version, validates, then replace with CAS and sourceVersions", async () => {
     const authorized = [chunk()];
     const validateSnapshot = vi.fn((snapshot: KnowledgeSnapshot) => snapshot);

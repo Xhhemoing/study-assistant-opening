@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { LearningObservation, ObservationRevisionInput, RetestCandidate } from "@aistudy/contracts";
 import { createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads, readOpeningObservationHistory, reviseOpeningLearningObservation } from "@aistudy/database";
-import { summarizeObservations } from "@aistudy/domain";
+import { evaluateEvidenceEligibility, summarizeObservations } from "@aistudy/domain";
 import { insertOpeningTask } from "../../packages/database/src/repositories/opening-retest-task";
 import { readOpeningRetestReviewCandidates } from "../../packages/database/src/repositories/opening-review-candidates";
 import { createRetestCandidateHandler } from "../../apps/worker/src/jobs/retest-candidate";
@@ -31,7 +31,15 @@ it("counts only the corrected head and preserves the retracted root in history",
   const evidence = await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId);
   expect(evidence.observations.map((row) => row.id)).toEqual([corrected.headObservationId]);
   expect(evidence.observations[0]).toMatchObject({ attemptId: initial.attemptId, itemVersionId: initial.itemVersionId, occurredAt: initial.occurredAt, startedAt: initial.startedAt, submittedAt: initial.submittedAt });
-  expect(summarizeObservations(evidence.observations, new Date().toISOString(), { evidenceContexts: evidence.evidenceContexts })[0]).toMatchObject({ status: "observed_independent", sampleCount: 1, evidenceIds: [corrected.headObservationId] });
+  expect(summarizeObservations(evidence.observations, new Date().toISOString(), { evidenceContexts: evidence.evidenceContexts })[0]).toMatchObject({ status: "needs_check", sampleCount: 1, evidenceIds: [corrected.headObservationId] });
+  expect(evidence.observations[0]).toMatchObject({ verdictSource: "self_report" });
+  const current = evidence.evidenceContexts[corrected.headObservationId];
+  if (!current) throw new Error("Corrected head has no canonical evidence context");
+  expect(current.observation).toMatchObject({ observationId: corrected.headObservationId, verdictSource: "self_report" });
+  expect(current.context.referenceCheckAuthority).toBe("learner");
+  const eligibility = evaluateEvidenceEligibility(current.observation, current.context);
+  expect(eligibility.verifiedCorrect).toBe("unknown");
+  expect(eligibility.reasonCodes).toContain("learner_reference_compare");
   const retracted = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, command(corrected.observation!));
   expect((await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId)).observations).toEqual([]);
   expect(await readOpeningCourseObservationHeads(fixture.sql, fixture.scope, f.courseId)).toEqual([expect.objectContaining({ id: retracted.headObservationId, rootObservationId: initial.id, revisionKind: "retract" })]);
@@ -99,6 +107,7 @@ it("invalidates linked and exact legacy bases while preserving accepted complete
   // before the correction the completed activity blocks automatic regeneration.
   // The new candidate references the corrected head, not the superseded one.
   const [currentHead] = await fixture.sql`SELECT COALESCE(effective_head_id,id) AS head FROM opening_learning_observations WHERE id=${initial.rootObservationId ?? initial.id}`;
+  if (!currentHead) throw new Error("Corrected observation head is missing");
   const pending = { ...candidate(initial), evidenceObservationIds: [String(currentHead.head)] };
   await repo.saveCandidates(fixture.scope, [pending]);
   const jobs = await fixture.sql`SELECT id,payload FROM opening_jobs WHERE id IN ${fixture.sql([pending.id, accepted.id, legacyId, otherRequirement.id])}`;

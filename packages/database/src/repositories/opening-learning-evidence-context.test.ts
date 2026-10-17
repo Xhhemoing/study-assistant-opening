@@ -24,7 +24,9 @@ function evidenceDatabase() {
     return { then(resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) {
     queries++;
     try {
+    if (query.includes("SELECT * FROM (?) identity")) return Promise.resolve([]).then(resolve, reject);
     if (query.includes("JOIN opening_learning_observations root")) return Promise.resolve(rows).then(resolve, reject);
+    if (query.includes("opening_exam_attempt_links")) return Promise.resolve([]).then(resolve, reject);
     if (query.includes("opening_help_exposures")) return Promise.resolve([]).then(resolve, reject);
     if (query.includes("opening_privacy_exclusions")) return Promise.resolve([]).then(resolve, reject);
     if (query.includes("opening_source_versions")) return Promise.resolve([{ source_id: sourceId, version: 1, availability: "available" }]).then(resolve, reject);
@@ -47,6 +49,6 @@ describe("course evidence batch contexts", () => {
     expect(result.observations.map(row => evaluateEvidenceEligibility(
       result.evidenceContexts[row.id]!.observation, result.evidenceContexts[row.id]!.context,
     ).independentAttempt)).toEqual(Array(8).fill("yes"));
-    expect(fixture.queries()).toBeLessThanOrEqual(10);
+    expect(fixture.queries()).toBeLessThanOrEqual(11);
   });
 });

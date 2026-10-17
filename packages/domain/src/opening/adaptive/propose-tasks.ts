@@ -12,6 +12,7 @@ import {
 } from "./types";
 import { adaptiveSkillIdentity, normalizeSkillLabelKey, normalizedSuggestionIdentity } from "./skill-identity";
 import { suggestionFeedbackIdentity } from "./suggestion-feedback";
+import { goalPlanningPriority, resolveGoalLearningContext } from "./goal-policy";
 
 export const MAX_DAILY_SUGGESTIONS = 3;
 /** Suggestions may fill at most this share of the day's free time, after committed tasks. */
@@ -36,6 +37,10 @@ export type ProposeAdaptiveTasksOptions = {
   capacityMinutes: number;
   /** Minutes of the learner's own pending work planned ahead of suggestions. */
   committedMinutes: number;
+  /** Override with only schedulable work that outranks this course's suggestions. */
+  committedMinutesForCourse?: (courseId: string | null) => number;
+  /** Largest remaining continuous slot after higher-ranked work and earlier candidates. */
+  maxContinuousMinutesForCourse?: (courseId: string | null, suggestions: readonly SuggestedTask[]) => number;
   /** Pending tasks; a suggestion for a course+skill that already has one is skipped. */
   pendingTasks: readonly TaskItem[];
   /** Pre-assigns the task id for a suggestion key (deterministic in production). */
@@ -57,6 +62,8 @@ type Candidate = {
   reason: string;
   rank: number;
   urgency: number;
+  goalPriority: number;
+  examMode: boolean;
 };
 
 /** Hinted/revealed on most of the latest three observations (at least two observed). */
@@ -70,10 +77,6 @@ function leansOnHints(skill: SkillSignal): boolean {
 function weekdayIndexMonday0(date: string): number {
   const day = new Date(`${date}T00:00:00Z`).getUTCDay();
   return day === 0 ? 6 : day - 1;
-}
-
-function daysBetween(from: string, to: string): number {
-  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 }
 
 /** Behind when this week's completed minutes trail the goal's pro-rata share up to today. */
@@ -90,8 +93,8 @@ function courseUrgency(snapshot: LearnerSnapshot): Map<string, number> {
   const ranked = [...snapshot.courses].sort((a, b) => {
     const behind = Number(isCourseBehind(b, snapshot.date)) - Number(isCourseBehind(a, snapshot.date));
     if (behind) return behind;
-    const daysA = a.goal?.targetDate ? daysBetween(snapshot.date, a.goal.targetDate) : Number.POSITIVE_INFINITY;
-    const daysB = b.goal?.targetDate ? daysBetween(snapshot.date, b.goal.targetDate) : Number.POSITIVE_INFINITY;
+    const daysA = resolveGoalLearningContext(a.goal, snapshot.date).daysRemaining ?? Number.POSITIVE_INFINITY;
+    const daysB = resolveGoalLearningContext(b.goal, snapshot.date).daysRemaining ?? Number.POSITIVE_INFINITY;
     if (daysA !== daysB) return daysA < daysB ? -1 : 1;
     return a.courseId < b.courseId ? -1 : a.courseId > b.courseId ? 1 : 0;
   });
@@ -128,7 +131,7 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
   );
   const out: Candidate[] = [];
   const seen = new Set<string>();
-  const push = (candidate: Omit<Candidate, "rank" | "urgency" | "comparisonIdentities">, behind: boolean) => {
+  const push = (candidate: Omit<Candidate, "rank" | "urgency" | "comparisonIdentities" | "goalPriority" | "examMode">, behind: boolean) => {
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     const comparable = normalizedSuggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     // Upgrade old label-only history only when there is one unambiguous target.
@@ -148,11 +151,16 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
       candidate.courseId, adaptiveSkillIdentity(normalizeSkillLabelKey(candidate.skillLabel), null),
     ]))) return;
     seen.add(comparable);
+    const context = resolveGoalLearningContext(
+      snapshot.courses.find(course => course.courseId === candidate.courseId)?.goal ?? null, snapshot.date,
+    );
     out.push({
       ...candidate,
       comparisonIdentities,
       rank: KIND_PRIORITY[candidate.kind] - (behind ? BEHIND_BOOST : 0),
       urgency: candidate.courseId ? urgency.get(candidate.courseId) ?? Number.MAX_SAFE_INTEGER : -1,
+      goalPriority: goalPlanningPriority(context),
+      examMode: context.mode === "exam",
     });
   };
 
@@ -216,6 +224,7 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
 }
 
 function compareCandidates(a: Candidate, b: Candidate): number {
+  if (a.goalPriority !== b.goalPriority) return b.goalPriority - a.goalPriority;
   if (a.rank !== b.rank) return a.rank - b.rank;
   if (a.urgency !== b.urgency) return a.urgency - b.urgency;
   const courseA = a.courseId ?? "", courseB = b.courseId ?? "";
@@ -226,7 +235,7 @@ function compareCandidates(a: Candidate, b: Candidate): number {
 }
 
 /**
- * Rule set `adaptive-2`: weak skills, due cards, the next learnable node and courses behind
+ * Goal-driven rules: weak skills, due cards, the next learnable node and courses behind
  * their weekly goal become suggestions. Manual mode proposes nothing. Suggestions are
  * proposals only; they become tasks when the learner (or the coach) accepts the draft.
  */
@@ -236,7 +245,8 @@ export function proposeAdaptiveTasks(
 ): { suggestions: SuggestedTask[] } {
   if (options.autonomy === "manual") return { suggestions: [] };
   const max = options.maxSuggestions ?? MAX_DAILY_SUGGESTIONS;
-  let budget = Math.max(0, Math.floor(options.capacityMinutes * SUGGESTION_CAPACITY_SHARE) - options.committedMinutes);
+  const capacity = Math.max(0, Math.floor(options.capacityMinutes * SUGGESTION_CAPACITY_SHARE));
+  let suggestedMinutes = 0;
   const suggestions: SuggestedTask[] = [];
 
   const suppressed = new Set(options.suppressedSuggestionIdentities ?? []);
@@ -246,6 +256,9 @@ export function proposeAdaptiveTasks(
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     const skippedDays = consecutiveSkippedDays(snapshot, candidate.comparisonIdentities);
     if (skippedDays >= 3) continue;
+    const committed = options.committedMinutesForCourse?.(candidate.courseId) ?? options.committedMinutes;
+    const continuous = options.maxContinuousMinutesForCourse?.(candidate.courseId, suggestions) ?? Number.POSITIVE_INFINITY;
+    const budget = Math.max(0, Math.min(capacity - committed - suggestedMinutes, continuous));
     let { minutes, reasonCode, reason } = candidate;
     if (skippedDays === 2) {
       // Card reviews can start below the study-block minimum. Applying the
@@ -255,8 +268,12 @@ export function proposeAdaptiveTasks(
       reasonCode = "repeatedly_skipped";
       reason = `连续两天跳过，缩短为 ${minutes} 分钟（${candidate.reason}）`;
     }
+    if (candidate.examMode && minutes > budget && budget >= MIN_SUGGESTION_MINUTES) {
+      minutes = Math.floor(budget);
+      reason = `${reason}；根据剩余时间缩短为 ${minutes} 分钟应试练习`;
+    }
     if (minutes > budget) continue;
-    budget -= minutes;
+    suggestedMinutes += minutes;
     const key = suggestionKey(snapshot.date, identity);
     suggestions.push({
       key,

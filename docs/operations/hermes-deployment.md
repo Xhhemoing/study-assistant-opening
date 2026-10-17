@@ -39,8 +39,8 @@ bash infra/deploy/deploy-hermes.sh rollback
 2. 在服务器持有同一把非阻塞 `flock`；发布、重启、回退不能并行。先检查 releases 与 backups 所在磁盘可用空间，默认各需至少 4 GiB；不足直接停止，不删除在线代码、旧 release、缓存或备份。
 3. 解包新 release，独立执行 `npm ci` 与构建，补齐 standalone 静态资源，使用稳定 venv 在新 parser 目录执行 `--check`。安装、构建日志保存在本轮发布状态目录，不打印生产环境变量。
 4. 从生产配置解析 `DATABASE_URL`，用 `pg_dump --format=custom` 写备份并执行 `pg_restore --list`；成功后才将 `.partial` 命名为 `.dump`。清除继承的 `PG*` 路由变量，只从 URL 重建连接参数。未知或重复 URL 查询参数直接拒绝，避免猜测备份目标。
-5. 备份可读后才执行迁移；迁移失败保留备份与新目录，当前软链与服务配置不变。迁移可能已提交的 additive 变更不会被撤销。
-6. 保存 web override 与 worker 配置快照；配置服务使用 current 路径。worker helper 对实际新 release 以专用用户进行预检。
+5. 构建、parser 检查、备份归档校验完成后，保存 web override 与 worker 配置快照并启用故障恢复，然后停止仍 active 的旧 worker；确认其不再 active 后才执行迁移。旧 worker 在构建和备份期间继续服务，但不能跨越 claim-token / 迟到写入保护的协议切换继续写回。迁移失败会恢复旧 worker 和配置、保留原软链、备份与新目录；已提交的 additive 变更不会被撤销。
+6. 迁移成功后，worker helper 对实际新 release 以专用用户进行预检，配置服务使用 current 路径。不会在迁移阶段重新启动旧 worker。
 7. 用同目录临时软链加 `mv -T` 原子切换 current，重启 web 与原来运行或启用的 worker。禁用且未运行的 worker 保持关闭。
 8. `/api/health` 成功后，还检查 `systemctl show` 的有效 MainPID / User / ExecStart / WorkingDirectory 与 `/proc` 中真实 cwd、可执行文件、UID，读取前后 MainPID 与启动配置必须一致。Next 会改写 process.title，所以 web 不依赖会消失的命令行参数；它的有效 ExecStart、真实 Node 可执行文件和 cwd 必须属于该 release。worker 必须是 `aistudy-worker`、UID 与该账号一致且非 root，在该 release 中执行 worker。高优先级 drop-in 把进程指回旧代码时不能通过。
 9. 仅输出并核对明示允许的开关：adaptive planning、chat prose / answer style / artifacts、四个 teaching 开关和 daily cap。运行进程中的值必须与解析后的配置一致；不输出其余环境、连接串或密钥。最后原子记录成功 transition。

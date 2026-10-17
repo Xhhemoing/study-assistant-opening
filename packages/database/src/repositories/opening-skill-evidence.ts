@@ -6,7 +6,10 @@ import {
   type SkillEvidence,
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import { learningError, type LearningSql } from "./opening-learning-facts";
+import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "@aistudy/domain";
+import { learningError, mapLearningObservation, type LearningSql } from "./opening-learning-facts";
+import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
+import { openingCurrentKnowledgeNodesQuery } from "./opening-exam-skill-identity";
 
 export type SkillEvidenceDimension = SkillEvidence["dimension"];
 
@@ -53,7 +56,7 @@ function mapRow(row: Record<string, unknown>): SkillEvidenceRecord {
 async function assertOwnedWorkspace(db: LearningSql, scope: Scope): Promise<void> {
   const rows = await db`
     SELECT id FROM workspaces
-    WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+    WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
   if (!rows.length) throw learningError("NOT_FOUND", "workspace not found");
 }
 
@@ -133,6 +136,7 @@ export async function linkOpeningSkillEvidenceInTx(
   scope: Scope,
   input: LinkSkillEvidenceInput & { courseId: string },
 ): Promise<SkillEvidenceRecord> {
+  await assertOwnedWorkspace(tx, scope);
   skillEvidenceSchema.parse({
     nodeId: input.nodeId,
     observationId: input.observationId,
@@ -218,48 +222,43 @@ export function createOpeningSkillEvidenceRepository(sql: Sql) {
     /**
      * Flags Experience/AI need for recommendAdaptiveTutorAction.
      * Independent = linked observation passes eligibility (independent + verified + usable).
-     * Assistance = any linked observation with hinted/revealed assistance (or unknown treated as assistance-linked only when not independent-eligible).
+     * Only current supported nodes and usable effective heads contribute flags.
+     * Historical links stay available through listByNode/listByObservation.
      */
     async flagsForNode(scope: Scope, nodeId: string): Promise<NodeSkillEvidenceFlags> {
-      await assertOwnedWorkspace(sql, scope);
-      const rows = await sql`
-        SELECT e.id AS evidence_id, e.observation_id, o.assistance,
-               el.independent_attempt, el.verified_correct, el.usable_for_current_version
+      return sql.begin("isolation level repeatable read", async tx => {
+        await assertOwnedWorkspace(tx, scope);
+        const rows = await tx`
+        SELECT o.*,e.id AS evidence_id
         FROM opening_skill_evidence e
-        JOIN opening_learning_observations o
-          ON o.id = e.observation_id
-          AND o.workspace_id = e.workspace_id
-          AND o.owner_user_id = e.owner_user_id
-        LEFT JOIN opening_learning_eligibility el
-          ON el.workspace_id = e.workspace_id
-          AND el.owner_user_id = e.owner_user_id
-          AND el.root_observation_id = COALESCE(o.root_observation_id, o.id)
-          AND el.head_observation_id = COALESCE(o.effective_head_id, o.id)
+        JOIN courses c ON c.id=e.course_id AND c.workspace_id=e.workspace_id AND c.archived_at IS NULL
+        JOIN (${openingCurrentKnowledgeNodesQuery(tx, scope)}) node ON node.course_id=e.course_id AND node.node_id=e.node_id
+        JOIN opening_learning_observations linked ON linked.id=e.observation_id
+          AND linked.workspace_id=e.workspace_id AND linked.owner_user_id=e.owner_user_id
+        JOIN opening_learning_observations root ON root.id=COALESCE(linked.root_observation_id,linked.id)
+          AND root.workspace_id=e.workspace_id AND root.owner_user_id=e.owner_user_id
+        JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
+          AND o.workspace_id=e.workspace_id AND o.owner_user_id=e.owner_user_id AND o.course_id=e.course_id
         WHERE e.workspace_id = ${scope.workspaceId}
           AND e.owner_user_id = ${scope.ownerUserId}
           AND e.node_id = ${nodeId}
+          AND COALESCE(o.revision_kind,'original')<>'retract'
         ORDER BY e.created_at, e.id`;
-
-      let hasCheckedIndependent = false;
-      let hasAssistance = false;
-      const evidenceIds: string[] = [];
-      for (const row of rows as Array<Record<string, unknown>>) {
-        evidenceIds.push(String(row.evidence_id));
-        const assistance = String(row.assistance);
-        if (assistance === "hinted" || assistance === "revealed") {
-          hasAssistance = true;
+        const heads = [...new Map(rows.map(row => [String(row.id), mapLearningObservation(row)])).values()];
+        const contexts = await readOpeningLearningEvidenceContexts(tx, scope, heads);
+        let hasCheckedIndependent = false, hasAssistance = false;
+        const evidenceIds: string[] = [];
+        for (const row of rows) {
+          const facts = contexts[String(row.id)]!;
+          const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
+          if (eligibility.usableForCurrentVersion !== "yes") continue;
+          evidenceIds.push(String(row.evidence_id));
+          const assistance = resolveEvidenceAssistance(facts.observation, facts.context);
+          if (assistance === "hinted" || assistance === "revealed") hasAssistance = true;
+          if (eligibility.independentAttempt === "yes" && eligibility.verifiedCorrect === "yes") hasCheckedIndependent = true;
         }
-        const independent =
-          row.independent_attempt === "yes" &&
-          row.verified_correct === "yes" &&
-          row.usable_for_current_version === "yes";
-        if (independent && assistance === "independent") {
-          hasCheckedIndependent = true;
-        } else if (!independent && (assistance === "hinted" || assistance === "revealed")) {
-          hasAssistance = true;
-        }
-      }
-      return { nodeId, hasCheckedIndependent, hasAssistance, evidenceIds };
+        return { nodeId, hasCheckedIndependent, hasAssistance, evidenceIds };
+      }) as Promise<NodeSkillEvidenceFlags>;
     },
   };
 }

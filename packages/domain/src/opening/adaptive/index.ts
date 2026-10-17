@@ -51,6 +51,8 @@ export type {
 } from "./snapshot-sources";
 export { assembleLearnerSnapshot } from "./assemble-snapshot";
 export { nextLearningStep } from "./next-learning-step";
+export { resolveGoalLearningContext, goalPlanningPriority, goalPlanningReason } from "./goal-policy";
+export { toSupportedKnowledgeNodes, selectPrerequisiteRepair } from "./prerequisite-repair";
 export { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
 export { toSnapshotEvidence } from "./snapshot-evidence";
 

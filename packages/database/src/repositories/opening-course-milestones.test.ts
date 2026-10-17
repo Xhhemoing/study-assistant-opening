@@ -9,6 +9,16 @@ const milestone: CourseMilestoneUpdate = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa
 const create = () => mergeCourseGoal(goal, { ...goal, milestones: [milestone] }, 0, now);
 
 describe("course outcome version ownership", () => {
+  it("persists goal execution preferences through legacy and milestone edits", () => {
+    const saved = mergeCourseGoal(goal, { ...goal, learningMode: "exam", priority: 3 }, 0, now);
+    expect(saved).toMatchObject({ learningMode: "exam", priority: 3, revision: 1 });
+    const edited = mergeCourseGoal(saved, { ...goal, milestones: [milestone] }, 1, now);
+    expect(edited).toMatchObject({ learningMode: "exam", priority: 3, revision: 2 });
+    const reset = mergeCourseGoal(edited, { ...goal, learningMode: "auto", priority: 0 }, 2, now);
+    expect(reset).toMatchObject({ learningMode: "auto", priority: 0, revision: 3 });
+    expect(reset.milestones).toEqual(edited.milestones);
+    expect(() => mergeCourseGoal(reset, { ...goal, learningMode: "understand" }, 2, now)).toThrow(/已更新/);
+  });
   it("preserves legacy shape until milestones are used", () => {
     expect(mergeCourseGoal(goal, goal, undefined, now)).toEqual(goal);
     expect(mergeCourseGoal(goal, goal, 0, now)).toEqual({ ...goal, revision: 1 });
