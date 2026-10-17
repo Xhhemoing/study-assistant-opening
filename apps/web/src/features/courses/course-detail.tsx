@@ -12,6 +12,7 @@ import { createCourseStateClient } from "./course-state-client";
 import { CourseStudyActions } from "./course-study-actions";
 import { CourseGoalForm } from "./course-goal-form";
 import { CourseKnowledge } from "../opening/knowledge/course-knowledge";
+import { CourseExamProgress } from "../opening/exam-sprint/course-exam-progress";
 import { MediaReader } from "../opening/sources/media-reader";
 
 export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; libraryHref: string }) {
@@ -181,6 +182,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
       <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} />
       {paths.openingActions ? <CourseGoalForm courseId={id} /> : null}
+      {paths.openingActions ? <CourseExamProgress courseId={id} /> : null}
       <CourseLearningView courseId={id} />
       <CourseKnowledge courseId={id} />
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>

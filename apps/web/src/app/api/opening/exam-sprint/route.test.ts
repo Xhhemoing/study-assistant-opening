@@ -50,7 +50,7 @@ describe("exam sprint HTTP boundary", () => {
   });
 
   it("preserves validation and conflict responses without writing on oversize input", async () => {
-    const oversized = new Request("http://localhost/api/opening/exam-sprint", { method: "POST", headers: { "content-length": "16385" }, body: "{}" });
+    const oversized = new Request("http://localhost/api/opening/exam-sprint", { method: "POST", headers: { "content-length": "32769" }, body: "{}" });
     expect((await POST(oversized)).status).toBe(413);
     expect(deps.act).not.toHaveBeenCalled();
     deps.act.mockRejectedValue(Object.assign(new Error("This command key was already used"), { code: "CONFLICT" }));

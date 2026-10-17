@@ -43,6 +43,21 @@ describe("exam sprint UI boundaries", () => {
     expect(html).toContain("不是完整考试卷");
   });
 
+  it("allows external-help audit before a mock answer while keeping hints and solutions sealed", () => {
+    const data = fixture();
+    data.currentAttempt = { ...attempt, answeredAt: null, answer: null, correct: null, independent: false };
+    data.attempts = [data.currentAttempt];
+    data.activeRun!.deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    const html = renderToStaticMarkup(createElement(ActiveRun, { overview: data, disabled: false, send: () => undefined }));
+    const externalButton = html.match(/<button[^>]*>已用外部帮助<\/button>/)?.[0];
+    expect(externalButton).toBeDefined();
+    expect(externalButton).not.toMatch(/\sdisabled(?:=|[ >])/);
+    expect(html).not.toContain("给我提示");
+    expect(html).not.toContain("直接看答案");
+    expect(html).not.toContain(attempt.feedback!.explanation);
+    expect(html).not.toContain(attempt.hint);
+  });
+
   it("shows completed mock feedback and counts unanswered questions without inventing attempts", () => {
     const overview = fixture();
     overview.activeRun = null;
@@ -70,7 +85,7 @@ describe("exam sprint UI boundaries", () => {
   it("distinguishes repeated question-family evidence from using help", () => {
     const repeated = { ...attempt, independent: false };
     const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: repeated, disabled: false, send: () => undefined }));
-    expect(html).toContain("重复题族练习，不计新增独立证据");
+    expect(html).toContain("当前不计新增独立证据（重复、帮助或资格变化）");
     expect(html).not.toContain("含帮助");
   });
 

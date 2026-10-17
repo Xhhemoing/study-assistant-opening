@@ -11,6 +11,6 @@ export const GET = (request: Request) => examSprintResponse(async () => {
 
 export const POST = (request: Request) => examSprintResponse(async () => {
   const { scope, sql } = await requireOpeningScope(request);
-  const command = examSprintCommandSchema.parse(await readOpeningJsonBody(request, 16_384));
+  const command = examSprintCommandSchema.parse(await readOpeningJsonBody(request, 32_768));
   return getExamSprintService(sql).act(scope, command);
 });

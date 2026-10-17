@@ -34,7 +34,7 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
       AND ${filter.groups ? db`EXISTS (SELECT 1 FROM jsonb_to_recordset(${groupJson}::text::jsonb) AS g("skillLabel" text,"requirementKey" text)
         WHERE g."skillLabel"=o.skill_label AND g."requirementKey" IS NOT DISTINCT FROM o.requirement_key)` : db`TRUE`}
   ), live AS (
-    SELECT o.*,COALESCE(help.revision,0) AS live_help_revision,
+    SELECT o.*,GREATEST(COALESCE(help.revision,0),COALESCE(exam_help.revision,0)) AS live_help_revision,
       EXISTS(SELECT 1 FROM opening_learning_item_versions v JOIN opening_problem_refs r
         ON r.problem_id=v.problem_id AND r.workspace_id=v.workspace_id
           AND r.source_id=v.source_id AND r.source_version=v.source_version AND r.stem_snapshot=v.stem_snapshot
@@ -47,6 +47,16 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
       JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
       WHERE h.workspace_id=o.workspace_id AND l.owner_user_id=o.owner_user_id AND l.course_id=origin.course_id
         AND (h.attempt_id=o.attempt_id OR h.problem_id=o.problem_id OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id=o.session_id))) help ON TRUE
+    LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_exam_help_receipts h
+      JOIN opening_exam_attempt_links e ON e.id=h.attempt_link_id
+      JOIN opening_exam_sprints s ON s.id=e.sprint_id
+      JOIN opening_learning_attempts a ON a.id=e.learning_attempt_id
+        AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+      JOIN opening_learning_sessions l ON l.id=a.session_id AND l.workspace_id=a.workspace_id
+        AND l.owner_user_id=a.owner_user_id AND l.course_id=a.course_id
+      JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
+      WHERE s.workspace_id=o.workspace_id AND s.owner_user_id=o.owner_user_id AND a.course_id=origin.course_id
+        AND (a.id=o.attempt_id OR a.problem_id=o.problem_id)) exam_help ON TRUE
     LEFT JOIN LATERAL (SELECT jsonb_agg(jsonb_build_object('sourceId',ids.source_id,'version',s.version,
         'uploaded',COALESCE(s.upload_state='uploaded',FALSE),'historicalUnavailable',EXISTS(SELECT 1 FROM opening_source_versions v
           WHERE v.workspace_id=o.workspace_id AND v.source_id::text=ids.source_id AND v.version::text=o.source_versions->>ids.source_id AND v.availability='unavailable'))

@@ -1,0 +1,363 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { ExamBindInput, ExamPack, ExamSprintCommand, ExamSprintOverview, ObservationInput } from "@aistudy/contracts";
+import { evaluateEvidenceEligibility } from "@aistudy/domain";
+import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
+import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
+import { createOpeningLearningAttemptRepository } from "../../packages/database/src/repositories/opening-learning-attempts";
+import { insertOpeningLearningObservation, insertOpeningLearningObservationInTx } from "../../packages/database/src/repositories/opening-learning-observations";
+import { mapLearningObservation } from "../../packages/database/src/repositories/opening-learning-facts";
+import { readOpeningLearningEvidenceContext } from "../../packages/database/src/repositories/opening-learning-evidence-context";
+import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
+import { createOpeningPrivacyRepository } from "../../packages/database/src/repositories/opening-privacy";
+import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+
+const pack: ExamPack = {
+  id: "canonical-exam-fixture", version: "1", title: "Limits sprint", description: "Public review",
+  topics: [{ id: "limits", title: "Limits" }],
+  lessons: [{ id: "lesson", topicId: "limits", title: "Limit laws", summary: "Public summary", steps: ["Check conditions"],
+    workedExample: "Public example", pitfalls: ["Check the domain"] }],
+  questions: ["training-1", "training-2", "mock-a-1", "mock-b-1"].map((id, index) => ({
+    id, topicId: "limits", skillId: "limit-laws", lessonId: "lesson", familyId: index < 2 ? "shared-training-family" : `family-${index}`,
+    pool: index < 2 ? "training" : index === 2 ? "mock-a" : "mock-b", difficulty: "foundation", prompt: `Question ${index}`,
+    options: [{ id: "a", label: "First" }, { id: "b", label: "Second" }], answer: "a",
+    explanation: `SEALED-EXPLANATION-${index}`, hint: `DELIVERED-HINT-${index}`, estimatedMinutes: 5,
+  })),
+  sourceItems: [{ id: "paper-1", topicId: "limits", label: "Paper exercise", sourceTitle: "Worksheet.pdf", sourcePage: 3,
+    kind: "exercise", suggestedDay: 1, skills: ["limit-laws"] }], weekPlan: [], limitations: ["Fixture only"],
+};
+let f: OpeningFixture;
+let courseId: string;
+let sprint: ReturnType<typeof createOpeningExamSprintRepository>;
+let integration: ReturnType<typeof createOpeningExamIntegrationRepository>;
+const key = () => `integration:${randomUUID()}`;
+const iso = (value: unknown) => new Date(value as string | Date).toISOString();
+
+beforeAll(async () => {
+  f = await createOpeningFixture();
+  sprint = createOpeningExamSprintRepository(f.sql, pack);
+  integration = createOpeningExamIntegrationRepository(f.sql, pack);
+});
+beforeEach(async () => {
+  await f.sql`TRUNCATE opening_exam_sprints CASCADE`;
+  courseId = randomUUID();
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'Canonical exam',${courseId})`;
+});
+afterAll(async () => { await f?.close(); });
+
+function bindInput(overrides: Partial<ExamBindInput> = {}): ExamBindInput {
+  return { clientKey: key(), courseId, milestoneId: null, expectedPackVersion: pack.version,
+    createKnowledgeNodes: true, skills: [], materials: [], ...overrides };
+}
+const bind = () => integration.bind(f.scope, bindInput());
+const start = (mode: "diagnostic" | "practice" | "mock-a" = "diagnostic") => sprint.act(f.scope, { action: "start", mode, clientKey: key() });
+function answer(view: ExamSprintOverview, clientKey = key()) {
+  return sprint.act(f.scope, { action: "answer", attemptId: view.currentAttempt!.id, answer: "a", confidence: 4, clientKey });
+}
+const finish = (view: ExamSprintOverview) => sprint.act(f.scope, { action: "finish", runId: view.activeRun!.id, clientKey: key() });
+async function factsCount() {
+  const [row] = await f.sql`SELECT
+    (SELECT count(*)::int FROM opening_learning_sessions WHERE course_id=${courseId}) AS sessions,
+    (SELECT count(*)::int FROM opening_learning_attempts WHERE course_id=${courseId}) AS attempts,
+    (SELECT count(*)::int FROM opening_learning_observations WHERE course_id=${courseId}) AS observations,
+    (SELECT count(*)::int FROM opening_skill_evidence WHERE course_id=${courseId}) AS evidence`;
+  return row;
+}
+async function linkFor(examAttemptId: string) {
+  const [row] = await f.sql`SELECT l.*,a.session_id,a.course_id,a.activity_id,a.skill_label,a.problem_id,a.source_ids,a.source_versions
+    FROM opening_exam_attempt_links l JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
+    WHERE l.exam_attempt_id=${examAttemptId} AND a.workspace_id=${f.scope.workspaceId} AND a.course_id=${courseId}`;
+  if (!row) throw new Error("Expected a captured canonical attempt");
+  return row;
+}
+async function observation(id: string) {
+  const [row] = await f.sql`SELECT * FROM opening_learning_observations WHERE id=${id} AND workspace_id=${f.scope.workspaceId}`;
+  if (!row) throw new Error("Expected a canonical observation");
+  return row;
+}
+async function eligibility(id: string) {
+  const record = mapLearningObservation(await observation(id));
+  const facts = await readOpeningLearningEvidenceContext(f.sql, f.scope, record);
+  return evaluateEvidenceEligibility(facts.observation, facts.context);
+}
+function ordinaryObservation(link: Awaited<ReturnType<typeof linkFor>>): ObservationInput {
+  return { sessionId: String(link.session_id), courseId, skillLabel: String(link.skill_label), sourceIds: link.source_ids as string[],
+    attemptId: String(link.learning_attempt_id), problemId: String(link.problem_id), answer: "a", outcome: "correct",
+    assistance: "independent", clientKey: key() };
+}
+async function source(options: { image?: boolean; version?: number; history?: boolean } = {}) {
+  const id = randomUUID(), version = options.version ?? 1;
+  await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES(${id},${f.scope.workspaceId},${options.image ? "My-work.png" : "Worksheet.pdf"},${options.image ? "image/png" : "application/pdf"},12,
+      ${"a".repeat(64)},${version},'uploaded','ready')`;
+  for (const v of options.history ? [version - 1, version] : [version]) {
+    await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+      VALUES(${id},${v},${f.scope.workspaceId},12,${"a".repeat(64)},'available')`;
+    await f.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text,image_object_key)
+      VALUES(${id},${v},3,${options.image ? "" : `Reference body version ${v}`},${options.image ? `opening/sources/${id}/v${v}/work.png` : null})`;
+  }
+  return { sourceTitle: "Worksheet.pdf", sourceId: id, sourceVersion: version };
+}
+
+describe("course-bound exam sprint canonical bridge", () => {
+  it("serializes concurrent bind replay into one source and graph, and rejects conflicting same-key intent", async () => {
+    expect((await integration.read(f.scope)).binding).toBeNull();
+    const input = bindInput();
+    const [first, second] = await Promise.all([integration.bind(f.scope, input), integration.bind(f.scope, input)]);
+    expect(first.binding).toEqual(second.binding);
+    expect(first.binding?.skills).toHaveLength(1);
+    expect(await factsCount()).toEqual({ sessions: 0, attempts: 0, observations: 0, evidence: 0 });
+    const [graph] = await f.sql`SELECT version,snapshot FROM opening_course_knowledge WHERE course_id=${courseId}`;
+    expect(graph?.version).toBe(1);
+    expect((graph?.snapshot as { nodes: unknown[] }).nodes).toHaveLength(1);
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE course_id=${courseId} AND asset_type='source'`).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_exam_integration_commands`).toHaveLength(1);
+    await expect(integration.bind(f.scope, { ...input, createKnowledgeNodes: false })).rejects.toMatchObject({ code: "CONFLICT" });
+    const refreshed = await integration.bind(f.scope, bindInput());
+    expect(refreshed.binding).toEqual(first.binding);
+  });
+
+  it("captures exactly one session and attempt on presentation, then one root observation and skill evidence under concurrent answer replay", async () => {
+    const bound = await bind(), view = await start();
+    const before = await linkFor(view.currentAttempt!.id);
+    expect(before).toMatchObject({ publication: "pending_answer", observation_id: null, submitted_answer: null, captured_at: null });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+    const created = await createOpeningLearningAttemptRepository(f.sql).get(f.scope, String(before.learning_attempt_id));
+    expect(created).toMatchObject({ startedAt: view.currentAttempt!.presentedAt, submittedAt: null, observationId: null,
+      sourceVersions: { [bound.binding!.packSourceId]: 0 } });
+    const clientKey = key();
+    const [left, right] = await Promise.all([answer(view, clientKey), answer(view, clientKey)]);
+    expect(left.attempts).toEqual(right.attempts);
+    await expect(answer(view)).rejects.toMatchObject({ code: "CONFLICT" });
+    const link = await linkFor(view.currentAttempt!.id), saved = await observation(String(link.observation_id));
+    expect(link.publication).toBe("published");
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 1, evidence: 1 });
+    expect(saved).toMatchObject({ revision_kind: "original", root_observation_id: saved.id, effective_head_id: saved.id,
+      verdict_source: "deterministic", outcome: "correct", requirement_key: bound.binding!.skills[0]!.requirementKey });
+    expect(iso(saved.submitted_at)).toBe(left.attempts[0]!.answeredAt);
+    expect(await eligibility(String(saved.id))).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "yes" });
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
+  });
+
+  it("rolls back state, captured submission, observations and receipts when skill evidence linking fails late in publication", async () => {
+    await bind();
+    const view = await start(), link = await linkFor(view.currentAttempt!.id);
+    const [before] = await f.sql`SELECT state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId}`;
+    const receiptsBefore = await f.sql`SELECT c.id FROM opening_exam_sprint_commands c JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} ORDER BY c.id`;
+    // Preserve a structurally valid graph but remove the node after presentation.
+    // Publication reaches linkSkillEvidence only after inserting its observation.
+    await f.sql`UPDATE opening_course_knowledge SET snapshot=jsonb_set(snapshot,'{nodes}','[]'::jsonb)
+      WHERE workspace_id=${f.scope.workspaceId} AND course_id=${courseId}`;
+    await expect(answer(view)).rejects.toMatchObject({ code: "VALIDATION", message: "nodeId is not in the course knowledge snapshot" });
+    const [after] = await f.sql`SELECT state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId}`;
+    expect(after?.state).toEqual(before?.state);
+    expect(await linkFor(view.currentAttempt!.id)).toMatchObject({ publication: "pending_answer", captured_at: null,
+      submitted_answer: null, observation_id: null });
+    expect(await createOpeningLearningAttemptRepository(f.sql).get(f.scope, String(link.learning_attempt_id)))
+      .toMatchObject({ submittedAt: null, observationId: null });
+    expect((await sprint.read(f.scope)).currentAttempt).toMatchObject({ answer: null, answeredAt: null, correct: null });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+    expect(await f.sql`SELECT c.id FROM opening_exam_sprint_commands c JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} ORDER BY c.id`).toEqual(receiptsBefore);
+  });
+
+  it("rejects independent sprint configuration after binding and presents the next question after completing the prior activity", async () => {
+    await bind();
+    const before = await sprint.read(f.scope);
+    await expect(sprint.act(f.scope, { action: "configure", clientKey: key(), examDate: "2026-11-01", dailyMinutes: 60 }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await sprint.read(f.scope)).state).toEqual(before.state);
+    const first = await start("practice"), firstLink = await linkFor(first.currentAttempt!.id);
+    await answer(first);
+    expect((await f.sql`SELECT status FROM opening_teaching_activities WHERE id=${String(firstLink.activity_id)}`)[0]?.status).toBe("completed");
+    const next = await sprint.act(f.scope, { action: "next", clientKey: key(), runId: first.activeRun!.id });
+    expect(next.currentAttempt!.id).not.toBe(first.currentAttempt!.id);
+    const nextLink = await linkFor(next.currentAttempt!.id);
+    expect(nextLink.activity_id).not.toBe(firstLink.activity_id);
+    expect(nextLink.session_id).not.toBe(firstLink.session_id);
+    expect((await f.sql`SELECT status FROM opening_teaching_activities WHERE id=${String(nextLink.activity_id)}`)[0]?.status).toBe("active");
+    expect(await factsCount()).toEqual({ sessions: 2, attempts: 2, observations: 1, evidence: 1 });
+    await answer(next);
+    expect(await factsCount()).toEqual({ sessions: 2, attempts: 2, observations: 2, evidence: 2 });
+  });
+
+  it("seals captured mock answers from course facts and generic submit paths until hand-in, preserving captured submission time", async () => {
+    await bind();
+    const view = await start("mock-a"), submitted = await answer(view), link = await linkFor(view.currentAttempt!.id);
+    expect(link).toMatchObject({ publication: "pending_mock", observation_id: null, submitted_answer: "a" });
+    expect(iso(link.captured_at)).toBe(submitted.attempts[0]!.answeredAt);
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+    for (const result of [submitted, await sprint.read(f.scope), await sprint.export(f.scope)]) {
+      expect(result.attempts[0]).toMatchObject({ correct: null, feedback: null, hint: null, independent: false });
+      expect(result.attempts[0]).not.toHaveProperty("prediction");
+      expect(JSON.stringify(result)).not.toContain("SEALED-EXPLANATION");
+    }
+    const generic = createOpeningLearningAttemptRepository(f.sql);
+    expect(await generic.get(f.scope, String(link.learning_attempt_id))).toMatchObject({ submittedAt: null, observationId: null });
+    expect((await generic.listByActivity(f.scope, String(link.activity_id)))[0]).toMatchObject({ outcome: null, assistance: null });
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
+    await expect(insertOpeningLearningObservation(f.sql, f.scope, ordinaryObservation(link))).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(f.sql.begin(tx => insertOpeningLearningObservationInTx(tx, f.scope, ordinaryObservation(link))))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(insertOpeningLearningObservation(f.sql, f.scope, ordinaryObservation(link), { examSprintPublication: true }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await factsCount())?.observations).toBe(0);
+    const finished = await finish(submitted), published = await linkFor(view.currentAttempt!.id), saved = await observation(String(published.observation_id));
+    expect(published.publication).toBe("published");
+    expect(iso(saved.submitted_at)).toBe(iso(link.captured_at));
+    expect(Date.parse(iso(saved.recorded_at))).toBeGreaterThanOrEqual(Date.parse(finished.state.runs[0]!.completedAt!));
+    expect(finished.attempts[0]).toMatchObject({ correct: true, feedback: { answer: "a" } });
+    expect(await f.sql`SELECT dimension FROM opening_skill_evidence WHERE observation_id=${String(saved.id)}`).toEqual([{ dimension: "timed" }]);
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
+  });
+
+  it("rejects reusing an exam problem identity through the ordinary attempt creation API", async () => {
+    await bind();
+    const view = await start(), link = await linkFor(view.currentAttempt!.id), before = await factsCount();
+    await expect(createOpeningLearningAttemptRepository(f.sql).create(f.scope, {
+      sessionId: String(link.session_id), problemId: String(link.problem_id), requirementKey: String(link.requirement_key), clientKey: key(),
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await factsCount()).toEqual(before);
+    expect((await integration.read(f.scope)).links).toHaveLength(1);
+  });
+
+  it("records all delivered help without AI turns and prevents reference-check revisions from laundering independence", async () => {
+    const bound = await bind(), view = await start();
+    const [turnsBefore] = await f.sql`SELECT count(*)::int AS count FROM opening_turns WHERE workspace_id=${f.scope.workspaceId}`;
+    for (const kind of ["hint", "solution", "external"] as const) {
+      const command = { action: "help" as const, attemptId: view.currentAttempt!.id, kind, clientKey: key() };
+      await sprint.act(f.scope, command);
+      await sprint.act(f.scope, command);
+    }
+    await answer(view);
+    const link = await linkFor(view.currentAttempt!.id), saved = await observation(String(link.observation_id));
+    const receipts = await f.sql`SELECT kind,content_snapshot,delivered_at FROM opening_exam_help_receipts WHERE attempt_link_id=${String(link.id)} ORDER BY kind`;
+    expect(receipts.map(row => row.kind)).toEqual(["external", "hint", "solution"]);
+    expect(receipts.every(row => typeof row.content_snapshot === "string" && row.content_snapshot.length > 0)).toBe(true);
+    expect(receipts.every(row => Date.parse(iso(row.delivered_at)) <= Date.parse(iso(saved.submitted_at)))).toBe(true);
+    expect((await f.sql`SELECT count(*)::int AS count FROM opening_turns WHERE workspace_id=${f.scope.workspaceId}`)[0]).toEqual(turnsBefore);
+    expect(saved.assistance).toBe("revealed");
+    expect(await eligibility(String(saved.id))).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes" });
+    const revised = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: String(saved.id), expectedHead: String(saved.id),
+      clientKey: key(), reason: "Check the reference", revisionKind: "replace",
+      replacement: { answer: "a", outcome: "correct", assistance: "independent", verdictSource: "reference_checked",
+        referenceSourceId: bound.binding!.packSourceId, referenceCheck: { referenceSourceId: bound.binding!.packSourceId,
+          method: "Checked the complete response", scope: "whole_answer" } },
+    });
+    expect(await eligibility(revised.headObservationId)).toMatchObject({ independentAttempt: "no" });
+    expect(revised.observation?.eligibility?.independentAttempt).toBe("no");
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
+  });
+
+  it("does not backfill attempts or observations when isolated historical practice is later bound", async () => {
+    const historical = await start();
+    await answer(historical);
+    await finish(historical);
+    expect(await factsCount()).toEqual({ sessions: 0, attempts: 0, observations: 0, evidence: 0 });
+    const bound = await bind();
+    expect(bound.links).toEqual([]);
+    expect(bound.bkt.eligible).toBe(0);
+    expect(await factsCount()).toEqual({ sessions: 0, attempts: 0, observations: 0, evidence: 0 });
+    const newView = await start("practice");
+    expect((await integration.read(f.scope)).links.map(link => link.examAttemptId)).toEqual([newView.currentAttempt!.id]);
+    expect(newView.currentAttempt!.id).not.toBe(historical.currentAttempt!.id);
+    expect((await factsCount())?.attempts).toBe(1);
+  });
+
+  it("treats a new question in an already exposed family as practice rather than fresh independent evidence", async () => {
+    await bind();
+    const first = await start();
+    await answer(first);
+    await finish(first);
+    const repeat = await start("practice");
+    expect(repeat.currentAttempt!.questionId).not.toBe(first.currentAttempt!.questionId);
+    await answer(repeat);
+    const link = await linkFor(repeat.currentAttempt!.id);
+    expect(link.first_family_exposure).toBe(false);
+    expect(await eligibility(String(link.observation_id))).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes" });
+    expect((await integration.read(f.scope)).bkt).toMatchObject({ eligible: 1, excluded: 1 });
+  });
+
+  it("keeps unmapped paper reports isolated and preserves photo/reference versions in mapped self-reports without inventing attempts", async () => {
+    const reference = await source(), work = await source({ image: true, version: 2, history: true });
+    const bound = await integration.bind(f.scope, bindInput({ materials: [reference] }));
+    expect(bound.sourceMappings[0]).toMatchObject({ skillIds: [], nodeIds: [], sourceId: reference.sourceId, sourceVersion: 1, physicalPage: 3 });
+    const command: Extract<ExamSprintCommand, { action: "source" }> = { action: "source", clientKey: key(), sourceId: "paper-1", phase: "first",
+      outcome: "correct", assistance: "none", durationMinutes: 7, errorCause: null, note: "Paper work", answerText: "My written method",
+      workSourceId: work.sourceId, workSourceVersion: 1 };
+    await sprint.act(f.scope, command);
+    expect((await factsCount())?.observations).toBe(0);
+    const mapping = { clientKey: key(), sourceItemId: "paper-1", skillIds: ["limit-laws"] };
+    const mapped = await integration.mapSource(f.scope, mapping);
+    await integration.mapSource(f.scope, mapping);
+    expect(mapped.sourceMappings[0]).toMatchObject({ skillIds: ["limit-laws"], nodeIds: [bound.binding!.skills[0]!.nodeId] });
+    const reported = await sprint.act(f.scope, { ...command, clientKey: key(), phase: "blind" });
+    const record = reported.state.sourceRecords.at(-1)!;
+    const [projected] = await f.sql`SELECT o.* FROM opening_exam_source_observations p JOIN opening_learning_observations o ON o.id=p.observation_id
+      WHERE p.source_record_id=${record.id} AND o.course_id=${courseId}`;
+    expect(projected).toMatchObject({ attempt_id: null, started_at: null, submitted_at: null, assistance: "unknown", verdict_source: "self_report",
+      source_versions: { [reference.sourceId]: 1, [work.sourceId]: 1, [bound.binding!.packSourceId]: 0 } });
+    expect(record).toMatchObject({ workSourceId: work.sourceId, workSourceVersion: 1, answerText: "My written method" });
+    expect(await eligibility(String(projected!.id))).toMatchObject({ independentAttempt: "unknown", verifiedCorrect: "unknown" });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 0, observations: 1, evidence: 1 });
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
+  });
+
+  it("removes privacy-excluded evidence from live BKT and current rule eligibility without deleting the original fact", async () => {
+    const bound = await bind(), view = await start();
+    await answer(view);
+    const link = await linkFor(view.currentAttempt!.id);
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
+    expect(await eligibility(String(link.observation_id))).toMatchObject({ usableForCurrentVersion: "yes" });
+    await createOpeningPrivacyRepository(f.sql).recordExclusions(f.sql, f.scope, {
+      sourceIds: [bound.binding!.packSourceId], memoryId: randomUUID(), deletedAt: new Date(),
+    });
+    expect(await eligibility(String(link.observation_id))).toMatchObject({ usableForCurrentVersion: "no" });
+    expect((await integration.read(f.scope)).bkt).toMatchObject({ eligible: 0, excluded: 1, bktBrier: null, baselineBrier: null });
+    expect((await sprint.read(f.scope)).skills[0]?.status).toBe("untested");
+    expect((await observation(String(link.observation_id))).outcome).toBe("correct");
+    expect((await factsCount())?.observations).toBe(1);
+  });
+
+  it("preserves coverage for old and newly unmapped paper work while excluding a projected report whose source becomes private", async () => {
+    const coveragePack: ExamPack = { ...pack, sourceItems: ["paper-1", "paper-unmapped", "paper-projected"].map(id => ({ ...pack.sourceItems[0]!, id })) };
+    const paperSprint = createOpeningExamSprintRepository(f.sql, coveragePack);
+    const paperIntegration = createOpeningExamIntegrationRepository(f.sql, coveragePack);
+    const report = (sourceId: string) => paperSprint.act(f.scope, { action: "source", clientKey: key(), sourceId,
+      phase: "first", outcome: "correct", assistance: "none", durationMinutes: 5, errorCause: null, note: "Completed paper work" });
+    expect((await report("paper-1")).summary.sourceCovered).toBe(1);
+    const reference = await source();
+    await paperIntegration.bind(f.scope, bindInput({ materials: [reference] }));
+    expect((await paperSprint.read(f.scope)).summary.sourceCovered).toBe(1);
+    expect((await factsCount())?.observations).toBe(0);
+    expect((await report("paper-unmapped")).summary.sourceCovered).toBe(2);
+    expect((await factsCount())?.observations).toBe(0);
+    await paperIntegration.mapSource(f.scope, { clientKey: key(), sourceItemId: "paper-projected", skillIds: ["limit-laws"] });
+    expect((await report("paper-projected")).summary.sourceCovered).toBe(3);
+    expect((await factsCount())?.observations).toBe(1);
+    await createOpeningPrivacyRepository(f.sql).recordExclusions(f.sql, f.scope, {
+      sourceIds: [reference.sourceId], memoryId: randomUUID(), deletedAt: new Date(),
+    });
+    const afterExclusion = await paperSprint.read(f.scope);
+    expect(afterExclusion.summary.sourceCovered).toBe(2);
+    expect(afterExclusion.state.sourceRecords).toHaveLength(3);
+    expect((await factsCount())?.observations).toBe(1);
+  });
+
+  it("isolates owner scopes across binding, canonical attempts, mapping and private integration reads", async () => {
+    await bind();
+    const view = await start(), link = await linkFor(view.currentAttempt!.id);
+    const forged = { workspaceId: f.scope.workspaceId, ownerUserId: f.otherScope.ownerUserId };
+    await expect(integration.read(forged)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(integration.bind(forged, bindInput())).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(integration.mapSource(forged, { clientKey: key(), sourceItemId: "paper-1", skillIds: ["limit-laws"] }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(sprint.act(forged, { action: "answer", clientKey: key(), attemptId: view.currentAttempt!.id, answer: "a", confidence: 4 }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await createOpeningLearningAttemptRepository(f.sql).get(f.otherScope, String(link.learning_attempt_id))).toBeNull();
+    expect(await integration.read(f.otherScope)).toMatchObject({ binding: null, links: [], bkt: { eligible: 0 } });
+    expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+  });
+});

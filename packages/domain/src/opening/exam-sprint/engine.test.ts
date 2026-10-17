@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExamAttempt, ExamPack, ExamQuestion, ExamSprintCommand, ExamSprintState } from "@aistudy/contracts";
-import { applyExamSprintCommand, createExamSprintState, examSprintOverview } from "./engine";
+import { applyExamSprintCommand, createExamSprintState, examSprintOverview, type ExamSelectionContext } from "./engine";
 
 const NOW = "2026-10-17T08:00:00.000Z";
 const LATER = "2026-10-18T08:00:00.000Z";
@@ -198,6 +198,33 @@ describe("exam sprint answer isolation and evidence", () => {
 });
 
 describe("source self-report and workload", () => {
+  it("uses only explicitly mapped latest self-reported failures to rank practice, without adding mastery", () => {
+    const initial = createExamSprintState(NOW);
+    const failed = source(initial, { sourceId: "source-c", outcome: "incorrect", errorCause: "method" });
+    const prioritized = start(failed, "practice", LATER);
+    expect(prioritized.runs[0]!.questionIds[0]).toBe("s3-0");
+    const overview = examSprintOverview(prioritized, pack, LATER);
+    expect(overview.skills.every(skill => skill.status === "untested")).toBe(true);
+    expect(prioritized.attempts[0]!.prediction!.historyAttemptIds).toEqual([]);
+    expect(overview.recommendations.at(-1)!.reason).toContain("仅提高相关题");
+    const unmapped = { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item, skills: [] })) };
+    expect(start(failed, "practice", LATER, unmapped).runs[0]!.questionIds).toEqual(start(initial, "practice", LATER, unmapped).runs[0]!.questionIds);
+    const recovered = source(failed, { sourceId: "source-c", phase: "blind", outcome: "correct", assistance: "none" }, LATER);
+    expect(start(recovered, "practice", LATER).runs[0]!.questionIds[0]).toBe("s1-0");
+    const helped = source(initial, { sourceId: "source-c", outcome: "correct", assistance: "hint" });
+    expect(start(helped, "practice", LATER).runs[0]!.questionIds[0]).toBe("s3-0");
+  });
+
+  it("retains original work references and review markers as self-report data", () => {
+    const state = source(createExamSprintState(NOW), {
+      answerText: "u=x, dv=e^x dx", workSourceId: "work-source", workSourceVersion: 2, reviewId: "review-id", referenceChecked: true,
+    });
+    expect(state.sourceRecords[0]).toMatchObject({
+      answerText: "u=x, dv=e^x dx", workSourceId: "work-source", workSourceVersion: 2, reviewId: "review-id", referenceChecked: true,
+    });
+    expect(examSprintOverview(state, pack, NOW).skills.every(skill => skill.status === "untested")).toBe(true);
+  });
+
   it("validates source identity, first/blank/delayed/variant progression and elapsed time", () => {
     const initial = createExamSprintState(NOW);
     expect(() => source(initial, { sourceId: "missing" })).toThrow("不存在");
@@ -240,5 +267,113 @@ describe("source self-report and workload", () => {
     expect(examSprintOverview(state, pack, NOW).workload).toMatchObject({ remainingItems: 2, estimatedMinutes: 50, availableMinutes: 30, overloaded: true });
     expect(examSprintOverview(state, pack, LATER).workload.availableMinutes).toBe(0);
     expect(examSprintOverview(createExamSprintState(NOW), pack, NOW).workload.availableMinutes).toBeNull();
+  });
+});
+
+describe("current formal qualification and retained sprint history", () => {
+  const valid = { usable: true, correct: true, independent: true, assisted: false };
+  const withdrawn = { usable: false, correct: null, independent: false, assisted: false };
+
+  it("removes withdrawn/private success from mastery and targets a fresh confirmation without deleting history", () => {
+    const state = addEvidence(addEvidence(createExamSprintState(NOW), "s3-0", NOW), "s3-1", LATER);
+    expect(examSprintOverview(state, pack, LATER).skills.find(skill => skill.skillId === "s3")!.status).toBe("secure");
+    const context: ExamSelectionContext = { bktEligibleAttemptIds: [], ruleEvidence: {
+      [state.attempts[0]!.id]: withdrawn, [state.attempts[1]!.id]: withdrawn,
+    } };
+    const before = structuredClone(state);
+    const view = examSprintOverview(state, pack, LATER, context);
+    expect(view.skills.find(skill => skill.skillId === "s3")).toMatchObject({ status: "untested", independentCorrect: 0 });
+    expect(view.summary.onlineIndependentCorrect).toBe(0);
+    expect(view.attempts).toHaveLength(2);
+    expect(view.attempts.every(attempt => attempt.correct === true && attempt.independent === false)).toBe(true);
+    expect(view.recommendations.some(item => item.title === "重新确认：s3" && item.mode === "practice")).toBe(true);
+    const practice = applyExamSprintCommand(state, { action: "start", clientKey: key, mode: "practice" }, pack, LATER, context);
+    expect(practice.runs.at(-1)!.questionIds).toEqual(expect.arrayContaining(["s3-2", "s3-3"]));
+    expect(practice.runs.at(-1)!.questionIds.filter(id => id.startsWith("s3-"))).toHaveLength(3);
+    expect(state).toEqual(before);
+  });
+
+  it("uses a live incorrect revision to require remediation, while a correction cannot create a new first success", () => {
+    const state = addEvidence(addEvidence(createExamSprintState(NOW), "s1-0", NOW), "s1-1", LATER);
+    const context: ExamSelectionContext = { ruleEvidence: {
+      [state.attempts[0]!.id]: valid,
+      [state.attempts[1]!.id]: { ...valid, correct: false, independent: false },
+    } };
+    const view = examSprintOverview(state, pack, LATER, context);
+    expect(view.skills.find(skill => skill.skillId === "s1")).toMatchObject({ status: "weak", independentCorrect: 1 });
+    expect(view.summary.onlineIndependentCorrect).toBe(1);
+    expect(view.attempts[1]!.correct).toBe(true); // Captured first-answer history is unchanged.
+    const originallyWrong = addEvidence(createExamSprintState(NOW), "s1-0", NOW, { correct: false, answer: "B" });
+    const corrected = examSprintOverview(originallyWrong, pack, LATER, { ruleEvidence: { [originallyWrong.attempts[0]!.id]: { ...valid, independent: false } } });
+    expect(corrected.skills.find(skill => skill.skillId === "s1")).toMatchObject({ status: "weak", independentCorrect: 0 });
+  });
+
+  it("keeps assisted/failed evidence for remediation even when BKT excludes every record", () => {
+    const state = addEvidence(addEvidence(createExamSprintState(NOW), "s2-0", NOW), "s2-1", LATER, { correct: false, answer: "B" });
+    const context: ExamSelectionContext = { bktEligibleAttemptIds: [], ruleEvidence: {
+      [state.attempts[0]!.id]: { ...valid, independent: false, assisted: true },
+      [state.attempts[1]!.id]: { ...valid, independent: false, correct: false },
+    } };
+    const view = examSprintOverview(state, pack, LATER, context);
+    expect(view.skills.find(skill => skill.skillId === "s2")).toMatchObject({ status: "weak", attempted: 2, independentCorrect: 0 });
+    expect(view.summary.onlineAnswered).toBe(2);
+    const onlyAssisted = { ...state, runs: state.runs.slice(0, 1), attempts: state.attempts.slice(0, 1) };
+    expect(examSprintOverview(onlyAssisted, pack, LATER, context).skills.find(skill => skill.skillId === "s2")!.status).toBe("weak");
+  });
+
+  it("allows fresh independent evidence to restore confidence after historical evidence was withdrawn", () => {
+    let state = addEvidence(addEvidence(createExamSprintState(NOW), "s3-0", NOW), "s3-1", LATER);
+    const context: ExamSelectionContext = { ruleEvidence: { [state.attempts[0]!.id]: withdrawn, [state.attempts[1]!.id]: withdrawn } };
+    state = addEvidence(state, "s3-2", "2026-10-19T08:00:00.000Z");
+    state = addEvidence(state, "s3-3", "2026-10-20T08:00:00.000Z");
+    const view = examSprintOverview(state, pack, "2026-10-20T08:00:00.000Z", context);
+    expect(view.skills.find(skill => skill.skillId === "s3")).toMatchObject({ status: "secure", independentCorrect: 2 });
+    expect(view.recommendations.some(item => item.lessonId === "lesson-s3")).toBe(false);
+  });
+
+  it("permits honest external-help registration during a sealed mock without revealing answers", () => {
+    let state = start(undefined, "mock-a");
+    state = applyExamSprintCommand(state, { action: "help", clientKey: key, attemptId: state.attempts[0]!.id, kind: "external" }, pack, NOW);
+    state = answer(state);
+    expect(examSprintOverview(state, pack, NOW).currentAttempt).toMatchObject({ correct: null, feedback: null, hint: null, independent: false });
+    const view = examSprintOverview(finish(state), pack, LATER);
+    expect(view.attempts[0]).toMatchObject({ correct: true, independent: false });
+    expect(view.summary.onlineIndependentCorrect).toBe(0);
+    expect(view.skills.find(skill => skill.skillId === "s1")!.status).toBe("weak");
+  });
+
+  it("removes private/stale paper records from current priorities and workload while retaining their originals", () => {
+    const initial = createExamSprintState(NOW);
+    let state = source(initial, { sourceId: "source-c", outcome: "incorrect", errorCause: "method", durationMinutes: 40 });
+    state = source(state, { sourceId: "source-a", outcome: "correct", durationMinutes: 10 });
+    const excluded = Object.fromEntries(state.sourceRecords.map(record => [record.id, false]));
+    const context: ExamSelectionContext = { sourceRecordEligibility: excluded, sourceCoverageEligibility: excluded };
+    const view = examSprintOverview(state, pack, LATER, context);
+    expect(view.state.sourceRecords).toEqual(state.sourceRecords);
+    expect(view.summary).toMatchObject({ sourceCovered: 0, sourceIndependent: 0, sourceDelayed: 0 });
+    expect(view.workload).toMatchObject({ remainingItems: 4, estimatedMinutes: null });
+    const selected = applyExamSprintCommand(state, { action: "start", mode: "practice", clientKey: key }, pack, LATER, context);
+    expect(selected.runs[0]!.questionIds).toEqual(start(initial, "practice", LATER).runs[0]!.questionIds);
+    expect(view.recommendations.at(-1)!.reason).not.toContain("纸笔自评错误");
+  });
+
+  it("preserves actual paper coverage and timing when old or unmapped work has no canonical link", () => {
+    const initial = createExamSprintState(NOW);
+    let state = source(initial, { sourceId: "source-c", outcome: "incorrect", errorCause: "method", durationMinutes: 40 });
+    state = source(state, { sourceId: "source-a", outcome: "correct", durationMinutes: 10 });
+    const context: ExamSelectionContext = {
+      sourceRecordEligibility: Object.fromEntries(state.sourceRecords.map(record => [record.id, false])),
+      sourceCoverageEligibility: {}, // No known withdrawal/privacy/version invalidation.
+    };
+    for (const selectedPack of [pack, { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item, skills: [] })) }]) {
+      const view = examSprintOverview(state, selectedPack, LATER, context);
+      expect(view.summary).toMatchObject({ sourceCovered: 2, sourceIndependent: 1, onlineIndependentCorrect: 0 });
+      expect(view.workload).toMatchObject({ remainingItems: 2, estimatedMinutes: 50 });
+      expect(view.state.sourceRecords).toEqual(state.sourceRecords);
+      expect(view.skills.every(skill => skill.status === "untested")).toBe(true);
+      expect(view.recommendations.at(-1)!.reason).not.toContain("纸笔自评错误");
+      const practice = applyExamSprintCommand(state, { action: "start", mode: "practice", clientKey: key }, selectedPack, LATER, context);
+      expect(practice.runs[0]!.questionIds).toEqual(start(initial, "practice", LATER, selectedPack).runs[0]!.questionIds);
+    }
   });
 });

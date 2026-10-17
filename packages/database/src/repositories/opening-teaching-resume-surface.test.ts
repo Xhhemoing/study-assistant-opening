@@ -60,7 +60,7 @@ describe("V2-14 teaching resume database surfaces", () => {
     expect(files.filter((f) => f >= "0058")).toEqual([
       "0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql",
       "0061_opening_adaptive_planning.sql", "0062_opening_model_routing_and_card_evidence.sql", "0063_opening_model_quick_setup.sql", "0064_card_source_lineage.sql",
-      "0065_opening_task_requirement.sql", "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql", "0070_opening_exam_sprint.sql",
+      "0065_opening_task_requirement.sql", "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql", "0070_opening_exam_sprint.sql", "0071_opening_exam_integration.sql", "0072_opening_exam_forecast_reviews.sql",
     ]);
     expect(files.some((f) => /resume/i.test(f))).toBe(false);
   });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ExamPredictionSnapshot } from "./exam-integration";
 
 export const examErrorCauseSchema = z.enum(["concept", "method", "calculation", "conditions", "modeling", "reading", "time"]);
 export type ExamErrorCause = z.infer<typeof examErrorCauseSchema>;
@@ -24,6 +25,7 @@ export type ExamAttempt = {
   confidence: number | null; durationSeconds: number | null;
   help: Array<{ kind: "hint" | "solution" | "external"; at: string }>;
   errorCause: ExamErrorCause | null;
+  prediction?: ExamPredictionSnapshot;
 };
 export type ExamRun = { id: string; mode: ExamMode; questionIds: string[]; startedAt: string; deadlineAt: string | null; completedAt: string | null };
 export type ExamSourceRecord = {
@@ -31,6 +33,7 @@ export type ExamSourceRecord = {
   outcome: "correct" | "partial" | "incorrect" | "read";
   assistance: "none" | "hint" | "solution";
   durationMinutes: number; errorCause: ExamErrorCause | null; note: string; recordedAt: string;
+  answerText?: string; workSourceId?: string; workSourceVersion?: number; reviewId?: string; referenceChecked?: boolean;
 };
 export type ExamSprintState = {
   version: 1; startedAt: string; examDate: string | null; dailyMinutes: number;
@@ -61,6 +64,6 @@ export const examSprintCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("next"), clientKey: key, runId: id }).strict(),
   z.object({ action: z.literal("finish"), clientKey: key, runId: id }).strict(),
   z.object({ action: z.literal("error"), clientKey: key, attemptId: id, errorCause: examErrorCauseSchema.nullable() }).strict(),
-  z.object({ action: z.literal("source"), clientKey: key, sourceId: id, phase: z.enum(["first", "blind", "delayed", "variant"]), outcome: z.enum(["correct", "partial", "incorrect", "read"]), assistance: z.enum(["none", "hint", "solution"]), durationMinutes: z.number().min(0).max(720), errorCause: examErrorCauseSchema.nullable(), note: z.string().trim().max(2000) }).strict(),
+  z.object({ action: z.literal("source"), clientKey: key, sourceId: id, phase: z.enum(["first", "blind", "delayed", "variant"]), outcome: z.enum(["correct", "partial", "incorrect", "read"]), assistance: z.enum(["none", "hint", "solution"]), durationMinutes: z.number().min(0).max(720), errorCause: examErrorCauseSchema.nullable(), note: z.string().trim().max(2000), answerText: z.string().max(20000).optional(), workSourceId: z.string().uuid().optional(), workSourceVersion: z.number().int().nonnegative().optional(), reviewId: z.string().uuid().optional(), referenceChecked: z.boolean().optional() }).strict(),
 ]);
 export type ExamSprintCommand = z.infer<typeof examSprintCommandSchema>;

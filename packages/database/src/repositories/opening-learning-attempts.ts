@@ -88,6 +88,10 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
             VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${referencedProblemVersionKnown ? problem.artifactKind : "unknown"})`;
         }
         if (problemId) {
+          const examItems = await tx`SELECT id FROM opening_learning_item_versions
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND problem_id=${problemId} AND evaluation_spec->>'kind'='exam_choice' LIMIT 1`;
+          if (examItems.length) throw learningError("CONFLICT", "冲刺题目只能在冲刺入口创建作答，不能复制为普通练习");
           const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id
             WHERE p.problem_id=${problemId} AND p.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id=${courseId} FOR SHARE OF p`;
           const ref = refs[0];

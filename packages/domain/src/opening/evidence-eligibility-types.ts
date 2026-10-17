@@ -44,6 +44,8 @@ export interface EvidenceHelpExposure {
 
 export interface EvidenceEligibilityContext {
   serverEvaluation?: ServerEvaluation | null;
+  /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
+  examAttempt?: { firstFamilyExposure: boolean } | null;
   helpHistory?: {
     /** Covers this attempt and historical answer exposure for the same problem. */
     complete: boolean;
@@ -91,6 +93,7 @@ export type EvidenceEligibilityReasonCode =
   | "assistance_unknown"
   | "prior_answer_exposure"
   | "prior_evaluation_feedback"
+  | "exam_family_already_seen"
   | "verification_source_untrusted"
   | "server_evaluation_incomplete"
   | "server_evaluation_identity_mismatch"

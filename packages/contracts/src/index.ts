@@ -383,3 +383,4 @@ export type WorkerSmokeJob = z.infer<typeof workerSmokeJobSchema>;
 export * from "./opening";
 export { observationCardDraftSchema, type ObservationCardDraft } from "./reviews";
 export * from "./opening/exam-sprint";
+export * from "./opening/exam-integration";
