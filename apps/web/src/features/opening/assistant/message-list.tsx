@@ -17,6 +17,7 @@ import {
 import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
 import { selectedSourceFor } from "./selection-source";
+import { SenseWeavePilot } from "./senseweave-pilot";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -99,6 +100,7 @@ export const MessageList = memo(function MessageList({ messages, historyTruncate
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-zinc-700">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
         ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} /> : null}</div>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
+      {message.role === "assistant" && proseEnabled && message.text ? <SenseWeavePilot messageId={message.id} content={message.text} /> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
         <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
         <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />
