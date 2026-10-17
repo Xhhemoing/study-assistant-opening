@@ -8,7 +8,7 @@ import {
 import { createExamSprintState, reportExamBkt } from "@aistudy/domain";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
-import { ensureExamCourseBinding } from "./opening-exam-integration-binding";
+import { ensureExamCourseBinding, type ExamPublicSourceWriter } from "./opening-exam-integration-binding";
 import { lockExamCourse, parseExamBinding, readExamBinding, readExamEligibleAttemptIds } from "./opening-exam-integration-facts";
 
 async function owner(tx: TransactionSql, scope: Scope, write: boolean) {
@@ -64,7 +64,9 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
   };
 }
 
-export function createOpeningExamIntegrationRepository(sql: Sql, pack: ExamPack) {
+export function createOpeningExamIntegrationRepository(
+  sql: Sql, pack: ExamPack, options: { writePublicSource?: ExamPublicSourceWriter } = {},
+) {
   return {
     async read(scope: Scope): Promise<ExamIntegrationOverview> {
       return sql.begin(async tx => { await owner(tx, scope, false); return readExamIntegrationInTx(tx, scope, pack); });
@@ -87,7 +89,7 @@ export function createOpeningExamIntegrationRepository(sql: Sql, pack: ExamPack)
         const intent = { action: "bind", ...input };
         if (await commandReplay(tx, sprintId, input.clientKey, intent)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
         const existing = await readExamBinding(tx, sprintId);
-        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined);
+        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined, options.writePublicSource);
         await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding,updated_at)
           VALUES(${sprintId},${binding.courseId},${tx.json(binding as never)},${now}) ON CONFLICT(sprint_id)
           DO UPDATE SET binding=EXCLUDED.binding,updated_at=EXCLUDED.updated_at`;

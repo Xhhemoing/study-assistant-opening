@@ -10,7 +10,12 @@ import { createExamPhotoReviewService } from "./review-service";
 
 // The complete answer bank is reachable only through this server adapter.
 export const getExamSprintService = (sql: Sql) => createOpeningExamSprintRepository(sql, EXAM_SPRINT_PACK);
-export const getExamIntegrationService = (sql: Sql) => createOpeningExamIntegrationRepository(sql, EXAM_SPRINT_PACK);
+export const getExamIntegrationService = (sql: Sql) => {
+  const storage = openingPageStorage();
+  return createOpeningExamIntegrationRepository(sql, EXAM_SPRINT_PACK, {
+    writePublicSource: source => storage.putObject(storage.finalKey(source.sourceId, source.version), source.body, { mime: source.mime }),
+  });
+};
 export const getExamForecastService = (sql: Sql) => createOpeningExamForecastRepository(sql, EXAM_SPRINT_PACK);
 export const getExamReviewService = (sql: Sql) => {
   const budget = createOpeningBudgetRepository(sql, { envCapCents: loadOpeningModelCatalog().dailyCapCents });

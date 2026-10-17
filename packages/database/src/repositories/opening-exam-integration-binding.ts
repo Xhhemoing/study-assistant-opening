@@ -11,6 +11,9 @@ import { learningError } from "./opening-learning-facts";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
+export type ExamPublicSourceWriter = (source: {
+  sourceId: string; version: 0; mime: "text/plain"; body: Uint8Array;
+}) => Promise<void>;
 
 async function assertCourseAndMilestone(tx: TransactionSql, scope: Scope, input: ExamBindInput): Promise<void> {
   const rows = await tx`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id
@@ -61,7 +64,9 @@ async function mapMaterials(tx: TransactionSql, scope: Scope, pack: ExamPack, in
 }
 
 /** Whitelist public lesson fields. The question pool is never serialized into the course material. */
-async function createPublicPackSource(tx: TransactionSql, scope: Scope, pack: ExamPack, courseId: string, now: string) {
+async function createPublicPackSource(
+  tx: TransactionSql, scope: Scope, pack: ExamPack, courseId: string, now: string, writePublicSource?: ExamPublicSourceWriter,
+) {
   const sourceId = randomUUID();
   const sections = [
     { lessonId: null, title: pack.title, text: `${pack.title}\n\n${pack.description}\n\n${pack.limitations.join("\n")}` },
@@ -70,6 +75,9 @@ async function createPublicPackSource(tx: TransactionSql, scope: Scope, pack: Ex
   ];
   const body = sections.map(section => section.text).join("\n\n");
   const bytes = Buffer.byteLength(body, "utf8"), digest = createHash("sha256").update(body).digest("hex");
+  // Production supplies the object writer. Await it before declaring a source
+  // uploaded/ready so ordinary downloads, backups and re-parsing share the same original.
+  await writePublicSource?.({ sourceId, version: 0, mime: "text/plain", body: Buffer.from(body, "utf8") });
   await tx`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state,created_at,updated_at)
     VALUES(${sourceId},${scope.workspaceId},${`${pack.title} · 公开串讲`.slice(0, 180)},'text/plain',${bytes},${digest},0,'uploaded','ready',${now},${now})`;
   await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
@@ -92,7 +100,7 @@ async function createPublicPackSource(tx: TransactionSql, scope: Scope, pack: Ex
  */
 export async function ensureExamCourseBinding(
   tx: TransactionSql, scope: Scope, pack: ExamPack, input: ExamBindInput, now: string,
-  existing?: ExamCourseBinding,
+  existing?: ExamCourseBinding, writePublicSource?: ExamPublicSourceWriter,
 ): Promise<ExamCourseBinding> {
   await assertCourseAndMilestone(tx, scope, input);
   if (input.expectedPackVersion !== pack.version) throw conflict("冲刺题包版本已变化，请刷新后重试");
@@ -135,7 +143,7 @@ export async function ensureExamCourseBinding(
     throw conflict("请映射全部技能，或明确允许为缺少的技能建立知识节点");
   }
   const materials = await mapMaterials(tx, scope, pack, input, now);
-  const { sourceId, lessonChunks } = await createPublicPackSource(tx, scope, pack, input.courseId, now);
+  const { sourceId, lessonChunks } = await createPublicPackSource(tx, scope, pack, input.courseId, now, writePublicSource);
   const added: KnowledgeSnapshot["nodes"] = [];
   const skills: ExamSkillBinding[] = skillIds.map(skillId => {
     let nodeId = explicit.get(skillId);

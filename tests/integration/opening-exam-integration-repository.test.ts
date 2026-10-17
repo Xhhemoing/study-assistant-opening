@@ -101,10 +101,17 @@ async function source(options: { image?: boolean; version?: number; history?: bo
 
 describe("course-bound exam sprint canonical bridge", () => {
   it("serializes concurrent bind replay into one source and graph, and rejects conflicting same-key intent", async () => {
-    expect((await integration.read(f.scope)).binding).toBeNull();
+    const originals: Array<{ sourceId: string; body: Uint8Array }> = [];
+    const withStorage = createOpeningExamIntegrationRepository(f.sql, pack, {
+      writePublicSource: async source => { originals.push(source); },
+    });
+    expect((await withStorage.read(f.scope)).binding).toBeNull();
     const input = bindInput();
-    const [first, second] = await Promise.all([integration.bind(f.scope, input), integration.bind(f.scope, input)]);
+    const [first, second] = await Promise.all([withStorage.bind(f.scope, input), withStorage.bind(f.scope, input)]);
     expect(first.binding).toEqual(second.binding);
+    expect(originals).toHaveLength(1);
+    expect(originals[0]?.sourceId).toBe(first.binding?.packSourceId);
+    expect(Buffer.from(originals[0]!.body).toString("utf8")).not.toContain("SEALED-EXPLANATION");
     expect(first.binding?.skills).toHaveLength(1);
     expect(await factsCount()).toEqual({ sessions: 0, attempts: 0, observations: 0, evidence: 0 });
     const [graph] = await f.sql`SELECT version,snapshot FROM opening_course_knowledge WHERE course_id=${courseId}`;
@@ -112,9 +119,23 @@ describe("course-bound exam sprint canonical bridge", () => {
     expect((graph?.snapshot as { nodes: unknown[] }).nodes).toHaveLength(1);
     expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE course_id=${courseId} AND asset_type='source'`).toHaveLength(1);
     expect(await f.sql`SELECT id FROM opening_exam_integration_commands`).toHaveLength(1);
-    await expect(integration.bind(f.scope, { ...input, createKnowledgeNodes: false })).rejects.toMatchObject({ code: "CONFLICT" });
-    const refreshed = await integration.bind(f.scope, bindInput());
+    await expect(withStorage.bind(f.scope, { ...input, createKnowledgeNodes: false })).rejects.toMatchObject({ code: "CONFLICT" });
+    const refreshed = await withStorage.bind(f.scope, bindInput());
     expect(refreshed.binding).toEqual(first.binding);
+    expect(originals).toHaveLength(1);
+  });
+
+  it("rolls back the binding transaction when writing the public original fails", async () => {
+    const before = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const unavailable = createOpeningExamIntegrationRepository(f.sql, pack, {
+      writePublicSource: async () => { throw new Error("Object write failed"); },
+    });
+    await expect(unavailable.bind(f.scope, bindInput())).rejects.toThrow("Object write failed");
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual(before);
+    expect(await f.sql`SELECT id FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM course_asset_memberships WHERE course_id=${courseId}`).toHaveLength(0);
+    expect(await f.sql`SELECT course_id FROM opening_course_knowledge WHERE course_id=${courseId}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM opening_exam_integration_commands`).toHaveLength(0);
   });
 
   it("captures exactly one session and attempt on presentation, then one root observation and skill evidence under concurrent answer replay", async () => {

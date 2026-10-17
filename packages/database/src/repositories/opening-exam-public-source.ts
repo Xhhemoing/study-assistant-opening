@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import { OpeningSourceError } from "./opening-sources";
 
-/** The public lesson source is stored as frozen chunks, not as an uploaded S3 object. */
+/** Reconstruct the verified public original from the bound version-zero lesson chunks. */
 export async function readOpeningExamPublicSource(
   sql: Sql, scope: Scope, sourceId: string, version: number,
 ): Promise<{ text: string; bytes: number } | null> {
