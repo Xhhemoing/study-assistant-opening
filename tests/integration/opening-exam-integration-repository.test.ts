@@ -251,6 +251,60 @@ describe("course-bound exam sprint canonical bridge", () => {
     expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
   });
 
+  it("does not turn a changed exam answer into independent course evidence through a later reference check or restoration", async () => {
+    const bound = await bind(), view = await start();
+    await sprint.act(f.scope, { action: "answer", attemptId: view.currentAttempt!.id, answer: "b", confidence: 4, clientKey: key() });
+    const link = await linkFor(view.currentAttempt!.id), saved = await observation(String(link.observation_id));
+    expect(saved).toMatchObject({ answer: "b", outcome: "incorrect" });
+    expect((await eligibility(String(saved.id))).independentAttempt).toBe("yes");
+    const edited = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: String(saved.id), expectedHead: String(saved.id),
+      clientKey: key(), reason: "Replace my answer after seeing the result", revisionKind: "replace",
+      replacement: { answer: "a", outcome: "correct", assistance: "independent", verdictSource: "self_report" },
+    });
+    expect((await eligibility(edited.headObservationId)).independentAttempt).toBe("no");
+    const checked = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: edited.headObservationId, expectedHead: edited.headObservationId,
+      clientKey: key(), reason: "Check the replacement answer", revisionKind: "replace",
+      replacement: { answer: "a", outcome: "correct", assistance: "independent", verdictSource: "reference_checked",
+        referenceSourceId: bound.binding!.packSourceId, referenceCheck: { referenceSourceId: bound.binding!.packSourceId,
+          method: "Checked the complete replacement answer", scope: "whole_answer" } },
+    });
+    expect(await eligibility(checked.headObservationId)).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes" });
+    expect(checked.observation?.eligibility?.independentAttempt).toBe("no");
+    const restored = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: checked.headObservationId, expectedHead: checked.headObservationId,
+      clientKey: key(), reason: "Restore the captured answer", revisionKind: "replace",
+      replacement: { answer: "b", outcome: "incorrect", assistance: "independent", verdictSource: "self_report" },
+    });
+    expect((await eligibility(restored.headObservationId)).independentAttempt).toBe("no");
+    expect(restored.observation?.eligibility?.independentAttempt).toBe("no");
+    expect(await observation(String(saved.id))).toMatchObject({ answer: "b", outcome: "incorrect", effective_head_id: restored.headObservationId });
+    expect(await linkFor(view.currentAttempt!.id)).toMatchObject({ submitted_answer: "b", observation_id: saved.id });
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
+  });
+
+  it("allows grading corrections on an unchanged captured answer without discarding its independent attempt", async () => {
+    const bound = await bind(), view = await start();
+    await answer(view);
+    const link = await linkFor(view.currentAttempt!.id), saved = await observation(String(link.observation_id));
+    const marked = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: String(saved.id), expectedHead: String(saved.id),
+      clientKey: key(), reason: "Reconsider the grading without editing my answer", revisionKind: "replace",
+      replacement: { answer: "a", outcome: "incorrect", assistance: "independent", verdictSource: "self_report" },
+    });
+    const corrected = await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: String(saved.id), revisesObservationId: marked.headObservationId, expectedHead: marked.headObservationId,
+      clientKey: key(), reason: "Correct the grade after checking the unchanged answer", revisionKind: "replace",
+      replacement: { answer: "a", outcome: "correct", assistance: "independent", verdictSource: "reference_checked",
+        referenceSourceId: bound.binding!.packSourceId, referenceCheck: { referenceSourceId: bound.binding!.packSourceId,
+          method: "Checked the complete original answer", scope: "whole_answer" } },
+    });
+    expect(await eligibility(corrected.headObservationId)).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(corrected.observation?.eligibility?.independentAttempt).toBe("yes");
+    expect(await linkFor(view.currentAttempt!.id)).toMatchObject({ submitted_answer: "a", observation_id: saved.id });
+  });
+
   it("does not backfill attempts or observations when isolated historical practice is later bound", async () => {
     const historical = await start();
     await answer(historical);

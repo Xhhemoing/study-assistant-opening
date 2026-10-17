@@ -45,7 +45,11 @@ export interface EvidenceHelpExposure {
 export interface EvidenceEligibilityContext {
   serverEvaluation?: ServerEvaluation | null;
   /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
-  examAttempt?: { firstFamilyExposure: boolean } | null;
+  examAttempt?: {
+    firstFamilyExposure: boolean;
+    /** Every ancestor still has the captured answer; null means the chain cannot be proved. */
+    answerUnchanged: boolean | null;
+  } | null;
   helpHistory?: {
     /** Covers this attempt and historical answer exposure for the same problem. */
     complete: boolean;
@@ -94,6 +98,8 @@ export type EvidenceEligibilityReasonCode =
   | "prior_answer_exposure"
   | "prior_evaluation_feedback"
   | "exam_family_already_seen"
+  | "exam_answer_changed"
+  | "exam_answer_history_unknown"
   | "verification_source_untrusted"
   | "server_evaluation_incomplete"
   | "server_evaluation_identity_mismatch"
@@ -130,5 +136,5 @@ export interface EvidenceEligibility {
   usableForCurrentVersion: EvidenceEligibilityValue;
   usableForDelayedCheck: EvidenceEligibilityValue;
   reasonCodes: EvidenceEligibilityReasonCode[];
-  policyVersion: "opening-evidence-v1";
+  policyVersion: "opening-evidence-v1" | "opening-evidence-v2";
 }

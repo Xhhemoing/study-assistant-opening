@@ -12,7 +12,7 @@ const evaluation: ServerEvaluation = {
   reasonCodes: ["exam_choice_compared"], evaluatedAt: "2026-10-17T12:00:00.000Z",
 };
 const context: EvidenceEligibilityContext = {
-  serverEvaluation: evaluation, examAttempt: { firstFamilyExposure: true },
+  serverEvaluation: evaluation, examAttempt: { firstFamilyExposure: true, answerUnchanged: true },
   helpHistory: { complete: true, exposures: [] }, version: { applicability: "exact", currentItemVersionId: "item" },
 };
 
@@ -53,7 +53,7 @@ describe("exam choice evidence qualification", () => {
   it("retains assistance, version and family-exposure exclusions", () => {
     expect(evaluateEvidenceEligibility({ ...observation, assistance: "hinted" }, context)).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes" });
     expect(evaluateEvidenceEligibility(observation, { ...context, version: { applicability: "changed_needs_check" } }).usableForCurrentVersion).toBe("unknown");
-    expect(evaluateEvidenceEligibility(observation, { ...context, examAttempt: { firstFamilyExposure: false } })).toMatchObject({
+    expect(evaluateEvidenceEligibility(observation, { ...context, examAttempt: { firstFamilyExposure: false, answerUnchanged: true } })).toMatchObject({
       independentAttempt: "no", verifiedCorrect: "yes", reasonCodes: expect.arrayContaining(["exam_family_already_seen"]),
     });
     expect(evaluateEvidenceEligibility(observation, { ...context, helpHistory: { complete: false, exposures: [] } }).independentAttempt).toBe("unknown");
@@ -62,15 +62,32 @@ describe("exam choice evidence qualification", () => {
   it("does not let reference checks or corrections upgrade a previously seen family", () => {
     const revised = { ...observation, observationId: "revision", verdictSource: "reference_checked" as const };
     expect(evaluateEvidenceEligibility(revised, {
-      ...context, serverEvaluation: null, examAttempt: { firstFamilyExposure: false },
+      ...context, serverEvaluation: null, examAttempt: { firstFamilyExposure: false, answerUnchanged: true },
       referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "item", referenceId: "reference", checkerId: "learner", method: "compare", scope: "whole_answer", outcome: "correct" },
     })).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes", usableForDelayedCheck: "no" });
+  });
+
+  it("never restores first-answer independence through a corrected answer or reference check", () => {
+    const revised = { ...observation, observationId: "revision", verdictSource: "reference_checked" as const };
+    const checked: EvidenceEligibilityContext = {
+      ...context, serverEvaluation: null, examAttempt: { firstFamilyExposure: true, answerUnchanged: false },
+      referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "item", referenceId: "reference",
+        checkerId: "learner", method: "compare", scope: "whole_answer", outcome: "correct" },
+    };
+    expect(evaluateEvidenceEligibility(revised, checked)).toMatchObject({
+      independentAttempt: "no", verifiedCorrect: "yes", usableForDelayedCheck: "no",
+      reasonCodes: expect.arrayContaining(["exam_answer_changed"]), policyVersion: "opening-evidence-v2",
+    });
+    expect(evaluateEvidenceEligibility(revised, { ...checked, examAttempt: { firstFamilyExposure: true, answerUnchanged: true } }))
+      .toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(evaluateEvidenceEligibility(revised, { ...checked, examAttempt: { firstFamilyExposure: true, answerUnchanged: null } }))
+      .toMatchObject({ independentAttempt: "unknown", reasonCodes: expect.arrayContaining(["exam_answer_history_unknown"]) });
   });
 
   it("uses the supplied exam retest protocol without assuming the measurement protocol", () => {
     const delayedCheck = { protocolId: "exam-sprint-24h-v1", attemptId: "attempt", earliestAt: 100, priorAnswerPolicy: "require_unseen_problem" as const };
     expect(evaluateEvidenceEligibility(observation, { ...context, delayedCheck }).usableForDelayedCheck).toBe("yes");
     expect(evaluateEvidenceEligibility(observation, { ...context, delayedCheck: { ...delayedCheck, earliestAt: 101 } }).usableForDelayedCheck).toBe("no");
-    expect(evaluateEvidenceEligibility(observation, { ...context, delayedCheck, examAttempt: { firstFamilyExposure: false } }).usableForDelayedCheck).toBe("no");
+    expect(evaluateEvidenceEligibility(observation, { ...context, delayedCheck, examAttempt: { firstFamilyExposure: false, answerUnchanged: true } }).usableForDelayedCheck).toBe("no");
   });
 });

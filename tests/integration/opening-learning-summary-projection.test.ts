@@ -45,7 +45,7 @@ it("repairs exact source and policy dependencies without advancing the semantic 
   await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${observation.id}`;
   const rebuilt = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
   expect(rebuilt.status).toBe("ready");
-  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v1");
+  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v2");
   expect(rebuilt.groups[0]?.representatives[0]?.eligibility.usableForDelayedCheck).toBe("unknown");
 });
 it("automatically repairs bounded batches before exposing complete group statistics", async () => {

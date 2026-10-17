@@ -125,7 +125,7 @@ export function evaluateEvidenceEligibility(
     usableForCurrentVersion: "unknown",
     usableForDelayedCheck: "unknown",
     reasonCodes: [],
-    policyVersion: "opening-evidence-v1",
+    policyVersion: "opening-evidence-v2",
   };
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     result.reasonCodes.push("observation_identity_incomplete");
@@ -137,6 +137,15 @@ export function evaluateEvidenceEligibility(
   if (context.examAttempt?.firstFamilyExposure === false) {
     result.independentAttempt = "no";
     reasons.add("exam_family_already_seen");
+  }
+  if (context.examAttempt) {
+    if (context.examAttempt.answerUnchanged === false) {
+      result.independentAttempt = "no";
+      reasons.add("exam_answer_changed");
+    } else if (context.examAttempt.answerUnchanged !== true) {
+      if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
+      reasons.add("exam_answer_history_unknown");
+    }
   }
   result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);

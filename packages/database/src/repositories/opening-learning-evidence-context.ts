@@ -35,6 +35,24 @@ function revisedAnswerRecordedAt(record: LearningObservation, chain: readonly Ro
   return current ? undefined : null;
 }
 
+/** A changed choice cannot inherit the original attempt's independence, even after changing back. */
+function examAnswerUnchanged(record: LearningObservation, chain: readonly Row[], capturedAnswer: unknown): boolean | null {
+  if (typeof capturedAnswer !== "string") return null;
+  if (record.answer !== capturedAnswer) return false;
+  const rows = new Map(chain.map(row => [String(row.id), row]));
+  const rootId = record.rootObservationId ?? record.id, visited = new Set<string>();
+  let current = rows.get(record.id);
+  while (current) {
+    const id = String(current.id);
+    if (visited.has(id) || typeof current.answer !== "string") return null;
+    visited.add(id);
+    if (current.answer !== capturedAnswer) return false;
+    if (id === rootId) return true;
+    current = rows.get(String(current.revises_observation_id));
+  }
+  return null;
+}
+
 function references(row: { sourceIds: readonly string[]; sourceVersions?: Record<string, number> | null; referenceSourceId?: string | null; referenceCheck?: { referenceId?: string | null } | null }): string[] {
   return [...new Set([...row.sourceIds, ...Object.keys(row.sourceVersions ?? {}),
     ...[row.referenceSourceId, row.referenceCheck?.referenceId].filter((id): id is string => Boolean(id))])].sort();
@@ -64,7 +82,7 @@ export async function readOpeningLearningEvidenceContexts(
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
   // Keep the immutable exposure/protocol link even if the observation is revised.
   const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
-      e.learning_attempt_id AS attempt_id,e.first_family_exposure,e.delayed_earliest_at,
+      e.learning_attempt_id AS attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
       a.session_id,a.course_id,a.problem_id,a.item_version_id,
       s.pack_snapshot->>'id' AS exam_pack_id,s.pack_snapshot->>'version' AS exam_pack_version,
       h.id AS receipt_id,h.kind,h.delivered_at,h.history_revision
@@ -235,7 +253,10 @@ export async function readOpeningLearningEvidenceContexts(
       && examLink.exam_pack_id === examSpec.packId && examLink.exam_pack_version === examSpec.packVersion
       && typeof examLink.first_family_exposure === "boolean";
     if (linkedExam) {
-      context.examAttempt = { firstFamilyExposure: examLink.first_family_exposure as boolean };
+      context.examAttempt = {
+        firstFamilyExposure: examLink.first_family_exposure as boolean,
+        answerUnchanged: examAnswerUnchanged(record, chains.get(record.rootObservationId ?? record.id) ?? [], examLink.submitted_answer),
+      };
       const earliestAt = examLink.delayed_earliest_at == null ? Number.NaN : new Date(examLink.delayed_earliest_at as string | Date).getTime();
       if (Number.isFinite(earliestAt)) context.delayedCheck = {
         protocolId: "exam-sprint-24h-v1", attemptId: record.attemptId!, earliestAt, priorAnswerPolicy: "require_unseen_problem",
