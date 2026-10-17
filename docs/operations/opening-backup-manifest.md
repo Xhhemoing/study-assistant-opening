@@ -1,5 +1,7 @@
 # Opening backup / restore — scope + format contract (draft)
 
+**Current scope note (2026-10-17):** The draft below records the 2026-10-12 design and inventory. The current export/apply allowlists in `packages/database/src/repositories/opening-backup-records.ts` and `opening-backup-apply.ts` are authoritative. Opening archives do **not** include `opening_measurement_trials`, `opening_measurement_attempts`, or `opening_measurement_commands`; neither these archives nor the learning-test analysis JSON can restore measurement progress. Preserve those records with a full database backup, and back up source objects separately. See [learning measurement recovery](../quality/learning-measurement-plugin.md#数据库备份与恢复). The historical table counts below are not the current schema inventory.
+
 **Status:** draft for Q03 / PR-K. Not an executor implementation and not a verified restore drill.  
 **Date:** 2026-10-12 (Asia/Shanghai)  
 **Baseline assumptions:** code at the `fix/q03-restore-scope` worktree; schema from `packages/database/src/migrations/` (latest durable SQL id `0057_opening_help_exposure_kind.sql`).
