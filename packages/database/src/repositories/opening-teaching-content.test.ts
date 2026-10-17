@@ -78,12 +78,16 @@ describe("teaching content helpers (T1/T6/T7 unit)", () => {
 });
 
 describe("opening teaching content repository (unit)", () => {
-  it.each([{ citations: [] }, { citations: ["a-different-chunk"] }, { citations: ["answer-chunk"] }])("attributes a revealed answer only to its own citations $citations", async ({ citations }) => {
+  it.each([
+    { citations: [], live: true }, { citations: ["a-different-chunk"], live: true },
+    { citations: ["answer-chunk"], live: true }, { citations: ["answer-chunk"], live: false },
+  ])("attributes an answer only to its own current citations ($citations, live=$live)", async ({ citations, live }) => {
     const sourceId = "ffffffff-ffff-4fff-8fff-fffffffffff1";
     const { sql } = db(query => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
       if (query.includes("FROM opening_teaching_activities")) return [{ content_version: 1, source_ids: [sourceId] }];
       if (query.includes("FROM opening_sources")) return [{ id: sourceId, version: 1 }];
+      if (query.includes("FROM opening_source_chunks")) return live ? [{ id: "answer-chunk", source_id: sourceId, source_version: 1 }] : [];
       if (query.includes("FROM opening_learning_attempts")) return [{ submitted_at: now,
         create_intent: { teachingBlock: { blockId: blockTeach, contentVersion: 1 } }, source_versions: { [sourceId]: 1 } }];
       if (query.includes("FROM opening_teaching_activity_specs")) return [{ document_id: documentId, revision_number: 1, version: 1,
@@ -96,7 +100,7 @@ describe("opening teaching content repository (unit)", () => {
       return [];
     });
     const answer = await createOpeningTeachingContentRepository(sql).getSubmittedAnswerKey(scope, activityId, blockTeach, "attempt");
-    expect(answer).toEqual({ answer: "A generated answer", referenceSourceId: citations.includes("answer-chunk") ? sourceId : null });
+    expect(answer).toEqual({ answer: "A generated answer", referenceSourceId: live && citations.includes("answer-chunk") ? sourceId : null });
   });
 
   it("T2 publishActivitySpec CAS: stale expectedVersion → CONFLICT", async () => {

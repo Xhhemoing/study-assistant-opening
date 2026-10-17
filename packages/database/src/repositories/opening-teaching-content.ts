@@ -249,9 +249,14 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         const answer = body && [body.text, body.markdown, body.answer, body.solution].find((value): value is string => typeof value === "string");
         const ownCitations = new Set(Array.isArray(body?.citedChunkIds)
           ? body.citedChunkIds.filter((id): id is string => typeof id === "string") : []);
-        const reference = spec.sourceRefs.find((ref) => ref.chunkId && ownCitations.has(ref.chunkId)
+        const candidates = spec.sourceRefs.filter((ref) => ref.chunkId && ownCitations.has(ref.chunkId)
           && ref.version != null && Number.isInteger(Number(ref.version))
           && capturedVersions[ref.sourceId] === Number(ref.version) && currentVersions.get(ref.sourceId) === Number(ref.version));
+        const chunks = candidates.length ? await tx`SELECT id,source_id,source_version FROM opening_source_chunks
+          WHERE workspace_id=${scope.workspaceId} AND id::text=ANY(${candidates.map(ref => ref.chunkId!)}::text[])
+          FOR SHARE` : [];
+        const reference = candidates.find(ref => chunks.some(chunk => String(chunk.id) === ref.chunkId
+          && String(chunk.source_id) === ref.sourceId && Number(chunk.source_version) === Number(ref.version)));
         return { answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null };
       });
     },
