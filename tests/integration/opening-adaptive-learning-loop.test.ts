@@ -118,9 +118,11 @@ describe("adaptive learning loop with real evidence", () => {
     const generated = teachingLearnerFocus(read, course.courseId, "integration", false)!;
     expect(generated).toMatchObject({ activityKind: "diagnose", goalContext: { mode: "exam", priority: 4 },
       prerequisiteRepair: { nodeId, targetNodeId, maxMinutes: 5 } });
-    const { activityId } = await storeTeachingFocus(course, null, generated);
+    // An unobserved target must not inherit the prerequisite matrix exercise's requirement.
+    const { activityId } = await storeTeachingFocus(course, null, { ...generated, requirementKey: generated.requirementKey });
     const before = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
     expect(before.learnerFocus).toEqual(generated);
+    expect(before.learnerFocus?.requirementKey).toBeUndefined();
     // Preferences change for future activities; this activity retains its policy snapshot.
     await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
       courseGoal: { courseId: course.courseId, expectedRevision: saved.prefs.courseGoals[course.courseId]?.revision ?? 0,
