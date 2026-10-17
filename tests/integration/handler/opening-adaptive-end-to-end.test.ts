@@ -138,6 +138,7 @@ it("carries a verified error through Today selection into a server-derived targe
     goal_json: { learnerFocus: {
       skillLabel: matrixSkill, requirementKey: matrixRequirement, activityKind: "targeted_explain", reasonCode: "verified_incorrect",
       focusObservationId: chosen.observation.id, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION,
+      goalContext: { mode: "understand", targetDate: null, daysRemaining: null, priority: 0, prerequisiteBudgetMinutes: 10, reasonCode: "long_term" },
     } },
   });
   const activityReplay = await createActivity(request("/teaching-activities", activityBody));
