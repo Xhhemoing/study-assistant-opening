@@ -152,8 +152,9 @@ describe("opening knowledge repository", () => {
     expect(await repo.listAuthorizedChunks(f.scope, courseId)).toHaveLength(1);
     if (change === "version") await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
     if (change === "privacy") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${f.scope.workspaceId},${sourceId})`;
-    if (change === "parse") await f.sql`UPDATE opening_sources SET parse_state='pending' WHERE id=${sourceId}`;
+    if (change === "parse") await f.sql`UPDATE opening_sources SET parse_state='queued' WHERE id=${sourceId}`;
     if (change === "history") await f.sql`UPDATE opening_source_versions SET availability='unavailable' WHERE source_id=${sourceId}`;
+    expect(await repo.listAuthorizedChunks(f.scope, courseId)).toHaveLength(0);
     await expect(repo.replace(f.scope, courseId, { expectedVersion: 0,
       snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
     expect(await repo.get(f.scope, courseId)).toBeNull();

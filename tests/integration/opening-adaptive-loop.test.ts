@@ -32,8 +32,16 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   if (!f) return;
-  await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.close();
+  try {
+    const workspaces = [f.scope.workspaceId, f.otherScope.workspaceId];
+    await f.sql.begin(async tx => {
+      await tx`DELETE FROM opening_turns WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      // Sessions remove attempts/observations first; item versions must go before activity cascade.
+      await tx`DELETE FROM opening_learning_sessions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM opening_learning_item_versions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM workspaces WHERE id=ANY(${workspaces}::uuid[])`;
+    });
+  } finally { await f.close(); }
 });
 beforeEach(async () => {
   await f.sql`TRUNCATE opening_skill_evidence, opening_learning_eligibility, opening_learning_observations,
