@@ -4,6 +4,7 @@ import type { Scope } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import { lockWorkspaceLearningHistory, mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContexts, type OpeningEvidenceInput } from "./opening-learning-evidence-context";
+import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
 
 type Row = Record<string, unknown>;
 // The evaluator owns this version. No second policy literal is maintained here.
@@ -35,13 +36,20 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
         WHERE g."skillLabel"=o.skill_label AND g."requirementKey" IS NOT DISTINCT FROM o.requirement_key)` : db`TRUE`}
   ), live AS (
     SELECT o.*,GREATEST(COALESCE(help.revision,0),COALESCE(exam_help.revision,0)) AS live_help_revision,
-      EXISTS(SELECT 1 FROM opening_learning_item_versions v JOIN opening_problem_refs r
+      (EXISTS(SELECT 1 FROM opening_learning_item_versions v JOIN opening_problem_refs r
         ON r.problem_id=v.problem_id AND r.workspace_id=v.workspace_id
           AND r.source_id=v.source_id AND r.source_version=v.source_version AND r.stem_snapshot=v.stem_snapshot
           AND r.chunk_id IS NOT DISTINCT FROM v.chunk_id AND r.physical_page IS NOT DISTINCT FROM v.physical_page AND r.artifact_kind=v.artifact_kind
-        WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id) AS live_item_matches,
+        WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id)
+        OR (o.item_version_id IS NULL AND exam_identity.observation_id IS NOT NULL))
+        AND CASE WHEN exam_identity.identity_current IS NOT NULL THEN exam_identity.identity_current
+          AND exam_identity.requirement_key IS NOT DISTINCT FROM o.requirement_key
+          ELSE COALESCE(o.server_evaluation->>'evaluatorVersion','')<>'exam-choice-exact-v1'
+            AND COALESCE(o.requirement_key,'') NOT LIKE 'exam-skill:%' END AS live_item_matches,
       COALESCE(sources.states,'[]'::jsonb) AS live_source_states,COALESCE(privacy.ids,ARRAY[]::text[]) AS live_privacy_ids
     FROM heads o
+    LEFT JOIN LATERAL (SELECT identity_current,requirement_key,observation_id FROM (${openingExamIdentityStateQuery(db, scope)}) identity
+      WHERE identity.attempt_id=o.attempt_id OR identity.observation_id=o.current_root_id LIMIT 1) exam_identity ON TRUE
     LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_help_exposures h
       JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
       JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id

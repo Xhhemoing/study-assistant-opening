@@ -18,7 +18,7 @@ import {
   type LearnerSnapshotDeps,
 } from "../../apps/web/src/features/opening/planning/learner-snapshot-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
-import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
 
 const timeZone = "Asia/Shanghai";
 let fixture: OpeningFixture;
@@ -55,13 +55,9 @@ const today = () => localDateKeyInZone(new Date(), timeZone);
 const read = (overrides: Partial<LearnerSnapshotDeps> = {}) =>
   createLearnerSnapshotService(deps(overrides)).read(fixture.scope, { date: today(), timeZone });
 
-type AttemptFixture = Awaited<ReturnType<typeof learningAttemptFixture>>;
-function checked(f: AttemptFixture, outcome: "correct" | "incorrect", extra: Record<string, unknown> = {}) {
-  return {
-    outcome, verdictSource: "reference_checked", referenceSourceId: f.sourceId,
-    referenceCheck: { referenceSourceId: f.sourceId, method: "Compared against the reference solution", scope: "whole_answer" },
-    ...extra,
-  };
+type AttemptFixture = Awaited<ReturnType<typeof matrixAttemptFixture>>;
+function checked(_f: AttemptFixture, outcome: "correct" | "incorrect", extra: Record<string, unknown> = {}) {
+  return { answer: outcome === "correct" ? "[2,3]" : "[1,1]", outcome: "unverified", ...extra };
 }
 async function submitChecked(f: AttemptFixture, outcome: "correct" | "incorrect", extra: Record<string, unknown> = {}) {
   return f.submit(await f.start(), checked(f, outcome, extra));
@@ -81,8 +77,8 @@ async function insertTask(workspaceId: string, ownerUserId: string, input: {
 
 describe("learner snapshot read", () => {
   it("reads every effective observation with server eligibility, not a capped projection", async () => {
-    const f = await learningAttemptFixture(fixture);
-    for (let index = 0; index < 24; index += 1) await f.submit(await f.start());
+    const f = await matrixAttemptFixture(fixture);
+    for (let index = 0; index < 24; index += 1) await f.submit(await f.start(), { answer: "Unparseable working" });
     const wrong = await submitChecked(f, "incorrect");
 
     const result = await read();
@@ -90,14 +86,14 @@ describe("learner snapshot read", () => {
     expect(course.evidenceStatus).toBe("available");
     expect(course.observations).toHaveLength(25);
     const latest = course.observations.find((row) => row.id === wrong.id)!;
-    expect(latest).toMatchObject({ skillLabel: "fractions", verifiedCorrect: "no", independentAttempt: "yes", problemId: wrong.problemId });
+    expect(latest).toMatchObject({ skillLabel: "矩阵维数", verifiedCorrect: "no", independentAttempt: "yes", problemId: wrong.problemId });
     expect(course.observations.filter((row) => row.id !== wrong.id).every((row) => row.verifiedCorrect === "unknown")).toBe(true);
-    expect(course.summaries).toEqual([expect.objectContaining({ skillLabel: "fractions", status: "needs_check" })]);
+    expect(course.summaries).toEqual([expect.objectContaining({ skillLabel: "矩阵维数", status: "needs_check" })]);
     expect(result.dataStatus).toEqual({ evidence: "available", goals: "not_configured", dueCards: "available" });
   });
 
   it("keeps a correct answer after help from counting as independent", async () => {
-    const f = await learningAttemptFixture(fixture);
+    const f = await matrixAttemptFixture(fixture);
     const attempt: LearningAttempt = await f.start();
     await f.help(attempt, "hinted");
     const observation = await f.submit(attempt, checked(f, "correct", { assistance: "hinted" }));
@@ -110,7 +106,7 @@ describe("learner snapshot read", () => {
   });
 
   it("uses only effective heads after a replacement or a retraction", async () => {
-    const f = await learningAttemptFixture(fixture);
+    const f = await matrixAttemptFixture(fixture);
     const original: LearningObservation = await submitChecked(f, "incorrect");
     const replaced = await f.learning.reviseObservation(fixture.scope, {
       rootObservationId: original.id, expectedHead: original.id, revisesObservationId: original.id,
@@ -127,27 +123,27 @@ describe("learner snapshot read", () => {
     expect(course.observations.map((row) => row.id)).toEqual([replaced.headObservationId]);
   });
 
-  it.each([["replace", "done"], ["retract", "skipped"]] as const)("preserves a legacy %s spelling's %s task after the earliest observation changes", async (change, status) => {
-    const f = await learningAttemptFixture(fixture);
+  it.each([["replace", "done"], ["retract", "skipped"]] as const)("preserves a legacy %s spelling's %s task while a learner correction loses grading authority", async (change, status) => {
+    const f = await matrixAttemptFixture(fixture);
     const first = await submitChecked(f, "incorrect");
     const displayed = change === "retract" ? await submitChecked(f, "incorrect") : first;
-    const clientKey = suggestionKey(today(), suggestionIdentity("weak_skill", f.courseId, "fractions"));
+    const clientKey = suggestionKey(today(), suggestionIdentity("weak_skill", f.courseId, "矩阵维数"));
     await insertTask(fixture.scope.workspaceId, fixture.scope.ownerUserId, {
-      clientKey, courseId: f.courseId, skillLabel: "fractions", status,
+      clientKey, courseId: f.courseId, skillLabel: "矩阵维数", status,
     });
     await f.learning.reviseObservation(fixture.scope, {
       rootObservationId: displayed.id, expectedHead: displayed.id, revisesObservationId: displayed.id,
       reason: "Normalize the displayed skill spelling", clientKey: randomUUID(), revisionKind: "replace",
-      replacement: { answer: displayed.answer, outcome: displayed.outcome, assistance: displayed.assistance, skillLabel: "FRAC TIONS" },
+      replacement: { answer: displayed.answer, outcome: displayed.outcome, assistance: displayed.assistance, skillLabel: "矩 阵维数" },
     });
     if (change === "retract") await f.learning.reviseObservation(fixture.scope, {
       rootObservationId: first.id, expectedHead: first.id, revisesObservationId: first.id,
       reason: "Withdraw an incorrectly attributed earlier attempt", clientKey: randomUUID(), revisionKind: "retract",
     });
     const result = await read({ assembleSnapshot: assembleLearnerSnapshot });
-    expect(result.sources.tasks).toContainEqual(expect.objectContaining({ clientKey, skillLabel: "fractions", status }));
+    expect(result.sources.tasks).toContainEqual(expect.objectContaining({ clientKey, skillLabel: "矩阵维数", status }));
     expect(result.snapshot.courses.find(row => row.courseId === f.courseId)?.skills).toMatchObject([
-      { skillLabel: "FRAC TIONS", status: "needs_review" },
+      { skillLabel: "矩 阵维数", status: "needs_check" },
     ]);
     expect(proposeAdaptiveTasks(result.snapshot, {
       autonomy: "copilot", capacityMinutes: 180, committedMinutes: 0, pendingTasks: [], idFor: () => randomUUID(),
@@ -174,7 +170,7 @@ describe("learner snapshot read", () => {
   });
 
   it("keeps other courses when one course's evidence read fails", async () => {
-    const f = await learningAttemptFixture(fixture);
+    const f = await matrixAttemptFixture(fixture);
     await submitChecked(f, "incorrect");
     const broken = await insertCourse(fixture.scope.workspaceId, "Broken evidence");
     const onReadFailure = vi.fn();
@@ -194,23 +190,31 @@ describe("learner snapshot read", () => {
     expect(onReadFailure).toHaveBeenCalledWith("evidence", expect.any(Error), broken);
   });
 
-  it("reads materials, knowledge prerequisites and course goals", async () => {
-    const f = await learningAttemptFixture(fixture);
+  it("reads materials, supported knowledge prerequisites and course goals without promoting candidate graph entries", async () => {
+    const f = await matrixAttemptFixture(fixture);
     await fixture.sql`INSERT INTO course_asset_memberships
       (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
       VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${f.courseId}, 'source', ${f.sourceId}, 'core', 0, 'course')`;
     const bare = await insertCourse(fixture.scope.workspaceId, "No materials");
-    const [chapter, first, second] = [randomUUID(), randomUUID(), randomUUID()];
-    const node = (id: string, label: string, kind: "chapter" | "concept") =>
-      ({ id, courseId: f.courseId, label, kind, evidenceChunkIds: [], status: "suggested" as const });
-    const edge = (from: string, to: string, kind: "contains" | "prerequisite") =>
-      ({ from, to, kind, evidenceChunkIds: [], status: "suggested" as const });
+    const [chapter, first, second, independent, suggested, unchecked] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    type GraphStatus = KnowledgeSnapshot["nodes"][number]["status"];
+    const node = (id: string, label: string, kind: "chapter" | "concept", status: GraphStatus = "supported") =>
+      ({ id, courseId: f.courseId, label, kind, evidenceChunkIds: [f.chunkId], status });
+    const edge = (from: string, to: string, kind: "contains" | "prerequisite", status: GraphStatus = "supported") =>
+      ({ from, to, kind, evidenceChunkIds: [f.chunkId], status });
     const snapshot: KnowledgeSnapshot = {
       courseId: f.courseId, version: 0,
-      nodes: [node(chapter, "第一章", "chapter"), node(first, "分数", "concept"), node(second, "分数加法", "concept")],
-      edges: [edge(chapter, first, "contains"), edge(chapter, second, "prerequisite"), edge(first, second, "prerequisite")],
+      nodes: [node(chapter, "第一章", "chapter"), node(first, "分数", "concept"), node(second, "分数加法", "concept"),
+        node(independent, "约分", "concept"),
+        node(suggested, "待确认技能", "concept", "suggested"), node(unchecked, "待核对技能", "concept", "needs_check")],
+      edges: [edge(chapter, first, "contains"), edge(chapter, second, "prerequisite"), edge(first, second, "prerequisite"),
+        // Supported endpoints do not make an unconfirmed edge a prerequisite.
+        edge(first, independent, "prerequisite", "suggested"),
+        edge(suggested, first, "prerequisite"), edge(unchecked, second, "prerequisite")],
     };
-    await createOpeningKnowledgeRepository(fixture.sql).replace(fixture.scope, f.courseId, { expectedVersion: 0, snapshot, sourceVersions: {} });
+    await createOpeningKnowledgeRepository(fixture.sql).replace(fixture.scope, f.courseId, {
+      expectedVersion: 0, snapshot, sourceVersions: { [f.sourceId]: 1 },
+    });
     await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
       courseGoal: { courseId: f.courseId, goal: { targetDate: "2026-12-20", weeklyMinutes: 240 } },
     });
@@ -221,13 +225,14 @@ describe("learner snapshot read", () => {
     expect(course.knowledgeNodes).toEqual([
       { id: first, title: "分数", prerequisiteIds: [] },
       { id: second, title: "分数加法", prerequisiteIds: [first] },
+      { id: independent, title: "约分", prerequisiteIds: [] },
     ]);
     expect(result.sources.courses.find((row) => row.courseId === bare)).toMatchObject({ hasUsableMaterials: false, goal: null, knowledgeNodes: [] });
     expect(result.dataStatus.goals).toBe("available");
   });
 
   it("changes the history revision only when learning changes", async () => {
-    const f = await learningAttemptFixture(fixture);
+    const f = await matrixAttemptFixture(fixture);
     await submitChecked(f, "correct");
     const first = await read();
     const again = await read();

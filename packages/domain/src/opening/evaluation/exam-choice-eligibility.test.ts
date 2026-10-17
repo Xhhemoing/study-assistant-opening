@@ -62,24 +62,25 @@ describe("exam choice evidence qualification", () => {
   it("does not let reference checks or corrections upgrade a previously seen family", () => {
     const revised = { ...observation, observationId: "revision", verdictSource: "reference_checked" as const };
     expect(evaluateEvidenceEligibility(revised, {
-      ...context, serverEvaluation: null, examAttempt: { firstFamilyExposure: false, answerUnchanged: true },
+      ...context, serverEvaluation: null, referenceCheckAuthority: "learner", examAttempt: { firstFamilyExposure: false, answerUnchanged: true },
       referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "item", referenceId: "reference", checkerId: "learner", method: "compare", scope: "whole_answer", outcome: "correct" },
-    })).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes", usableForDelayedCheck: "no" });
+    })).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown", usableForDelayedCheck: "no",
+      reasonCodes: expect.arrayContaining(["learner_reference_compare"]) });
   });
 
   it("never restores first-answer independence through a corrected answer or reference check", () => {
     const revised = { ...observation, observationId: "revision", verdictSource: "reference_checked" as const };
     const checked: EvidenceEligibilityContext = {
-      ...context, serverEvaluation: null, examAttempt: { firstFamilyExposure: true, answerUnchanged: false },
+      ...context, serverEvaluation: null, referenceCheckAuthority: "learner", examAttempt: { firstFamilyExposure: true, answerUnchanged: false },
       referenceCheck: { attemptId: "attempt", problemId: "problem", itemVersionId: "item", referenceId: "reference",
         checkerId: "learner", method: "compare", scope: "whole_answer", outcome: "correct" },
     };
     expect(evaluateEvidenceEligibility(revised, checked)).toMatchObject({
-      independentAttempt: "no", verifiedCorrect: "yes", usableForDelayedCheck: "no",
-      reasonCodes: expect.arrayContaining(["exam_answer_changed"]), policyVersion: "opening-evidence-v2",
+      independentAttempt: "no", verifiedCorrect: "unknown", usableForDelayedCheck: "no",
+      reasonCodes: expect.arrayContaining(["exam_answer_changed", "learner_reference_compare"]), policyVersion: "opening-evidence-v3",
     });
     expect(evaluateEvidenceEligibility(revised, { ...checked, examAttempt: { firstFamilyExposure: true, answerUnchanged: true } }))
-      .toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+      .toMatchObject({ independentAttempt: "yes", verifiedCorrect: "unknown" });
     expect(evaluateEvidenceEligibility(revised, { ...checked, examAttempt: { firstFamilyExposure: true, answerUnchanged: null } }))
       .toMatchObject({ independentAttempt: "unknown", reasonCodes: expect.arrayContaining(["exam_answer_history_unknown"]) });
   });

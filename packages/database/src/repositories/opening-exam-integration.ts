@@ -47,7 +47,8 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
   return {
     binding, links: links.map(link => {
       const attempt = snapshot.state.attempts.find(item => item.id === link.exam_attempt_id);
-      const completed = attempt?.answeredAt != null && snapshot.state.runs.some(run => run.id === attempt.runId && run.completedAt !== null);
+      const completed = attempt?.answeredAt != null && snapshot.state.runs.some(run => run.id === attempt.runId
+        && (run.completedAt !== null || (run.mode !== "mock-a" && run.mode !== "mock-b")));
       return { examAttemptId: String(link.exam_attempt_id), learningAttemptId: String(link.learning_attempt_id),
         observationId: link.observation_id as string | null, nodeId: String(link.node_id), requirementKey: String(link.requirement_key),
         publication: completed && link.publication !== "published" ? "unavailable" : link.publication as ExamCanonicalLink["publication"] };

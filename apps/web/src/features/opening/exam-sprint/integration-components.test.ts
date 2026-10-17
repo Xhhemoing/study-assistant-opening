@@ -77,8 +77,9 @@ describe("exam integration evidence presentation", () => {
     const parsed = integrationSchema.parse(state);
     expect(parsed.links[0].publication).toBe("unavailable");
     const html = renderToStaticMarkup(createElement(EvidenceLinks, { integration: parsed }));
-    expect(html).toContain("已结束，来源不可用，未计入正式证据");
-    expect(html).toContain("已关联 0 次 · 未提交/未作答 0 次 · 来源不可用 1 次");
+    expect(html).toContain("已保存答案，材料或技能身份待核对，未计入正式证据");
+    expect(html).toContain("已关联 0 次 · 未提交/未作答 0 次 · 材料或技能待核对 1 次");
+    expect(html).toContain("不会把旧成绩转给新技能");
     expect(html).not.toContain("等待模拟交卷");
     expect(html).not.toContain("尚无作答记录");
   });

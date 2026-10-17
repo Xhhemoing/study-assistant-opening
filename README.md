@@ -4,6 +4,7 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 产品原则
 
+- 目标学习优先服务用户目的：兼顾长期能力与短期考试，教学按偏好调整；时间紧张时优先练习与必要补缺。
 - 默认界面只显示少量结果：状态、关键数据、下一步行动。
 - 点击结果可展开原因、证据和解决路径；完整参数仅在开发者设置中显示。
 - 用户无需创建课程或考试目标即可开始自由探索、笔记和知识整理。
@@ -17,6 +18,8 @@ AIstudy 是一个云端优先、面向终身使用的学习平台。它以目标
 
 ## 文档入口
 
+- [目标驱动学习新框架与首批改进](docs/plans/2026-10-17-goal-driven-learning-framework.md)
+- [目标策略、学习证据与知识图谱研究](docs/brainstorm/2026-10-17-goal-driven-learning.md)
 - [Brainstorm 研究与算法候选库](docs/brainstorm/README.md)
 - [Brainstorm 研究索引](docs/brainstorm/INDEX.md)
 - [项目算法与工程做法地图](docs/brainstorm/ALGORITHM_MAP.md)

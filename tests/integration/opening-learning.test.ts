@@ -83,7 +83,7 @@ describe("opening learning observations (L01)", () => {
       problemId: randomUUID(),
     }, { verdictSource: "reference_checked", referenceSourceId: sourceId });
     expect(retest.assistance).toBe("independent");
-    expect(retest.verdictSource).toBe("reference_checked");
+    expect(retest.verdictSource).toBe("self_report");
     expect(retest.allowsIndependent).toBe(false);
   });
 

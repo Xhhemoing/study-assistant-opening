@@ -34,7 +34,7 @@ function chainRow(record: LearningObservation) {
     source_ids: record.sourceIds, source_versions: record.sourceVersions, reference_check: record.referenceCheck ?? null };
 }
 
-function fixture(options: { links?: Record<string, unknown>[]; record?: LearningObservation; chain?: Record<string, unknown>[]; sourceVersion?: number; spec?: unknown } = {}) {
+function fixture(options: { links?: Record<string, unknown>[]; record?: LearningObservation; chain?: Record<string, unknown>[]; sourceVersion?: number; spec?: unknown; identityCurrent?: boolean; identityRequirementKey?: string; identityMissing?: boolean } = {}) {
   const record = options.record ?? observation;
   const chain = [
     { id: observation.id, root_observation_id: observation.id, revises_observation_id: null, answer: "A", recorded_at: submittedAt, source_ids: [id(16)], source_versions: { [id(16)]: 1 } },
@@ -43,6 +43,11 @@ function fixture(options: { links?: Record<string, unknown>[]; record?: Learning
   ];
   const db = ((strings: TemplateStringsArray) => {
     const query = strings.join("?");
+    if (query.includes("FROM opening_course_knowledge") || query.includes("WITH current_nodes AS")) return {};
+    if (query.includes("SELECT * FROM (?) identity")) return Promise.resolve(options.identityMissing ? [] : [{
+      attempt_id: observation.attemptId, observation_id: observation.id, identity_current: options.identityCurrent ?? true,
+      requirement_key: options.identityRequirementKey ?? observation.requirementKey,
+    }]);
     if (!query.includes(" FROM ") && !query.includes("\n    FROM ")) return {};
     if (query.includes("FROM opening_exam_attempt_links")) return Promise.resolve(options.links ?? [link]);
     if (query.includes("FROM opening_help_exposures")) return Promise.resolve([]);
@@ -69,6 +74,18 @@ describe("exam evidence context bridge", () => {
     });
   });
 
+  it.each([
+    { identityCurrent: false }, { identityRequirementKey: "exam-skill:replacement" }, { identityMissing: true },
+  ])("keeps detached skill identity out of canonical current eligibility: %j", async options => {
+    const { db, record } = fixture(options);
+    const input = await readOpeningLearningEvidenceContext(db, scope, record);
+    expect(input.dependencies.itemMatches).toBe(false);
+    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({
+      independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "no",
+      reasonCodes: expect.arrayContaining(["version_unavailable"]),
+    });
+  });
+
   it.each(["hint", "solution", "external"])("keeps %s receipts in qualification and dependency revisions", async kind => {
     const { db, record } = fixture({ links: [{ ...link, receipt_id: id(18), kind, delivered_at: "2026-10-18T08:00:30.000Z", history_revision: 7 }] });
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
@@ -88,8 +105,8 @@ describe("exam evidence context bridge", () => {
     const { db, record } = fixture({ record: revised, links: [{ ...link, first_family_exposure: false,
       receipt_id: id(18), kind: "external", delivered_at: "2026-10-18T08:00:30.000Z", history_revision: 9 }] });
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
-    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes",
-      reasonCodes: expect.arrayContaining(["help_before_submission", "exam_family_already_seen"]) });
+    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown",
+      reasonCodes: expect.arrayContaining(["help_before_submission", "exam_family_already_seen", "learner_reference_compare"]) });
     expect(input.dependencies.helpRevision).toBe(9);
   });
 
@@ -123,7 +140,7 @@ describe("exam evidence context bridge", () => {
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
     expect(input.context.examAttempt).toEqual({ firstFamilyExposure: true, answerUnchanged: false });
     expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({
-      independentAttempt: "no", verifiedCorrect: "yes", usableForDelayedCheck: "no", reasonCodes: expect.arrayContaining(["exam_answer_changed"]),
+      independentAttempt: "no", verifiedCorrect: "unknown", usableForDelayedCheck: "no", reasonCodes: expect.arrayContaining(["exam_answer_changed", "learner_reference_compare"]),
     });
   });
 
@@ -137,18 +154,19 @@ describe("exam evidence context bridge", () => {
     const { db, record } = fixture({ record: finalCheck, chain: [observation, checked, replacement, restored, finalCheck].map(chainRow) });
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
     expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({
-      independentAttempt: "no", verifiedCorrect: "yes", reasonCodes: expect.arrayContaining(["exam_answer_changed"]),
+      independentAttempt: "no", verifiedCorrect: "unknown", reasonCodes: expect.arrayContaining(["exam_answer_changed", "learner_reference_compare"]),
     });
   });
 
-  it("allows a genuine grading correction when the entire answer lineage is unchanged", async () => {
+  it("preserves the unchanged answer's attempt independence while keeping learner grading corrections unverified", async () => {
     const disputed: LearningObservation = { ...observation, id: id(30), revisesObservationId: observation.id,
       outcome: "incorrect", recordedAt: "2026-10-18T09:00:00.000Z", serverEvaluation: null, verdictSource: "self_report" };
     const checked = referenceChecked({ ...disputed, outcome: "correct" }, id(31));
     const { db, record } = fixture({ record: checked, chain: [observation, disputed, checked].map(chainRow) });
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
     expect(input.context.examAttempt?.answerUnchanged).toBe(true);
-    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "unknown",
+      reasonCodes: expect.arrayContaining(["learner_reference_compare"]) });
   });
 
   it("does not let a later answer edit change a fixed historical ancestor's qualification", async () => {
@@ -166,8 +184,8 @@ describe("exam evidence context bridge", () => {
     const { db, record } = fixture({ record: checked, chain,
       links: [{ ...link, submitted_answer: scenario === "missing capture" ? null : "A" }] });
     const input = await readOpeningLearningEvidenceContext(db, scope, record);
-    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "unknown", verifiedCorrect: "yes",
-      reasonCodes: expect.arrayContaining(["exam_answer_history_unknown"]) });
+    expect(evaluateEvidenceEligibility(input.observation, input.context)).toMatchObject({ independentAttempt: "unknown", verifiedCorrect: "unknown",
+      reasonCodes: expect.arrayContaining(["exam_answer_history_unknown", "learner_reference_compare"]) });
   });
 });
 

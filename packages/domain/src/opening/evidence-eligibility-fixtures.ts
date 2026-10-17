@@ -18,6 +18,7 @@ export const observation: EvidenceObservation = {
 };
 export const context: EvidenceEligibilityContext = {
   helpHistory: { complete: true, exposures: [] },
+  referenceCheckAuthority: "independent_review",
   referenceCheck: {
     attemptId: "attempt-2",
     problemId: "problem-1",

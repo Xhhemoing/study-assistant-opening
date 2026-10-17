@@ -52,14 +52,23 @@ it("records help after submission without retroactively marking it as pre-submit
   expect(evaluateEvidenceEligibility(facts.observation, facts.context).independentAttempt).toBe("yes");
 });
 
-it("requires documented reference checking and preserves unlinked ordinary observations as unknown", async () => {
+it("keeps public reference comparisons as self-reports and unlinked ordinary observations unknown", async () => {
   const f = await learningAttemptFixture(fixture);
   const labelOnly = await f.submit(await f.start(), { verdictSource: "reference_checked", referenceSourceId: f.sourceId });
   expect(labelOnly.eligibility.verifiedCorrect).toBe("unknown");
-  const checked = await f.submit(await f.start(), { verdictSource: "reference_checked", referenceSourceId: f.sourceId,
-    referenceCheck: { referenceSourceId: f.sourceId, method: "Compared each step against the reference solution", scope: "whole_answer" } });
-  expect(checked.eligibility.verifiedCorrect).toBe("yes");
+  const attempt = await f.start();
+  const compare = { clientKey: randomUUID(), verdictSource: "reference_checked", referenceSourceId: f.sourceId,
+    referenceCheck: { referenceSourceId: f.sourceId, method: "Compared each step against the reference solution", scope: "whole_answer" } };
+  const checked = await f.submit(attempt, compare);
+  expect(checked.verdictSource).toBe("self_report");
+  expect(checked.eligibility.verifiedCorrect).toBe("unknown");
+  expect(checked.eligibility.reasonCodes).toContain("learner_reference_compare");
+  expect(checked.allowsIndependent).toBe(false);
   expect(checked.referenceCheck?.checkerId).toBe(fixture.scope.ownerUserId);
+  expect((await f.submit(attempt, compare)).id).toBe(checked.id);
+  const [stored] = await fixture.sql`SELECT verdict_source,submitted_intent->>'verdictSource' AS requested_source
+    FROM opening_learning_observations WHERE id=${checked.id}`;
+  expect(stored).toEqual({ verdict_source: "self_report", requested_source: "reference_checked" });
   const legacy = await f.learning.insertObservation(fixture.scope, { sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "1", outcome: "correct", assistance: "independent", clientKey: randomUUID() });
   expect(legacy.itemVersionId).toBeNull(); expect(legacy.attemptId).toBeNull();

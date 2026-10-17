@@ -8,6 +8,7 @@ import {
 import {
   localDateKeyInZone,
   toSnapshotEvidence,
+  toSupportedKnowledgeNodes,
   type CourseEvidence,
   type LearnerSnapshot,
   type LearnerSnapshotSources,
@@ -56,20 +57,12 @@ export type LearnerSnapshotRead = {
   metrics: { reads: number; durationMs: number };
 };
 
-/** Chapters are outline containers, not skills; prerequisites on them are dropped. */
+/** Only supported skills and supported direct prerequisites affect planning. */
 export function toSnapshotKnowledgeNodes(stored: unknown): SnapshotKnowledgeNode[] {
   if (stored == null) return [];
   const parsed = knowledgeSnapshotSchema.safeParse(stored);
   if (!parsed.success) return [];
-  const nodes = parsed.data.nodes.filter((node) => node.kind !== "chapter");
-  const ids = new Set(nodes.map((node) => node.id));
-  return nodes.map((node) => ({
-    id: node.id,
-    title: node.label,
-    prerequisiteIds: parsed.data.edges
-      .filter((edge) => edge.kind === "prerequisite" && edge.to === node.id && ids.has(edge.from))
-      .map((edge) => edge.from),
-  }));
+  return toSupportedKnowledgeNodes(parsed.data);
 }
 
 export { toSnapshotEvidence };

@@ -16,7 +16,7 @@ const now = "2026-09-30T00:00:00.000Z";
 const enabled = process.env.OPENING_SUMMARY_PERF === "1";
 const report = (...values: unknown[]) => process.stdout.write(`${values.map(String).join(" ")}\n`);
 
-/** Synthetic reader workload only: distinct attempt/problem/item identities, one current source. */
+/** Synthetic learner-report reader workload; no independently verified outcomes. */
 async function seed(fixture: OpeningFixture, count: number): Promise<string> {
   await fixture.reset();
   await fixture.sql`TRUNCATE opening_learning_sessions, opening_learning_item_versions,
@@ -112,7 +112,7 @@ async function measure(sql: Sql, fixture: OpeningFixture, courseId: string, coun
     expect(response).toHaveLength(groupCount);
     expect(response.reduce((sum, row) => sum + row.sampleCount, 0)).toBe(count);
     expect(response.every(row => row.evidenceIds.length === 20)).toBe(true);
-    expect(response.reduce((sum, row) => sum + (row.historicalIncorrectCount ?? 0), 0)).toBe(count / 5);
+    expect(response.reduce((sum, row) => sum + (row.historicalIncorrectCount ?? 0), 0)).toBe(0);
     report("OPENING_SUMMARY_PERF_SAMPLE", JSON.stringify({ phase, records: count, groups: response.length,
       milliseconds: { authorization: milliseconds(authorized - start), evidenceRead: milliseconds(read - authorized),
         summarize: milliseconds(summarized - read), project: milliseconds(projected - summarized),
@@ -143,7 +143,7 @@ it.skipIf(!enabled)("measures the real course summary read with synthetic record
       database: database?.version, seedMilliseconds: milliseconds(performance.now() - setupStart), records: count,
       distribution: { courses: 1, requirementSkillGroups: groupCount, recordsPerGroup: count / groupCount,
         originalHeads: count, correctedHeads: 0, retractedHeads: 0, sourceVersions: 1, helpExposures: 0,
-        referenceCheckedCorrect: count * 0.8, referenceCheckedIncorrect: count * 0.2 },
+        learnerReportedCorrect: count * 0.8, learnerReportedIncorrect: count * 0.2, verifiedCorrect: 0 },
       limitations: ["First read is application-first, not physical cold cache; seeding has warmed database pages",
         "Sequential warm reads, no concurrent load", "No forced GC; sampled memory can miss short synchronous peaks",
         "Database memory and container resource limits are not measured", "No HTTP transport/auth-session overhead or provider calls"],

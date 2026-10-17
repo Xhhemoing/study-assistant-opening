@@ -80,8 +80,8 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
       "窗口内作答的当前非撤回有效 head，排除隐私材料", exclusions, input.learningComplete),
     ratio("learning.qualification_unknown", "资格仍未知比例", unknown.length, observations.length,
       "同一批当前有效 head，任一独立性/核对/版本资格未知", exclusions, input.learningComplete),
-    ratio("learning.checked_correct", "合格独立参考核对正确比例", referenceChecks.filter(row => row.eligibility.verifiedCorrect === "yes").length,
-      referenceChecks.length, "独立、当前版本可用且参考核对结论明确的作答（含错误），包含学习者自核", exclusions, input.learningComplete),
+    ratio("learning.checked_correct", "合格独立参考复核正确比例", referenceChecks.filter(row => row.eligibility.verifiedCorrect === "yes").length,
+      referenceChecks.length, "独立、当前版本可用且由可信独立评分来源核对的作答（含错误），不含学习者自核", exclusions, input.learningComplete),
     ratio("learning.deterministic_correct", "合格独立确定性评价正确比例", deterministicChecks.filter(row => row.eligibility.verifiedCorrect === "yes").length,
       deterministicChecks.length, "独立、当前版本可用且服务器确定性评价结论明确的作答（含错误），不含自核", exclusions, input.learningComplete),
   ];
@@ -153,7 +153,7 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
     qualification: "current_heads_as_of_report", groups: { runtime, learning, burden },
     notes: ["所有组共享统计区间与报告时点；学习资格按当前有效 head 和当前材料重算，历史修订不会计成新增作答。",
       "任务按创建 cohort 报告当前状态；未结束、失败、取消与结果未知分列，未推断最终成功率或任务延迟。",
-      "参考核对包含学习者核对，不能等同客观自动评分；合格错误也属于核对覆盖。",
+      "学习者自对照保留为自报记录，不进入已核验正确比例；合格错误也属于独立核对覆盖。",
       "等待时间只描述已返回样本，并列出右删失人数；不将未返回当作零分钟或答错。",
       "操作、生成建议与账面费用均为描述性记录，不构成掌握度、总体评分或教学收益证据。",
       "任务反馈仅覆盖新增事件入口；更早的操作历史未知，补测自动完成不计入手动标记次数。"] });

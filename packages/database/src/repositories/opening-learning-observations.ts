@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
 import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance } from "@aistudy/domain";
-import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
@@ -26,10 +26,11 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (input.sourceIds.some((id) => !(session.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "observation source is outside the session");
   await lockLearningHistory(tx, scope, input.courseId);
   const sources = await admitLearningSources(tx, scope, input.sourceIds);
-  const verdictSource = opts.verdictSource ?? input.verdictSource ?? "self_report";
+  const submittedVerdictSource = opts.verdictSource ?? input.verdictSource ?? "self_report";
+  const verdictSource = learnerVerdictSource(submittedVerdictSource);
   const referenceSourceId = opts.referenceSourceId ?? input.referenceSourceId ?? input.referenceCheck?.referenceSourceId ?? null;
-  if (input.referenceCheck && verdictSource !== "reference_checked") throw learningError("VALIDATION", "reference check requires an explicit reference_checked verdict");
-  if (verdictSource === "reference_checked") {
+  if (input.referenceCheck && verdictSource !== "self_report") throw learningError("VALIDATION", "learner reference checks require a self_report verdict");
+  if (input.referenceCheck || submittedVerdictSource === "reference_checked") {
     if (!referenceSourceId || !(session.source_ids as string[]).includes(referenceSourceId)) throw learningError("VALIDATION", "reference source is not bound to this session");
     if (input.referenceCheck && input.referenceCheck.referenceSourceId !== referenceSourceId) throw learningError("VALIDATION", "reference check source mismatch");
     await admitLearningSources(tx, scope, [referenceSourceId]);
@@ -60,7 +61,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   }
   const intent = { sessionId: input.sessionId, courseId: input.courseId, skillLabel: input.skillLabel, sourceIds: [...new Set(input.sourceIds)].sort(),
     attemptId: input.attemptId ?? null, problemId: input.problemId ?? null, retestId: (retestActivity?.id as string | undefined) ?? null,
-    answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource, referenceSourceId,
+    answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource: submittedVerdictSource, referenceSourceId,
     referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
     ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
   const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;

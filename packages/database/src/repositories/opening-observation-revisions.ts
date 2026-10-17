@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
 import { observationRevisionInputSchema, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
-import { admitLearningSources, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { admitLearningSources, learnerVerdictSource, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
@@ -64,11 +64,11 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       && (replacement?.verdictSource === undefined || replacement.verdictSource === previous.verdictSource)
       && (replacement?.referenceSourceId === undefined || replacement.referenceSourceId === previous.referenceSourceId);
     // Ordinary learner corrections never carry a server evaluator's authority to a new head.
-    const verdictSource = replacement?.verdictSource ?? (replacement?.referenceCheck ? "reference_checked" : keepCheck && previous.verdictSource !== "deterministic" ? previous.verdictSource : "self_report");
+    const verdictSource = learnerVerdictSource(replacement?.verdictSource ?? (replacement?.referenceCheck ? "self_report" : keepCheck && previous.verdictSource !== "deterministic" ? previous.verdictSource : "self_report"));
     const referenceSourceId = replacement?.referenceSourceId !== undefined ? replacement.referenceSourceId
       : replacement?.referenceCheck?.referenceSourceId ?? (keepCheck ? previous.referenceSourceId : null);
-    if (replacement?.referenceCheck && (verdictSource !== "reference_checked" || referenceSourceId !== replacement.referenceCheck.referenceSourceId)) throw learningError("VALIDATION", "reference check source or verdict mismatch");
-    if (verdictSource === "reference_checked" && (!referenceSourceId || !(session.source_ids as string[]).includes(referenceSourceId))) throw learningError("VALIDATION", "reference source is outside original session");
+    if (replacement?.referenceCheck && (verdictSource !== "self_report" || referenceSourceId !== replacement.referenceCheck.referenceSourceId)) throw learningError("VALIDATION", "reference check source or verdict mismatch");
+    if ((replacement?.referenceCheck || replacement?.verdictSource === "reference_checked" || keepCheck && previous.referenceCheck) && (!referenceSourceId || !(session.source_ids as string[]).includes(referenceSourceId))) throw learningError("VALIDATION", "reference source is outside original session");
     const originalSources = [...new Set([...previous.sourceIds, ...Object.keys(previous.sourceVersions ?? {}),
       ...[referenceSourceId, previous.referenceSourceId, previous.referenceCheck?.referenceId].filter((id): id is string => Boolean(id))])];
     await admitLearningSources(tx, scope, originalSources);

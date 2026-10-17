@@ -88,7 +88,7 @@ export function buildSelfCompareRevision(input: {
       courseId: input.observation.courseId,
       skillLabel: input.observation.skillLabel,
       requirementKey: input.observation.requirementKey ?? null,
-      verdictSource: "reference_checked",
+      verdictSource: "self_report",
       referenceSourceId: input.referenceSourceId,
       referenceCheck: {
         referenceSourceId: input.referenceSourceId,

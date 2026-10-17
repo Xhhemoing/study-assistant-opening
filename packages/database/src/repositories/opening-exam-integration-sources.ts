@@ -60,7 +60,7 @@ export async function projectExamSourceRecord(tx: TransactionSql, scope: Scope, 
     outcome: record.outcome === "correct" ? "correct" : record.outcome === "incorrect" ? "incorrect" : "unverified",
     assistance: record.assistance === "solution" ? "revealed" : record.assistance === "hint" ? "hinted" : "unknown",
     clientKey: `exam-source:${sprintId}:${record.id}`.slice(0, 200),
-    verdictSource: record.referenceChecked ? "reference_checked" : "self_report",
+    verdictSource: "self_report",
     ...(record.referenceChecked && reference ? { referenceSourceId: reference.sourceId, referenceCheck: {
       referenceSourceId: reference.sourceId, method: "用户确认已使用绑定的参考材料核对整题；作答时间与独立性未经服务器测量", scope: "whole_answer" as const,
     } } : {}), nodeId: first.nodeId, dimension: "procedure",

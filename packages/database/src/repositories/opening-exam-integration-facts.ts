@@ -1,24 +1,10 @@
-import { z } from "zod";
 import type { TransactionSql } from "postgres";
-import { type ExamCourseBinding, type ExamPack, type ExamSprintState, type Scope } from "@aistudy/contracts";
+import { type ExamPack, type ExamSprintState, type Scope } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "@aistudy/domain";
 import { learningError, lockLearningHistory, mapLearningObservation } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
-
-const bindingSchema: z.ZodType<ExamCourseBinding> = z.object({
-  courseId: z.string().uuid(), milestoneId: z.string().uuid().nullable(), packSourceId: z.string().uuid(), boundAt: z.string().datetime(),
-  skills: z.array(z.object({ skillId: z.string(), nodeId: z.string().uuid(), requirementKey: z.string().min(1) }).strict()),
-  materials: z.array(z.object({ sourceTitle: z.string(), sourceId: z.string().uuid(), sourceVersion: z.number().int().nonnegative() }).strict()),
-}).strict();
-export function parseExamBinding(value: unknown): ExamCourseBinding {
-  const parsed = bindingSchema.safeParse(value);
-  if (!parsed.success) throw learningError("CONFLICT", "课程绑定无法校验，请保留记录并联系维护者");
-  return parsed.data;
-}
-export async function readExamBinding(tx: TransactionSql, sprintId: string): Promise<ExamCourseBinding | null> {
-  const [row] = await tx`SELECT binding FROM opening_exam_bindings WHERE sprint_id=${sprintId}`;
-  return row ? parseExamBinding(row.binding) : null;
-}
+import { readExamBinding, readCurrentExamNodeIds } from "./opening-exam-skill-identity";
+export { parseExamBinding, readExamBinding, readCurrentExamNodeIds } from "./opening-exam-skill-identity";
 export async function packWithExamSourceMappings(tx: TransactionSql, sprintId: string, pack: ExamPack): Promise<ExamPack> {
   const rows = await tx`SELECT source_item_id,skill_ids FROM opening_exam_source_mappings WHERE sprint_id=${sprintId}`;
   return { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item,
@@ -38,7 +24,9 @@ export async function lockBoundExamCourse(tx: TransactionSql, scope: Scope): Pro
 }
 /** Score and display current formal heads without rewriting the immutable exam capture. */
 export async function readExamEvidenceState(tx: TransactionSql, scope: Scope, sprintId: string, state: ExamSprintState) {
-  const rows = await tx`SELECT o.*,l.exam_attempt_id FROM opening_exam_attempt_links l
+  const binding = await readExamBinding(tx, sprintId);
+  const nodeIds = binding ? await readCurrentExamNodeIds(tx, scope, binding) : new Set<string>();
+  const rows = await tx`SELECT o.*,l.exam_attempt_id,l.node_id AS exam_node_id,l.requirement_key AS exam_requirement_key FROM opening_exam_attempt_links l
     JOIN opening_exam_sprints s ON s.id=l.sprint_id
     JOIN opening_learning_observations root ON root.id=l.observation_id
       AND root.workspace_id=s.workspace_id AND root.owner_user_id=s.owner_user_id
@@ -61,7 +49,9 @@ export async function readExamEvidenceState(tx: TransactionSql, scope: Scope, sp
     const assistance = resolveEvidenceAssistance(facts.observation, facts.context);
     const assisted = assistance === "hinted" || assistance === "revealed";
     const verified = eligibility.verifiedCorrect !== "unknown";
-    const usable = row.revision_kind !== "retract" && (verified || assisted) && eligibility.usableForCurrentVersion === "yes";
+    const identityCurrent = binding?.skills.some(skill => skill.nodeId === row.exam_node_id
+      && skill.requirementKey === row.exam_requirement_key && skill.requirementKey === row.requirement_key && nodeIds.has(skill.nodeId));
+    const usable = identityCurrent === true && row.revision_kind !== "retract" && (verified || assisted) && eligibility.usableForCurrentVersion === "yes";
     const unchanged = attempt.answer === row.answer && (attempt.correct ? "correct" : "incorrect") === row.outcome;
     const independent = usable && unchanged && eligibility.independentAttempt === "yes";
     ruleEvidence[attemptId] = { usable, correct: usable && verified ? row.outcome === "correct" : null, independent, assisted };
@@ -69,10 +59,11 @@ export async function readExamEvidenceState(tx: TransactionSql, scope: Scope, sp
   }
   const sourceRecordEligibility: Record<string, boolean> = {};
   const sourceCoverageEligibility: Record<string, boolean> = {};
-  const binding = state.sourceRecords.length ? await readExamBinding(tx, sprintId) : null;
-  if (binding) {
+  if (binding && state.sourceRecords.length) {
     for (const record of state.sourceRecords) sourceRecordEligibility[record.id] = false;
-    const sourceRows = await tx`SELECT o.*,l.source_record_id,l.skill_ids AS captured_skill_ids FROM opening_exam_source_observations l
+    const sourceRows = await tx`SELECT o.*,l.source_record_id,l.skill_ids AS captured_skill_ids,
+      ARRAY(SELECT e.node_id FROM opening_skill_evidence e WHERE e.observation_id=l.observation_id
+        AND e.workspace_id=${scope.workspaceId} AND e.owner_user_id=${scope.ownerUserId}) AS captured_node_ids FROM opening_exam_source_observations l
       JOIN opening_learning_observations root ON root.id=l.observation_id
         AND root.workspace_id=${scope.workspaceId} AND root.owner_user_id=${scope.ownerUserId}
       JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
@@ -91,8 +82,13 @@ export async function readExamEvidenceState(tx: TransactionSql, scope: Scope, sp
       }
       const mapped = (mappings.find(mapping => mapping.source_item_id === record.sourceId)?.skill_ids ?? []) as string[];
       const captured = row.captured_skill_ids as string[];
+      const capturedNodes = row.captured_node_ids as string[];
+      const identityCurrent = captured.every(id => {
+        const skill = binding.skills.find(item => item.skillId === id);
+        return skill && nodeIds.has(skill.nodeId) && capturedNodes.includes(skill.nodeId);
+      });
       const outcome = record.outcome === "correct" ? "correct" : record.outcome === "incorrect" ? "incorrect" : "unverified";
-      sourceRecordEligibility[record.id] = row.outcome === outcome && mapped.length === captured.length && mapped.every(id => captured.includes(id))
+      sourceRecordEligibility[record.id] = identityCurrent && row.outcome === outcome && mapped.length === captured.length && mapped.every(id => captured.includes(id))
         && facts.dependencies.sourceStates.length > 0 && facts.dependencies.sourceStates.every(source => source.version === sourceVersions?.[source.sourceId]);
     }
     // Unmapped and pre-binding self-reports still count as completed paper work.

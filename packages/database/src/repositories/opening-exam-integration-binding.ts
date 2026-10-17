@@ -8,6 +8,7 @@ import { validateKnowledgeSnapshot } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { z } from "zod";
 import { learningError } from "./opening-learning-facts";
+import { readCurrentExamNodeIds } from "./opening-exam-skill-identity";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -106,15 +107,27 @@ export async function ensureExamCourseBinding(
   if (input.expectedPackVersion !== pack.version) throw conflict("冲刺题包版本已变化，请刷新后重试");
   if (existing) {
     if (existing.courseId !== input.courseId) throw conflict("冲刺已绑定课程，不可改绑其他课程");
+    const [storedGraph] = await tx`SELECT snapshot FROM opening_course_knowledge
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} FOR UPDATE`;
+    const currentNodes = storedGraph ? knowledgeSnapshotSchema.parse(storedGraph.snapshot).nodes : [];
+    const currentNodeIds = await readCurrentExamNodeIds(tx, scope, existing);
+    const skills = existing.skills.map(skill => ({ ...skill }));
     const seen = new Set<string>();
     for (const mapping of input.skills) {
-      if (seen.has(mapping.skillId) || !existing.skills.some(skill => skill.skillId === mapping.skillId && skill.nodeId === mapping.nodeId)) {
-        throw conflict("冲刺已有稳定技能映射，不可在更新材料时改变技能身份");
-      }
+      const skill = skills.find(item => item.skillId === mapping.skillId);
+      if (seen.has(mapping.skillId) || !skill) throw conflict("技能映射包含未知或重复的技能");
       seen.add(mapping.skillId);
+      if (skill.nodeId === mapping.nodeId) continue;
+      if (currentNodeIds.has(skill.nodeId)) throw conflict("原技能仍有效，不能将其历史证据改贴到其他节点");
+      const replacement = currentNodes.find(node => node.id === mapping.nodeId && node.kind !== "chapter" && currentNodeIds.has(node.id));
+      if (!replacement) throw conflict("替代节点尚无可用依据；请先在课程图谱确认新的技能身份和材料");
+      // Explicit recovery after invalidation/deletion/split starts a new requirement. Existing
+      // attempt/observation links retain their original UUID and remain historical.
+      skill.nodeId = replacement.id;
+      skill.requirementKey = `exam-skill:${replacement.id}`;
     }
     const materials = await mapMaterials(tx, scope, pack, input, now);
-    return { ...existing, milestoneId: input.milestoneId, materials };
+    return { ...existing, skills, milestoneId: input.milestoneId, materials };
   }
   const rows = await tx`SELECT owner_user_id,version,snapshot,source_versions FROM opening_course_knowledge
     WHERE workspace_id=${scope.workspaceId} AND course_id=${input.courseId} FOR UPDATE`;

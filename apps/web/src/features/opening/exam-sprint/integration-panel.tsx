@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ui } from "../design/ui";
 import type { ExamIntegrationIntent } from "./client";
 import type { ExamResources } from "./use-exam-resources";
+import { SkillRebinding } from "./skill-rebinding";
 
 type Send = (intent: ExamIntegrationIntent) => void;
 
@@ -30,6 +31,7 @@ export function IntegrationPanel({ overview, integration, resources, initialCour
     <details className="rounded-lg border border-zinc-200 p-3"><summary className="cursor-pointer text-sm font-medium">对应真实资料 · {titles.length} 组（手动选择）</summary><p className="my-3 text-xs leading-6 text-zinc-500">只选你核对过的文件，系统不会按文件名猜测。可选择当前文件版本；已有绑定版本会保留，只有手动换选才更新。未选择的组保留为纸面索引。</p><div className="space-y-3">{titles.map(title => <label key={title} className="block space-y-1"><span className={ui.label}>{title}</span><select className={ui.input} value={materials[title] ?? ""} disabled={disabled} onChange={event => setMaterials(current => ({ ...current, [title]: event.target.value }))}><option value="">尚未关联</option>{integration.binding?.materials.filter(item => item.sourceTitle === title && !resources.sources.some(source => source.id === item.sourceId && source.version === item.sourceVersion)).map(item => <option key="saved-version" value={`${item.sourceId}@${item.sourceVersion}`}>保留已绑定版本 · v{item.sourceVersion}</option>)}{resources.sources.map(source => <option key={source.id} value={`${source.id}@${source.version}`}>{source.name} · v{source.version}</option>)}</select></label>)}</div><Link href="/opening/library?tab=materials#upload" className={`${ui.quiet} mt-3`}>前往资料库上传</Link></details>
     <button className={ui.primary} type="submit" disabled={disabled || !courseId}>{integration.binding ? "保存课程与资料关联" : "导入预置考点和串讲到课程"}</button></form></section>
     {integration.binding ? <SourceSkillMapping overview={overview} integration={integration} disabled={disabled} send={send} /> : null}
+    {integration.binding ? <SkillRebinding key={integration.binding.skills.map(skill => skill.nodeId).join(":")} binding={integration.binding} overview={overview} disabled={disabled} send={send} /> : null}
     <EvidenceLinks integration={integration} />
   </div>;
 }
@@ -45,5 +47,5 @@ export function EvidenceLinks({ integration }: { integration: ExamIntegrationOve
   const published = integration.links.filter(item => item.publication === "published").length;
   const pending = integration.links.filter(item => item.publication === "pending_mock" || item.publication === "pending_answer").length;
   const unavailable = integration.links.filter(item => item.publication === "unavailable").length;
-  return <details className={`${ui.panel} p-4`}><summary className="cursor-pointer text-sm font-medium">统一学习证据 · 已关联 {published} 次 · 未提交/未作答 {pending} 次 · 来源不可用 {unavailable} 次</summary><p className="mt-3 text-xs leading-6 text-zinc-500">模拟交卷前只显示待发布状态，不展示正确性。以下编号用于导出核对和问题反馈。</p><ul className="mt-3 max-h-72 space-y-2 overflow-y-auto">{integration.links.map(item => <li key={item.examAttemptId} className="rounded-lg bg-zinc-50 p-3 text-xs leading-6"><p>{item.publication === "published" ? "已关联学习记录" : item.publication === "pending_mock" ? "等待模拟交卷" : item.publication === "unavailable" ? "已结束，来源不可用，未计入正式证据" : "尚无作答记录"}</p><p className="break-all text-zinc-500">冲刺记录 {item.examAttemptId} → 学习记录 {item.learningAttemptId}</p>{item.observationId ? <p className="break-all text-zinc-500">观察 {item.observationId}</p> : null}</li>)}</ul></details>;
+  return <details className={`${ui.panel} p-4`}><summary className="cursor-pointer text-sm font-medium">统一学习证据 · 已关联 {published} 次 · 未提交/未作答 {pending} 次 · 材料或技能待核对 {unavailable} 次</summary><p className="mt-3 text-xs leading-6 text-zinc-500">模拟交卷前只显示待发布状态，不展示正确性。材料失效或技能身份变化时，原答案仍保留，继续练习不会把旧成绩转给新技能。以下编号用于导出核对和问题反馈。</p><ul className="mt-3 max-h-72 space-y-2 overflow-y-auto">{integration.links.map(item => <li key={item.examAttemptId} className="rounded-lg bg-zinc-50 p-3 text-xs leading-6"><p>{item.publication === "published" ? "已关联学习记录" : item.publication === "pending_mock" ? "等待模拟交卷" : item.publication === "unavailable" ? "已保存答案，材料或技能身份待核对，未计入正式证据" : "尚无作答记录"}</p><p className="break-all text-zinc-500">冲刺记录 {item.examAttemptId} → 学习记录 {item.learningAttemptId}</p>{item.observationId ? <p className="break-all text-zinc-500">观察 {item.observationId}</p> : null}</li>)}</ul></details>;
 }

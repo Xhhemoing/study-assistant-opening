@@ -6,7 +6,7 @@ import { admitLearningSources, learningError, nextLearningHistoryRevision, nextW
 import { createExamSession } from "./opening-exam-integration-session";
 import { insertOpeningLearningObservationInTx } from "./opening-learning-observations";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
-import { examSkillLabel, readExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
+import { examSkillLabel, readCurrentExamNodeIds, readExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { projectExamSourceRecord } from "./opening-exam-integration-sources";
 
 
@@ -83,7 +83,8 @@ async function mockSourcesAvailable(tx: TransactionSql, scope: Scope, attempt: R
     && source.availability === "available" && source.excluded === false && Number(source.version) === versions![String(source.id)]);
 }
 
-async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state: ExamSprintState, attempt: ExamAttempt) {
+async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state: ExamSprintState, attempt: ExamAttempt,
+  binding: ExamCourseBinding, nodeIds: ReadonlySet<string>) {
   const [row] = await tx`SELECT l.id AS link_id,l.publication,l.node_id,l.first_family_exposure,a.*
     FROM opening_exam_attempt_links l JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
     WHERE l.sprint_id=${sprintId} AND l.exam_attempt_id=${attempt.id} AND a.workspace_id=${scope.workspaceId}
@@ -94,7 +95,9 @@ async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state
   await tx`UPDATE opening_exam_attempt_links SET submitted_answer=${attempt.answer},captured_at=${attempt.answeredAt},
     publication=${mock ? "pending_mock" : "pending_answer"} WHERE id=${String(row.link_id)}`;
   if (sealed) return;
-  if (mock && !await mockSourcesAvailable(tx, scope, row)) {
+  const identityCurrent = binding.skills.some(skill => skill.nodeId === row.node_id
+    && skill.requirementKey === row.requirement_key && nodeIds.has(skill.nodeId));
+  if (!identityCurrent || mock && !await mockSourcesAvailable(tx, scope, row)) {
     // Keep the captured answer and pending audit link. No observation or eligibility is invented.
     await tx`UPDATE opening_teaching_activities SET status='completed',updated_at=clock_timestamp()
       WHERE id=${String(row.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -122,6 +125,7 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
     await projectExamSourceRecord(tx, scope, sprintId, pack, binding, record, now);
   }
   if (!binding) return;
+  const nodeIds = await readCurrentExamNodeIds(tx, scope, binding);
   const previousAttemptIds = new Set(before.attempts.map(attempt => attempt.id));
   for (const attempt of state.attempts.filter(item => !previousAttemptIds.has(item.id))) {
     await present(tx, scope, sprintId, pack, binding, before, state, attempt, now);
@@ -137,6 +141,6 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
     WHERE sprint_id=${sprintId} AND publication<>'published'`;
   const pendingIds = new Set(pending.map(link => String(link.exam_attempt_id)));
   for (const attempt of candidates.filter(item => pendingIds.has(item.id))) {
-    await publish(tx, scope, sprintId, state, attempt);
+    await publish(tx, scope, sprintId, state, attempt, binding, nodeIds);
   }
 }

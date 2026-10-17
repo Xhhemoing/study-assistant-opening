@@ -25,7 +25,7 @@ const observation = {
 };
 
 describe("buildSelfCompareRevision", () => {
-  it("locks the original answer into a reference_checked whole_answer match", () => {
+  it("keeps the original answer and saves a self_report with whole-answer comparison metadata", () => {
     const command = buildSelfCompareRevision({
       observation,
       referenceSourceId: SOURCE,
@@ -42,7 +42,7 @@ describe("buildSelfCompareRevision", () => {
         answer: "原始答案不得改动",
         outcome: "correct",
         assistance: "independent",
-        verdictSource: "reference_checked",
+        verdictSource: "self_report",
         referenceSourceId: SOURCE,
         referenceCheck: {
           referenceSourceId: SOURCE,

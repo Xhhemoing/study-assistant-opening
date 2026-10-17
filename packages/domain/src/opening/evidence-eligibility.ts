@@ -29,6 +29,7 @@ function evaluateCorrectness(
   check: EvidenceEligibilityContext["referenceCheck"],
   reasons: Reasons,
   automatic: EvidenceEligibilityContext["serverEvaluation"],
+  authority: EvidenceEligibilityContext["referenceCheckAuthority"],
 ): EvidenceEligibilityValue {
   if (observation.verdictSource === "deterministic") {
     const supported = automatic && (
@@ -52,6 +53,7 @@ function evaluateCorrectness(
   }
   if (observation.verdictSource !== "reference_checked") {
     reasons.add("verification_source_untrusted");
+    if (observation.verdictSource === "self_report" && check) reasons.add("learner_reference_compare");
     return "unknown";
   }
   if (!check?.referenceId || !check.method || !check.checkerId || !check.outcome) {
@@ -74,7 +76,15 @@ function evaluateCorrectness(
     reasons.add("outcome_unverified");
     return "unknown";
   }
-  // A documented reference check qualifies within its scope; this does not claim objective grading.
+  if (authority === "learner" || /^learner_self_compare(?:\s|$)/.test(check.method)) {
+    reasons.add("learner_reference_compare");
+    return "unknown";
+  }
+  if (authority !== "independent_review") {
+    reasons.add("reference_check_authority_unknown");
+    return "unknown";
+  }
+  // A trusted server context can establish an independently reviewed reference check.
   reasons.add(check.outcome === "correct" ? "reference_checked_correct" : "reference_checked_incorrect");
   return check.outcome === "correct" ? "yes" : "no";
 }
@@ -125,7 +135,7 @@ export function evaluateEvidenceEligibility(
     usableForCurrentVersion: "unknown",
     usableForDelayedCheck: "unknown",
     reasonCodes: [],
-    policyVersion: "opening-evidence-v2",
+    policyVersion: "opening-evidence-v3",
   };
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     result.reasonCodes.push("observation_identity_incomplete");
@@ -147,7 +157,7 @@ export function evaluateEvidenceEligibility(
       reasons.add("exam_answer_history_unknown");
     }
   }
-  result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation);
+  result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
   result.usableForDelayedCheck = evaluateDelayedCheck(
     observation,
