@@ -79,6 +79,24 @@ describe("snapshot row mapping", () => {
     expect(toSnapshotKnowledgeNodes(null)).toEqual([]);
   });
 
+  it("uses only supported skills and supported edges, without treating missing evidence as mastery", () => {
+    const a = "44444444-4444-4444-8444-444444444444", b = "55555555-5555-4555-8555-555555555555";
+    const c = "66666666-6666-4666-8666-666666666666", chapter = "77777777-7777-4777-8777-777777777777";
+    const base = { courseId, label: "skill", kind: "concept", status: "supported", evidenceChunkIds: [] };
+    const edge = { to: b, kind: "prerequisite", status: "supported", evidenceChunkIds: [] };
+    const graph = { courseId, version: 1,
+      nodes: [{ ...base, id: a }, { ...base, id: b }, { ...base, id: c, status: "suggested" }, { ...base, id: chapter, kind: "chapter" }],
+      edges: [{ ...edge, from: a }, { ...edge, from: c }, { ...edge, from: chapter }],
+    };
+    expect(toSnapshotKnowledgeNodes(graph)).toEqual([
+      { id: a, title: "skill", prerequisiteIds: [] }, { id: b, title: "skill", prerequisiteIds: [a] },
+    ]);
+    for (const status of ["suggested", "needs_check"]) {
+      expect(toSnapshotKnowledgeNodes({ ...graph, edges: [{ ...edge, from: a, status }] })[1]?.prerequisiteIds).toEqual([]);
+    }
+    expect(toSnapshotKnowledgeNodes({ ...graph, nodes: graph.nodes.map(node => ({ ...node, status: "needs_check" })) })).toEqual([]);
+  });
+
   it("dates a closed task in the workspace zone and leaves pending tasks open", () => {
     const row = { clientKey: null, minutes: 25, courseId: null, updatedAt: "2026-10-14T17:30:00.000Z" };
     expect(toSnapshotTaskRow({ ...row, status: "done" }, "Asia/Shanghai").closedLocalDate).toBe("2026-10-15");

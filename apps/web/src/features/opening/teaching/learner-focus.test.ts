@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { assembleLearnerSnapshot, type LearnerSnapshotSources, type SnapshotObservation } from "@aistudy/domain";
+import { ADAPTIVE_STRATEGY_VERSION, assembleLearnerSnapshot, type LearnerSnapshotSources, type SnapshotObservation } from "@aistudy/domain";
 import type { LearnerSnapshotRead } from "../planning/learner-snapshot-service";
 import { teachingLearnerFocus } from "./learner-focus";
 
@@ -21,7 +21,7 @@ it.each([
   ["unknown", "diagnose"], ["no", "targeted_explain"], ["yes", "transfer_check"],
 ] as const)("maps %s evidence for the actual task skill to %s", (correct, activityKind) => {
   const result = teachingLearnerFocus(read(correct), courseId, " LINEAR algebra ", false);
-  expect(result).toMatchObject({ skillLabel: "Linear Algebra", activityKind, strategyVersion: "adaptive-2" });
+  expect(result).toMatchObject({ skillLabel: "Linear Algebra", activityKind, strategyVersion: ADAPTIVE_STRATEGY_VERSION });
   expect(result?.focusObservationId).toBe(correct === "no" ? "22222222-2222-4222-8222-222222222222" : null);
 });
 
@@ -53,4 +53,42 @@ it("does not borrow another course's observations or turn unavailable evidence i
   expect(teachingLearnerFocus(value, "other-course", "Linear Algebra", false)).toBeNull();
   const sources = { ...value.sources, courses: value.sources.courses.map(course => ({ ...course, evidenceStatus: "unavailable" as const })) };
   expect(teachingLearnerFocus({ ...value, sources }, courseId, "Linear Algebra", false)).toBeNull();
+});
+
+it("captures the goal strategy and one bounded prerequisite while preserving the original skill and error", () => {
+  const value = read("no");
+  const source = value.sources.courses[0]!;
+  source.goal = { targetDate: "2026-10-20", weeklyMinutes: 300, learningMode: "auto", priority: 4 };
+  source.knowledgeNodes = [{ id: "33333333-3333-4333-8333-333333333333", title: "Arithmetic", prerequisiteIds: [] },
+    { id: "44444444-4444-4444-8444-444444444444", title: "Linear Algebra", prerequisiteIds: ["33333333-3333-4333-8333-333333333333"] }];
+  source.observations = [...source.observations, { ...source.observations[0]!, id: "55555555-5555-4555-8555-555555555555", skillLabel: "Arithmetic" }];
+  const now = new Date("2026-10-16T12:00:00Z");
+  const focus = teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, now);
+  expect(focus).toMatchObject({ skillLabel: "Linear Algebra", focusObservationId: source.observations[0]!.id,
+    goalContext: { mode: "exam", daysRemaining: 4, priority: 4 },
+    prerequisiteRepair: { skillLabel: "Arithmetic", returnToSkillLabel: "Linear Algebra", maxMinutes: 5 } });
+  source.goal = { ...source.goal, learningMode: "understand" };
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", true, undefined, now)).toMatchObject({
+    activityKind: "full_explain", goalContext: { mode: "understand" }, prerequisiteRepair: { maxMinutes: 10 },
+  });
+});
+
+it("keeps local-day goal timing separate from elapsed prerequisite evidence age", () => {
+  const value = read("no");
+  value.sources.date = "2026-10-17";
+  const source = value.sources.courses[0]!;
+  source.goal = { targetDate: "2026-10-20", weeklyMinutes: 300 };
+  source.knowledgeNodes = [{ id: "a", title: "Arithmetic", prerequisiteIds: [] }, { id: "b", title: "Linear Algebra", prerequisiteIds: ["a"] }];
+  source.observations = [...source.observations, { ...source.observations[0]!, id: "pre", skillLabel: "Arithmetic", attemptedAt: "2026-10-18T03:00:00Z" }];
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, new Date("2026-10-17T20:05:00-07:00")))
+    .toMatchObject({ goalContext: { daysRemaining: 3 }, prerequisiteRepair: { skillLabel: "Arithmetic" } });
+});
+
+it("does not insert a prerequisite detour when the current target already has independent evidence", () => {
+  const value = read("yes");
+  const source = value.sources.courses[0]!;
+  source.knowledgeNodes = [{ id: "a", title: "Arithmetic", prerequisiteIds: [] }, { id: "b", title: "Linear Algebra", prerequisiteIds: ["a"] }];
+  source.observations = [...source.observations, { ...source.observations[0]!, id: "pre", skillLabel: "Arithmetic", verifiedCorrect: "no" }];
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)).toMatchObject({ activityKind: "transfer_check" });
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)?.prerequisiteRepair).toBeUndefined();
 });

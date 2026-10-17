@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { assistanceLevelSchema } from "./learning";
+import { goalLearningContextSchema, prerequisiteRepairSchema } from "./goal-learning";
 
 export const teachingActivityIntentKindSchema = z.enum([
   "material",
@@ -73,6 +74,8 @@ export const teachingLearnerFocusSchema = z
     /** Assistance on the latest observations, newest first. */
     recentAssistance: z.array(assistanceLevelSchema).max(3),
     strategyVersion: z.string().min(1).max(40),
+    goalContext: goalLearningContextSchema.optional(),
+    prerequisiteRepair: prerequisiteRepairSchema.optional(),
   })
   .strict();
 

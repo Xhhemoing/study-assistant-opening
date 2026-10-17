@@ -11,13 +11,14 @@ import {
   readOpeningTeachingCompilerFocus,
   readOpeningTeachingTaskFocus,
 } from "@aistudy/database";
-import { ADAPTIVE_STRATEGY_VERSION, addLocalDays, suggestionIdentity, suggestionKey } from "@aistudy/domain";
+import { ADAPTIVE_STRATEGY_VERSION, addLocalDays, resolveGoalLearningContext, suggestionIdentity, suggestionKey } from "@aistudy/domain";
 import { readOpeningCourseObservationHeads } from "../../packages/database/src/repositories/opening-learning-read";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createSqlLearnerSnapshotService } from "../../apps/web/src/features/opening/planning/learner-snapshot-runtime";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { teachingLearnerFocus } from "../../apps/web/src/features/opening/teaching/learner-focus";
 
 const day = "2026-10-21";
 const timeZone = "Asia/Shanghai";
@@ -99,6 +100,59 @@ function planningResult(draft: PlanDraft) {
 }
 
 describe("adaptive learning loop with real evidence", () => {
+  it.each(["edge_unconfirmed", "graph_rebuilt", "source_unlinked"] as const)("rechecks a stored prerequisite before compiling after %s", async change => {
+    const course = await seedCourse();
+    await submitVerifiedError(course);
+    const nodeId = randomUUID(), targetNodeId = randomUUID();
+    const knowledge = createOpeningKnowledgeRepository(fixture.sql);
+    const graph = await knowledge.replace(fixture.scope, course.courseId, { expectedVersion: 0,
+      sourceVersions: { [course.sourceId]: 1 }, snapshot: { courseId: course.courseId, version: 0,
+        nodes: [{ id: nodeId, courseId: course.courseId, label: "fractions", kind: "concept", status: "supported", evidenceChunkIds: [course.chunkId] },
+          { id: targetNodeId, courseId: course.courseId, label: "integration", kind: "procedure", status: "supported", evidenceChunkIds: [course.chunkId] }],
+        edges: [{ from: nodeId, to: targetNodeId, kind: "prerequisite", status: "supported", evidenceChunkIds: [course.chunkId] }],
+      } });
+    const date = new Date().toISOString().slice(0, 10);
+    const saved = await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
+      courseGoal: { courseId: course.courseId, goal: { targetDate: date, weeklyMinutes: 300, learningMode: "exam", priority: 4 } },
+    });
+    const read = await services(true, () => new Date()).snapshots.read(fixture.scope, { date, timeZone: "UTC" });
+    const generated = teachingLearnerFocus(read, course.courseId, "integration", false)!;
+    expect(generated).toMatchObject({ activityKind: "diagnose", goalContext: { mode: "exam", priority: 4 },
+      prerequisiteRepair: { nodeId, targetNodeId, maxMinutes: 5 } });
+    const { activityId } = await storeTeachingFocus(course, null, generated);
+    const before = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
+    expect(before.learnerFocus).toEqual(generated);
+    // Preferences change for future activities; this activity retains its policy snapshot.
+    await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
+      courseGoal: { courseId: course.courseId, expectedRevision: saved.prefs.courseGoals[course.courseId]?.revision ?? 0,
+        goal: { targetDate: null, weeklyMinutes: 300, learningMode: "understand" } },
+    });
+    if (change === "source_unlinked") {
+      await fixture.sql`DELETE FROM course_asset_memberships WHERE workspace_id=${fixture.scope.workspaceId}
+        AND course_id=${course.courseId} AND asset_type='source' AND asset_id=${course.sourceId}`;
+    } else {
+      const replacementId = change === "graph_rebuilt" ? randomUUID() : nodeId;
+      await knowledge.replace(fixture.scope, course.courseId, { expectedVersion: graph.version, sourceVersions: graph.sourceVersions,
+        snapshot: { ...graph.snapshot, nodes: graph.snapshot.nodes.map(node => node.id === nodeId ? { ...node, id: replacementId } : node),
+          edges: graph.snapshot.edges.map(edge => ({ ...edge, from: replacementId, status: change === "edge_unconfirmed" ? "suggested" : "supported" })) } });
+    }
+    const after = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
+    expect(after.learnerFocus).toMatchObject({ skillLabel: "integration", activityKind: "diagnose", goalContext: generated.goalContext });
+    expect(after.learnerFocus?.prerequisiteRepair).toBeUndefined();
+  });
+
+  it("keeps the activity goal policy and removes obsolete error context when material evidence expires", async () => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course);
+    const goalContext = resolveGoalLearningContext({ targetDate: null, weeklyMinutes: 300, learningMode: "exam" }, day);
+    const { activityId } = await storeTeachingFocus(course, wrong.id, { goalContext });
+    await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
+    await backupRows(fixture.sql, fixture.scope).chunk(course.sourceId, 2);
+    const focus = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
+    expect(focus.learnerFocus).toMatchObject({ goalContext, activityKind: "diagnose", focusObservationId: null, recentAssistance: [] });
+    expect(focus.focusAttempt).toBeUndefined();
+  });
+
   it.each(["transfer_check", "reduced_help_practice"] as const)("rechecks current evidence for %s even without a focus observation", async (activityKind) => {
     const course = await seedCourse();
     const attempt = await course.start({ requirementKey: "R1" });
