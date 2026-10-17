@@ -1,6 +1,7 @@
 import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
-import { parseCanonicalMatrixExercise, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
+import { parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
 import type { LearningSql } from "./opening-learning-facts";
+import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
 
 type Row = Record<string, unknown>;
 export type OpeningEvidenceDependencies = {
@@ -35,6 +36,24 @@ function revisedAnswerRecordedAt(record: LearningObservation, chain: readonly Ro
   return current ? undefined : null;
 }
 
+/** A changed choice cannot inherit the original attempt's independence, even after changing back. */
+function examAnswerUnchanged(record: LearningObservation, chain: readonly Row[], capturedAnswer: unknown): boolean | null {
+  if (typeof capturedAnswer !== "string") return null;
+  if (record.answer !== capturedAnswer) return false;
+  const rows = new Map(chain.map(row => [String(row.id), row]));
+  const rootId = record.rootObservationId ?? record.id, visited = new Set<string>();
+  let current = rows.get(record.id);
+  while (current) {
+    const id = String(current.id);
+    if (visited.has(id) || typeof current.answer !== "string") return null;
+    visited.add(id);
+    if (current.answer !== capturedAnswer) return false;
+    if (id === rootId) return true;
+    current = rows.get(String(current.revises_observation_id));
+  }
+  return null;
+}
+
 function references(row: { sourceIds: readonly string[]; sourceVersions?: Record<string, number> | null; referenceSourceId?: string | null; referenceCheck?: { referenceId?: string | null } | null }): string[] {
   return [...new Set([...row.sourceIds, ...Object.keys(row.sourceVersions ?? {}),
     ...[row.referenceSourceId, row.referenceCheck?.referenceId].filter((id): id is string => Boolean(id))])].sort();
@@ -61,6 +80,37 @@ export async function readOpeningLearningEvidenceContexts(
         OR ${problemIds.length ? db`h.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`}
         OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id =ANY(${sessionIds}::uuid[])))
     ORDER BY h.created_at,h.id` : [];
+  // Catalogue help is a retrievable receipt, not an invented assistant turn.
+  // Keep the immutable exposure/protocol link even if the observation is revised.
+  const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
+      e.learning_attempt_id AS attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
+      a.session_id,a.course_id,a.problem_id,a.item_version_id,
+      s.pack_snapshot->>'id' AS exam_pack_id,s.pack_snapshot->>'version' AS exam_pack_version,
+      h.id AS receipt_id,h.kind,h.delivered_at,h.history_revision
+    FROM opening_exam_attempt_links e
+    JOIN opening_exam_sprints s ON s.id=e.sprint_id
+    JOIN opening_learning_attempts a ON a.id=e.learning_attempt_id
+      AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+    JOIN opening_learning_sessions l ON l.id=a.session_id AND l.workspace_id=a.workspace_id
+      AND l.owner_user_id=a.owner_user_id AND l.course_id=a.course_id
+    LEFT JOIN opening_exam_help_receipts h ON h.attempt_link_id=e.id
+    WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+      AND a.course_id =ANY(${courseIds}::uuid[])
+      AND (${attemptIds.length ? db`a.id =ANY(${attemptIds}::uuid[])` : db`FALSE`}
+        OR ${problemIds.length ? db`a.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`})
+    ORDER BY e.id,h.delivered_at,h.id` : [];
+  const examLinks = new Map(examRows.map(row => [String(row.attempt_id), row]));
+  const examIdentities = await db`SELECT * FROM (${openingExamIdentityStateQuery(db, scope)}) identity
+    WHERE identity.attempt_id=ANY(${attemptIds}::uuid[]) OR identity.observation_id=ANY(${rootIds}::uuid[])`;
+  const identitiesByAttempt = new Map(examIdentities.filter(row => row.attempt_id != null).map(row => [String(row.attempt_id), row]));
+  const identitiesByRoot = new Map(examIdentities.filter(row => row.observation_id != null).map(row => [String(row.observation_id), row]));
+  const examHelp: Row[] = examRows.filter(row => row.receipt_id != null).map(row => ({
+    id: `exam-help:${row.receipt_id}`, session_id: row.session_id, attempt_id: row.attempt_id,
+    problem_id: row.problem_id, course_id: row.course_id,
+    kind: row.kind === "solution" ? "solution" : "hint",
+    level: row.kind === "solution" ? "revealed" : "hinted", delivered: true,
+    delivered_at: row.delivered_at, history_revision: row.history_revision,
+  }));
   const chain = await db`SELECT id,root_observation_id,revises_observation_id,answer,recorded_at,source_ids,source_versions,reference_source_id,reference_check
     FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
       AND COALESCE(root_observation_id,id) =ANY(${rootIds}::uuid[])`;
@@ -93,6 +143,10 @@ export async function readOpeningLearningEvidenceContexts(
       AND p.chunk_id IS NOT DISTINCT FROM v.chunk_id AND p.physical_page IS NOT DISTINCT FROM v.physical_page AND p.artifact_kind=v.artifact_kind
     WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.id =ANY(${itemIds}::uuid[])` : [];
   const matchingItems = new Set(items.filter(row => row.problem_id != null).map(row => String(row.id)));
+  const examItems = new Map(items.flatMap(row => {
+    const spec = parseExamChoiceSpec(row.evaluation_spec);
+    return spec ? [[String(row.id), spec] as const] : [];
+  }));
   const catalogueItems = new Map(items.flatMap(row => {
     const spec = parseCanonicalMatrixExercise(row.evaluation_spec);
     return spec && row.course_id ? [[String(row.id), { spec, courseId: String(row.course_id) }] as const] : [];
@@ -138,7 +192,7 @@ export async function readOpeningLearningEvidenceContexts(
   }
   const helpByAttempt = new Map<string, Row[]>(), helpByProblem = new Map<string, Row[]>(), legacyHelp = new Map<string, Row[]>();
   const add = (map: Map<string, Row[]>, key: string, row: Row) => { const entries = map.get(key) ?? []; entries.push(row); map.set(key, entries); };
-  for (const row of help) {
+  for (const row of [...help, ...examHelp]) {
     if (row.attempt_id) add(helpByAttempt, `${row.course_id}:${row.attempt_id}`, row);
     if (row.problem_id) add(helpByProblem, `${row.course_id}:${row.problem_id}`, row);
     if (row.attempt_id == null && row.problem_id == null) add(legacyHelp, String(row.session_id), row);
@@ -200,6 +254,31 @@ export async function readOpeningLearningEvidenceContexts(
         deliveredAt: row.delivered_at ? new Date(row.delivered_at as string | Date).getTime() : null,
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,
     };
+    const examSpec = record.itemVersionId ? examItems.get(record.itemVersionId) : undefined;
+    const examLink = record.attemptId ? examLinks.get(record.attemptId) : undefined;
+    const examIdentity = (record.attemptId ? identitiesByAttempt.get(record.attemptId) : undefined)
+      ?? identitiesByRoot.get(record.rootObservationId ?? record.id);
+    const identityCurrent = examIdentity ? examIdentity.identity_current === true && examIdentity.requirement_key === record.requirementKey
+      : !(examSpec || examLink || record.serverEvaluation?.evaluatorVersion === "exam-choice-exact-v1"
+        || record.requirementKey?.startsWith("exam-skill:"));
+    const linkedExam = examSpec && examLink && examLink.session_id === record.sessionId
+      && examLink.problem_id === record.problemId && examLink.item_version_id === record.itemVersionId
+      && examLink.exam_pack_id === examSpec.packId && examLink.exam_pack_version === examSpec.packVersion
+      && typeof examLink.first_family_exposure === "boolean";
+    if (linkedExam) {
+      context.examAttempt = {
+        firstFamilyExposure: examLink.first_family_exposure as boolean,
+        answerUnchanged: examAnswerUnchanged(record, chains.get(record.rootObservationId ?? record.id) ?? [], examLink.submitted_answer),
+      };
+      const earliestAt = examLink.delayed_earliest_at == null ? Number.NaN : new Date(examLink.delayed_earliest_at as string | Date).getTime();
+      if (Number.isFinite(earliestAt)) context.delayedCheck = {
+        protocolId: "exam-sprint-24h-v1", attemptId: record.attemptId!, earliestAt, priorAnswerPolicy: "require_unseen_problem",
+      };
+    } else if (examSpec || record.serverEvaluation?.evaluatorVersion === "exam-choice-exact-v1" || examLink) {
+      // A detached/mismatched catalogue item cannot prove complete exposure history.
+      context.helpHistory!.complete = false;
+      if (context.serverEvaluation?.evaluatorVersion === "exam-choice-exact-v1") context.serverEvaluation = null;
+    }
     const rootId = record.rootObservationId ?? record.id;
     if (record.revisesObservationId || record.id !== rootId) context.helpHistory!.answerRecordedAt = revisedAnswerRecordedAt(record, chains.get(rootId) ?? []);
     const ids = recordSources.get(record.id)!;
@@ -209,7 +288,9 @@ export async function readOpeningLearningEvidenceContexts(
       return { sourceId, version: source ? Number(source.version) : null, uploaded: source?.upload_state === "uploaded",
         historicalUnavailable: unavailableVersions.has(`${sourceId}:${record.sourceVersions?.[sourceId]}`) };
     });
-    const itemMatches = Boolean(record.itemVersionId && matchingItems.has(record.itemVersionId));
+    // For paper registrations without an item, this existing cache dependency also
+    // records their explicit skill identity. Historical item matching stays unchanged.
+    const itemMatches = Boolean(record.itemVersionId ? matchingItems.has(record.itemVersionId) : examIdentity) && identityCurrent;
     if (privacySourceIds.some(id => excluded.has(id))) context.version = { applicability: "privacy_excluded" };
     else if (ids.length) {
       if (sourceStates.some(source => !source.uploaded)) context.version = { applicability: "unavailable" };
@@ -220,6 +301,7 @@ export async function readOpeningLearningEvidenceContexts(
           ? { applicability: "exact", currentItemVersionId: record.itemVersionId } : { applicability: "changed_needs_check" };
       }
     }
+    if (!identityCurrent && context.version?.applicability !== "privacy_excluded") context.version = { applicability: "unavailable" };
     result[record.id] = { observation, context, dependencies: {
       helpRevision: history.reduce((latest, row) => Math.max(latest, Number(row.history_revision ?? 0)), 0),
       itemMatches, sourceStates, privacySourceIds,

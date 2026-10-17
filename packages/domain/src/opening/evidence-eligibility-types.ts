@@ -44,6 +44,12 @@ export interface EvidenceHelpExposure {
 
 export interface EvidenceEligibilityContext {
   serverEvaluation?: ServerEvaluation | null;
+  /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
+  examAttempt?: {
+    firstFamilyExposure: boolean;
+    /** Every ancestor still has the captured answer; null means the chain cannot be proved. */
+    answerUnchanged: boolean | null;
+  } | null;
   /** Assembled by the server, never read from user-provided reference-check JSON. */
   referenceCheckAuthority?: "learner" | "independent_review" | null;
   helpHistory?: {
@@ -93,6 +99,9 @@ export type EvidenceEligibilityReasonCode =
   | "assistance_unknown"
   | "prior_answer_exposure"
   | "prior_evaluation_feedback"
+  | "exam_family_already_seen"
+  | "exam_answer_changed"
+  | "exam_answer_history_unknown"
   | "verification_source_untrusted"
   | "learner_reference_compare"
   | "reference_check_authority_unknown"

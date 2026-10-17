@@ -32,7 +32,11 @@ function evaluateCorrectness(
   authority: EvidenceEligibilityContext["referenceCheckAuthority"],
 ): EvidenceEligibilityValue {
   if (observation.verdictSource === "deterministic") {
-    if (!automatic || automatic.evaluatorVersion !== "matrix-exact-v1" || automatic.specVersion !== "matrix-arithmetic-v1") {
+    const supported = automatic && (
+      automatic.evaluatorVersion === "matrix-exact-v1" && automatic.specVersion === "matrix-arithmetic-v1"
+      || automatic.evaluatorVersion === "exam-choice-exact-v1" && automatic.specVersion === "exam-choice-v1"
+    );
+    if (!automatic || !supported) {
       reasons.add("server_evaluation_incomplete"); return "unknown";
     }
     if (!observation.observationId || automatic.observationId !== observation.observationId
@@ -140,6 +144,19 @@ export function evaluateEvidenceEligibility(
   const reasons: Reasons = new Set();
   const assistance = evaluateAssistance(observation, context.helpHistory, reasons);
   result.independentAttempt = assistance.independent;
+  if (context.examAttempt?.firstFamilyExposure === false) {
+    result.independentAttempt = "no";
+    reasons.add("exam_family_already_seen");
+  }
+  if (context.examAttempt) {
+    if (context.examAttempt.answerUnchanged === false) {
+      result.independentAttempt = "no";
+      reasons.add("exam_answer_changed");
+    } else if (context.examAttempt.answerUnchanged !== true) {
+      if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
+      reasons.add("exam_answer_history_unknown");
+    }
+  }
   result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
   result.usableForDelayedCheck = evaluateDelayedCheck(

@@ -491,3 +491,8 @@ export { validateBackupCourseMilestones, projectBackupCourseMilestoneReferences 
 export * from "./opening/conversation-planning-context";
 
 export * from "./opening/measurement";
+export * from "./opening/exam-sprint/engine";
+export { reportExamBkt } from "./opening/exam-sprint/analytics";
+export { forecastExamTopics } from "./opening/exam-sprint/forecast";
+export * from "./opening/evaluation/exam-choice-evaluator";
+export { sameKnowledgeNodeIdentity } from "./opening/knowledge-node-identity";

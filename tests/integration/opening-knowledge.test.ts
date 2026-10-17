@@ -28,6 +28,8 @@ async function seedCourseMaterial(scope = f.scope) {
   const rows = backupRows(f.sql, scope);
   const sourceId = await rows.source();
   const chunkId = await rows.chunk(sourceId);
+  await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${sourceId}`;
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${scope.workspaceId}, 'Knowledge course', ${courseId})`;
@@ -142,6 +144,31 @@ describe("opening knowledge repository", () => {
         sourceVersions: { [sourceId]: 1 },
       }),
     ).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it.each(["version", "privacy", "parse", "history"])("rejects evidence that became unavailable before replace: %s", async change => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    expect(await repo.listAuthorizedChunks(f.scope, courseId)).toHaveLength(1);
+    if (change === "version") await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+    if (change === "privacy") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${f.scope.workspaceId},${sourceId})`;
+    if (change === "parse") await f.sql`UPDATE opening_sources SET parse_state='queued' WHERE id=${sourceId}`;
+    if (change === "history") await f.sql`UPDATE opening_source_versions SET availability='unavailable' WHERE source_id=${sourceId}`;
+    expect(await repo.listAuthorizedChunks(f.scope, courseId)).toHaveLength(0);
+    await expect(repo.replace(f.scope, courseId, { expectedVersion: 0,
+      snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(await repo.get(f.scope, courseId)).toBeNull();
+  });
+  it("requires a new UUID for a semantic edit while allowing status-only review", async () => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql), original = snapshotFor(courseId, chunkId, 1);
+    const saved = await repo.replace(f.scope, courseId, { expectedVersion: 0, snapshot: original, sourceVersions: { [sourceId]: 1 } });
+    await expect(repo.replace(f.scope, courseId, { expectedVersion: 1, sourceVersions: { [sourceId]: 1 },
+      snapshot: { ...saved.snapshot, nodes: saved.snapshot.nodes.map((node, index) => index === 0 ? { ...node, label: "Different meaning" } : node) } }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const reviewed = await repo.replace(f.scope, courseId, { expectedVersion: 1, sourceVersions: { [sourceId]: 1 },
+      snapshot: { ...saved.snapshot, nodes: saved.snapshot.nodes.map(node => ({ ...node, status: "needs_check" })) } });
+    expect(reviewed.snapshot.nodes.map(node => node.id)).toEqual(saved.snapshot.nodes.map(node => node.id));
   });
 
   it("rejects other owner / other course", async () => {

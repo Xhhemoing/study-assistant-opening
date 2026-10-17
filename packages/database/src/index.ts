@@ -228,3 +228,12 @@ export * from "./repositories/opening-conversation-planning-context";
 
 export * from "./schema/opening-measurement";
 export { createOpeningMeasurementRepository, type OpeningMeasurementRepository } from "./repositories/opening-measurement";
+
+export * from "./schema/opening-exam-sprint";
+export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, type OpeningExamSprintRepository, type OpeningExamSprintExport } from "./repositories/opening-exam-sprint";
+export * from "./schema/opening-exam-integration";
+export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
+export { createOpeningExamReviewsRepository } from "./repositories/opening-exam-reviews";
+export * from "./schema/opening-exam-forecast";
+export { createOpeningExamForecastRepository } from "./repositories/opening-exam-forecast";
+export { readOpeningExamPublicSource } from "./repositories/opening-exam-public-source";

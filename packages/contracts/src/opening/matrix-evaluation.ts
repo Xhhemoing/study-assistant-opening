@@ -18,16 +18,28 @@ export const matrixExerciseSpecSchema = z.object({
   matrixB: integerMatrixSchema.optional(),
   scalar: z.string().regex(/^-?\d+(?:\/[1-9]\d*)?$/).max(20).optional(),
 }).strict();
-export const serverEvaluationSchema = z.object({
+/** Catalogue identity only. Answers remain in the server's frozen exam pack. */
+export const examChoiceSpecSchema = z.object({
+  kind: z.literal("exam_choice"), specVersion: z.literal("exam-choice-v1"),
+  packId: z.string().min(1).max(100), packVersion: z.string().min(1).max(100),
+  questionId: z.string().min(1).max(100), familyId: z.string().min(1).max(100),
+}).strict();
+
+const serverEvaluationFacts = {
   observationId: uuidSchema, attemptId: uuidSchema, problemId: uuidSchema, itemVersionId: uuidSchema,
   requirementKey: z.string().min(1).max(200),
-  evaluatorVersion: z.literal("matrix-exact-v1"), specVersion: z.literal("matrix-arithmetic-v1"),
   decision: z.enum(["correct", "incorrect", "abstain"]),
   outcome: z.enum(["correct", "incorrect", "unverified"]),
   reasonCodes: z.array(z.string().min(1)).min(1).max(8),
   evaluatedAt: isoDateTimeSchema,
-}).strict();
+};
+/** Each evaluator is paired with its exact supported spec, never an arbitrary deterministic label. */
+export const serverEvaluationSchema = z.discriminatedUnion("evaluatorVersion", [
+  z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("matrix-exact-v1"), specVersion: z.literal("matrix-arithmetic-v1") }).strict(),
+  z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("exam-choice-exact-v1"), specVersion: z.literal("exam-choice-v1") }).strict(),
+]);
 
 export type MatrixExerciseInput = z.infer<typeof matrixExerciseInputSchema>;
 export type MatrixExerciseSpec = z.infer<typeof matrixExerciseSpecSchema>;
+export type ExamChoiceSpec = z.infer<typeof examChoiceSpecSchema>;
 export type ServerEvaluation = z.infer<typeof serverEvaluationSchema>;

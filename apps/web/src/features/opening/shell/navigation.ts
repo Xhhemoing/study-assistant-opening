@@ -1,7 +1,7 @@
 export type OpeningNavigationItem = {
   href: string;
   label: string;
-  icon: "today" | "assistant" | "library" | "courses" | "cards" | "review" | "connections";
+  icon: "today" | "assistant" | "library" | "courses" | "cards" | "sprint" | "review" | "connections";
   group: "core" | "more";
 };
 
@@ -13,6 +13,7 @@ export function openingNavigation(): OpeningNavigationItem[] {
     { href: "/opening/library", label: "笔记", icon: "library", group: "core" },
     { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
     { href: "/opening/cards", label: "卡片", icon: "cards", group: "more" },
+    { href: "/opening/sprint", label: "考前冲刺", icon: "sprint", group: "more" },
     { href: "/opening/review", label: "待确认", icon: "review", group: "more" },
     { href: "/opening/settings/connections", label: "连接", icon: "connections", group: "more" },
   ];
