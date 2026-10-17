@@ -484,4 +484,10 @@ export {
   type RulesSkillStateEstimatorOptions,
 } from "./opening/estimators";
 
+export * from "./opening/evaluation/matrix-evaluator";
+
+export { validateBackupCourseMilestones, projectBackupCourseMilestoneReferences } from "./opening/backup-course-milestones";
+
+export * from "./opening/conversation-planning-context";
+
 export * from "./opening/measurement";

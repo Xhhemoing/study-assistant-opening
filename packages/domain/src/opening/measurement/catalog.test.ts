@@ -163,7 +163,7 @@ describe("measurement probe schedule", () => {
 
   it("does not issue another item while the current item is unanswered", () => {
     expect(select({ attempts: [attempt(practice[0]!, 0, { answer: null, answeredAt: null, outcome: null })] }))
-      .toEqual({ item: null, dueAt: null, complete: false });
+      .toEqual({ item: null, dueAt: null, availableAt: null, complete: false });
   });
 
   it("moves past skipped and retracted exposures without retrying the same questions", () => {
@@ -175,43 +175,57 @@ describe("measurement probe schedule", () => {
   });
 
   it("requires the recorded practice completion time even when all practice items are closed", () => {
-    expect(select({ attempts: practiceAttempts })).toEqual({ item: null, dueAt: null, complete: false });
+    expect(select({ attempts: practiceAttempts })).toEqual({ item: null, dueAt: null, availableAt: null, complete: false });
   });
 
   it("gates the first delayed phase at exactly 48 hours after completion, not enrollment", () => {
     const inputs = { trial: { ...trial, practiceCompletedAt: completedAt }, attempts: practiceAttempts };
     expect(select({ ...inputs, now: "2026-10-19T02:59:59.999Z" }))
-      .toEqual({ item: null, dueAt: due48h, complete: false });
+      .toEqual({ item: null, dueAt: due48h, availableAt: due48h, complete: false });
     expect(select({ ...inputs, now: new Date(due48h) }))
-      .toEqual({ item: delay48h[0], dueAt: due48h, complete: false });
+      .toEqual({ item: delay48h[0], dueAt: due48h, availableAt: due48h, complete: false });
   });
 
   it("keeps the original due time when late instead of relabeling a late answer as on time", () => {
     expect(select({ trial: { ...trial, practiceCompletedAt: completedAt }, attempts: practiceAttempts, now: due7d }))
-      .toEqual({ item: delay48h[0], dueAt: due48h, complete: false });
+      .toEqual({ item: delay48h[0], dueAt: due48h, availableAt: due48h, complete: false });
   });
 
-  it("anchors the 7-day phase to practice completion even if the 48-hour phase was late", () => {
+  it("waits 72 hours after every 48-hour exposure without moving the original 7-day deadline", () => {
     const attempts = [...practiceAttempts, ...delay48h.map((item, index) => attempt(item, index + 6, {
       presentedAt: "2026-10-23T10:00:00.000Z", answeredAt: "2026-10-23T10:01:00.000Z", dueAt: due48h,
     }))];
+    // Retraction excludes a score but cannot erase an actual exposure.
+    attempts.at(-1)!.retractedAt = "2026-10-23T11:00:00.000Z";
     const inputs = { trial: { ...trial, practiceCompletedAt: completedAt }, attempts };
-    expect(select({ ...inputs, now: "2026-10-24T02:59:59.999Z" })).toEqual({ item: null, dueAt: due7d, complete: false });
-    expect(select({ ...inputs, now: due7d })).toEqual({
-      item: unit.items.find((item) => item.phase === "delay_7d"), dueAt: due7d, complete: false,
+    const availableAt = "2026-10-26T10:01:00.000Z";
+    expect(select({ ...inputs, now: due7d })).toEqual({ item: null, dueAt: due7d, availableAt, complete: false });
+    expect(select({ ...inputs, now: "2026-10-26T10:00:59.999Z" }).item).toBeNull();
+    expect(select({ ...inputs, now: availableAt })).toEqual({
+      item: unit.items.find((item) => item.phase === "delay_7d"), dueAt: due7d, availableAt, complete: false,
     });
+    expect(select({ ...inputs, trial: { ...inputs.trial, status: "paused" }, now: availableAt }))
+      .toEqual({ item: null, dueAt: due7d, availableAt, complete: false });
+  });
+
+  it("does not let another trial postpone the 7-day phase", () => {
+    const attempts = [...practiceAttempts, ...delay48h.map((item, index) => attempt(item, index + 6, {
+      presentedAt: due48h, answeredAt: due48h, dueAt: due48h,
+    })), attempt(delay48h[0]!, 20, { trialId: "other", answeredAt: due7d })];
+    expect(select({ trial: { ...trial, practiceCompletedAt: completedAt }, attempts, now: due7d }))
+      .toEqual({ item: unit.items.find(item => item.phase === "delay_7d"), dueAt: due7d, availableAt: due7d, complete: false });
   });
 
   it("preserves due dates while paused but never issues items", () => {
-    expect(select({ trial: { ...trial, status: "paused" } })).toEqual({ item: null, dueAt: null, complete: false });
+    expect(select({ trial: { ...trial, status: "paused" } })).toEqual({ item: null, dueAt: null, availableAt: null, complete: false });
     expect(select({ trial: { ...trial, status: "paused", practiceCompletedAt: completedAt },
-      attempts: practiceAttempts, now: due7d })).toEqual({ item: null, dueAt: due48h, complete: false });
+      attempts: practiceAttempts, now: due7d })).toEqual({ item: null, dueAt: due48h, availableAt: due48h, complete: false });
   });
 
   it("marks exhaustion complete, and never reopens a completed trial", () => {
     expect(select({ attempts: unit.items.map((item, index) => attempt(item, index)) }))
-      .toEqual({ item: null, dueAt: null, complete: true });
-    expect(select({ trial: { ...trial, status: "completed" } })).toEqual({ item: null, dueAt: null, complete: true });
+      .toEqual({ item: null, dueAt: null, availableAt: null, complete: true });
+    expect(select({ trial: { ...trial, status: "completed" } })).toEqual({ item: null, dueAt: null, availableAt: null, complete: true });
   });
 
   it("rejects invalid persisted timestamps rather than silently allowing delayed probes", () => {

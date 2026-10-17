@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
-import { assistanceLevelSchema, observationOutcomeSchema, verdictSourceSchema } from "./learning";
+import { assistanceLevelSchema, observationOutcomeSchema, publicVerdictSourceSchema } from "./learning";
 import { referenceCheckInputSchema, sourceVersionsSchema } from "./learning-evidence";
+import { matrixExerciseInputSchema, matrixExerciseSpecSchema } from "./matrix-evaluation";
 
 export const learningAttemptProblemInputSchema = z.object({
   sourceId: uuidSchema,
@@ -15,11 +16,13 @@ export const learningAttemptCreateInputSchema = z.object({
   problemId: uuidSchema.nullable().optional(), problem: learningAttemptProblemInputSchema.optional(),
   teachingBlock: z.object({ blockId: uuidSchema, contentVersion: z.number().int().positive() }).strict().optional(),
   requirementKey: z.string().trim().min(1).max(200).nullable().optional(),
-}).strict().refine((input) => !(input.problemId && input.problem), "choose an existing problem or a new problem");
+  matrixExercise: matrixExerciseInputSchema.optional(),
+}).strict().refine((input) => !(input.problemId && input.problem), "choose an existing problem or a new problem")
+  .refine(input => !input.matrixExercise || !(input.problemId || input.problem || input.teachingBlock || input.requirementKey), "matrix exercise sets its own question and requirement");
 export const learningAttemptSubmitInputSchema = z.object({
   clientKey: z.string().min(8).max(200), answer: z.string().max(20_000),
   outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,
-  verdictSource: verdictSourceSchema.optional(), referenceSourceId: uuidSchema.nullable().optional(),
+  verdictSource: publicVerdictSourceSchema.optional(), referenceSourceId: uuidSchema.nullable().optional(),
   referenceCheck: referenceCheckInputSchema.optional(), retestId: uuidSchema.nullable().optional(),
 }).strict();
 export const learningAttemptSchema = z.object({
@@ -29,6 +32,7 @@ export const learningAttemptSchema = z.object({
   sourceIds: z.array(uuidSchema), sourceVersions: sourceVersionsSchema,
   startedAt: isoDateTimeSchema, submittedAt: isoDateTimeSchema.nullable(),
   observationId: uuidSchema.nullable(), historyRevision: z.number().int().nonnegative(),
+  matrixExercise: matrixExerciseSpecSchema.optional(),
 }).strict();
 export type LearningAttempt = z.infer<typeof learningAttemptSchema>;
 export type LearningAttemptCreateInput = z.infer<typeof learningAttemptCreateInputSchema>;

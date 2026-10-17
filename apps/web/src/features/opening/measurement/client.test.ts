@@ -8,6 +8,15 @@ const empty = {
 const courseId = "11111111-1111-4111-8111-111111111111";
 
 describe("measurement HTTP client", () => {
+  it("includes archived courses so existing trials remain accessible", async () => {
+    const courses = [
+      { id: courseId, title: "Archived", archivedAt: "2026-10-16T00:00:00.000Z" },
+      { id: "22222222-2222-4222-8222-222222222222", title: "Active", archivedAt: null },
+    ];
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ courses }));
+    await expect(createMeasurementClient(fetcher).courses()).resolves.toEqual(courses);
+    expect(fetcher).toHaveBeenCalledWith("/api/courses?includeArchived=true", { method: "GET", cache: "no-store" });
+  });
   it("validates returned records and never uses a cached response", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json(empty));
     await expect(createMeasurementClient(fetcher).read(courseId)).resolves.toEqual(empty);

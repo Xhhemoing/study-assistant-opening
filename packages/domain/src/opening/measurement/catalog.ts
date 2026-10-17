@@ -4,6 +4,7 @@ import type {
   MeasurementPhase,
   MeasurementTrial,
 } from "@aistudy/contracts";
+import { MEASUREMENT_RETEST_GAP_MS } from "./evaluation";
 
 /** Import this bank only in server code. Only publicMeasurementItem may cross to a client. */
 export type MeasurementCatalogItem = MeasurementItemView & {
@@ -148,26 +149,38 @@ export function chooseNextMeasurementItem(input: {
   attempts: readonly MeasurementAttempt[];
   items: readonly MeasurementCatalogItem[];
   now: Date | string;
-}): { item: MeasurementCatalogItem | null; dueAt: string | null; complete: boolean } {
+}): { item: MeasurementCatalogItem | null; dueAt: string | null; availableAt: string | null; complete: boolean } {
   const { trial, items } = input;
-  if (trial.status === "completed") return { item: null, dueAt: null, complete: true };
+  if (trial.status === "completed") return { item: null, dueAt: null, availableAt: null, complete: true };
   const attempts = input.attempts.filter((attempt) => attempt.trialId === trial.id);
   if (attempts.some((attempt) => attempt.outcome === null && attempt.retractedAt === null)) {
-    return { item: null, dueAt: null, complete: false };
+    return { item: null, dueAt: null, availableAt: null, complete: false };
   }
   const presentedIds = new Set(attempts.map((attempt) => attempt.item.id));
   const phases: MeasurementPhase[] = ["practice", "delay_48h", "delay_7d"];
   const next = phases.flatMap((phase) => items.filter((item) => item.phase === phase))
     .find((item) => !presentedIds.has(item.id));
-  if (!next) return { item: null, dueAt: null, complete: true };
+  if (!next) return { item: null, dueAt: null, availableAt: null, complete: true };
   if (next.phase === "practice") {
-    return { item: trial.status === "active" ? next : null, dueAt: null, complete: false };
+    return { item: trial.status === "active" ? next : null, dueAt: null, availableAt: null, complete: false };
   }
-  if (trial.practiceCompletedAt === null) return { item: null, dueAt: null, complete: false };
+  if (trial.practiceCompletedAt === null) return { item: null, dueAt: null, availableAt: null, complete: false };
   const completedAt = new Date(trial.practiceCompletedAt).getTime();
   const now = new Date(input.now).getTime();
   if (!Number.isFinite(completedAt) || !Number.isFinite(now)) throw new RangeError("Invalid measurement clock");
   const due = completedAt + phaseDelayMilliseconds[next.phase];
   const dueAt = new Date(due).toISOString();
-  return { item: trial.status === "active" && now >= due ? next : null, dueAt, complete: false };
+  // Keep the original protocol deadline for scoring. A late 48h return must
+  // postpone presentation, without moving the 7d scoring window along with it.
+  let available = due;
+  if (next.phase === "delay_7d") {
+    for (const attempt of attempts) {
+      if (attempt.item.phase !== "delay_48h" || attempt.answeredAt === null) continue;
+      const answeredAt = Date.parse(attempt.answeredAt);
+      if (!Number.isFinite(answeredAt)) throw new RangeError("Invalid measurement clock");
+      available = Math.max(available, answeredAt + MEASUREMENT_RETEST_GAP_MS);
+    }
+  }
+  return { item: trial.status === "active" && now >= available ? next : null,
+    dueAt, availableAt: new Date(available).toISOString(), complete: false };
 }

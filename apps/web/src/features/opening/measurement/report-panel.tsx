@@ -24,8 +24,8 @@ function ModelScores({ models, label }: { models: MeasurementModelScore[]; label
   </table></div>;
 }
 
-function AnswerRecord({ attempt, overview, busy, onRetract }: {
-  attempt: MeasurementAttempt; overview: MeasurementOverview; busy: boolean; onRetract: (id: string, reason: string) => void;
+function AnswerRecord({ attempt, overview, busy, readOnly, onRetract }: {
+  attempt: MeasurementAttempt; overview: MeasurementOverview; busy: boolean; readOnly: boolean; onRetract: (id: string, reason: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [reason, setReason] = useState("");
@@ -39,7 +39,7 @@ function AnswerRecord({ attempt, overview, busy, onRetract }: {
       {attempt.feedback ? <p className="whitespace-pre-wrap">{attempt.feedback}</p> : null}
       <p>提交于 {measurementDate(attempt.answeredAt!)}{delay ? `；距初次练习结束 ${delay}` : ""}。</p>
       {attempt.predictions.length ? <p>作答前已保存的答对概率：{attempt.predictions.map(prediction => `${overview.trial?.models.find(model => model.id === prediction.modelId)?.label ?? prediction.modelId} ${(prediction.probability * 100).toFixed(1)}%`).join("；")}。这是模型预测，不是掌握度。</p> : null}
-      {attempt.retractedAt ? <p>标记原因：{attempt.retractionReason}。原始记录保留，已从有效比较中排除。</p> : editing ? <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (reason.trim() && !busy) onRetract(attempt.id, reason.trim()); }}>
+      {attempt.retractedAt ? <p>标记原因：{attempt.retractionReason}。原始记录保留，已从有效比较中排除。</p> : readOnly ? null : editing ? <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (reason.trim() && !busy) onRetract(attempt.id, reason.trim()); }}>
         <label className="block" htmlFor={`retract-${attempt.id}`}>说明误操作、已见过答案或其他影响独立性的情况</label>
         <textarea id={`retract-${attempt.id}`} className={ui.input} value={reason} maxLength={500} rows={2} disabled={busy} onChange={event => setReason(event.target.value)} />
         <div className="flex gap-2"><button type="submit" className={ui.secondary} disabled={busy || !reason.trim()}>保留原始记录并标记无效</button><button type="button" className={ui.quiet} disabled={busy} onClick={() => setEditing(false)}>取消</button></div>
@@ -48,8 +48,8 @@ function AnswerRecord({ attempt, overview, busy, onRetract }: {
   </details>;
 }
 
-export function MeasurementReportPanel({ overview, busy, onRetract }: {
-  overview: MeasurementOverview; busy: boolean; onRetract: (id: string, reason: string) => void;
+export function MeasurementReportPanel({ overview, busy, readOnly, onRetract }: {
+  overview: MeasurementOverview; busy: boolean; readOnly: boolean; onRetract: (id: string, reason: string) => void;
 }) {
   const label = (id: string) => overview.trial?.models.find(model => model.id === id)?.label ?? id;
   return <details className={`${ui.panel} p-5`}>
@@ -64,9 +64,10 @@ export function MeasurementReportPanel({ overview, busy, onRetract }: {
         <ul>{Object.entries(overview.report.excluded).map(([reason, count]) => <li key={reason}>{exclusionLabels[reason] ?? reason}：{count}</li>)}</ul>
         {overview.report.models.map(model => <div key={model.modelId}><p className="font-medium">{label(model.modelId)} · 预测区间 / 样本数 / 平均预测 / 实际正确率</p>{model.calibration.filter(bin => bin.count > 0).map(bin => <p key={bin.lower}>{Math.round(bin.lower * 100)}–{Math.round(bin.upper * 100)}% / {bin.count} / {number(bin.meanPrediction)} / {number(bin.observedAccuracy)}</p>)}</div>)}
       </div></details>
-      <div><h3 className="text-sm font-medium text-zinc-800">已提交的记录</h3>{overview.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => <AnswerRecord key={attempt.id} attempt={attempt} overview={overview} busy={busy} onRetract={onRetract} />)}</div>
+      <div><h3 className="text-sm font-medium text-zinc-800">已提交的记录</h3>{overview.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => <AnswerRecord key={attempt.id} attempt={attempt} overview={overview} busy={busy} readOnly={readOnly} onRetract={onRetract} />)}</div>
       {overview.trial ? <a className={ui.secondary} href={`/api/opening/measurement/export?courseId=${encodeURIComponent(overview.trial.courseId)}`} download><Download size={14} aria-hidden="true" />导出个人测试数据 JSON</a> : null}
       <p className="text-xs leading-6 text-zinc-500">导出包含个人作答、时间、帮助与更正记录、模型版本及预测。暂停会保留记录；同一题组不重复启动，以免已见题影响复测。</p>
+      <p className="text-xs leading-6 text-zinc-600">此 JSON 仅供分析，不能用于恢复；应用的 Opening 备份暂不包含学习测试记录。恢复原试验、预测与进度需要站点管理员的完整数据库备份。</p>
     </div>
   </details>;
 }

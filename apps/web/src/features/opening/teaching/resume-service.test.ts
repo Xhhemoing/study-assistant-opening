@@ -55,12 +55,11 @@ describe("resume-service surface (V2-14)", () => {
       .sort();
     // PR-D: 0059_opening_budget_reconcile (budget ledger); PR-E: 0060_opening_retest_accept_key (retest accept key);
     // 0061 planning; 0062 model routing + card evidence; 0063 quick setup idempotency;
-    // 0064 card source lineage; 0065 task requirement; 0066 isolated measurement. Still no teaching/resume migration.
+    // 0064 card source lineage; 0065 task requirement scope; 0066 BKT measurement; 0067 planning feedback. Still no teaching/resume migration.
     expect(numbered.filter((f) => f >= "0058")).toEqual([
       "0058_opening_turn_clarify.sql", "0059_opening_budget_reconcile.sql", "0060_opening_retest_accept_key.sql",
       "0061_opening_adaptive_planning.sql", "0062_opening_model_routing_and_card_evidence.sql", "0063_opening_model_quick_setup.sql", "0064_card_source_lineage.sql",
-      "0065_opening_task_requirement.sql",
-      "0066_opening_measurement.sql",
+      "0065_opening_task_requirement.sql", "0066_opening_measurement.sql", "0067_opening_plan_feedback.sql", "0068_opening_plan_control.sql", "0069_opening_matrix_evaluation.sql",
     ]);
     expect(numbered.some((f) => /resume/i.test(f))).toBe(false);
   });

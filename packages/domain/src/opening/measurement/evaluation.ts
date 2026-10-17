@@ -71,6 +71,7 @@ export function measurementEligibility(attempt: MeasurementAttempt): string | nu
 }
 
 const HOUR_MS = 60 * 60 * 1000;
+export const MEASUREMENT_RETEST_GAP_MS = 72 * HOUR_MS;
 
 /** Predeclared protocol windows, not evidence that these windows are optimal for learning. */
 export function measurementTimingExclusion(attempt: MeasurementAttempt, history: readonly MeasurementAttempt[]): string | null {
@@ -86,7 +87,7 @@ export function measurementTimingExclusion(attempt: MeasurementAttempt, history:
     if (prior.trialId !== attempt.trialId || prior.item.phase !== "delay_48h" || prior.answeredAt === null) return false;
     const gap = presentedAt - Date.parse(prior.answeredAt);
     // Any recent probe can expose or rehearse content, even when its score was excluded.
-    return gap >= 0 && gap < 72 * HOUR_MS;
+    return gap >= 0 && gap < MEASUREMENT_RETEST_GAP_MS;
   })) return "insufficient_retest_gap";
   return null;
 }

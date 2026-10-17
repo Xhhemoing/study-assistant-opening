@@ -7,10 +7,13 @@ import { EmptyState, PageHeader, secondaryButtonClass } from "../design/ui";
 import { createReviewActions, loadReviewItems, retainUnconfirmedReviews, type ReviewApi } from "./review-service";
 import { ReviewCard } from "./review-card";
 import { reviewItemKey, type ReviewItem } from "./review-types";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { supportsConversationPlan } from "./conversation-plan-controller";
 
 type ReadState = { kind: "loading" | "ready" | "error" | "loggedOut"; items: ReviewItem[]; message?: string };
 export function ReviewView({ api: supplied }: { api?: ReviewApi }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
+  const conversationApi = useOpeningCapabilities().adaptivePlanning && supportsConversationPlan(api) ? api : undefined;
   const actions = useMemo(() => createReviewActions(api), [api]);
   const [state, setState] = useState<ReadState>({ kind: "loading", items: [] });
   const requestId = useRef(0);
@@ -34,7 +37,7 @@ export function ReviewView({ api: supplied }: { api?: ReviewApi }) {
     {state.kind === "loggedOut" ? <><EmptyState title="尚未登录" description="登录后查看属于你的待审核建议。" /><Link href="/login" className={secondaryButtonClass}>去登录</Link></> : null}
     {state.kind === "error" ? <div role="alert" className="space-y-2"><p className="text-sm text-red-700">建议暂时无法读取：{state.message}</p><p className="text-xs text-zinc-500">读取失败不表示没有待审核建议；已有输入不会被清空。</p></div> : null}
     {state.kind === "ready" && state.items.length === 0 ? <EmptyState title="没有待审核建议" description="目前没有需要决定的任务、记忆或补测。可以返回今天继续学习。" /> : null}
-    {state.kind !== "loggedOut" && state.items.length > 0 ? <ul className="mx-auto max-w-4xl divide-y divide-zinc-200 border-y border-zinc-200" aria-label="待审核建议">{state.items.map((item) => <ReviewCard key={reviewItemKey(item)} item={item} actions={actions} />)}</ul> : null}
+    {state.kind !== "loggedOut" && state.items.length > 0 ? <ul className="mx-auto max-w-4xl divide-y divide-zinc-200 border-y border-zinc-200" aria-label="待审核建议">{state.items.map((item) => <ReviewCard key={reviewItemKey(item)} item={item} actions={actions} conversationApi={conversationApi} />)}</ul> : null}
     </div>
   </section>;
 }

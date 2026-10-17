@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { MeasurementOverview } from "@aistudy/contracts";
-import { createOpeningMeasurementRepository } from "@aistudy/database";
+import { createOpeningMeasurementRepository, readOpeningLoopMetrics } from "@aistudy/database";
 import { getMeasurementUnit } from "@aistudy/domain/measurement-catalog";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
@@ -180,11 +180,24 @@ describe("isolated real-use measurement repository", () => {
     expect(overview.report.eligible).toBe(9);
     await expect(issue(trialId)).rejects.toMatchObject({ code: "CONFLICT" });
     await fixture.sql`UPDATE opening_measurement_trials SET practice_completed_at=clock_timestamp()-interval '8 days' WHERE id=${trialId}`;
+    const waiting = await repository.read(fixture.scope, courseId);
+    const last48h = overview.attempts.at(-1)!;
+    expect(Date.parse(waiting.nextDueAt!) - Date.parse(last48h.answeredAt!)).toBe(72 * 60 * 60 * 1000);
+    await expect(issue(trialId)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await repository.read(fixture.scope, courseId)).attempts).toHaveLength(9);
+    // Advance the fixture's whole answer timeline together so forecasts remain
+    // before presentation and prior evidence remains before each forecast.
+    const shift = (value: string | null) => value === null ? null : new Date(Date.parse(value) - 96 * 60 * 60 * 1000).toISOString();
+    for (const attempt of overview.attempts) {
+      const predictions = attempt.predictions.map(prediction => ({ ...prediction, predictedAt: shift(prediction.predictedAt)! }));
+      await fixture.sql`UPDATE opening_measurement_attempts SET presented_at=${shift(attempt.presentedAt)},
+        answered_at=${shift(attempt.answeredAt)},due_at=${shift(attempt.dueAt)},predictions=${fixture.sql.json(predictions)} WHERE id=${attempt.id}`;
+    }
     for (let index = 0; index < 3; index += 1) overview = await answerLast(await issue(trialId));
     expect(overview.trial!.status).toBe("completed");
-    // These fixture responses occur immediately after the 48h phase, so the
-    // 7d phase is retained but cannot qualify as an independent delayed score.
-    expect(overview.report.eligible).toBe(9);
+    expect(overview.report.eligible).toBe(12);
+    const originalDue = Date.parse(overview.trial!.practiceCompletedAt!) + 7 * 24 * 60 * 60 * 1000;
+    expect(overview.attempts.filter(attempt => attempt.item.phase === "delay_7d").every(attempt => Date.parse(attempt.dueAt!) === originalDue)).toBe(true);
     expect(overview.attempts.filter(attempt => attempt.item.phase === "delay_7d").every(attempt => attempt.firstAttempt && attempt.dueAt !== null)).toBe(true);
     await expect(repository.setStatus(fixture.scope, { trialId, status: "active" })).rejects.toMatchObject({ code: "CONFLICT" });
     const original = overview.attempts[0]!;
@@ -221,16 +234,23 @@ describe("isolated real-use measurement repository", () => {
   });
 
   it("does not create production learning observations, sessions, or tasks", async () => {
+    const now = new Date(Date.now() + 60_000);
+    const metricsBefore = await readOpeningLoopMetrics(fixture.sql, fixture.scope, { now });
     const before = await fixture.sql`SELECT
+      (SELECT count(*) FROM opening_plan_drafts) AS drafts,
+      (SELECT count(*) FROM opening_plan_acceptances) AS acceptances,
       (SELECT count(*) FROM opening_learning_observations) AS observations,
       (SELECT count(*) FROM opening_learning_sessions) AS sessions,
       (SELECT count(*) FROM opening_tasks) AS tasks`;
     await answerLast(await issue((await start()).trial!.id));
     const after = await fixture.sql`SELECT
+      (SELECT count(*) FROM opening_plan_drafts) AS drafts,
+      (SELECT count(*) FROM opening_plan_acceptances) AS acceptances,
       (SELECT count(*) FROM opening_learning_observations) AS observations,
       (SELECT count(*) FROM opening_learning_sessions) AS sessions,
       (SELECT count(*) FROM opening_tasks) AS tasks`;
     expect(after).toEqual(before);
+    expect(await readOpeningLoopMetrics(fixture.sql, fixture.scope, { now })).toEqual(metricsBefore);
   });
 
   it("keeps archived-course evidence readable and exportable while blocking new measurement writes", async () => {

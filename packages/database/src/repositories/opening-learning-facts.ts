@@ -126,5 +126,6 @@ export function mapLearningObservation(row: Record<string, unknown>): LearningOb
     requirementKey: (row.requirement_key ?? null) as string | null, startedAt: learningIso(row.started_at), submittedAt: learningIso(row.submitted_at),
     recordedAt: learningIso(row.recorded_at), sourceVersions: (row.source_versions ?? null) as Record<string, number> | null,
     historyRevision: Number(row.history_revision ?? 0), referenceCheck: (row.reference_check ?? null) as LearningObservation["referenceCheck"],
+    ...(row.server_evaluation != null ? { serverEvaluation: row.server_evaluation as LearningObservation["serverEvaluation"] } : {}),
   };
 }

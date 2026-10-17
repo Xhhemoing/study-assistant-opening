@@ -1,5 +1,5 @@
-import type { LearningObservation, Scope } from "@aistudy/contracts";
-import type { EvidenceObservation, EvidenceEligibilityContext } from "@aistudy/domain";
+import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
+import { parseCanonicalMatrixExercise, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
 import type { LearningSql } from "./opening-learning-facts";
 
 type Row = Record<string, unknown>;
@@ -87,14 +87,41 @@ export async function readOpeningLearningEvidenceContexts(
   const versions = sourceIds.length ? await db`SELECT source_id,version,availability FROM opening_source_versions
     WHERE workspace_id=${scope.workspaceId} AND source_id =ANY(${sourceIds}::uuid[])` : [];
   const unavailableVersions = new Set(versions.filter(row => row.availability === "unavailable").map(row => `${row.source_id}:${row.version}`));
-  const items = itemIds.length ? await db`SELECT v.id,p.problem_id FROM opening_learning_item_versions v
-    JOIN opening_problem_refs p ON p.problem_id=v.problem_id AND p.workspace_id=v.workspace_id
+  const items = itemIds.length ? await db`SELECT v.id,p.problem_id,v.course_id,v.evaluation_spec FROM opening_learning_item_versions v
+    LEFT JOIN opening_problem_refs p ON p.problem_id=v.problem_id AND p.workspace_id=v.workspace_id
       AND p.source_id=v.source_id AND p.source_version=v.source_version AND p.stem_snapshot=v.stem_snapshot
       AND p.chunk_id IS NOT DISTINCT FROM v.chunk_id AND p.physical_page IS NOT DISTINCT FROM v.physical_page AND p.artifact_kind=v.artifact_kind
     WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.id =ANY(${itemIds}::uuid[])` : [];
-  const matchingItems = new Set(items.map(row => String(row.id)));
+  const matchingItems = new Set(items.filter(row => row.problem_id != null).map(row => String(row.id)));
+  const catalogueItems = new Map(items.flatMap(row => {
+    const spec = parseCanonicalMatrixExercise(row.evaluation_spec);
+    return spec && row.course_id ? [[String(row.id), { spec, courseId: String(row.course_id) }] as const] : [];
+  }));
+  const catalogueSpecs = [...new Map([...catalogueItems.values()].map(item => [JSON.stringify(item.spec), item.spec])).values()];
+  const catalogueCourses = [...new Set([...catalogueItems.values()].map(item => item.courseId))];
+  // First two original feedback events per canonical question suffice: exclude this
+  // attempt, then use the earliest other event. Revisions never erase past delivery.
+  const automaticFeedback = catalogueSpecs.length ? await db`WITH ranked AS (
+    SELECT o.id,o.attempt_id,o.problem_id,o.recorded_at,v.course_id,v.evaluation_spec,
+      row_number() OVER (PARTITION BY v.course_id,v.evaluation_spec ORDER BY o.recorded_at,o.id) AS feedback_rank
+    FROM opening_learning_observations o
+    JOIN opening_learning_item_versions v ON v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
+      AND v.course_id =ANY(${catalogueCourses}::uuid[])
+      AND v.evaluation_spec IN (SELECT value FROM jsonb_array_elements(${JSON.stringify(catalogueSpecs)}::text::jsonb))
+      AND o.verdict_source='deterministic' AND o.server_evaluation->>'decision' IN ('correct','incorrect')
+      AND o.attempt_id IS NOT NULL AND o.recorded_at IS NOT NULL
+  ) SELECT * FROM ranked WHERE feedback_rank<=2` : [];
+  const feedbackByCatalogue = new Map<string, Row[]>();
+  for (const row of automaticFeedback) {
+    const spec = parseCanonicalMatrixExercise(row.evaluation_spec);
+    if (!spec) continue;
+    const key = `${row.course_id}:${JSON.stringify(spec)}`;
+    const entries = feedbackByCatalogue.get(key) ?? [];
+    entries.push(row); feedbackByCatalogue.set(key, entries);
+  }
   // Same-problem prior reference checks count as revealed answer exposure for later attempts.
-  const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id,
+  const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id, o.verdict_source,
       o.submitted_at, o.recorded_at
     FROM opening_learning_observations o
     JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
@@ -139,24 +166,33 @@ export async function readOpeningLearningEvidenceContexts(
           id: `prior-reference:${prior.id}`,
           attempt_id: prior.attempt_id,
           problem_id: prior.problem_id,
-          level: "revealed",
+          level: "revealed", kind: "solution",
           delivered: true,
           delivered_at: checkedAt,
           history_revision: 0,
         });
       }
     }
+    const catalogue = record.itemVersionId ? catalogueItems.get(record.itemVersionId) : undefined;
+    for (const prior of catalogue ? feedbackByCatalogue.get(`${catalogue.courseId}:${JSON.stringify(catalogue.spec)}`) ?? [] : []) {
+      if (prior.attempt_id === record.attemptId) continue;
+      history.push({ id: `catalogue-feedback:${prior.id}`, attempt_id: prior.attempt_id, problem_id: prior.problem_id,
+        kind: "evaluation_feedback", same_question: true, level: "hinted", delivered: true,
+        delivered_at: prior.recorded_at, history_revision: 0 });
+    }
     const observation: EvidenceObservation = {
-      attemptId: record.attemptId ?? null, problemId: record.problemId ?? null, itemVersionId: record.itemVersionId ?? null,
+      observationId: record.id, attemptId: record.attemptId ?? null, problemId: record.problemId ?? null, itemVersionId: record.itemVersionId ?? null,
       courseId: record.courseId, requirementKey: record.requirementKey ?? null,
       startedAt: record.startedAt ? Date.parse(record.startedAt) : null, submittedAt: record.submittedAt ? Date.parse(record.submittedAt) : null,
       assistance: record.assistance, outcome: record.outcome, verdictSource: record.verdictSource,
     };
     const context: EvidenceEligibilityContext = {
+      serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
       helpHistory: { complete: Boolean(record.attemptId), exposures: history.map(row => ({
         attemptId: row.attempt_id as string | null, problemId: row.problem_id as string | null,
         level: row.level as "hinted" | "revealed",
-        kind: (row.kind as "instruction" | "hint" | "solution" | null | undefined) ?? "hint",
+        kind: (row.kind as "instruction" | "hint" | "solution" | "evaluation_feedback" | null | undefined) ?? "hint",
+        ...(row.same_question === true ? { sameQuestion: true } : {}),
         delivered: row.delivered as boolean | null,
         deliveredAt: row.delivered_at ? new Date(row.delivered_at as string | Date).getTime() : null,
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,

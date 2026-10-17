@@ -28,6 +28,7 @@ export type BuildAdaptiveDraftInput = {
   timeZone: string;
   now: Date;
   planDayOptions(preferredOrder: readonly string[]): PlanDayOptions;
+  suppressedSuggestionIdentities?: readonly string[];
 };
 
 /**
@@ -69,6 +70,7 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
     committedMinutes,
     pendingTasks: tasks.filter((task) => task.status === "pending"),
     idFor: (key) => suggestionTaskId(input.workspaceId, key),
+    suppressedSuggestionIdentities: input.suppressedSuggestionIdentities,
   });
   const ranked = rankForPlan({ tasks, suggestions, yesterdayAccepted, date, timeZone, now });
   const byId = new Map([...tasks, ...suggestionsAsTasks(suggestions)].map((task) => [task.id, task]));

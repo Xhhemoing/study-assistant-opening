@@ -5,7 +5,7 @@ import {
 } from "@aistudy/contracts";
 import { z } from "zod";
 
-const courseList = z.object({ courses: z.array(z.object({ id: z.string().uuid(), title: z.string() })) });
+const courseList = z.object({ courses: z.array(z.object({ id: z.string().uuid(), title: z.string(), archivedAt: z.string().datetime().nullable() })) });
 const errorBody = z.object({ error: z.object({ message: z.string() }) });
 export type MeasurementCourse = z.infer<typeof courseList>["courses"][number];
 
@@ -28,7 +28,7 @@ export function createMeasurementClient(fetcher: typeof fetch = fetch) {
     measurementOverviewSchema.parse(await request(path, method, body));
 
   return {
-    async courses() { return courseList.parse(await request("/api/courses")).courses; },
+    async courses() { return courseList.parse(await request("/api/courses?includeArchived=true")).courses; },
     read(courseId: string) { return overview(`/api/opening/measurement?courseId=${encodeURIComponent(courseId)}`); },
     start(input: MeasurementStartInput) { return overview("/api/opening/measurement", "POST", measurementStartInputSchema.parse(input)); },
     status(input: MeasurementStatusInput) { return overview("/api/opening/measurement", "PATCH", measurementStatusInputSchema.parse(input)); },

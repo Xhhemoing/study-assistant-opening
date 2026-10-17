@@ -40,6 +40,13 @@ describe("evaluateOpeningRestoreEmptyNamespace", () => {
     expect(result.errors.join(" ")).toMatch(/courses has 2/);
     expect(result.errors.join(" ")).toMatch(/opening_sources has 1/);
   });
+
+  it("rejects a namespace whose only counted record is planning feedback", () => {
+    const counts = zeroCounts();
+    counts.opening_plan_feedback = 1;
+    expect(evaluateOpeningRestoreEmptyNamespace(counts)).toMatchObject({ ok: false, totalRows: 1,
+      errors: ["opening_plan_feedback has 1 row(s) in target namespace"] });
+  });
 });
 
 describe("OPENING_RESTORE_NEVER_TABLES", () => {

@@ -81,7 +81,7 @@ it("renders Chinese queue group headings from groupTodayQueue", () => {
     dueRetests: [],
     overdue: [tasks[2]!],
     other: [tasks[1]!],
-    upcomingRetestCount: 2,
+    upcomingRetestCount: 2, deferred: [],
     done: [],
   };
   const html = renderToStaticMarkup(createElement(TodayGroupedQueue, {

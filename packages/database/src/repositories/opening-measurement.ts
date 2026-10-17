@@ -94,7 +94,7 @@ export function createOpeningMeasurementRepository(sql: Sql) {
             await recordMeasurementCommand(tx, trial.id, null, input.clientKey, intent);
             return measurementOverview(tx, completed!);
           }
-          throw learningError("CONFLICT", `复测尚未到期，请在 ${next.dueAt ?? "计划时间"} 后继续`);
+          throw learningError("CONFLICT", `复测尚未到期，请在 ${next.availableAt ?? "计划时间"} 后继续`);
         }
         const attemptId = randomUUID();
         const predictions = predictMeasurementPair({ skillId: next.item.skillId, history, predictedAt: now, plugins });
@@ -163,6 +163,7 @@ export function createOpeningMeasurementRepository(sql: Sql) {
     async export(scope: Scope, courseId: string): Promise<MeasurementExport> {
       const overview = await this.read(scope, courseId);
       return { ...overview, format: "aistudy-measurement-v1", exportedAt: new Date().toISOString(), limitations: [
+        "此 JSON 仅供分析，不能导入恢复；应用的 Opening 备份尚不包含学习测试记录，恢复需要完整数据库备份。",
         "这是同一用户真实作答上的前瞻预测比较，不是随机对照学习效果实验。",
         "BKT 参数尚未用真实学习数据校准；样本量小不能证明学习提升。",
         "首次作答仅表示本工作区该单元内首次呈现，无法证明此前未在线下或其他工作区见过题目。",

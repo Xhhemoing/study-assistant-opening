@@ -22,15 +22,16 @@ export function shouldOfferReplan(input: {
 }): ReplanOffer {
   const nowMs = input.now.getTime();
   const byId = new Map(input.tasks.map((task) => [task.id, task]));
-  const missed = input.acceptedBlocks.filter(
-    (block) => byId.get(block.taskId)?.status === "pending" && Date.parse(block.end) <= nowMs,
-  );
+  const eligible = (task: TaskItem | undefined) => task?.status === "pending" && (!task.notBefore || Date.parse(task.notBefore) <= nowMs);
   const futurePending = new Set(
     input.acceptedBlocks
-      .filter((block) => Date.parse(block.end) > nowMs && byId.get(block.taskId)?.status === "pending")
+      .filter((block) => Date.parse(block.end) > nowMs && eligible(byId.get(block.taskId)))
       .map((block) => block.taskId),
   );
-  const unplanned = input.tasks.filter((task) => task.status === "pending" && !futurePending.has(task.id));
+  const missed = input.acceptedBlocks.filter(
+    (block) => eligible(byId.get(block.taskId)) && !futurePending.has(block.taskId) && Date.parse(block.end) <= nowMs,
+  );
+  const unplanned = input.tasks.filter((task) => eligible(task) && !futurePending.has(task.id));
 
   if (missed.length) {
     const taskIds = [...new Set([...missed.map((block) => block.taskId), ...unplanned.map((task) => task.id)])];
@@ -38,7 +39,8 @@ export function shouldOfferReplan(input: {
   }
   const freed = input.acceptedBlocks.some((block) => {
     const status = byId.get(block.taskId)?.status;
-    return (status === "done" || status === "skipped")
+    const task = byId.get(block.taskId);
+    return (status === "done" || status === "skipped" || (task?.notBefore && Date.parse(task.notBefore) > nowMs))
       && Date.parse(block.start) > nowMs
       && (Date.parse(block.end) - Date.parse(block.start)) / 60_000 >= MIN_FREED_MINUTES;
   });

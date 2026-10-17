@@ -1,6 +1,6 @@
 import type { TransactionSql } from "postgres";
 import { openingPlanningSettingsSchema, weekSessionSchema, type PlannedBlock, type Scope, type TimeBlock } from "@aistudy/contracts";
-import { deriveDayBlocks } from "@aistudy/domain";
+import { deriveDayBlocks, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 
 /** An explicit manual window can extend daily availability, but cannot erase a class, meal or sleep. */
@@ -14,24 +14,38 @@ export function plannedBlocksFitConstraints(blocks: readonly PlannedBlock[], con
 }
 
 /** Called while holding the workspace lock shared with settings and timetable writes. */
-export async function assertOpeningPlanConstraints(tx: TransactionSql, scope: Scope, day: string, blocks: readonly PlannedBlock[], autoDraft: boolean) {
+export async function assertOpeningPlanConstraints(tx: TransactionSql, scope: Scope, day: string, blocks: readonly PlannedBlock[], autoDraft: boolean,
+  explicitFree?: readonly TimeBlock[]) {
   const [preferences] = await tx`SELECT planning_settings FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
   const stored = preferences?.planning_settings;
-  if (stored == null && !autoDraft) return; // Existing explicit-time planning needs no saved semester settings.
   const parsed = openingPlanningSettingsSchema.safeParse(stored);
   const conflict = () => new OpeningPlanError("CONFLICT", "planning constraints changed; refresh", "stale_version");
-  if (!parsed.success) throw conflict();
-  const sessions = await tx`SELECT course_name, course_id, weekday, weeks, start_period, end_period
-    FROM opening_timetable_sessions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-    ORDER BY weekday, start_period`;
-  let constraints: TimeBlock[];
+  if ((!parsed.success && stored != null) || (stored == null && autoDraft && !explicitFree)) throw conflict();
+  let constraints: TimeBlock[] = [];
   try {
-    constraints = deriveDayBlocks(day, parsed.data, sessions.map(row => weekSessionSchema.parse({
-      courseName: row.course_name, courseId: row.course_id ?? null, weekday: Number(row.weekday),
-      weeks: row.weeks, startPeriod: Number(row.start_period), endPeriod: Number(row.end_period),
-    })));
+    if (parsed.success) {
+      const sessions = await tx`SELECT course_name, course_id, weekday, weeks, start_period, end_period
+        FROM opening_timetable_sessions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        ORDER BY weekday, start_period`;
+      constraints = deriveDayBlocks(day, parsed.data, sessions.map(row => weekSessionSchema.parse({
+        courseName: row.course_name, courseId: row.course_id ?? null, weekday: Number(row.weekday),
+        weeks: row.weeks, startPeriod: Number(row.start_period), endPeriod: Number(row.end_period),
+      })));
+    }
+    if (explicitFree) {
+      const bounds = resolveLocalDayBounds(day, resolveWorkspaceTimeZone(parsed.success ? parsed.data.timeZone : undefined));
+      if (explicitFree.some(block => Date.parse(block.start) < bounds.dayStart.getTime() || Date.parse(block.end) > bounds.nextDayStart.getTime())
+        || !plannedBlocksFitConstraints(blocks, explicitFree, true)) throw conflict();
+    }
   } catch {
     throw conflict();
   }
-  if (!plannedBlocksFitConstraints(blocks, constraints, autoDraft)) throw conflict();
+  // Without saved settings, retained hard rows remain authoritative; manual windows
+  // must not turn a missing preference row into permission to overlap them.
+  const locked = await tx`SELECT start_at, end_at, kind FROM opening_hard_blocks
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND day=${day}::date
+      AND kind<>'free' AND (kind='locked' OR ${stored == null})`;
+  constraints.push(...locked.map(row => ({ start: new Date(row.start_at as string | Date).toISOString(),
+    end: new Date(row.end_at as string | Date).toISOString(), kind: (row.kind ?? "locked") as TimeBlock["kind"] })));
+  if (!plannedBlocksFitConstraints(blocks, constraints, autoDraft && explicitFree === undefined)) throw conflict();
 }

@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { uuidSchema } from "./foundation";
-import { assistanceLevelSchema, learningObservationSchema, observationOutcomeSchema, verdictSourceSchema } from "./learning";
+import { assistanceLevelSchema, learningObservationSchema, observationOutcomeSchema, publicVerdictSourceSchema } from "./learning";
 import { referenceCheckInputSchema } from "./learning-evidence";
 
 export const observationReplacementSchema = z.object({
   answer: z.string().max(20_000), outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,
   courseId: uuidSchema.optional(), skillLabel: z.string().trim().min(1).max(200).optional(),
-  requirementKey: z.string().max(200).nullable().optional(), verdictSource: verdictSourceSchema.optional(),
+  requirementKey: z.string().max(200).nullable().optional(), verdictSource: publicVerdictSourceSchema.optional(),
   referenceSourceId: uuidSchema.nullable().optional(), referenceCheck: referenceCheckInputSchema.optional(),
 }).strict();
 const operation = {

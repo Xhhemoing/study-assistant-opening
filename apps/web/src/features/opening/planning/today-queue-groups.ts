@@ -11,6 +11,7 @@ export type TodayQueueGroups = {
   overdue: TodayQueueTask[];
   other: TodayQueueTask[];
   upcomingRetestCount: number;
+  deferred: TodayQueueTask[];
   done: TodayQueueTask[];
 };
 
@@ -70,6 +71,7 @@ export function groupTodayQueue(
   const overdue: TodayQueueTask[] = [];
   const other: TodayQueueTask[] = [];
   const done: TodayQueueTask[] = [];
+  const deferred: TodayQueueTask[] = [];
   let upcomingRetestCount = 0;
 
   for (const task of tasks) {
@@ -79,6 +81,10 @@ export function groupTodayQueue(
     }
     if (task.status !== "pending") continue;
 
+    if (task.notBefore && new Date(task.notBefore).getTime() > now.getTime()) {
+      deferred.push(task);
+      continue;
+    }
     if (isFutureRetest(task, now)) {
       upcomingRetestCount += 1;
       // Future retests are not selectable in today's lists.
@@ -100,5 +106,5 @@ export function groupTodayQueue(
     other.push(task);
   }
 
-  return { confirmed, dueRetests, overdue, other, upcomingRetestCount, done };
+  return { confirmed, dueRetests, overdue, other, upcomingRetestCount, deferred, done };
 }

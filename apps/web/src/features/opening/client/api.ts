@@ -1,3 +1,4 @@
+import { createOpeningCoachClient } from "./coach-client";
 import {
   snippetCreateInputSchema,
   snippetCreateResponseSchema,
@@ -38,6 +39,13 @@ import {
   taskCreateInputSchema,
   taskStatusUpdateInputSchema,
   taskDeferInputSchema,
+  planFeedbackSummarySchema,
+  loopMetricsReportSchema,
+  suggestionFeedbackInputSchema, suggestionFeedbackResultSchema, type SuggestionFeedbackInput,
+  conversationPlanInspectionSchema, conversationPlanInputSchema, conversationPlanResultSchema,
+  type ConversationPlanInput,
+  localReplanInputSchema, localReplanResultSchema, replanOfferSchema,
+  type LocalReplanInput,
   openingAdaptivePrefsPatchSchema,
   openingAdaptivePrefsResponseSchema,
   taskCreateResultSchema,
@@ -194,6 +202,7 @@ const todayPlanSchema = z.object({
   dailyDraftSkippedReason: dailyDraftSkippedReasonSchema.nullable().optional(),
   unplannedPendingCount: z.number().int().nonnegative().optional(),
   hasNewerSuggestion: z.boolean().optional(),
+  replanOffer: replanOfferSchema.optional(),
 });
 export type TodayPlanRead = z.infer<typeof todayPlanSchema>;
 const taskListSchema = z.object({ tasks: z.array(taskItemSchema) });
@@ -216,6 +225,7 @@ export function sourceDownloadHref(sourceId: string, version: number): string {
 
 export function createOpeningApi(fetchImpl: FetchLike = fetch) {
   return {
+    ...createOpeningCoachClient(fetchImpl),
     async listConversations(): Promise<ConversationSummary[]> {
       const body = await request("/api/opening/conversations", { method: "GET" }, fetchImpl);
       return summaryListSchema.parse(body);
@@ -514,6 +524,35 @@ export function createOpeningApi(fetchImpl: FetchLike = fetch) {
       const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
       const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
       return todayPlanSchema.parse(body);
+    },
+
+    async getPlanFeedbackSummary(days = 7) {
+      const body = await request(`/api/opening/plans/feedback?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
+      return planFeedbackSummarySchema.parse(body);
+    },
+
+    async inspectConversationPlan(candidateId: string) {
+      const body = await request(`/api/opening/plans/from-candidate?candidateId=${encodeURIComponent(candidateId)}`, { method: "GET" }, fetchImpl);
+      return conversationPlanInspectionSchema.parse(body);
+    },
+    async proposeConversationPlan(input: ConversationPlanInput) {
+      const body = await request("/api/opening/plans/from-candidate", { method: "POST", body: JSON.stringify(conversationPlanInputSchema.parse(input)) }, fetchImpl);
+      return conversationPlanResultSchema.parse(body);
+    },
+
+    async submitSuggestionFeedback(input: SuggestionFeedbackInput) {
+      const body = await request("/api/opening/plans/suggestions/feedback", { method: "POST", body: JSON.stringify(suggestionFeedbackInputSchema.parse(input)) }, fetchImpl);
+      return suggestionFeedbackResultSchema.parse(body);
+    },
+
+    async getLoopMetrics(days = 14) {
+      const body = await request(`/api/opening/plans/metrics?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
+      return loopMetricsReportSchema.parse(body);
+    },
+
+    async proposeLocalReplan(input: LocalReplanInput) {
+      const body = await request("/api/opening/plans/replan", { method: "POST", body: JSON.stringify(localReplanInputSchema.parse(input)) }, fetchImpl);
+      return localReplanResultSchema.parse(body);
     },
 
     async listTasks(): Promise<{ tasks: TaskItem[] }> {

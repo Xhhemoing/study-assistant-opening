@@ -1,3 +1,4 @@
+import type { ServerEvaluation } from "@aistudy/contracts";
 /** Local S2 policy inputs. Adapters must supply server-owned facts, not client eligibility claims. */
 export type EvidenceEligibilityValue = "yes" | "no" | "unknown";
 export type EvidenceVersionApplicability =
@@ -17,6 +18,7 @@ interface EvidenceIdentity {
 }
 
 export interface EvidenceObservation extends EvidenceIdentity {
+  observationId?: string | null;
   courseId?: string | null;
   requirementKey?: string | null;
   /** Server times in epoch milliseconds; missing historical times remain unknown. */
@@ -24,7 +26,7 @@ export interface EvidenceObservation extends EvidenceIdentity {
   submittedAt?: number | null;
   assistance?: "independent" | "hinted" | "revealed" | "unknown" | null;
   outcome?: EvidenceOutcome | null;
-  verdictSource?: "self_report" | "reference_checked" | "model_suggestion" | "unknown" | null;
+  verdictSource?: "self_report" | "reference_checked" | "model_suggestion" | "unknown" | "deterministic" | null;
 }
 
 export interface EvidenceHelpExposure {
@@ -32,13 +34,16 @@ export interface EvidenceHelpExposure {
   problemId?: string | null;
   level: "hinted" | "revealed";
   /** V2-13: instruction | hint | solution. Missing/legacy reads as hint. */
-  kind?: "instruction" | "hint" | "solution" | null;
+  kind?: "instruction" | "hint" | "solution" | "evaluation_feedback" | null;
+  /** Server canonical catalogue comparison; not a learner-supplied identity. */
+  sameQuestion?: boolean;
   /** Persisted and retrievable by the client, not proof of reading. Null means unknown. */
   delivered: boolean | null;
   deliveredAt?: number | null;
 }
 
 export interface EvidenceEligibilityContext {
+  serverEvaluation?: ServerEvaluation | null;
   helpHistory?: {
     /** Covers this attempt and historical answer exposure for the same problem. */
     complete: boolean;
@@ -85,7 +90,14 @@ export type EvidenceEligibilityReasonCode =
   | "declared_help"
   | "assistance_unknown"
   | "prior_answer_exposure"
+  | "prior_evaluation_feedback"
   | "verification_source_untrusted"
+  | "server_evaluation_incomplete"
+  | "server_evaluation_identity_mismatch"
+  | "server_evaluation_outcome_conflict"
+  | "server_evaluation_abstained"
+  | "deterministic_correct"
+  | "deterministic_incorrect"
   | "reference_check_incomplete"
   | "reference_check_scope_incomplete"
   | "reference_check_identity_mismatch"

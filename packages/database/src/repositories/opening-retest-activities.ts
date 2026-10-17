@@ -197,7 +197,7 @@ export function createOpeningRetestActivityRepository(sql: Sql) {
     async listDue(scope: OpeningScope, courseId: string, now: string): Promise<RetestActivity[]> {
       const rows = await sql`SELECT a.* FROM opening_retest_activities a
         JOIN opening_tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id AND t.owner_user_id=a.owner_user_id
-          AND t.status='pending'
+          AND t.status='pending' AND (t.not_before IS NULL OR t.not_before <= ${now})
         WHERE a.workspace_id=${scope.workspaceId}
           AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
           AND a.status IN ('accepted','in_progress')

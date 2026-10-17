@@ -91,7 +91,7 @@ export async function measurementOverview(tx: TransactionSql, row: MeasurementRo
     return withheld ? { ...attempt, feedbackWithheld: true, outcome: null, predictions: [], feedback: "已保存，完成本轮后查看解析" } : attempt;
   });
   const next = chooseNextMeasurementItem({ trial, attempts: internal, items, now: await measurementNow(tx) });
-  return { trial, attempts, nextDueAt: next.dueAt, report: buildMeasurementReport(attempts, trial.models) };
+  return { trial, attempts, nextDueAt: next.availableAt, report: buildMeasurementReport(attempts, trial.models) };
 }
 
 export async function replayMeasurementCommand(tx: TransactionSql, trialId: string, key: string, intent: unknown): Promise<boolean> {

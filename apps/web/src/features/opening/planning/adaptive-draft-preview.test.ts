@@ -14,6 +14,14 @@ const draft: PlanDraft = {
 };
 
 describe("adaptive draft details", () => {
+  it("keeps a persisted declined suggestion unselectable without relabeling it as unscheduled or a learner skip", () => {
+    const html = renderToStaticMarkup(createElement(AdaptiveDraftDetails, { draft: { ...draft, rejectedSuggestedKeys: ["suggestion-selected"] },
+      tasks: [], selectedKeys: ["suggestion-selected"], disabled: false, onSelectionChange: vi.fn() }));
+    expect(html).toContain("已反馈不适合，今天不再推荐");
+    expect(html).not.toContain("已跳过");
+    expect(html.match(/学习 selected/g)).toHaveLength(1);
+    expect(html).not.toContain('checked="" aria-checked="true"');
+  });
   it("shows stored reasons with a legacy fallback and makes unscheduled suggestions unavailable", () => {
     const html = renderToStaticMarkup(createElement(AdaptiveDraftDetails, { draft, tasks: [], selectedKeys: ["suggestion-selected", "suggestion-blocked"], disabled: false, onSelectionChange: vi.fn() }));
     expect(html).toContain("最近核对错误，先巩固这一步");

@@ -123,6 +123,7 @@ export const planDraftSchema = z
     /** Adaptive planning (0061) — omitted for plain drafts. */
     origin: planDraftOriginSchema.optional(),
     suggestedTasks: z.array(suggestedTaskSchema).max(10).optional(),
+    rejectedSuggestedKeys: z.array(z.string().min(8).max(200)).max(10).optional(),
     reasons: z.record(uuidSchema, planBlockReasonSchema).optional(),
     strategyVersion: z.string().min(1).max(40).optional(),
   })

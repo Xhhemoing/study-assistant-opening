@@ -18,3 +18,14 @@ it("accepts a pinned teaching block and rejects invalid versions", () => {
   expect(learningAttemptCreateInputSchema.safeParse(input).success).toBe(true);
   expect(learningAttemptCreateInputSchema.safeParse({ ...input, teachingBlock: { blockId: sessionId, contentVersion: 0 } }).success).toBe(false);
 });
+it("accepts only a catalogue selector, never client operands, answers, or grading facts", () => {
+  const input = { sessionId, clientKey: "matrix-001", matrixExercise: { sourceId: sessionId, exerciseKey: "multiplication", variant: 0 } };
+  expect(learningAttemptCreateInputSchema.safeParse(input).success).toBe(true);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, matrixExercise: { ...input.matrixExercise, matrixA: [[1]], answer: [[1]] } }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, requirementKey: "fake" }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problemId: sessionId }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, matrixExercise: { ...input.matrixExercise, variant: 9 } }).success).toBe(false);
+  const submit = { clientKey: "matrix-answer", answer: "[[1]]", outcome: "correct", assistance: "independent" };
+  expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, verdictSource: "deterministic" }).success).toBe(false);
+  expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, serverEvaluation: {} }).success).toBe(false);
+});
