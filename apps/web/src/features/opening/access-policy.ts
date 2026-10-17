@@ -12,6 +12,10 @@ export function isOpeningRelease(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const raw = env.OPENING_RELEASE?.trim().toLowerCase();
+  if (!raw) return env.NODE_ENV === "production";
+  if (raw === "0" || raw === "false" || raw === "no") return false;
+  // Invalid production switches must never silently reopen registration.
+  if (env.NODE_ENV === "production") return true;
   return raw === "1" || raw === "true" || raw === "yes";
 }
 

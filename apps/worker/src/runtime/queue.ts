@@ -11,11 +11,16 @@ export function createRedisConnection({ url }: RedisOptions): IORedis {
   return new IORedis(url, { maxRetriesPerRequest: null });
 }
 
+/** A producer must fail promptly; blocking-worker retry policy is unsuitable. */
+export function createProducerRedisConnection({ url }: RedisOptions): IORedis {
+  return new IORedis(url, { maxRetriesPerRequest: 1, enableOfflineQueue: false, commandTimeout: 5_000 });
+}
+
 export function createQueue(kind: string, connection: IORedis): OpeningQueue {
   return new Queue(`opening-${kind}`, { connection });
 }
 
-export function createQueues(connection: IORedis): Record<string, OpeningQueue> {
+export function createQueues(connection: IORedis, onCreate?: (queue: OpeningQueue) => void): Record<string, OpeningQueue> {
   return Object.fromEntries(
     [
       "parse",
@@ -26,6 +31,10 @@ export function createQueues(connection: IORedis): Record<string, OpeningQueue> 
       "parse-media",
       "extract-study-actions",
       "compile-teaching-unit",
-    ].map((kind) => [kind, createQueue(kind, connection)]),
+    ].map((kind) => {
+      const queue = createQueue(kind, connection);
+      onCreate?.(queue);
+      return [kind, queue];
+    }),
   );
 }

@@ -189,8 +189,9 @@ const HONOR_WITHOUT_MATERIAL: ReadonlySet<ClaimEvidenceKind> = new Set([
 ]);
 
 /**
- * Classify a claim against the pack. Citation id alone (no text overlap)
- * is never material_reorg (AN-RN-06).
+ * Find candidate material links, not proof of truth or entailment. Even complete
+ * lexical overlap can repeat an incorrect source or reverse its meaning.
+ * Citation id alone (no text overlap) is never material_reorg (AN-RN-06).
  */
 export function classifyClaimSupport(input: {
   claimText: string;
@@ -258,7 +259,7 @@ export function classifyClaimSupport(input: {
       kind: "material_reorg",
       anchors,
       okForMaterialClaim: true,
-      reason: "cited pack chunks have lexical overlap with claim",
+      reason: "cited pack chunks have lexical overlap only; factual support is unverified",
     };
   }
 

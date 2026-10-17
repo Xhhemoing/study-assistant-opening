@@ -36,6 +36,21 @@ function streamRequest(
 }
 
 describe("readOpeningJsonBody", () => {
+  it("counts UTF-8 bytes and cancels a sender that exceeds the cap", async () => {
+    let cancelled = false;
+    const request = new Request("http://localhost/opening-body", {
+      method: "POST",
+      body: new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"x":"中"}')); },
+        cancel() { cancelled = true; },
+      }),
+      duplex: "half",
+    } as RequestInit);
+    await expect(readOpeningJsonBody(request, 9)).rejects.toMatchObject({ status: 413 });
+    expect(cancelled).toBe(true);
+    expect(request.body?.locked).toBe(false);
+  });
+
   it("rejects a declared Content-Length above the limit with 413", async () => {
     const request = jsonRequest("{}", String(OPENING_JSON_BODY_MAX_BYTES + 1));
 

@@ -22,6 +22,15 @@ describe("provider settings presentation", () => {
     expect(providerRequestBody({ label: " A ", baseUrl: " https://example.com ", apiKey: "" })).toEqual({ label: "A", baseUrl: "https://example.com" });
     expect(providerRequestBody({ label: "A", baseUrl: "https://example.com", apiKey: " k " })).toEqual({ label: "A", baseUrl: "https://example.com", apiKey: " k " });
   });
+  it("asks for a destination-specific key when changing an endpoint with stored credentials", () => {
+    const current = { id: providerId, label: "P", baseUrl: "https://example.com/v1", hasApiKey: true,
+      apiKeyHint: "1234", apiKeyUpdatedAt: null, modelCount: 0, createdAt: "", updatedAt: "" };
+    const draft = { label: "Renamed", baseUrl: "https://new.example/v1", apiKey: "" };
+    expect(validateProviderDraft(draft, current)).toContain("同时填写");
+    expect(validateProviderDraft({ ...draft, baseUrl: "https://EXAMPLE.COM:443/v1/" }, current)).toBeNull();
+    expect(validateProviderDraft({ ...draft, apiKey: "new-key" }, current)).toBeNull();
+    expect(validateProviderDraft(draft, { ...current, hasApiKey: false })).toBeNull();
+  });
   it("requires positive numeric prices for models", () => {
     const base = { ...emptyModelDraft, label: "M", modelName: "m" };
     expect(validateModelDraft({ ...base, inputCentsPerMillion: "1", outputCentsPerMillion: "2" })).toBeNull();

@@ -1,3 +1,4 @@
+import { openingJobScope } from "@aistudy/database";
 import type {
   ActivitySpecPublishInput,
   ProviderInput,
@@ -209,7 +210,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
     payload: unknown,
   ): Promise<unknown> {
     const body = parsePayload(payload);
-    const scope: Scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const scope = openingJobScope(job);
     const operationId = `compile-teaching-unit:${job.id}`;
 
     const scopedBudget: BudgetedRepository = {

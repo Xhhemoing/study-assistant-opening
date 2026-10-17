@@ -1,3 +1,4 @@
+import { openingJobScope } from "@aistudy/database";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -120,7 +121,7 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
       };
     }
 
-    const scope = { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId };
+    const scope = openingJobScope(job);
     const source = await deps.sources.get(scope, sourceId);
     if (source.uploadState !== "uploaded") throw new Error("source is not uploaded");
     if (!MEDIA_MIMES.has(source.mime)) {

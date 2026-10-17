@@ -2,6 +2,11 @@
 # Serialize and de-prioritize expensive validation tasks on the small shared VM.
 set -euo pipefail
 
+if [[ "${HERMES_HEAVY_ENABLED:-1}" == 0 ]]; then
+  export HERMES_HEAVY_LOCK_HELD=1
+  exec "$@"
+fi
+
 lock_file="${HERMES_HEAVY_LOCK:-/tmp/hermes-project-heavy.lock}"
 mkdir -p "$(dirname "$lock_file")"
 

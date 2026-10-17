@@ -37,6 +37,14 @@ describe("loadEnv", () => {
     ).toBe(false);
   });
 
+  it("trusts no client IP header by default and validates an explicit header name", () => {
+    expect(loadEnv(valid).authTrustedIpHeader).toBeUndefined();
+    expect(loadEnv({ ...valid, AUTH_TRUSTED_IP_HEADER: " X-Real-IP " }).authTrustedIpHeader).toBe("X-Real-IP");
+    for (const header of ["x-real-ip, forwarded", "x-real-ip\r\ninjected: yes"]) {
+      expect(() => loadEnv({ ...valid, AUTH_TRUSTED_IP_HEADER: header })).toThrow(EnvValidationError);
+    }
+  });
+
   it("disables paid calls by default and validates a configured daily cap and prices", () => {
     expect(loadEnv(valid).openingModel.dailyCapCents).toBe(0);
     const paid = { ...valid, OPENING_MODEL_API_KEY: "test-key", OPENING_MODEL_DAILY_CAP_CENTS: "100", OPENING_MODEL_INPUT_CENTS_PER_MILLION: "10", OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "20" };

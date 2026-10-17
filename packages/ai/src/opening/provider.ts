@@ -7,6 +7,7 @@ import {
 } from "@aistudy/contracts";
 import { classifyProviderFailure } from "./errors";
 import { renderContext } from "./context";
+import { assertOpeningProviderEndpoint, fetchOpeningProvider, OpeningProviderEndpointError } from "./provider-network";
 
 const answerSchema = providerOutputSchema.pick({ text: true, citedChunkIds: true, candidates: true });
 const outputInstruction = [
@@ -54,6 +55,7 @@ export type OpeningProviderOptions = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Trusted test injection only; production callers use the guarded transport. */
   fetchImpl?: OpeningFetch;
   timeoutMs?: number;
   supportsVision?: boolean;
@@ -73,11 +75,6 @@ export class OpeningProviderError extends Error {
     this.code = code;
     this.retryable = retryable;
   }
-}
-
-function endpointAllowed(baseUrl: string): boolean {
-  const url = new URL(baseUrl);
-  return url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname));
 }
 
 /** Strip optional markdown code fences (```json ... ``` / ``` ... ```). */
@@ -168,10 +165,8 @@ function parseOutput(body: unknown, format: "answer" | "json" = "answer"): Provi
 }
 
 export function createOpeningProvider(options: OpeningProviderOptions): { complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput> } {
-  if (!endpointAllowed(options.baseUrl)) {
-    throw new Error("provider baseUrl must use HTTPS");
-  }
-  const fetchImpl = options.fetchImpl ?? fetch;
+  assertOpeningProviderEndpoint(options.baseUrl);
+  const fetchImpl = options.fetchImpl ?? fetchOpeningProvider;
   const timeoutMs = options.timeoutMs ?? 30_000;
   return {
     async complete(input, callerSignal) {
@@ -219,6 +214,7 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
             max_tokens: input.maxOutputTokens,
           }),
           signal,
+          redirect: "error",
         });
         if (!response.ok) {
           const failure = classifyProviderFailure(response.status);
@@ -233,6 +229,7 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
         return parseOutput(body, format);
       } catch (error) {
         if (error instanceof OpeningProviderError) throw error;
+        if (error instanceof OpeningProviderEndpointError) throw new OpeningProviderError("PROVIDER_ENDPOINT", error.message);
         if (callerSignal?.aborted) {
           throw new OpeningProviderError("PROVIDER_ABORTED", "provider request aborted", false);
         }

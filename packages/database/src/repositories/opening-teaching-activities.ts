@@ -1,3 +1,4 @@
+import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -400,27 +401,34 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       status: TeachingActivity["generateStatus"],
       options?: { from?: readonly TeachingActivity["generateStatus"][] },
     ): Promise<boolean> {
-      const from = options?.from;
-      if (from && from.length) {
-        const fromList = [...from];
-        const rows = await sql`
+      const write = async (db: Sql) => {
+        const from = options?.from;
+        if (from && from.length) {
+          const fromList = [...from];
+          const rows = await db`
+            UPDATE opening_teaching_activities
+            SET generate_status = ${status}, updated_at = now()
+            WHERE id = ${activityId}
+              AND workspace_id = ${scope.workspaceId}
+              AND owner_user_id = ${scope.ownerUserId}
+              AND generate_status = ANY(${fromList}::text[])
+            RETURNING id`;
+          return rows.length > 0;
+        }
+        const rows = await db`
           UPDATE opening_teaching_activities
           SET generate_status = ${status}, updated_at = now()
           WHERE id = ${activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}
-            AND generate_status = ANY(${fromList}::text[])
           RETURNING id`;
         return rows.length > 0;
-      }
-      const rows = await sql`
-        UPDATE opening_teaching_activities
-        SET generate_status = ${status}, updated_at = now()
-        WHERE id = ${activityId}
-          AND workspace_id = ${scope.workspaceId}
-          AND owner_user_id = ${scope.ownerUserId}
-        RETURNING id`;
-      return rows.length > 0;
+      };
+      if (!(scope as OpeningJobScope).jobExecution) return write(sql);
+      return sql.begin(async (tx) => {
+        await lockOpeningJobExecution(tx, scope);
+        return write(tx as unknown as Sql);
+      });
     },
 
     /**
@@ -522,7 +530,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           WHERE workspace_id = ${scope.workspaceId} AND key = ${key}`;
         const row = existing[0] as Record<string, unknown> | undefined;
         if (!row) throw learningError("NOT_FOUND", "compile job disappeared after conflict");
-        if (JSON.stringify(row.payload) !== JSON.stringify(payload)) {
+        if (!isDeepStrictEqual(row.payload, payload)) {
           throw learningError("CONFLICT", "idempotency payload differs for the same key");
         }
         return { jobId: String(row.id), kind: "compile-teaching-unit" as const, created: false };

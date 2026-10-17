@@ -36,9 +36,12 @@ function stagingUploadUrl(sourceId: string): string {
 function contentDispositionHeader(filename: string, kind: "attachment" | "inline"): string {
   const fallback = Array.from(filename).map((ch) => {
     const code = ch.charCodeAt(0);
-    return code === 34 || code === 13 || code === 10 ? "_" : ch;
+    return code < 32 || code > 126 || ch === '"' || ch === "\\" || ch === ";" ? "_" : ch;
   }).join("") || "download";
-  const encoded = encodeURIComponent(filename);
+  // Header values must be byte strings. Keep Unicode only in RFC 5987's
+  // percent-encoded parameter, and replace unpaired UTF-16 surrogates safely.
+  const unicodeFilename = new TextDecoder().decode(new TextEncoder().encode(filename));
+  const encoded = encodeURIComponent(unicodeFilename).replace(/[!'()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
   return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 

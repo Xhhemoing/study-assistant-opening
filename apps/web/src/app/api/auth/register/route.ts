@@ -10,6 +10,8 @@ import {
   isOpeningRelease,
 } from "../../../../features/opening/access-policy";
 import { getAuthRuntime } from "../../../../server/runtime";
+import { enforceAuthRateLimit } from "../../../../server/auth-throttle";
+import { readOpeningJsonBody } from "../../../../features/opening/request-body";
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -22,8 +24,9 @@ export async function POST(request: Request): Promise<Response> {
         ),
       );
     }
+    const body = await readOpeningJsonBody(request, 8 * 1024);
+    await enforceAuthRateLimit(request, body, "register");
     const runtime = getAuthRuntime();
-    const body = await request.json();
     const result = await registerUser(runtime, body);
     return Response.json(
       { user: result.user },

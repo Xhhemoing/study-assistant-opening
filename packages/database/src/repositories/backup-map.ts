@@ -58,6 +58,10 @@ export function wrapBackupError(error: unknown): never {
           : "VALIDATION";
     throw new BackupRestoreError(code, error.message);
   }
+  if (typeof error === "object" && error !== null && "code" in error
+    && typeof error.code === "string" && /^(22|23)/u.test(error.code)) {
+    throw new BackupRestoreError("VALIDATION", "Backup records conflict with the target workspace or contain invalid references");
+  }
   throw error;
 }
 

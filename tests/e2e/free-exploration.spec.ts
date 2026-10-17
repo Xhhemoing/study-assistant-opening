@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 function userInput(label: string) {
   return { email: `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`, password: "password123", displayName: label };

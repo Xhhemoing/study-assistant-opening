@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { expect, test, type BrowserContext } from "./fixtures";
 
 async function register(context: BrowserContext, label: string) {
   const response = await context.request.post("/api/auth/register", { headers: { origin: "http://127.0.0.1:3000" },

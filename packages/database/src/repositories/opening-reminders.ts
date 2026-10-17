@@ -299,7 +299,7 @@ export function createOpeningReminderRepository(sql: Sql) {
       return rows as Array<Record<string, unknown>>;
     },
 
-    async isCurrent(id: string, now = new Date()): Promise<boolean> {
+    async isCurrent(id: string, now = new Date(), claimToken?: string): Promise<boolean> {
       return sql.begin(async (tx) => {
         const rows = await tx`SELECT j.payload, j.privacy_epoch, j.workspace_id AS job_workspace_id,
             j.owner_user_id AS job_owner_user_id,
@@ -310,7 +310,8 @@ export function createOpeningReminderRepository(sql: Sql) {
             AND t.workspace_id=j.workspace_id AND t.owner_user_id=j.owner_user_id
           LEFT JOIN opening_retest_activities a ON a.task_id=t.id
             AND a.workspace_id=j.workspace_id AND a.owner_user_id=j.owner_user_id
-          WHERE j.id=${id} AND j.kind='remind' AND j.state='running'`;
+          WHERE j.id=${id} AND j.kind='remind' AND j.state='running'
+            AND (${claimToken ?? null}::uuid IS NULL OR j.claim_token = ${claimToken ?? null}::uuid)`;
         if (!rows.length) return false;
         const row = rows[0] as Record<string, unknown>;
         const payload = row.payload as ReminderPayload;
@@ -339,9 +340,13 @@ export function createOpeningReminderRepository(sql: Sql) {
 
     async recordAttempt(
       id: string,
-      input: { receiptId: string | null; outcome: ReminderPayload["outcome"]; state: "succeeded" | "failed" | "outcome_unknown" | "queued"; suppressed?: boolean; availableAt?: string },
+      input: { receiptId: string | null; outcome: ReminderPayload["outcome"]; state: "succeeded" | "failed" | "outcome_unknown" | "queued"; suppressed?: boolean; availableAt?: string; claimToken?: string },
     ): Promise<boolean> {
       return sql.begin(async tx => {
+        // Match recovery/cancel's workspace-first order before taking the job
+        // lock; a quiet retry inserts an outbox row with a workspace FK.
+        await tx`SELECT w.id FROM workspaces w JOIN opening_jobs j ON j.workspace_id = w.id
+          WHERE j.id = ${id} FOR SHARE OF w`;
         const rows = await tx`
         UPDATE opening_jobs
         SET state = ${input.state},
@@ -349,6 +354,7 @@ export function createOpeningReminderRepository(sql: Sql) {
             result = ${tx.json({ receiptId: input.receiptId, outcome: input.outcome } as never)},
             updated_at = now()
         WHERE id = ${id} AND state = 'running' AND kind = ${"remind"}
+          AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
         RETURNING id,workspace_id`;
         if (!rows.length) return false;
         if (input.state === "queued") {

@@ -64,6 +64,20 @@ describe("workspace model provider repository", () => {
     await repo.createModel(fixture.scope, provider.id, modelInput);
     expect((await repo.listResolvableModels(fixture.scope))[0]!.apiKey).toBe("sk-rotated-9999");
   });
+  it("requires a replacement credential before changing the endpoint and rolls back rejected updates", async () => {
+    const repo = createOpeningModelProvidersRepository(fixture.sql);
+    const provider = await repo.createProvider(fixture.scope, providerInput);
+    await repo.createModel(fixture.scope, provider.id, modelInput);
+    await expect(repo.updateProvider(fixture.scope, provider.id, { label: "Rejected rename", baseUrl: "https://new.example/v1" }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await repo.list(fixture.scope))[0]).toMatchObject({ label: providerInput.label, baseUrl: providerInput.baseUrl, apiKeyHint: "1234" });
+    await repo.updateProvider(fixture.scope, provider.id, { baseUrl: "https://API.EXAMPLE.COM:443/v1/", label: "Same destination" });
+    expect((await repo.listResolvableModels(fixture.scope))[0]).toMatchObject({ baseUrl: providerInput.baseUrl, apiKey: providerInput.apiKey });
+    await repo.updateProvider(fixture.scope, provider.id, { baseUrl: "https://new.example/v1", apiKey: "new-endpoint-key" });
+    expect((await repo.listResolvableModels(fixture.scope))[0]).toMatchObject({ baseUrl: "https://new.example/v1", apiKey: "new-endpoint-key" });
+    const empty = await repo.createProvider(fixture.scope, { label: "No key", baseUrl: "https://empty.example" });
+    await expect(repo.updateProvider(fixture.scope, empty.id, { baseUrl: "https://new.example" })).resolves.toMatchObject({ hasApiKey: false });
+  });
   it("stores free-tier models with a request cap and audio input, and rejects inconsistent pricing", async () => {
     const repo = createOpeningModelProvidersRepository(fixture.sql);
     const provider = await repo.createProvider(fixture.scope, { label: "Google", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "gm-key-9999" });

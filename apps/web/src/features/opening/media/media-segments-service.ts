@@ -369,7 +369,7 @@ export function createOpeningMediaSegmentsService(
           await jobs.finish(claimed.id, "succeeded", {
             ...payload,
             claimsVisualUnderstanding: false,
-          });
+          }, claimed.claimToken);
         }
       }
       return { jobId: job.id };

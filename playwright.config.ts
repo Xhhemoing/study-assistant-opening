@@ -21,6 +21,7 @@ export default defineConfig({
     reuseExistingServer: false,
     env: {
       NODE_ENV: "production",
+      OPENING_RELEASE: "0",
       HERMES_HEAVY_LOCK_HELD: "1",
       DATABASE_URL: e2eDatabaseUrl,
       E2E_DATABASE_URL: e2eDatabaseUrl,

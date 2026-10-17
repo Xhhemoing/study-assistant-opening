@@ -15,6 +15,7 @@ const alias = {
     root,
     "packages/database/src/migrate.ts",
   ),
+  "@aistudy/ai/model-routing": path.resolve(root, "packages/ai/src/model-routing.ts"),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
@@ -35,14 +36,16 @@ const sharedExclude = [
 
 export default defineConfig({
   test: {
-    maxWorkers: 1,
+    // CI is isolated; keep parallel unit/contract work bounded there while
+    // retaining the small shared development host's single-worker default.
+    maxWorkers: process.env.CI === "true" ? 4 : 1,
     projects: [
       defineProject({
         resolve: { alias },
         oxc: { jsx: { runtime: "automatic" } },
         test: {
           name: "unit",
-          include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
+          include: ["packages/*/src/**/*.test.{ts,tsx}", "apps/*/src/**/*.test.{ts,tsx}"],
           exclude: sharedExclude,
           environment: "node",
         },
@@ -53,6 +56,7 @@ export default defineConfig({
         test: {
           name: "handler",
           include: ["tests/integration/handler/**/*.test.ts"],
+          setupFiles: [path.resolve(root, "tests/integration/handler/auth-rate-limit-setup.ts")],
           exclude: sharedExclude,
           environment: "node",
           fileParallelism: false,

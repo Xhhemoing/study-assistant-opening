@@ -3,7 +3,7 @@
 import "katex/dist/katex.min.css";
 import type { Element, ElementContent, Root } from "hast";
 import type { Parent as MdastParent, Root as MdastRoot, Text as MdastText } from "mdast";
-import { Component, useMemo, type ReactNode } from "react";
+import { Component, memo, useMemo, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex, { type Options as KatexOptions } from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -127,12 +127,23 @@ export class PlainTextFallback extends Component<{ text: string; children: React
 }
 
 const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-emerald-700 no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50";
+const NO_CITATIONS: readonly CitationLink[] = [];
+type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[] };
+
+/** Citation links are derived by the message list; equivalent links do not require reparsing math. */
+export function sameLearningProseContent(previous: LearningProseProps, next: LearningProseProps): boolean {
+  if (previous.text !== next.text) return false;
+  const before = previous.citationLinks ?? NO_CITATIONS;
+  const after = next.citationLinks ?? NO_CITATIONS;
+  return before.length === after.length && before.every((link, index) =>
+    link.href === after[index]?.href && link.label === after[index]?.label);
+}
 
 /**
  * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
-export function LearningProse({ text, citationLinks = [] }: { text: string; citationLinks?: readonly CitationLink[] }) {
+export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS }: LearningProseProps) {
   const withCitations = useMemo<Components>(() => citationLinks.length ? {
     ...components,
     sup: ({ children, ...props }) => {
@@ -153,4 +164,4 @@ export function LearningProse({ text, citationLinks = [] }: { text: string; cita
       >{text}</Markdown>
     </div>
   </PlainTextFallback>;
-}
+}, sameLearningProseContent);

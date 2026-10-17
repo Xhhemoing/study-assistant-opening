@@ -22,7 +22,7 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
     VALUES (${sourceId}, ${f.scope.workspaceId}, 'audio.wav', 'audio/wav', 10, ${'a'.repeat(64)}, 1, 'uploaded', 'running')`;
   const jobs = createOpeningJobRepository(f.sql);
   const job = await jobs.createOnce(f.scope, { key: randomUUID(), kind: 'parse-media', payload: { sourceId, sourceVersion: 1 }, privacyEpoch: 0 });
-  await jobs.claim(job.id);
+  const claimed = await jobs.claim(job.id);
   const repo = createOpeningTranscriptionCheckpointsRepository(f.sql);
   const budget = createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 });
   const provider = vi.fn(async () => ({ text: JSON.stringify({ segments: [{ startMs: 0, endMs: 900, text: 'spoken' }] }),
@@ -48,7 +48,7 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
   } });
   const adapter = makeAdapter(job.id);
   async function manualRetry() {
-    await jobs.finish(job.id, 'failed', { message: 'parse failed' });
+    await jobs.finish(job.id, 'failed', { message: 'parse failed' }, claimed!.claimToken);
     const key = `parse:${sourceId}:retry:${randomUUID()}`;
     await createOpeningSourceRepository(f.sql).retryParseWithJob(f.scope, sourceId, {
       key, payload: { sourceId, sourceVersion: 1 }, privacyEpoch: 0,

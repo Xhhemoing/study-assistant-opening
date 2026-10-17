@@ -22,6 +22,7 @@ export type OpeningTutorJobRecord = {
   error: OpeningTutorJobError | null;
   createdAt: string;
   updatedAt: string;
+  claimToken?: string;
 };
 
 function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
@@ -36,6 +37,7 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
     error: (row.error as OpeningTutorJobRecord["error"]) ?? null,
     createdAt: new Date(row.created_at as string | Date).toISOString(),
     updatedAt: new Date(row.updated_at as string | Date).toISOString(),
+    ...(typeof row.claim_token === "string" ? { claimToken: row.claim_token } : {}),
   };
 }
 
@@ -53,9 +55,11 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     message: string;
     status: "failed" | "outcome_unknown";
     detail?: { code: string; nextAction?: "clarify" };
-  }): Promise<void> {
+    claimToken?: string;
+    staleBefore?: Date;
+  }): Promise<boolean> {
     const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
-    await sql.begin(async (tx) => {
+    return sql.begin(async (tx) => {
       // Use the same workspace-first lock order as completeTurn/cancel.
       await tx`
         SELECT id FROM workspaces
@@ -68,6 +72,8 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
               updated_at = now()
             WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
               AND status IN ('running', 'queued')
+              AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
+              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
             RETURNING assistant_turn_id
           `
         : await tx`
@@ -75,9 +81,11 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
               error = ${tx.json({ message: input.message } as never)}, updated_at = now()
             WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
               AND status = 'running'
+              AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
+              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
             RETURNING assistant_turn_id
           `;
-      if (!rows.length) return;
+      if (!rows.length) return false;
       const assistantTurnId = (rows[0] as Record<string, unknown>).assistant_turn_id as string;
       // A terminal turn (complete/failed/clarify/outcome_unknown) is never
       // rewritten, even if a stale job row is swept or re-terminated later.
@@ -102,6 +110,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
             AND NOT (status = ANY(${terminal}::text[]))
         `;
       }
+      return true;
     });
   }
 
@@ -110,16 +119,32 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     loadHistoryContext: (scope: OpeningScope, currentTurnId: string) => loadTutorHistoryContext(sql, scope, currentTurnId),
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
-        UPDATE opening_tutor_jobs j SET status = 'running', updated_at = now()
+        UPDATE opening_tutor_jobs j SET status = 'running', claim_token = ${randomUUID()}, updated_at = now()
         FROM workspaces w
         WHERE j.id = ${id} AND j.workspace_id = w.id
-          AND j.status IN ('queued', 'running')
-          AND (j.status = 'queued' OR j.updated_at < now() - interval '5 minutes')
+          AND j.status = 'queued'
         RETURNING j.*, w.owner_user_id
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;
       return { ...mapJob(row), ownerUserId: row.owner_user_id as string };
+    },
+
+    async heartbeat(id: string, claimToken: string): Promise<boolean> {
+      const rows = await sql`UPDATE opening_tutor_jobs SET updated_at = now()
+        WHERE id = ${id} AND status = 'running' AND claim_token = ${claimToken} RETURNING id`;
+      return rows.length > 0;
+    },
+
+    async recoverExpired(limit = 50): Promise<number> {
+      const rows = await sql`SELECT id, workspace_id, now() - interval '5 minutes' AS stale_before FROM opening_tutor_jobs
+        WHERE status = 'running' AND updated_at < now() - interval '5 minutes' ORDER BY updated_at LIMIT ${limit}`;
+      let recovered = 0;
+      for (const row of rows) {
+        if (await markTerminal({ scope: { workspaceId: row.workspace_id, ownerUserId: "" }, jobId: row.id,
+          message: "回答任务已中断，执行结果待确认；为避免重复调用未自动重发。", status: "outcome_unknown", staleBefore: row.stale_before as Date })) recovered += 1;
+      }
+      return recovered;
     },
 
     async findPendingForConversation(
@@ -206,9 +231,12 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     },
 
     async listQueued(limit: number): Promise<OpeningTutorJobRecord[]> {
+      // Short dispatch lease bounds Redis traffic and is recovered after a crash.
       const rows = await sql`
-        SELECT * FROM opening_tutor_jobs WHERE status = 'queued'
-        ORDER BY created_at ASC LIMIT ${limit}
+        UPDATE opening_tutor_jobs j SET dispatch_after = now() + interval '1 minute'
+        FROM (SELECT id FROM opening_tutor_jobs WHERE status = 'queued' AND dispatch_after <= now()
+          ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT ${limit}) due
+        WHERE j.id = due.id RETURNING j.*
       `;
       return rows.map((row) => mapJob(row as Record<string, unknown>));
     },
@@ -238,6 +266,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         delivered: true;
       };
       expectedPrivacyEpoch?: number;
+      claimToken?: string;
     }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure) await lockWorkspaceLearningHistory(tx, input.scope);
@@ -257,6 +286,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           WHERE id = ${input.jobId}
             AND workspace_id = ${input.scope.workspaceId}
             AND status = 'running'
+            AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
           RETURNING id
         `;
         if (!claimed.length) return;
@@ -341,12 +371,13 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
      * assistant turn; finish the running job without re-writing the turn.
      * Returns false when the job is no longer running or the turn is not complete.
      */
-    async completeFromReplay(scope: OpeningScope, jobId: string, assistantTurnId: string): Promise<boolean> {
+    async completeFromReplay(scope: OpeningScope, jobId: string, assistantTurnId: string, claimToken?: string): Promise<boolean> {
       const rows = await sql`
         UPDATE opening_tutor_jobs j SET status = 'succeeded', error = NULL, updated_at = now()
         WHERE j.id = ${jobId} AND j.workspace_id = ${scope.workspaceId}
           AND j.assistant_turn_id = ${assistantTurnId}
           AND j.status = 'running'
+          AND j.claim_token IS NOT DISTINCT FROM ${claimToken ?? null}::uuid
           AND EXISTS (
             SELECT 1 FROM opening_turns t
             WHERE t.id = ${assistantTurnId} AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
@@ -361,12 +392,13 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       jobId: string,
       message: string,
       detail?: { code: string; nextAction?: "clarify" },
+      claimToken?: string,
     ): Promise<void> {
-      await markTerminal({ scope, jobId, message, status: "failed", detail });
+      await markTerminal({ scope, jobId, message, status: "failed", detail, claimToken });
     },
 
-    async markUnknown(scope: OpeningScope, jobId: string, message: string): Promise<void> {
-      await markTerminal({ scope, jobId, message, status: "outcome_unknown" });
+    async markUnknown(scope: OpeningScope, jobId: string, message: string, claimToken?: string): Promise<void> {
+      await markTerminal({ scope, jobId, message, status: "outcome_unknown", claimToken });
     },
   };
 }

@@ -1,3 +1,4 @@
+import { lockOpeningJobExecution } from "./opening-job-execution";
 import { randomUUID } from "node:crypto";
 import {
   knowledgeSnapshotSchema,
@@ -221,6 +222,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
           FOR UPDATE`;
         if (!owner.length) throw new OpeningKnowledgeError("NOT_FOUND", "course not found");
+        await lockOpeningJobExecution(tx, scope);
 
         const currentRows = await tx`
           SELECT version, snapshot, source_versions FROM opening_course_knowledge

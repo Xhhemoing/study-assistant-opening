@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { isOpeningReleaseEnabled, loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 
 test.skip(!isOpeningReleaseEnabled(), "requires a web server started with OPENING_RELEASE=1");

@@ -264,6 +264,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
 
       const document = await library.createDocument({
         workspaceId: scope.workspaceId,
+        jobScope: scope,
         title: input.title,
         lifecycle,
         blocks,
@@ -316,6 +317,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       });
       const updated = await library.updateDocument({
         workspaceId: scope.workspaceId,
+        jobScope: scope,
         documentId: unit.documentId,
         expectedRevisionNumber: current.currentRevisionNumber,
         blocks: blocks.map((b) => ({ id: b.id, type: b.type, content: b.content })),

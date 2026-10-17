@@ -1,5 +1,5 @@
 import type { OpeningAiSettings, OpeningAiSettingsResponse, OpeningModelSummary, TutorMode } from "@aistudy/contracts";
-import { selectedFallbackModelIdForTask, selectedModelIdForTask, selectedOpeningModelId, type ModelTaskKey } from "@aistudy/ai";
+import { selectedFallbackModelIdForTask, selectedModelIdForTask, selectedOpeningModelId, type ModelTaskKey } from "@aistudy/ai/model-routing";
 
 export const tutorRouteLabels: Array<{ mode: TutorMode; label: string }> = [
   { mode: "listen", label: "倾听" }, { mode: "hint", label: "提示" },

@@ -113,7 +113,7 @@ test("stale backup beyond the configured age is named with the age, not silent",
   assert.ok(report.failing.some((item) => /backup/i.test(item)));
 });
 
-test("registration is locked only by the product OPENING_RELEASE parsing", () => {
+test("registration follows OPENING_RELEASE and the production closed default", () => {
   for (const value of ["1", "true", " YES "]) {
     assert.equal(registrationCheck({ OPENING_RELEASE: value }).ok, true, value);
   }
@@ -122,6 +122,12 @@ test("registration is locked only by the product OPENING_RELEASE parsing", () =>
   }
   // The old flag name is not what the product reads.
   assert.equal(registrationCheck({ OPENING_REGISTRATION_LOCKED: "true" }).ok, false);
+  for (const value of [undefined, "", "on", "1"]) {
+    assert.equal(registrationCheck({ NODE_ENV: "production", OPENING_RELEASE: value }).ok, true);
+  }
+  for (const value of ["0", "false", "no"]) {
+    assert.equal(registrationCheck({ NODE_ENV: "production", OPENING_RELEASE: value }).ok, false);
+  }
 });
 
 test("provider and cap readiness follow catalog availability, not string presence", () => {

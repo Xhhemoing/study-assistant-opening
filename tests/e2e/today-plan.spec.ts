@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { expect, test, type BrowserContext } from "./fixtures";
 import { isOpeningReleaseEnabled } from "./opening-auth";
 
 async function register(context: BrowserContext, label: string) {

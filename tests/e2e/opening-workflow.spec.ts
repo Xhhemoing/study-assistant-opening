@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 
 test.skip(process.env.OPENING_E2E !== "1", "requires the isolated Opening configuration and fixture provider");

@@ -6,7 +6,8 @@ import { createOpeningBudgetRepository, createOpeningJobRepository, createOpenin
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadServerConfig } from "@aistudy/config";
-import { createRedisConnection, createQueues } from "./runtime/queue";
+import { createRedisConnection, createProducerRedisConnection, createQueues } from "./runtime/queue";
+import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
 import { preflightParser } from "./parsers/parser-preflight";
@@ -46,7 +47,38 @@ export async function main(): Promise<void> {
   const runner = await preflightParser();
   const openingModel = loadOpeningModelCatalog();
   const redis = createRedisConnection({ url: env.redisUrl });
+  const producer = createProducerRedisConnection({ url: env.redisUrl });
+  const reportError = (error: unknown) => console.error("worker background operation failed", error instanceof Error ? error.name : "unknown error");
+  redis.on("error", reportError);
+  producer.on("error", reportError);
   const sql = createSqlClient(env.databaseUrl);
+  const workers: Worker[] = [];
+  const openedQueues: ReturnType<typeof createQueues>[string][] = [];
+  const tasks: ReturnType<typeof createSerialTask>[] = [];
+  const timers: ReturnType<typeof setInterval>[] = [];
+  let stopping = false;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = () => shutdownPromise ??= (async () => {
+    stopping = true;
+    for (const timer of timers) clearInterval(timer);
+    const failures: unknown[] = [];
+    const closeAll = async (closers: Array<() => Promise<unknown>>) => {
+      const results = await Promise.allSettled(closers.map((close) => Promise.resolve().then(close)));
+      for (const result of results) if (result.status === "rejected") failures.push(result.reason);
+    };
+    await closeAll(tasks.map((task) => () => task.stop()));
+    await closeAll(workers.map((worker) => () => worker.close()));
+    await closeAll(openedQueues.map((queue) => () => queue.close()));
+    producer.disconnect();
+    redis.disconnect();
+    await closeAll([() => sql.end({ timeout: 5 })]);
+    if (failures.length) {
+      process.exitCode = 1;
+      throw failures[0];
+    }
+  })();
+  try {
+
   const repository = createOpeningJobRepository(sql);
   const privacyRepo = createOpeningPrivacyRepository(sql);
   const learning = createOpeningLearningRepository(sql);
@@ -67,7 +99,7 @@ export async function main(): Promise<void> {
   const planningSettings = createOpeningPlanningSettingsRepository(sql);
   const remind = createRemindHandler({
     record: (id, input) => reminders.recordAttempt(id, input),
-    isCurrent: (id, at) => reminders.isCurrent(id, at),
+    isCurrent: (id, at, claimToken) => reminders.isCurrent(id, at, claimToken),
     externalConfig: (job) => reminders.getExternalConfig({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }),
     // TZ01: live planning TZ for older jobs lacking payload.timeZone stamp.
     resolveTimeZone: async (job) => {
@@ -157,10 +189,10 @@ export async function main(): Promise<void> {
       insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),
     },
   });
-  const queues = createQueues(redis);
-  let stopping = false;
-  const workers = Object.entries(queues).map(([kind, queue]) => new Worker(queue.name, async (job) => {
-    if (stopping) return;
+  const queues = createQueues(producer, (queue) => openedQueues.push(queue));
+  for (const [kind, queue] of Object.entries(queues)) {
+    const worker = new Worker(queue.name, async (job) => {
+    if (stopping) throw new Error("worker is shutting down");
     if (kind === "tutor") {
       const data = job.data as { jobId?: string };
       if (!data.jobId) throw new Error("tutor queue job is missing its tutor job id");
@@ -168,35 +200,42 @@ export async function main(): Promise<void> {
       return;
     }
     await runJob(repository, job.data.jobId ?? job.id, handlerForKind(kind, handlers));
-  }, { connection: redis, concurrency: kind === "parse" ? 1 : 2 }));
-  const tick = setInterval(() => { void dispatchPending({ repository, queues }).then(() => dispatchTutorTurns({ tutorJobs, queues })); }, 1000);
+  }, { connection: redis, concurrency: kind === "parse" ? 1 : 2 });
+    workers.push(worker);
+    worker.on("error", reportError);
+  }
+  const dispatch = createSerialTask(async () => {
+    await repository.recoverExpired();
+    await tutorJobs.recoverExpired();
+    await dispatchPending({ repository, queues });
+    await dispatchTutorTurns({ tutorJobs, queues });
+  }, reportError);
+  tasks.push(dispatch);
+  timers.push(setInterval(() => { void dispatch.run(); }, 1000));
   // G4: slower interval for pending-upload TTL sweep (Data sweepExpiredPendingUploadsAll).
   // Returned swept ids are the notify hook — delivery skipped this wave.
   const sweepPendingUploads = createSweepPendingUploadsJob({
     sweepAll: (options) => sweepExpiredPendingUploadsAll(sql, options),
   });
-  const sweepTick = setInterval(() => {
-    if (stopping) return;
-    void sweepPendingUploads().catch(() => {
-      /* sweep failure must not crash the worker */
-    });
-  }, PENDING_UPLOAD_SWEEP_INTERVAL_MS);
-  const shutdown = async () => {
-    stopping = true;
-    clearInterval(tick);
-    clearInterval(sweepTick);
-    await Promise.all(workers.map((worker) => worker.close()));
-    await Promise.all(Object.values(queues).map((queue) => queue.close()));
-    await redis.quit();
-    await sql.end({ timeout: 5 });
-  };
-  process.once("SIGINT", () => { void shutdown(); });
-  process.once("SIGTERM", () => { void shutdown(); });
-  await dispatchPending({ repository, queues });
+  const sweep = createSerialTask(sweepPendingUploads, reportError);
+  tasks.push(sweep);
+  timers.push(setInterval(() => { void sweep.run(); }, PENDING_UPLOAD_SWEEP_INTERVAL_MS));
+  process.once("SIGINT", () => { void shutdown().catch(reportError); });
+  process.once("SIGTERM", () => { void shutdown().catch(reportError); });
+  await dispatch.run();
+  } catch (error) {
+    await shutdown().catch(reportError);
+    throw error;
+  }
 }
 
 const entry = process.argv[1] ?? "";
-if (entry.endsWith("index.ts") || entry.endsWith("index.js")) void main();
+if (entry.endsWith("index.ts") || entry.endsWith("index.js")) {
+  void main().catch((error: unknown) => {
+    console.error("worker startup failed", error instanceof Error ? error.name : "unknown error");
+    process.exitCode = 1;
+  });
+}
 
 export { createRetestCloseHandler } from "./jobs/retest-close";
 

@@ -668,6 +668,19 @@ describe("opening signed upload service", () => {
     expect(download.contentDisposition).toContain("a.pdf");
   });
 
+  it.each(["高数讲义.pdf", "O'Brien (1).pdf", "\ud800.pdf"])("downloads %s with a valid ASCII header and encoded Unicode filename", async (name) => {
+    const { svc, put } = setup();
+    const ticket = await svc.beginUpload(principal, { name, mime: "application/pdf", bytes: pdfBytes.length, sha256: pdfSha });
+    put(`staging/${ticket.source.id}`, pdfBytes);
+    await svc.completeUpload(principal, ticket.source.id);
+    const download = await svc.getDownloadStream(principal, ticket.source.id);
+    const headers = new Headers({ "Content-Disposition": download.contentDisposition });
+    expect(headers.get("Content-Disposition")).toMatch(/^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''/);
+    const encoded = download.contentDisposition.split("filename*=UTF-8''")[1]!;
+    expect(decodeURIComponent(encoded)).toBe(new TextDecoder().decode(new TextEncoder().encode(name)));
+    expect(encoded).not.toMatch(/[!'()*]/);
+  });
+
   it("reissueUploadTicket refreshes the same-origin staging lease for pending only", async () => {
     const prev = process.env.PUBLIC_BASE_URL;
     process.env.PUBLIC_BASE_URL = "http://app.example:3000";

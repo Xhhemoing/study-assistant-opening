@@ -9,9 +9,9 @@ import { BoundsExceededError } from "../parsers/docling-process";
 import { PrivacyEpochError } from "./privacy-guard";
 
 describe("opening worker runtime guards", () => {
-  it("claims only queued or running jobs", () => {
+  it("claims only queued jobs; running executions are never taken over", () => {
     expect(canClaimJob("queued")).toBe(true);
-    expect(canClaimJob("running")).toBe(true);
+    expect(canClaimJob("running")).toBe(false);
     expect(canClaimJob("succeeded")).toBe(false);
     expect(canClaimJob("cancelled")).toBe(false);
     expect(canClaimJob("failed")).toBe(false);
@@ -49,7 +49,7 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
       kind: "remind",
       payload: {},
       result: null,
-      state: "queued",
+      state: "running",
       privacyEpoch: 1,
       ...over,
     };

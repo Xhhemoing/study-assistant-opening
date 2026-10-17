@@ -1,4 +1,5 @@
 import type { OpeningProviderConfigResponse, OpeningProviderModelView, OpeningProviderView } from "@aistudy/contracts";
+import { normalizeOpeningProviderBaseUrl } from "@aistudy/contracts";
 
 export type ProviderDraft = {
   label: string; baseUrl: string; apiKey: string;
@@ -34,13 +35,16 @@ export function modelDraftFromView(view: OpeningProviderModelView): ProviderMode
 function isBlank(value: string): boolean { return value.trim().length === 0; }
 
 /** Returns a user-facing message or null when the draft may be submitted. */
-export function validateProviderDraft(draft: ProviderDraft): string | null {
+export function validateProviderDraft(draft: ProviderDraft, current?: OpeningProviderView): string | null {
   if (isBlank(draft.label) || draft.label.trim().length > 120) return "请填写不超过 120 字的服务商名称。";
   if (isBlank(draft.baseUrl)) return "请填写接口地址（baseUrl）。";
   if (draft.apiKey.length > 4096) return "API 密钥过长（上限 4096 字符）。";
   let url: URL;
   try { url = new URL(draft.baseUrl.trim()); } catch { return "接口地址格式无效。"; }
   if (url.username || url.password || url.search || url.hash) return "接口地址不能包含用户信息、查询参数或片段。";
+  if (current?.hasApiKey && !draft.apiKey && normalizeOpeningProviderBaseUrl(draft.baseUrl) !== normalizeOpeningProviderBaseUrl(current.baseUrl)) {
+    return "更改接口地址时请同时填写该地址的 API 密钥。";
+  }
   if (url.protocol === "https:") return null;
   if (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname.toLowerCase())) return null;
   return "远程接口必须使用 https；仅本机开发地址可用 http。";

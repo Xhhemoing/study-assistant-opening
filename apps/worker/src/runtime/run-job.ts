@@ -1,18 +1,20 @@
 import type { OpeningJobRecord } from "@aistudy/database";
 import { isBudgetReplayError, ledgerActionForProviderError, OpeningProviderError } from "@aistudy/ai";
+import { withJobHeartbeat } from "./lifecycle";
 
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
 export type JobRepository = {
   claim(id: string): Promise<OpeningJobRecord | null>;
   /** M02 workspace epoch; implemented by createOpeningJobRepository. Optional only for unit doubles. */
   workspacePrivacyEpoch?(workspaceId: string): Promise<number>;
-  finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown): Promise<boolean>;
+  heartbeat?(id: string, claimToken: string): Promise<boolean>;
+  finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown, claimToken?: string): Promise<boolean>;
 };
 
 const UNKNOWN_OUTCOME_CODES = new Set(["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"]);
 
 export function canClaimJob(status: string): boolean {
-  return status === "queued" || status === "running";
+  return status === "queued";
 }
 
 export function isUnknownOutcome(error: unknown): boolean {
@@ -41,7 +43,7 @@ function canRetryParse(error: unknown): boolean {
 /**
  * Dispatch + writeback: workspace privacy epoch must still match the job snapshot.
  * Only a real mismatch is reported as a privacy change. Lookup failures propagate:
- * before dispatch the claimed job stays retryable, after the handler it is recorded
+ * before dispatch the interruption is recovered without automatic re-execution; after the handler it is recorded
  * as failed with the actual error instead of masquerading as an epoch change.
  */
 async function workspaceEpochIsCurrent(repository: JobRepository, job: OpeningJobRecord): Promise<boolean> {
@@ -56,23 +58,28 @@ export async function runJob(
   handler: JobHandler,
 ): Promise<boolean> {
   const job = await repository.claim(jobId);
-  if (!job || !canClaimJob(job.state)) return false;
-  if (!(await workspaceEpochIsCurrent(repository, job))) {
-    await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" });
-    return false;
-  }
-  try {
-    const result = await handler(job, job.payload);
-    if (!(await workspaceEpochIsCurrent(repository, job))) {
-      await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" });
-      return false;
-    }
-    return repository.finish(job.id, "succeeded", result);
-  } catch (error) {
-    const state = isUnknownOutcome(error) ? "outcome_unknown" : "failed";
-    return repository.finish(job.id, state, {
-      error: error instanceof Error ? error.message : "job failed",
-      ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),
-    });
-  }
+  if (!job || job.state !== "running") return false;
+  return withJobHeartbeat(
+    () => repository.heartbeat && job.claimToken ? repository.heartbeat(job.id, job.claimToken) : Promise.resolve(),
+    async () => {
+      if (!(await workspaceEpochIsCurrent(repository, job))) {
+        await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" }, job.claimToken);
+        return false;
+      }
+      try {
+        const result = await handler(job, job.payload);
+        if (!(await workspaceEpochIsCurrent(repository, job))) {
+          await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" }, job.claimToken);
+          return false;
+        }
+        return repository.finish(job.id, "succeeded", result, job.claimToken);
+      } catch (error) {
+        const state = isUnknownOutcome(error) ? "outcome_unknown" : "failed";
+        return repository.finish(job.id, state, {
+          error: error instanceof Error ? error.message : "job failed",
+          ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),
+        }, job.claimToken);
+      }
+    },
+  );
 }

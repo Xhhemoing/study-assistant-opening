@@ -4,6 +4,7 @@ import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts
 import type { OpeningJobRecord } from "./opening-jobs";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
+import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 
 export type OpeningSourceErrorCode =
   | "NOT_FOUND"
@@ -19,7 +20,7 @@ export class OpeningSourceError extends Error {
   }
 }
 
-export type OpeningScope = { workspaceId: string; ownerUserId: string };
+export type OpeningScope = OpeningJobScope;
 
 /**
  * Null-lease fallback for pending rows that never got `upload_url_expires_at`
@@ -334,9 +335,16 @@ export function createOpeningSourceRepository(sql: Sql): OpeningSourceRepository
     },
 
     async markParseState(scope, id, state, error = null) {
-      const rows = await sql`UPDATE opening_sources SET parse_state = ${state}, error = ${sql.json(error as never)}, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} RETURNING *`;
-      if (!rows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
-      return mapSource(rows[0] as Record<string, unknown>);
+      const write = async (tx: Sql) => {
+        const rows = await tx`UPDATE opening_sources SET parse_state = ${state}, error = ${tx.json(error as never)}, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} RETURNING *`;
+        if (!rows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+        return mapSource(rows[0] as Record<string, unknown>);
+      };
+      if (!scope.jobExecution) return write(sql);
+      return sql.begin(async (tx) => {
+        await lockOpeningJobExecution(tx, scope);
+        return write(tx as unknown as Sql);
+      });
     },
 
     async createWithParseJob(scope, input) {

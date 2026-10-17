@@ -25,11 +25,12 @@ describe("opening worker runtime", () => {
     const jobId = randomUUID();
     await fixture.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
       VALUES (${jobId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${randomUUID()}, 'parse', ${fixture.sql.json({})}, 0)`;
-    await fixture.sql`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
-      VALUES (${fixture.scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${fixture.sql.json({ jobId, kind: 'parse' })})`;
+    const [event] = await fixture.sql`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+      VALUES (${fixture.scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${fixture.sql.json({ jobId, kind: 'parse' })}) RETURNING id`;
     const repository = createOpeningJobRepository(fixture.sql);
-    expect(await Promise.all([dispatchPending({ repository, queues: { parse: queue } }), dispatchPending({ repository, queues: { parse: queue } })])).toEqual([1, 0]);
-    expect(await queue.getJob(jobQueueId(fixture.scope.workspaceId, jobId))).not.toBeNull();
+    const deliveries = await Promise.all([dispatchPending({ repository, queues: { parse: queue } }), dispatchPending({ repository, queues: { parse: queue } })]);
+    expect(deliveries.sort()).toEqual([0, 1]);
+    expect(await queue.getJob(`${jobQueueId(fixture.scope.workspaceId, jobId)}-event-${event!.id}`)).not.toBeNull();
   });
 
   it("claims, completes once, and skips redelivery or cancellation", async () => {
@@ -43,7 +44,7 @@ describe("opening worker runtime", () => {
     expect(await runJob(repository, jobId, async () => ({ ok: true }))).toBe(false);
   });
 
-  it("rejects fresh running jobs and takes over stale jobs", async () => {
+  it("never takes over running jobs and safely terminates interrupted executions", async () => {
     const repository = createOpeningJobRepository(fixture.sql);
     const staleId = randomUUID();
     const freshId = randomUUID();
@@ -51,7 +52,9 @@ describe("opening worker runtime", () => {
       await fixture.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch, state, updated_at)
         VALUES (${jobId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${randomUUID()}, 'tutor', ${fixture.sql.json({})}, 0, 'running', now() - ${age}::interval)`;
     }
-    expect(await runJob(repository, staleId, async () => ({ ok: true }))).toBe(true);
+    expect(await runJob(repository, staleId, async () => ({ ok: true }))).toBe(false);
+    expect(await repository.recoverExpired()).toBe(1);
+    expect((await repository.get(fixture.scope, staleId)).state).toBe("outcome_unknown");
     expect(await runJob(repository, freshId, async () => ({ ok: true }))).toBe(false);
   });
 
@@ -83,11 +86,11 @@ describe("opening worker runtime", () => {
       const jobId = randomUUID();
       await fixture.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
         VALUES (${jobId}, ${fixture.scope.workspaceId}, ${fixture.scope.ownerUserId}, ${randomUUID()}, 'tutor', ${fixture.sql.json({})}, 0)`;
-      await fixture.sql`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
-        VALUES (${fixture.scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${fixture.sql.json({ jobId, kind: 'parse' })})`;
+      const [event] = await fixture.sql`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+        VALUES (${fixture.scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${fixture.sql.json({ jobId, kind: 'parse' })}) RETURNING id`;
       const firstRepository = createOpeningJobRepository(fixture.sql);
       await dispatchPending({ repository: firstRepository, queues: { parse: queue } });
-      expect(await queue2.getJob(jobQueueId(fixture.scope.workspaceId, jobId))).not.toBeNull();
+      expect(await queue2.getJob(`${jobQueueId(fixture.scope.workspaceId, jobId)}-event-${event!.id}`)).not.toBeNull();
 
       const secondRepository = createOpeningJobRepository(fixture.sql);
       expect(await runJob(secondRepository, jobId, async () => ({ sent: true }))).toBe(true);

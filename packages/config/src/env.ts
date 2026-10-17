@@ -27,6 +27,7 @@ const envSchema = z.object({
   SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
   SESSION_TTL_SECONDS: z.string().optional().default("604800").transform((v) => Number.parseInt(v, 10)).refine((n) => Number.isFinite(n) && n >= 60, { message: "SESSION_TTL_SECONDS must be an integer >= 60" }),
   AUTH_COOKIE_NAME: z.string().min(1).default("aistudy_session"),
+  AUTH_TRUSTED_IP_HEADER: z.string().trim().regex(/^$|^[A-Za-z0-9][A-Za-z0-9-]*$/, "AUTH_TRUSTED_IP_HEADER must be a single HTTP header name").optional().transform((value) => value || undefined),
 
 });
 
@@ -39,6 +40,7 @@ export type AppEnv = {
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
   authCookieName: string;
+  authTrustedIpHeader?: string;
   openingModel: ReturnType<typeof loadOpeningModel>;
   s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean };
   toPublicSummary: () => { nodeEnv: "development" | "test" | "production"; publicBaseUrl: string; databaseConfigured: boolean; redisConfigured: boolean; storageConfigured: boolean; authConfigured: boolean };
@@ -62,6 +64,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sessionCookieSecure: data.SESSION_COOKIE_SECURE === undefined ? data.NODE_ENV === "production" : data.SESSION_COOKIE_SECURE === "true",
     sessionTtlSeconds: data.SESSION_TTL_SECONDS,
     authCookieName: data.AUTH_COOKIE_NAME,
+    authTrustedIpHeader: data.AUTH_TRUSTED_IP_HEADER,
     openingModel: catalog ? {
       baseUrl: defaultModel?.baseUrl ?? "https://api.openai.com/v1", apiKey: defaultModel?.apiKey ?? "",
       name: defaultModel?.modelName ?? "unconfigured", dailyCapCents: catalog.dailyCapCents,

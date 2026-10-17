@@ -97,7 +97,7 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow(VISION_REQUIRED_MESSAGE);
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, VISION_REQUIRED_MESSAGE);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, VISION_REQUIRED_MESSAGE, undefined, undefined);
   });
 
   it("attaches page 1 for image-only sources on a vision model even without currentPage", async () => {
@@ -189,7 +189,7 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, PAGE_CITATION_CLARIFY_MESSAGE, {
       code: "page_not_in_sources",
       nextAction: "clarify",
-    });
+    }, undefined);
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
   });
 
@@ -199,7 +199,7 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow("selected model removed");
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "selected model removed");
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "selected model removed", undefined, undefined);
   });
   it("completes the turn once with program-assigned candidate provenance", async () => {
     const { deps, tutorJobs, budget, provider } = setup();
@@ -596,7 +596,7 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toThrow(/privacy epoch drift/);
 
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ expectedPrivacyEpoch: 7 }));
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "privacy epoch drift: expected 7 current 8");
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "privacy epoch drift: expected 7 current 8", undefined, undefined);
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
     expect(budget.markUnknown).not.toHaveBeenCalled();
   });

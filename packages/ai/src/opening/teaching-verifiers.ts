@@ -38,7 +38,7 @@ export type VerifyTeachingInput = {
     content: Record<string, unknown>;
   }>;
   pack: TeachingEvidencePack;
-  /** Optional key claims extracted from teach/example blocks. */
+  /** Optional additional claims; persisted blocks are always checked as well. */
   keyClaims: VerifyTeachingKeyClaim[];
   /** Optional tool runner; timeout must surface as unknown. */
   tools?: {
@@ -317,10 +317,13 @@ function extractClaimsFromBlocks(
 ): VerifyTeachingKeyClaim[] {
   const out: VerifyTeachingKeyClaim[] = [];
   for (const block of blocks) {
-    if (block.role !== "teach" && block.role !== "example") continue;
+    // Formula correctness belongs to the formula tool, not prose overlap.
+    if (block.type === "formula" || block.type === "math") continue;
+    if (block.role !== "teach" && block.role !== "example" && block.role !== "answer_key") continue;
     const text =
       (typeof block.content.text === "string" && block.content.text) ||
       (typeof block.content.body === "string" && block.content.body) ||
+      (typeof block.content.answer === "string" && block.content.answer) ||
       textFromContent(block.content);
     if (!text.trim()) continue;
     const cited =
@@ -333,7 +336,7 @@ function extractClaimsFromBlocks(
       claimId: `auto:${block.id}`,
       text: text.slice(0, 2000),
       citedChunkIds: cited,
-      isCoreConclusion: block.role === "teach",
+      isCoreConclusion: block.role === "teach" || block.role === "answer_key",
     });
   }
   return out;
@@ -346,12 +349,18 @@ function verifyClaimSupport(input: VerifyTeachingInput): LayerResult {
     return spoof;
   }
 
-  let claims = input.keyClaims;
-  if (claims.length === 0) {
-    claims = extractClaimsFromBlocks(input.blocks);
-  }
+  // Additional caller-supplied claims must not hide an unsupported answer key
+  // or another persisted block from the automatic checks.
+  const claims = [...input.keyClaims, ...extractClaimsFromBlocks(input.blocks)];
 
   if (claims.length === 0) {
+    if (input.blocks.some((block) => block.type === "formula" || block.type === "math")) {
+      return {
+        layer: "claim_support",
+        outcome: "unknown",
+        reason: "formula content requires independent factual review; prose overlap does not verify mathematics",
+      };
+    }
     return {
       layer: "claim_support",
       outcome: "fail",
@@ -429,36 +438,36 @@ function verifyClaimSupport(input: VerifyTeachingInput): LayerResult {
 
   return {
     layer: "claim_support",
-    outcome: "pass",
-    reason: "core claims have material support via classifyClaimSupport",
+    outcome: "unknown",
+    reason: "candidate material links found; lexical overlap cannot verify factual claims or authorize formal scoring",
+    details: { requiresIndependentReview: true },
   };
 }
 
 async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult> {
-  if (!input.tools?.checkFormula) {
-    return {
-      layer: "tool_result",
-      outcome: "skipped",
-      reason: "no formula tool configured",
-    };
-  }
-
   const latexSnippets: string[] = [];
   for (const block of input.blocks) {
-    if (block.type === "formula" || block.role === "teach") {
-      const latex =
-        (typeof block.content.latex === "string" && block.content.latex) ||
-        (typeof block.content.formula === "string" && block.content.formula) ||
-        null;
-      if (latex) latexSnippets.push(latex);
-    }
+    const latex =
+      (typeof block.content.latex === "string" && block.content.latex) ||
+      (typeof block.content.formula === "string" && block.content.formula) ||
+      null;
+    if (latex) latexSnippets.push(latex);
   }
 
   if (latexSnippets.length === 0) {
+    const hasFormulaBlock = input.blocks.some((block) => block.type === "formula" || block.type === "math");
     return {
       layer: "tool_result",
-      outcome: "skipped",
-      reason: "no formula latex to check",
+      outcome: hasFormulaBlock ? "unknown" : "skipped",
+      reason: hasFormulaBlock ? "formula block has no checkable latex" : "no formula latex to check",
+    };
+  }
+
+  if (!input.tools?.checkFormula) {
+    return {
+      layer: "tool_result",
+      outcome: "unknown",
+      reason: "formula content present but no formula tool configured",
     };
   }
 
@@ -523,7 +532,9 @@ function verifyActionPermission(input: VerifyTeachingInput): LayerResult {
 }
 
 /**
- * Runs L1–L5; uses classifyClaimSupport; conflict/uncovered on core → fact fail;
+ * Runs L1–L5; uses classifyClaimSupport only as a material-link heuristic.
+ * Automatic checks never establish factual correctness or formal scoring authority.
+ * Conflict/uncovered on core → fact fail;
  * checkFormula timeout → layer tool_result unknown (not pass/fail);
  * another model "upvote" is NOT an accepted tool — rejected alternative.
  */

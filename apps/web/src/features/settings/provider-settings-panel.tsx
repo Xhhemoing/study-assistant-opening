@@ -23,18 +23,19 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-function ProviderForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
+function ProviderForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel, current }: {
   draft: ProviderDraft; busy: boolean; submitLabel: string;
+  current?: OpeningProviderView;
   onChange: (draft: ProviderDraft) => void; onSubmit: () => void; onCancel?: () => void;
 }) {
-  const problem = validateProviderDraft(draft);
-  const dirty = draft.apiKey.length > 0 || draft.label.trim() !== draft.label || draft.baseUrl.trim() !== draft.baseUrl;
+  const problem = validateProviderDraft(draft, current);
+  const dirty = !current || draft.apiKey.length > 0 || draft.label.trim() !== current.label || draft.baseUrl.trim() !== current.baseUrl;
   return <div className="space-y-2 rounded-md border border-zinc-200 p-3">
     <label className="block space-y-1.5"><span className={ui.label}>服务商名称</span>
       <input className={ui.input} disabled={busy} maxLength={120} onChange={event => onChange({ ...draft, label: event.target.value })} placeholder="例如：DeepSeek" value={draft.label} /></label>
     <label className="block space-y-1.5"><span className={ui.label}>接口地址（OpenAI 兼容 baseUrl）</span>
       <input className={ui.input} disabled={busy} onChange={event => onChange({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" value={draft.baseUrl} /></label>
-    <label className="block space-y-1.5"><span className={ui.label}>API 密钥{draft.apiKey ? "" : "（留空表示不修改密钥）"}</span>
+    <label className="block space-y-1.5"><span className={ui.label}>API 密钥{draft.apiKey ? "" : "（地址不变时可留空）"}</span>
       <input autoComplete="new-password" className={ui.input} disabled={busy} maxLength={4096} onChange={event => onChange({ ...draft, apiKey: event.target.value })} type="password" value={draft.apiKey} /></label>
     {problem ? <p className="text-xs leading-6 text-amber-800" role="alert">{problem}</p> : null}
     <div className="flex flex-wrap gap-2">
@@ -133,7 +134,7 @@ export function ProviderSettingsForm({ data, busy, probingId, probeResults = {},
             <button className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-red-200 px-2 text-xs text-red-700 hover:bg-red-50" disabled={busy} onClick={() => onDeleteProvider(provider)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
           </div>
         </div>
-        {edit ? <div className="mt-3"><ProviderForm draft={edit} busy={busy} onCancel={() => setEditing(current => { const next = { ...current }; delete next[provider.id]; return next; })} onChange={value => setEditing({ ...editing, [provider.id]: value })} onSubmit={() => onUpdateProvider(provider.id, edit)} submitLabel="保存服务商" /></div> : null}
+        {edit ? <div className="mt-3"><ProviderForm draft={edit} current={provider} busy={busy} onCancel={() => setEditing(current => { const next = { ...current }; delete next[provider.id]; return next; })} onChange={value => setEditing({ ...editing, [provider.id]: value })} onSubmit={() => onUpdateProvider(provider.id, edit)} submitLabel="保存服务商" /></div> : null}
         {addingModelFor === provider.id ? <div className="mt-3"><ModelForm draft={newModel} busy={busy} onCancel={() => { setAddingModelFor(null); setNewModel(emptyModelDraft); }} onChange={setNewModel} onSubmit={() => onCreateModel(provider.id, newModel)} submitLabel="添加模型" /></div> : null}
         {models.length ? <ul className="mt-3 space-y-2">{models.map(model => {
           const modelEdit = editingModels[model.id];

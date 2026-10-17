@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, Scope } from "@aistudy/contracts";
+import { lockOpeningJobExecution } from "./opening-job-execution";
 export type LearningSql = Sql | TransactionSql;
 export function learningError(code: "NOT_FOUND" | "VALIDATION" | "CONFLICT", message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
@@ -24,6 +25,7 @@ export async function nextWorkspaceLearningHistoryRevision(tx: TransactionSql, s
 export async function lockLearningOwner(tx: TransactionSql, scope: Scope): Promise<void> {
   const rows = await tx`SELECT id FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
   if (!rows.length) throw learningError("NOT_FOUND", "workspace not found");
+  await lockOpeningJobExecution(tx, scope);
 }
 export async function lockLearningSession(tx: TransactionSql, scope: Scope, sessionId: string) {
   await lockLearningOwner(tx, scope);
