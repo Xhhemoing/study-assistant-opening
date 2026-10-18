@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const effects: Array<() => unknown> = [];
 const stateSlots: unknown[] = [];
 let stateCall = 0;
+let pathname = "/opening/today";
 
 vi.mock("react", async () => {
   const actual = await vi.importActual<typeof import("react")>("react");
@@ -30,7 +31,7 @@ vi.mock("react", async () => {
 });
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/opening/today",
+  usePathname: () => pathname,
   useRouter: () => ({ replace: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -49,6 +50,7 @@ vi.mock("./focus-timer", () => ({
 vi.mock("./mobile-navigation", () => ({
   OpeningMobileNavigation: () => null,
 }));
+vi.mock("../inbox/citation-reader-host", () => ({ CitationReaderHost: () => null }));
 
 import { OpeningShell } from "./opening-shell";
 
@@ -60,6 +62,7 @@ beforeEach(() => {
   effects.length = 0;
   stateSlots.length = 0;
   stateCall = 0;
+  pathname = "/opening/today";
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -169,5 +172,32 @@ describe("OpeningShell focus mode keyboard exit", () => {
     for (const cleanup of cleanups) if (typeof cleanup === "function") cleanup();
     pressEscape();
     expect(stateSlots[FOCUS_MODE_SLOT]).toBe(true);
+  });
+});
+
+describe("course study focus layout", () => {
+  it("opens a lesson in focus and restores normal navigation outside the lesson", () => {
+    pathname = "/opening/courses/course-a/study";
+    expect(renderShell()).toContain('data-focus="true"');
+    expect(renderShell()).toContain('aria-label="退出专注模式"');
+    pathname = "/opening/courses/course-a";
+    expect(renderShell()).toContain('data-focus="false"');
+  });
+
+  it("lets Escape reveal navigation without leaving or restarting the lesson", async () => {
+    pathname = "/opening/courses/course-a/study";
+    const target = new EventTarget();
+    vi.stubGlobal("window", Object.assign(target, { localStorage: { getItem: () => null } }));
+    vi.stubGlobal("document", { querySelector: () => null });
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 404 }));
+    renderShell();
+    await runCapturedEffects();
+    const event = new Event("keydown");
+    Object.defineProperty(event, "key", { value: "Escape" });
+    target.dispatchEvent(event);
+    expect(renderShell()).toContain('data-focus="false"');
+    expect(pathname).toBe("/opening/courses/course-a/study");
+    pathname = "/opening/courses/course-b/study";
+    expect(renderShell()).toContain('data-focus="true"');
   });
 });

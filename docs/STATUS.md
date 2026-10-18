@@ -16,6 +16,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| 专注学习界面改版 P0 首批 | Codex + 独立交叉审查 | `codex/focused-learning-ui` | 课程按真实活动/任务恢复，独立资料阅读及返回焦点/位置，教学/普通/矩阵练习草稿与原提交请求保留，完成补测只读回顾。244 项定向单元、Web 类型、19 份改动测试严格类型、定向 lint 与客户端边界检查通过；无新迁移或依赖，未部署，待用户浏览器验收。永久失效资料下旧草稿仅只读复制/查历史，同一入口暂不能另开练习；P1/P2 按计划在 P0 交互验收后推进 |
 | 深度审计按板块复核与修复 | Codex + 独立交叉审查 | [#66](https://github.com/Xhhemoing/study-assistant-opening/pull/66) · `codex/audit-hardening` | 已同步实际合并的#65/#64；0073保留0070–0072，公开原文接入统一配额，迁移前停旧worker并取消待重启；跨协议回退legacy持久暂停worker，返回降级，部署/身份故障注入检查通过。整合真实PG已通过；队列spike监听竞态已修并通过隔离真实Redis。最终提交完整CI须以#66当前检查为准，不能用旧head代替。生产部署、可信代理、分支保护及用户验收未完成，详见[审议与欠项](operations/audit-remediation.md) |
 | Math I 考前冲刺与课程证据集成 | Codex + 独立身份/存储复核 | [#64](https://github.com/Xhhemoing/study-assistant-opening/pull/64) · `codex/exam-sprint` | 已在#65后合入40a4be7；head5cbfa7d的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050725855)通过，含真实PG、handler、浏览器及构建。稳定技能UUID、退役保护、引用CAS、实时资格/摘要/BKT/导师flags及显式重关联通过独审和回归，保留0070–0072。公开原文配额随#66整合。尚未部署或用户验收；见[统一数据关联](product/exam-sprint.md#统一数据关联) |
 | 目标驱动框架与首批规划/教学改进 | Codex + 独立交叉审查 | [#65](https://github.com/Xhhemoing/study-assistant-opening/pull/65) · `codex/goal-driven-learning` | 已合入b70ae56；headf12c5df的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050710975)通过，含真实PG、handler、浏览器及构建。目标策略/编译接线、答案自身引用、self_report/v3资格与曝光保留已实现，无DDL。可信同label跨requirement已有domain回归，生产模板尚无可信PG正例；不伪造权威记录。尚未部署或用户验收 |
