@@ -20,8 +20,16 @@ describe("inbox material collection rendering", () => {
     expect(html).toContain("Visible.pdf");
     expect(html).not.toContain("Hidden.pdf");
     expect(html).not.toContain("还没有材料");
-    expect(html).toContain("PDF · 12.9 MB · 2026-10-03");
+    expect(html).toContain("PDF");
+    expect(html).toContain("12.9 MB · 2026-10-03");
+    expect(html).toContain("添加资料");
+    expect(html).not.toContain("拖入文件到这里，或点击选择");
     expect(html).toContain("可以用于提问");
+  });
+  it("keeps the large upload dropzone for an empty library", () => {
+    const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [], onChanged }));
+    expect(html).toContain("拖入文件到这里，或点击选择");
+    expect(html).toContain("还没有材料");
   });
   it("renders accessible stable checkboxes for the selected page and accepts course metadata", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources, onChanged,

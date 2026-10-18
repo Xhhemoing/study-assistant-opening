@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { SourceContentBody, loadSourceContent } from "./source-content";
+import { SourceContentBody, loadSourceContent, sourceContentExplanation } from "./source-content";
 const content = { sourceId: "11111111-1111-4111-8111-111111111111", version: 0, currentVersion: 0, page: 2, pages: [1,2], pageKind: "physical" as const, readablePages: 1, characters: 30, text: "<script>alert(1)</script>\nA formula", truncated: true };
 describe("parsed source content", () => {
   it("renders extracted text safely with exact page/version and truncation", () => {
@@ -24,4 +24,19 @@ describe("parsed source content", () => {
     expect(value.text).toBe(content.text);
     await expect(loadSourceContent(content.sourceId, 0, undefined, async () => new Response(null, { status: 409 }))).rejects.toThrow();
   });
+  it.each([
+    { sourceId: "22222222-2222-4222-8222-222222222222" },
+    { version: 1 }, { page: 1 },
+  ])("rejects body identity or locator drift rather than displaying the wrong evidence: %j", async drift => {
+    await expect(loadSourceContent(content.sourceId, 0, 2, async () => Response.json({ ...content, ...drift }))).rejects.toThrow("不一致");
+  });
+
+  it("names the specified physical page and does not offer current-version analysis for old, empty, or section evidence", () => {
+    expect(sourceContentExplanation(content)).toEqual({ href: `/opening/assistant?source=${content.sourceId}&page=2`, label: "解释第 2 页" });
+    expect(sourceContentExplanation({ ...content, currentVersion: 1 })).toBeNull();
+    expect(sourceContentExplanation({ ...content, text: "  " })).toBeNull();
+    expect(sourceContentExplanation({ ...content, pageKind: "section" })).toBeNull();
+    expect(sourceContentExplanation({ ...content, page: null })).toBeNull();
+  });
+
 });

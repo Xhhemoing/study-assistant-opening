@@ -5,6 +5,7 @@ import Link from "next/link";
 import { materialAnalysisHref } from "../library/material-analysis-link";
 import { z } from "zod";
 import { ui } from "../design/ui";
+import { rememberSourceReaderPage, sourceReaderInitialPage } from "./source-reader-position";
 const schema = z.object({ sourceId: z.string().uuid(), version: z.number().int().nonnegative(), currentVersion: z.number().int().nonnegative(),
   page: z.number().int().positive().nullable(), pages: z.array(z.number().int().positive().nullable()), pageKind: z.enum(["physical", "section"]),
   readablePages: z.number().int().nonnegative(), characters: z.number().int().nonnegative(), text: z.string().max(20000), truncated: z.boolean() });
@@ -14,7 +15,16 @@ export async function loadSourceContent(sourceId: string, version: number, page?
   if (page !== undefined) query.set("page", String(page));
   const response = await fetcher(`/api/opening/sources/${sourceId}/content?${query}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`解析正文暂不可读取 (${response.status})`);
-  return schema.parse(await response.json());
+  const content = schema.parse(await response.json());
+  if (content.sourceId !== sourceId || content.version !== version || (page !== undefined && content.page !== page)) {
+    throw new Error("正文的材料、版本或页码与请求不一致，请重新读取。");
+  }
+  return content;
+}
+/** Page explanations need current, actually readable physical-page evidence. */
+export function sourceContentExplanation(content: Content): { href: string; label: string } | null {
+  if (content.version !== content.currentVersion || content.pageKind !== "physical" || content.page == null || !content.text.trim()) return null;
+  return { href: materialAnalysisHref(content.sourceId, content.page), label: `解释第 ${content.page} 页` };
 }
 export function SourceContentBody({ content }: { content: Content }) {
   return <div className="space-y-3">
@@ -26,18 +36,19 @@ export function SourceContentBody({ content }: { content: Content }) {
   </div>;
 }
 export function SourceContent({ sourceId, version, initialPage }: { sourceId: string; version: number; initialPage?: number }) {
-  const [content, setContent] = useState<Content | null>(null), [page, setPage] = useState<number | undefined>(initialPage);
+  const [content, setContent] = useState<Content | null>(null), [page, setPage] = useState<number | undefined>(() => sourceReaderInitialPage(sourceId, version, initialPage));
   const [error, setError] = useState(""), [loading, setLoading] = useState(true), [revision, setRevision] = useState(0);
-  useEffect(() => { setPage(initialPage); }, [sourceId, version, initialPage]);
+  useEffect(() => { setPage(sourceReaderInitialPage(sourceId, version, initialPage)); }, [sourceId, version, initialPage]);
   useEffect(() => {
     let active = true;
     setLoading(true); setError(""); setContent(null);
-    void loadSourceContent(sourceId, version, page).then(value => { if (active) setContent(value); })
+    void loadSourceContent(sourceId, version, page).then(value => { if (active) { setContent(value); rememberSourceReaderPage(sourceId, version, value.page); } })
       .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "读取失败"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [sourceId, version, page, revision]);
   const index = content ? content.pages.indexOf(content.page) : -1;
+  const explanation = content ? sourceContentExplanation(content) : null;
   return <section aria-label="解析正文" className="space-y-3 border-t border-zinc-200 pt-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-zinc-900">解析正文</h3>
       <button type="button" className={ui.quiet} disabled={loading} onClick={() => setRevision(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />重新读取</button></div>
@@ -48,7 +59,7 @@ export function SourceContent({ sourceId, version, initialPage }: { sourceId: st
       <select aria-label="正文页码" className={`${ui.input} max-w-40`} value={content.page ?? "unpaged"} onChange={event => setPage(event.target.value === "unpaged" ? undefined : Number(event.target.value))}>
         {content.pages.map(value => <option key={value ?? "unpaged"} value={value ?? "unpaged"}>{content.pageKind === "physical" ? "物理页" : "文本段"} {value ?? "未编号"}</option>)}
       </select>
-      {content.version === content.currentVersion && content.pageKind === "physical" && content.page != null ? <Link className={ui.primary} href={materialAnalysisHref(sourceId, content.page)}><Sparkles size={14} aria-hidden="true" />AI 分析本页</Link> : null}
+      {explanation ? <Link className={ui.primary} href={explanation.href}><Sparkles size={14} aria-hidden="true" />{explanation.label}</Link> : null}
       <button type="button" aria-label="下一页正文" className={ui.icon} disabled={index >= content.pages.length - 1} onClick={() => setPage(content.pages[index + 1] ?? undefined)}><ChevronRight size={14} aria-hidden="true" /></button>
     </div><SourceContentBody content={content} /></> : null}
   </section>;
