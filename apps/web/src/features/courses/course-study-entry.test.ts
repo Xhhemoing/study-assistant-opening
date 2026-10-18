@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { TaskItem, TeachingActivity } from "@aistudy/contracts";
 import { openCourseStudy } from "./course-study-entry";
 import { buildCourseStudyInput, courseActivityNextStep, courseStudyTasks, currentCourseActivity } from "./course-study-model";
+import { CourseRetestReview } from "./course-study-workspace";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
 const otherCourseId = "22222222-2222-4222-8222-222222222222";
@@ -90,6 +93,38 @@ describe("course study entry", () => {
     const client = api(); client.listTasks.mockResolvedValue({ tasks: [selected] });
     expect(await openCourseStudy(client, { ...options, teachingEnabled: false, retestId: courseId })).toEqual({ kind: "practice", task: selected });
     expect(client.listTeachingActivities).not.toHaveBeenCalled();
+  });
+  it.each([
+    { teachingEnabled: true, query: { taskId } },
+    { teachingEnabled: false, query: { taskId } },
+    { teachingEnabled: true, query: { retestId: courseId } },
+    { teachingEnabled: false, query: { retestId: courseId } },
+  ])("returns completed retest context without teaching calls for $query and teaching=$teachingEnabled", async ({ teachingEnabled, query }) => {
+    const selected = task({ status: "done", retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "原补测题干", recommendedAt: null } });
+    const client = api(); client.listTasks.mockResolvedValue({ tasks: [selected] });
+    expect(await openCourseStudy(client, { ...options, teachingEnabled, ...query })).toEqual({ kind: "retest-review", task: selected });
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.listTeachingActivities).not.toHaveBeenCalled();
+  });
+  it("rejects foreign, mismatched and skipped completed-retest links", async () => {
+    const retest = { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "原补测题干", recommendedAt: null };
+    for (const selected of [task({ status: "done", courseId: otherCourseId, retest }), task({ status: "done", retest: { ...retest, courseId: otherCourseId } }), task({ status: "skipped", retest })]) {
+      const client = api(); client.listTasks.mockResolvedValue({ tasks: [selected] });
+      await expect(openCourseStudy(client, { ...options, retestId: courseId })).rejects.toThrow("重新选择");
+      expect(client.createTeachingActivity).not.toHaveBeenCalled();
+      expect(client.listTeachingActivities).not.toHaveBeenCalled();
+    }
+  });
+  it("renders completed retest as a review with its real prompt and course history link", () => {
+    const selected = { ...task({ status: "done" }), retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "原补测题干", recommendedAt: null } };
+    const html = renderToStaticMarkup(createElement(CourseRetestReview, { courseId, task: selected }));
+    expect(html).toContain("补测已完成 · 只读回顾");
+    expect(html).toContain("原补测题干");
+    expect(html).toContain(`/opening/courses/${courseId}#course-learning-records`);
+    expect(html).not.toContain("<form");
+    expect(html).not.toContain("<textarea");
+    expect(html).not.toContain("开始学习");
   });
   it("uses the server-owned task identity and preserves multiple choices", async () => {
     const tasks = [task(), task({ id: otherCourseId, priority: 2 })];

@@ -10,9 +10,20 @@ import { retestPrefillFromProjection } from "../opening/learning/retest-attempt"
 import { LoadError, LoadingRows, ui } from "../opening/design/ui";
 import { TeachingContinueEntry } from "../opening/teaching/teaching-workspace";
 import { courseActivityNextStep } from "./course-study-model";
-import { openCourseStudy, type CourseStudyEntry } from "./course-study-entry";
+import { openCourseStudy, type CompletedRetestTask, type CourseStudyEntry } from "./course-study-entry";
 import { useCourseBundle } from "./course-detail";
 import { CourseStudyMaterials } from "./course-study-materials";
+
+export function CourseRetestReview({ courseId, task }: { courseId: string; task: CompletedRetestTask }) {
+  return <section className="space-y-3 px-5 py-6" aria-labelledby="course-retest-review-heading">
+    <h2 className="text-sm font-semibold" id="course-retest-review-heading">补测已完成 · 只读回顾</h2>
+    <p className="break-words text-sm font-medium text-zinc-800">{task.title}</p>
+    <p className="text-xs text-zinc-500">补测主题：{task.retest.skillLabel}</p>
+    <p className="whitespace-pre-wrap break-words text-sm leading-7 text-zinc-700">{task.retest.prompt}</p>
+    <p className="text-xs leading-6 text-zinc-500">这项补测任务已结束。已保存的作答与核验结果可在课程学习记录中查看。</p>
+    <Link className={ui.primary} href={`/opening/courses/${encodeURIComponent(courseId)}#course-learning-records`}>查看学习记录</Link>
+  </section>;
+}
 
 export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, teachingEnabled, teachingCompileEnabled, sourceIds, sourceLoadError = false, timeZone, api: suppliedApi }: {
   courseId: string; activityId?: string; taskId?: string; retestId?: string; teachingEnabled: boolean; teachingCompileEnabled: boolean;
@@ -42,7 +53,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
         try {
           const restored = await api.getTeachingResume(next.activity.id);
           if (restored.activityId !== next.activity.id) throw new Error("学习断点不匹配，请重新读取。");
-          if (active) { setResume(restored); setEntry({ kind: "activity", activity: { ...next.activity, status: restored.status, generateStatus: restored.generateStatus, contentVersion: restored.contentVersion } }); }
+          if (active) { setResume(restored); setEntry({ kind: "activity", activity: { ...next.activity, status: restored.status, generateStatus: restored.generateStatus, contentVersion: restored.contentVersion, pathVersion: restored.pathVersion } }); }
         } catch (reason) { if (active) setResumeError(reason instanceof Error ? reason.message : "学习位置暂时无法读取，请重试。"); }
       } else if (next.kind === "practice") setPractice(true);
     }).catch(reason => { if (active) setEntryError(reason instanceof Error ? reason.message : "学习活动暂时无法读取，请重试。"); })
@@ -72,8 +83,9 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
         {activity.status === "completed" || activity.status === "skipped" ? <div className="px-5 pb-4"><Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(courseId)}/study?after=${encodeURIComponent(activity.id)}`}>开始下一次学习</Link></div> : null}
       </div> : null}
       {!busy && entry?.kind === "cards" && !archived ? <div className="space-y-3 p-5"><h2 className="text-sm font-semibold">{entry.task.title}</h2><p className="text-sm text-zinc-600">这项任务需要复习已有卡片。</p><Link className={ui.primary} href="/opening/cards">开始卡片复习</Link></div> : null}
-      {!busy && !archived && (practice || !teachingEnabled) ? <section id="course-practice" className="space-y-4 px-5 py-6" aria-labelledby="course-practice-heading"><div><h2 className="text-sm font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-zinc-500">选主题 → 作答 → 保存。先保留自己的尝试，再获取参考；没有目标或材料也可以开始。</p></div><LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill} onRecorded={() => setRecorded(true)} />{recorded ? <p className="text-xs text-zinc-600" role="status">本次作答已保存，可返回课程查看学习记录。</p> : null}</section> : null}
-      {!practice && teachingEnabled && !archived ? <details className="mx-5 mt-4 border-t border-zinc-200 pt-3"><summary className="cursor-pointer py-1 text-xs text-zinc-500 focus-visible:ring-2 focus-visible:ring-emerald-700">其他学习方式</summary><div className="mt-3 flex flex-wrap gap-2"><button type="button" className={ui.secondary} onClick={() => setPractice(true)}>独立练习</button><Link className={ui.quiet} href="/opening/assistant">自由探索</Link></div></details> : null}
+      {!busy && entry?.kind === "retest-review" ? <CourseRetestReview courseId={courseId} task={entry.task} /> : null}
+      {!busy && !archived && entry?.kind !== "retest-review" && (practice || !teachingEnabled) ? <section id="course-practice" className="space-y-4 px-5 py-6" aria-labelledby="course-practice-heading"><div><h2 className="text-sm font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-zinc-500">选主题 → 作答 → 保存。先保留自己的尝试，再获取参考；没有目标或材料也可以开始。</p></div><LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill} onRecorded={() => setRecorded(true)} />{recorded ? <p className="text-xs text-zinc-600" role="status">本次作答已保存，可返回课程查看学习记录。</p> : null}</section> : null}
+      {!practice && teachingEnabled && !archived && entry?.kind !== "retest-review" ? <details className="mx-5 mt-4 border-t border-zinc-200 pt-3"><summary className="cursor-pointer py-1 text-xs text-zinc-500 focus-visible:ring-2 focus-visible:ring-emerald-700">其他学习方式</summary><div className="mt-3 flex flex-wrap gap-2"><button type="button" className={ui.secondary} onClick={() => setPractice(true)}>独立练习</button><Link className={ui.quiet} href="/opening/assistant">自由探索</Link></div></details> : null}
     </div></div>
   </main>;
 }

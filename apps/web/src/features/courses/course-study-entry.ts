@@ -3,7 +3,8 @@ import type { OpeningApi } from "../opening/client/api";
 import { buildStartLearningCreateInput } from "../opening/teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
-export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem };
+export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
+export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask };
 
 /** Course/task matching is re-read before any creation; failed resume never creates a replacement. */
 export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity" | "listTeachingActivities" | "listTasks" | "createTeachingActivity">, options: {
@@ -16,16 +17,21 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     const activity = assertCourseStudyActivity(await api.getTeachingActivity(options.activityId), options.courseId);
     return { kind: "activity", activity };
   }
+  let task: TaskItem | undefined;
+  if (options.taskId || options.retestId) {
+    const result = await api.listTasks();
+    const selected = result.tasks.find(row => row.courseId === options.courseId && (options.taskId ? row.id === options.taskId : row.retest?.candidateId === options.retestId));
+    if (selected?.retest && selected.retest.courseId !== options.courseId) throw new Error("这项补测不属于本课程，请返回课程重新选择。");
+    if (selected?.status === "done" && selected.retest) return { kind: "retest-review", task: { ...selected, retest: selected.retest } };
+    task = selected ? courseStudyTasks([selected], options.courseId)[0] : undefined;
+    if (!task) throw new Error("这项任务不属于本课程、尚未到开始时间或已结束，请返回课程重新选择。");
+  }
   const activities = enabled ? await api.listTeachingActivities() : [];
   if (!options.taskId && !options.retestId) {
     const current = currentCourseActivity(activities, options.courseId);
     if (current) return { kind: "activity", activity: current };
   }
-  let task: TaskItem | undefined;
-  if (options.taskId || options.retestId) {
-    const result = await api.listTasks();
-    task = courseStudyTasks(result.tasks, options.courseId).find(row => options.taskId ? row.id === options.taskId : row.retest?.candidateId === options.retestId);
-    if (!task) throw new Error("这项任务不属于本课程、尚未到开始时间或已结束，请返回课程重新选择。");
+  if (task) {
     const taskKey = `task:${task.id}`;
     const taskActivity = activities.find(row => row.courseId === options.courseId && (row.clientKey === taskKey || row.clientKey.startsWith(`${taskKey}:next:`)) && (row.status === "active" || row.status === "paused"));
     if (taskActivity) {
