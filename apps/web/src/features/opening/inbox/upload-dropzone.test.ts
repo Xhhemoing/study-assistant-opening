@@ -2,8 +2,25 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { UploadDropzone, isAcceptedUploadFile, openingUploadAccept, supportedUploadTypesLabel, uploadFileRejection } from "./upload-dropzone";
+import { CaptureDialog } from "./capture-dialog";
 
 describe("UploadDropzone", () => {
+  it("provides a compact add control with the same accessible picker and file restrictions", () => {
+    const html = renderToStaticMarkup(createElement(CaptureDialog, {
+      compact: true,
+      onFiles: () => {},
+    }));
+    expect(html).toContain('aria-label="添加资料"');
+    expect(html).toContain('role="button"');
+    expect(html).toContain('tabindex="0"');
+    expect(html).toContain(`accept="${openingUploadAccept}"`);
+    expect(html).toContain('capture="environment"');
+    expect(html).toContain('multiple=""');
+    expect(html).not.toContain("拖入文件到这里");
+    expect(html).not.toContain("选择文件");
+    expect(html).not.toContain("可一次添加多个文件");
+  });
+
   it("renders a keyboard-accessible multi-file drop target", () => {
     const html = renderToStaticMarkup(createElement(UploadDropzone, {
       accept: ".pdf,.png,audio/*",

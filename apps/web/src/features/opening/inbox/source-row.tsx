@@ -2,16 +2,40 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { canDeleteSourceShortcut, sourceStatusLabel } from "./upload-state";
-import { ExternalLink, FileText, FolderInput, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { FileText, FolderInput, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { ui, tone } from "../design/ui";
 
 const dangerQuiet = `${ui.secondary} border-red-200 text-red-700 hover:bg-red-50`;
 
+const formatLabels: Record<string, string> = {
+  "application/pdf": "PDF",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PPTX",
+  "application/vnd.ms-powerpoint": "PPT",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "DOCX",
+  "application/msword": "DOC",
+  "text/plain": "TXT",
+  "text/markdown": "MD",
+  "text/html": "HTML",
+  "image/jpeg": "JPG",
+  "image/png": "PNG",
+  "image/webp": "WEBP",
+  "audio/mpeg": "MP3",
+  "audio/mp4": "M4A",
+  "audio/wav": "WAV",
+  "video/mp4": "MP4",
+  "video/webm": "WEBM",
+  "message/rfc822": "EML",
+};
+
+export function sourceFormatLabel(record: { name: string; mime?: string }): string {
+  const known = record.mime ? formatLabels[record.mime.toLowerCase()] : undefined;
+  return known ?? record.name.match(/\.([a-z0-9]{1,6})$/i)?.[1]?.toUpperCase() ?? "文件";
+}
+
 function sourceMetadata(record: { mime?: string; bytes?: number; createdAt?: string }): string {
-  const format = record.mime === "application/pdf" ? "PDF" : record.mime?.split("/").pop()?.replace("vnd.openxmlformats-officedocument.presentationml.presentation", "PPTX").replace("vnd.ms-powerpoint", "PPT").toUpperCase();
   const size = record.bytes == null ? null : record.bytes >= 1024 * 1024 ? `${(record.bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(record.bytes / 1024))} KB`;
   const date = record.createdAt ? record.createdAt.slice(0, 10) : null;
-  return [format, size, date].filter(Boolean).join(" · ");
+  return [size, date].filter(Boolean).join(" · ");
 }
 
 export function SourceRow({
@@ -34,6 +58,7 @@ export function SourceRow({
   onAssign?: (id: string) => void;
 }) {
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
+  const format = sourceFormatLabel(record);
   const metadata = sourceMetadata(record);
   const failed = record.uploadState === "rejected" || record.parseState === "failed";
   const canDeleteShortcut = canDeleteSourceShortcut(record);
@@ -41,33 +66,46 @@ export function SourceRow({
   return (
     <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">
       <FileText size={15} aria-hidden="true" className="shrink-0 text-zinc-500" /><div className="min-w-0 flex-1">
-        <h3 title={record.name} className="break-words text-sm font-medium text-zinc-950 [overflow-wrap:anywhere]">{record.name}</h3>
+        <h3 title={record.name} className="break-words text-sm font-medium text-zinc-950 [overflow-wrap:anywhere]">
+          {onOpen ? (
+            <button
+              aria-label={`打开资料：${record.name}`}
+              className="rounded-sm text-left hover:text-emerald-800 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-emerald-700"
+              data-source-open={record.id}
+              onClick={() => onOpen(record.id)}
+              type="button"
+            >{record.name}</button>
+          ) : record.name}
+        </h3>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+          {format ? <span className="text-xs text-zinc-500">{format}</span> : null}
           <span className={`${ui.badge} ${stateTone}`}>{record.uploadState === "rejected" ? "上传被拒绝" : sourceStatusLabel(record)}</span>
-          {metadata ? <span className="text-xs tabular-nums text-zinc-500">{metadata}</span> : null}
         </div>
         {percent != null ? (
           <p className="text-xs tabular-nums text-zinc-700">已上传 {percent}%</p>
         ) : null}
         {notice ? <p className="text-xs text-amber-800">{notice}</p> : null}
       </div>
-      <div className="flex gap-2">
-        {onAssign ? <button className={ui.quiet} onClick={() => onAssign(record.id)} type="button"><FolderInput size={14} aria-hidden="true" />归入课程</button> : null}
-        {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button"><Settings2 size={14} aria-hidden="true" />管理材料</button> : null}
-        {onOpen ? (
-          <button className={ui.quiet} onClick={() => onOpen(record.id)} type="button">
-            <ExternalLink size={14} aria-hidden="true" />查看原件
-          </button>
-        ) : null}
+      <div className="flex flex-wrap items-start gap-2">
         {onRetry && record.error?.retryable !== false ? (
           <button className={ui.secondary} onClick={() => onRetry(record.id)} type="button">
             <RefreshCw size={14} aria-hidden="true" />{record.parseState === "failed" ? "重新解析" : "重试上传"}
           </button>
         ) : null}
-        {canDeleteShortcut && onDelete ? (
-          <button className={dangerQuiet} onClick={() => onDelete(record.id)} type="button">
-            <Trash2 size={14} aria-hidden="true" />删除
-          </button>
+        {metadata || onAssign || onManage || (canDeleteShortcut && onDelete) ? (
+          <details className="max-w-full rounded-lg">
+            <summary className="cursor-pointer rounded-lg px-3 py-2 text-xs text-zinc-600 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700">更多操作</summary>
+            <div className="flex max-w-full flex-col items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+              {metadata ? <p className="text-xs tabular-nums text-zinc-500">{metadata}</p> : null}
+              {onAssign ? <button className={ui.quiet} onClick={() => onAssign(record.id)} type="button"><FolderInput size={14} aria-hidden="true" />归入课程</button> : null}
+              {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button"><Settings2 size={14} aria-hidden="true" />管理材料</button> : null}
+              {canDeleteShortcut && onDelete ? (
+                <button className={dangerQuiet} onClick={() => onDelete(record.id)} type="button">
+                  <Trash2 size={14} aria-hidden="true" />删除
+                </button>
+              ) : null}
+            </div>
+          </details>
         ) : null}
       </div>
     </article>

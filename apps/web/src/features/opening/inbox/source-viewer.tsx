@@ -116,7 +116,7 @@ export function sourceViewerCopy(input: {
   versionMismatch: boolean;
   page?: number | null;
 }): string {
-  const pageHint = input.page != null && input.page > 0 ? ` · 第 ${input.page} 页` : "";
+  const pageHint = input.page != null && input.page > 0 ? ` · 请求定位：第 ${input.page} 页` : "";
   if (!input.versionMismatch) return `正在查看 v${input.requestedVersion}${pageHint}`;
   return `正在查看 v${input.requestedVersion}${pageHint}，不是当前版本 v${input.currentVersion}`;
 }
@@ -151,7 +151,7 @@ function SourcePreviewPane({
       <iframe
         title={`${name} 预览`}
         src={previewHref}
-        className="h-[32rem] w-full rounded-md border border-zinc-200 bg-zinc-50"
+        className="h-[calc(100dvh-15rem)] min-h-80 w-full rounded-md border border-zinc-200 bg-zinc-50"
       />
     );
   }
@@ -160,7 +160,7 @@ function SourcePreviewPane({
       <img
         src={previewHref}
         alt={`${name} 预览`}
-        className="max-h-[32rem] w-full rounded-md border border-zinc-200 object-contain bg-zinc-50"
+        className="max-h-[calc(100dvh-15rem)] w-full rounded-md border border-zinc-200 object-contain bg-zinc-50"
       />
     );
   }
@@ -176,6 +176,7 @@ export function SourceViewer({
   requestedVersion,
   download,
   page,
+  hideHeading = false,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version"> &
     Partial<Pick<SourceRecord, "mime">>;
@@ -185,6 +186,7 @@ export function SourceViewer({
   download: SourceDownloadView;
   /** Physical page to prefer in open-original / viewer copy. */
   page?: number | null;
+  hideHeading?: boolean;
 }) {
   const currentVersion = Math.max(latestRecord.version, download.currentVersion);
   const versionMismatch = download.versionMismatch || currentVersion !== requestedVersion;
@@ -200,14 +202,15 @@ export function SourceViewer({
   const previewable = sourcePreviewKind(mime) != null;
   const previewHref = sourcePreviewHref(record.id, download.version, page);
   return (
-    <section className="space-y-3 border-t border-zinc-200 bg-white py-4">
-      <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2>
+    <section className="space-y-3 bg-white" aria-label="材料原件">
+      {!hideHeading ? <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2> : null}
       <p className="text-sm text-zinc-700">{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
-      <p className="text-sm text-amber-800">{copy}</p>
+      <p className="text-xs text-zinc-600">{copy}</p>
+      {sourcePreviewKind(mime) === "pdf" && page != null ? <p className="text-xs text-amber-800">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
       <div className="flex flex-wrap gap-2">
         {previewable ? (
-          <a className={ui.primary} href={previewHref} rel="noreferrer">
-            预览
+          <a className={ui.secondary} href={previewHref} target="_blank" rel="noreferrer">
+            在新窗口预览
             {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
           </a>
         ) : null}
@@ -215,6 +218,7 @@ export function SourceViewer({
           className={previewable ? ui.secondary : ui.primary}
           href={href}
           rel="noreferrer"
+          download
         >
           打开原件 v{download.version}
           {page != null && page > 0 ? ` · 第 ${page} 页` : ""}

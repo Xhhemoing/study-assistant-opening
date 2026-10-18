@@ -26,7 +26,7 @@ type LegacyUpload = (
 type UploadOperation = UploadQueueClient | LegacyUpload;
 export type UploadQueueUpdate = (items: UploadQueueItem[]) => void;
 
-const DISMISSIBLE: ReadonlySet<UploadQueueState> = new Set(["idle", "uploading", "failed"]);
+const DISMISSIBLE: ReadonlySet<UploadQueueState> = new Set(["idle", "uploading", "saved", "failed"]);
 
 let nextQueueItemId = 0;
 

@@ -1,9 +1,16 @@
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./preference-controls", () => ({
   PreferenceControls: () => createElement("div", { "data-testid": "session-intervention-prefs" }),
+}));
+
+// The shared panel owns its dialog/mount lifecycle tests; inspect this workspace's wiring here.
+vi.mock("./study-tools-panel", () => ({
+  StudyToolsPanel: ({ children, panels }: { children: ReactNode; panels: { id: string; label: string; content: ReactNode }[] }) => createElement("div", { "data-tools-layout": "true" },
+    createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
+    panels.map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
 }));
 
 vi.mock("./block-commands", async () => {
@@ -55,6 +62,9 @@ import {
   TeachingContinueEntry,
   TeachingWorkspace,
   waitInitActionVisibility,
+  saveCurrentTeachingUnitPosition,
+  type TeachingToolsContext,
+  type TeachingWorkspacePositionSnapshot,
 } from "./teaching-workspace";
 
 const AID = "11111111-1111-4111-8111-111111111111";
@@ -84,6 +94,37 @@ const activityReady: TeachingActivity = {
   createdAt: ISO,
   updatedAt: ISO,
 };
+
+describe("asynchronous teaching position updates", () => {
+  const initial: TeachingWorkspacePositionSnapshot = { activityId: AID, contentVersion: 3, pathVersion: 2, epoch: 1 };
+  it.each([
+    { cause: "new content", changed: { contentVersion: 4 } },
+    { cause: "a skip or branch command", changed: { pathVersion: 3 } },
+    { cause: "another activity", changed: { activityId: WID } },
+    { cause: "reread or parent refresh with the same versions", changed: { epoch: 2 } },
+  ])("does not apply a delayed cursor response after $cause", async ({ changed }) => {
+    type Result = { ok: true; contentVersion: number; checkpointJson: Record<string, unknown> };
+    let release!: (result: Result) => void;
+    const pending = new Promise<Result>(resolve => { release = resolve; });
+    const postTeachingCheckpoint = vi.fn(() => pending);
+    let latest = { ...initial };
+    const apply = vi.fn();
+    const saving = saveCurrentTeachingUnitPosition({ postTeachingCheckpoint }, { ...initial }, () => latest, BID2, apply);
+    latest = { ...latest, ...changed };
+    release({ ok: true, contentVersion: 3, checkpointJson: { currentBlockId: BID2, drafts: [{ blockId: BID, draftText: "旧快照" }] } });
+    await expect(saving).rejects.toThrow("刚才的位置响应未采用");
+    expect(apply).not.toHaveBeenCalled();
+    expect(postTeachingCheckpoint).toHaveBeenCalledWith(AID, { expectedVersion: 3, currentBlockId: BID2 });
+    expect(latest).toEqual({ ...initial, ...changed });
+  });
+  it("adopts an unchanged response once with the server's preserved checkpoint", async () => {
+    const result = { ok: true as const, contentVersion: 3, checkpointJson: { currentBlockId: BID2, drafts: [{ blockId: BID, draftText: "保留原草稿" }] } };
+    const postTeachingCheckpoint = vi.fn(async () => result);
+    const apply = vi.fn();
+    await saveCurrentTeachingUnitPosition({ postTeachingCheckpoint }, initial, () => initial, BID2, apply);
+    expect(apply).toHaveBeenCalledExactlyOnceWith(result);
+  });
+});
 
 function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecClientInit {
   return {
@@ -162,7 +203,7 @@ describe("isTeachingWorkspaceContentUsable", () => {
 });
 
 describe("TeachingWorkspace", () => {
-  it("renders ordered blocks, expandable cites, prefs, and block command chrome", () => {
+  it("focuses the complete current explanation and offers one main advance plus one auxiliary panel", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
         activity: activityReady,
@@ -171,31 +212,33 @@ describe("TeachingWorkspace", () => {
       }),
     );
     expect(html).toContain("data-teaching-workspace=\"true\"");
-    expect(html).toContain("当前 AI 教学");
+    expect(html).toContain("本次学习");
     expect(html).toContain("矩阵的秩");
-    // No checkpoint: current + all upcoming blocks render (including 试一试).
+    // Future questions are not pre-mounted until visited or the whole lesson is requested.
     expect(html).toContain('data-teaching-block-focus="current"');
-    expect(html).toContain('data-teaching-block-focus="upcoming"');
+    expect(html).not.toContain('data-teaching-block-focus="upcoming"');
     expect(html).toContain(`data-current-block-id="${BID}"`);
-    expect(html).toContain("试一试");
-    expect(html).toContain(`data-block-id="${BID2}"`);
-    expect(html).toContain(`data-block-id="${BID3}"`);
+    expect(html).toContain("进入练习");
+    expect(html).not.toContain(`data-block-id="${BID2}"`);
+    expect(html).not.toContain(`data-block-id="${BID3}"`);
     expect(html).not.toContain("data-teaching-past-collapsed");
-    expect(html).toContain("提纲（按需展开）");
-    expect(html).toContain("原材料 / 引用");
-    expect(html).toContain("打开自由对话（次要）");
-    expect(html).toContain("本课介入偏好（临时 · 按需展开）");
-    expect(html).toContain('data-expand="intervention-prefs"');
+    expect(html).toContain("提纲与回看");
+    expect(html).toContain("资料与引用");
+    expect(html).toContain("自由探索");
+    expect(html).toContain("学习设置");
+    expect(html).toContain('data-panel="settings"');
     expect(html).toContain('data-testid="block-commands-mock"');
     expect(html).toContain(`data-block-id="${BID}"`);
     expect(html).toContain('data-return-disabled="true"');
     expect(html).toContain('data-content-version="1"');
     expect(html).toContain('data-path-version="1"');
+    expect(html.match(/data-testid="block-commands-mock"/g)).toHaveLength(1);
+    expect(html.match(/data-teaching-primary-advance="true"/g)).toHaveLength(1);
     expect(html).not.toContain("AssistantView");
     expect(html).not.toContain("MediaReader");
   });
 
-  it("collapses past/skipped into details; keeps current + upcoming in the main list", () => {
+  it("restores the actual question unit and keeps earlier context available through the outline", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
         activity: activityReady,
@@ -210,18 +253,16 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain(`data-current-block-id="${BID2}"`);
     expect(html).toContain('data-teaching-block-focus="current"');
     expect(html).toContain(`data-block-id="${BID2}"`);
-    expect(html).toContain("data-teaching-past-collapsed");
+    expect(html).toContain(`data-study-unit="${BID2}"`);
     expect(html).toContain("<details");
     expect(html).toContain("<summary");
-    expect(html).toContain("已学过或已跳过 1 块");
-    // Past/skipped content remains available inside the expandable section.
-    expect(html).toContain("矩阵的秩表示线性无关行的最大个数。");
-    expect(html).toContain('data-teaching-block-focus="skipped"');
-    // Later blocks stay in the main list.
-    expect(html).toContain('data-teaching-block-focus="upcoming"');
-    expect(html).toContain(`data-block-id="${BID3}"`);
+    expect(html).toContain("提纲与回看");
+    expect(html).not.toContain("矩阵的秩表示线性无关行的最大个数。");
+    expect(html).not.toContain('data-teaching-block-focus="skipped"');
+    expect(html).not.toContain(`data-block-id="${BID3}"`);
     expect(html).toContain("试一试");
-    expect(html).toContain("data-block-fail-soft=\"answer_hidden\"");
+    expect(html).not.toContain("data-block-fail-soft=\"answer_hidden\"");
+    expect(html).not.toContain('data-teaching-primary-advance="true"');
   });
 
   it("shows material title not bare UUID as the sole source label", () => {
@@ -260,7 +301,7 @@ describe("TeachingWorkspace", () => {
       }),
     );
     expect(html).toContain('data-teaching-needs-check="true"');
-    expect(html).toContain("主讲内容待核对");
+    expect(html).toContain("主讲内容需要核查");
     expect(html).toContain('role="status"');
   });
 
@@ -310,6 +351,23 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain("data-workspace-schema-fail=\"true\"");
     expect(html).toContain("schema 版本不受支持");
   });
+
+  it("binds contextual tools to the actual restored question and excludes its hidden answer", () => {
+    const contextTools = vi.fn((context: TeachingToolsContext) => createElement("div", { "data-bound-context": context.blockId }, context.unitText));
+    const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+      activity: { ...activityReady, courseId: WID, pathVersion: 2 },
+      clientInit: clientInit({ checkpointJson: { currentBlockId: BID2 }, contentVersion: 3 }),
+      contextualTools: contextTools,
+    }));
+    expect(contextTools).toHaveBeenCalledWith(expect.objectContaining({
+      activity: expect.objectContaining({ id: AID, courseId: WID, contentVersion: 3, pathVersion: 2 }),
+      blockId: BID2, contentVersion: 3, isQuestion: true, learningAttempt: null,
+      unitText: "写出一个秩为 2 的 3×3 矩阵例子。", sourceRefs: [],
+    }));
+    expect(html).toContain("提问与笔记");
+    expect(html).toContain('data-study-question="true"');
+    expect(html).not.toContain("data-teaching-primary-advance=\"true\"");
+  });
 });
 
 function learningResume(overrides?: Partial<LearningResume>): LearningResume {
@@ -355,7 +413,7 @@ describe("TeachingContinueEntry", () => {
     );
     expect(html).toContain('data-teaching-continue-entry="workspace"');
     expect(html).toContain('data-teaching-needs-check="true"');
-    expect(html).toContain("主讲内容待核对");
+    expect(html).toContain("主讲内容需要核查");
   });
 
   it("starts on resume-card (not ConversationResume)", () => {
@@ -383,7 +441,7 @@ describe("TeachingContinueEntry", () => {
     expect(html).toContain('data-teaching-continue-entry="workspace"');
     expect(html).toContain('data-teaching-workspace="true"');
     expect(html).toContain('data-testid="block-commands-mock"');
-    expect(html).toContain("本课介入偏好");
+    expect(html).toContain("学习设置");
   });
 
   it("preserves V2-10/11/12 chrome when in workspace phase", () => {
@@ -407,8 +465,8 @@ describe("TeachingContinueEntry", () => {
       }),
     );
     expect(html).toContain('data-return-disabled="false"');
-    expect(html).toContain('data-expand="intervention-prefs"');
-    expect(html).toContain("打开自由对话（次要）");
+    expect(html).toContain('data-panel="settings"');
+    expect(html).toContain("自由探索");
   });
 });
 

@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { SourceRecord } from "@aistudy/contracts";
+import { sourceStatusLabel } from "../inbox/upload-state";
 import type { OpeningApi } from "../client/api";
 import { resolveUploadPutUrl } from "../client/api";
 import { putPrivateBytes } from "../inbox/put-private";
@@ -15,7 +17,8 @@ type CourseRole = "core" | "optional" | "reference";
 type Props = {
   api: OpeningApi;
   /** Called after upload/retry; receives newly saved source ids for auto-select (Package B). */
-  onUploaded: (savedSourceIds?: string[]) => void | Promise<void>;
+  onUploaded: (savedSourceIds?: string[], sources?: SourceRecord[]) => void | Promise<void>;
+  sources?: readonly SourceRecord[];
   disabled?: boolean;
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
@@ -26,7 +29,15 @@ function savedSourceIds(rows: UploadQueueItem[]): string[] {
   return rows.filter((item) => item.state === "saved" && item.source).map((item) => item.source!.id);
 }
 
-export function UploadStrip({ api, onUploaded, disabled, courseId = null, courseRole = "reference" }: Props) {
+export function uploadStripItemStatus(item: UploadQueueItem, sources: readonly SourceRecord[]): string {
+  if (item.state === "idle") return "等待上传";
+  if (item.state === "uploading") return `上传中 ${item.progress}%`;
+  if (item.state === "failed") return item.message ?? "上传失败";
+  const current = sources.find(source => source.id === item.source?.id);
+  return current ? sourceStatusLabel(current) : "原件已保存，处理状态待核实";
+}
+
+export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId = null, courseRole = "reference" }: Props) {
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const client = useMemo(() => createUploadClient({
     begin: (input) => api.beginUpload(input),
@@ -60,19 +71,19 @@ export function UploadStrip({ api, onUploaded, disabled, courseId = null, course
     await queue.start(setItems);
     const newlySaved = queue.snapshot().filter((item) => addedIds.has(item.id) && item.state === "saved");
     const ids = savedSourceIds(newlySaved);
-    await onUploaded(ids);
+    await onUploaded(ids, newlySaved.flatMap(item => item.source ? [item.source] : []));
     await attachSaved(newlySaved);
-    if (courseId && newlySaved.length) await onUploaded(ids);
+    if (courseId && newlySaved.length) await onUploaded(ids, newlySaved.flatMap(item => item.source ? [item.source] : []));
   }
 
   async function retry(id: string) {
     await queue.retry(id, setItems);
     const item = queue.snapshot().find((row) => row.id === id);
     const ids = item?.state === "saved" && item.source ? [item.source.id] : [];
-    await onUploaded(ids);
+    await onUploaded(ids, item?.source ? [item.source] : []);
     if (item?.state === "saved") {
       await attachSaved([item]);
-      if (courseId) await onUploaded(ids);
+      if (courseId) await onUploaded(ids, item.source ? [item.source] : []);
     }
   }
 
@@ -89,14 +100,14 @@ export function UploadStrip({ api, onUploaded, disabled, courseId = null, course
             <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs">
               <span className="min-w-0 flex-1 break-words text-zinc-700">{item.file.name}</span>
               <span className="text-zinc-500" role="status">
-                {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.state === "saved" ? "已保存，正在解析" : item.message ?? "上传失败"}
+                {uploadStripItemStatus(item, sources)}
               </span>
               {item.state === "failed" ? <>
                 <button className={ui.secondary} onClick={() => void retry(item.id)} type="button">重试</button>
                 <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">清除</button>
               </> : item.state === "idle" || item.state === "uploading" ? (
                 <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">取消</button>
-              ) : null}
+              ) : item.state === "saved" ? <button className={ui.quiet} onClick={() => dismiss(item.id)} type="button">清除任务</button> : null}
             </li>
           ))}
         </ul>

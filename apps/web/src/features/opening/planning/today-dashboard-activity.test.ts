@@ -158,7 +158,11 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     );
     expect(html).toContain("data-teaching-workspace=\"true\"");
     expect(html).not.toContain("data-today-primary-cta");
-    expect(html).toContain("打开自由对话（次要）");
+    expect(html).toContain("主讲正文");
+    // Free exploration is now inside the on-demand settings panel. The initial
+    // lesson keeps that panel closed and does not compete with Today's entry.
+    expect(html).toMatch(/<button\b[^>]*aria-expanded="false"[^>]*>学习设置<\/button>/);
+    expect(html).not.toMatch(/<a\b[^>]*href="\/opening\/assistant/);
   });
 });
 

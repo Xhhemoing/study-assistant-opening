@@ -33,6 +33,10 @@ import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-act
 import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 import { turnsWithKnownOutcome, unknownTurnQuestion, unknownTurnRecovery } from "./unknown-turn-recovery";
 import { UnknownTurnNotice } from "./unknown-turn-notice";
+import { shouldRefreshSources } from "../inbox/source-refresh";
+import { startSourceProcessingRefresh } from "./source-processing-refresh";
+import { createQuestionDraftStore } from "./question-drafts";
+import { pinnedStudySourceProblem, questionWithStudyContext, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "./study-conversation-context";
 import { createConversationReader } from "./conversation-reader";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 
@@ -51,6 +55,8 @@ type Props = {
   initialPage?: number | null;
   initialDraft?: string;
   embedded?: boolean;
+  studyContext?: StudyConversationContext;
+  studyContextError?: string;
 };
 
 export function jobStatusHint(job: JobStatusResponse): string {
@@ -247,22 +253,39 @@ export function conversationForAssistant(
   return eligible.find((row) => row.id === initialConversationId) ?? eligible[0] ?? null;
 }
 
-export function selectionForResumedConversation(resume: ConversationResume, attempt?: LearningAttempt) {
-  return attempt
-    ? { sourceIds: attempt.sourceIds, currentPage: null }
-    : { sourceIds: resume.sourceIds, currentPage: resume.currentPage ?? null };
+export function selectionForResumedConversation(resume: ConversationResume, attempt?: LearningAttempt, entry?: { sourceIds: string[]; currentPage: number | null }) {
+  if (attempt) return { sourceIds: attempt.sourceIds, currentPage: null };
+  if (entry?.sourceIds.length) return entry;
+  return { sourceIds: resume.sourceIds, currentPage: resume.currentPage ?? null };
+}
+
+export function assistantSessionIndex(session: { identity: string; count: number }, identity: string): number {
+  return session.identity === identity ? session.count : 0;
 }
 
 export function AssistantView(props: Props) {
-  const [session, setSession] = useState(0);
-  return <AssistantWorkspace key={session} {...props} initialConversationId={session ? null : props.initialConversationId}
-    initialTitle={session ? undefined : props.initialTitle} startFresh={session ? true : props.startFresh}
-    initialSourceIds={session ? [] : props.initialSourceIds} initialPage={session ? null : props.initialPage}
+  const identity = `${studyConversationIdentity(props.studyContext)}:${props.initialCourseId ?? ""}:${props.initialConversationId ?? ""}:${[...(props.initialSourceIds ?? [])].sort().join(",")}:${props.initialPage ?? ""}:${props.learningAttempt?.id ?? ""}`;
+  const [sessionState, setSession] = useState({ identity, count: 0 });
+  const session = assistantSessionIndex(sessionState, identity);
+  const [newSelection, setNewSelection] = useState<{ identity: string; sourceIds: string[]; page: number | null } | null>(null);
+  const selection = newSelection?.identity === identity ? newSelection : null;
+  return <AssistantWorkspace key={`${identity}:${session}`} {...props}
+    initialConversationId={session ? null : props.initialConversationId}
+    startFresh={session ? true : props.startFresh}
+    initialSourceIds={selection?.sourceIds ?? props.initialSourceIds} initialPage={selection ? selection.page : props.initialPage}
     initialDraft={session ? "" : props.initialDraft}
-    onNew={() => setSession((value) => value + 1)} />;
+    onNew={(sourceIds, page) => { setNewSelection({ identity, sourceIds, page }); setSession(value => ({ identity, count: assistantSessionIndex(value, identity) + 1 })); }} />;
 }
-function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId = null, learningAttempt, task, initialTitle,
-  startFresh = false, initialSourceIds = [], initialPage = null, initialDraft = "", embedded = false, onNew }: Props & { onNew: () => void }) {
+function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
+  startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", embedded = false,
+  studyContext, studyContextError, onNew }: Props & { onNew: (sourceIds: string[], page: number | null) => void }) {
+  const initialCourseId = studyContext?.courseId ?? courseIdProp;
+  const entrySourceKey = sourceIdsProp.join(",");
+  const initialSourceIds = useMemo(() => {
+    const suppliedIds = entrySourceKey ? entrySourceKey.split(",") : [];
+    return studyContext?.sourceId ? addSelectedSourceIds([studyContext.sourceId], suppliedIds) : suppliedIds;
+  }, [studyContext?.sourceId, entrySourceKey]);
+  const initialPage = studyContext?.page ?? pageProp;
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [conversationId, setConversationIdState] = useState<string | null>(
     learningAttempt ? null : initialConversationId,
@@ -275,11 +298,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const conversationReader = useMemo(() => createConversationReader(api), [api]);
   const [resume, setResume] = useState<ConversationResume | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
+  const sourceRequestSequence = useRef(0);
+  const sourceRefresh = useRef<ReturnType<typeof startSourceProcessingRefresh> | null>(null);
+  const [sourceRefreshError, setSourceRefreshError] = useState(false);
   const [organization, setOrganization] = useState<MaterialOrganization | null>(null);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? initialSourceIds);
   const [currentPage, setCurrentPage] = useState(initialPage == null ? "" : String(initialPage));
   const [turns, setTurns] = useState<TurnRecord[]>([]);
-  const [draft, setDraft] = useState(initialDraft);
+  const [draft, setDraftState] = useState(initialDraft);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [pending, setPending] = useState(false);
@@ -293,6 +319,30 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
+  const draftStore = useMemo(() => createQuestionDraftStore(), []);
+  const [draftUnavailable, setDraftUnavailable] = useState(false);
+  const draftScope = `${studyConversationIdentity(studyContext)}:${initialCourseId ?? ""}:${initialConversationId ?? ""}:${[...initialSourceIds].sort().join(",")}:${initialPage ?? ""}:${learningAttempt?.id ?? ""}`;
+  const draftEdited = useRef(false);
+  const preserveEntrySelection = useRef(true);
+  const setDraft = useCallback((text: string) => {
+    draftEdited.current = true;
+    setDraftState(text);
+    if (privacy === "saved") draftStore.write(draftScope, text);
+    else draftStore.remove(draftScope);
+    setDraftUnavailable(draftStore.unavailable);
+  }, [draftScope, draftStore, privacy]);
+  useEffect(() => {
+    if (draftEdited.current) return;
+    const saved = draftStore.read(draftScope);
+    if (saved !== null) setDraftState(saved);
+    setDraftUnavailable(draftStore.unavailable);
+  }, [draftScope, draftStore]);
+  function changePrivacy(next: ComposerPrivacy) {
+    setPrivacy(next);
+    if (next === "ephemeral") draftStore.remove(draftScope);
+    else draftStore.write(draftScope, draftRef.current);
+    setDraftUnavailable(draftStore.unavailable);
+  }
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
   const [ephemeralPrivacyEpoch, setEphemeralPrivacyEpoch] = useState<number>();
   const [snippetDraft, setSnippetDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
@@ -326,8 +376,25 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }, [unknownJob]);
 
   const refreshSources = useCallback(async () => {
-    setSources(await api.listSources());
+    const sequence = ++sourceRequestSequence.current;
+    const records = await api.listSources();
+    if (sequence === sourceRequestSequence.current) { setSources(records); setSourceRefreshError(false); }
   }, [api]);
+  const sourcesProcessing = shouldRefreshSources(sources);
+  useEffect(() => {
+    if (!sourcesProcessing) return;
+    let sequence = 0;
+    const controller = startSourceProcessingRefresh({
+      read: () => { sequence = ++sourceRequestSequence.current; return api.listSources(); },
+      accept: records => {
+        if (sequence !== sourceRequestSequence.current) return false;
+        setSources(records); setSourceRefreshError(false); return true;
+      },
+      onError: () => { if (sequence === sourceRequestSequence.current) setSourceRefreshError(true); },
+    });
+    sourceRefresh.current = controller;
+    return () => { controller.stop(); if (sourceRefresh.current === controller) sourceRefresh.current = null; };
+  }, [api, sourcesProcessing]);
 
   const refreshOrganization = useCallback(async () => {
     // Client-side membership until Data exposes listReadySourceIdsForCourse on the web API.
@@ -349,12 +416,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   );
   const readyCourseMaterials = hasReadyMembershipMaterials(sources, membershipIds);
 
-  const handleUploaded = useCallback(async (savedSourceIds?: string[]) => {
-    await refreshSources();
+  const handleUploaded = useCallback(async (savedSourceIds?: string[], knownSources?: SourceRecord[]) => {
+    if (knownSources?.length) setSources(current => [...current, ...knownSources.filter(record => !current.some(item => item.id === record.id))]);
+    if (savedSourceIds?.length) setSelectedSourceIds(current => addSelectedSourceIds(current, savedSourceIds));
+    try { await refreshSources(); } catch { setSourceRefreshError(true); }
     await refreshOrganization();
-    if (savedSourceIds?.length) {
-      setSelectedSourceIds((current) => addSelectedSourceIds(current, savedSourceIds));
-    }
   }, [refreshOrganization, refreshSources]);
 
   const refreshTutorActions = useCallback(async () => {
@@ -396,7 +462,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       setResume(nextResume);
       setTurns(nextTurns);
-      const restoredSelection = selectionForResumedConversation(nextResume, learningAttempt);
+      const restoredSelection = selectionForResumedConversation(nextResume, learningAttempt, preserveEntrySelection.current ? { sourceIds: initialSourceIds, currentPage: initialPage } : undefined);
       if (learningAttempt || restoredSelection.sourceIds.length > 0) {
         setSelectedSourceIds(restoredSelection.sourceIds);
       }
@@ -440,7 +506,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       return true;
     },
-    [conversationReader, initialCourseId, learningAttempt, setConversationId],
+    [conversationReader, initialCourseId, initialSourceIds, initialPage, learningAttempt, setConversationId],
   );
 
 
@@ -461,7 +527,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         const currentId = conversationIdRef.current;
         if (currentId && await refreshConversation(currentId, controller.signal)) return;
         if (cancelled) return;
-        if (startFresh && !learningAttempt) return;
+        if ((startFresh || studyContext?.activityId || initialSourceIds.length > 0) && !learningAttempt) return;
         // Practice conversations are associated with turns server-side, but the
         // summary/resume contract does not expose that association. Starting a
         // fresh conversation here prevents another practice attempt's tutoring
@@ -484,7 +550,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       cancelled = true;
       controller.abort();
     };
-  }, [api, initialConversationId, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh]);
+  }, [api, initialConversationId, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, initialSourceIds.length]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -563,6 +629,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
     setAutoSelectNotice(null);
+    if (studyContextError) { setError(studyContextError); return { accepted: false }; }
+    if (studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
+      try {
+        const sequence = ++sourceRequestSequence.current;
+        const latestSources = await api.listSources();
+        if (sequence === sourceRequestSequence.current) setSources(latestSources);
+        const problem = pinnedStudySourceProblem(studyContext, latestSources);
+        if (problem) { setError(problem); return { accepted: false }; }
+      } catch { setError("无法核对指定材料版本，本次未发送；问题草稿已保留。"); return { accepted: false }; }
+    }
+    const submittedText = questionWithStudyContext(input.text, studyContext);
+    if (submittedText.length > 20000) { setError("问题和携入背景合计超过 20000 字，请缩短问题或选中片段后再发送。"); return { accepted: false }; }
     let page: number | null | undefined;
     try {
       page = pageForSubmit(currentPage);
@@ -591,12 +669,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       if (input.privacy === "ephemeral" && !learningAttempt) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
         const output = await api.replyEphemeral({
-          text: input.text,
+          text: submittedText,
           sourceIds: selectedSourceIds,
           mode: input.mode,
           history,
           ...(ephemeralPrivacyEpoch === undefined ? {} : { historyPrivacyEpoch: ephemeralPrivacyEpoch }),
           ...(page !== undefined ? { currentPage: page } : {}),
+          ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
           // Package B/C: course scope lets server fill/narrow when sourceIds empty.
           ...(boundCourseId ? { courseId: boundCourseId } : {}),
         }, abortController.signal);
@@ -612,13 +691,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         }
         setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
           clientKey: input.clientKey,
-          text: input.text,
+          text: submittedText,
           sourceIds: turnSourceIds,
           output,
         }, abortController.signal));
         setPendingHint(output.historyDiscarded
           ? "隐私设置已变化或旧临时历史无法验证，已清除旧临时上下文；本次只发送当前输入和允许的材料。"
           : "本轮仅保留在当前标签页；刷新后不会恢复。");
+        preserveEntrySelection.current = false;
         setDraft("");
         setPending(false);
         abortRef.current = null;
@@ -627,19 +707,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       const id = await ensureConversation();
       const submitted = await api.submitTurn({
         conversationId: id,
-        text: input.text,
+        text: submittedText,
         sourceIds: selectedSourceIds,
         mode: input.mode,
         clientKey: input.clientKey,
         privacy: "saved",
         ...learningAttemptTurnContext(learningAttempt),
         ...(page !== undefined ? { currentPage: page } : {}),
+        ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
       setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;
       setPendingHint("回答任务已提交，等待状态更新。");
       abortRef.current = null;
+      preserveEntrySelection.current = false;
       setDraft("");
       await refreshConversation(id);
       return { accepted: true };
@@ -721,13 +803,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const setPrompt = useCallback((value: string) => {
     if (pending || loading || recoveryRequired) return;
     setDraft(replacePromptDraft(draftRef.current, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
-  }, [pending, loading, recoveryRequired]);
+  }, [pending, loading, recoveryRequired, setDraft]);
   function prepareUnknownQuestion() {
     if (!retryQuestion || pending || loading || recoveryRequired || unknownTurnRecovery(unknownJob, Date.now())?.canRetry !== true) return;
     const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的草稿将被替换。"));
     if (next !== retryQuestion.text) return;
     setDraft(next);
-    setPrivacy("saved");
+    changePrivacy("saved");
+    draftStore.write(draftScope, next);
     setModePrefill({ mode: retryQuestion.mode, nonce: Date.now() });
     // This is an explicit new question, not a replay of an unconfirmed submission key.
     setRetryDraftVersion(value => value + 1);
@@ -735,15 +818,31 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
   }
   const Heading = embedded ? "h2" : "h1";
+  const sourceProblem = !loading ? pinnedStudySourceProblem(studyContext, sources) : null;
+  const contextProblem = studyContextError ?? sourceProblem;
+  const returnHref = studyContextReturnHref(studyContext);
   return <section aria-label="自由探索工作台" className="flex h-full min-h-[400px] min-w-0 overflow-hidden bg-white lg:min-h-0">
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 sm:px-5">
         <Heading className="min-w-0 truncate text-sm font-semibold text-zinc-800">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "自由探索")}</Heading>
         <div className="flex shrink-0 items-center gap-1">
           <button type="button" className={secondaryButtonClass} aria-expanded={contextOpen} aria-controls="exploration-context" onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
-          {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; onNew(); }}><Plus size={15} aria-hidden /></button> : null}
+          {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; draftStore.remove(draftScope); onNew(selectedSourceIds, pageIntentValue(currentPage)); }}><Plus size={15} aria-hidden /></button> : null}
         </div>
       </header>
+      {studyContext ? <div className="space-y-1 border-b border-zinc-100 px-4 py-2 text-xs leading-5 text-zinc-600 sm:px-5">
+        <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : "指定材料")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
+        <p>{studyContext.activityId || studyContext.fragment ? "背景将在你发送时作为文字附上；资料依据仍以回答中的真实引用为准。" : "已指定参考材料和位置；回答中的实际引用用于核对依据。"}</p>
+        {returnHref && !embedded ? <a href={returnHref} className="text-emerald-800 underline">返回原内容</a> : null}
+        <details><summary className="cursor-pointer">上下文详情</summary><dl className="break-all">
+          {studyContext.courseId ? <><dt>课程</dt><dd>{studyContext.courseId}</dd></> : null}
+          {studyContext.activityId ? <><dt>活动 / 内容版本</dt><dd>{studyContext.activityId} / {studyContext.contentVersion ?? "未指定"}</dd></> : null}
+          {studyContext.blockId ? <><dt>学习单元</dt><dd>{studyContext.blockId}</dd></> : null}
+          {studyContext.sourceId ? <><dt>材料 / 版本</dt><dd>{studyContext.sourceId} / {studyContext.sourceVersion ?? "提交时当前版本"}</dd></> : null}
+          {studyContext.fragment ? <><dt>带入片段</dt><dd className="whitespace-pre-wrap">{studyContext.fragment}</dd></> : null}
+        </dl></details>
+      </div> : null}
+      {contextProblem ? <p role="alert" className="mx-4 mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">{contextProblem}{returnHref ? <a href={returnHref} className="ml-2 underline">返回阅读</a> : null}</p> : null}
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
       {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
       {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
@@ -764,19 +863,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       ) : null}
 
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
-      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage) }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : setPrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-amber-800">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
+      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || !!contextProblem} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}</p>
-      <UploadStrip api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
+      {sourceRefreshError ? <div className="mb-3 space-y-2 text-xs text-amber-800"><p role="status">材料状态暂时无法读取；已保留上次状态，会继续核实，尚未标记为解析完成。</p><button type="button" className={secondaryButtonClass} onClick={() => { if (sourceRefresh.current) sourceRefresh.current.retry(); else void refreshSources().catch(() => setSourceRefreshError(true)); }}>重新读取材料状态</button></div> : null}
+      <UploadStrip sources={sources} api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
       <SourcePageControls
         sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources}
         selectedSourceIds={selectedSourceIds}
         currentPage={currentPage}
-        onSelectedSourceIdsChange={setSelectedSourceIds}
-        onCurrentPageChange={setCurrentPage}
+        onSelectedSourceIdsChange={value => { preserveEntrySelection.current = false; setSelectedSourceIds(value); }}
+        onCurrentPageChange={value => { preserveEntrySelection.current = false; setCurrentPage(value); }}
         disabled={pending || loading}
         membershipSourceIds={learningAttempt || !boundCourseId ? null : membershipIds}
       />

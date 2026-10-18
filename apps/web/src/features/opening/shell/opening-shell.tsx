@@ -10,6 +10,7 @@ import { ui } from "../design/ui";
 import { FocusTimer } from "./focus-timer";
 import { OpeningMobileNavigation } from "./mobile-navigation";
 import { navigationIsActive, openingNavigation } from "./navigation";
+import { CitationReaderHost } from "../inbox/citation-reader-host";
 
 const icons = {
   today: Sun,
@@ -41,6 +42,18 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   const [focusMode, setFocusMode] = useState(false);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [dismissedFocusPath, setDismissedFocusPath] = useState<string | null>(null);
+  const studySurface = /^\/opening\/courses\/[^/]+\/study(?:\/matrix)?\/?$/.test(pathname);
+  // Entering a lesson is a layout choice, never a change to AI intervention settings.
+  const effectiveFocusMode = focusMode || (studySurface && dismissedFocusPath !== pathname);
+  const exitFocusMode = useCallback(() => {
+    setFocusMode(false);
+    if (studySurface) setDismissedFocusPath(pathname);
+  }, [pathname, studySurface]);
+  const toggleFocusMode = useCallback(() => {
+    if (effectiveFocusMode) exitFocusMode();
+    else setFocusMode(true);
+  }, [effectiveFocusMode, exitFocusMode]);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const toggleSidebar = useCallback(() => {
@@ -59,15 +72,15 @@ export function OpeningShell({ children }: { children: ReactNode }) {
     setSidebarCollapsed(readSidebarCollapsed());
   }, []);
   useEffect(() => {
-    if (!focusMode) return;
-    const exitFocusMode = (event: KeyboardEvent) => {
+    if (!effectiveFocusMode) return;
+    const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || document.querySelector("dialog[open]")) return;
-      setFocusMode(false);
+      exitFocusMode();
     };
     // Run after document-level dismiss handlers so an open panel gets Escape first.
-    window.addEventListener("keydown", exitFocusMode);
-    return () => window.removeEventListener("keydown", exitFocusMode);
-  }, [focusMode]);
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [effectiveFocusMode, exitFocusMode]);
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/auth/me", { cache: "no-store", signal: controller.signal })
@@ -110,9 +123,10 @@ export function OpeningShell({ children }: { children: ReactNode }) {
     <Link href="/opening/review" className={`${ui.icon} hidden md:inline-flex`} aria-label="待确认建议" title="审核 AI 生成的任务、记忆与补测建议" aria-current={pathname.startsWith("/opening/review") ? "page" : undefined}><ClipboardCheck size={16} aria-hidden="true" />{pendingCount != null && pendingCount > 0 ? <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white ring-2 ring-white motion-safe:animate-pop" aria-label={`${pendingCount} 项待审核`}>{pendingCount}</span> : null}</Link>
   </>;
   return <>
-    <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} mobileNavigation={<OpeningMobileNavigation pathname={pathname} pendingCount={pendingCount} />} settingsHref="/opening/settings" focusMode={focusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} topbar={<>{focusMode ? null : quickActions}<FocusTimer /><button type="button" className={`${ui.icon} relative`} aria-pressed={focusMode} aria-label={focusMode ? "退出专注模式" : "进入专注模式"} title={focusMode ? "退出专注模式" : "进入专注模式"} onClick={() => setFocusMode(value => !value)}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}</button></>}>
+    <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={studySurface ? "课程学习" : activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} mobileNavigation={<OpeningMobileNavigation pathname={pathname} pendingCount={pendingCount} />} settingsHref="/opening/settings" focusMode={effectiveFocusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} topbar={<>{effectiveFocusMode ? null : quickActions}<FocusTimer /><button type="button" className={`${ui.icon} relative`} aria-pressed={effectiveFocusMode} aria-label={effectiveFocusMode ? "退出专注模式" : "进入专注模式"} title={effectiveFocusMode ? "退出专注模式" : "进入专注模式"} onClick={toggleFocusMode}>{effectiveFocusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}</button></>}>
       {logoutError ? <div className="border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700" role="alert">{logoutError}</div> : null}{children}
     </AppShell>
     <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
+    <CitationReaderHost />
   </>;
 }

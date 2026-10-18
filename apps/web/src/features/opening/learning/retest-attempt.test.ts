@@ -37,10 +37,18 @@ describe("retest attempt helpers", () => {
   it("maps the task retest projection into form prefill", () => {
     expect(retestPrefillFromProjection(projection)).toEqual({
       retestId: candidateId,
+      retestActivityId: activityId,
       skillLabel: "分数加减",
       prompt: projection.prompt,
       recommendedAt: projection.recommendedAt,
     });
+  });
+
+  it("preserves the authoritative requirement while keeping retest activity separate from teaching sessions", () => {
+    expect(retestPrefillFromProjection({ ...projection, requirementKey: "fractions-v2" })).toMatchObject({
+      retestActivityId: activityId, requirementKey: "fractions-v2",
+    });
+    expect(retestPrefillFromProjection({ ...projection, requirementKey: null })).toHaveProperty("requirementKey", null);
   });
 
   it("marks pending retests due when recommendedAt is past or missing", () => {
@@ -62,6 +70,7 @@ describe("retest attempt helpers", () => {
   it("finds prefill from the task list by candidate id", () => {
     expect(findRetestPrefill([{ retest: null }, { retest: projection }], candidateId)).toEqual({
       retestId: candidateId,
+      retestActivityId: activityId,
       skillLabel: "分数加减",
       prompt: projection.prompt,
       recommendedAt: projection.recommendedAt,

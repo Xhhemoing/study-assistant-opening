@@ -1,21 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { LearningAttempt, LearningObservation, SourceRecord } from "@aistudy/contracts";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type SetStateAction } from "react";
+import type { LearningAttempt, LearningObservation, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
 import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
+import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
 import { formatRetestSubmitError, withRetestSubmit, type RetestAttemptPrefill } from "./retest-attempt";
 import { ReferenceCheckStep } from "./reference-check-step";
 import {
   isAssistanceAllowed,
   preselectAssistance,
   raiseAssistanceOnly,
-  type DeliveredAssistance,
 } from "./reference-check";
 import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label-options";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
+import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeFields, type PracticeStart } from "./practice-draft";
 
 
 function readPracticeSkillPrefill(): string {
@@ -37,36 +38,56 @@ const ASSISTANCE_OPTIONS: Array<{ value: LearningObservation["assistance"]; labe
 
 type Props = {
   courseId: string;
+  initialMode?: "matrix" | "practice";
+  initialMatrixKey?: MatrixExerciseSpec["exerciseKey"];
+  initialMatrixVariant?: number;
   retest?: RetestAttemptPrefill | null;
   skillLabels?: string[];
   onRecorded: () => void;
 };
 
 /** A fresh attempt captures server identity/version before any answer or help. */
-export function LearningAttemptForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded }: Props) {
+export function LearningAttemptForm(props: Props) {
+  return <PracticeController key={practiceScope(props.courseId, "ordinary", props.retest)} {...props} />;
+}
+
+function PracticeController(props: Props) {
+  const scope = practiceScope(props.courseId, "ordinary", props.retest);
+  const continuity = usePracticeDraft(scope, { skillLabel: props.retest?.skillLabel ?? readPracticeSkillPrefill(), stem: props.retest?.prompt ?? "", matrixMode: props.initialMode === "matrix" && !props.retest });
+  return <div className="space-y-3"><PracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.retest} /></div>;
+}
+
+function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, continuity }: Props & { continuity: PracticeContinuity }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
-  const [matrixMode, setMatrixMode] = useState(false);
+  const scope = practiceScope(courseId, "ordinary", retest);
+  const { draft, patch, ready, storageWarning, requireSaved } = continuity;
+  const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
+  const { sourceId, referenceSourceId, skillLabel, stem, answer, outcome, assistance, deliveredAssistance, referenceSkipped, matrixMode } = draft.fields;
+  function fieldSetter<K extends keyof PracticeFields>(key: K) {
+    return (next: SetStateAction<PracticeFields[K]>) => {
+      patch(current => ({ fields: { [key]: typeof next === "function" ? (next as (value: PracticeFields[K]) => PracticeFields[K])(current.fields[key]) : next } }));
+    };
+  }
+  const setMatrixMode = fieldSetter("matrixMode");
+  const setSourceId = fieldSetter("sourceId");
+  const setReferenceSourceId = fieldSetter("referenceSourceId");
+  const setSkillLabel = fieldSetter("skillLabel");
+  const setStem = fieldSetter("stem");
+  const setAnswer = fieldSetter("answer");
+  const setOutcome = fieldSetter("outcome");
+  const setAssistance = fieldSetter("assistance");
+  const setDeliveredAssistance = fieldSetter("deliveredAssistance");
+  const setReferenceSkipped = fieldSetter("referenceSkipped");
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [skillOptions, setSkillOptions] = useState<string[]>(skillLabelsProp ?? []);
-  const [sourceId, setSourceId] = useState("");
-  const [referenceSourceId, setReferenceSourceId] = useState("");
-  const [skillLabel, setSkillLabel] = useState(() => retest?.skillLabel ?? readPracticeSkillPrefill());
-  const [stem, setStem] = useState(() => retest?.prompt ?? "");
   const [attempt, setAttempt] = useState<LearningAttempt | null>(null);
-  const [answer, setAnswer] = useState("");
-  const [outcome, setOutcome] = useState<LearningObservation["outcome"]>("unverified");
-  const [assistance, setAssistance] = useState<LearningObservation["assistance"]>("unknown");
-  const [deliveredAssistance, setDeliveredAssistance] = useState<DeliveredAssistance>("none");
   const [recorded, setRecorded] = useState<LearningObservation | null>(null);
   const [referenceChecked, setReferenceChecked] = useState(false);
-  const [referenceSkipped, setReferenceSkipped] = useState(false);
   const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
   const [error, setError] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpOpenedOnce, setHelpOpenedOnce] = useState(false);
-  const startRequest = useRef<{ fingerprint: string; sessionId: string | null; clientKey: string } | null>(null);
-  const repeatKey = useRef<string | null>(null);
-  const submitRequest = useRef<{ fingerprint: string; clientKey: string } | null>(null);
 
   useEffect(() => {
     if (skillLabelsProp) setSkillOptions(skillLabelsProp);
@@ -97,7 +118,8 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
   async function refreshDeliveredAssistance(attemptId: string) {
     try {
       const snapshot = await client.getAttempt(attemptId);
-      setDeliveredAssistance(snapshot.deliveredAssistance);
+      if (readPracticeDraft(scope, null, draft.id)?.attemptId !== attemptId) return;
+      setDeliveredAssistance(current => current === "revealed" || snapshot.deliveredAssistance === "revealed" ? "revealed" : current === "hinted" || snapshot.deliveredAssistance === "hinted" ? "hinted" : "none");
       setAssistance((current) => {
         const floored = raiseAssistanceOnly(current, snapshot.deliveredAssistance);
         // First load (still unknown) adopts the delivered preselect; later only raises.
@@ -111,128 +133,116 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
     }
   }
 
-  async function start(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (pending) return;
+  async function acceptAttempt(next: LearningAttempt, expectedRequestKey: string) {
+    const checkpoint = readPracticeDraft(scope, null, draft.id) ?? draft;
+    assertPracticeAttempt(checkpoint, next, expectedRequestKey);
+    patch({ attemptId: next.id });
+    const state = await readPracticeRecord(client, courseId, next, checkpoint.observationId);
+    if (readPracticeDraft(scope, null, draft.id)?.attemptId !== next.id || readPracticeDraft(scope, null, draft.id)?.start?.clientKey !== expectedRequestKey) return;
+    setAttempt(next);
+    setRecorded(state.observation);
+    setReferenceChecked(Boolean(state.observation?.referenceCheck));
+    patch(current => ({ observationId: state.observation?.id ?? null, fields: {
+      ...restoredPracticeAssistance(current.fields, state.deliveredAssistance),
+    } }));
+    setHelpOpen(false); setHelpOpenedOnce(false); setRestored(false);
+  }
+
+  async function start(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (pendingRef.current || !ready) return;
+    pendingRef.current = true;
     setPending(true); setError("");
-    const sessionSources = [...new Set([sourceId, referenceSourceId].filter(Boolean))];
-    const fingerprint = JSON.stringify([courseId, skillLabel.trim(), sessionSources, stem.trim()]);
-    if (startRequest.current?.fingerprint !== fingerprint) {
-      startRequest.current = { fingerprint, sessionId: null, clientKey: `attempt-${crypto.randomUUID()}` };
-    }
-    const request = startRequest.current;
+    const request = patch(current => ({ start: current.start ?? {
+      sessionId: null, clientKey: `attempt-${crypto.randomUUID()}`, createInput: null,
+      sessionInput: { courseId, skillLabel: skillLabel.trim(), sourceIds: [...new Set([sourceId, referenceSourceId].filter(Boolean))], ...(retest?.requirementKey !== undefined ? { requirementKey: retest.requirementKey } : {}) },
+    } })).start!;
     try {
-      if (!request.sessionId) {
-        request.sessionId = (await client.createSession({
-          courseId,
-          skillLabel: skillLabel.trim(),
-          sourceIds: sessionSources,
-        })).id;
-      }
-      const next = await client.createAttempt({
-        sessionId: request.sessionId,
-        clientKey: request.clientKey,
-        ...(sourceId && stem.trim()
-          ? { problem: { sourceId, stemSnapshot: stem.trim(), artifactKind: "reference_item" as const } }
-          : {}),
+      requireSaved();
+      const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, async () => {
+        if (!request.sessionId) {
+          if (!request.sessionInput) throw new Error("练习会话不可用，原草稿已保留。");
+          request.sessionId = (await client.createSession(request.sessionInput)).id;
+          patch({ start: request });
+          requireSaved();
+        }
+        request.createInput ??= {
+          sessionId: request.sessionId, clientKey: request.clientKey,
+          ...(retest?.requirementKey !== undefined ? { requirementKey: retest.requirementKey } : {}),
+          ...(sourceId && stem.trim() ? { problem: { sourceId, stemSnapshot: stem.trim(), artifactKind: "reference_item" as const } } : {}),
+        };
+        patch({ start: request });
+        requireSaved();
+        const created = await client.createAttempt(request.createInput);
+        assertPracticeAttempt(readPracticeDraft(scope, null, draft.id) ?? draft, created, request.clientKey);
+        patch({ start: request, attemptId: created.id });
+        return created;
       });
-      setAttempt(next);
-      setRecorded(null);
-      setReferenceChecked(false);
-      setReferenceSkipped(false);
-      setHelpOpen(false);
-      setHelpOpenedOnce(false);
-      setDeliveredAssistance("none");
-      setAssistance("unknown");
-      await refreshDeliveredAssistance(next.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法开始练习"); }
-    finally { setPending(false); }
+      await acceptAttempt(next, request.clientKey);
+    } catch (reason) { setRestored(true); setError(reason instanceof Error ? reason.message : "无法恢复练习，原答案已保留"); }
+    finally { pendingRef.current = false; setPending(false); }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!attempt || pending) return;
+    if (!attempt || pendingRef.current) return;
+    pendingRef.current = true;
     setPending(true); setError("");
-    const nextAssistance = raiseAssistanceOnly(assistance, deliveredAssistance);
-    const fingerprint = JSON.stringify([attempt.id, answer, outcome, nextAssistance]);
-    if (submitRequest.current?.fingerprint !== fingerprint) {
-      submitRequest.current = { fingerprint, clientKey: `answer-${crypto.randomUUID()}` };
-    }
+    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report" }, retest?.retestId) } })).submission!;
     try {
-      const result = await client.submitAttempt(
-        attempt.id,
-        withRetestSubmit(
-          {
-            clientKey: submitRequest.current.clientKey,
-            answer,
-            outcome,
-            assistance: nextAssistance,
-            verdictSource: "self_report",
-          },
-          retest?.retestId,
-        ),
-      );
-      setRecorded(result);
-      setAssistance(result.assistance);
-      setHelpOpen(false);
-      setHelpOpenedOnce(false);
+      if (draft.submission) {
+        const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);
+        if (existing.observation) { setRecorded(existing.observation); onRecorded(); return; }
+      }
+      requireSaved();
+      const result = await runPracticeRequest(`${scope}:submit:${submission.input.clientKey}`, () => client.submitAttempt(submission.attemptId, submission.input));
+      if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
+      patch({ observationId: result.id });
+      const current = await readPracticeRecord(client, courseId, { ...attempt, observationId: result.id });
+      if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
+      if (!current.observation) throw new Error("已收到保存回执，尚未读取最新记录，请保留原答案后重试。");
+      setRecorded(current.observation);
+      setAssistance(current.observation.assistance);
+      setHelpOpen(false); setHelpOpenedOnce(false);
       onRecorded();
     } catch (reason) { setError(formatRetestSubmitError(reason)); }
-    finally { setPending(false); }
+    finally { pendingRef.current = false; setPending(false); }
   }
 
   async function repeatProblem() {
-    if (!attempt?.problemId || pending) return;
+    if (!attempt?.problemId || pendingRef.current) return;
+    pendingRef.current = true;
+    const request: PracticeStart = { sessionId: attempt.sessionId, sessionInput: null, clientKey: `attempt-${crypto.randomUUID()}`, createInput: null };
+    request.createInput = { sessionId: attempt.sessionId, problemId: attempt.problemId, requirementKey: attempt.requirementKey, clientKey: request.clientKey };
+    patch({ start: request, attemptId: null, observationId: null, submission: null, fields: { answer: "", outcome: "unverified", assistance: "unknown", referenceSkipped: false } });
+    setAttempt(null); setRecorded(null); setReferenceChecked(false); setRestored(true);
+    // A repeated attempt retains the same session and its delivered assistance floor.
     setPending(true); setError("");
-    repeatKey.current ??= `attempt-${crypto.randomUUID()}`;
     try {
-      const next = await client.createAttempt({
-        sessionId: attempt.sessionId,
-        problemId: attempt.problemId,
-        requirementKey: attempt.requirementKey,
-        clientKey: repeatKey.current,
-      });
-      setAttempt(next);
-      setRecorded(null);
-      setReferenceChecked(false);
-      setReferenceSkipped(false);
-      setAnswer("");
-      setOutcome("unverified");
-      setAssistance("unknown");
-      setDeliveredAssistance("none");
-      setHelpOpen(false);
-      setHelpOpenedOnce(false);
-      submitRequest.current = null;
-      repeatKey.current = null;
-      await refreshDeliveredAssistance(next.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法重新开始本题"); }
-    finally { setPending(false); }
+      requireSaved();
+      const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, () => client.createAttempt(request.createInput!));
+      patch({ attemptId: next.id });
+      await acceptAttempt(next, request.clientKey);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法重新开始本题，草稿已保留"); }
+    finally { pendingRef.current = false; setPending(false); }
   }
 
   function reset() {
-    setAttempt(null);
-    setRecorded(null);
-    setReferenceChecked(false);
-    setReferenceSkipped(false);
-    setAnswer("");
-    setOutcome("unverified");
-    setAssistance("unknown");
-    setDeliveredAssistance("none");
-    setHelpOpen(false);
-    setHelpOpenedOnce(false);
-    setStem(retest?.prompt ?? "");
-    startRequest.current = null;
-    submitRequest.current = null;
-    repeatKey.current = null;
+    continuity.startAnother({ skillLabel, stem: retest?.prompt ?? "", sourceId, referenceSourceId });
   }
 
-  if (matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} sources={sources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
+  if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={sources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
   return (
-    <div className="space-y-3 border-t border-zinc-200 pt-4">
+    <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-zinc-200 pt-4">
+      {!ready ? <p className="text-sm text-zinc-500" role="status">正在读取练习草稿…</p> : null}
       <h3 className="text-sm font-semibold text-zinc-800">记录一次练习</h3>
       <p className="text-xs text-zinc-500">选主题 → 作答 → 保存</p>
-      {!attempt && !retest ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-zinc-200 px-3 py-2 text-sm text-zinc-800">练习内置矩阵题（自动核算）</button> : null}
-      {!attempt ? (
+      {ready && initialMode === "matrix" && !matrixMode && draft.start ? <p className="text-xs text-zinc-600" role="status">已恢复原普通练习草稿，新的入口选择不会覆盖它。可保留此草稿后开始其他练习。</p> : null}
+      {storageWarning ? <p className="text-xs text-amber-800" role="status">草稿暂时只在当前页面内保留，刷新前请复制答案。</p> : null}
+      {!attempt && !draft.start && !retest ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-zinc-200 px-3 py-2 text-sm text-zinc-800">练习内置矩阵题（自动核算）</button> : null}
+      {restored ? (
+        <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} />
+      ) : !attempt ? (
         <form onSubmit={start} className="space-y-3">
           <p className="text-xs leading-6 text-zinc-500" role="status">默认三步：选主题 → 作答 → 保存。辅导与材料选项按需展开。</p>
           {retest ? (
@@ -353,7 +363,10 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
               referenceSourceId={referenceSourceId}
               referenceSourceName={referenceSource?.name}
               onChecked={(next) => {
+                const current = readPracticeDraft(scope, null, draft.id);
+                if (!current || current.attemptId !== next.attemptId || current.start?.sessionId !== next.sessionId) { onRecorded(); return; }
                 setRecorded(next);
+                patch({ observationId: next.id });
                 setReferenceChecked(true);
                 onRecorded();
               }}
@@ -391,6 +404,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
             {attempt.problemId ? "题目与版本已由服务器记录。" : "未关联可核验题目，资格保持待核验。"}
             {deliveredAssistance !== "none" ? ` 会话内已送达帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}，只能上调不能下调。` : null}
           </p>
+          {draft.submission ? <p className="text-xs text-amber-800" role="status">上次保存结果待核对，原答案已锁定；重试会沿用同一次请求。</p> : null}
           <form onSubmit={submit} className="space-y-3">
             <p className="text-xs leading-6 text-zinc-500">2. 作答 · 3. 保存</p>
             <label className="block text-sm text-zinc-800">
@@ -398,7 +412,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
               <textarea
                 maxLength={20000}
                 value={answer}
-                disabled={pending}
+                disabled={pending || Boolean(draft.submission)}
                 onChange={(event) => setAnswer(event.target.value)}
                 className="mt-1 min-h-24 w-full rounded border border-zinc-200 bg-white px-3 py-2"
               />
@@ -407,7 +421,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
               自报结果
               <select
                 value={outcome}
-                disabled={pending}
+                disabled={pending || Boolean(draft.submission)}
                 onChange={(event) => setOutcome(event.target.value as LearningObservation["outcome"])}
                 className="ml-2 rounded border border-zinc-200 bg-white px-2 py-1"
               >
@@ -422,7 +436,7 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
                 本次帮助
                 <select
                   value={assistance}
-                  disabled={pending}
+                  disabled={pending || Boolean(draft.submission)}
                   onChange={(event) => {
                     const next = event.target.value as LearningObservation["assistance"];
                     setAssistance(raiseAssistanceOnly(next, deliveredAssistance));
@@ -442,13 +456,13 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
               </label>
             </details>
             <button disabled={pending} className="rounded bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50">
-              {pending ? "正在保存…" : "先保存原答案"}
+              {pending ? "正在保存…" : draft.submission ? "重试保存同一答案" : "先保存原答案"}
             </button>
           </form>
           <div className="border-t border-zinc-100 pt-3">
             <button
               type="button"
-              disabled={pending}
+              disabled={pending || Boolean(draft.submission)}
               aria-expanded={helpOpen}
               onClick={() => {
                 setHelpOpenedOnce(true);
@@ -471,6 +485,6 @@ export function LearningAttemptForm({ courseId, retest = null, skillLabels: skil
         </div>
       )}
       {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
-    </div>
+    </fieldset>
   );
 }

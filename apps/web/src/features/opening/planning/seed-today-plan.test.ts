@@ -62,6 +62,8 @@ describe("buildCourseSeedTaskInput", () => {
       dueAt: null,
       priority: 1,
       candidateId: null,
+      courseId: COURSE_ID,
+      origin: "course_seed",
       clientKey: `course-seed:${COURSE_ID}:2026-10-14`,
     });
   });
@@ -138,7 +140,7 @@ describe("runSeedTodayPlan", () => {
 
     expect(api.getPlanningSettings).toHaveBeenCalledOnce();
     expect(api.putPlanningSettings).toHaveBeenCalledOnce();
-    const putBody = vi.mocked(api.putPlanningSettings).mock.calls[0]![0];
+    const putBody = vi.mocked(api.putPlanningSettings).mock.calls[0]![0]!;
     expect(putBody.weekOneMonday).toBe("2026-10-12");
     expect(putBody.periodTimes).toEqual(PERIOD_45MIN_TEMPLATE);
 
@@ -148,6 +150,8 @@ describe("runSeedTodayPlan", () => {
       dueAt: null,
       priority: 1,
       candidateId: null,
+      courseId: COURSE_ID,
+      origin: "course_seed",
       clientKey: `course-seed:${COURSE_ID}:2026-10-14`,
     });
     expect(navigate).toHaveBeenCalledWith(SEED_TODAY_HREF);

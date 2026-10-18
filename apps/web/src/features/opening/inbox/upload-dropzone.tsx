@@ -53,6 +53,7 @@ export function uploadFileRejection(file: Pick<File, "name" | "type" | "size">, 
 }
 
 type Props = {
+  compact?: boolean;
   disabled?: boolean;
   multiple?: boolean;
   accept?: string;
@@ -64,7 +65,7 @@ function filesFromList(list: FileList | null): File[] {
   return list ? Array.from(list) : [];
 }
 
-export function UploadDropzone({ disabled = false, multiple = true, accept = openingUploadAccept, capture, onFiles }: Props) {
+export function UploadDropzone({ compact = false, disabled = false, multiple = true, accept = openingUploadAccept, capture, onFiles }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [rejection, setRejection] = useState<string | null>(null);
@@ -119,8 +120,9 @@ export function UploadDropzone({ disabled = false, multiple = true, accept = ope
     <div className="space-y-2">
       <div
         aria-disabled={disabled}
-        aria-label="上传材料"
-        className={`group rounded-xl border-2 border-dashed px-4 py-5 text-center transition-[border-color,background-color,box-shadow] duration-150 motion-reduce:transition-none ${
+        aria-label={compact ? "添加资料" : "上传材料"}
+        title={compact ? `可拖入文件，或点击添加。支持类型：${supportedUploadTypesLabel(accept)}` : undefined}
+        className={`group ${compact ? "inline-flex min-h-10 items-center rounded-lg border px-3 py-2" : "rounded-xl border-2 border-dashed px-4 py-5 text-center"} transition-[border-color,background-color,box-shadow] duration-150 motion-reduce:transition-none ${
           disabled
             ? "cursor-not-allowed border-zinc-200 bg-zinc-50 opacity-60"
             : dragging
@@ -138,10 +140,12 @@ export function UploadDropzone({ disabled = false, multiple = true, accept = ope
       >
         <div className="mx-auto flex max-w-lg items-center justify-center gap-2 text-sm font-medium text-zinc-900">
           {disabled ? <LoaderCircle className="size-4 animate-spin text-zinc-500 motion-reduce:animate-none" aria-hidden /> : dragging ? <Files className="size-4 text-emerald-700" aria-hidden /> : <Upload className="size-4 text-zinc-600" aria-hidden />}
-          {disabled ? "当前正在上传" : dragging ? "松开鼠标即可添加材料" : "拖入文件到这里，或点击选择"}
+          {disabled ? "当前正在上传" : dragging ? "松开鼠标即可添加材料" : compact ? "添加资料" : "拖入文件到这里，或点击选择"}
         </div>
-        <p className="mt-1 text-xs leading-5 text-zinc-500">支持类型：{supportedUploadTypesLabel(accept)}，可一次添加多个文件。</p>
-        <span className={`${ui.secondary} pointer-events-none mt-3 inline-flex`}>选择文件</span>
+        {!compact ? <>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">支持类型：{supportedUploadTypesLabel(accept)}，{multiple ? "可一次添加多个文件" : "每次添加一个文件"}。</p>
+          <span className={`${ui.secondary} pointer-events-none mt-3 inline-flex`}>选择文件</span>
+        </> : null}
       </div>
       {rejection ? <p className="text-xs text-rose-700" role="alert">{rejection}</p> : null}
       <input

@@ -1,0 +1,80 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useId, useMemo, useState } from "react";
+import type { LearningAttempt } from "@aistudy/contracts";
+import { createEditorApi } from "../../editor/editor-api";
+import { libraryNotePath } from "../../editor/library-paths";
+import { AssistantView } from "../assistant/assistant-view";
+import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
+import { textareaClass, ui } from "../design/ui";
+import { associateStudyNote, readStudyNote, saveStudyNote, writeStudyNote, type StudyNoteDraft } from "./study-note-draft";
+
+/** The prompt's tutor must use its real attempt, so delivered help stays in the evidence chain. */
+export function StudyContextTools({ context, isQuestion = false, learningAttempt = null, initialQuestion = "", questionBlockedReason }: {
+  context: StudyConversationContext;
+  isQuestion?: boolean;
+  learningAttempt?: LearningAttempt | null;
+  initialQuestion?: string;
+  questionBlockedReason?: string;
+}) {
+  const [tab, setTab] = useState<"question" | "note">("question");
+  const [questionVisited, setQuestionVisited] = useState(Boolean(initialQuestion));
+  const identity = studyConversationIdentity(context);
+  const canAsk = !questionBlockedReason && (!isQuestion || Boolean(learningAttempt));
+  return <div className="min-w-0 space-y-4">
+    <p className="break-words text-xs leading-6 text-zinc-600">围绕：{context.label || "当前内容"}{context.sourceVersion !== undefined ? ` · v${context.sourceVersion}` : ""}{context.page ? ` · 指定第 ${context.page} 页` : ""}</p>
+    <div className="flex flex-wrap gap-2" aria-label="选择上下文工具">
+      <button type="button" className={tab === "question" ? ui.secondary : ui.quiet} aria-pressed={tab === "question"} onClick={() => setTab("question")}>提问</button>
+      <button type="button" className={tab === "note" ? ui.secondary : ui.quiet} aria-pressed={tab === "note"} onClick={() => setTab("note")}>记笔记</button>
+    </div>
+    <div hidden={tab !== "question"}>
+      {!canAsk ? <p className="text-sm leading-7 text-zinc-600">{questionBlockedReason || "先在题目下保存自己的原答案，再继续提问。之后的辅导会关联本次作答，并记录实际获得的帮助。"}</p> : <>
+        {!questionVisited ? <button type="button" className={ui.secondary} onClick={() => setQuestionVisited(true)}>打开此处提问</button> : null}
+        {questionVisited ? <div className="min-w-0" key={identity}><AssistantView embedded startFresh studyContext={context}
+          initialCourseId={context.courseId} initialSourceIds={learningAttempt?.sourceIds ?? (context.sourceId ? [context.sourceId] : [])}
+          initialPage={context.page ?? null} initialDraft={initialQuestion} learningAttempt={learningAttempt ?? undefined} /></div> : null}
+      </>}
+    </div>
+    <div hidden={tab !== "note"}><StudyNotePanel key={identity} context={context} /></div>
+  </div>;
+}
+
+function StudyNotePanel({ context }: { context: StudyConversationContext }) {
+  const [draft, setDraft] = useState<StudyNoteDraft | null>(null);
+  const [storageWarning, setStorageWarning] = useState(false);
+  const [message, setMessage] = useState("");
+  const api = useMemo(() => createEditorApi(), []);
+  const id = useId();
+  useEffect(() => { setDraft(readStudyNote(context)); }, [context]);
+  function edit(update: Partial<Pick<StudyNoteDraft, "title" | "text">>) {
+    if (!draft || draft.status !== "editing") return;
+    const next = { ...draft, ...update };
+    setDraft(next);
+    setStorageWarning(!writeStudyNote(context, next));
+    setMessage("");
+  }
+  async function save() {
+    if (!draft || !draft.title.trim() || !draft.text.trim() || draft.status !== "editing") return;
+    const request = saveStudyNote(context, draft, api, associateStudyNote);
+    setDraft(readStudyNote(context));
+    const result = await request;
+    setDraft(result);
+    if (result.status === "editing") setMessage("保存未完成，请核对内容后重试。");
+  }
+  const locked = !draft || draft.status !== "editing";
+  return <div className="space-y-3">
+    <p className="text-xs leading-6 text-zinc-500">写下自己的理解。保存时使用已有笔记功能，并附上本次学习与固定版本原文链接。</p>
+    <label htmlFor={`${id}-title`} className="block space-y-1 text-xs text-zinc-700"><span>标题</span><input id={`${id}-title`} className={ui.input} value={draft?.title ?? ""} maxLength={200} disabled={locked} onChange={event => edit({ title: event.target.value })} /></label>
+    <label htmlFor={`${id}-text`} className="block space-y-1 text-xs text-zinc-700"><span>笔记内容</span><textarea id={`${id}-text`} className={`${textareaClass} min-h-48`} value={draft?.text ?? ""} maxLength={20_000} readOnly={locked} onChange={event => edit({ text: event.target.value })} /></label>
+    {draft?.status === "editing" ? <button type="button" className={ui.primary} disabled={!draft.title.trim() || !draft.text.trim()} onClick={() => void save()}>保存为笔记</button> : null}
+    {draft?.status === "pending" ? <p role="status" className="text-xs text-zinc-600">正在保存笔记，请保留此处内容…</p> : null}
+    {draft?.status === "unknown" ? <p role="alert" className="text-xs leading-6 text-amber-800">保存结果尚未确认，可能已经保存。原内容已保留，请先检查笔记列表，避免重复创建。</p> : null}
+    {draft?.status === "unavailable" ? <p role="alert" className="text-xs leading-6 text-amber-800">无法可靠读取原笔记草稿或保存回执，已停止新建，避免重复保存。请允许浏览器存储或检查笔记列表后重新进入。</p> : null}
+    {draft?.storageError && draft.status === "editing" ? <p role="alert" className="text-xs leading-6 text-amber-800">无法保留本次保存请求，尚未发送。原内容仍可编辑和复制；请释放浏览器存储空间后重试。</p> : null}
+    {draft?.status === "saved" && draft.documentId ? <div role="status" className="space-y-2 text-xs leading-6 text-emerald-800"><p>{draft.associationFailed ? "笔记已保存，课程关联未确认；文中的学习与原文链接仍保留。" : "笔记已保存。"}</p><Link className={ui.secondary} href={libraryNotePath("/opening/library", draft.documentId)}>打开笔记继续编辑</Link></div> : null}
+    {message ? <p role="alert" className="text-xs text-red-700">{message}</p> : null}
+    {storageWarning ? <p role="status" className="text-xs leading-6 text-amber-800">此浏览器无法保留草稿。工具切换期间仍保留内容，刷新前请先复制或保存。</p> : null}
+    <Link className={ui.quiet} href="/opening/library?tab=notes">查看笔记列表</Link>
+  </div>;
+}

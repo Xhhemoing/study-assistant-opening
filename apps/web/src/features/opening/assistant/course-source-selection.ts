@@ -14,13 +14,13 @@ export function parseAssistantCourseIdParam(value: string | undefined | null): s
   return UUID_RE.test(value) ? value : null;
 }
 
-/** learningAttempt > resume > query/shell initialCourseId. */
+/** An explicitly requested course must not be replaced by a resumed conversation. */
 export function resolveAssistantCourseId(input: {
   learningAttemptCourseId?: string | null;
   resumeCourseId?: string | null;
   initialCourseId?: string | null;
 }): string | null {
-  return input.learningAttemptCourseId ?? input.resumeCourseId ?? input.initialCourseId ?? null;
+  return input.learningAttemptCourseId ?? input.initialCourseId ?? input.resumeCourseId ?? null;
 }
 
 export function membershipSourceIdsForCourse(

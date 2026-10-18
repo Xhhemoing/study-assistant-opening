@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SourceRecord } from "@aistudy/contracts";
+import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import { createUploadQueue } from "./upload-queue";
 import { createUploadClient, type LocalUploadFile } from "./upload-client";
 
@@ -24,7 +24,7 @@ function file(name: string): LocalUploadFile {
 describe("createUploadQueue", () => {
   it("accepts initial files as idle items and preserves their File object", () => {
     const initial = file("initial.pdf");
-    const queue = createUploadQueue(vi.fn(), [initial]);
+    const queue = createUploadQueue(vi.fn(async (): Promise<SourceRecord> => source), [initial]);
 
     expect(queue.items).toHaveLength(1);
     expect(queue.items[0]?.state).toBe("idle");
@@ -66,7 +66,7 @@ describe("createUploadQueue", () => {
   });
 
   it("retries complete failure with the same ticket without beginning again", async () => {
-    const ticket = {
+    const ticket: UploadTicket = {
       source: { ...source, uploadState: "pending" as const },
       uploadUrl: "https://minio.local/upload",
       expiresAt: "2026-10-04T00:00:00.000Z",
@@ -85,7 +85,7 @@ describe("createUploadQueue", () => {
     });
     const putUrls: string[] = [];
     const put = vi.fn(async (url: string) => { putUrls.push(url); });
-    const resolvePutUrl = (t: typeof ticket) => `/api/opening/sources/${t.source.id}/staging`;
+    const resolvePutUrl = (t: UploadTicket) => `/api/opening/sources/${t.source.id}/staging`;
     const client = createUploadClient({ begin, complete, put, refreshTicket, resolvePutUrl });
     const initial = file("complete-retry.pdf");
     const queue = createUploadQueue(client, [initial]);
@@ -109,7 +109,7 @@ describe("createUploadQueue", () => {
   });
 
   it("on retry refreshes ticket then PUT then complete (never reuses expired uploadUrl)", async () => {
-    const ticket = {
+    const ticket: UploadTicket = {
       source: { ...source, uploadState: "pending" as const },
       uploadUrl: "https://minio.local/expired",
       expiresAt: "2026-10-04T00:00:00.000Z",
@@ -199,7 +199,7 @@ describe("createUploadQueue", () => {
     expect(updates.every((progress) => Number.isFinite(progress) && progress >= 0 && progress <= 100)).toBe(true);
   });
 
-  it("dismisses failed items and no-ops for saved or missing ids", async () => {
+  it("dismisses saved and failed items from the session queue without re-uploading or changing saved sources", async () => {
     const upload = vi.fn(async (input: LocalUploadFile) => {
       if (input.name === "broken.pdf") {
         return { phase: "interrupted", keptLocal: true, message: "网络中断" } as const;
@@ -211,16 +211,20 @@ describe("createUploadQueue", () => {
     await queue.start();
 
     const updates: number[] = [];
+    const savedSource = queue.snapshot()[1]?.source;
     queue.dismiss(saved!.id, (items) => updates.push(items.length));
-    expect(queue.snapshot()).toHaveLength(2);
-    expect(updates).toEqual([]);
+    expect(queue.snapshot().map((item) => item.id)).toEqual([failed!.id]);
+    expect(updates).toEqual([1]);
+    expect(savedSource).toEqual({ ...source, name: "ok.pdf" });
 
     queue.dismiss(failed!.id, (items) => updates.push(items.length));
-    expect(queue.snapshot().map((item) => item.id)).toEqual([saved!.id]);
-    expect(updates).toEqual([1]);
+    expect(queue.snapshot()).toEqual([]);
+    expect(updates).toEqual([1, 0]);
 
     queue.dismiss(failed!.id, (items) => updates.push(items.length));
-    expect(updates).toEqual([1]);
+    expect(updates).toEqual([1, 0]);
+    await queue.start();
+    expect(upload).toHaveBeenCalledTimes(2);
   });
 
   it("dismisses idle items from the session queue", () => {

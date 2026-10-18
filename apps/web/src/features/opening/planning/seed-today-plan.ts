@@ -62,6 +62,8 @@ export function buildCourseSeedTaskInput(
     dueAt: null,
     priority: 1,
     candidateId: null,
+    courseId,
+    origin: "course_seed",
     clientKey: `course-seed:${courseId}:${localDate}`,
   });
 }

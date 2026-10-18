@@ -1,21 +1,21 @@
 import { AssistantView } from "@/features/opening/assistant/assistant-view";
-import { parseAssistantCourseIdParam } from "@/features/opening/assistant/course-source-selection";
 import { materialAnalysisEntry } from "@/features/opening/library/material-analysis-link";
+import { parseStudyConversationContext, studyConversationIdentity, type StudyConversationQuery } from "@/features/opening/assistant/study-conversation-context";
 
-export default async function OpeningAssistantPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ conversation?: string; source?: string; page?: string; courseId?: string }>;
+export default async function OpeningAssistantPage({ searchParams }: {
+  searchParams: Promise<StudyConversationQuery & { conversation?: string }>;
 }) {
-  const { conversation, source, page, courseId: courseIdParam } = await searchParams;
-  const analysis = materialAnalysisEntry(source, page);
-  const initialCourseId = parseAssistantCourseIdParam(courseIdParam);
-  return (
-    <AssistantView
-      key={analysis ? `${source}:${page}` : `${conversation ?? "chat"}:${initialCourseId ?? ""}`}
-      initialConversationId={analysis ? null : conversation ?? null}
-      initialCourseId={initialCourseId}
-      {...(analysis ?? {})}
-    />
-  );
+  const { conversation, ...query } = await searchParams;
+  const { context, error } = parseStudyConversationContext(query);
+  const analysis = context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : null;
+  const freshContext = Boolean(context?.activityId || context?.sourceId || context?.fragment);
+  return <AssistantView
+    key={`${studyConversationIdentity(context)}:${freshContext ? "fresh" : conversation ?? "chat"}`}
+    initialConversationId={freshContext ? null : conversation ?? null}
+    initialCourseId={context?.courseId ?? null}
+    {...(analysis ?? {})}
+    startFresh={freshContext || !!error}
+    studyContext={context ?? undefined}
+    studyContextError={error ?? undefined}
+  />;
 }
