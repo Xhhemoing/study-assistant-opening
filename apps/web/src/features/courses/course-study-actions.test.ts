@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { OpeningPlanningSettings } from "@aistudy/contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CourseLearningView } from "../opening/learning/course-view";
 import { OpeningApiError } from "../opening/client/api";
@@ -29,10 +30,9 @@ it("keeps a single primary practice CTA without competing materials CTA (CT-01/0
   const html = renderToStaticMarkup(createElement(CourseStudyActions, { assetCount: 0, goalCount: 0 }));
   expect(html).toContain('href="#course-practice"');
   expect(html).toContain("开始独立练习");
-  expect(html).toContain('href="#course-learning-records"');
   expect(html).toContain('href="/library/new"');
   expect(html).not.toContain('href="#course-assets"');
-  expect(html).toMatch(/选主题/);
+  expect(html).toContain("选择一个主题即可开始");
   expect(html).not.toContain("设为今日计划");
   expect(html).not.toMatch(/\s(?:aria-)?disabled(?:=|>)/u);
 });
@@ -43,7 +43,7 @@ it("keeps Opening note actions under the Opening library", () => {
   expect(html).not.toContain('href="/library/new"');
 });
 
-it("makes 设为今日计划 the Opening primary when course identity is present", () => {
+it("makes actual study primary and keeps plan seeding inside secondary details", () => {
   const html = renderToStaticMarkup(
     createElement(CourseStudyActions, {
       assetCount: 1,
@@ -53,10 +53,10 @@ it("makes 设为今日计划 the Opening primary when course identity is present
     }),
   );
   expect(html).toContain("设为今日计划");
-  expect(html).toContain("开始独立练习");
-  expect(html).toMatch(/设为今日计划[\s\S]*开始独立练习|开始独立练习[\s\S]*设为今日计划/);
-  // Practice stays available but is no longer the sole primary path copy.
-  expect(html).toMatch(/设为今日计划/);
+  expect(html).toContain(`href="/opening/courses/${COURSE_ID}/study"`);
+  expect(html).toContain("开始学习");
+  expect(html.indexOf("开始学习")).toBeLessThan(html.indexOf("设为今日计划"));
+  expect(html).toMatch(/<details[\s\S]*学习安排与其他入口[\s\S]*设为今日计划[\s\S]*<\/details>/);
   expect(html).toMatch(/确认草案/);
 });
 
@@ -78,7 +78,7 @@ it("omits the goal counter when Opening hides goal data", () => {
 
 describe("Opening seed CTA composition", () => {
   it("calls put settings + createTask then navigates (mock api)", async () => {
-    const putPlanningSettings = vi.fn(async (settings: unknown) => ({
+    const putPlanningSettings = vi.fn(async (settings: OpeningPlanningSettings) => ({
       settings,
       saved: true,
       invalidStoredSettings: false,
@@ -121,6 +121,8 @@ describe("Opening seed CTA composition", () => {
       priority: 1,
       candidateId: null,
       clientKey: `course-seed:${COURSE_ID}:2026-10-14`,
+      courseId: COURSE_ID,
+      origin: "course_seed",
     });
     expect(navigate).toHaveBeenCalledWith("/opening/today");
   });

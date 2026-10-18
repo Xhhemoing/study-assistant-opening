@@ -2,9 +2,10 @@
 
 import { ArrowLeft, BookOpen } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../opening/design/ui";
-import { CourseLearningView } from "../opening/learning/course-view";
+import { CourseLearningView, CourseSummaryPanel } from "../opening/learning/course-view";
 import type { CourseAsset, CourseSummary } from "./course-model";
 import { CourseAddMaterials } from "./course-add-materials";
 import { CourseSettingsPanel } from "./course-settings-panel";
@@ -14,6 +15,30 @@ import { CourseGoalForm } from "./course-goal-form";
 import { CourseKnowledge } from "../opening/knowledge/course-knowledge";
 import { CourseExamProgress } from "../opening/exam-sprint/course-exam-progress";
 import { MediaReader } from "../opening/sources/media-reader";
+import { createOpeningApi } from "../opening/client/api";
+import { sourceViewerHref } from "../opening/inbox/source-viewer";
+import { courseStudyHref } from "./course-study-model";
+
+export function CourseContents({ courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
+  const [versions, setVersions] = useState<Record<string, number>>({});
+  const [error, setError] = useState("");
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setVersions({}); setError("");
+    if (assets.some(asset => asset.source)) void createOpeningApi().listSources().then(rows => {
+      if (active) setVersions(Object.fromEntries(rows.map(source => [source.id, source.version])));
+    }).catch(() => { if (active) setError("材料版本暂时无法读取，请重试或从材料库打开。"); });
+    return () => { active = false; };
+  }, [assets, revision]);
+  return <section aria-labelledby="course-contents-heading" className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-contents-heading">课程目录</h2><a className={ui.quiet} href="#course-assets">管理材料</a></div>
+    {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700" href={sourceViewerHref(asset.source.id, versions[asset.source.id]!)}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-emerald-800 underline underline-offset-4" href={`/opening/library?tab=notes#document-${encodeURIComponent(asset.document.id)}`}>{asset.document.title}</Link> : <span className="break-words text-zinc-600">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <p className="text-sm leading-6 text-zinc-500">尚无材料；可以直接开始练习，也可以添加已有资料。</p>}
+    {assets.length > 5 ? <a className={ui.quiet} href="#course-assets">查看全部 {assets.length} 份材料</a> : null}
+    {error ? <p className="text-xs leading-6 text-amber-800" role="status">{error}<button className={ui.quiet} type="button" onClick={() => setRevision(value => value + 1)}>重试</button></p> : null}
+    <Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>打开课程材料库</Link>
+  </section>;
+}
 
 export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; libraryHref: string }) {
   const [selected, setSelected] = useState<CourseAsset | null>(null);
@@ -173,18 +198,38 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 
 /** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
 export function CourseDetail({ id, surface = "opening" }: { id: string; surface?: CourseDetailSurface }) {
+  const router = useRouter();
   const paths = COURSE_DETAIL_PATHS[surface];
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
+  const [mediaOpen, setMediaOpen] = useState(false);
+  useEffect(() => { setMediaOpen(Boolean(readCourseMediaDeepLink(window.location.search).sourceId)); }, [id]);
+  useEffect(() => {
+    if (!paths.openingActions) return;
+    function followLegacyStudyLink() {
+      const params = new URLSearchParams(window.location.search);
+      const retest = params.get("retest");
+      if (retest) router.replace(`${courseStudyHref(id)}?retest=${encodeURIComponent(retest)}`);
+      if (window.location.hash === "#course-practice" && !retest) router.replace(courseStudyHref(id));
+      if (window.location.hash === "#course-learning-records") {
+        const records = document.getElementById("course-learning-records");
+        const details = records?.closest("details");
+        if (details) details.open = true;
+      }
+    }
+    followLegacyStudyLink();
+    window.addEventListener("hashchange", followLegacyStudyLink);
+    return () => window.removeEventListener("hashchange", followLegacyStudyLink);
+  }, [id, loading, paths.openingActions, router]);
   if (loading) return <LoadingRows label="正在读取课程…" />;
   if (error || !course) return <main className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></main>;
   return <main className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
     <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
-      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} />
-      {paths.openingActions ? <CourseGoalForm courseId={id} /> : null}
-      {paths.openingActions ? <CourseExamProgress courseId={id} /> : null}
-      <CourseLearningView courseId={id} />
-      <CourseKnowledge courseId={id} />
+      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />
+      {paths.openingActions ? <CourseContents courseId={id} assets={assets} /> : null}
+      {paths.openingActions ? <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">目标与学习安排</summary><div className="mt-3"><CourseGoalForm courseId={id} /></div></details> : null}
+      {paths.openingActions ? <details className="scroll-mt-6 border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">学习进展与记录</summary><div className="mt-3 space-y-5"><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} /></div></details> : <CourseLearningView courseId={id} />}
+      <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">知识关联与完整目录</summary><div className="mt-3"><CourseKnowledge courseId={id} /></div></details>
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>
         <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
           <h2 className="text-sm font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
@@ -206,7 +251,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
           )}
         </div>
       </details>
-      <CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />
+      {paths.openingActions ? <details open={mediaOpen} className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">媒体阅读与片段定位</summary><CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} /></details> : <CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />}
       <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />
       <Link className={ui.quiet} href={paths.today}><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>

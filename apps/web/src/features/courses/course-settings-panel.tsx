@@ -59,7 +59,7 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
       <span className="text-xs text-zinc-500">{course.archivedAt ? "已归档" : "进行中"} · 默认折叠</span>
     </summary>
     <div className="mt-3 space-y-3">
-    <p className="text-xs leading-6 text-zinc-500">课程设置只能进一步关闭自动行为。“跟随账号”不会开启账号中已关闭的项目。手动记录和已接受任务仍可继续。</p>
+    <p className="text-xs leading-6 text-zinc-500">课程设置只能进一步关闭自动行为。“跟随账号”不会开启账号中已关闭的项目。关闭自动行为不会删除历史记录；归档后需先恢复课程才能记录新作答。</p>
     {course.archivedAt ? <p className="text-xs leading-6 text-zinc-600">归档期间停止此课程的自动评价、补测建议和学习提醒。恢复后沿用保存的限制，不补发历史积压。</p> : account && !account.assessmentEnabled ? <p className="text-xs leading-6 text-zinc-600">账号已关闭自动评价，此课程的三项自动行为当前均关闭。</p> : null}
     {loading ? <p className="text-xs text-zinc-500" role="status">正在读取课程设置…</p> : <div className="space-y-3">{fields.map(({ key, label }) => <div className="flex flex-wrap items-center gap-3" key={key}>
       <label className="w-28 text-xs font-medium" htmlFor={`course-setting-${key}`}>{label}</label>
