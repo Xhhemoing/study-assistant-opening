@@ -25,11 +25,14 @@ test.describe("opening capabilities (U04)", () => {
     }
   });
 
-  test("course page leads with knowledge chapters not a mastery meter", async ({ page, request }) => {
+  test("course page leads with study and keeps knowledge chapters available without a mastery meter", async ({ page, request }) => {
     const f = await seedCapabilityAccount(request);
     try {
       await page.context().addCookies([f.cookie]);
       await page.goto(`/opening/courses/${f.courseId}`);
+      await expect(page.getByRole("heading", { name: "课程目录", exact: true })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "课程学习方式", exact: true }).getByRole("link", { name: /学习$/ })).toBeVisible();
+      await page.locator("summary").filter({ hasText: "知识关联与完整目录" }).click();
       await expect(page.getByRole("heading", { name: "课程知识", exact: true })).toBeVisible();
       await expect(page.getByText(/掌握\s*%|掌握度/i)).toHaveCount(0);
     } finally {

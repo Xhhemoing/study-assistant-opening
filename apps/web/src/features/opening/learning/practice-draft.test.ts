@@ -86,6 +86,13 @@ it("rejects canonical matrix identities that no longer match the frozen question
   expect(() => assertPracticeAttempt(draft, { ...attempt, sourceIds: [sourceId], matrixExercise: { kind: "matrix_arithmetic", specVersion: "matrix-arithmetic-v1", exerciseKey: "multiplication", variant: 0, matrixA: [[1]] } })).not.toThrow();
 });
 
+it("rejects an old request result after the same draft has begun a different attempt in the same session", () => {
+  const saved = checkpoint();
+  expect(() => assertPracticeAttempt(saved, attempt, saved.start.clientKey)).not.toThrow();
+  const next = { ...saved, attemptId: null, submission: null, start: { ...saved.start, clientKey: "new-repeat-key", createInput: { ...saved.start.createInput, clientKey: "new-repeat-key" } } };
+  expect(() => assertPracticeAttempt(next, attempt, saved.start.clientKey)).toThrow("身份");
+});
+
 it("raises restored help without changing a frozen submission's original payload", () => {
   const draft = checkpoint();
   const raised = restoredPracticeAssistance(draft.fields, "revealed");

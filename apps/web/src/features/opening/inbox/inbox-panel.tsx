@@ -259,7 +259,7 @@ export function InboxPanel({
       </ul>
       {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !displayed.length ? <p className="py-4 text-sm text-zinc-500">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
-        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel}
+        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}
     </section>
   );

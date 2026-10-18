@@ -43,7 +43,7 @@ export async function loadCitationReaderRecord(api: Pick<OpeningApi, "listSource
 export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const pathname = usePathname();
-  const [request, setRequest] = useState<{ target: SourceViewerTarget; href: string; returnPoint: ReaderReturnPoint } | null>(null);
+  const [request, setRequest] = useState<{ target: SourceViewerTarget; href: string; returnPoint: ReaderReturnPoint; courseId?: string; questionProtected: boolean } | null>(null);
   const [record, setRecord] = useState<SourceRecord | null>(null);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -67,7 +67,9 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
       if (!target) return;
       event.preventDefault();
       setRecord(null); setError("");
-      setRequest({ target, href: anchor.href, returnPoint: captureReaderReturnPoint(anchor) });
+      setRequest({ target, href: anchor.href, returnPoint: captureReaderReturnPoint(anchor),
+        courseId: /^\/opening\/courses\/([^/]+)/.exec(window.location.pathname)?.[1],
+        questionProtected: Boolean(anchor.closest('[data-study-question="true"]')) });
     }
     document.addEventListener("click", open);
     return () => { document.removeEventListener("click", open); };
@@ -86,7 +88,7 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
   if (!request) return null;
   const close = () => { sequence.current++; setRequest(null); setRecord(null); setError(""); };
   return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} slideLabel={request.target.slideLabel}
-    returnPoint={request.returnPoint} onClose={close} onRetry={async () => {
+    returnPoint={request.returnPoint} courseId={request.courseId} questionProtected={request.questionProtected} onClose={close} onRetry={async () => {
       const current = sequence.current;
       await api.retryParse(record.id);
       const value = await loadCitationReaderRecord(api, request.target);

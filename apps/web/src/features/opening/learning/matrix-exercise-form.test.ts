@@ -25,3 +25,9 @@ it("distinguishes an automatic verdict from a learner's documented reference che
   expect(html).toContain("只覆盖这道结构化题目");
   expect(html).not.toContain("不代表系统客观判分");
 });
+it("seeds the exact exercise and variation of a new matrix entry while draft reads are pending", () => {
+  const html = renderToStaticMarkup(createElement(MatrixExerciseForm, { courseId: "new-course", sources: [], initialKey: "addition", initialVariant: 2, onRecorded() {}, onBack() {} }));
+  expect(html).toContain('<option value="addition" selected="">');
+  expect(html).toContain("本次题组：3");
+  expect(html).toContain('<fieldset disabled=""');
+});

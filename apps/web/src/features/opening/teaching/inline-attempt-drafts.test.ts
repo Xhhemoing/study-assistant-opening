@@ -2,12 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInlineAttemptDrafts, inlineAttemptDraftConflict, inlineAttemptIdentityKey, type InlineAttemptDraftStorage } from "./inline-attempt-drafts";
 import { OpeningApiError } from "../client/api";
 import { createInlineAttemptSubmission, readInlineAttemptObservationHead, type InlineAttemptSubmissionCheckpoint } from "./inline-attempt-submission";
+import type { LearningAttempt } from "@aistudy/contracts";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const otherId = "22222222-2222-4222-8222-222222222222";
 const input = { activityId: id, courseId: id, blockId: id, contentVersion: 3, sourceIds: [id], prompt: "旧版题干", skillLabel: "矩阵秩", answer: "尚未确认的答案" };
 const draft = { answer: input.answer, skillLabel: input.skillLabel, prompt: input.prompt };
 const key = inlineAttemptIdentityKey(id, id, 3);
+const canonicalAttempt: LearningAttempt = { id, workspaceId: id, courseId: id, sessionId: id, skillLabel: input.skillLabel,
+  requirementKey: `teaching:${id}:v3`, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: null, itemVersionId: null,
+  startedAt: "2026-10-18T00:00:00.000Z", submittedAt: null, observationId: null, historyRevision: 1 };
+const savedObservation = { id, attemptId: id, courseId: id, sessionId: id, answer: input.answer, outcome: "unverified" };
 function memoryStorage() {
   const values = new Map<string, string>();
   const storage: InlineAttemptDraftStorage = {
@@ -63,7 +68,7 @@ describe("inline attempt draft continuity", () => {
   it("keeps an unknown submission's exact session, attempt and write keys across a document reload", async () => {
     const { storage } = memoryStorage();
     const drafts = createInlineAttemptDrafts(storage);
-    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue({ id }), submitAttempt: vi.fn().mockRejectedValue(new Error("reply lost")) };
+    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockRejectedValue(new Error("reply lost")) };
     const original = createInlineAttemptSubmission(input, client, { onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) });
     await expect(original.submit()).rejects.toThrow("reply lost");
     const recovered = createInlineAttemptDrafts(storage).get(key)!;
@@ -71,10 +76,12 @@ describe("inline attempt draft continuity", () => {
     expect(recovered.submission).toMatchObject({ sessionId: id, attemptId: id, status: "pending" });
     vi.resetModules(); // New document: no surviving controller or promise.
     const { createInlineAttemptSubmission: restore } = await import("./inline-attempt-submission");
-    client.submitAttempt.mockResolvedValue({ id });
-    await restore(input, client, { checkpoint: recovered.submission, onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) }).submit();
+    client.submitAttempt.mockResolvedValue(savedObservation);
+    const result = await restore(input, client, { checkpoint: recovered.submission, onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) }).submit();
+    expect(result.attempt).toBe(canonicalAttempt);
     expect(client.createSession).toHaveBeenCalledTimes(1);
-    expect(client.createAttempt).toHaveBeenCalledTimes(1);
+    expect(client.createAttempt).toHaveBeenCalledTimes(2);
+    expect(client.createAttempt.mock.calls[1]).toEqual(client.createAttempt.mock.calls[0]);
     expect(client.submitAttempt.mock.calls[1]).toEqual(client.submitAttempt.mock.calls[0]);
     // Confirmed answers retain the checkpoint: remounts cannot invent a fresh independent answer.
     expect(createInlineAttemptDrafts(storage).get(key)?.submission).toMatchObject({ attemptId: id, status: "saved" });
@@ -82,13 +89,13 @@ describe("inline attempt draft continuity", () => {
     const { createInlineAttemptSubmission: reloadSaved } = await import("./inline-attempt-submission");
     await reloadSaved(input, client, { checkpoint: drafts.get(key)!.submission }).submit();
     expect(client.submitAttempt.mock.calls[2]).toEqual(client.submitAttempt.mock.calls[0]);
-    expect(client.createAttempt).toHaveBeenCalledTimes(1);
+    expect(client.createAttempt).toHaveBeenCalledTimes(3);
   });
 
   it("retains the frozen request after a 409 instead of creating a new independent attempt", async () => {
     const { storage } = memoryStorage();
     const drafts = createInlineAttemptDrafts(storage);
-    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue({ id }), submitAttempt: vi.fn().mockRejectedValue(new OpeningApiError(409, "content changed")) };
+    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockRejectedValue(new OpeningApiError(409, "content changed")) };
     const original = createInlineAttemptSubmission(input, client, { onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) });
     await expect(original.submit()).rejects.toMatchObject({ status: 409 });
     const frozen = drafts.get(key)!;
@@ -96,7 +103,8 @@ describe("inline attempt draft continuity", () => {
     const { createInlineAttemptSubmission: restore } = await import("./inline-attempt-submission");
     await expect(restore(input, client, { checkpoint: frozen.submission }).submit()).rejects.toMatchObject({ status: 409 });
     expect(client.createSession).toHaveBeenCalledTimes(1);
-    expect(client.createAttempt).toHaveBeenCalledTimes(1);
+    expect(client.createAttempt).toHaveBeenCalledTimes(2);
+    expect(client.createAttempt.mock.calls[1]).toEqual(client.createAttempt.mock.calls[0]);
     expect(client.submitAttempt.mock.calls[1]).toEqual(client.submitAttempt.mock.calls[0]);
     expect(drafts.get(key)).toEqual(frozen);
   });
@@ -118,11 +126,11 @@ describe("inline attempt draft continuity", () => {
     const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockImplementation(() => {
       expect(drafts.get(key)?.submission).toMatchObject({ sessionId: id, attemptId: null });
       throw new Error("attempt reply lost");
-    }), submitAttempt: vi.fn().mockResolvedValue({ id }) };
+    }), submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
     await expect(createInlineAttemptSubmission(input, client, { onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) }).submit()).rejects.toThrow("attempt reply lost");
     vi.resetModules();
     const { createInlineAttemptSubmission: restore } = await import("./inline-attempt-submission");
-    client.createAttempt.mockResolvedValue({ id });
+    client.createAttempt.mockResolvedValue(canonicalAttempt);
     await restore(input, client, { checkpoint: createInlineAttemptDrafts(storage).get(key)!.submission }).submit();
     expect(client.createSession).toHaveBeenCalledTimes(1);
     expect(client.createAttempt.mock.calls[0]).toEqual(client.createAttempt.mock.calls[1]);
@@ -133,7 +141,7 @@ describe("inline attempt draft continuity", () => {
     const { storage } = memoryStorage();
     const drafts = createInlineAttemptDrafts(storage);
     let resolveSession!: (value: { id: string }) => void;
-    const client = { createSession: vi.fn().mockImplementation(() => new Promise<{ id: string }>(resolve => { resolveSession = resolve; })), createAttempt: vi.fn().mockResolvedValue({ id }), submitAttempt: vi.fn().mockResolvedValue({ id }) };
+    const client = { createSession: vi.fn().mockImplementation(() => new Promise<{ id: string }>(resolve => { resolveSession = resolve; })), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
     const first = createInlineAttemptSubmission(input, client, { onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) }).submit();
     const remounted = createInlineAttemptSubmission(input, client, { checkpoint: drafts.get(key)!.submission }).submit();
     expect(remounted).toBe(first);

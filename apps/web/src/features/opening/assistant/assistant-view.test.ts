@@ -2,6 +2,7 @@ import { PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 import { jobStatusResponseSchema, type ConversationResume, type LearningAttempt } from "@aistudy/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  assistantSessionIndex,
   appendEphemeralResponseIfActive,
   applyEffectiveSourceIds,
   assistantContextHint,
@@ -406,5 +407,27 @@ describe("LAB-U01 jobStatusHint clarify", () => {
     expect(jobStatusHint({
       id: JOB_ID, status: "failed", error: { message: "unknown strategy template: x", code: "unknown_strategy_template" }, updatedAt: ISO,
     })).toBe("回答任务失败：unknown strategy template: x");
+  });
+});
+
+
+describe("explicit study entry selection", () => {
+  it("keeps a requested source and physical page instead of a resumed conversation's selection", () => {
+    const resume = { sourceIds: ["unrelated"], currentPage: 99 } as ConversationResume;
+    expect(selectionForResumedConversation(resume, undefined, { sourceIds: ["requested"], currentPage: 3 })).toEqual({ sourceIds: ["requested"], currentPage: 3 });
+    expect(selectionForResumedConversation(resume, undefined, { sourceIds: ["requested"], currentPage: null })).toEqual({ sourceIds: ["requested"], currentPage: null });
+    const attempt = { sourceIds: ["attempt"] } as LearningAttempt;
+    expect(selectionForResumedConversation(resume, attempt, { sourceIds: ["requested"], currentPage: 3 })).toEqual({ sourceIds: ["attempt"], currentPage: null });
+  });
+});
+
+
+describe("new conversations remain scoped to their entry context", () => {
+  it("applies new-session overrides only to the material or activity where New was clicked", () => {
+    const newInMaterialA = { identity: "material-a:v1", count: 2 };
+    expect(assistantSessionIndex(newInMaterialA, "material-a:v1")).toBe(2);
+    expect(assistantSessionIndex(newInMaterialA, "material-b:v1")).toBe(0);
+    expect(assistantSessionIndex(newInMaterialA, "material-a:v2")).toBe(0);
+    expect(assistantSessionIndex({ identity: "activity-b", count: 0 }, "activity-b")).toBe(0);
   });
 });

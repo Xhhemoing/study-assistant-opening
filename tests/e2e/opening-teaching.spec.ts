@@ -43,7 +43,7 @@ test.describe("opening teaching loop (V2-16 skeleton)", () => {
       // Do not assert live model / compiled blocks here — real_model=not_run.
       if (dualFlagsOn && workspaceOn) {
         // Soft presence check only — may show empty/honest CTA without ready activity.
-        await expect(page.getByRole("heading", { name: /今日/ })).toBeAttached();
+        await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeAttached();
       }
     } finally {
       await context.close();

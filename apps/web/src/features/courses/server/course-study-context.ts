@@ -16,8 +16,9 @@ export async function loadCourseStudyContext(request: Request, courseId: string)
     ]);
     return { sourceIds: sources.status === "fulfilled" ? sources.value : [], sourceLoadError: sources.status === "rejected",
       timeZone: settings.status === "fulfilled" ? resolveWorkspaceTimeZone(settings.value.settings?.timeZone) : DEFAULT_WORKSPACE_TIME_ZONE,
-      teachingEnabled: capabilities.teachingLoop.api && capabilities.teachingLoop.ui };
+      teachingEnabled: capabilities.teachingLoop.api && capabilities.teachingLoop.ui,
+      matrixInteractiveEnabled: capabilities.matrixTransformInteractive };
   } catch {
-    return { sourceIds: [], sourceLoadError: true, timeZone: DEFAULT_WORKSPACE_TIME_ZONE, teachingEnabled: false };
+    return { sourceIds: [], sourceLoadError: true, timeZone: DEFAULT_WORKSPACE_TIME_ZONE, teachingEnabled: false, matrixInteractiveEnabled: false };
   }
 }

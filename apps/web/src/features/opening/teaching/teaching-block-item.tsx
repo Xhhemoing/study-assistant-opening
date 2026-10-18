@@ -42,6 +42,8 @@ export type TeachingBlockItemProps = {
   onSuccess: (result: TeachingCommandSuccess) => void;
   onConflict: (conflict: TeachingCommandConflict) => void;
   onReread: () => void | Promise<void>;
+  /** A complete unit supplies its own hierarchy; individual blocks need no competing frame. */
+  unitChrome?: boolean;
 };
 
 /**
@@ -64,10 +66,11 @@ export function TeachingBlockItem({
   onSuccess,
   onConflict,
   onReread,
+  unitChrome = false,
 }: TeachingBlockItemProps) {
   return (
     <div
-      className={teachingBlockItemClassName(focusStatus)}
+      className={unitChrome ? "min-w-0 space-y-3" : teachingBlockItemClassName(focusStatus)}
       data-teaching-block-focus={focusStatus}
       data-block-id={block.blockId}
     >

@@ -30,12 +30,12 @@ export function SourceContentBody({ content }: { content: Content }) {
   return <div className="space-y-3">
     <p className="text-xs text-zinc-600">v{content.version} · {content.pageKind === "physical" ? "物理页" : "文本段"} {content.page ?? "未编号"} · {content.pages.length} 页/段 · {content.characters} 个提取字符</p>
     <p className="text-xs text-amber-800">提取文字可能有遗漏，请核对原件。</p>
-    {content.text.trim() ? <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-y border-zinc-200 py-4 font-sans text-sm leading-7 text-zinc-800">{content.text}</pre>
+    {content.text.trim() ? <pre data-study-reading-text="true" data-source-page={content.page ?? undefined} data-page-kind={content.pageKind} className="max-h-[65dvh] overflow-auto whitespace-pre-wrap break-words border-y border-zinc-200 py-4 font-sans text-sm leading-7 text-zinc-800">{content.text}</pre>
       : <p role="status" className="py-4 text-sm text-amber-800">本页未提取到正文，不能作为文字依据；请核对原件。图片或扫描页在未配置 OCR 时无法提取文字。</p>}
     {content.truncated ? <p role="status" className="text-xs text-amber-800">本页显示内容已截断，请打开原件核对完整内容。</p> : null}
   </div>;
 }
-export function SourceContent({ sourceId, version, initialPage }: { sourceId: string; version: number; initialPage?: number }) {
+export function SourceContent({ sourceId, version, initialPage, onExplain }: { sourceId: string; version: number; initialPage?: number; onExplain?: (page: number) => void }) {
   const [content, setContent] = useState<Content | null>(null), [page, setPage] = useState<number | undefined>(() => sourceReaderInitialPage(sourceId, version, initialPage));
   const [error, setError] = useState(""), [loading, setLoading] = useState(true), [revision, setRevision] = useState(0);
   useEffect(() => { setPage(sourceReaderInitialPage(sourceId, version, initialPage)); }, [sourceId, version, initialPage]);
@@ -59,7 +59,7 @@ export function SourceContent({ sourceId, version, initialPage }: { sourceId: st
       <select aria-label="正文页码" className={`${ui.input} max-w-40`} value={content.page ?? "unpaged"} onChange={event => setPage(event.target.value === "unpaged" ? undefined : Number(event.target.value))}>
         {content.pages.map(value => <option key={value ?? "unpaged"} value={value ?? "unpaged"}>{content.pageKind === "physical" ? "物理页" : "文本段"} {value ?? "未编号"}</option>)}
       </select>
-      {explanation ? <Link className={ui.primary} href={explanation.href}><Sparkles size={14} aria-hidden="true" />{explanation.label}</Link> : null}
+      {explanation ? onExplain && content.page != null ? <button type="button" className={ui.primary} onClick={() => onExplain(content.page!)}><Sparkles size={14} aria-hidden="true" />{explanation.label}</button> : <Link className={ui.primary} href={explanation.href}><Sparkles size={14} aria-hidden="true" />{explanation.label}</Link> : null}
       <button type="button" aria-label="下一页正文" className={ui.icon} disabled={index >= content.pages.length - 1} onClick={() => setPage(content.pages[index + 1] ?? undefined)}><ChevronRight size={14} aria-hidden="true" /></button>
     </div><SourceContentBody content={content} /></> : null}
   </section>;

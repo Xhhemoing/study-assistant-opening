@@ -42,7 +42,7 @@ describe("parseAssistantCourseIdParam", () => {
 });
 
 describe("resolveAssistantCourseId", () => {
-  it("prefers learningAttempt, then resume, then query/shell", () => {
+  it("prefers learningAttempt, then explicit query/shell, then resume", () => {
     expect(resolveAssistantCourseId({
       learningAttemptCourseId: COURSE,
       resumeCourseId: S1,
@@ -51,7 +51,7 @@ describe("resolveAssistantCourseId", () => {
     expect(resolveAssistantCourseId({
       resumeCourseId: S1,
       initialCourseId: S2,
-    })).toBe(S1);
+    })).toBe(S2);
     expect(resolveAssistantCourseId({ initialCourseId: S2 })).toBe(S2);
     expect(resolveAssistantCourseId({})).toBeNull();
   });

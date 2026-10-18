@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, BookOpen } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ActivitySpecClientInit,
   LearningResume,
+  LearningAttempt,
   TeachingActivity,
   TeachingCommandConflict,
   TeachingCommandSuccess,
@@ -18,6 +19,7 @@ import {
 import { ui, tone } from "../design/ui";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import {
+  BlockCommands,
   isBranchStackEmpty,
 } from "./block-commands";
 import { TeachingBlockItem } from "./teaching-block-item";
@@ -35,6 +37,41 @@ import { PreferenceControls } from "./preference-controls";
 import { ResumeCard, type LocalUnsentDraft } from "./resume-card";
 import { ActivityEndControl } from "./activity-end-control";
 import { TeachingGoalGuidance } from "./goal-guidance";
+import { sourceViewerHref } from "../inbox/source-viewer";
+import { StudyToolsPanel } from "./study-tools-panel";
+import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
+
+export type TeachingToolsContext = {
+  activity: TeachingActivity;
+  blockId: string | null;
+  contentVersion: number;
+  unitTitle: string;
+  unitText: string;
+  sourceRefs: TeachingSourceRef[];
+  sourceNameById?: Record<string, string>;
+  isQuestion: boolean;
+  learningAttempt?: LearningAttempt | null;
+};
+
+type ContextualTeachingTools = ReactNode | ((context: TeachingToolsContext) => ReactNode);
+
+export type TeachingWorkspacePositionSnapshot = {
+  activityId: string;
+  contentVersion: number;
+  pathVersion: number;
+  epoch: number;
+};
+
+function sameWorkspaceSnapshot(a: TeachingWorkspacePositionSnapshot, b: TeachingWorkspacePositionSnapshot): boolean {
+  return a.activityId === b.activityId && a.contentVersion === b.contentVersion && a.pathVersion === b.pathVersion && a.epoch === b.epoch;
+}
+
+/** A late cursor response must not replace a newer command, reread or parent snapshot. */
+export async function saveCurrentTeachingUnitPosition(api: Pick<OpeningApi, "postTeachingCheckpoint">, snapshot: TeachingWorkspacePositionSnapshot, current: () => TeachingWorkspacePositionSnapshot, targetBlockId: string, apply: (result: Awaited<ReturnType<typeof saveTeachingUnitPosition>>) => void): Promise<void> {
+  const result = await saveTeachingUnitPosition(api, snapshot.activityId, snapshot.contentVersion, targetBlockId);
+  if (!sameWorkspaceSnapshot(snapshot, current())) throw new Error("学习内容或位置已变化，刚才的位置响应未采用。请重新读取后继续，原草稿仍保留。");
+  apply(result);
+}
 
 export type TeachingWorkspaceProps = {
   activity: TeachingActivity;
@@ -49,6 +86,7 @@ export type TeachingWorkspaceProps = {
    * When omitted, workspace resolves names via api.listSources().
    */
   sourceNameById?: Record<string, string> | null;
+  contextualTools?: ContextualTeachingTools;
 };
 
 /**
@@ -101,43 +139,6 @@ export function buildSourceNameMap(
   return map;
 }
 
-function ExpandSection({
-  id,
-  title,
-  children,
-  defaultOpen = false,
-}: {
-  id: string;
-  title: string;
-  children: ReactNode;
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="border-t border-zinc-100 pt-3" data-expand={id}>
-      <button
-        type="button"
-        className={`${ui.quiet} w-full justify-between px-0`}
-        aria-expanded={open}
-        aria-controls={`teaching-expand-${id}`}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span>{title}</span>
-        <ChevronDown
-          size={14}
-          aria-hidden
-          className={open ? "rotate-180 transition-transform" : "transition-transform"}
-        />
-      </button>
-      {open ? (
-        <div id={`teaching-expand-${id}`} className="mt-2 space-y-2">
-          {children}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export function TeachingWorkspace({
   activity,
   clientInit: clientInitProp,
@@ -146,8 +147,9 @@ export function TeachingWorkspace({
   api: apiProp,
   onActivityUpdated,
   sourceNameById: sourceNameByIdProp = null,
+  contextualTools,
 }: TeachingWorkspaceProps) {
-  const api = apiProp ?? createOpeningApi();
+  const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [liveActivity, setLiveActivity] = useState(activity);
   const [liveInit, setLiveInit] = useState<ActivitySpecClientInit>(clientInitProp);
   const [contentVersion, setContentVersion] = useState(
@@ -158,9 +160,47 @@ export function TeachingWorkspace({
     useState<TeachingCommandConflict | null>(null);
   const [rereadError, setRereadError] = useState<string | null>(null);
   const [fetchedSourceNames, setFetchedSourceNames] = useState<Record<string, string>>({});
+  const [panel, setPanel] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const [positionBusy, setPositionBusy] = useState(false);
+  const [positionError, setPositionError] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<Record<string, LearningAttempt>>({});
+  const positionInFlight = useRef(false);
+  const commandInFlight = useRef(false);
+  const positionSnapshot = useRef<TeachingWorkspacePositionSnapshot>({ activityId: activity.id, contentVersion: clientInitProp.contentVersion ?? activity.contentVersion, pathVersion: activity.pathVersion, epoch: 0 });
+  const commandSnapshot = useRef<TeachingWorkspacePositionSnapshot | null>(null);
+  const parentSnapshot = useRef({ activity, clientInit: clientInitProp });
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Invalidate pending work as soon as changed parent input is rendered, before its effect applies.
+  if (parentSnapshot.current.activity !== activity || parentSnapshot.current.clientInit !== clientInitProp) {
+    positionSnapshot.current = { ...positionSnapshot.current, epoch: positionSnapshot.current.epoch + 1 };
+    parentSnapshot.current = { activity, clientInit: clientInitProp };
+  }
+
+  const markSnapshot = useCallback((next: Partial<Omit<TeachingWorkspacePositionSnapshot, "epoch">> = {}) => {
+    positionSnapshot.current = { ...positionSnapshot.current, ...next, epoch: positionSnapshot.current.epoch + 1 };
+  }, []);
+
+  const commandApi = useMemo<OpeningApi>(() => ({ ...api, async postTeachingCommand(id, input) {
+    if (positionInFlight.current || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
+    const latest = positionSnapshot.current;
+    if (id !== latest.activityId || input.expectedVersion !== latest.contentVersion || (input.expectedPathVersion != null && input.expectedPathVersion !== latest.pathVersion)) throw new Error("学习内容已切换，请重新读取当前内容后再操作。");
+    commandInFlight.current = true;
+    markSnapshot();
+    commandSnapshot.current = { ...positionSnapshot.current };
+    try { return await api.postTeachingCommand(id, input); }
+    finally { commandInFlight.current = false; }
+  } }), [api, markSnapshot]);
 
   // Sync when parent passes a new activity/init identity (e.g. today dashboard reload).
   useEffect(() => {
+    const incomingVersion = clientInitProp.contentVersion ?? activity.contentVersion;
+    const latest = positionSnapshot.current;
+    if (latest.activityId === activity.id && (incomingVersion < latest.contentVersion || activity.pathVersion < latest.pathVersion)) {
+      setPositionError("收到的课程快照已过期，保留当前学习位置。请重新读取后继续。");
+      return;
+    }
+    markSnapshot({ activityId: activity.id, contentVersion: incomingVersion, pathVersion: activity.pathVersion });
     setLiveActivity(activity);
     setLiveInit(clientInitProp);
     setContentVersion(clientInitProp.contentVersion ?? activity.contentVersion);
@@ -175,6 +215,7 @@ export function TeachingWorkspace({
     clientInitProp.contentVersion,
     clientInitProp.updatedAt,
     clientInitProp,
+    markSnapshot,
   ]);
 
   const schemaVersion = useMemo(() => readSchemaVersion(liveInit), [liveInit]);
@@ -187,6 +228,12 @@ export function TeachingWorkspace({
     () => resolveTeachingBlockFocus(orderedBlocks, liveInit.checkpointJson ?? {}),
     [orderedBlocks, liveInit.checkpointJson],
   );
+  const units = useMemo(() => buildTeachingStudyUnits(orderedBlocks), [orderedBlocks]);
+  const currentUnit = teachingUnitForBlock(units, blockFocus.currentBlockId);
+  const currentIndex = currentUnit ? units.indexOf(currentUnit) : -1;
+  const currentUnitId = currentUnit?.id ?? null;
+  const [visitedUnits, setVisitedUnits] = useState<Set<string>>(() => new Set(currentUnitId ? [currentUnitId] : []));
+  const currentQuestionId = currentUnit?.questionBlockId ?? null;
   const sourceNameById = useMemo(() => {
     if (sourceNameByIdProp && Object.keys(sourceNameByIdProp).length) {
       return sourceNameByIdProp;
@@ -217,41 +264,28 @@ export function TeachingWorkspace({
   }, [api, liveActivity.sourceIds, liveInit.sourceRefs, sourceNameByIdProp]);
 
   useEffect(() => {
-    if (typeof document === "undefined") return;
-    const el = document.querySelector('[data-teaching-block-focus="current"]');
-    if (el && "scrollIntoView" in el) {
-      (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-  }, [blockFocus.currentBlockId, pathVersion]);
-
-  const pastOrSkippedBlocks = useMemo(
-    () =>
-      orderedBlocks.filter((block) => {
-        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
-        return status === "past" || status === "skipped";
-      }),
-    [orderedBlocks, blockFocus],
-  );
-  const focusMainBlocks = useMemo(
-    () =>
-      orderedBlocks.filter((block) => {
-        const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
-        return status === "current" || status === "upcoming";
-      }),
-    [orderedBlocks, blockFocus],
-  );
+    if (currentUnitId) setVisitedUnits(previous => new Set([...previous, currentUnitId]));
+    const heading = contentRef.current?.querySelector<HTMLElement>('[data-study-unit-current="true"] h3');
+    heading?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+  }, [currentUnitId]);
 
   const returnDisabled = isBranchStackEmpty(liveInit.checkpointJson ?? {});
   const generateTone =
-    activity.generateStatus === "failed" || activity.generateStatus === "stale"
+    liveActivity.generateStatus === "failed" || liveActivity.generateStatus === "stale"
       ? tone.danger
-      : activity.generateStatus === "ready"
+      : liveActivity.generateStatus === "ready"
         ? tone.success
-        : activity.generateStatus === "needs_check"
+        : liveActivity.generateStatus === "needs_check"
           ? tone.warning
           : tone.neutral;
 
   const applySuccess = useCallback((result: TeachingCommandSuccess) => {
+    const started = commandSnapshot.current;
+    if (!started || !sameWorkspaceSnapshot(started, positionSnapshot.current) || result.contentVersion < started.contentVersion || result.pathVersion < started.pathVersion) {
+      setPositionError("学习内容或位置已变化，刚才的操作结果需重新读取确认。原草稿仍保留。");
+      return;
+    }
+    markSnapshot({ contentVersion: result.contentVersion, pathVersion: result.pathVersion });
     setWorkspaceConflict(null);
     setContentVersion(result.contentVersion);
     setPathVersion(result.pathVersion);
@@ -264,7 +298,7 @@ export function TeachingWorkspace({
         checkpointJson: result.checkpointJson,
       }));
     }
-  }, []);
+  }, [markSnapshot]);
 
   const handleConflict = useCallback((conflict: TeachingCommandConflict) => {
     setWorkspaceConflict(conflict);
@@ -272,15 +306,22 @@ export function TeachingWorkspace({
 
   const reread = useCallback(async () => {
     setRereadError(null);
+    markSnapshot();
+    const started = { ...positionSnapshot.current };
     const [freshInit, freshActivity] = await Promise.all([
-      api.getTeachingClientInit(activity.id),
-      api.getTeachingActivity(activity.id),
+      api.getTeachingClientInit(started.activityId),
+      api.getTeachingActivity(started.activityId),
     ]);
+    if (!sameWorkspaceSnapshot(started, positionSnapshot.current)) throw new Error("重新读取期间学习状态又有变化，较早的快照未采用。请再读取一次，原草稿仍保留。");
+    const freshVersion = freshInit.contentVersion ?? freshActivity.contentVersion;
+    if (freshVersion < started.contentVersion || freshActivity.pathVersion < started.pathVersion) throw new Error("读取到较早的课程快照，保留当前学习位置。请稍后重新读取。");
+    markSnapshot({ contentVersion: freshVersion, pathVersion: freshActivity.pathVersion });
     setLiveInit(freshInit);
+    setLiveActivity(freshActivity);
     setContentVersion(freshInit.contentVersion ?? freshActivity.contentVersion);
     setPathVersion(freshActivity.pathVersion);
     setWorkspaceConflict(null);
-  }, [activity.id, api]);
+  }, [api, markSnapshot]);
 
   const handleBlockReread = useCallback(async () => {
     try {
@@ -293,6 +334,34 @@ export function TeachingWorkspace({
     }
   }, [reread]);
 
+  const navigateUnit = useCallback(async (unit: TeachingStudyUnit) => {
+    if (positionInFlight.current || !schemaOk) return;
+    if (commandInFlight.current) { setPositionError("学习操作仍在保存，请稍后切换单元。"); return; }
+    positionInFlight.current = true; setPositionBusy(true); setPositionError(null);
+    const started = { ...positionSnapshot.current };
+    try {
+      await saveCurrentTeachingUnitPosition(api, started, () => positionSnapshot.current, unit.questionBlockId ?? unit.id, result => {
+        markSnapshot({ contentVersion: result.contentVersion });
+        setLiveInit(previous => ({ ...previous, contentVersion: result.contentVersion, checkpointJson: result.checkpointJson }));
+        setContentVersion(result.contentVersion);
+        setVisitedUnits(previous => new Set([...previous, unit.id]));
+        setPanel(null);
+        requestAnimationFrame(() => contentRef.current?.querySelector<HTMLElement>('[data-study-unit-current="true"] h3')?.focus({ preventScroll: true }));
+      });
+    } catch (error) { setPositionError(error instanceof Error ? error.message : "学习位置保存未确认，请重新读取后继续。"); }
+    finally { positionInFlight.current = false; setPositionBusy(false); }
+  }, [api, markSnapshot, schemaOk]);
+
+  const updateLiveActivity = useCallback((next: TeachingActivity) => {
+    markSnapshot({ activityId: next.id, contentVersion: next.contentVersion, pathVersion: next.pathVersion });
+    setLiveActivity(next);
+    onActivityUpdated?.(next);
+  }, [markSnapshot, onActivityUpdated]);
+
+  const onAttemptReady = useCallback((blockId: string, attempt: LearningAttempt) => {
+    setAttempts(previous => ({ ...previous, [`${liveActivity.id}:${blockId}:${contentVersion}`]: attempt }));
+  }, [contentVersion, liveActivity.id]);
+
   const attemptContext = useMemo(
     () => ({
       ...liveActivity,
@@ -300,228 +369,92 @@ export function TeachingWorkspace({
       outlineTitle: typeof liveInit.generationConfig.extras?.focusItemTitle === "string"
         ? liveInit.generationConfig.extras.focusItemTitle : undefined,
       onCourseAssociated: (next: TeachingActivity) => {
-        setLiveActivity(next);
-        onActivityUpdated?.(next);
+        updateLiveActivity(next);
       },
+      onAttemptReady,
     }),
-    [liveActivity, contentVersion, liveInit.generationConfig, onActivityUpdated],
+    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady],
   );
 
-  const showBlockCommands = liveActivity.status !== "completed";
-
-  return (
-    <section
-      className="flex h-full min-h-0 flex-col overflow-y-auto px-5 py-5"
-      aria-labelledby="teaching-workspace-heading"
-      data-teaching-workspace="true"
-      data-content-version={contentVersion}
-      data-path-version={pathVersion}
-    >
-      <header className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h2
-            id="teaching-workspace-heading"
-            className="flex items-center gap-2 text-sm font-semibold text-zinc-900"
-          >
-            <BookOpen size={16} aria-hidden className="shrink-0 text-emerald-700" />
-            当前 AI 教学
-          </h2>
-          <p className="mt-1 break-words text-sm leading-6 text-zinc-700">
-            {activity.intentSummary}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          <span className={`${ui.badge} ${tone.neutral}`}>
-            {teachingActivityStatusLabel(liveActivity.status)}
-          </span>
-          <span className={`${ui.badge} ${generateTone}`}>
-            {teachingActivityGenerateStatusLabel(activity.generateStatus, { contentVersion: activity.contentVersion })}
-          </span>
-        </div>
-      </header>
-
+  const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
+  const toolsContext: TeachingToolsContext = {
+    activity: { ...liveActivity, contentVersion, pathVersion },
+    blockId: currentQuestionId ?? blockFocus.currentBlockId,
+    contentVersion,
+    unitTitle: currentUnit?.title ?? liveActivity.intentSummary,
+    unitText: teachingStudyUnitText(currentUnit),
+    sourceRefs: liveInit.sourceRefs,
+    sourceNameById,
+    isQuestion: Boolean(currentQuestionId),
+    learningAttempt: currentQuestionId ? attempts[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`] ?? null : null,
+  };
+  const contextualContent = typeof contextualTools === "function" ? contextualTools(toolsContext) : contextualTools;
+  const toggleWholeLesson = () => {
+    if (!showAll) setVisitedUnits(previous => new Set([...previous, ...units.map(unit => unit.id)]));
+    setShowAll(value => !value);
+  };
+  const panels = [
+    { id: "outline", label: "提纲与回看", content: <div className="space-y-4">
+      <p className="text-xs leading-6 text-zinc-500">回看完整知识单元，切换位置会保存阅读断点。</p>
+      <ol className="space-y-1">{units.map((unit, index) => <li key={unit.id}><button type="button" className={`${ui.quiet} h-auto w-full justify-start whitespace-normal py-2 text-left ${unit.id === currentUnitId ? "bg-emerald-50 text-emerald-900" : ""}`} aria-current={unit.id === currentUnitId ? "step" : undefined} disabled={positionBusy} onClick={() => { void navigateUnit(unit); }}>{index + 1}. {unit.title}</button></li>)}</ol>
+      <button type="button" className={ui.secondary} onClick={toggleWholeLesson} aria-pressed={showAll}>{showAll ? "只看当前单元" : "查看整节内容"}</button>
+      {liveInit.goals.length ? <details className="text-xs leading-6 text-zinc-600"><summary className="cursor-pointer">本节目标</summary><ul className="mt-2 list-disc space-y-1 pl-4">{liveInit.goals.map(goal => <li key={goal.goalId}>{goal.statement}</li>)}</ul></details> : null}
+    </div> },
+    { id: "help", label: "学习帮助", content: currentUnit && showBlockCommands ? <BlockCommands key={toolsContext.blockId} activityId={liveActivity.id} blockId={toolsContext.blockId ?? currentUnit.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} disabled={positionBusy} whyAvailable={WHY_ASSIST_AVAILABLE} api={commandApi} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} defaultOpen compact /> : <p className="text-xs leading-6 text-zinc-500">当前没有可以调整的学习内容。</p> },
+    { id: "materials", label: "资料与引用", content: <div className="space-y-3">
+      {liveInit.sourceRefs.length ? <ul className="space-y-3">{liveInit.sourceRefs.map((ref, index) => {
+        const label = formatTeachingSourceLabel(ref, sourceNameById);
+        const numericVersion = ref.version == null || (typeof ref.version === "string" && !/^\d+$/.test(ref.version.trim())) ? null : Number(ref.version);
+        const version = numericVersion != null && Number.isInteger(numericVersion) && numericVersion >= 0 ? numericVersion : null;
+        return <li key={`${ref.sourceId}:${index}`} className="space-y-1 text-xs leading-6" data-source-ref={ref.sourceId}>
+          {version != null ? <a className="break-words font-medium text-emerald-800 underline underline-offset-4" href={sourceViewerHref(ref.sourceId, version, { page: ref.page })}>{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""}</a> : <p className="break-words font-medium text-zinc-800">{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""} · 引用版本待确认</p>}
+          <details className="text-zinc-500"><summary className="cursor-pointer">来源详情</summary><p className="break-all">资料标识：{ref.sourceId}</p><p>引用版本：{ref.version ?? "未知"}</p>{ref.chunkId ? <p className="break-all">原始片段：{ref.chunkId}</p> : null}</details>
+        </li>;
+      })}</ul> : <p className="text-xs leading-6 text-zinc-500">本节没有附带可定位的资料引用。</p>}
+      <p className="text-xs leading-6 text-zinc-500">打开引用后可返回原学习单元。历史引用使用原来的资料版本。</p>
+    </div> },
+    ...(contextualContent ? [{ id: "context", label: "提问与笔记", content: contextualContent }] : []),
+    { id: "settings", label: "学习设置", content: <div className="space-y-4">
       <TeachingGoalGuidance focus={liveActivity.learnerFocus} />
+      <PreferenceControls scope="session" activityId={liveActivity.id} courseId={liveActivity.courseId} expectedUpdatedAt={liveActivity.updatedAt} compact />
+      <p className="text-xs leading-6 text-zinc-500">阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
+      <details className="space-y-2 text-xs leading-6 text-zinc-500"><summary className="cursor-pointer">诊断信息与草稿状态</summary>
+        <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p><p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
+        <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
+        <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
+      </details>
+      <Link href={assistantHref ?? (liveActivity.courseId ? `/opening/assistant?courseId=${encodeURIComponent(liveActivity.courseId)}` : "/opening/assistant")} className={ui.quiet}>自由探索</Link>
+    </div> },
+  ];
 
-      {activity.generateStatus === "needs_check" ? (
-        <div
-          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}
-          role="status"
-          data-teaching-needs-check="true"
-        >
-          主讲内容待核对：内容已发布，来源校验尚未完成，可先学习。
-        </div>
-      ) : null}
-
-      <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
-        最近更新 {formatActivityUpdatedAt(activity.updatedAt, timeZone)}
-        {liveInit.verificationStatus
-          ? ` · 校验 ${liveInit.verificationStatus}`
-          : null}
-        {` · cv ${contentVersion} · pv ${pathVersion}`}
-      </p>
-
-      {workspaceConflict ? (
-        <div
-          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}
-          role="status"
-          data-workspace-command-conflict={workspaceConflict.conflict}
-        >
-          教学命令冲突（{workspaceConflict.conflict}）。请重新拉取合并，勿强制覆盖。
-        </div>
-      ) : null}
-      {rereadError ? (
-        <p className={`mt-2 text-xs ${tone.danger}`} role="alert">
-          {rereadError}
-        </p>
-      ) : null}
-
-      {!schemaOk ? (
-        <div
-          className={`mt-4 rounded-lg px-3 py-2 text-xs leading-5 ${tone.warning}`}
-          role="status"
-          data-workspace-schema-fail="true"
-        >
-          教学内容 schema 版本不受支持（{schemaVersion}）。今日工作台仍可用；请稍后重试或改用活动摘要。
-        </div>
-      ) : null}
-
-      {schemaOk ? (
-        <div className="mt-4 space-y-4" data-teaching-blocks="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
-          {pastOrSkippedBlocks.length > 0 ? (
-            <details
-              className="rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2"
-              data-teaching-past-collapsed="true"
-            >
-              <summary className="cursor-pointer select-none text-[11px] leading-5 text-zinc-600">
-                已学过或已跳过 {pastOrSkippedBlocks.length} 块
-              </summary>
-              <div className="mt-3 space-y-4">
-                {pastOrSkippedBlocks.map((block) => {
-                  const status = blockFocus.statusById.get(block.blockId) ?? "past";
-                  return (
-                    <TeachingBlockItem
-                      key={block.blockId}
-                      block={block}
-                      focusStatus={status}
-                      schemaVersion={schemaVersion}
-                      sourceRefs={liveInit.sourceRefs}
-                      attemptContext={attemptContext}
-                      showCommands={showBlockCommands}
-                      activityId={activity.id}
-                      contentVersion={contentVersion}
-                      pathVersion={pathVersion}
-                      returnDisabled={returnDisabled}
-                      whyAvailable={WHY_ASSIST_AVAILABLE}
-                      api={api}
-                      onSuccess={applySuccess}
-                      onConflict={handleConflict}
-                      onReread={handleBlockReread}
-                    />
-                  );
-                })}
-              </div>
-            </details>
-          ) : null}
-          {focusMainBlocks.map((block) => {
-            const status = blockFocus.statusById.get(block.blockId) ?? "upcoming";
-            return (
-              <TeachingBlockItem
-                key={block.blockId}
-                block={block}
-                focusStatus={status}
-                schemaVersion={schemaVersion}
-                sourceRefs={liveInit.sourceRefs}
-                attemptContext={attemptContext}
-                showCommands={showBlockCommands}
-                activityId={activity.id}
-                contentVersion={contentVersion}
-                pathVersion={pathVersion}
-                returnDisabled={returnDisabled}
-                whyAvailable={WHY_ASSIST_AVAILABLE}
-                api={api}
-                onSuccess={applySuccess}
-                onConflict={handleConflict}
-                onReread={handleBlockReread}
-              />
-            );
-          })}
-        </div>
-      ) : null}
-
-      <div className="mt-6 space-y-1">
-        <ExpandSection id="outline" title="提纲（按需展开）">
-          {liveInit.goals.length ? (
-            <ul className="list-disc space-y-1 pl-5 text-xs leading-5 text-zinc-700">
-              {liveInit.goals.map((g) => (
-                <li key={g.goalId}>{g.statement}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-[11px] text-zinc-500">暂无提纲目标元数据。</p>
-          )}
-        </ExpandSection>
-
-        <ExpandSection id="materials" title="原材料 / 引用（按需展开）" defaultOpen={liveInit.sourceRefs.length > 0}>
-          {liveInit.sourceRefs.length ? (
-            <ul className="space-y-1.5 text-xs leading-5 text-zinc-700">
-              {liveInit.sourceRefs.map((ref, i) => {
-                const label = formatTeachingSourceLabel(ref, sourceNameById);
-                return (
-                <li
-                  key={`${ref.sourceId}-${i}`}
-                  className="rounded-md bg-zinc-50 px-2 py-1.5 ring-1 ring-zinc-900/5"
-                  data-source-ref={ref.sourceId}
-                >
-                  <span className="font-medium">{label.primary}</span>{" "}
-                  <span className="tabular-nums text-zinc-500">{label.secondary}</span>
-                  {ref.page != null ? <span className="ml-2">p.{ref.page}</span> : null}
-                  {ref.chunkId ? (
-                    <span className="ml-2 text-zinc-500">
-                      chunk {String(ref.chunkId).slice(0, 8)}…
-                    </span>
-                  ) : null}
-                </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="text-[11px] text-zinc-500">暂无 sourceRefs。</p>
-          )}
-          <p className="mt-2 text-[11px] text-zinc-500">
-            完整课件阅读器为次要入口；学习无需先打开原阅读器。
-          </p>
-        </ExpandSection>
-
-        <ExpandSection id="drafts" title="草稿（按需展开）">
-          <p className="text-[11px] leading-5 text-zinc-600">
-            草稿锚点保存在服务端 checkpoint；隐藏答案不会预加载到本页。教学命令成功后会保留仍存在的草稿，不会静默覆盖。
-            {liveInit.checkpointJson && Object.keys(liveInit.checkpointJson).length
-              ? ` 已有 checkpoint 字段 ${Object.keys(liveInit.checkpointJson).length} 个。`
-              : " 当前无个人草稿。"}
-          </p>
-        </ExpandSection>
+  return <section className="min-w-0 px-4 py-5 sm:px-6" aria-labelledby="teaching-workspace-heading" data-teaching-workspace="true" data-study-question={currentQuestionId ? "true" : "false"} data-content-version={contentVersion} data-path-version={pathVersion}>
+    <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-emerald-700" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-zinc-900">本次学习</h2><span className="text-xs text-zinc-500">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
+      <span className={`${ui.badge} ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "needs_check" ? "需要核查" : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span>
+    </header>
+    {liveActivity.generateStatus === "needs_check" ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-teaching-needs-check="true">主讲内容需要核查：内容已发布，来源校验尚未完成，可先学习。</div> : null}
+    {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>学习内容已更新，请重新读取后对照草稿。</p><p>{workspaceConflict.message}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>重新读取学习内容</button><details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}</p></details></div> : null}
+    {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-red-700" role="alert"><p>{rereadError ?? positionError}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>重新读取，保留草稿</button></div> : null}
+    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">教学内容的格式暂不受支持。学习记录仍保留，请重新读取或查看活动小结。<details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details></div> : null}
+    <StudyToolsPanel panels={panels} activePanel={panel} onPanelChange={setPanel}>
+      <div ref={contentRef} className="min-w-0 space-y-6" data-teaching-blocks="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
+        {schemaOk ? units.map(unit => {
+          const current = unit.id === currentUnitId;
+          if (!showAll && !current && !visitedUnits.has(unit.id)) return null;
+          return <div key={unit.id} hidden={!showAll && !current} className={current ? "space-y-5" : "space-y-5 [&_[data-inline-attempt]]:hidden"} data-study-unit={unit.id} data-study-unit-current={current ? "true" : "false"}>
+            <h3 tabIndex={-1} className="break-words text-lg font-semibold leading-8 text-zinc-900 outline-none focus-visible:ring-2 focus-visible:ring-emerald-700">{unit.title}</h3>
+            {unit.blocks.filter(block => block.role !== "answer_key" && block.blockType !== "answer_key").map(block => <TeachingBlockItem key={block.blockId} block={block} focusStatus={blockFocus.statusById.get(block.blockId) ?? "upcoming"} schemaVersion={schemaVersion} sourceRefs={liveInit.sourceRefs} attemptContext={attemptContext} showCommands={false} activityId={liveActivity.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} whyAvailable={WHY_ASSIST_AVAILABLE} api={api} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} unitChrome />)}
+          </div>;
+        }) : null}
+        {schemaOk && currentUnit ? <nav aria-label="学习单元导航" className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
+          {currentIndex > 0 ? <button type="button" className={ui.quiet} disabled={positionBusy} onClick={() => { const previous = units[currentIndex - 1]; if (previous) void navigateUnit(previous); }}><ArrowLeft size={14} aria-hidden />回看上一单元</button> : <span />}
+          {units[currentIndex + 1] ? <button type="button" className={currentQuestionId ? ui.secondary : ui.primary} disabled={positionBusy} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance={currentQuestionId ? "false" : "true"}>{positionBusy ? "正在保存位置…" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
+        </nav> : null}
+        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-zinc-500">切换单元会保留原答案草稿；作答与核对结果按实际保存情况记录。</p> : null}
+        <details open={currentIndex === units.length - 1 || liveActivity.status === "completed"} className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer text-xs font-medium text-zinc-600">本次学习与小结</summary><div className="mt-3"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={updateLiveActivity} /></div></details>
       </div>
-
-      <div className="mt-4">
-        <ExpandSection id="intervention-prefs" title="本课介入偏好（临时 · 按需展开）">
-          <PreferenceControls
-            scope="session"
-            activityId={activity.id}
-            courseId={activity.courseId}
-            expectedUpdatedAt={activity.updatedAt}
-            compact
-          />
-        </ExpandSection>
-      </div>
-
-      <p className="mt-4">
-        <Link href={assistantHref ?? "/opening/assistant"} className={ui.quiet}>
-          打开自由对话（次要）
-        </Link>
-      </p>
-      <div className="mt-5"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={(next) => { setLiveActivity(next); onActivityUpdated?.(next); }} /></div>
-    </section>
-  );
+    </StudyToolsPanel>
+  </section>;
 }
 
 
@@ -560,6 +493,7 @@ export type TeachingContinueEntryProps = {
    * Default true preserves prior call sites; Today wires the real switch.
    */
   teachingCompileEnabled?: boolean;
+  contextualTools?: ContextualTeachingTools;
 };
 
 export function TeachingContinueEntry({
@@ -573,8 +507,9 @@ export function TeachingContinueEntry({
   initialClientInit = null,
   onActivityUpdated,
   teachingCompileEnabled = true,
+  contextualTools,
 }: TeachingContinueEntryProps) {
-  const api = apiProp ?? createOpeningApi();
+  const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [activity, setActivity] = useState(activityProp);
   const [phase, setPhase] = useState<"card" | "workspace" | "wait_init">(
     startInWorkspace &&
@@ -601,6 +536,7 @@ export function TeachingContinueEntry({
   const openWorkspaceFromResume = useCallback(
     async (resume: LearningResume) => {
       setLiveResume(resume);
+      setActivity(previous => ({ ...previous, status: resume.status, generateStatus: resume.generateStatus, contentVersion: resume.contentVersion, pathVersion: resume.pathVersion }));
       setWaitError(null);
 
       // Prefer resume.clientInit when present and usable.
@@ -695,6 +631,7 @@ export function TeachingContinueEntry({
           assistantHref={assistantHref}
           timeZone={timeZone}
           api={api}
+          contextualTools={contextualTools}
           onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }}
         />
       </div>
@@ -717,18 +654,18 @@ export function TeachingContinueEntry({
         data-resume-client-init="null"
       >
         <h2 className="text-sm font-semibold text-zinc-900">
-          {waitingInFlight ? "等待主讲内容" : "主讲内容暂不可用"}
+          {waitingInFlight ? "正在准备学习内容" : "主讲内容暂不可用"}
         </h2>
         <p className="mt-2 text-xs leading-5 text-zinc-600">
           {waitingInFlight
-            ? "断点已恢复，但 clientInit 暂缺或不可用。不会伪造讲义；生成中请等待。"
-            : "断点已恢复，但当前没有可用的主讲内容。可重新生成，或返回断点卡片；不会反复空拉 client-init。"}
+            ? "学习位置与草稿已保留，内容仍在准备中。稍后可刷新状态。"
+            : "学习位置与草稿已保留，当前还没有可用的讲解。可以重新准备内容，或返回学习断点。"}
         </p>
         {liveResume ? (
-          <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
+          <details className="mt-2 text-[11px] tabular-nums text-zinc-500"><summary className="cursor-pointer">诊断信息</summary><p>
             jobGate={liveResume.gates.job} · materials={liveResume.gates.materials} · cv{" "}
             {liveResume.contentVersion}
-          </p>
+          </p></details>
         ) : null}
         {waitError ? (
           <p className={`mt-3 text-xs ${tone.danger}`} role="alert">
@@ -755,7 +692,7 @@ export function TeachingContinueEntry({
               data-resume-retry-client-init="true"
               onClick={() => void retryFromFreshResume()}
             >
-              {waitBusy ? "拉取中…" : "重试拉取 client-init"}
+              {waitBusy ? "正在读取…" : "刷新准备状态"}
             </button>
           ) : null}
           {actions.showBack ? (

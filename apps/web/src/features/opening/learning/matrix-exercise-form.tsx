@@ -5,8 +5,8 @@ import type { LearningAttempt, LearningObservation, MatrixExerciseSpec, SourceRe
 import { matrixExerciseSkillLabel, matrixExerciseStem } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
-import { PracticeDraftRecovery } from "./practice-draft-recovery";
-import { assertPracticeAttempt, emptyPracticeDraft, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft } from "./practice-draft";
+import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
+import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity } from "./practice-draft";
 import { raiseAssistanceOnly, isAssistanceAllowed } from "./reference-check";
 
 type Key = MatrixExerciseSpec["exerciseKey"];
@@ -21,14 +21,19 @@ const reasonText: Record<string, string> = {
 };
 
 /** Built-in deterministic questions use the same session/attempt/observation history as ordinary work. */
-type Props = { courseId: string; sources: SourceRecord[]; onRecorded: () => void; onBack: () => void };
+type Props = { courseId: string; initialKey?: Key; initialVariant?: number; sources: SourceRecord[]; onRecorded: () => void; onBack: () => void };
 export function MatrixExerciseForm(props: Props) {
-  return <MatrixForm key={practiceScope(props.courseId, "matrix")} {...props} />;
+  return <MatrixController key={practiceScope(props.courseId, "matrix")} {...props} />;
 }
-function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
+function MatrixController(props: Props) {
+  const continuity = usePracticeDraft(practiceScope(props.courseId, "matrix"), { matrixKey: props.initialKey ?? "multiplication", matrixVariant: props.initialVariant ?? 0 });
+  return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} /></div>;
+}
+function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, continuity }: Props & { continuity: PracticeContinuity }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const scope = practiceScope(courseId, "matrix");
-  const { draft, patch, ready, restored, setRestored, storageWarning } = usePracticeDraft(scope, {});
+  const { draft, patch, ready, storageWarning, requireSaved } = continuity;
+  const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
   const { matrixKey: key, matrixVariant: variant, sourceId, answer, assistance, deliveredAssistance } = draft.fields;
   const setKey = (matrixKey: Key) => patch({ fields: { matrixKey } });
   const setSourceId = (value: string) => patch({ fields: { sourceId: value } });
@@ -41,13 +46,13 @@ function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  async function acceptAttempt(next: LearningAttempt) {
+  async function acceptAttempt(next: LearningAttempt, expectedRequestKey: string) {
     if (!next.matrixExercise) throw new Error("矩阵题目暂不可用，草稿已保留。");
-    const checkpoint = readPracticeDraft(scope, null) ?? draft;
-    assertPracticeAttempt(checkpoint, next);
+    const checkpoint = readPracticeDraft(scope, null, draft.id) ?? draft;
+    assertPracticeAttempt(checkpoint, next, expectedRequestKey);
     patch({ attemptId: next.id });
     const state = await readPracticeRecord(client, courseId, next, checkpoint.observationId);
-    if (readPracticeDraft(scope, null)?.attemptId !== next.id) return;
+    if (readPracticeDraft(scope, null, draft.id)?.attemptId !== next.id || readPracticeDraft(scope, null, draft.id)?.start?.clientKey !== expectedRequestKey) return;
     setAttempt(next); setRecord(state.observation); setRestored(false);
     patch(current => ({ observationId: state.observation?.id ?? null, fields: {
       ...restoredPracticeAssistance(current.fields, state.deliveredAssistance),
@@ -61,20 +66,23 @@ function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
       sessionInput: { courseId, sourceIds: [sourceId], skillLabel: matrixExerciseSkillLabel(key) } } })).start!;
     setPending(true); setError("");
     try {
+      requireSaved();
       const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, async () => {
         if (!request.sessionId) {
           if (!request.sessionInput) throw new Error("练习会话不可用，草稿已保留。");
           request.sessionId = (await client.createSession(request.sessionInput)).id;
           patch({ start: request });
+          requireSaved();
         }
         request.createInput ??= { sessionId: request.sessionId, clientKey: request.clientKey, matrixExercise: { sourceId, exerciseKey: key, variant } };
         patch({ start: request });
+        requireSaved();
         const created = await client.createAttempt(request.createInput);
-        assertPracticeAttempt(readPracticeDraft(scope, null) ?? draft, created);
+        assertPracticeAttempt(readPracticeDraft(scope, null, draft.id) ?? draft, created, request.clientKey);
         patch({ attemptId: created.id });
         return created;
       });
-      await acceptAttempt(next);
+      await acceptAttempt(next, request.clientKey);
     } catch (reason) { setRestored(true); setError(reason instanceof Error ? reason.message : "无法恢复练习，草稿已保留"); }
     finally { pendingRef.current = false; setPending(false); }
   }
@@ -90,11 +98,12 @@ function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
         const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);
         if (existing.observation) { setRecord(existing.observation); onRecorded(); return; }
       }
+      requireSaved();
       const next = await runPracticeRequest(`${scope}:submit:${submission.input.clientKey}`, () => client.submitAttempt(submission.attemptId, submission.input));
-      if (readPracticeDraft(scope, null)?.attemptId !== submission.attemptId) { onRecorded(); return; }
+      if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
       patch({ observationId: next.id });
       const state = await readPracticeRecord(client, courseId, { ...attempt, observationId: next.id });
-      if (readPracticeDraft(scope, null)?.attemptId !== submission.attemptId) { onRecorded(); return; }
+      if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
       if (!state.observation) throw new Error("已收到保存回执，尚未读取最新记录，请保留答案后重试。");
       setRecord(state.observation); onRecorded();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "保存失败，原答案已锁定，请重试同一次保存"); }
@@ -107,12 +116,13 @@ function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
     patch({ disputeKey });
     setPending(true); setError("");
     try {
+      requireSaved();
       const next = await client.reviseObservation({ rootObservationId: record.rootObservationId ?? record.id,
         revisesObservationId: record.id, expectedHead: record.id, clientKey: disputeKey, revisionKind: "replace",
         reason: "学生对内置矩阵题自动评价有异议，暂停将其作为已核验答案。",
         replacement: { answer: record.answer, outcome: "unverified", assistance: record.assistance, verdictSource: "self_report", referenceSourceId: null } });
       if (next.observation) {
-        if (readPracticeDraft(scope, null)?.attemptId !== record.attemptId) { onRecorded(); return; }
+        if (readPracticeDraft(scope, null, draft.id)?.attemptId !== record.attemptId) { onRecorded(); return; }
         patch({ observationId: next.observation.id });
         const history = await client.getObservationHistory(next.observation.id);
         const head = history.revisions.find(row => row.id === history.headObservationId);
@@ -124,14 +134,14 @@ function MatrixForm({ courseId, sources, onRecorded, onBack }: Props) {
     finally { pendingRef.current = false; setPending(false); }
   }
   function nextQuestion() {
-    const fresh = emptyPracticeDraft(scope, { sourceId, matrixKey: key, matrixVariant: (variant + 1) % 9 });
-    patch({ ...fresh, fields: fresh.fields });
-    setAttempt(null); setRecord(null); setRestored(false); setMessage(""); setError("");
+    continuity.startAnother({ sourceId, matrixKey: key, matrixVariant: (variant + 1) % 9 });
   }
   return <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-zinc-200 pt-4">
     {!ready ? <p className="text-sm text-zinc-500" role="status">正在读取矩阵练习草稿…</p> : null}
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-zinc-800">内置矩阵练习</h3>
       <button type="button" disabled={pending} onClick={onBack} className="rounded border border-zinc-200 px-3 py-2 text-sm">返回普通练习</button></div>
+    {ready && ((initialKey && key !== initialKey) || (initialVariant !== undefined && variant !== initialVariant)) ? <p className="text-xs text-zinc-600" role="status">已恢复此前的{matrixExerciseSkillLabel(key)}第 {variant + 1} 组草稿，新入口的选择不会覆盖原题。</p> : null}
+    <p className="text-xs text-zinc-500">本次题组：{variant + 1}</p>
     <p className="text-xs leading-6 text-zinc-500">题目由内置规则生成，使用精确计算核对。材料仅用于课程与版本关联，题目并非从材料中抽取。</p>
     {storageWarning ? <p className="text-xs text-amber-800" role="status">草稿暂时只在当前页面内保留，刷新前请复制答案。</p> : null}
     {restored ? <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} /> : !attempt ? <form onSubmit={start} className="space-y-3">

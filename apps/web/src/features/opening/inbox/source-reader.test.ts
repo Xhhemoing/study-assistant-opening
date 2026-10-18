@@ -35,7 +35,8 @@ describe("dedicated material reader", () => {
   it("starts reading extracted content for parsed formats without an inline original viewer", () => {
     const html = renderToStaticMarkup(createElement(SourceReader, { record: { ...record, name: "slides.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }, requestedVersion: 2, onClose: () => {} }));
     expect(html).toContain('aria-label="解析正文"');
-    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain("原件信息");
+    expect(html).toContain("提问与笔记");
     expect(html).not.toContain("<iframe");
   });
 

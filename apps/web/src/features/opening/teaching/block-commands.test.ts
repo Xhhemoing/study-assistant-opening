@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { TeachingCommandConflict } from "@aistudy/contracts";
 import {
+  BlockCommands,
   BlockCommandsBarView,
   SKIP_HONESTY_COPY,
   TEACHING_COMMAND_KINDS,
@@ -51,6 +52,88 @@ describe("command labels / conflict policy", () => {
 });
 
 describe("BlockCommandsBarView", () => {
+  it("keeps all auxiliary actions in one initially collapsed native disclosure", () => {
+    const html = renderToStaticMarkup(
+      createElement(BlockCommandsBarView, {
+        blockId: BID,
+        returnDisabled: false,
+        whyAvailable: true,
+        onCommand: () => undefined,
+      }),
+    );
+    const help = html.match(/<details[^>]*data-command-help="true"[^>]*>([\s\S]*?)<\/details>/);
+    expect(help).not.toBeNull();
+    expect(help![0].split(">")[0]).not.toMatch(/\bopen(?:=|\s|$)/);
+    expect(help![1]).toMatch(/<summary[^>]*>[\s\S]*?学习帮助[\s\S]*?<\/summary>/);
+    expect(help![1]).toContain('role="group"');
+    expect(help![1]).toContain('aria-label="当前学习单元帮助"');
+    for (const kind of TEACHING_COMMAND_KINDS) {
+      expect(help![1]).toContain(`data-command-kind="${kind}"`);
+    }
+    expect(help![1]).toContain(SKIP_HONESTY_COPY);
+    expect(html).not.toContain('role="toolbar"');
+  });
+
+  it("keeps help results and recovery visible outside the collapsed disclosure", () => {
+    const html = renderToStaticMarkup(
+      createElement(BlockCommandsBarView, {
+        blockId: BID,
+        returnDisabled: true,
+        whyAvailable: true,
+        assist: { kind: "why", summary: "先比较两组向量的方向。" },
+        conflict: {
+          ok: false,
+          conflict: "stale_path_version",
+          message: "学习路径已更新。",
+          currentPathVersion: 3,
+        },
+        onCommand: () => undefined,
+        onReread: () => undefined,
+      }),
+    );
+    const helpEnd = html.indexOf("</details>");
+    expect(html.indexOf('data-command-assist="why"')).toBeGreaterThan(helpEnd);
+    expect(html.indexOf('data-command-conflict="stale_path_version"')).toBeGreaterThan(helpEnd);
+    expect(html.indexOf('data-command-reread="true"')).toBeGreaterThan(helpEnd);
+    expect(html).toContain("学习路径已更新。");
+    expect(html).toMatch(/<details[^>]*><summary[^>]*>技术信息<\/summary>[\s\S]*?path=3[\s\S]*?<\/details>/);
+  });
+
+  it.each([
+    { disabled: true },
+    { busyKind: "example" },
+    { rereadBusy: true },
+  ] as const)("preserves command locking while help is available: %j", (state) => {
+    const html = renderToStaticMarkup(
+      createElement(BlockCommandsBarView, {
+        blockId: BID,
+        returnDisabled: false,
+        whyAvailable: true,
+        onCommand: () => undefined,
+        ...state,
+      }),
+    );
+    for (const kind of TEACHING_COMMAND_KINDS) {
+      expect(html).toMatch(new RegExp(`data-command-kind="${kind}"[^>]*disabled`));
+    }
+    expect(html).toContain("学习帮助");
+  });
+
+  it("can open the commands inside an explicitly selected parent help panel", () => {
+    const html = renderToStaticMarkup(
+      createElement(BlockCommands, {
+        activityId: "activity-1",
+        blockId: BID,
+        contentVersion: 2,
+        returnDisabled: false,
+        compact: true,
+        defaultOpen: true,
+      }),
+    );
+    expect(html).toMatch(/<details[^>]*data-command-help="true"[^>]*open=""/);
+    expect(html).toContain('data-command-kind="skip"');
+  });
+
   it("renders kinds (why hidden by default), disables return when stack empty, skip honesty, no force overwrite", () => {
     const onCommand = vi.fn();
     const conflict: TeachingCommandConflict = {

@@ -5,7 +5,7 @@ import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
  * Real opening upload loop. Requires the Playwright web server plus MinIO.
  * Do not stub /api/opening/sources with page.route.
  *
- * Since a8d7c8d the source list, "查看原件" and the original viewer live in the
+ * The source list, material-name opener and original viewer live in the
  * material library (/opening/library?tab=materials); the assistant page only
  * keeps a compact upload strip. The Playwright web server starts no worker, so
  * the parse outcome is not asserted here (the isolated OPENING_E2E workflow
@@ -33,11 +33,12 @@ test.describe("opening upload", () => {
         mimeType: "application/pdf",
         buffer: original,
       }, { timeout: 30_000 });
-      await expect(page.getByRole("list", { name: "上传队列" }).getByText("已保存，正在解析")).toBeVisible({ timeout: 30_000 });
+      await page.locator("summary").filter({ hasText: "已上传 1 份材料" }).click({ timeout: 30_000 });
+      await expect(page.getByRole("list", { name: "已上传任务", exact: true }).getByText(/^原件已保存，/)).toBeVisible();
       const sourceRow = page.getByRole("article").filter({ has: page.getByRole("heading", { name, exact: true }) });
       await expect(sourceRow).toBeVisible();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: "查看原件", exact: true }).click({ timeout: 15_000 });
+      await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
       const originalLink = page.getByRole("link", { name: "打开原件 v0", exact: true });
       await expect(originalLink).toBeVisible();
       const download = await context.request.get((await originalLink.getAttribute("href"))!);
@@ -45,7 +46,7 @@ test.describe("opening upload", () => {
       expect(await download.body()).toEqual(original);
       await page.reload();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: "查看原件", exact: true }).click({ timeout: 15_000 });
+      await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
       await expect(originalLink).toBeVisible();
     } finally {
       await context.close();

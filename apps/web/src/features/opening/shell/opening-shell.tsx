@@ -43,7 +43,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dismissedFocusPath, setDismissedFocusPath] = useState<string | null>(null);
-  const studySurface = /^\/opening\/courses\/[^/]+\/study\/?$/.test(pathname);
+  const studySurface = /^\/opening\/courses\/[^/]+\/study(?:\/matrix)?\/?$/.test(pathname);
   // Entering a lesson is a layout choice, never a change to AI intervention settings.
   const effectiveFocusMode = focusMode || (studySurface && dismissedFocusPath !== pathname);
   const exitFocusMode = useCallback(() => {

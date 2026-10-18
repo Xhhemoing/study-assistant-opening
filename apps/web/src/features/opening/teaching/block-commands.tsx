@@ -20,7 +20,7 @@ import {
   type TeachingCommandResponse,
   type TeachingCommandSuccess,
 } from "@aistudy/contracts";
-import { LoaderCircle, RefreshCw } from "lucide-react";
+import { ChevronDown, CircleHelp, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui, tone } from "../design/ui";
@@ -112,6 +112,10 @@ export type BlockCommandsBarViewProps = {
   conflict?: TeachingCommandConflict | null;
   assist?: TeachingCommandAssist | null;
   disabled?: boolean;
+  /** Remove outer spacing when nested in the current unit's controls. */
+  compact?: boolean;
+  /** Open initially when the parent already provides an explicit help panel. */
+  defaultOpen?: boolean;
   /** When false, hide Why (stub-only era). Default false. */
   whyAvailable?: boolean;
   onCommand: (kind: TeachingCommandKind) => void;
@@ -130,6 +134,8 @@ export function BlockCommandsBarView({
   conflict = null,
   assist = null,
   disabled = false,
+  compact = false,
+  defaultOpen = false,
   whyAvailable = false,
   onCommand,
   onReread,
@@ -146,52 +152,71 @@ export function BlockCommandsBarView({
     !(assist?.summary?.includes(blockId) ?? false);
   return (
     <div
-      className="mt-2 space-y-2"
+      className={compact ? "space-y-2" : "mt-2 space-y-2"}
       data-block-commands="true"
       data-block-id={blockId}
       data-why-available={whyAvailable ? "true" : "false"}
     >
-      <div
-        className="flex flex-wrap gap-1"
-        role="toolbar"
-        aria-label="教学块命令"
-      >
-        {visibleKinds.map((kind) => {
-          const isReturn = kind === "return";
-          const kindDisabled =
-            disabled || busy || (isReturn && returnDisabled);
-          const title =
-            kind === "skip"
-              ? SKIP_HONESTY_COPY
-              : kind === "why"
-                ? "仅解释说明，不改写正文"
-                : isReturn && returnDisabled
-                  ? "分支栈为空，无法返回"
-                  : KIND_LABEL[kind];
-          return (
-            <button
-              key={kind}
-              type="button"
-              className={ui.secondary}
-              data-command-kind={kind}
-              disabled={kindDisabled}
-              title={title}
-              aria-label={KIND_LABEL[kind]}
-              aria-busy={busyKind === kind}
-              onClick={() => onCommand(kind)}
-            >
-              {busyKind === kind ? (
-                <LoaderCircle size={12} className="animate-spin" aria-hidden />
-              ) : null}
-              {KIND_LABEL[kind]}
-            </button>
-          );
-        })}
-      </div>
-
-      <p className="text-[11px] leading-5 text-zinc-500" data-skip-honesty="true">
-        {SKIP_HONESTY_COPY}
-      </p>
+      <details className="group/help" data-command-help="true" open={defaultOpen}>
+        <summary
+          className={`${ui.quiet} list-none [&::-webkit-details-marker]:hidden`}
+          aria-busy={busy}
+        >
+          {busy ? (
+            <LoaderCircle size={14} className="animate-spin" aria-hidden />
+          ) : (
+            <CircleHelp size={14} aria-hidden />
+          )}
+          学习帮助
+          <ChevronDown
+            size={12}
+            className="transition-transform group-open/help:rotate-180 motion-reduce:transition-none"
+            aria-hidden
+          />
+        </summary>
+        <div className="mt-2 space-y-2 rounded-lg border border-zinc-200 p-3">
+          <div
+            className="flex flex-wrap gap-1"
+            role="group"
+            aria-label="当前学习单元帮助"
+          >
+            {visibleKinds.map((kind) => {
+              const isReturn = kind === "return";
+              const kindDisabled =
+                disabled || busy || (isReturn && returnDisabled);
+              const title =
+                kind === "skip"
+                  ? SKIP_HONESTY_COPY
+                  : kind === "why"
+                    ? "仅解释说明，不改写正文"
+                    : isReturn && returnDisabled
+                      ? "分支栈为空，无法返回"
+                      : KIND_LABEL[kind];
+              return (
+                <button
+                  key={kind}
+                  type="button"
+                  className={ui.secondary}
+                  data-command-kind={kind}
+                  disabled={kindDisabled}
+                  title={title}
+                  aria-label={KIND_LABEL[kind]}
+                  aria-busy={busyKind === kind}
+                  onClick={() => onCommand(kind)}
+                >
+                  {busyKind === kind ? (
+                    <LoaderCircle size={12} className="animate-spin" aria-hidden />
+                  ) : null}
+                  {KIND_LABEL[kind]}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] leading-5 text-zinc-500" data-skip-honesty="true">
+            {SKIP_HONESTY_COPY}
+          </p>
+        </div>
+      </details>
 
       {showAssist ? (
         <div
@@ -216,15 +241,20 @@ export function BlockCommandsBarView({
           <p className="mt-1 text-zinc-700">{conflict.message}</p>
           {conflict.currentContentVersion != null ||
           conflict.currentPathVersion != null ? (
-            <p className="mt-1 tabular-nums text-zinc-600">
-              服务端版本
-              {conflict.currentContentVersion != null
-                ? ` content=${conflict.currentContentVersion}`
-                : ""}
-              {conflict.currentPathVersion != null
-                ? ` path=${conflict.currentPathVersion}`
-                : ""}
-            </p>
+            <details className="mt-1 text-zinc-600">
+              <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">
+                技术信息
+              </summary>
+              <p className="mt-1 tabular-nums">
+                服务端版本
+                {conflict.currentContentVersion != null
+                  ? ` content=${conflict.currentContentVersion}`
+                  : ""}
+                {conflict.currentPathVersion != null
+                  ? ` path=${conflict.currentPathVersion}`
+                  : ""}
+              </p>
+            </details>
           ) : null}
           <p className="mt-1 text-zinc-600">
             请重新拉取教学内容并合并本地草稿后再试；不会提供「强制覆盖」。
@@ -259,6 +289,8 @@ export type BlockCommandsProps = {
   pathVersion?: number;
   returnDisabled: boolean;
   disabled?: boolean;
+  compact?: boolean;
+  defaultOpen?: boolean;
   /** When false, hide Why control (default). */
   whyAvailable?: boolean;
   api?: OpeningApi;
@@ -277,6 +309,8 @@ export function BlockCommands({
   pathVersion,
   returnDisabled,
   disabled = false,
+  compact = false,
+  defaultOpen = false,
   whyAvailable = false,
   api: apiProp,
   onSuccess,
@@ -372,6 +406,8 @@ export function BlockCommands({
         conflict={conflict}
         assist={assist}
         disabled={disabled}
+        compact={compact}
+        defaultOpen={defaultOpen}
         whyAvailable={whyAvailable}
         onCommand={(kind) => void runCommand(kind)}
         onReread={onReread ? () => void handleReread() : undefined}

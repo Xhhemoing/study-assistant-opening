@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
-import type { LearningObservation, TeachingActivity, TeachingAnswerKey } from "@aistudy/contracts";
+import type { LearningAttempt, LearningObservation, TeachingActivity, TeachingAnswerKey } from "@aistudy/contracts";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { buildSelfCompareRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
@@ -17,6 +17,8 @@ export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "s
   learnerFocus?: TeachingActivity["learnerFocus"];
   outlineTitle?: string;
   onCourseAssociated: (activity: TeachingActivity) => void;
+  /** Available only after the original answer is durably saved and identity checked. */
+  onAttemptReady?: (blockId: string, attempt: LearningAttempt) => void;
 };
 
 /** The reference is fetched only after the original answer is durably submitted. */
@@ -59,6 +61,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
   const [skillLabel, setSkillLabel] = useState(() => defaultInlineAttemptSkill({
     draftSkillLabel: initialDraft?.skillLabel, learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
   }));
+  const [skillEditorOpen, setSkillEditorOpen] = useState(() => !skillLabel.trim());
   // Delayed optional reads must never replace an edited (including cleared) skill.
   const skillEdited = useRef(initialDraft !== undefined);
   const [skillOptions, setSkillOptions] = useState<string[]>([]);
@@ -134,6 +137,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
       if (!observation) { setUnavailable(true); setError("这条作答记录已撤回，无法继续核对。"); return; }
       setRecorded(observation); setAttemptId(result.attemptId); setChecked(Boolean(observation.referenceCheck));
+      context.onAttemptReady?.(blockId, result.attempt);
       await readAnswer(result.attemptId);
     } catch (reason) { setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : reason instanceof Error ? reason.message : "答案保存未确认，可用相同请求重新确认。"); }
     finally { inFlight.current = false; setPending(false); }
@@ -181,9 +185,15 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
     {!recorded || draftConflict ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
       {draftConflict ? <div role="status" className="space-y-1 text-xs text-amber-800"><p>{draftConflict === "course_changed" ? "此答案提交时所属课程已改变。原答案和提交请求已保留为只读，请到原课程的学习记录核实保存结果。" : "当前题干与原草稿不一致。原草稿已保留为只读，请重新读取活动，避免将旧答案提交到新题目。"}</p><p className="whitespace-pre-wrap">原草稿题目：{initialDraft?.prompt}</p></div> : null}
       {initialDraft?.submission && !draftConflict ? <p role="status" className="text-xs text-zinc-600">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
-      <label className="block text-xs text-zinc-700">记录的技能<input className="mt-1 block w-full rounded-md border border-zinc-200 bg-white px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); onDraftChange({ answer, skillLabel: event.target.value, prompt }); }} /></label>
-      <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
-      {skillReuseHint ? <p className="text-xs leading-6 text-amber-800" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-emerald-800 underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); onDraftChange({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
+      <p className="break-words text-xs leading-6 text-zinc-600">记录到：{skillLabel.trim() || "尚未选择技能"}</p>
+      <details open={skillEditorOpen} onToggle={event => setSkillEditorOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer py-1 text-xs text-zinc-500 focus-visible:ring-2 focus-visible:ring-emerald-700">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
+        <div className="space-y-2 pt-2">
+          <label className="block text-xs text-zinc-700">记录的技能<input className="mt-1 block w-full rounded-md border border-zinc-200 bg-white px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); onDraftChange({ answer, skillLabel: event.target.value, prompt }); }} /></label>
+          <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
+          {skillReuseHint ? <p className="text-xs leading-6 text-amber-800" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-emerald-800 underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); onDraftChange({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
+        </div>
+      </details>
       <label className="block text-xs text-zinc-700">我的原答案<textarea className="mt-1 min-h-24 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm" value={answer} maxLength={20_000} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={(event) => { setAnswer(event.target.value); onDraftChange({ answer: event.target.value, skillLabel, prompt }); }} /></label>
       <button type="submit" className={ui.primary} disabled={!ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{draftConflict ? "原草稿已保留（只读）" : pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : "提交原答案，再看参考"}</button>
     </form> : <div className="space-y-2">

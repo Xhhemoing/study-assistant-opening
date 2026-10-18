@@ -215,7 +215,7 @@ export function CourseGoalForm({
         <p className="text-xs text-zinc-500">{hasGoal ? "已设置" : "未设置"}</p>
       </div>
       <p className="mt-1 text-xs leading-6 text-zinc-500">
-        目标决定学习安排和讲练方式；留空日期支持长期学习，阶段成果可设置近期目标。
+        先选择目标日期与讲练方式；日期留空支持长期学习。未设置目标也可以直接开始。
       </p>
       {loading ? (
         <p className="mt-3 text-xs text-zinc-500" role="status">
@@ -239,13 +239,13 @@ export function CourseGoalForm({
       ) : (
         <div className="mt-3 space-y-3">
           <div className="flex flex-wrap items-end gap-3">
-            <label className="block min-w-[10rem] flex-1 space-y-1">
+            <label className="block min-w-0 flex-1 basis-52 space-y-1">
               <span className={ui.label}>目标日期（可选）</span>
               <div className="flex gap-2">
                 <input
                   id="course-goal-target-date"
                   type="date"
-                  className={ui.input}
+                  className={`${ui.input} min-w-0`}
                   value={targetDate}
                   disabled={busy || mustReload}
                   onChange={(event) => {
@@ -268,27 +268,7 @@ export function CourseGoalForm({
                 ) : null}
               </div>
             </label>
-            <label className="block min-w-[8rem] space-y-1">
-              <span className={ui.label}>每周投入分钟</span>
-              <input
-                id="course-goal-weekly-minutes"
-                type="number"
-                inputMode="numeric"
-                min={WEEKLY_MIN}
-                max={WEEKLY_MAX}
-                step={1}
-                className={ui.input}
-                value={weeklyMinutes}
-                disabled={busy || mustReload}
-                onChange={(event) => {
-                  setWeeklyMinutes(event.target.value);
-                  setMessage("");
-                }}
-              />
-            </label>
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="block min-w-[12rem] flex-1 space-y-1">
+            <label className="block min-w-0 flex-1 basis-48 space-y-1">
               <span className={ui.label}>学习安排</span>
               <select id="course-goal-learning-mode" className={ui.input} value={learningMode} disabled={busy || mustReload}
                 onChange={event => { setLearningMode(event.target.value as GoalLearningMode); setMessage(""); }}>
@@ -297,20 +277,11 @@ export function CourseGoalForm({
                 <option value="exam">应试练习</option>
               </select>
             </label>
-            <label className="block min-w-[8rem] space-y-1">
-              <span className={ui.label}>相对其他课程</span>
-              <select id="course-goal-priority" className={ui.input} value={priority} disabled={busy || mustReload}
-                onChange={event => { setPriority(Number(event.target.value)); setMessage(""); }}>
-                {(["常规", "略优先", "较优先", "优先", "重点", "首要"] as const).map((label, value) =>
-                  <option key={value} value={value}>{label}</option>)}
-              </select>
-            </label>
           </div>
           <p className="text-xs leading-6 text-zinc-500">
             {learningMode === "auto" ? "目标或未完成阶段成果进入最后7天时，优先短讲解和练习；其他时间侧重理解与迁移。"
               : learningMode === "exam" ? "优先练习与必要补课，减少无关扩展；仍保留独立作答与复测记录。"
                 : "侧重理解、方法解释与迁移；遇到阻塞时先补必要前置，再回到原任务。"}
-            {priority > 0 ? " 本课程可排在其他课程的普通积压任务之前，当天截止事项仍优先。" : ""}
           </p>
           {datePast ? (
             <p className="text-xs leading-6 text-amber-800" role="status">
@@ -346,8 +317,30 @@ export function CourseGoalForm({
             </p>
           ) : null}
           {mustReload ? <button type="button" className={ui.secondary} disabled={busy} onClick={() => setReloadToken(value => value + 1)}>重新读取课程目标</button> : null}
-          {storedGoal ? <CourseMilestones key={courseId} courseId={courseId} goal={storedGoal} api={api}
-            onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-zinc-500">保存课程目标后，可添加阶段成果与成功标准。</p>}
+          <details className="border-t border-zinc-200 pt-3">
+            <summary className="cursor-pointer py-1 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700">投入时间、优先级与阶段成果</summary>
+            <div className="mt-3 space-y-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="block min-w-0 flex-1 basis-40 space-y-1">
+                  <span className={ui.label}>每周投入分钟</span>
+                  <input id="course-goal-weekly-minutes" type="number" inputMode="numeric" min={WEEKLY_MIN} max={WEEKLY_MAX} step={1}
+                    className={ui.input} value={weeklyMinutes} disabled={busy || mustReload}
+                    onChange={event => { setWeeklyMinutes(event.target.value); setMessage(""); }} />
+                </label>
+                <label className="block min-w-0 flex-1 basis-40 space-y-1">
+                  <span className={ui.label}>相对其他课程</span>
+                  <select id="course-goal-priority" className={ui.input} value={priority} disabled={busy || mustReload}
+                    onChange={event => { setPriority(Number(event.target.value)); setMessage(""); }}>
+                    {(["常规", "略优先", "较优先", "优先", "重点", "首要"] as const).map((label, value) =>
+                      <option key={value} value={value}>{label}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="text-xs leading-6 text-zinc-500">时间与优先级调整后，使用上方“保存”确认。{priority > 0 ? "本课程可排在其他课程的普通积压任务之前，当天截止事项仍优先。" : ""}</p>
+              {storedGoal ? <CourseMilestones key={courseId} courseId={courseId} goal={storedGoal} api={api}
+                onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-zinc-500">保存课程目标后，可添加阶段成果与成功标准。</p>}
+            </div>
+          </details>
         </div>
       )}
     </section>
