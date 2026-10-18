@@ -5,6 +5,9 @@ export type RetestAttemptPrefill = {
   retestId: string;
   skillLabel: string;
   prompt: string;
+  /** Retest activity identity, distinct from a teaching activity/session. */
+  retestActivityId?: string;
+  requirementKey?: string | null;
   /** Soft UX hint only; server still enforces earliest on submit. */
   recommendedAt?: string | null;
 };
@@ -22,6 +25,8 @@ export function parseRetestCandidateId(value: string | null | undefined): string
 export function retestPrefillFromProjection(retest: TaskRetestProjection): RetestAttemptPrefill {
   return {
     retestId: retest.candidateId,
+    retestActivityId: retest.activityId,
+    ...(retest.requirementKey !== undefined ? { requirementKey: retest.requirementKey } : {}),
     skillLabel: retest.skillLabel,
     prompt: retest.prompt,
     recommendedAt: retest.recommendedAt,
