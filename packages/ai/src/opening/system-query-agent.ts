@@ -58,7 +58,8 @@ export async function runSystemQuery(input: {
     else if (seen.has(key)) result = unknown(parsed.data.name, "repeated_query", asOf);
     else {
       seen.add(key);
-      try { result = systemQueryResultSchema.parse(await bounded(input.read(parsed.data, controller.signal))); }
+      try { result = systemQueryResultSchema.parse(await bounded(input.read(parsed.data, controller.signal)));
+        if (result.name !== parsed.data.name) throw new Error("query tool mismatch"); }
       catch { result = unknown(parsed.data.name, controller.signal.aborted ? "timeout" : "unavailable", asOf); }
     }
     await check();
