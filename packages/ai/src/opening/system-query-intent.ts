@@ -5,9 +5,9 @@ export type SystemQueryIntent = { kind: SystemQueryRequest["name"] | "unknown"; 
 const quoted = (text: string) => text.match(/[“「『"]([^”」』"]{1,240})[”」』"]/)?.[1];
 const validDate = (date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(`${date}T12:00:00Z`)) && new Date(`${date}T12:00:00Z`).toISOString().slice(0, 10) === date;
 export function resolveSystemQueryDate(question: string, clock: SystemQueryClock): { date?: string; clarification?: string } {
-  const dates = [...question.matchAll(/\d{4}-\d{1,2}-\d{1,2}/g)].map(match => match[0]);
+  const dates = [...question.matchAll(/(?<![\d-])\d{4}-\d{1,2}-\d{1,2}(?![\d-])/g)].map(match => match[0]);
   const relative = [...question.matchAll(/大后天|后天|明天|明日|今天|今日|现在|昨天|昨日|前天|tomorrow|today|yesterday/gi)].map(match => match[0].toLowerCase());
-  if (dates.length + relative.length !== 1 || /下周|本周|这周|周[一二三四五六日天]|星期|月底|月初|下个?月|next week|this week/i.test(question)) return { clarification: "请指定一个日期（YYYY-MM-DD），或说明今天、明天、后天、昨天；当前不支持日期范围或星期推算。" };
+  if (dates.length + relative.length !== 1 || /下周|本周|这周|周[一二三四五六日天]|星期|月底|月初|下个?月|明年|去年|之前|之后|以前|以后|以来|截至|直到|连续|未来|接下来|期间|范围|(?:今天|明天|后天|昨天)起|\d\s*(?:至|到|~|～|—|–)\s*\d|next week|this week|next year|last year|between/i.test(question)) return { clarification: "请指定一个日期（YYYY-MM-DD），或说明今天、明天、后天、昨天；当前不支持日期范围或星期推算。" };
   if (dates.length) return validDate(dates[0]!) ? { date: dates[0] } : { clarification: "这个日期无效，请使用真实的 YYYY-MM-DD 日期。" };
   const offsets: Record<string, number> = { 大后天: 3, 后天: 2, 明天: 1, 明日: 1, 今天: 0, 今日: 0, 现在: 0, 昨天: -1, 昨日: -1, 前天: -2, tomorrow: 1, today: 0, yesterday: -1 };
   const date = new Date(`${clock.today}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + offsets[relative[0]!]!);
