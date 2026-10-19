@@ -112,3 +112,19 @@ it("retains the captured source version when a mock planner omits it instead of 
   expect(reply.receipt.results[0]).toMatchObject({ reason: "stale", data: [], sourceRefs: [] });
   expect(reply.receipt.results.flatMap(result => result.sourceRefs)).toEqual([]); expect(forbidden).not.toHaveBeenCalled();
 });
+it.each([false, true])("rejects model-filtered courses(B) through the complete engine (bound=%s)", async bound => {
+  const { a, b } = await courses();
+  const planner = vi.fn(async (_input: ProviderInput, round: number) => modelOutput(round === 0
+    ? { name: "courses", arguments: { courseId: b, limit: 5, offset: 0 } } : { name: "learning", arguments: { courseId: b, limit: 5, offset: 0 } }));
+  const reply = await createDbSystemQueryService(fixture.sql, "web", { planner }).reply(fixture.scope, { question: "我现在学到哪里", focus: bound ? { courseId: a } : undefined });
+  expect(planner).toHaveBeenCalledTimes(1); expect(reply.receipt.results).toMatchObject([{ name: "courses", reason: "clarification_required", data: [] }]);
+  expect(reply.text).not.toContain("物理乙"); expect(forbidden).not.toHaveBeenCalled();
+});
+it.each([0, 1])("does not promote a paginated one-source candidate into user selection through the complete engine (offset=%s)", async offset => {
+  const rows = backupRows(fixture.sql, fixture.scope), a = await rows.source(), b = await rows.source(); await rows.chunk(a); await rows.chunk(b);
+  const planner = vi.fn(async (_input: ProviderInput, round: number) => modelOutput(round === 0
+    ? { name: "materials", arguments: { query: "source evidence", limit: 1, offset } } : { name: "materials", arguments: { sourceId: a, limit: 5, offset: 0 } }));
+  const reply = await createDbSystemQueryService(fixture.sql, "web", { planner }).reply(fixture.scope, { question: "材料“source evidence”在哪页" });
+  expect(planner).toHaveBeenCalledTimes(1); expect(reply.receipt.results).toHaveLength(1); expect(reply.receipt.clarification).toContain("完整");
+  expect(reply.receipt.results[0]!.data).toHaveLength(1); expect(forbidden).not.toHaveBeenCalled();
+});

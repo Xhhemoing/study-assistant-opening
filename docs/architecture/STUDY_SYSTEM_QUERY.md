@@ -96,4 +96,6 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 
 `createDbSystemQueryService(...,{planner})` 与 ephemeral runtime 的受信构造选项现在把callback接入原PR69 `callModel`；HTTP输入不能注入这个选项。planner获得服务端日期/时区/绑定和实际工具结果，不获得旧history；自由正文仍不成为答案。测试用模拟模型走真实PG的saved Worker handler与ephemeral runtime，两轮实际读取并验证错日期/对象/权限边界。**生产bootstrap仍未注入模型gateway**，也未读取任何真实密钥；真实模型、供应商协议/质量、完整provider receipt、原子父预算及晚账务仍属C1/C2与并行升级计划后续，不由模拟通过证明。
 
+F3增量复核：courses.courseId筛选只能来自服务端绑定、用户明确ID或此前已确认对象，不能由模型自行缩成一条后制造“全局唯一”；绑定课程也不能由courses过滤替换。材料唯一性只从status=ok、nextOffset=null、offset=0的完整候选确认；未绑定时模型不得额外按页码/版本/自造关键词收窄结果。截断与非首页的单条来源不会成为后续工具的授权选择。增量只跑对象边界反例，保留已通过日期逻辑。
+
 并行协调：`codex/study-upgrade-20261019@ad4c668` 基于本PR的93e455f5；复用相同0074 blob，本批不占其计划的0075–0078。后续W1.7需保留19ac815恢复/临时保存修复及本F3路由改动，不能从旧93快照覆盖。仅核对该仓库合法远端refs，未访问其他私有会话目录。

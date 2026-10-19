@@ -20,8 +20,12 @@ export function createSystemQueryRoute(question: string, clock: SystemQueryClock
         if (request.arguments.date !== undefined && request.arguments.date !== date.date) return deny("查询日期与问题不一致，请明确指定日期后重试。");
         return { ...request, arguments: { ...request.arguments, date: date.date } };
       }
-      if (request.name === "courses" && request.arguments.query
-        && (!explicitName || request.arguments.query.normalize("NFKC").toLowerCase() !== explicitName.normalize("NFKC").toLowerCase())) return deny("请先选择课程，或用引号明确课程名称；不能由模型猜测或缩小课程对象。");
+      if (request.name === "courses") {
+        const id = request.arguments.courseId;
+        if (id && ((focus?.courseId && id !== focus.courseId) || (id !== courseId && !contains(id)))) return deny("课程筛选对象未由用户或完整候选确认，请先选择课程。");
+        if (request.arguments.query && (!explicitName || request.arguments.query.normalize("NFKC").toLowerCase() !== explicitName.normalize("NFKC").toLowerCase())) return deny("请先选择课程，或用引号明确课程名称；不能由模型猜测或缩小课程对象。");
+        if (focus?.courseId && !id) return { ...request, arguments: { ...request.arguments, courseId: focus.courseId } };
+      }
       if ((request.name === "learning" || request.name === "recommendation" || request.name === "teaching")
         && ((focus?.courseId && request.arguments.courseId !== focus.courseId)
           || (request.arguments.courseId !== courseId && !contains(request.arguments.courseId)))) return deny("请先选择一门课程，或明确课程名称；当前不会替你猜选课程。");
@@ -36,7 +40,7 @@ export function createSystemQueryRoute(question: string, clock: SystemQueryClock
         }
         if (request.arguments.sourceId) {
           if (!sourceIds.has(request.arguments.sourceId) && !contains(request.arguments.sourceId)) return deny("材料对象尚未唯一确认，请先选择一份材料。");
-        } else if (!request.arguments.query?.trim() || !contains(request.arguments.query)) return deny("请提供明确的原文关键词，不能由模型猜测检索词。");
+        } else if (!explicitName || request.arguments.query !== explicitName || request.arguments.physicalPage !== undefined || request.arguments.sourceVersion !== undefined) return deny("请用引号提供原文关键词；未选择材料时不能用模型指定的页码或版本缩小候选。");
       }
       return request;
     },
@@ -44,10 +48,15 @@ export function createSystemQueryRoute(question: string, clock: SystemQueryClock
       if (!focus?.courseId && result.name === "courses" && result.status === "ok" && result.nextOffset === null
         && request?.name === "courses" && request.arguments.offset === 0) {
         const matches = result.data.filter(row => row.title.trim().length > 0 && contains(row.title));
-        if (result.data.length === 1) courseId = result.data[0]!.id;
+        const filterId = request.arguments.courseId;
+        if (filterId) {
+          if (contains(filterId) && result.data.length === 1 && result.data[0]!.id === filterId) courseId = filterId;
+        } else if (result.data.length === 1) courseId = result.data[0]!.id;
         else if (matches.length === 1) courseId = matches[0]!.id;
       }
       if (result.name === "materials" && result.data.length) {
+        const complete = result.status === "ok" && result.nextOffset === null && request?.name === "materials" && request.arguments.offset === 0;
+        if (!complete) { if (!focus?.sourceId) clarification = "材料候选尚未完整覆盖，请选择一份明确材料；不能凭截断或分页结果确认唯一来源。"; return; }
         const ids = [...new Set(result.sourceRefs.map(ref => ref.sourceId))];
         if (ids.length === 1) sourceIds.add(ids[0]!);
         else if (ids.length > 1) clarification = "关键词匹配多份材料，请选择一份材料后再定位；以下仅为候选记录。";
