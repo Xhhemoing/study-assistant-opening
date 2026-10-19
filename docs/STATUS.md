@@ -16,6 +16,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| Study 助理升级最终计划 | Codex + GPT-6.1 Sol high 子代理 | `codex/study-upgrade-20261019` | W0 已核对发布 b140d54 与最新查询93e455f，复用0074；按职责分工实现锚点/曝光、父预算、精确span、LearnerState/Decision、教学三模式及Composer。分部分验收提交；实施细节见 [计划](plans/2026-10-19-study-assistant-upgrade.md)。未合并、未部署、用户交互及真实学习效果待验收 |
 | Study 独立回归修复 ST-001–004 | Codex | [#68](https://github.com/Xhhemoing/study-assistant-opening/pull/68) | c283e78 经完整 CI 39206856601 和主线程独立复核后，已合入 feat/opening-release（b140d548）；四项独立缺陷修复不等于新架构验收。dc792e0/ce4de2a 尚未从合法可见仓库/refs/制品取得，不宣称源码丢失。未部署 |
 | Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89修复五项P2及请求/结果工具配对，完整CI39216797557成功。后续接保存/临时聊天与显式开关（默认0），绑定用途/owner grant、核验完整祖先来源；只查元数据，不发起模型请求。含0074与临时24h来源元数据，回滚先停/取消遗留查询再启旧worker并保留DDL。相关222单元及补跑35项、60真实PG（含10聊天/竞态）、4HTTP、七包类型和改动lint通过；#70初轮CI两项旧workspace mock已补，terminal15项回归通过；独立review/新head完整CI待收口；[边界与用户验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。不等于26项新架构或单元三模式完成；原生模型C1/C2、release/ack、M4试验与用户浏览器待完成，无生产操作 |
 | 专注学习界面改版 P0–P2 | Codex + 独立交叉审查 | [#67](https://github.com/Xhhemoing/study-assistant-opening/pull/67) · `codex/focused-learning-ui` | 编码已补齐：课程断点、固定版本资料阅读、练习草稿保留/另开/切回、完整教学单元与统一工具、关联真实作答的提问/笔记、矩阵平面概念课及真实迁移题。102 文件 847 项整合单元、最终 126 项定向回归、Web/34 份测试/E2E 类型、94 文件 lint、边界检查及 worker/Web 生产构建通过；无新迁移或依赖。已维护旧 E2E；最新 CI 暴露的 Today C5 旧断言已按默认收起工具语义修正，37 项最近回归通过。用户已授权合并，完整 CI 与合并状态见 #67；未部署，用户交互与真实学习效果待验收 |
