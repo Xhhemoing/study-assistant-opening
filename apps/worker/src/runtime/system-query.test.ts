@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { DEFAULT_OPENING_AI_SETTINGS, providerInputSchema, type SystemQueryRequest } from "@aistudy/contracts";
+import { DEFAULT_OPENING_AI_SETTINGS, previousRecordQuestion, providerInputSchema, type SystemQueryRequest } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 const fixture = vi.hoisted(() => ({ read: vi.fn(), grant: vi.fn(), call: vi.fn(), budget: {} }));
 vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<typeof import("@aistudy/database")>(),
@@ -47,4 +47,27 @@ it("cancelling the claimed job after round one prevents later tools, paid rounds
   });
   await expect(createDbSystemQueryService(sql, "worker").reply(scope, { question: "模型设置", parentBudget: { id: "study-turn:test" }, jobLease: { jobId: id, claimToken: id } })).rejects.toThrow("context changed");
   expect(fixture.call).toHaveBeenCalledTimes(1); expect(fixture.read).not.toHaveBeenCalled();
+});
+it("bounds a hanging prior referent resolver before entering planning", async () => {
+  vi.useFakeTimers();
+  try {
+    const pending = createDbSystemQueryService({} as Sql, "web").reply(scope, { question: "那明天呢", resolvePreviousQuestion: () => new Promise(() => {}) });
+    const assertion = expect(pending).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(12001); await assertion;
+    expect(fixture.call).not.toHaveBeenCalled(); expect(fixture.read).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
+});
+it("passes authenticated history as separate questions through the shared runtime", async () => {
+  fixture.grant.mockResolvedValue({ authorization, privacyEpoch: 0, localDate: "2026-10-19" });
+  fixture.read.mockImplementation(async (request: SystemQueryRequest) => ({ name: request.name, authorization, status: "ok", reason: "read", asOf: new Date().toISOString(),
+    version: "v1", data: request.name === "courses"
+      ? [{ id, title: "高等数学", updatedAt: new Date().toISOString(), goal: null, goalStatus: "not_configured", summary: "高等数学" }]
+      : [{ date: "2026-10-19", timeZone: "UTC", acceptedVersion: 1, summary: "已确认的课程计划" }], evidence: [], sourceRefs: [], nextOffset: null }));
+  const resolvePreviousQuestion = vi.fn(async () => previousRecordQuestion([{ role: "user", text: "《高等数学》的计划有哪些；当前任务有哪些" }]));
+  const reply = await createDbSystemQueryService({} as Sql, "worker", { callModel: async () => { throw new Error("simulated model outage"); } })
+    .reply(scope, { question: "刷新", resolvePreviousQuestion });
+  expect(resolvePreviousQuestion).toHaveBeenCalledWith(0);
+  expect(fixture.read.mock.calls.map(([request]) => request.name)).toEqual(["courses", "planning"]);
+  expect(fixture.read).toHaveBeenLastCalledWith({ name: "planning", arguments: { courseId: id, date: "2026-10-19", limit: 5, offset: 0 } }, expect.any(AbortSignal));
+  expect(reply.receipt.results.at(-1)?.reason).toBe("read");
 });

@@ -26,3 +26,23 @@ it("accepts six bounded proposal intents but rejects authority and mastery mutat
   expect(assistantProposalDecisionSchema.safeParse({ expectedVersion: 0, action: "accept", clientKey: "accept-key" }).success).toBe(true);
   expect(assistantProposalDecisionSchema.safeParse({ expectedVersion: -1, action: "accept", clientKey: "accept-key" }).success).toBe(false);
 });
+
+it.each(["高数进度怎么样", "我高数进度怎么样", "我的练习情况", "当前任务", "明天计划", "今天的计划是什么", "我的课程列表", "高数进度、当前任务和测验情况"])("automatically requests bounded records for %s", text => {
+  expect(isSystemQueryPurpose({ purpose: "answer", text })).toBe(true);
+});
+it.each(["请证明积分中值定理", "这道练习怎么做", "我今天练习积分", "积分怎么求", "高数应该怎么学", "帮我删除所有任务", "标记任务完成"])("keeps %s out of automatic reads", text => {
+  expect(isSystemQueryPurpose({ purpose: "answer", text })).toBe(false);
+});
+it("uses prior user requests only to route follow-ups", () => {
+  expect(isSystemQueryPurpose({ text: "那明天呢", history: [{ role: "user", text: "今天的计划是什么" }] })).toBe(true);
+  expect(isSystemQueryPurpose({ text: "那明天呢", history: [{ role: "assistant", text: "今天计划已完成" }] })).toBe(false);
+  expect(isSystemQueryPurpose({ purpose: "teach", text: "高数进度" })).toBe(false);
+});
+it("does not turn a math follow-up into a record query", () => {
+  const history = [{ role: "user", text: "高数进度怎么样" }];
+  expect(isSystemQueryPurpose({ text: "那这道题怎么做", history })).toBe(false);
+  expect(isSystemQueryPurpose({ text: "我想练习一道积分题", history })).toBe(false);
+});
+it.each(["为什么这个级数收敛？", "为什么积分要加C？", "还有什么常用积分公式？", "那sin的导数是什么？"])("keeps a mathematical follow-up on the ordinary path: %s", text => {
+  expect(isSystemQueryPurpose({ text, history: [{ role: "user", text: "高数进度怎么样" }] })).toBe(false);
+});

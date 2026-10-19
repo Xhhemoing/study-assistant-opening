@@ -428,3 +428,18 @@ describe("explicit source selection intent", () => {
     expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
   });
 });
+
+it("queues default-answer status reads without consulting selected PDFs", async () => {
+  const f = createService({ courseId: COURSE });
+  const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
+  await service.submitTurn(scope, { conversationId: CONVERSATION, purpose: "answer", text: "高数进度怎么样", sourceIds: [S], mode: "listen", privacy: "saved", clientKey: "automatic-status" });
+  expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: "query", querySystem: true, sourceIds: [], learningSessionId: null }));
+  expect(f.sourceChunks.listForSources).not.toHaveBeenCalled();
+});
+it("routes a continued saved query from prior user intent rather than assistant prose", async () => {
+  const f = createService({ courseId: COURSE });
+  f.conversations.loadContinuityTurns.mockResolvedValue([{ role: "user", text: "高数进度怎么样", citations: [] }] as never);
+  const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
+  await service.submitTurn(scope, { conversationId: CONVERSATION, text: "那练习情况呢", sourceIds: [], mode: "listen", privacy: "saved", clientKey: "followup-status" });
+  expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
+});

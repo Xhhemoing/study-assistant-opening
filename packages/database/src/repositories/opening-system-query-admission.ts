@@ -1,7 +1,12 @@
+import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { systemQueryAuthorizationSchema, type Scope, type SystemQueryAuthorization } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
+
+export class SystemQueryPermissionError extends Error {
+  constructor() { super("没有当前工作区记录的读取权限。"); this.name = "SystemQueryPermissionError"; }
+}
 
 export function systemQueryOwnerGrant(scope: Scope, epoch: number, purpose: SystemQueryAuthorization["purpose"]): SystemQueryAuthorization {
   return systemQueryAuthorizationSchema.parse({ workspaceId: scope.workspaceId, principalId: scope.ownerUserId,
@@ -11,11 +16,11 @@ export async function readOpeningSystemQueryAuthorization(sql: Sql, scope: Scope
   return withSystemQueryReadDeadline(outerSignal, async signal => {
   const [owner] = await sql.begin("read only", async tx => {
     await tx`SET LOCAL statement_timeout='2000ms'`;
-    return tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    return tx`SELECT w.privacy_epoch,p.planning_settings FROM workspaces w LEFT JOIN workspace_preferences p ON p.workspace_id=w.id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
   });
   if (signal.aborted) throw new Error("system query cancelled");
-  if (!owner) throw new Error("system query permission unavailable");
-  return { authorization: systemQueryOwnerGrant(scope, Number(owner.privacy_epoch), purpose), privacyEpoch: Number(owner.privacy_epoch) };
+  if (!owner) throw new SystemQueryPermissionError();
+  return { authorization: systemQueryOwnerGrant(scope, Number(owner.privacy_epoch), purpose), privacyEpoch: Number(owner.privacy_epoch), localDate: localDateKeyInZone(new Date(), resolveWorkspaceTimeZone(owner.planning_settings?.timeZone)) };
   });
 }
 

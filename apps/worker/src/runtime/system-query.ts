@@ -6,6 +6,17 @@ import { loadFeatureSwitches } from "@aistudy/config";
 
 type QueryModelOptions = { parentBudget: import("@aistudy/ai").ParentInteractionBudget; operationId: string; signal?: AbortSignal; beforeSend?: () => Promise<void> };
 type QueryModelCall = (scope: import("@aistudy/contracts").Scope, input: import("@aistudy/contracts").ProviderInput, options: QueryModelOptions) => Promise<import("@aistudy/contracts").ProviderOutput>;
+/** Bound contextual referent resolution by the same cancellation/deadline as actual reads. */
+async function queryContextBeforeDeadline<T>(run: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new Error("system query cancelled or timed out");
+  let abort!: () => void;
+  try {
+    return await Promise.race([run(), new Promise<never>((_, reject) => {
+      abort = () => reject(new Error("system query cancelled or timed out"));
+      signal.addEventListener("abort", abort, { once: true });
+    })]);
+  } finally { signal.removeEventListener("abort", abort); }
+}
 /** Reuse the one router/vault/ledger path, loading model configuration only for an actual query. */
 async function callDbQueryModel(sql: Sql, scope: import("@aistudy/contracts").Scope, input: import("@aistudy/contracts").ProviderInput, options: QueryModelOptions) {
   const [{ createDbModelGateway, scopeBudget }, { createOpeningBudgetRepository }, { loadOpeningModelCatalog }] = await Promise.all([
@@ -41,12 +52,12 @@ export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", 
       const receipt = await runSystemQuery({ ...frame,
         callModel: (request, round, signal) => (options.callModel ?? ((owner, request, context) => callDbQueryModel(sql, owner, request, context)))(scope, request, {
           parentBudget, operationId: `system-query:${parentBudget.id}:round:${round}`, signal, beforeSend: assertCurrent,
-        }), question: input.question, focus: input.focus, signal: controller.signal, assertCurrent,
+        }), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: true, focus: input.focus, signal: controller.signal, assertCurrent,
         read: createScopedOpeningSystemQueryReader(sql, scope, { purpose: "system_record_lookup", publicSettings: () => {
           const flags = loadFeatureSwitches(); return { process, adaptivePlanning: flags.adaptivePlanning, teachingLoop: flags.teachingLoop.api };
         } }),
       });
-      await assertCurrent();
+      await queryContextBeforeDeadline(assertCurrent, controller.signal);
       if (controller.signal.aborted) throw new Error("system query cancelled");
       return { text: renderSystemQuery(receipt), receipt, privacyEpoch: frame.privacyEpoch,
         contextSourceRefs: mergeContextSourceRefs(...receipt.results.map(result => result.sourceRefs)) };

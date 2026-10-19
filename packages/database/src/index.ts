@@ -97,7 +97,7 @@ export * from "./repositories/opening-observation-revisions";
 
 export { createOpeningAiSettingsRepository, setOpeningAiSettingsInTx } from "./repositories/opening-ai-settings";
 export { createScopedOpeningSystemQueryReader, type SystemQueryPublicSettings } from "./repositories/opening-system-query";
-export { readOpeningSystemQueryAuthorization } from "./repositories/opening-system-query-admission";
+export { readOpeningSystemQueryAuthorization, SystemQueryPermissionError } from "./repositories/opening-system-query-admission";
 export * from "./schema/opening-query-provenance";
 export { createOpeningPlanningSettingsRepository } from "./repositories/opening-planning-settings";
 export { createOpeningAdaptivePrefsRepository, type OpeningAdaptivePrefsRepository } from "./repositories/opening-adaptive-prefs";

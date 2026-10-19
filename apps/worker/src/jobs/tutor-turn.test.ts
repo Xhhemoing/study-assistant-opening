@@ -831,7 +831,8 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler(deps)(claimedJob.id);
     const input = provider.complete.mock.calls[0]![0] as { instruction: string };
     expect(input.instruction).toContain(makeTutorInstruction("explain"));
-    expect(input.instruction).toContain("所有结论必须锚定所选材料的具体物理页");
+    expect(input.instruction).toContain("材料内容论断必须锚定所选材料的具体物理页");
+    expect(input.instruction).toContain("系统状态事实只依据本轮服务端结构化查询回执");
   });
 
   it("falls back to the default strategy for unknown template ids", async () => {

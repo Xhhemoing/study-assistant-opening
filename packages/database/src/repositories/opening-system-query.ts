@@ -70,7 +70,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       } else if (request.name === "learning" || request.name === "recommendation") {
         await readSystemLearningQuery(tx, scope, request, out, limit, offset);
       } else if (request.name === "materials") {
-        if (!request.arguments.sourceId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
+        if (!request.arguments.sourceId && !request.arguments.courseId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
         const a = request.arguments;
         if (a.sourceId) {
           const [source] = await tx`SELECT s.version,s.upload_state FROM opening_sources s WHERE s.workspace_id=${scope.workspaceId} AND s.id=${a.sourceId}
@@ -83,6 +83,8 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
           WHERE s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded' AND s.parse_state='ready' AND length(btrim(c.text))>0
             AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
             AND NOT EXISTS(SELECT 1 FROM opening_source_versions v WHERE v.workspace_id=s.workspace_id AND v.source_id=s.id AND v.version=s.version AND v.availability='unavailable')
+            AND ${a.courseId ? tx`EXISTS(SELECT 1 FROM course_asset_memberships m JOIN courses course ON course.id=m.course_id AND course.workspace_id=m.workspace_id AND course.archived_at IS NULL
+              WHERE m.workspace_id=s.workspace_id AND m.asset_id=s.id AND m.asset_type='source' AND m.course_id=${a.courseId})` : tx`TRUE`}
             AND ${a.sourceId ? tx`s.id=${a.sourceId}` : tx`TRUE`}
             AND ${a.sourceVersion !== undefined ? tx`c.source_version=${a.sourceVersion}` : tx`TRUE`}
             AND ${a.physicalPage ? tx`c.page=${a.physicalPage}` : tx`TRUE`}
@@ -195,10 +197,13 @@ async function readPlanning(tx: TransactionSql, scope: Scope, request: Extract<S
   const parsed = plannedBlockSchema.array().max(200).safeParse(state.accepted_blocks);
   if (!parsed.success) { out.status = "unknown"; out.reason = "unavailable"; return; }
   out.version += `:plan:${state.accepted_version}`;
-  const blocks = parsed.data.slice(a.offset, a.offset + a.limit + 1), ids = blocks.map(block => block.taskId);
+  const ids = parsed.data.map(block => block.taskId);
   const tasks = ids.length ? await tx`SELECT id,title,status,minutes,origin,candidate_id,version FROM opening_tasks
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id=ANY(${ids}::uuid[])` : [];
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id=ANY(${ids}::uuid[])
+      AND ${a.courseId ? tx`course_id=${a.courseId} AND EXISTS(SELECT 1 FROM courses c WHERE c.id=${a.courseId} AND c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL)` : tx`TRUE`}` : [];
   const byId = new Map(tasks.map(row => [String(row.id), row]));
+  const scopedBlocks = a.courseId ? parsed.data.filter(block => byId.has(block.taskId)) : parsed.data;
+  const blocks = scopedBlocks.slice(a.offset, a.offset + a.limit + 1);
   out.data = page(blocks as unknown as Row[]).map(raw => {
     const block = raw as unknown as typeof parsed.data[number], task = byId.get(block.taskId);
     // Derived titles/reasons need ancestry admission. Until that is connected, return only schedule metadata.
@@ -208,5 +213,5 @@ async function readPlanning(tx: TransactionSql, scope: Scope, request: Extract<S
     return { date, timeZone, acceptedVersion: Number(state.accepted_version), taskId: block.taskId, title, start: block.start, end: block.end,
       taskStatus: task?.status ?? "unavailable", summary: `${date} ${title}：${block.start} 至 ${block.end}，任务状态 ${task?.status ?? "不可确认"}；已确认计划版本 ${state.accepted_version}` };
   });
-  if (!parsed.data.length) out.data = [{ date, timeZone, acceptedVersion: Number(state.accepted_version), summary: `${date} 已确认计划为空（版本 ${state.accepted_version}）` }];
+  if (!scopedBlocks.length && !a.courseId) out.data = [{ date, timeZone, acceptedVersion: Number(state.accepted_version), summary: `${date} 已确认计划为空（版本 ${state.accepted_version}）` }];
 }

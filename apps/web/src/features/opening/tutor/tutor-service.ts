@@ -1,6 +1,6 @@
 import {
   conversationCreateInputSchema,
-  isSystemQueryPurpose,
+  isSystemQueryPurpose, isRecordFollowup,
   shouldCreateLearningSession,
   turnInputSchema,
   type ConversationCreateInput,
@@ -164,11 +164,12 @@ export function createTutorService(deps: {
       }
 
       const owned = await deps.conversations.getOwned(scope, input.conversationId);
-      if (isSystemQueryPurpose(input)) {
+      const queryHistory = isRecordFollowup(input.text) ? await deps.conversations.loadContinuityTurns(scope, input.conversationId) : [];
+      if (isSystemQueryPurpose({ ...input, history: queryHistory })) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
         const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: input.text, mode: input.mode,
-          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
-          contextAnchor: input.contextAnchor, purpose: input.purpose,
+          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+          contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
           learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
         return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null };
       }

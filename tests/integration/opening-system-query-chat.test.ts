@@ -66,15 +66,18 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     expect(await process(queued.jobId)).toEqual({ skipped: true });
     const turns = await tutor.listTurns(fixture.scope, conversation.id), assistant = turns.find(turn => turn.role === "assistant")!;
     expect(turns).toHaveLength(2); expect(assistant.status).toBe("complete");
-    expect(assistant.systemQuery).toMatchObject({ mode: "deterministic", reason: "native_tools_not_enabled", privacyEpoch: 0,
+    expect(assistant.systemQuery).toMatchObject({ mode: "deterministic", reason: "model_unavailable", privacyEpoch: 0,
       authorization: { purpose: "system_record_lookup", workspaceId: fixture.scope.workspaceId, principalId: fixture.scope.ownerUserId } });
-    expect(assistant.systemQuery!.results[0]).toMatchObject({ name: "learning", sourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
-    expect(assistant.systemQuery!.results[0].data[0]).toMatchObject({ answerWithheld: true, eligibility: { verifiedCorrect: "unknown" } });
-    expect(assistant.systemQuery!.results[0].data[0]).not.toHaveProperty("answerExcerpt");
+    const learning = assistant.systemQuery!.results.find(result => result.name === "learning")!;
+    expect(learning).toMatchObject({ name: "learning", sourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
+    expect(learning.data[0]).toMatchObject({ answerWithheld: true, eligibility: { verifiedCorrect: "unknown" } });
+    expect(learning.data[0]).not.toHaveProperty("answerExcerpt");
     expect(assistant.text).toContain("核验正确未知"); expect(assistant.citations).toEqual([]);
-    expect(assistant.text).toContain("未发起模型请求");
+    expect(assistant.text).toContain("固定规则查询");
     expect(await counts()).toEqual(before); expect(forbidden).not.toHaveBeenCalled();
-    await expect(tutor.submitTurn(fixture.scope, { ...input, querySystem: false })).rejects.toMatchObject({ code: "CONFLICT" });
+    // The same status request now resolves to the same read intent without a manual switch.
+    expect(await tutor.submitTurn(fixture.scope, { ...input, querySystem: false })).toEqual(queued);
+    await expect(tutor.submitTurn(fixture.scope, { ...input, querySystem: false, text: "解释积分中值定理" })).rejects.toMatchObject({ code: "CONFLICT" });
     const [stored] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id=${assistant.id}`;
     expect(stored!.context_source_refs).toEqual([{ sourceId: f.sourceId, sourceVersion: 1 }]);
     await backupRows(fixture.sql, fixture.scope).exclude(f.sourceId);

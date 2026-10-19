@@ -1,3 +1,4 @@
+import { isSystemQueryPurpose } from "@aistudy/contracts";
 import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
@@ -112,7 +113,7 @@ export function setEphemeralTutorDepsForTests(
 
 export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   return { replyEphemeral(scope, input, signal) {
-    if (input?.querySystem || input?.purpose === "query" || input?.purpose === "explain_state") return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web"),
+    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web"),
       provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
     return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
   } };

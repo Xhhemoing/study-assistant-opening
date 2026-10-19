@@ -59,7 +59,7 @@ export function exposureLevelForMode(
 
 /** hint/guided = next-step only; explain/worked_example = full + reveal. */
 const CITE_WHEN_MATERIALS =
-  " 若提供了材料片段且作答依据它们，请在 citedChunkIds 列出支持性 chunk id；纯一般说明可用空数组。系统中的课程、计划、任务状态和学习资格必须依据当前已核验的查询回执；历史聊天不证明当前状态。未提供当前回执时说明无法核实，并引导使用‘查询系统记录’，不要编造系统读取或掌握结论。";
+  " 若提供了材料片段且作答依据它们，请在 citedChunkIds 列出支持性 chunk id；纯一般说明可用空数组。系统中的课程、计划、任务状态和学习资格必须依据当前已核验的查询回执；历史聊天不证明当前状态。未提供当前回执时明确说明本轮无法核实，建议重试该状态问题；不得编造系统读取或掌握结论。";
 
 export function makeTutorInstruction(mode: DeepenTutorMode): string {
   switch (normalizeDeepenMode(mode)) {
