@@ -139,4 +139,11 @@ describe("bounded system query planner", () => {
     expect(receipt.results[0]).toMatchObject({ status: "unknown", reason: "unavailable", data: [] });
     expect(JSON.stringify(callModel.mock.calls[1]![0])).not.toContain("PRIVATE_CREDENTIAL");
   });
+  it("rejects a valid settings receipt returned for a courses request", async () => {
+    const input = base(); input.read.mockResolvedValue(result("settings"));
+    const callModel = vi.fn().mockResolvedValueOnce(output([call("courses")])).mockResolvedValueOnce(output());
+    const receipt = await runSystemQuery({ ...input, callModel });
+    expect(receipt.results[0]).toMatchObject({ name: "courses", status: "unknown", reason: "unavailable", data: [] });
+    expect(callModel.mock.calls[1]![0].toolMessages[1].text).not.toContain('"mode":"automatic"');
+  });
 });
