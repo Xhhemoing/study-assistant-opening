@@ -16,6 +16,7 @@ import {
 } from "../inbox/source-viewer";
 import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
+import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
@@ -97,8 +98,9 @@ export const MessageList = memo(function MessageList({ messages, historyTruncate
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-zinc-700">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
-        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} /> : null}</div>
+        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
+      {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <a key={link.href} href={link.href} className="text-emerald-700 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">{link.label}</a>)}</nav> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
         <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
         <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />

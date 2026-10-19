@@ -7,6 +7,7 @@ import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer"
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
+import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
 import Link from "next/link";
@@ -214,6 +215,7 @@ export function appendEphemeralResponseIfActive(
       origin: "ephemeral",
       provenanceId: input.output.provenanceId ?? null,
       systemQuery: Boolean(input.output.systemQuery),
+      queryEvidenceLinks: queryEvidenceLinks(input.output.systemQuery),
       hadMaterialContext,
     },
   ];

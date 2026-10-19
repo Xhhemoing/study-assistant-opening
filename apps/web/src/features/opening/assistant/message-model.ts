@@ -1,5 +1,7 @@
 import type { Citation, ConversationResume, EphemeralTurnInput, TurnRecord } from "@aistudy/contracts";
 
+import { queryEvidenceLinks, type QueryEvidenceLink } from "./query-evidence-links";
+
 export type ChatMessageView = {
   id: string;
   role: "user" | "assistant";
@@ -10,6 +12,7 @@ export type ChatMessageView = {
   origin?: "saved" | "ephemeral";
   provenanceId?: string | null;
   systemQuery?: boolean;
+  queryEvidenceLinks?: readonly QueryEvidenceLink[];
   /** True when this assistant turn had selected materials / context intent (T02 general label). */
   hadMaterialContext?: boolean;
 };
@@ -45,6 +48,8 @@ export function messagesFromTurns(turns: readonly TurnRecord[]): ChatMessageView
     citations: turn.citations,
     citationLabels: turn.citations.map((c) => c.label),
     status: turn.status,
+    systemQuery: Boolean(turn.systemQuery),
+    queryEvidenceLinks: turn.role === "assistant" ? queryEvidenceLinks(turn.systemQuery) : [],
   }));
 }
 
