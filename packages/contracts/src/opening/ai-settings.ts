@@ -9,8 +9,8 @@ const modelId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
  * else <= OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS (2000).
  */
 export const OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS = 2_147_483_647;
-/** Model task key shape ("group.name"); the registry lives in @aistudy/ai MODEL_TASKS. */
-export const modelTaskKeySchema = z.string().regex(/^[a-z][a-z_]{0,31}\.[a-z][a-z_]{0,31}$/);
+/** Two lowercase identifiers, each 1–32 characters, allowing digits, underscores and hyphens after the first letter. Registry: @aistudy/ai MODEL_TASKS. */
+export const modelTaskKeySchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}\.[a-z][a-z0-9_-]{0,31}$/);
 export const openingAiSettingsSchema = z.object({
   mode: z.enum(["manual", "automatic"]),
   defaultModelId: modelId.nullable(),

@@ -83,9 +83,19 @@ def convert(path: Path, timeout: float):
 def texts_by_page(document):
     result = {page: [] for page in document.pages}
     for item in document.texts:
+        # Docling can merge text across pages. Its provenance offsets address
+        # orig (before sanitization), not text; copying the full item leaks text
+        # into citations for the other physical pages.
+        page_numbers = {provenance.page_no for provenance in item.prov}
+        if len(page_numbers) == 1:
+            page_no = next(iter(page_numbers))
+            if page_no in result:
+                result[page_no].append(item.text)
+            continue
         for provenance in item.prov:
             if provenance.page_no in result:
-                result[provenance.page_no].append(item.text)
+                start, end = provenance.charspan
+                result[provenance.page_no].append(item.orig[start:end])
     for table in getattr(document, "tables", []):
         text = table.export_to_markdown(doc=document)
         for page_no in {provenance.page_no for provenance in table.prov}:
