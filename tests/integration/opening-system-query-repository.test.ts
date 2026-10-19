@@ -1,0 +1,190 @@
+import { randomUUID } from "node:crypto";
+import type { TransactionSql } from "postgres";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createScopedOpeningSystemQueryReader } from "@aistudy/database";
+import { DEFAULT_OPENING_ADAPTIVE_PREFS, DEFAULT_OPENING_AI_SETTINGS, systemQueryRequestSchema, type SystemQueryResult } from "@aistudy/contracts";
+import { runSystemQuery, renderSystemQuery } from "@aistudy/ai";
+import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
+import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+
+let fixture: OpeningFixture;
+const signal = () => new AbortController().signal;
+const read = (request: unknown) => createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope)(systemQueryRequestSchema.parse(request), signal());
+beforeEach(async () => { fixture = await createOpeningFixture(); });
+afterEach(async () => {
+  if (!fixture) return;
+  try {
+    const workspaces = [fixture.scope.workspaceId, fixture.otherScope.workspaceId], users = [fixture.scope.ownerUserId, fixture.otherScope.ownerUserId];
+    await fixture.sql`UPDATE opening_turns SET attempt_id=NULL,learning_session_id=NULL WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+    await fixture.sql`DELETE FROM opening_learning_sessions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+    await fixture.sql`DELETE FROM opening_learning_item_versions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+    await fixture.sql`DELETE FROM courses WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+    await fixture.sql`DELETE FROM workspaces WHERE id=ANY(${workspaces}::uuid[])`;
+    await fixture.sql`DELETE FROM sessions WHERE user_id=ANY(${users}::uuid[])`;
+    await fixture.sql`DELETE FROM users WHERE id=ANY(${users}::uuid[])`;
+  } finally { await fixture.close(); }
+});
+
+describe("owned read-only system query against PostgreSQL", () => {
+  it("executes all eight tools in enforced read-only transactions with zero row writes", async () => {
+    const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
+    let checked = 0;
+    const observedSql = new Proxy(fixture.sql, { get(target, property, receiver) {
+      if (property !== "begin") return Reflect.get(target, property, receiver);
+      return (mode: string, execute: (tx: TransactionSql) => Promise<SystemQueryResult>) => target.begin(mode, async tx => {
+        const [before] = await tx`SELECT COALESCE(sum(n_tup_ins+n_tup_upd+n_tup_del),0)::int AS writes FROM pg_stat_xact_user_tables`;
+        const result = await execute(tx);
+        const [state] = await tx`SELECT current_setting('transaction_read_only') AS read_only,
+          (SELECT COALESCE(sum(n_tup_ins+n_tup_upd+n_tup_del),0)::int FROM pg_stat_xact_user_tables) AS writes`;
+        expect(state?.read_only).toBe("on");
+        expect(Number(state?.writes) - Number(before?.writes)).toBe(0); checked++;
+        return result;
+      });
+    } });
+    const reader = createScopedOpeningSystemQueryReader(observedSql, fixture.scope);
+    for (const name of systemQueryRequestSchema.options.map(option => option.shape.name.value)) {
+      const args = ["learning", "recommendation", "teaching"].includes(name) ? { courseId: f.courseId } : name === "materials" ? { sourceId: f.sourceId } : {};
+      await reader(systemQueryRequestSchema.parse({ name, arguments: args }), signal());
+    }
+    expect(checked).toBe(8);
+  });
+  it("reads courses and validated goal fields, caps pagination and rejects a forged server scope", async () => {
+    const id = randomUUID();
+    for (const [scope, title] of [[fixture.scope, "数学 A"], [fixture.scope, "数学 B"], [fixture.otherScope, "PRIVATE COURSE"]] as const) {
+      await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${title === "数学 A" ? id : randomUUID()},${scope.workspaceId},${title},${randomUUID()})`;
+    }
+    const prefs = { ...DEFAULT_OPENING_ADAPTIVE_PREFS, courseGoals: { [id]: { targetDate: "2026-11-01", weeklyMinutes: 90 } } };
+    await fixture.sql`INSERT INTO workspace_preferences(workspace_id,adaptive_planning) VALUES (${fixture.scope.workspaceId},${fixture.sql.json(prefs)})`;
+    const page = await read({ name: "courses", arguments: { limit: 1 } });
+    expect(page).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 1 });
+    expect(page.data[0]).toMatchObject({ id, goal: { targetDate: "2026-11-01", weeklyMinutes: 90 } });
+    expect(JSON.stringify(page)).not.toContain("PRIVATE COURSE");
+    await expect(createScopedOpeningSystemQueryReader(fixture.sql, { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId })(systemQueryRequestSchema.parse({ name: "courses", arguments: {} }), signal())).rejects.toThrow("privacy changed");
+  });
+  it("reads fresh qualifications and answer identity without promoting self-report to verified success", async () => {
+    const f = await learningAttemptFixture(fixture), observation = await f.submit(await f.start());
+    const result = await read({ name: "learning", arguments: { courseId: f.courseId } });
+    expect(result.status).toBe("ok");
+    expect(result.data[0]).toMatchObject({ id: observation.id, attemptId: observation.attemptId, itemVersionId: observation.itemVersionId,
+      answerExcerpt: "1", projectionFresh: true, eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3" } });
+    expect(result.evidence[0]).toMatchObject({ recordId: observation.id, attemptId: observation.attemptId });
+    expect(result.sourceRefs).toContainEqual({ sourceId: f.sourceId, sourceVersion: 1 });
+    expect(await read({ name: "learning", arguments: { courseId: randomUUID() } })).toMatchObject({ status: "unknown", reason: "not_available", data: [] });
+  });
+  it("does not repair a stale source/policy projection or expose source-derived answer text", async () => {
+    const f = await learningAttemptFixture(fixture), observation = await f.submit(await f.start());
+    await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${observation.id}`;
+    await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+    const result = await read({ name: "learning", arguments: { courseId: f.courseId } });
+    expect(result).toMatchObject({ status: "partial", reason: "stale" });
+    expect(result.data[0]).not.toHaveProperty("answerExcerpt");
+    expect(result.data[0]).not.toHaveProperty("eligibility");
+    const [projection] = await fixture.sql`SELECT policy_version FROM opening_learning_eligibility WHERE root_observation_id=${observation.id}`;
+    expect(projection?.policy_version).toBe("old-policy");
+  });
+  it("uses live delivered-help dependencies and excludes a revoked ancestor even after a revision", async () => {
+    const f = await learningAttemptFixture(fixture), attempt = await f.start();
+    await f.help(attempt, "revealed");
+    const observation = await f.submit(attempt);
+    const current = await read({ name: "learning", arguments: { courseId: f.courseId } });
+    expect(current.data[0]).toMatchObject({ effectiveAssistance: "revealed", eligibility: { independentAttempt: "no" } });
+    expect(Number(current.data[0]?.liveHelpRevision)).toBeGreaterThan(0);
+    await f.learning.reviseObservation(fixture.scope, { rootObservationId: observation.id, revisesObservationId: observation.id, expectedHead: observation.id,
+      revisionKind: "replace", reason: "correcting text", clientKey: randomUUID(), replacement: { answer: "revised private answer", outcome: "unverified", assistance: "independent" } });
+    await backupRows(fixture.sql, fixture.scope).exclude(f.sourceId);
+    const excluded = await read({ name: "learning", arguments: { courseId: f.courseId } });
+    expect(excluded).toMatchObject({ status: "unknown", reason: "no_data", data: [], evidence: [], sourceRefs: [] });
+    expect(JSON.stringify(excluded)).not.toContain("revised private answer");
+  });
+  it("uses the shared next-step rule with explicit limits, and refuses inference from a truncated course", async () => {
+    const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
+    const result = await read({ name: "recommendation", arguments: { courseId: f.courseId } });
+    expect(result).toMatchObject({ status: "partial", reason: "not_available" });
+    expect(result.data[0]).toMatchObject({ step: { activityKind: "diagnose", reasonCode: "unverified_only" } });
+    expect(result.data[0]?.evidenceIds).toHaveLength(1);
+    const receipt = await runSystemQuery({ question: "为什么建议我继续诊断？", privacyEpoch: 0,
+      read: createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope), assertCurrent: async () => {} });
+    expect(receipt.results.map(row => row.name)).toEqual(["courses", "recommendation"]);
+    expect(renderSystemQuery(receipt)).toContain("现有结果尚未核验");
+    for (let index = 0; index < 10; index++) await f.submit(await f.start());
+    const truncated = await read({ name: "recommendation", arguments: { courseId: f.courseId } });
+    expect(truncated).toMatchObject({ status: "partial", reason: "truncated" });
+    expect(truncated.data[0]).toMatchObject({ recommendationStatus: "unknown" });
+    expect(truncated.data[0]).not.toHaveProperty("step");
+  });
+  it("returns current physical pages and exact lineage, with explicit excerpt limits and stale-version refusal", async () => {
+    const rows = backupRows(fixture.sql, fixture.scope), sourceId = await rows.source(), chunkId = await rows.chunk(sourceId);
+    await fixture.sql`UPDATE opening_source_chunks SET text=${"q".repeat(1300)} WHERE id=${chunkId}`;
+    const result = await read({ name: "materials", arguments: { sourceId, sourceVersion: 1, physicalPage: 1 } });
+    expect(result).toMatchObject({ status: "partial", reason: "truncated" });
+    expect(result.data[0]).toMatchObject({ physicalPage: 1, sourceVersion: 1, truncated: true });
+    expect(String(result.data[0]?.excerpt)).toHaveLength(1200);
+    expect(result.evidence[0]).toMatchObject({ recordId: chunkId, sourceId, sourceVersion: 1, physicalPage: 1 });
+    expect(result.evidence[0]?.href).toContain("&page=1");
+    expect(await read({ name: "materials", arguments: { sourceId, sourceVersion: 2 } })).toMatchObject({ status: "unknown", reason: "stale", data: [] });
+    expect(await read({ name: "materials", arguments: {} })).toMatchObject({ status: "unknown", reason: "invalid_arguments" });
+  });
+  it("cannot read foreign/excluded/unavailable material or treat SQL wildcards as an instruction", async () => {
+    const own = backupRows(fixture.sql, fixture.scope), foreign = backupRows(fixture.sql, fixture.otherScope);
+    const privateSource = await foreign.source(); await foreign.chunk(privateSource);
+    expect(await read({ name: "materials", arguments: { sourceId: privateSource } })).toMatchObject({ status: "unknown", data: [] });
+    const sourceId = await own.source(); await own.chunk(sourceId);
+    expect(await read({ name: "materials", arguments: { query: "%" } })).toMatchObject({ status: "unknown", reason: "no_data" });
+    await own.exclude(sourceId);
+    expect(await read({ name: "materials", arguments: { sourceId } })).toMatchObject({ status: "unknown", data: [] });
+    const unavailable = await own.source(); await own.chunk(unavailable);
+    await fixture.sql`UPDATE opening_sources SET parse_state='failed' WHERE id=${unavailable}`;
+    expect(await read({ name: "materials", arguments: { sourceId: unavailable } })).toMatchObject({ status: "unknown", data: [] });
+  });
+  it("reports real background and tutor job states without payloads, errors or claims about content quality", async () => {
+    const own = backupRows(fixture.sql, fixture.scope), conversation = await own.conversation(), userTurn = await own.turn(conversation), assistantTurn = await own.turn(conversation);
+    const background = randomUUID(), tutor = randomUUID();
+    await fixture.sql`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,state)
+      VALUES (${background},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${background},'parse','{"apiKey":"PRIVATE_PAYLOAD"}'::jsonb,'succeeded')`;
+    await fixture.sql`INSERT INTO opening_tutor_jobs(id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status,mode)
+      VALUES (${tutor},${fixture.scope.workspaceId},${conversation},${userTurn},${assistantTurn},'failed','listen')`;
+    const result = await read({ name: "jobs", arguments: {} });
+    expect(result.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: background, status: "succeeded" }), expect.objectContaining({ id: tutor, status: "failed" })]));
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_PAYLOAD");
+    const receipt = await runSystemQuery({ question: "后台任务成功了吗？", privacyEpoch: 0, read: createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope), assertCurrent: async () => {} });
+    expect(renderSystemQuery(receipt)).toContain(background);
+    expect(renderSystemQuery(receipt)).toContain("不能证明内容质量或学习效果");
+  });
+  it.each([false, true])("shows only nonsecret saved routing and actual caller-process flags (planning=%s)", async enabled => {
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes: { "practice.grade-photo": { primary: null, fallback: null } } };
+    await fixture.sql`INSERT INTO workspace_preferences(workspace_id,ai_settings) VALUES (${fixture.scope.workspaceId},${fixture.sql.json(settings)})`;
+    const reader = createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope, { publicSettings: () => ({ process: "web", adaptivePlanning: enabled, teachingLoop: true,
+      apiKey: "PRIVATE_SECRET", internalPrompt: "PRIVATE_PROMPT" } as never) });
+    const result = await reader(systemQueryRequestSchema.parse({ name: "settings", arguments: {} }), signal());
+    expect(result.data[0]).toMatchObject({ process: "web", adaptivePlanning: enabled, taskRoutes: settings.taskRoutes });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    expect(result.data[0]?.summary).toContain("未检测真实模型连通性或另一进程的配置");
+    expect(await read({ name: "settings", arguments: {} })).toMatchObject({ status: "partial", reason: "not_available" });
+  });
+  it("reads accepted slots rather than generating/accepting a plan or exposing derived titles and reasons", async () => {
+    const taskId = randomUUID();
+    await fixture.sql`INSERT INTO opening_tasks(id,workspace_id,owner_user_id,title,minutes,origin)
+      VALUES (${taskId},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},'PRIVATE_DERIVED_TITLE',30,'planner')`;
+    const blocks = [{ taskId, start: "2026-10-19T10:00:00Z", end: "2026-10-19T10:30:00Z", reason: "PRIVATE_DERIVED_REASON" }];
+    await fixture.sql`INSERT INTO opening_plan_state(workspace_id,day,accepted_version,accepted_blocks)
+      VALUES (${fixture.scope.workspaceId},'2026-10-19',4,${fixture.sql.json(blocks)})`;
+    const result = await read({ name: "planning", arguments: { date: "2026-10-19" } });
+    expect(result.data[0]).toMatchObject({ taskId, acceptedVersion: 4, title: "已确认学习任务" });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_DERIVED");
+    expect(await read({ name: "planning", arguments: { date: "2026-10-20" } })).toMatchObject({ status: "unknown", reason: "no_data" });
+    const [state] = await fixture.sql`SELECT accepted_version FROM opening_plan_state WHERE workspace_id=${fixture.scope.workspaceId}`;
+    expect(state?.accepted_version).toBe(4);
+  });
+  it("exposes teaching metadata without hidden answers, then removes activities tied to excluded sources", async () => {
+    const f = await learningAttemptFixture(fixture);
+    await fixture.sql`UPDATE opening_teaching_activities SET source_ids=${[f.sourceId]},intent_summary='PRIVATE_INTENT',goal_json='{"answer":"PRIVATE_ANSWER"}'::jsonb
+      WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const result = await read({ name: "teaching", arguments: { courseId: f.courseId } });
+    expect(result.data).toHaveLength(1);
+    expect(result.sourceRefs).toContainEqual({ sourceId: f.sourceId, sourceVersion: 1 });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    await backupRows(fixture.sql, fixture.scope).exclude(f.sourceId);
+    expect(await read({ name: "teaching", arguments: { courseId: f.courseId } })).toMatchObject({ status: "unknown", reason: "no_data", data: [] });
+  });
+});

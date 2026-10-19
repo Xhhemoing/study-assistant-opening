@@ -96,6 +96,7 @@ export * from "./schema/opening-learning-attempts";
 export * from "./repositories/opening-observation-revisions";
 
 export { createOpeningAiSettingsRepository, setOpeningAiSettingsInTx } from "./repositories/opening-ai-settings";
+export { createScopedOpeningSystemQueryReader, type SystemQueryPublicSettings } from "./repositories/opening-system-query";
 export { createOpeningPlanningSettingsRepository } from "./repositories/opening-planning-settings";
 export { createOpeningAdaptivePrefsRepository, type OpeningAdaptivePrefsRepository } from "./repositories/opening-adaptive-prefs";
 export { createOpeningInterventionSettingsRepository } from "./repositories/opening-intervention-settings";
