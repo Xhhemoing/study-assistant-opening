@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { citationSchema, sourceChunkSchema } from "./sources";
+import { providerToolCallSchema, providerToolSchema, providerToolMessageSchema } from "./system-query";
 
 export const tutorModeSchema = z.enum([
   "hint",
@@ -69,6 +70,8 @@ export const providerInputSchema = z
     imageParts: z.array(providerImagePartSchema).max(32).default([]),
     /** "answer" (default) = tutor answer shape; "json" = task-specific JSON object returned in `text`. */
     outputFormat: z.enum(["answer", "json"]).optional(),
+    tools: z.array(providerToolSchema).max(8).optional(),
+    toolMessages: z.array(providerToolMessageSchema).max(12).optional(),
     /** Raw base64 audio (no data: prefix) for models with audio input. */
     audioParts: z.array(z.object({
       data: z.string().min(1).max(30_000_000).regex(/^[A-Za-z0-9+/]+={0,2}$/),
@@ -77,6 +80,19 @@ export const providerInputSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    const registered = new Set(value.tools?.map(tool => tool.name) ?? []);
+    if (registered.size !== (value.tools?.length ?? 0)) ctx.addIssue({ code: "custom", message: "duplicate tool registration", path: ["tools"] });
+    const used = new Set<string>(), pending = new Set<string>();
+    for (const message of value.toolMessages ?? []) {
+      if (message.role === "assistant") {
+        if (pending.size) ctx.addIssue({ code: "custom", message: "unanswered tool call", path: ["toolMessages"] });
+        for (const call of message.calls) {
+          if (!registered.has(call.name) || used.has(call.id)) ctx.addIssue({ code: "custom", message: "unregistered or duplicate tool call", path: ["toolMessages"] });
+          used.add(call.id); pending.add(call.id);
+        }
+      } else if (!pending.delete(message.callId)) ctx.addIssue({ code: "custom", message: "orphan or duplicate tool result", path: ["toolMessages"] });
+    }
+    if (pending.size) ctx.addIssue({ code: "custom", message: "unanswered tool call", path: ["toolMessages"] });
     if (
       value.mediaCapability === "text_plus_page_images" &&
       value.imageParts.length === 0
@@ -129,6 +145,7 @@ export const providerOutputSchema = z
     candidates: z.array(assistantCandidateSchema).max(16),
     inputTokens: z.number().int().nonnegative().nullable(),
     outputTokens: z.number().int().nonnegative().nullable(),
+    toolCalls: z.array(providerToolCallSchema).max(4).optional(),
   })
   .strict();
 

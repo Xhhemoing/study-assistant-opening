@@ -229,6 +229,7 @@ export {
 } from "./retest-activity";
 
 export * from "./ai-settings";
+export * from "./system-query";
 export * from "./planning-settings";
 export * from "./plan-feedback";
 export { taskFeedbackInputSchema, taskFeedbackReasonSchema, type TaskFeedbackInput } from "./planning-tasks";
