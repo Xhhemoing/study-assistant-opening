@@ -38,13 +38,23 @@ export const openingProblemRefs = pgTable("opening_problem_refs", {
 
 /** Server-confirmed help only (delivered = true). */
 export const openingHelpExposures = pgTable("opening_help_exposures", {
+  ownerUserId: uuid("owner_user_id"),
+  courseId: uuid("course_id"),
+  releaseKey: text("release_key"),
+  releaseIntent: jsonb("release_intent"),
+  contextAnchor: jsonb("context_anchor"),
+  exposureOrigin: text("exposure_origin"),
+  supportDomain: text("support_domain").notNull().default("unknown"),
+  generatedAt: timestamp("generated_at", { withTimezone: true }),
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+  workspaceHistoryRevision: bigint("workspace_history_revision", { mode: "number" }),
   id: uuid("id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull(),
   sessionId: uuid("session_id")
-    .notNull()
     .references(() => openingLearningSessions.id, { onDelete: "cascade" }),
   problemId: uuid("problem_id"),
-  turnId: uuid("turn_id").notNull(),
+  turnId: uuid("turn_id"),
   attemptId: uuid("attempt_id"),
   activityId: uuid("activity_id"),
   itemVersionId: uuid("item_version_id"),

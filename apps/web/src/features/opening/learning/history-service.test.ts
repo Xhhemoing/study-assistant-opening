@@ -50,7 +50,8 @@ describe("course history route authorization and error mapping", () => {
     const cursor = "opaque+/= with spaces";
     const response = await read(new URLSearchParams({ cursor, requirementKey: "", limit: "1" }).toString());
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual(page);
+    await expect(response.json()).resolves.toEqual({ ...page, exposureReceipts: [] });
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(dependencies.requireScope).toHaveBeenCalledWith(expect.any(Request));
     expect(dependencies.readHistory).toHaveBeenCalledExactlyOnceWith(sql, scope, { courseId, cursor, requirementKey: "", limit: 1 });
   });

@@ -14,6 +14,7 @@ const tables = [
   "opening_privacy_exclusions", "opening_tasks", "opening_plan_feedback", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
   "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts", "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
+  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
 ] as const;
 
 function backup(): OpeningBackup {
@@ -112,7 +113,7 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    expect(new Set(names).size).toBe(36);
+    expect(new Set(names).size).toBe(39);
     expect(names.indexOf("opening_sources")).toBeLessThan(names.indexOf("opening_source_chunks"));
     expect(names.indexOf("opening_conversations")).toBeLessThan(names.indexOf("opening_turns"));
     expect(names.indexOf("opening_turns")).toBeLessThan(names.indexOf("opening_assistant_candidates"));

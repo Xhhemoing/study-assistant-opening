@@ -23,7 +23,6 @@ import { UploadStrip } from "./upload-strip";
 import { createMaterialOrganizationClient, type MaterialOrganization } from "../library/material-organization-client";
 import {
   addSelectedSourceIds,
-  hasReadyMembershipMaterials,
   membershipSourceIdsForCourse,
   resolveAssistantCourseId,
   uniqueCappedSourceIds,
@@ -37,7 +36,11 @@ import { UnknownTurnNotice } from "./unknown-turn-notice";
 import { shouldRefreshSources } from "../inbox/source-refresh";
 import { startSourceProcessingRefresh } from "./source-processing-refresh";
 import { createQuestionDraftStore } from "./question-drafts";
-import { pinnedStudySourceProblem, questionWithStudyContext, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "./study-conversation-context";
+import { ProposalPanel } from "./proposal-panel";
+import { StudyIntentControls } from "../teaching/study-intent-controls";
+import { LearnerStateCard } from "../teaching/learner-state-card";
+import { acknowledgeStudyExposure } from "./study-exposure-ack";
+import { pinnedStudySourceProblem, questionWithStudyContext, studyContextAnchor, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "./study-conversation-context";
 import { createConversationReader } from "./conversation-reader";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 
@@ -118,20 +121,6 @@ export function assistantContextHint(selectedSourceIds: string[]): string {
     : `已选材料：${selectedSourceIds.length} 份`;
 }
 
-/** Soft honesty when course-bound (or ready membership materials) but none selected this turn. */
-export function shouldConfirmEmptyCourseSources(input: {
-  sourceIds: readonly string[];
-  courseId: string | null | undefined;
-  hasReadyCourseMaterials?: boolean;
-}): boolean {
-  if (input.sourceIds.length > 0) return false;
-  return Boolean(input.courseId) || Boolean(input.hasReadyCourseMaterials);
-}
-
-export const EMPTY_COURSE_SOURCES_CONFIRM =
-  "当前课程有材料，尚未选入本轮。仍要继续发送？\n\n确定：继续（一般说明）\n取消：打开参考资料再选材料";
-
-
 /** Notice when server auto-filled/narrowed sources (Package C). Empty/omitted → no hint. */
 export function autoSelectSourcesNotice(effectiveSourceIds: readonly string[] | undefined | null): string | null {
   const n = effectiveSourceIds?.length ?? 0;
@@ -174,11 +163,8 @@ export function presetPromptForMode(mode: "hint" | "explain"): string {
     ? "请只给下一步提示，不要直接给完整答案。"
     : "请给一道完整例题讲解，并标明材料依据。";
 }
-export function mergeChatMessages(
-  saved: ChatMessageView[],
-  ephemeral: ChatMessageView[],
-): ChatMessageView[] {
-  return [...saved, ...ephemeral];
+export function messagesForChatBranch(saved: ChatMessageView[], ephemeral: ChatMessageView[], privacy: ComposerPrivacy): ChatMessageView[] {
+  return privacy === "ephemeral" ? ephemeral : saved;
 }
 
 export function appendEphemeralResponseIfActive(
@@ -281,7 +267,8 @@ export function AssistantView(props: Props) {
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", embedded = false,
   studyContext, studyContextError, onNew }: Props & { onNew: (sourceIds: string[], page: number | null) => void }) {
-  const systemQueryAvailable = useOpeningCapabilities().systemQuery;
+  const capabilities = useOpeningCapabilities();
+  const systemQueryAvailable = capabilities.systemQuery;
   const initialCourseId = studyContext?.courseId ?? courseIdProp;
   const entrySourceKey = sourceIdsProp.join(",");
   const initialSourceIds = useMemo(() => {
@@ -304,13 +291,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const sourceRequestSequence = useRef(0);
   const sourceRefresh = useRef<ReturnType<typeof startSourceProcessingRefresh> | null>(null);
   const [sourceRefreshError, setSourceRefreshError] = useState(false);
+  const [organizationError, setOrganizationError] = useState(false);
   const [organization, setOrganization] = useState<MaterialOrganization | null>(null);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(learningAttempt?.sourceIds ?? initialSourceIds);
+  const [sourceSelection, setSourceSelection] = useState<"auto" | "selected" | "none" | null>(null);
+  const materialMode = sourceSelection ?? (selectedSourceIds.length ? "selected" : "auto");
+  const requestSourceIds = materialMode === "selected" ? selectedSourceIds : [];
   const [currentPage, setCurrentPage] = useState(initialPage == null ? "" : String(initialPage));
   const [turns, setTurns] = useState<TurnRecord[]>([]);
+  const [supportPurpose, setSupportPurpose] = useState(studyContext?.purpose ?? "learning_help");
+  useEffect(() => { for (const turn of turns) if (turn.exposureReceipt) void acknowledgeStudyExposure(turn.exposureReceipt).catch(() => undefined); }, [turns]);
   const [draft, setDraftState] = useState(initialDraft);
+  const branchDrafts = useRef({ saved: initialDraft, ephemeral: "" });
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const [aiBlocked, setAiBlocked] = useState(true);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
@@ -331,19 +326,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     draftEdited.current = true;
     setDraftState(text);
     if (privacy === "saved") draftStore.write(draftScope, text);
-    else draftStore.remove(draftScope);
+
     setDraftUnavailable(draftStore.unavailable);
   }, [draftScope, draftStore, privacy]);
   useEffect(() => {
     if (draftEdited.current) return;
     const saved = draftStore.read(draftScope);
-    if (saved !== null) setDraftState(saved);
+    if (saved !== null) { setDraftState(saved); branchDrafts.current.saved = saved; }
     setDraftUnavailable(draftStore.unavailable);
   }, [draftScope, draftStore]);
   function changePrivacy(next: ComposerPrivacy) {
-    setPrivacy(next);
-    if (next === "ephemeral") draftStore.remove(draftScope);
-    else draftStore.write(draftScope, draftRef.current);
+    if (next === privacy) return;
+    branchDrafts.current[privacy] = draftRef.current;
+    const restored = branchDrafts.current[next];
+    setPrivacy(next); setDraftState(restored); draftRef.current = restored; draftEdited.current = true;
+    if (next === "saved") draftStore.write(draftScope, restored);
     setDraftUnavailable(draftStore.unavailable);
   }
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
@@ -402,9 +399,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const refreshOrganization = useCallback(async () => {
     // Client-side membership until Data exposes listReadySourceIdsForCourse on the web API.
     try {
-      setOrganization(await createMaterialOrganizationClient().read());
+      setOrganization(await createMaterialOrganizationClient().read()); setOrganizationError(false);
     } catch {
-      setOrganization(null);
+      setOrganization(null); setOrganizationError(true);
     }
   }, []);
 
@@ -417,7 +414,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     () => membershipSourceIdsForCourse(organization, boundCourseId),
     [organization, boundCourseId],
   );
-  const readyCourseMaterials = hasReadyMembershipMaterials(sources, membershipIds);
+
 
   const handleUploaded = useCallback(async (savedSourceIds?: string[], knownSources?: SourceRecord[]) => {
     if (knownSources?.length) setSources(current => [...current, ...knownSources.filter(record => !current.some(item => item.id === record.id))]);
@@ -530,7 +527,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         const currentId = conversationIdRef.current;
         if (currentId && await refreshConversation(currentId, controller.signal)) return;
         if (cancelled) return;
-        if ((startFresh || studyContext?.activityId || initialSourceIds.length > 0) && !learningAttempt) return;
+        if ((startFresh || (studyContext?.activityId || studyContext?.attemptId) || initialSourceIds.length > 0) && !learningAttempt) return;
         // Practice conversations are associated with turns server-side, but the
         // summary/resume contract does not expose that association. Starting a
         // fresh conversation here prevents another practice attempt's tutoring
@@ -587,7 +584,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     [resume, recoveredTurns],
   );
   const display = useMemo(() => privacy === "ephemeral"
-    ? { messages: mergeChatMessages(savedDisplay.messages, ephemeralMessages), historyTruncated: savedDisplay.historyTruncated }
+    ? { messages: messagesForChatBranch(savedDisplay.messages, ephemeralMessages, privacy), historyTruncated: false }
     : savedDisplay, [privacy, savedDisplay, ephemeralMessages]);
   const currentVersions = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.version])), [sources]);
   const sourceNames = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.name])), [sources]);
@@ -652,16 +649,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       return { accepted: false };
     }
 
-    // Package A soft confirm; Package B supplies membership-ready flag + query courseId.
-    if (!input.querySystem && shouldConfirmEmptyCourseSources({
-      sourceIds: selectedSourceIds,
-      courseId: boundCourseId,
-      hasReadyCourseMaterials: readyCourseMaterials,
-    })) {
-      if (!window.confirm(EMPTY_COURSE_SOURCES_CONFIRM)) {
-        setContextOpen(true);
-        return { accepted: false };
-      }
+    if (!input.querySystem && materialMode === "selected" && !requestSourceIds.length) {
+      setError("请先选择资料，或切换为自动参考 / 不用资料。"); setContextOpen(true); return { accepted: false };
     }
 
     setPending(true);
@@ -672,22 +661,26 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       if (input.privacy === "ephemeral" && !learningAttempt) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
         const output = await api.replyEphemeral({
-          ...(input.querySystem ? { querySystem: true } : {}),
+          clientKey: input.clientKey,
+          ...(input.purpose ? { purpose: input.purpose } : {}),
+          ...(input.querySystem ? { querySystem: true } : { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) }),
           text: submittedText,
-          sourceIds: selectedSourceIds,
+          sourceIds: requestSourceIds,
+          ...(!input.querySystem ? { sourceSelection: materialMode } : {}),
           mode: input.mode,
           history,
           ...(ephemeralPrivacyEpoch === undefined ? {} : { historyPrivacyEpoch: ephemeralPrivacyEpoch }),
-          ...(page !== undefined ? { currentPage: page } : {}),
+          ...(materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
           ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
           // Package B/C: course scope lets server fill/narrow when sourceIds empty.
           ...(boundCourseId ? { courseId: boundCourseId } : {}),
         }, abortController.signal);
         if (abortController.signal.aborted) return { accepted: false };
+        if (output.exposureReceipt) void acknowledgeStudyExposure(output.exposureReceipt).catch(() => undefined);
         setEphemeralPrivacyEpoch(output.privacyEpoch);
         const applied = applyEffectiveSourceIds(output.effectiveSourceIds);
-        const turnSourceIds = applied.sourceIds ?? selectedSourceIds;
-        if (applied.sourceIds) {
+        const turnSourceIds = applied.sourceIds ?? requestSourceIds;
+        if (applied.sourceIds && materialMode === "selected") {
           setSelectedSourceIds(applied.sourceIds);
         }
         if (applied.notice) {
@@ -710,15 +703,17 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       const id = await ensureConversation();
       const submitted = await api.submitTurn({
-        ...(input.querySystem ? { querySystem: true } : {}),
+        ...(input.purpose ? { purpose: input.purpose } : {}),
+          ...(input.querySystem ? { querySystem: true } : { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) }),
         conversationId: id,
         text: submittedText,
-        sourceIds: selectedSourceIds,
+        sourceIds: requestSourceIds,
+        ...(!input.querySystem ? { sourceSelection: materialMode } : {}),
         mode: input.mode,
         clientKey: input.clientKey,
         privacy: "saved",
         ...learningAttemptTurnContext(learningAttempt),
-        ...(page !== undefined ? { currentPage: page } : {}),
+        ...(materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
         ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
       setActiveJobId(submitted.jobId);
@@ -826,16 +821,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const sourceProblem = !loading ? pinnedStudySourceProblem(studyContext, sources) : null;
   const contextProblem = studyContextError ?? sourceProblem;
   const returnHref = studyContextReturnHref(studyContext);
-  return <section aria-label="自由探索工作台" className="flex h-full min-h-[400px] min-w-0 overflow-hidden bg-white lg:min-h-0">
+  return <section aria-label="自由探索工作台" className={`flex h-full min-w-0 overflow-hidden bg-white ${embedded ? "min-h-0" : "min-h-[400px] lg:min-h-0"}`}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 sm:px-5">
+      {!embedded ? <header className={`flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 sm:px-5 `}>
         <Heading className="min-w-0 truncate text-sm font-semibold text-zinc-800">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "自由探索")}</Heading>
         <div className="flex shrink-0 items-center gap-1">
           <button type="button" className={secondaryButtonClass} aria-expanded={contextOpen} aria-controls="exploration-context" onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
           {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; draftStore.remove(draftScope); onNew(selectedSourceIds, pageIntentValue(currentPage)); }}><Plus size={15} aria-hidden /></button> : null}
         </div>
-      </header>
-      {studyContext ? <div className="space-y-1 border-b border-zinc-100 px-4 py-2 text-xs leading-5 text-zinc-600 sm:px-5">
+      </header> : null}
+      {!embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
+      {studyContext && (!embedded || learningAttempt || studyContext.fragment) ? <div className="space-y-1 border-b border-zinc-100 px-4 py-2 text-xs leading-5 text-zinc-600 sm:px-5">
+        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="rounded border border-zinc-200 bg-white px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
         <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : "指定材料")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
         <p>{studyContext.activityId || studyContext.fragment ? "背景将在你发送时作为文字附上；资料依据仍以回答中的真实引用为准。" : "已指定参考材料和位置；回答中的实际引用用于核对依据。"}</p>
         {returnHref && !embedded ? <a href={returnHref} className="text-emerald-800 underline">返回原内容</a> : null}
@@ -849,7 +846,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       </div> : null}
       {contextProblem ? <p role="alert" className="mx-4 mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">{contextProblem}{returnHref ? <a href={returnHref} className="ml-2 underline">返回阅读</a> : null}</p> : null}
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
-      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
+      {privacy === "ephemeral" ? <div className="shrink-0 border-b border-zinc-200 px-4 py-2 text-xs leading-5 text-zinc-600" role="status">
+        <p className="font-medium">临时对话从这里开始</p><p>本轮不接续已保存历史；只使用本标签页的临时消息、当前输入和所选背景。刷新后不会恢复。</p>
+        {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
+      </div> : null}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-zinc-500">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
       {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">
@@ -867,21 +868,26 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         </div>
       ) : null}
 
-      {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
+      {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-zinc-600"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
+      {privacy === "saved" && !loading && !embedded ? <details className="mx-5 mb-2 text-xs text-zinc-600"><summary className="cursor-pointer py-1">准备或查看行动草稿</summary><ProposalPanel api={api} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
+      {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-amber-800">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
-      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError)} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      {!learningAttempt && !studyContext?.sourceId ? <label className="mx-4 mb-2 flex shrink-0 flex-wrap items-center gap-2 text-xs text-zinc-600">资料范围<select aria-label="本轮资料范围" className="min-h-9 max-w-full rounded border border-zinc-200 px-2" value={materialMode} disabled={pending || loading} onChange={event => { const next = event.target.value as typeof materialMode; setSourceSelection(next); if (next !== "selected") setCurrentPage(""); }}><option value="auto">{boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流"}</option><option value="selected">仅用所选资料（{selectedSourceIds.length} 份）</option><option value="none">不用资料</option></select></label> : null}
+      <Composer compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-zinc-500">{assistantContextHint(selectedSourceIds)}</p>
       {sourceRefreshError ? <div className="mb-3 space-y-2 text-xs text-amber-800"><p role="status">材料状态暂时无法读取；已保留上次状态，会继续核实，尚未标记为解析完成。</p><button type="button" className={secondaryButtonClass} onClick={() => { if (sourceRefresh.current) sourceRefresh.current.retry(); else void refreshSources().catch(() => setSourceRefreshError(true)); }}>重新读取材料状态</button></div> : null}
+      {!learningAttempt && !studyContext?.sourceId ? <label className="mb-4 block space-y-2 text-xs text-zinc-700"><span>资料使用方式</span><select aria-label="资料使用方式" className="min-h-10 w-full rounded border border-zinc-200 px-2" value={materialMode} disabled={pending || loading} onChange={event => { const mode = event.target.value as typeof materialMode; setSourceSelection(mode); if (mode !== "selected") setCurrentPage(""); }}><option value="auto">自动参考本课资料</option><option value="selected">仅用所选资料</option><option value="none">不用资料</option></select><p>{materialMode === "auto" ? (boundCourseId ? "自动查找本课程可读资料；回答后列出实际引用。" : "未绑定课程，不会自动补入课程资料。") : materialMode === "selected" ? "只检索你选择的资料；尚未选择时不能发送。" : "本轮不检索资料。已有对话文字仍可能包含先前讨论的内容。"}</p></label> : null}
       <UploadStrip sources={sources} api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
+      {organizationError && boundCourseId ? <p role="status" className="mb-3 text-xs text-amber-800">课程资料关系暂时无法读取，不能据此判断本课没有资料。<button type="button" className={secondaryButtonClass} onClick={() => void refreshOrganization()}>重新读取</button></p> : null}
       <SourcePageControls
         sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources}
         selectedSourceIds={selectedSourceIds}
         currentPage={currentPage}
-        onSelectedSourceIdsChange={value => { preserveEntrySelection.current = false; setSelectedSourceIds(value); }}
+        onSelectedSourceIdsChange={value => { setSourceSelection("selected"); preserveEntrySelection.current = false; setSelectedSourceIds(value); }}
         onCurrentPageChange={value => { preserveEntrySelection.current = false; setCurrentPage(value); }}
         disabled={pending || loading}
         membershipSourceIds={learningAttempt || !boundCourseId ? null : membershipIds}

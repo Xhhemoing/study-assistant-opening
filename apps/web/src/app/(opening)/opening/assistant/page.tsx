@@ -8,7 +8,7 @@ export default async function OpeningAssistantPage({ searchParams }: {
   const { conversation, ...query } = await searchParams;
   const { context, error } = parseStudyConversationContext(query);
   const analysis = context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : null;
-  const freshContext = Boolean(context?.activityId || context?.sourceId || context?.fragment);
+  const freshContext = Boolean(context?.attemptId || context?.activityId || context?.sourceId || context?.fragment);
   return <AssistantView
     key={`${studyConversationIdentity(context)}:${freshContext ? "fresh" : conversation ?? "chat"}`}
     initialConversationId={freshContext ? null : conversation ?? null}

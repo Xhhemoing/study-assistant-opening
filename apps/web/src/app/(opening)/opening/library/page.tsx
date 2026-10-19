@@ -9,5 +9,5 @@ export default async function OpeningLibraryPage({
   const params = await searchParams;
   const { tab, courseId } = params;
   const initialOpen = parseSourceViewerSearchParams(params);
-  return <LibraryView tab={tab} courseId={courseId} initialOpen={initialOpen} />;
+  return <LibraryView key={courseId ?? "global"} tab={tab} courseId={courseId} initialOpen={initialOpen} />;
 }

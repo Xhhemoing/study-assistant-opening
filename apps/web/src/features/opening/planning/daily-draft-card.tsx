@@ -215,6 +215,7 @@ export function DailyDraftCard({
     }
   }
 
+  if (dailyDraftSkippedReason === "accepted" && (unplannedPendingCount ?? 0) === 0) return null;
   if (dailyDraftSkippedReason) {
     return (
       <section

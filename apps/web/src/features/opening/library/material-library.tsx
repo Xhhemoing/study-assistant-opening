@@ -32,7 +32,7 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
   { value: "name", label: "名称排序" }, { value: "largest", label: "文件大小" },
 ];
 
-export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null }) {
+export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void }) {
   const library = useMaterialLibrary(api, { uploadCourseId });
   const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load, changeSpace: setLibrarySpace } = library;
   const [query, setQuery] = useState("");
@@ -40,17 +40,40 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const [status, setStatus] = useState<MaterialStatus>("all");
   const [sort, setSort] = useState<MaterialSort>("newest");
   const [page, setPage] = useState(1);
+  const [filtersRestored, setFiltersRestored] = useState(false);
+  const [managing, setManaging] = useState(false);
   const [assignId, setAssignId] = useState<string | null>(null);
   // Inbound courseId query only — setLibrarySpace is stable (useCallback); do not depend on whole library identity.
   useEffect(() => {
     if (uploadCourseId) setLibrarySpace(`course:${uploadCourseId}`);
   }, [uploadCourseId, setLibrarySpace]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setQuery((params.get("q") ?? "").slice(0, 200));
+    const kind = params.get("kind"); if (kinds.some(item => item.value === kind)) setKind(kind as MaterialKind);
+    const status = params.get("status"); if (statuses.some(item => item.value === status)) setStatus(status as MaterialStatus);
+    const sort = params.get("sort"); if (sorts.some(item => item.value === sort)) setSort(sort as MaterialSort);
+    const page = Number(params.get("listPage")); if (Number.isSafeInteger(page) && page > 0) setPage(page);
+    const view = params.get("view"); if (["all", "inbox", "ready", "attention"].includes(view ?? "") && !params.get("courseId")) setLibrarySpace(view as typeof space);
+    setFiltersRestored(true);
+  }, [setLibrarySpace]);
+  useEffect(() => {
+    if (!filtersRestored) return;
+    const url = new URL(window.location.href);
+    for (const [key, value] of Object.entries({ q: query, kind: kind === "all" ? "" : kind, status: status === "all" ? "" : status, sort: sort === "newest" ? "" : sort, listPage: page === 1 ? "" : String(page), view: space.startsWith("course:") || space === "all" ? "" : space, courseId: space.startsWith("course:") ? space.slice(7) : "" })) {
+      if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+    }
+    window.history.replaceState(window.history.state, "", url);
+    const filterParams = new URLSearchParams();
+    for (const key of ["q", "kind", "status", "sort", "listPage", "view"]) { const value = url.searchParams.get(key); if (value) filterParams.set(key, value); }
+    onFilterQueryChange?.(filterParams.size ? `&${filterParams}` : "");
+  }, [filtersRestored, query, kind, status, sort, page, space, onFilterQueryChange]);
   const scoped = useMemo(() => materialsInSpace(sources, organization, space), [sources, organization, space]);
   const collection = useMemo(() => collectMaterials(scoped, { query, kind, status, sort, page, pageSize: 20 }), [scoped, query, kind, status, sort, page]);
   const courseId = space.startsWith("course:") ? space.slice(7) : null;
   const titles = { all: "全部原件", inbox: "待整理", ready: "可用于提问", attention: "需处理" };
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
-  const changeSpace = (next: typeof space) => { library.changeSpace(next); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
+  const changeSpace = (next: typeof space) => { library.changeSpace(next); onCourseChange?.(next.startsWith("course:") ? next.slice(7) : null); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
   const incompleteUpload = scoped.filter(record => materialStatus(record) === "incomplete_upload").length;
   const parsing = scoped.filter(record => materialStatus(record) === "parsing").length;
@@ -71,6 +94,7 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
           <input aria-label="搜索材料名称" className={`${ui.input} pl-9`} placeholder="搜索材料名称" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} />
         </span></label>
+        <details className="min-w-0"><summary className={`${ui.quiet} cursor-pointer`}>筛选与排序{kind !== "all" || status !== "all" || sort !== "newest" ? " · 已启用" : ""}</summary><div className="mt-3 flex flex-wrap gap-3">
         <label className="w-36"><span className={`${ui.label} mb-1 block`}>文件格式</span>
           <select className={ui.input} value={kind} onChange={event => { setKind(event.target.value as MaterialKind); setPage(1); }}>{kinds.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
         </label>
@@ -80,8 +104,11 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
         <label className="w-36"><span className={`${ui.label} mb-1 flex items-center gap-1`}><ArrowDownWideNarrow size={12} aria-hidden="true" />排序</span>
           <select className={ui.input} value={sort} onChange={event => { setSort(event.target.value as MaterialSort); setPage(1); }}>{sorts.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
         </label>
-        {filtered ? <button type="button" className={ui.quiet} onClick={() => { setQuery(""); setKind("all"); setStatus("all"); setPage(1); }}><X size={14} aria-hidden="true" />清除筛选</button> : null}
+        </div></details>
+        <button type="button" className={ui.quiet} disabled={busy} aria-pressed={managing} onClick={() => { setManaging(value => !value); library.clearSelection(); }}>{managing ? "退出批量管理" : "批量管理"}</button>
+        {filtered || sort !== "newest" ? <button type="button" className={ui.quiet} onClick={() => { setQuery(""); setKind("all"); setStatus("all"); setSort("newest"); setPage(1); }}><X size={14} aria-hidden="true" />清除筛选</button> : null}
       </div>
+      {kind !== "all" || status !== "all" || sort !== "newest" ? <p className="text-xs leading-5 text-zinc-600" role="status">当前条件：{[kind !== "all" ? kinds.find(item => item.value === kind)?.label : null, status !== "all" ? statuses.find(item => item.value === status)?.label : null, sort !== "newest" ? sorts.find(item => item.value === sort)?.label : null].filter(Boolean).join(" · ")}</p> : null}
       {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
       {organizationError ? <LoadError message={organizationError} onRetry={() => void load()} /> : null}
       {!loading && !library.organizationReady && !organizationError ? (
@@ -96,9 +123,9 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
         {selection.size ? <MaterialBatchActions key={space} count={selection.size} courses={organization.courses} busy={busy || !library.organizationReady} courseId={courseId}
           onAdd={(target, role) => library.batch(target, role)} onRemove={() => courseId ? library.batch(courseId) : Promise.resolve()}
           onDelete={() => library.deleteSelected()} onClear={library.clearSelection} /> : null}
-        <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
-          checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label>
-        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={library.toggle} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
+        {managing ? <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
+          checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label> : null}
+        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={managing ? library.toggle : undefined} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
           renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
           onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
           renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}

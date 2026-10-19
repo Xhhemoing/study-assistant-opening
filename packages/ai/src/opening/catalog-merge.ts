@@ -6,6 +6,7 @@ export type WorkspaceCatalogModel = {
   supportsAudio?: boolean | undefined; billing?: "metered" | "free_tier" | undefined;
   dailyRequestCap?: number | null | undefined;
   inputCentsPerMillion: number; outputCentsPerMillion: number;
+  mediaInputTokenUpperBound?: number | undefined; mediaMaxInputBytes?: number | undefined; mediaInputCentsPerMillion?: number | undefined;
   vaultConfigBroken?: boolean | undefined;
 };
 
@@ -109,6 +110,10 @@ export function mergeOpeningCatalog(
     dailyRequestCap: model.dailyRequestCap ?? null,
     baseUrl: model.baseUrl, apiKey: model.apiKey,
     inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
+    ...(model.mediaInputTokenUpperBound === undefined ? {} : {
+      mediaInputTokenUpperBound: model.mediaInputTokenUpperBound,
+      mediaMaxInputBytes: model.mediaMaxInputBytes, mediaInputCentsPerMillion: model.mediaInputCentsPerMillion,
+    }),
     source: "workspace" as const,
   }));
   const models = [...servers, ...custom];

@@ -180,3 +180,35 @@ describe("resolved evidence assistance", () => {
     expect(resolveEvidenceAssistance(observation, withHelp([{ ...exposure, deliveredAt: 400 }]))).toBe("independent");
   });
 });
+
+// Release ordering is allocated by the server transaction shared with answer capture.
+it("uses release order even when timestamp precision cannot distinguish delivery and answer", () => {
+  const result = evaluateEvidenceEligibility({ ...observation, startedAt: 1, submittedAt: 2 }, {
+    ...context,
+    helpHistory: { complete: true, exposures: [{ ...exposure, deliveredAt: 2, serverOrder: "before_answer" }] },
+  });
+  expect(result.independentAttempt).toBe("no");
+});
+
+it("does not turn confirmed language support into mathematical help", () => {
+  const helpHistory = { complete: true, exposures: [{ ...exposure, supportDomain: "language" as const }] };
+  expect(evaluateEvidenceEligibility({ ...observation, assessmentDomain: "math" }, { ...context, helpHistory }).independentAttempt).toBe("yes");
+  expect(evaluateEvidenceEligibility({ ...observation, assessmentDomain: "language" }, { ...context, helpHistory }).independentAttempt).toBe("no");
+});
+
+it("keeps a completed answer independent when a later release has the same millisecond", () => {
+  const result = evaluateEvidenceEligibility(observation, { ...context,
+    helpHistory: { complete: true, exposures: [{ ...exposure, deliveredAt: observation.submittedAt, serverOrder: "after_answer" }] },
+  });
+  expect(result.independentAttempt).toBe("yes");
+});
+
+it("records copied-answer and guessed-answer conditions without changing the verified mathematical verdict", () => {
+  const copied = evaluateEvidenceEligibility(observation, { ...context, selfReportedAnswerConditions: { copiedAnswer: true, reportedGuess: false } });
+  expect(copied.independentAttempt).toBe("no");
+  expect(copied.verifiedCorrect).toBe("yes");
+  expect(copied.reasonCodes).toContain("self_reported_copied_answer");
+  const guessed = evaluateEvidenceEligibility(observation, { ...context, selfReportedAnswerConditions: { copiedAnswer: false, reportedGuess: true } });
+  expect(guessed.independentAttempt).toBe("unknown");
+  expect(guessed.verifiedCorrect).toBe("yes");
+});

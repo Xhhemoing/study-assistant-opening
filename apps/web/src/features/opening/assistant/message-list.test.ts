@@ -330,3 +330,10 @@ describe("MessageList", () => {
     expect(html).not.toContain("出处：");
   });
 });
+
+it("renders an empty contextual conversation without the assistant home screen", () => {
+  const html = renderToStaticMarkup(createElement(MessageList, { messages: [], compact: true, onPrompt: () => {} }));
+  expect(html).toContain("当前页或选段");
+  expect(html).not.toContain("今天，想弄懂什么");
+  expect(html).not.toContain("检验自己的理解");
+});

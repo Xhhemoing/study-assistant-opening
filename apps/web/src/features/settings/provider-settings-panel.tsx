@@ -6,6 +6,7 @@ import {
 } from "@aistudy/contracts";
 import { KeyRound, LoaderCircle, PlugZap, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ProviderMediaBudgetFields } from "./provider-media-budget-fields";
 import { ui } from "../opening/design/ui";
 import {
   FREE_TIER_NOTICE, emptyModelDraft, emptyProviderDraft, keyStatusText, modelDraftFromView, modelRequestBody,
@@ -84,6 +85,7 @@ function ModelForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
         <p className="text-xs leading-6 text-amber-800" role="note">{FREE_TIER_NOTICE}</p>
       </> : null}
     </fieldset>
+    <ProviderMediaBudgetFields draft={draft} disabled={busy} onChange={patch => onChange({ ...draft, ...patch })} />
     {problem ? <p className="text-xs leading-6 text-amber-800" role="alert">{problem}</p> : null}
     <div className="flex flex-wrap gap-2">
       <button className={ui.primary} disabled={busy || problem !== null} onClick={onSubmit} type="button">
@@ -242,7 +244,7 @@ export function ProviderSettingsPanel() {
           return "模型已添加，可在上方「模型路由」中选择。";
         })}
         onUpdateModel={(model, draft) => void run(async () => {
-          await requestJson(`/api/opening/model-providers/${model.providerId}/models/${model.id}`, jsonInit("PUT", modelRequestBody(draft)));
+          await requestJson(`/api/opening/model-providers/${model.providerId}/models/${model.id}`, jsonInit("PUT", modelRequestBody(draft, { clearMedia: true })));
           return "模型已保存。";
         })}
         onDeleteModel={model => {

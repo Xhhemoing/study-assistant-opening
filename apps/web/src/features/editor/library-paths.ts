@@ -7,6 +7,6 @@ export function libraryNotePath(basePath: LibraryBasePath, documentId: string): 
   return `${basePath}/${encodeURIComponent(documentId)}`;
 }
 
-export function libraryNewNotePath(basePath: LibraryBasePath): string {
-  return `${basePath}/new`;
+export function libraryNewNotePath(basePath: LibraryBasePath, courseId?: string | null): string {
+  return `${basePath}/new${courseId ? `?courseId=${encodeURIComponent(courseId)}` : ""}`;
 }

@@ -1,8 +1,13 @@
+import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
+import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage } from "@aistudy/domain";
+import { isDeepStrictEqual } from "node:util";
+import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { generateOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt } from "@aistudy/contracts";
+import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
@@ -256,7 +261,10 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       candidates: Array<{ payload: unknown; sourceIds: string[] }>;
       contextSourceRefs?: ContextSourceRef[];
       systemQuery?: SystemQueryReceipt;
+      generatedExposure?: OpeningStudyExposureInput;
       helpExposure?: {
+        contextAnchor?: StudyContextAnchor;
+        supportDomain?: "language" | "math" | "unknown";
         id: string;
         sessionId: string;
         problemId: string | null;
@@ -272,7 +280,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       claimToken?: string;
     }): Promise<void> {
       await sql.begin(async (tx) => {
-        if (input.helpExposure) await lockWorkspaceLearningHistory(tx, input.scope);
+        if (input.helpExposure || input.generatedExposure) await lockWorkspaceLearningHistory(tx, input.scope);
         const workspace = await tx`
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
@@ -324,7 +332,56 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
             )
           `;
         }
-        if (input.helpExposure) await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure);
+        if (input.helpExposure) await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure, { generatedOnly: true });
+        if (input.generatedExposure) await generateOpeningStudyExposure(tx, input.scope, input.generatedExposure);
+      });
+    },
+
+    /** Apply the immutable saved user text once, after validating the actual running job and owned target. */
+    async applyUserTurnIntent(scope: OpeningScope, input: { userTurnId: string; jobId: string; claimToken?: string }): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const [row] = await tx`SELECT t.text,t.attempt_id,t.context_anchor,t.learning_session_id,t.query_system,t.composer_purpose FROM opening_tutor_jobs j
+          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id
+          JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+          WHERE j.id=${input.jobId} AND j.user_turn_id=${input.userTurnId} AND j.workspace_id=${scope.workspaceId}
+            AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
+            AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR SHARE OF j`;
+        if (!row) throw new Error("study intent job lease is no longer current");
+        if (row.query_system === true || row.composer_purpose && row.composer_purpose !== "answer" && row.composer_purpose !== "teach"
+          || (row.context_anchor as StudyContextAnchor | null)?.purpose === "language_support") {
+          throw new Error("read-only or proposal composer purpose cannot change study intent");
+        }
+        const attemptId = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId ?? null;
+        const [attempt] = attemptId ? await tx`SELECT id,session_id FROM opening_learning_attempts WHERE id=${String(attemptId)}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
+        const sessionId = attempt?.session_id ?? row.learning_session_id;
+        if (!sessionId) return null;
+        const [session] = await tx`SELECT id FROM opening_learning_sessions WHERE id=${String(sessionId)}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!session || attemptId && !attempt) throw new Error("study intent target is not owned");
+        const latest = await readOpeningStudyIntentInTx(tx, scope, String(sessionId));
+        const clientKey = `tutor-intent:${input.userTurnId}`;
+        const replay = await tx`SELECT id FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND (client_key=${clientKey} OR client_key LIKE ${`${clientKey}:signal:%`}) LIMIT 1`;
+        // A retry must not reapply an older message over a subsequently confirmed preference.
+        if (replay.length) return latest;
+        const text = String(row.text), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
+        const applied = parseExplicitStudyMessage(current, text);
+        if (!applied) return latest;
+        const changed = !isDeepStrictEqual(current, applied.intent);
+        if (!changed && !applied.signals.length && !applied.needsConfirmation) return latest;
+        const target = { sessionId: String(sessionId), ...(attempt ? { attemptId: String(attempt.id) } : {}) };
+        if (text.length <= 2000 && (attempt || !applied.signals.some(signal => signal === "guessed" || signal === "copied_answer"))) {
+          return appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "explicit_request", text } });
+        }
+        // Without an actual attempt, answer-condition reports cannot become evidence about an arbitrary question.
+        if (changed) await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "preference", intent: applied.intent } });
+        for (const signal of applied.signals) {
+          if (!attempt && (signal === "guessed" || signal === "copied_answer")) continue;
+          await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey: `${clientKey}:signal:${signal}`, change: { kind: "signal", signal } });
+        }
+        return studyIntentForMessage(latest, text);
       });
     },
 
@@ -340,15 +397,26 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       strategyTemplateId: string | null;
       querySystem?: boolean;
       courseId?: string | null;
+      contextAnchor?: StudyContextAnchor;
+      purpose?: ComposerPurpose;
+      languageSupportQuestion?: string | null;
+      studyIntent?: StudyIntentEvent | null;
     } | null> {
       const rows = await sql`
-        SELECT t.text,t.mode,t.source_ids,t.source_versions,t.current_page,t.chunk_id,t.learning_session_id,t.attempt_id,t.strategy_template_id,t.query_system,c.course_id
+        SELECT t.text,t.mode,t.source_ids,t.source_versions,t.current_page,t.chunk_id,t.learning_session_id,t.attempt_id,t.strategy_template_id,t.query_system,t.context_anchor,t.composer_purpose,c.course_id,c.owner_user_id,v.evaluation_spec,
+          COALESCE(t.learning_session_id,(SELECT a.session_id FROM opening_learning_attempts a WHERE a.workspace_id=t.workspace_id AND a.owner_user_id=c.owner_user_id
+            AND (a.id=t.attempt_id OR a.id::text=t.context_anchor->>'attemptId') LIMIT 1)) AS intent_session_id
         FROM opening_turns t JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+        LEFT JOIN opening_learning_item_versions v ON v.workspace_id=t.workspace_id AND v.owner_user_id=c.owner_user_id
+          AND v.id::text=COALESCE(t.context_anchor->>'itemVersionId',(SELECT a.item_version_id::text FROM opening_learning_attempts a WHERE a.id=t.attempt_id AND a.workspace_id=t.workspace_id AND a.owner_user_id=c.owner_user_id))
         WHERE t.id = ${id} AND t.workspace_id = ${workspaceId} LIMIT 1
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;
+      const studyIntent = row.intent_session_id && row.owner_user_id ? await createOpeningStudyIntentRepository(sql).latest(
+        { workspaceId, ownerUserId: String(row.owner_user_id) }, String(row.intent_session_id)) : null;
       return {
+        studyIntent,
         text: row.text as string,
         mode: row.mode as string,
         sourceIds: (row.source_ids as string[]) ?? [],
@@ -357,6 +425,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         chunkId: (row.chunk_id as string | null) ?? null,
         learningSessionId: (row.learning_session_id as string | null) ?? null,
         attemptId: (row.attempt_id as string | null) ?? null,
+        ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),
+        ...(row.composer_purpose ? { purpose: row.composer_purpose as ComposerPurpose } : {}),
+        languageSupportQuestion: openingCanonicalLanguageQuestion(row.evaluation_spec),
         strategyTemplateId: (row.strategy_template_id as string | null) ?? null,
         querySystem: row.query_system === true, courseId: (row.course_id as string | null) ?? null,
       };

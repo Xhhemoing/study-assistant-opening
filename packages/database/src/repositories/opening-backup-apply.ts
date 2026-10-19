@@ -185,13 +185,16 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_learning_attempts: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "requirement_key",
     "problem_id", "item_version_id", "source_ids", "source_versions", "started_at", "submitted_at",
-    "observation_id", "client_key", "create_intent", "history_revision",
+    "observation_id", "client_key", "create_intent", "history_revision", "context_anchor",
   ],
+  opening_study_intent_events: ["id", "workspace_id", "owner_user_id", "session_id", "activity_id", "attempt_id", "client_key", "version", "event_kind", "payload", "resulting_intent", "action", "created_at"],
+  opening_learning_decisions: ["id", "workspace_id", "owner_user_id", "layer", "target_id", "parent_decision_id", "client_key", "receipt", "created_at"],
+  opening_learning_shadow_predictions: ["attempt_id", "workspace_id", "owner_user_id", "course_id", "requirement_key", "family_key", "input_cutoff", "captured_at", "state_version", "receipt"],
   opening_turns: [
     "id", "workspace_id", "conversation_id", "role", "text", "mode", "status", "client_key",
     "learning_session_id", "current_page", "chunk_id", "source_ids", "citations", "created_at",
     "intent_hash", "source_versions", "context_source_refs", "attempt_id",
-    "query_system", "system_query",
+    "query_system", "system_query", "context_anchor", "composer_purpose",
   ],
   opening_assistant_candidates: [
     "id", "workspace_id", "conversation_id", "source_turn_id", "source_ids", "payload", "status",
@@ -200,7 +203,8 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_help_exposures: [
     "id", "workspace_id", "session_id", "problem_id", "turn_id", "level", "delivered",
     "created_at", "attempt_id", "delivered_at", "history_revision",
-    "kind", "activity_id", "item_version_id",
+    "kind", "activity_id", "item_version_id", "owner_user_id", "course_id", "release_key", "release_intent", "context_anchor",
+    "exposure_origin", "support_domain", "generated_at", "released_at", "acknowledged_at", "workspace_history_revision",
   ],
   opening_learning_observations: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "source_ids",
@@ -270,6 +274,14 @@ const JSONB_COLUMNS = new Set([
   "workspace_preferences.intervention_settings",
   "courses.intervention_settings",
   "opening_sources.error",
+  "opening_turns.context_anchor",
+  "opening_learning_attempts.context_anchor",
+  "opening_help_exposures.context_anchor",
+  "opening_help_exposures.release_intent",
+  "opening_study_intent_events.payload",
+  "opening_study_intent_events.resulting_intent",
+  "opening_learning_decisions.receipt",
+  "opening_learning_shadow_predictions.receipt",
   "opening_turns.citations",
   "opening_turns.source_versions",
   "opening_turns.context_source_refs",
@@ -443,7 +455,10 @@ export async function executeOpeningRestoreApply(
           throw new Error(`refusing to restore banned table ${table}`);
         }
         const rows = (backup.tables[table] as Record<string, unknown>[] | undefined) ?? [];
-        for (const row of rows) {
+        const orderedRows = table === "opening_learning_decisions"
+          ? [...rows].sort((a, b) => ["plan", "session", "activity"].indexOf(String(a.layer)) - ["plan", "session", "activity"].indexOf(String(b.layer)))
+          : rows;
+        for (const row of orderedRows) {
           if (!row || typeof row !== "object") continue;
           const payload = filterPayload(tx as unknown as Sql, table, row, workspaceId);
           if (!payload) continue;

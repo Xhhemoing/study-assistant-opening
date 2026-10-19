@@ -10,6 +10,7 @@ import { ui } from "../design/ui";
 import { FocusTimer } from "./focus-timer";
 import { OpeningMobileNavigation } from "./mobile-navigation";
 import { navigationIsActive, openingNavigation } from "./navigation";
+import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 
 const icons = {
@@ -43,7 +44,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dismissedFocusPath, setDismissedFocusPath] = useState<string | null>(null);
-  const studySurface = /^\/opening\/courses\/[^/]+\/study(?:\/matrix)?\/?$/.test(pathname);
+  const studySurface = /^\/opening\/courses\/[^/]+\/study(?:\/(?:matrix|span))?\/?$/.test(pathname);
   // Entering a lesson is a layout choice, never a change to AI intervention settings.
   const effectiveFocusMode = focusMode || (studySurface && dismissedFocusPath !== pathname);
   const exitFocusMode = useCallback(() => {
@@ -124,7 +125,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   </>;
   return <>
     <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={studySurface ? "课程学习" : activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} mobileNavigation={<OpeningMobileNavigation pathname={pathname} pendingCount={pendingCount} />} settingsHref="/opening/settings" focusMode={effectiveFocusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} topbar={<>{effectiveFocusMode ? null : quickActions}<FocusTimer /><button type="button" className={`${ui.icon} relative`} aria-pressed={effectiveFocusMode} aria-label={effectiveFocusMode ? "退出专注模式" : "进入专注模式"} title={effectiveFocusMode ? "退出专注模式" : "进入专注模式"} onClick={toggleFocusMode}>{effectiveFocusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}</button></>}>
-      {logoutError ? <div className="border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700" role="alert">{logoutError}</div> : null}{children}
+      {logoutError ? <div className="border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700" role="alert">{logoutError}</div> : null}<OpeningCapabilityNotice />{children}
     </AppShell>
     <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
     <CitationReaderHost />

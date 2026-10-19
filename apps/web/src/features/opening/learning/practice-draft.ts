@@ -16,12 +16,16 @@ export function restoredPracticeAssistance(fields: Pick<PracticeFields, "assista
 }
 
 export function assertPracticeAttempt(draft: PracticeDraft, attempt: LearningAttempt, expectedRequestKey?: string) {
-  const [courseId, mode, retestId, , requirementKey] = JSON.parse(draft.scope) as unknown[];
+  const [courseId, mode, retestId, , requirementKey, , , focusSkill, focusRequirement] = JSON.parse(draft.scope) as unknown[];
   if ((expectedRequestKey && draft.start?.clientKey !== expectedRequestKey) || attempt.courseId !== courseId || (draft.attemptId && attempt.id !== draft.attemptId) || attempt.sessionId !== draft.start?.createInput?.sessionId) throw new Error("练习身份已改变，原草稿已保留。");
+  if (focusSkill && (attempt.skillLabel !== focusSkill || (attempt.requirementKey ?? null) !== focusRequirement)) throw new Error("针对练习的主题或要求已改变，原草稿已保留。");
   if (mode === "matrix") {
     const input = draft.start?.createInput?.matrixExercise;
     if (!input || !attempt.matrixExercise || attempt.matrixExercise.exerciseKey !== input.exerciseKey || attempt.matrixExercise.variant !== input.variant || !attempt.sourceIds.includes(input.sourceId)) throw new Error("矩阵题目已改变，原答案已保留，请到课程历史核对。");
-  } else if (attempt.matrixExercise || (retestId && attempt.requirementKey !== requirementKey)) throw new Error("练习要求已改变，原草稿已保留。");
+  } else if (mode === "span") {
+    const input = draft.start?.createInput?.spanExercise;
+    if (!input || !attempt.spanExercise || attempt.spanExercise.id !== input.problemId || Number(attempt.spanExercise.version) !== input.version || !attempt.sourceIds.includes(input.sourceId)) throw new Error("span题目已改变，首答与请求已保留。");
+  } else if (attempt.spanExercise || attempt.matrixExercise || (retestId && attempt.requirementKey !== requirementKey)) throw new Error("练习要求已改变，原草稿已保留。");
 }
 
 function browserStorage(): Storage | null {

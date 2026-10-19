@@ -54,7 +54,7 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(36);
+    expect(Object.keys(snapshot.tables)).toHaveLength(39);
     expect(sql.calls.some((call) => /(?:FROM|JOIN)\s+(?:opening_tutor_jobs|opening_jobs|opening_outbox|opening_budget_reservations|sessions)(?:\s|$)/.test(call.query))).toBe(false);
   });
 
@@ -140,4 +140,50 @@ it("retains each observation workspace revision as a portable number", async () 
   });
   const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
   expect(snapshot.tables.opening_learning_observations).toMatchObject([{ id: candidateId, workspace_history_revision: 7 }]);
+});
+
+
+it("retains generated non-session Study receipts and their three visibility timestamps", async () => {
+  const exposure = { id: candidateId, workspace_id: workspaceId, owner_user_id: ownerUserId, session_id: null, turn_id: null,
+    attempt_id: null, item_version_id: null, delivered: false, release_key: "generated-receipt", context_anchor: { purpose: "learning_help" },
+    generated_at: "2026-10-19T10:00:00Z", released_at: null, acknowledged_at: null, workspace_history_revision: null };
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.includes("FROM opening_help_exposures")) return [exposure];
+    return [];
+  });
+  const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+  expect(snapshot.tables.opening_help_exposures).toEqual([exposure]);
+  const help = sql.calls.find(call => call.query.includes("FROM opening_help_exposures"));
+  expect(help?.query).toContain("LEFT JOIN opening_learning_sessions");
+  expect(snapshot.tables.opening_learning_decisions).toEqual([]);
+  expect(snapshot.tables.opening_learning_shadow_predictions).toEqual([]);
+});
+
+it("never reads private intent text for a session excluded by the existing source closure", async () => {
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.includes("SELECT id, session_id, activity_id, attempt_id, version FROM opening_study_intent_events")) {
+      return [{ id: candidateId, session_id: "excluded-session", activity_id: "excluded-activity", attempt_id: null, version: 1 }];
+    }
+    if (call.query.includes("payload, resulting_intent, action, created_at FROM opening_study_intent_events")) throw new Error("private event text must never be queried");
+    return [];
+  });
+  const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+  expect(snapshot.tables.opening_study_intent_events).toEqual([]);
+  expect(sql.calls.some(call => call.query.includes("payload, resulting_intent, action, created_at FROM opening_study_intent_events"))).toBe(false);
+});
+
+it("refuses a retained intent chain before reading text when a referenced attempt was privacy-filtered", async () => {
+  const activityId = "a0000000-0000-4000-8000-000000000001", sessionId = "a0000000-0000-4000-8000-000000000002";
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.trim().startsWith("SELECT a.id, a.workspace_id, a.owner_user_id, a.course_id, a.status")) return [{ id: activityId, workspace_id: workspaceId, owner_user_id: ownerUserId }];
+    if (call.query.trim().startsWith("SELECT l.id, l.workspace_id, l.owner_user_id")) return [{ id: sessionId, workspace_id: workspaceId, owner_user_id: ownerUserId, activity_id: activityId }];
+    if (call.query.includes("SELECT id, session_id, activity_id, attempt_id, version FROM opening_study_intent_events")) return [{ id: candidateId, session_id: sessionId, activity_id: activityId, attempt_id: "excluded-attempt", version: 1 }];
+    if (call.query.includes("payload, resulting_intent, action, created_at FROM opening_study_intent_events")) throw new Error("private event text must never be queried");
+    return [];
+  });
+  await expect(readOpeningBackupRecords(sql, { workspaceId, ownerUserId })).rejects.toThrow("incomplete after privacy filtering");
+  expect(sql.calls.some(call => call.query.includes("payload, resulting_intent, action, created_at FROM opening_study_intent_events"))).toBe(false);
 });

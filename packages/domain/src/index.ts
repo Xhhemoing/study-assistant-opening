@@ -496,3 +496,20 @@ export { reportExamBkt } from "./opening/exam-sprint/analytics";
 export { forecastExamTopics } from "./opening/exam-sprint/forecast";
 export * from "./opening/evaluation/exam-choice-evaluator";
 export { sameKnowledgeNodeIdentity } from "./opening/knowledge-node-identity";
+
+export * from "./opening/span-verifier";
+
+export * from "./opening/span-teaching";
+
+export * from "./opening/span-teaching-catalog";
+
+export * from "./opening/learner-state";
+
+export * from "./opening/learning-decision";
+
+export * from "./opening/learner-shadow-predictions";
+
+export * from "./opening/evidence-transfer-eligibility";
+
+export * from "./opening/study-language-support";
+export * from "./opening/study-intent-instruction";

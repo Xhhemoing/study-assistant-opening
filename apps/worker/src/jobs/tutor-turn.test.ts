@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
-import type { ConversationPlanningContext, SourceChunk } from "@aistudy/contracts";
+import type { ConversationPlanningContext, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
@@ -55,6 +55,73 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it.each(["hint", "explain", "listen", "think_together"])("generates a context-only receipt in %s mode without claiming delivery", async mode => {
+    const { deps, tutorJobs } = setup({ claim: { ...claimedJob, mode } });
+    const selected = { ...turn, mode, sourceVersions: { [chunkA.sourceId]: 0 },
+      contextAnchor: { purpose: "material_read" as const, sourceId: chunkA.sourceId, sourceVersion: 0, chunkId: chunkA.id, page: 1 } };
+    tutorJobs.getUserTurn.mockResolvedValueOnce(selected);
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      generatedExposure: expect.objectContaining({ releaseKey: `assistant:${claimedJob.assistantTurnId}`, contextAnchor: selected.contextAnchor,
+        origin: "assistant", kind: mode === "explain" ? "solution" : "hint" }),
+    }));
+    expect(tutorJobs.completeTurn.mock.calls[0]?.[0]).not.toHaveProperty("helpExposure");
+  });
+
+  it("serves deterministic language help without sending a model request", async () => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const selected = { ...turn, sourceVersions: { [chunkA.sourceId]: 0 }, languageSupportQuestion: "判断 u 是否属于 span{v,w}。",
+      contextAnchor: { purpose: "language_support" as const, sourceId: chunkA.sourceId, sourceVersion: 0 } };
+    tutorJobs.getUserTurn.mockResolvedValueOnce(selected);
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining(selected.languageSupportQuestion),
+      generatedExposure: expect.objectContaining({ supportDomain: "language", kind: "hint" }) }));
+  });
+
+  it("applies the server session's latest explicit presentation preferences to the actual model input", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const studyIntent: StudyIntentEvent = { id: chunkA.id, sessionId: claimedJob.conversationId, activityId: claimedJob.conversationId, attemptId: null,
+      version: 3, change: { kind: "explicit_request", text: "用英文，只给关键步骤，每步等我" }, signals: [], action: "continue", createdAt: "2026-10-19T00:00:00.000Z",
+      intent: { purpose: "review", timeBudgetMinutes: 10, language: "en", pace: "fast", continuous: false, selfReportedFatigue: "unknown", explanationStyle: "key_steps" } };
+    const selected = { ...turn, sourceVersions: { [chunkA.sourceId]: 0 }, studyIntent };
+    tutorJobs.getUserTurn.mockResolvedValueOnce(selected);
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const input = provider.complete.mock.calls[0]?.[0];
+    expect(input.instruction).toContain("Use English");
+    expect(input.instruction).toContain("只给关键步骤");
+    expect(input.instruction).toContain("每次一小步后停下");
+    expect(input.instruction.indexOf("本轮已确认的会话呈现偏好")).toBeGreaterThan(input.instruction.indexOf("完整答案"));
+  });
+
+  it("uses the lease-checked typed intent result before constructing the provider instruction", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const applyUserTurnIntent = vi.fn(async () => ({ intent: { purpose: "confused" as const, timeBudgetMinutes: 10,
+      language: "zh" as const, pace: "slow" as const, continuous: false, selfReportedFatigue: "unknown" as const }, action: "diagnose" as const }));
+    await createTutorTurnHandler({ ...deps, tutorJobs: { ...tutorJobs, applyUserTurnIntent } })(claimedJob.id);
+    expect(applyUserTurnIntent).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      { userTurnId: claimedJob.userTurnId, jobId: claimedJob.id, claimToken: undefined });
+    expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("放慢节奏");
+    expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("先定位不懂之处");
+  });
+
+  it.each(["query", "explain_state", "plan", "language_support"] as const)("does not parse %s content as a learning intent mutation", async purpose => {
+    const { deps, tutorJobs } = setup();
+    const applyUserTurnIntent = vi.fn(async () => null);
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, text: "为什么刚才快速串讲", sourceVersions: { [chunkA.sourceId]: 0 },
+      ...(purpose === "language_support" ? { contextAnchor: { purpose } } : { purpose }) });
+    const authorization = { purpose: "system_record_lookup" as const, workspaceId: claimedJob.workspaceId,
+      principalId: claimedJob.ownerUserId, role: "workspace_owner" as const, permissionRevision: "owner-fixture" };
+    await createTutorTurnHandler({ ...deps, tutorJobs: { ...tutorJobs, applyUserTurnIntent },
+      systemQuery: { enabled: () => true, reply: async () => ({ text: "Read-only reply", contextSourceRefs: [], privacyEpoch: 0,
+        receipt: { authorization, version: "study-query-v1", asOf: "2026-10-19T00:00:00Z", privacyEpoch: 0,
+          mode: "deterministic", status: "unknown", reason: "no record", results: [] } }) },
+      proposals: { reply: async () => ({ text: "Draft only", proposal: {}, privacyEpoch: 0, contextSourceRefs: [] }) },
+    })(claimedJob.id);
+    expect(applyUserTurnIntent).not.toHaveBeenCalled();
+  });
 
   // These doubles represent a claim already granted by the repository. They
   // cover the defensive settled-ledger branch, not a public retry/requeue API.
@@ -119,7 +186,7 @@ describe("tutor turn handler", () => {
     const { deps, provider, tutorJobs } = setup();
     const image = { mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: chunkA.sourceId, physicalPage: 1 };
     const pageImages = vi.fn(async () => [image]);
-    await createTutorTurnHandler({ ...deps, resolveModel: async () => ({ provider, supportsVision: true, modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 }, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }), pageImages })(claimedJob.id);
+    await createTutorTurnHandler({ ...deps, resolveModel: async () => ({ provider, supportsVision: true, modelSnapshot: { id: "visual", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }), pageImages })(claimedJob.id);
     expect(pageImages).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: claimedJob.workspaceId }), expect.objectContaining({ sourceIds: [chunkA.sourceId], sourceVersions: { [chunkA.sourceId]: 0 }, physicalPage: 1 }));
     expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [image] });
     expect(tutorJobs.completeTurn).toHaveBeenCalled();
@@ -149,7 +216,7 @@ describe("tutor turn handler", () => {
       ...deps,
       resolveModel: async () => ({
         provider, supportsVision: true,
-        modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+        modelSnapshot: { id: "visual", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
         inputCentsPerMillion: 100, outputCentsPerMillion: 200,
       }),
       pageImages,

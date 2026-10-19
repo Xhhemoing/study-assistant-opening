@@ -1,3 +1,4 @@
+import { NativePdfPreview } from "./native-pdf-preview";
 import type { SourceRecord } from "@aistudy/contracts";
 import { z } from "zod";
 import { sourceStatusLabel } from "./upload-state";
@@ -140,20 +141,18 @@ function SourcePreviewPane({
   mime,
   previewHref,
   name,
+  fillHeight,
+  toolsOpen,
 }: {
   mime: string;
   previewHref: string;
   name: string;
+  fillHeight?: boolean;
+  toolsOpen?: boolean;
 }) {
   const kind = sourcePreviewKind(mime);
   if (kind === "pdf") {
-    return (
-      <iframe
-        title={`${name} 预览`}
-        src={previewHref}
-        className="h-[calc(100dvh-15rem)] min-h-80 w-full rounded-md border border-zinc-200 bg-zinc-50"
-      />
-    );
+    return <NativePdfPreview href={previewHref} name={name} fillHeight={fillHeight} toolsOpen={toolsOpen} />;
   }
   if (kind === "image") {
     return (
@@ -177,6 +176,8 @@ export function SourceViewer({
   download,
   page,
   hideHeading = false,
+  fillHeight = false,
+  toolsOpen = false,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version"> &
     Partial<Pick<SourceRecord, "mime">>;
@@ -187,6 +188,8 @@ export function SourceViewer({
   /** Physical page to prefer in open-original / viewer copy. */
   page?: number | null;
   hideHeading?: boolean;
+  fillHeight?: boolean;
+  toolsOpen?: boolean;
 }) {
   const currentVersion = Math.max(latestRecord.version, download.currentVersion);
   const versionMismatch = download.versionMismatch || currentVersion !== requestedVersion;
@@ -202,31 +205,42 @@ export function SourceViewer({
   const previewable = sourcePreviewKind(mime) != null;
   const previewHref = sourcePreviewHref(record.id, download.version, page);
   return (
-    <section className="space-y-3 bg-white" aria-label="材料原件">
+    <section className={fillHeight ? "flex min-h-0 flex-1 flex-col gap-2 bg-white" : "space-y-3 bg-white"} aria-label="材料原件">
       {!hideHeading ? <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2> : null}
-      <p className="text-sm text-zinc-700">{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
-      <p className="text-xs text-zinc-600">{copy}</p>
-      {sourcePreviewKind(mime) === "pdf" && page != null ? <p className="text-xs text-amber-800">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
-      <div className="flex flex-wrap gap-2">
-        {previewable ? (
-          <a className={ui.secondary} href={previewHref} target="_blank" rel="noreferrer">
-            在新窗口预览
-            {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
-          </a>
-        ) : null}
-        <a
-          className={previewable ? ui.secondary : ui.primary}
-          href={href}
-          rel="noreferrer"
-          download
-        >
-          打开原件 v{download.version}
-          {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
-        </a>
+      <div className="shrink-0 text-xs text-zinc-600">
+        <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <p className={versionMismatch ? "text-amber-800" : ""}>{copy}</p>
+          {!versionMismatch && latestRecord.parseState !== "ready" ? <span role="status">{sourceStatusLabel(latestRecord)}</span> : null}
+          <details open={!previewable} className="min-w-0 max-w-full">
+            <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-emerald-800 focus-visible:ring-2 focus-visible:ring-emerald-700">原件与处理信息</summary>
+            <div className="max-h-36 space-y-2 overflow-y-auto overscroll-contain py-2">
+              <p>{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
+              {sourcePreviewKind(mime) === "pdf" ? <p className="text-amber-800">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
+              <div className="flex flex-wrap gap-2">
+                {previewable ? (
+                  <a className={ui.secondary} href={previewHref} target="_blank" rel="noreferrer">
+                    在新窗口预览
+                    {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
+                  </a>
+                ) : null}
+                <a
+                  className={previewable ? ui.secondary : ui.primary}
+                  href={href}
+                  rel="noreferrer"
+                  download
+                >
+                  打开原件 v{download.version}
+                  {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
+                </a>
+              </div>
+
+            </div>
+          </details>
+        </div>
       </div>
       {previewable ? (
-        <div className="space-y-2" aria-label="原件预览">
-          <SourcePreviewPane mime={mime} previewHref={previewHref} name={latestRecord.name} />
+        <div className={fillHeight ? "flex min-h-0 flex-1 flex-col" : "space-y-2"} aria-label="原件预览">
+          <SourcePreviewPane mime={mime} previewHref={previewHref} name={latestRecord.name} fillHeight={fillHeight} toolsOpen={toolsOpen} />
         </div>
       ) : null}
     </section>

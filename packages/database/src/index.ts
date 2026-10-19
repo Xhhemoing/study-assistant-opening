@@ -242,3 +242,25 @@ export { createOpeningExamReviewsRepository } from "./repositories/opening-exam-
 export * from "./schema/opening-exam-forecast";
 export { createOpeningExamForecastRepository } from "./repositories/opening-exam-forecast";
 export { readOpeningExamPublicSource } from "./repositories/opening-exam-public-source";
+
+export * from "./repositories/opening-study-context";
+
+export * from "./repositories/opening-learner-state-read";
+
+export * from "./repositories/opening-learning-decisions";
+
+export * from "./schema/opening-learning-decisions";
+
+export * from "./repositories/opening-study-exposure";
+export * from "./repositories/opening-study-intent-events";
+export * from "./schema/opening-study-intent-events";
+
+export * from "./repositories/opening-learner-shadow-predictions";
+
+export * from "./repositories/opening-assistant-proposals";
+
+export { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./repositories/opening-learning-facts";
+
+export * from "./repositories/opening-content-delivery";
+
+export * from "./schema/opening-assistant-proposals";

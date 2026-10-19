@@ -18,7 +18,7 @@ export function retainCompleteObservationChains(tables: LearningTables, lineage:
     const attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
     tables.opening_turns = tables.opening_turns.filter(row => row.attempt_id == null || attemptIds.has(row.attempt_id));
     const turnIds = new Set(tables.opening_turns.map(row => row.id));
-    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => turnIds.has(row.turn_id) && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
+    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(row.turn_id)) && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
     tables.opening_learning_observations = tables.opening_learning_observations.filter(row => (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.source_turn_ids as string[]).every(turn => turnIds.has(turn)));
   }

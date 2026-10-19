@@ -1,3 +1,4 @@
+import { acknowledgeStudyExposureHeaders } from "../opening/assistant/study-exposure-ack";
 export type EditorBlock = {
   id: string;
   type: string;
@@ -92,6 +93,7 @@ export function createEditorApi(fetchImpl: FetchImpl = fetch) {
         response.status,
       );
     }
+    if (body !== null) acknowledgeStudyExposureHeaders(response, fetchImpl);
     return body as T;
   }
 

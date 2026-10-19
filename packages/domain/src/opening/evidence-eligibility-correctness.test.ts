@@ -106,3 +106,12 @@ describe("evaluateEvidenceEligibility correctness", () => {
     expect(result.verifiedCorrect).toBe("unknown");
     expect(result.usableForDelayedCheck).toBe("unknown");
   });
+
+it("requires the span verifier's complete core evidence before accepting its correct verdict", () => {
+  const answer = { ...observation, observationId: "observation-span", verdictSource: "deterministic" as const };
+  const serverEvaluation = { observationId: "observation-span", attemptId: answer.attemptId!, problemId: answer.problemId!, itemVersionId: answer.itemVersionId!,
+    requirementKey: answer.requirementKey!, evaluatorVersion: "span-exact-v1" as const, specVersion: "span-v1" as const,
+    decision: "correct" as const, outcome: "correct" as const, reasonCodes: [], evaluatedAt: "2026-10-19T00:00:00.000Z" };
+  expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation }).verifiedCorrect).toBe("unknown");
+  expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation: { ...serverEvaluation, coreEvidenceComplete: true } }).verifiedCorrect).toBe("yes");
+});

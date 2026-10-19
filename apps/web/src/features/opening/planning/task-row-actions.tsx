@@ -2,6 +2,7 @@
 
 import { createContext, useContext } from "react";
 import Link from "next/link";
+import { studyConversationHref } from "../assistant/study-conversation-context";
 import type { StudyTask } from "./study-task";
 import { isRetestOriginTask } from "./task-status-control";
 import { ui } from "../design/ui";
@@ -16,5 +17,5 @@ export function TaskRowActions({ task }: { task: StudyTask }) {
     return <Link className={`${ui.secondary} mb-2`} href="/opening/cards">开始卡片复习</Link>;
   }
   if (!action) return null;
-  return <button type="button" className={`${ui.secondary} mb-2`} disabled={action.busy} onClick={() => action.start(task)}>开始任务主讲</button>;
+  return <div className="flex flex-wrap gap-2"><Link className={`${ui.quiet} mb-2`} href={studyConversationHref({ courseId: task.courseId ?? undefined, purpose: "task_start", label: task.title.slice(0, 160), fragment: `任务：${task.title}。预计 ${task.minutes} 分钟。`.slice(0, 4000), returnTo: "/opening/today" })}>先问问这项任务</Link><button type="button" className={`${ui.secondary} mb-2`} disabled={action.busy} onClick={() => action.start(task)}>开始任务主讲</button></div>;
 }

@@ -1,6 +1,7 @@
+import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
-import { parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
-import type { LearningSql } from "./opening-learning-facts";
+import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
+import { mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
 
 type Row = Record<string, unknown>;
@@ -54,6 +55,29 @@ function examAnswerUnchanged(record: LearningObservation, chain: readonly Row[],
   return null;
 }
 
+function answerEventRevision(record: LearningObservation, chain: readonly Row[]): number | null {
+  const rows = new Map(chain.map(row => [String(row.id), row]));
+  const seen = new Set<string>();
+  let current = rows.get(record.id);
+  while (current) {
+    if (seen.has(String(current.id))) return null;
+    seen.add(String(current.id));
+    const previous = rows.get(String(current.revises_observation_id));
+    if (!previous || current.answer !== previous.answer) {
+      const revision = Number(current.workspace_history_revision);
+      return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+    }
+    current = previous;
+  }
+  return null;
+}
+
+function catalogueSpec(value: unknown) {
+  const matrix = parseCanonicalMatrixExercise(value);
+  if (matrix) return matrix;
+  return parseOpeningSpanExercise(value) ? value as Record<string, unknown> : null;
+}
+
 function references(row: { sourceIds: readonly string[]; sourceVersions?: Record<string, number> | null; referenceSourceId?: string | null; referenceCheck?: { referenceId?: string | null } | null }): string[] {
   return [...new Set([...row.sourceIds, ...Object.keys(row.sourceVersions ?? {}),
     ...[row.referenceSourceId, row.referenceCheck?.referenceId].filter((id): id is string => Boolean(id))])].sort();
@@ -61,7 +85,7 @@ function references(row: { sourceIds: readonly string[]; sourceVersions?: Record
 
 /** One bounded set of queries for the whole batch, including fixed-R historical heads. */
 export async function readOpeningLearningEvidenceContexts(
-  db: LearningSql, scope: Scope, records: readonly LearningObservation[],
+  db: LearningSql, scope: Scope, records: readonly LearningObservation[], includeRetestProtocols = true,
 ): Promise<Record<string, OpeningEvidenceInput>> {
   if (!records.length) return {};
   const sessionIds = [...new Set(records.map(row => row.sessionId))];
@@ -69,17 +93,65 @@ export async function readOpeningLearningEvidenceContexts(
   const problemIds = [...new Set(records.flatMap(row => row.problemId ? [row.problemId] : []))];
   const rootIds = [...new Set(records.map(row => row.rootObservationId ?? row.id))];
   const itemIds = [...new Set(records.flatMap(row => row.itemVersionId ? [row.itemVersionId] : []))];
+  const answerConditions = attemptIds.length ? await db`SELECT attempt_id,
+      bool_or(COALESCE(payload->'signals' ? 'copied_answer',FALSE)) AS copied_answer,
+      bool_or(COALESCE(payload->'signals' ? 'guessed',FALSE)) AS reported_guess
+    FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND attempt_id=ANY(${attemptIds}::uuid[]) GROUP BY attempt_id` : [];
+  const recordSourceIds = [...new Set(records.flatMap(row => [...row.sourceIds]))];
+  const skillLabels = [...new Set(records.map(row => row.skillLabel))];
   const sessions = await db`SELECT id,course_id FROM opening_learning_sessions
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id =ANY(${sessionIds}::uuid[])`;
   const origins = new Map(sessions.map(row => [String(row.id), String(row.course_id)]));
   const courseIds = [...new Set(origins.values())];
-  const help = courseIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,l.course_id
-    FROM opening_help_exposures h JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
-    WHERE h.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id =ANY(${courseIds}::uuid[])
+  const help = courseIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,h.workspace_history_revision,h.support_domain,h.context_anchor,h.release_intent,COALESCE(h.course_id,l.course_id) AS course_id
+    FROM opening_help_exposures h LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
+    WHERE h.workspace_id=${scope.workspaceId} AND COALESCE(h.owner_user_id,l.owner_user_id)=${scope.ownerUserId}
+      AND h.delivered=TRUE AND (COALESCE(h.course_id,l.course_id) =ANY(${courseIds}::uuid[]) OR (h.course_id IS NULL AND h.session_id IS NULL))
       AND (${attemptIds.length ? db`h.attempt_id =ANY(${attemptIds}::uuid[])` : db`FALSE`}
         OR ${problemIds.length ? db`h.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`}
-        OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id =ANY(${sessionIds}::uuid[])))
+        OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id =ANY(${sessionIds}::uuid[]))
+        OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND EXISTS(SELECT 1 FROM opening_learning_item_versions v
+          WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+            AND v.source_id::text=h.context_anchor->>'sourceId' AND v.source_version::text=h.context_anchor->>'sourceVersion'
+            AND (h.context_anchor->>'page' IS NULL OR v.physical_page::text=h.context_anchor->>'page')
+            AND (h.context_anchor->>'chunkId' IS NULL OR v.chunk_id::text=h.context_anchor->>'chunkId'))
+          OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.release_intent->'originReference'->>'skillLabel'=ANY(${skillLabels}::text[])
+            AND EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(h.release_intent->'originReference'->'sourceRefs','[]'::jsonb)) ref
+              WHERE ref->>'sourceId'=ANY(${recordSourceIds}::text[])))))
     ORDER BY h.created_at,h.id` : [];
+  const retestIds = [...new Set(records.flatMap(record => record.retestId ? [record.retestId] : []))];
+  const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,
+      j.payload->'spanDelayedProtocol' AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,
+      baseline.course_id AS baseline_course_id,baseline.requirement_key AS baseline_requirement_key,
+      root.id AS baseline_root_id,COALESCE(root.effective_head_id,root.id)=baseline.id AND COALESCE(baseline.revision_kind,'original')<>'retract' AS baseline_current
+    FROM opening_retest_activities r JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
+    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+      AND baseline.workspace_id=r.workspace_id AND baseline.owner_user_id=r.owner_user_id
+    JOIN opening_learning_observations root ON root.id=COALESCE(baseline.root_observation_id,baseline.id)
+      AND root.workspace_id=baseline.workspace_id AND root.owner_user_id=baseline.owner_user_id
+    WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.purpose='retest'
+      AND (r.id=ANY(${retestIds}::uuid[]) OR r.candidate_id=ANY(${retestIds}::uuid[]))` : [];
+  const baselineRecords = [...new Map(retestProtocols.map(row => [String(row.baseline_id), mapLearningObservation(row.baseline_record as Row)])).values()];
+  const baselineEvidence = baselineRecords.length ? await readOpeningLearningEvidenceContexts(db, scope, baselineRecords, false) : {};
+  const baselineEligibility = new Map(Object.entries(baselineEvidence).map(([id, evidence]) => [id, evaluateEvidenceEligibility(evidence.observation, evidence.context)]));
+  const intervalExposures = retestProtocols.length ? await db`SELECT r.id AS retest_id,o.id AS observation_id,count(h.id)::int AS recorded_count,
+      (SELECT count(*)::int FROM opening_learning_attempts practice WHERE practice.workspace_id=o.workspace_id AND practice.owner_user_id=o.owner_user_id
+        AND practice.course_id=o.course_id AND practice.requirement_key IS NOT DISTINCT FROM o.requirement_key AND practice.id<>o.attempt_id
+        AND practice.started_at>baseline.recorded_at AND practice.started_at<=o.started_at) AS recorded_practice_count
+    FROM opening_learning_observations o JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
+    JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
+    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+      AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
+    LEFT JOIN opening_help_exposures h ON h.workspace_id=o.workspace_id AND COALESCE(h.owner_user_id,
+        (SELECT l.owner_user_id FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id))=o.owner_user_id
+      AND h.delivered=TRUE AND h.support_domain<>'language' AND (h.course_id IS NULL OR h.course_id=o.course_id) AND COALESCE(h.released_at,h.delivered_at)>baseline.recorded_at AND COALESCE(h.released_at,h.delivered_at)<=o.started_at
+      AND (h.attempt_id=o.attempt_id OR h.problem_id=o.problem_id OR h.context_anchor->>'sourceId'=ANY(o.source_ids::text[])
+        OR h.release_intent->'originReference'->>'skillLabel'=o.skill_label
+        OR EXISTS(SELECT 1 FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id
+          AND l.course_id=o.course_id AND l.skill_label=o.skill_label))
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND o.id=ANY(${records.map(record => record.id)}::uuid[])
+    GROUP BY r.id,o.id,baseline.recorded_at` : [];
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
   // Keep the immutable exposure/protocol link even if the observation is revised.
   const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
@@ -111,7 +183,7 @@ export async function readOpeningLearningEvidenceContexts(
     level: row.kind === "solution" ? "revealed" : "hinted", delivered: true,
     delivered_at: row.delivered_at, history_revision: row.history_revision,
   }));
-  const chain = await db`SELECT id,root_observation_id,revises_observation_id,answer,recorded_at,source_ids,source_versions,reference_source_id,reference_check
+  const chain = await db`SELECT id,root_observation_id,revises_observation_id,answer,recorded_at,workspace_history_revision,source_ids,source_versions,reference_source_id,reference_check
     FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
       AND COALESCE(root_observation_id,id) =ANY(${rootIds}::uuid[])`;
   const chains = new Map<string, Row[]>();
@@ -137,7 +209,7 @@ export async function readOpeningLearningEvidenceContexts(
   const versions = sourceIds.length ? await db`SELECT source_id,version,availability FROM opening_source_versions
     WHERE workspace_id=${scope.workspaceId} AND source_id =ANY(${sourceIds}::uuid[])` : [];
   const unavailableVersions = new Set(versions.filter(row => row.availability === "unavailable").map(row => `${row.source_id}:${row.version}`));
-  const items = itemIds.length ? await db`SELECT v.id,p.problem_id,v.course_id,v.evaluation_spec FROM opening_learning_item_versions v
+  const items = itemIds.length ? await db`SELECT v.id,p.problem_id,v.course_id,v.evaluation_spec,v.source_id,v.source_version,v.physical_page,v.chunk_id FROM opening_learning_item_versions v
     LEFT JOIN opening_problem_refs p ON p.problem_id=v.problem_id AND p.workspace_id=v.workspace_id
       AND p.source_id=v.source_id AND p.source_version=v.source_version AND p.stem_snapshot=v.stem_snapshot
       AND p.chunk_id IS NOT DISTINCT FROM v.chunk_id AND p.physical_page IS NOT DISTINCT FROM v.physical_page AND p.artifact_kind=v.artifact_kind
@@ -148,7 +220,7 @@ export async function readOpeningLearningEvidenceContexts(
     return spec ? [[String(row.id), spec] as const] : [];
   }));
   const catalogueItems = new Map(items.flatMap(row => {
-    const spec = parseCanonicalMatrixExercise(row.evaluation_spec);
+    const spec = catalogueSpec(row.evaluation_spec);
     return spec && row.course_id ? [[String(row.id), { spec, courseId: String(row.course_id) }] as const] : [];
   }));
   const catalogueSpecs = [...new Map([...catalogueItems.values()].map(item => [JSON.stringify(item.spec), item.spec])).values()];
@@ -168,7 +240,7 @@ export async function readOpeningLearningEvidenceContexts(
   ) SELECT * FROM ranked WHERE feedback_rank<=2` : [];
   const feedbackByCatalogue = new Map<string, Row[]>();
   for (const row of automaticFeedback) {
-    const spec = parseCanonicalMatrixExercise(row.evaluation_spec);
+    const spec = catalogueSpec(row.evaluation_spec);
     if (!spec) continue;
     const key = `${row.course_id}:${JSON.stringify(spec)}`;
     const entries = feedbackByCatalogue.get(key) ?? [];
@@ -194,13 +266,28 @@ export async function readOpeningLearningEvidenceContexts(
   const add = (map: Map<string, Row[]>, key: string, row: Row) => { const entries = map.get(key) ?? []; entries.push(row); map.set(key, entries); };
   for (const row of [...help, ...examHelp]) {
     if (row.attempt_id) add(helpByAttempt, `${row.course_id}:${row.attempt_id}`, row);
-    if (row.problem_id) add(helpByProblem, `${row.course_id}:${row.problem_id}`, row);
+    if (row.problem_id && !(row.release_intent as { originReference?: { possibleOpenAttemptOnly?: boolean } } | null)?.originReference?.possibleOpenAttemptOnly) add(helpByProblem, `${row.course_id}:${row.problem_id}`, row);
     if (row.attempt_id == null && row.problem_id == null) add(legacyHelp, String(row.session_id), row);
   }
   const result: Record<string, OpeningEvidenceInput> = {};
   for (const record of records) {
     const origin = origins.get(record.sessionId);
+    const item = items.find(row => row.id === record.itemVersionId);
+    const sourceHelp = item ? help.filter(row => {
+      if (row.attempt_id != null || row.problem_id != null || row.course_id != null && row.course_id !== record.courseId) return false;
+      const anchor = row.context_anchor as { sourceId?: string; sourceVersion?: number; page?: number | null; chunkId?: string | null } | null;
+      return anchor != null && anchor.sourceId === item.source_id && anchor.sourceVersion === Number(item.source_version)
+        && (anchor.page == null || anchor.page === item.physical_page) && (anchor.chunkId == null || anchor.chunkId === item.chunk_id);
+    }) : [];
+    const uncertainSourceHelp = help.filter(row => {
+      if (row.attempt_id != null || row.problem_id != null || row.course_id != null && row.course_id !== record.courseId) return false;
+      const ref = (row.release_intent as { originReference?: { skillLabel?: string; requirementKey?: string; sourceRefs?: Array<{ sourceId: string; sourceVersion: number | null }> } } | null)?.originReference;
+      return ref?.skillLabel === record.skillLabel && (!ref.requirementKey || ref.requirementKey === record.requirementKey)
+        && Boolean(ref.sourceRefs?.some(source => record.sourceIds.includes(source.sourceId)
+          && (source.sourceVersion == null || source.sourceVersion === record.sourceVersions?.[source.sourceId])));
+    });
     const history = [...new Map([
+      ...sourceHelp, ...uncertainSourceHelp,
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []),
@@ -236,17 +323,23 @@ export async function readOpeningLearningEvidenceContexts(
     }
     const observation: EvidenceObservation = {
       observationId: record.id, attemptId: record.attemptId ?? null, problemId: record.problemId ?? null, itemVersionId: record.itemVersionId ?? null,
+      assessmentDomain: record.requirementKey?.startsWith("language:") ? "language" : "math",
       courseId: record.courseId, requirementKey: record.requirementKey ?? null,
       startedAt: record.startedAt ? Date.parse(record.startedAt) : null, submittedAt: record.submittedAt ? Date.parse(record.submittedAt) : null,
       assistance: record.assistance, outcome: record.outcome, verdictSource: record.verdictSource,
     };
+    const declaredConditions = answerConditions.find(row => row.attempt_id === record.attemptId);
     const context: EvidenceEligibilityContext = {
+      selfReportedAnswerConditions: { copiedAnswer: declaredConditions?.copied_answer === true, reportedGuess: declaredConditions?.reported_guess === true },
       serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
       // Every existing manual-check write is learner-owned. Persisted JSON and
       // historical checker ids cannot grant independent-review authority.
       referenceCheckAuthority: "learner",
       helpHistory: { complete: Boolean(record.attemptId), exposures: history.map(row => ({
-        attemptId: row.attempt_id as string | null, problemId: row.problem_id as string | null,
+        ...(row.support_domain === "language" || row.support_domain === "math" || row.support_domain === "unknown" ? { supportDomain: row.support_domain } : {}),
+        ...(row.workspace_history_revision != null && answerEventRevision(record, chains.get(record.rootObservationId ?? record.id) ?? []) != null
+          ? { serverOrder: Number(row.workspace_history_revision) < answerEventRevision(record, chains.get(record.rootObservationId ?? record.id) ?? [])! ? "before_answer" as const : "after_answer" as const } : {}),
+        attemptId: row.attempt_id as string | null, problemId: (row.release_intent as { originReference?: { possibleOpenAttemptOnly?: boolean } } | null)?.originReference?.possibleOpenAttemptOnly ? null : row.problem_id as string | null,
         level: row.level as "hinted" | "revealed",
         kind: (row.kind as "instruction" | "hint" | "solution" | "evaluation_feedback" | null | undefined) ?? "hint",
         ...(row.same_question === true ? { sameQuestion: true } : {}),
@@ -254,6 +347,31 @@ export async function readOpeningLearningEvidenceContexts(
         deliveredAt: row.delivered_at ? new Date(row.delivered_at as string | Date).getTime() : null,
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,
     };
+    if (record.retestId && record.requirementKey === SPAN_REQUIREMENT_KEY && record.attemptId) {
+      const retest = retestProtocols.find(row => row.id === record.retestId || row.candidate_id === record.retestId);
+      const protocol = retest?.protocol as { protocolId?: string; baselineObservationId?: string; baselineRootId?: string; priorAnswerPolicy?: string } | undefined;
+      const earliestAt = retest?.not_before_at == null ? NaN : new Date(retest.not_before_at as Date).getTime();
+      const baselineAt = retest?.baseline_recorded_at == null ? NaN : new Date(retest.baseline_recorded_at as Date).getTime();
+      if (retest && protocol?.protocolId === "span-delayed-3d-v1" && protocol.priorAnswerPolicy === "require_unseen_problem"
+        && protocol.baselineObservationId === retest.baseline_id && protocol.baselineRootId === retest.baseline_root_id && retest.baseline_current === true
+        && retest.course_id === record.courseId && retest.baseline_course_id === record.courseId && retest.skill_label === record.skillLabel
+        && retest.requirement_key === record.requirementKey && retest.baseline_requirement_key === record.requirementKey
+        && Number.isFinite(earliestAt) && Number.isFinite(baselineAt) && earliestAt >= baselineAt + 3 * 24 * 60 * 60 * 1000) {
+        const baseline = baselineEligibility.get(String(retest.baseline_id));
+        context.delayedCheck = { protocolId: protocol.protocolId, attemptId: record.attemptId, earliestAt, priorAnswerPolicy: "require_unseen_problem",
+          baselineEstablished: baseline?.independentAttempt === "yes" && baseline.verifiedCorrect === "yes" && baseline.usableForCurrentVersion === "yes",
+          ...(record.startedAt ? { intervalExposure: { from: baselineAt, to: Date.parse(record.startedAt), complete: false,
+            recordedCount: Number(intervalExposures.find(row => row.observation_id === record.id)?.recorded_count ?? 0),
+            recordedPracticeCount: Number(intervalExposures.find(row => row.observation_id === record.id)?.recorded_practice_count ?? 0) } } : {}) };
+      }
+    }
+    if (context.serverEvaluation?.evaluatorVersion === "span-exact-v1") {
+      const span = parseOpeningSpanExercise(item?.evaluation_spec);
+      if (!span || record.requirementKey !== SPAN_REQUIREMENT_KEY) {
+        context.serverEvaluation = null;
+        context.helpHistory!.complete = false;
+      }
+    }
     const examSpec = record.itemVersionId ? examItems.get(record.itemVersionId) : undefined;
     const examLink = record.attemptId ? examLinks.get(record.attemptId) : undefined;
     const examIdentity = (record.attemptId ? identitiesByAttempt.get(record.attemptId) : undefined)

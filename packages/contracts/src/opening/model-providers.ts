@@ -55,7 +55,28 @@ export function pricingIssue(input: {
   return input.dailyRequestCap ? null : "免费额度模型必须设置每日请求上限";
 }
 
+export const openingMediaBudgetFields = {
+  mediaInputTokenUpperBound: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  mediaMaxInputBytes: z.number().int().positive().max(104_857_600).nullable().optional(),
+  mediaInputCentsPerMillion: z.number().finite().nonnegative().nullable().optional(),
+};
+
+/** These bounds come from the supplier's context/price rules, never a byte-to-token guess. */
+export function mediaPricingIssue(input: {
+  billing?: OpeningModelBilling | undefined;
+  mediaInputTokenUpperBound?: number | null | undefined;
+  mediaMaxInputBytes?: number | null | undefined;
+  mediaInputCentsPerMillion?: number | null | undefined;
+}): string | null {
+  const values = [input.mediaInputTokenUpperBound, input.mediaMaxInputBytes, input.mediaInputCentsPerMillion];
+  if (values.every(value => value == null)) return null;
+  if (values.some(value => value == null)) return "媒体 token 上界、总字节上限和价格必须一起填写或一起清空。";
+  if ((input.billing ?? "metered") === "metered" && input.mediaInputCentsPerMillion! <= 0) return "按量计费的媒体输入价格必须大于 0。";
+  return null;
+}
+
 const modelFields = {
+  ...openingMediaBudgetFields,
   label: z.string().trim().min(1).max(120),
   modelName: z.string().trim().min(1).max(200),
   inputCentsPerMillion: z.number().finite().nonnegative(),
@@ -67,12 +88,15 @@ const modelFields = {
 };
 
 export const openingProviderModelInputSchema = z.object(modelFields).strict().superRefine((input, ctx) => {
+  const mediaIssue = mediaPricingIssue(input);
+  if (mediaIssue) ctx.addIssue({ code: "custom", path: ["mediaInputTokenUpperBound"], message: mediaIssue });
   const issue = pricingIssue(input);
   if (issue) ctx.addIssue({ code: "custom", path: ["inputCentsPerMillion"], message: issue });
 });
 export type OpeningProviderModelInput = z.infer<typeof openingProviderModelInputSchema>;
 
 export const openingModelQuickSetupInputSchema = z.object({
+  ...openingMediaBudgetFields,
   clientKey: z.string().min(8).max(120),
   label: modelFields.label,
   baseUrl: providerBaseUrlSchema,
@@ -87,6 +111,8 @@ export const openingModelQuickSetupInputSchema = z.object({
   dailyCapCents: z.number().int().nonnegative().max(2_147_483_647).nullable().optional(),
   confirmBudget: z.boolean().optional(),
 }).strict().superRefine((input, ctx) => {
+  const mediaIssue = mediaPricingIssue(input);
+  if (mediaIssue) ctx.addIssue({ code: "custom", path: ["mediaInputTokenUpperBound"], message: mediaIssue });
   const issue = pricingIssue(input);
   if (issue) ctx.addIssue({ code: "custom", path: ["inputCentsPerMillion"], message: issue });
   if ((input.billing ?? "metered") === "metered" && (!input.confirmBudget || !input.dailyCapCents)) {
@@ -106,6 +132,7 @@ export type OpeningProviderUpdate = z.infer<typeof openingProviderUpdateSchema>;
 
 /** Partial update; the merged row is re-checked with pricingIssue (and the DB CHECK). */
 export const openingProviderModelUpdateSchema = z.object({
+  ...openingMediaBudgetFields,
   label: modelFields.label.optional(),
   modelName: modelFields.modelName.optional(),
   inputCentsPerMillion: modelFields.inputCentsPerMillion.optional(),
@@ -114,7 +141,13 @@ export const openingProviderModelUpdateSchema = z.object({
   supportsAudio: z.boolean().optional(),
   billing: openingModelBillingSchema.optional(),
   dailyRequestCap: dailyRequestCapSchema.nullable().optional(),
-}).strict().refine(input => Object.keys(input).length > 0, "至少提供一个要更新的字段");
+}).strict().refine(input => Object.keys(input).length > 0, "至少提供一个要更新的字段").superRefine((input, ctx) => {
+  const count = Object.keys(openingMediaBudgetFields).filter(key => key in input).length;
+  if (count !== 0 && count !== 3) ctx.addIssue({ code: "custom", path: ["mediaInputTokenUpperBound"], message: "媒体上界三项必须一起更新。" });
+  // The repository rechecks the merged billing mode for a partial update.
+  const issue = mediaPricingIssue({ ...input, billing: input.billing ?? "free_tier" });
+  if (issue) ctx.addIssue({ code: "custom", path: ["mediaInputTokenUpperBound"], message: issue });
+});
 export type OpeningProviderModelUpdate = z.infer<typeof openingProviderModelUpdateSchema>;
 
 /** Management view: never carries the key material itself. */
@@ -132,6 +165,9 @@ export const openingProviderViewSchema = z.object({
 export type OpeningProviderView = z.infer<typeof openingProviderViewSchema>;
 
 export const openingProviderModelViewSchema = z.object({
+  mediaInputTokenUpperBound: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  mediaMaxInputBytes: z.number().int().positive().max(104_857_600).optional(),
+  mediaInputCentsPerMillion: z.number().finite().nonnegative().optional(),
   id: modelIdSchema,
   providerId: uuidSchema,
   label: z.string().min(1).max(120),

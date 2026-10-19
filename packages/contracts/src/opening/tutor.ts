@@ -1,7 +1,41 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { composerPurposeSchema } from "./composer-purpose";
 import { citationSchema, sourceChunkSchema } from "./sources";
 import { providerToolCallSchema, providerToolSchema, providerToolMessageSchema, systemQueryReceiptSchema } from "./system-query";
+
+/** Client selection; the server resolves and validates every relationship before use. */
+export const studyContextAnchorSchema = z.object({
+  courseId: uuidSchema.nullable().optional(),
+  activityId: uuidSchema.nullable().optional(),
+  blockId: uuidSchema.nullable().optional(),
+  contentVersion: z.number().int().positive().nullable().optional(),
+  attemptId: uuidSchema.nullable().optional(),
+  itemVersionId: uuidSchema.nullable().optional(),
+  sourceId: uuidSchema.nullable().optional(),
+  sourceVersion: z.number().int().nonnegative().nullable().optional(),
+  chunkId: uuidSchema.nullable().optional(),
+  page: z.number().int().positive().nullable().optional(),
+  kcMappingVersion: z.number().int().nonnegative().nullable().optional(),
+  purpose: z.enum(["learning_help", "language_support", "material_read", "note_read", "card_answer", "history_solution", "exam_help", "task_start"]),
+}).strict().superRefine((value, ctx) => {
+  if (value.blockId && (!value.activityId || value.contentVersion == null)) ctx.addIssue({ code: "custom", path: ["blockId"], message: "block requires activity and content version" });
+  if ((value.chunkId || value.sourceVersion != null || value.page != null) && !value.sourceId) ctx.addIssue({ code: "custom", path: ["sourceId"], message: "material selection requires source identity" });
+});
+export type StudyContextAnchor = z.infer<typeof studyContextAnchorSchema>;
+
+export const studyExposureReceiptSchema = z.object({
+  id: uuidSchema,
+  releaseKey: z.string().min(8).max(200),
+  contextAnchor: studyContextAnchorSchema,
+  origin: z.enum(["assistant", "material_excerpt", "note", "card_answer", "history_solution"]),
+  supportDomain: z.enum(["language", "math", "unknown"]),
+  generatedAt: isoDateTimeSchema,
+  releasedAt: isoDateTimeSchema.nullable(),
+  acknowledgedAt: isoDateTimeSchema.nullable(),
+  historyRevision: z.number().int().nonnegative(),
+}).strict();
+export type StudyExposureReceipt = z.infer<typeof studyExposureReceiptSchema>;
 
 export const tutorModeSchema = z.enum([
   "hint",
@@ -16,11 +50,19 @@ export const tutorModeSchema = z.enum([
  * currentPage/chunkId are server-validated membership selections (RU-03) —
  * never invent a page when both are absent. File selection is not page selection.
  */
+function validateSourceSelection(value: { sourceSelection?: string; sourceIds: string[]; currentPage?: number | null; chunkId?: string | null; attemptId?: string | null; contextAnchor?: { sourceId?: string | null; sourceVersion?: number | null; page?: number | null; chunkId?: string | null; attemptId?: string | null; itemVersionId?: string | null } }, ctx: z.RefinementCtx) {
+  if (value.sourceSelection === "selected" && !value.sourceIds.length) ctx.addIssue({ code: "custom", path: ["sourceIds"], message: "请先选择至少一份资料。" });
+  if ((value.sourceSelection === "none" || value.sourceSelection === "auto") && value.sourceIds.length) ctx.addIssue({ code: "custom", path: ["sourceIds"], message: "自动或不用资料时不能携带手选资料。" });
+  if (value.sourceSelection === "none" && (value.currentPage != null || value.chunkId || value.attemptId || value.contextAnchor?.sourceId || value.contextAnchor?.sourceVersion != null || value.contextAnchor?.page != null || value.contextAnchor?.chunkId || value.contextAnchor?.attemptId || value.contextAnchor?.itemVersionId)) ctx.addIssue({ code: "custom", path: ["sourceSelection"], message: "不用资料时不能指定原文位置。" });
+}
+
 export const turnInputSchema = z
   .object({
     conversationId: uuidSchema,
+    contextAnchor: studyContextAnchorSchema.optional(),
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
+    sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
     mode: tutorModeSchema,
     clientKey: z.string().min(8).max(200),
     privacy: z.enum(["saved", "ephemeral"]),
@@ -29,9 +71,10 @@ export const turnInputSchema = z
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
     strategyTemplateId: z.string().min(1).max(100).optional(),
+    purpose: composerPurposeSchema.optional(),
     querySystem: z.boolean().optional(),
   })
-  .strict();
+  .strict().superRefine(validateSourceSelection);
 
 export const providerMediaCapabilitySchema = z.enum([
   "text_only",
@@ -71,7 +114,7 @@ export const providerInputSchema = z
     imageParts: z.array(providerImagePartSchema).max(32).default([]),
     /** "answer" (default) = tutor answer shape; "json" = task-specific JSON object returned in `text`. */
     outputFormat: z.enum(["answer", "json"]).optional(),
-    tools: z.array(providerToolSchema).max(8).optional(),
+    tools: z.array(providerToolSchema).max(16).optional(),
     toolMessages: z.array(providerToolMessageSchema).max(12).optional(),
     /** Raw base64 audio (no data: prefix) for models with audio input. */
     audioParts: z.array(z.object({
@@ -179,6 +222,8 @@ export const turnRecordSchema = z
     createdAt: isoDateTimeSchema,
     mode: tutorModeSchema,
     status: turnStatusSchema,
+    contextAnchor: studyContextAnchorSchema.nullable().optional(),
+    exposureReceipt: studyExposureReceiptSchema.nullable().optional(),
     systemQuery: systemQueryReceiptSchema.nullable().optional(),
   })
   .strict();
@@ -193,6 +238,8 @@ export const budgetReservationSchema = z
   .strict();
 
 export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
+  contextAnchor: studyContextAnchorSchema.optional(),
+  exposureReceipt: studyExposureReceiptSchema.optional(),
   systemQuery: systemQueryReceiptSchema.optional(),
   provenanceId: uuidSchema.nullable().default(null),
   privacyEpoch: z.number().int().nonnegative(),
@@ -209,10 +256,14 @@ export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
 
 export const ephemeralTurnInputSchema = z
   .object({
+    contextAnchor: studyContextAnchorSchema.optional(),
+    clientKey: z.string().min(8).max(160).optional(),
+    purpose: composerPurposeSchema.optional(),
     querySystem: z.boolean().optional(),
     historyPrivacyEpoch: z.number().int().nonnegative().optional(),
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
+    sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
     mode: tutorModeSchema,
     history: z
       .array(
@@ -230,7 +281,7 @@ export const ephemeralTurnInputSchema = z
     /** Optional course scope for Package B/C pool fill when sourceIds are empty. */
     courseId: uuidSchema.nullable().optional(),
   })
-  .strict();
+  .strict().superRefine(validateSourceSelection);
 
 export const conversationCreateInputSchema = z
   .object({

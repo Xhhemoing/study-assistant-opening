@@ -17,6 +17,7 @@ export function CourseStudyContextTools({ context }: { context: TeachingToolsCon
       : !context.sourceRefs.length && context.activity.sourceIds.length ? "本讲解没有可锁定的资料版本。请打开原材料后提问，避免将旧讲解静默配给新版资料。" : undefined;
   const studyContext = { courseId: context.activity.courseId ?? undefined, activityId: context.activity.id,
     blockId: context.blockId ?? undefined, contentVersion: context.contentVersion,
+    attemptId: context.learningAttempt?.id, itemVersionId: context.learningAttempt?.itemVersionId ?? undefined, purpose: "learning_help" as const,
     label: context.unitTitle, fragment: context.unitText,
     ...(!questionBound && ref && pinned ? { sourceId: ref.sourceId, sourceVersion: version, page: ref.page ?? undefined } : {}),
   };

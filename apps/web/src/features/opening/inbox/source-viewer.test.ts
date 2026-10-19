@@ -144,7 +144,7 @@ describe("source preview panes", () => {
       download: buildSourceDownloadView(record.id, 2, 2),
     }));
     expect(html).toContain("预览");
-    expect(html).toContain(`src="${escapedPreviewHref(record.id, 2)}"`);
+    expect(html).toContain(`src="${escapedPreviewHref(record.id, 2)}#view=FitH&amp;navpanes=0"`);
     expect(html).toContain("disposition=inline");
     expect(html).toContain("<iframe");
     expect(html).toContain("打开原件 v2");

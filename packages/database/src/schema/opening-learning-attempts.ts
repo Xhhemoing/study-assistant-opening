@@ -18,6 +18,7 @@ export const openingLearningAttempts = pgTable("opening_learning_attempts", {
   problemId: uuid("problem_id"), itemVersionId: uuid("item_version_id").references(() => openingLearningItemVersions.id),
   sourceIds: uuid("source_ids").array().notNull().default([]), sourceVersions: jsonb("source_versions").notNull().default({}),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(), submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  contextAnchor: jsonb("context_anchor"),
   observationId: uuid("observation_id"), clientKey: text("client_key").notNull(), createIntent: jsonb("create_intent").notNull(), historyRevision: bigint("history_revision", { mode: "number" }).notNull(),
 }, (t) => ({ key: uniqueIndex("opening_learning_attempts_workspace_owner_key").on(t.workspaceId, t.ownerUserId, t.clientKey) }));
 export const openingSourceVersions = pgTable("opening_source_versions", {

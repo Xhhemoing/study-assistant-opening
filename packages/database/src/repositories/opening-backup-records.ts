@@ -14,6 +14,7 @@ export const OPENING_BACKUP_TABLES = [
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
   "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
   "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
+  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
 ] as const;
 export type OpeningBackupTable = (typeof OPENING_BACKUP_TABLES)[number];
 export type OpeningBackupRecordSnapshot = {

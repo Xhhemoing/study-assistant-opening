@@ -78,3 +78,41 @@ describe("composer logical-send idempotency", () => {
     expect(changed.fingerprint).not.toBe(first.fingerprint);
   });
 });
+
+it("keeps ordinary answer routing as the default inside a real practice attempt", () => {
+  const html = renderToStaticMarkup(createElement(Composer, { practiceMode: true, draft: "给我一个提示", onDraftChange: () => undefined, onSubmit: () => undefined }));
+  expect(html).toMatch(/<option value="answer" selected="">/);
+  expect(html).not.toMatch(/<option value="teach" selected="">/);
+});
+
+it("does not reuse an unconfirmed send key after changing the material intent", () => {
+  const base = { text: "explain", mode: "explain" as const, sourceIds: [] };
+  const none = logicalSendFingerprint({ ...base, sourceSelection: "none" });
+  const auto = logicalSendFingerprint({ ...base, sourceSelection: "auto" });
+  expect(none).not.toBe(auto);
+  expect(nextClientKey({ clientKey: "none-key", fingerprint: none, nextFingerprint: auto, mint: () => "auto-key" }).clientKey).toBe("auto-key");
+});
+
+describe("compact reader composer", () => {
+  it.each(["saved", "ephemeral"] as const)("exposes the current %s privacy in the collapsed settings summary", privacy => {
+    const html = renderToStaticMarkup(createElement(Composer, {
+      compact: true, privacy, draft: "请解释当前页", onDraftChange() {}, onSubmit() {}, onPrivacyChange() {},
+    }));
+    const settings = html.match(/<details[^>]*>([\s\S]*?)<\/details>/)?.[0];
+    expect(settings).toBeDefined();
+    expect(settings).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(settings?.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)?.[1]).toContain(privacy === "saved" ? "保存" : "临时");
+    expect(html).toContain('aria-label="消息输入"');
+    expect(html).toContain('aria-label="发送"');
+    expect(html).toContain('aria-label="本轮目的"');
+    if (privacy === "ephemeral") expect(html).toContain("刷新后不会恢复");
+  });
+  it("keeps saved-only help tracking visible for a real attempt", () => {
+    const html = renderToStaticMarkup(createElement(Composer, {
+      compact: true, practiceMode: true, privacy: "ephemeral", draft: "提示", onDraftChange() {}, onSubmit() {},
+    }));
+    expect(html).toContain("练习辅导会保存对话并记录帮助");
+    expect(html).not.toContain("刷新后不会恢复");
+    expect(html).not.toContain('<option value="ephemeral"');
+  });
+});

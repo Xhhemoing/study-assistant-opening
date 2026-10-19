@@ -1,8 +1,14 @@
+import { validateSystemQueryDelivery } from "./system-query-delivery";
 import { z } from "zod";
 import { systemQueryRequestSchema, systemQueryResultSchema, systemQueryReceiptSchema, type ProviderInput, type ProviderOutput, type SystemQueryReceipt, type SystemQueryRequest, type SystemQueryResult, type SystemQueryAuthorization } from "@aistudy/contracts";
 
 export const SYSTEM_QUERY_LIMITS = { calls: 4, modelRounds: 2, inputCharacters: 60000, resultCharacters: 10000, totalCharacters: 24000, timeoutMs: 12000 } as const;
 const descriptions: Record<SystemQueryRequest["name"], string> = {
+  learner_state: "读取当前学习者状态的共同事实、版本与完整性；不更新状态、不签发掌握。",
+  explain_decision: "按真实decisionId读取已保存Decision及当前有效性；没有历史回执不能编造历史原因。",
+  notes: "按标题检索笔记元数据与版本；正文和可能包含的解法不释放。",
+  cards: "读取卡片内容版本和复习到期时间；不展示背面答案、不改复习状态。",
+  exam_sprint: "读取已保存冲刺快照的日期和作答计数；不等于学习资格或掌握。",
   courses: "读取当前工作区课程和课程目标；可按标题查询。先读取课程以取得真实courseId，不猜ID。",
   learning: "读取课程当前有效作答、实际帮助、版本和服务端资格。四个资格标志不等于已掌握。",
   recommendation: "解释现有规则建议的下一学习活动；证据不足或结果不全必须说明。",
@@ -20,7 +26,7 @@ export type SystemQueryReader = (request: SystemQueryRequest, signal: AbortSigna
 export type SystemQueryFocus = { courseId?: string | null; sourceId?: string; sourceVersion?: number; physicalPage?: number | null };
 export type SystemQueryService = {
   enabled(): boolean;
-  reply(scope: { workspaceId: string; ownerUserId: string }, input: { question: string; focus?: SystemQueryFocus }, signal?: AbortSignal): Promise<{
+  reply(scope: { workspaceId: string; ownerUserId: string }, input: { question: string; focus?: SystemQueryFocus; jobLease?: { jobId: string; claimToken: string }; parentBudget?: { id: string; budgetCents?: number; maxProviderCalls?: number } }, signal?: AbortSignal): Promise<{
     text: string; receipt: SystemQueryReceipt; contextSourceRefs: SystemQueryResult["sourceRefs"]; privacyEpoch: number;
   }>;
 };
@@ -28,12 +34,20 @@ type CallModel = (input: ProviderInput, round: number, signal: AbortSignal) => P
 
 /** Deterministic fallback is a real limited read, never a claimed model/tool success. */
 export function fallbackSystemQuery(question: string, focus?: SystemQueryFocus): SystemQueryRequest[] {
-  if (/设置|模型|生效|settings|model/i.test(question)) return [{ name: "settings", arguments: {} }];
-  if (/任务.*(成功|完成|状态)|后台|job|worker/i.test(question)) return [{ name: "jobs", arguments: { limit: 5, offset: 0 } }];
-  if (/哪页|原文|材料|source|page/i.test(question)) return [{ name: "materials", arguments: { ...(focus?.sourceId
+  const decisionId = question.match(/(?:decision|决策)[\s:#：]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
+  if (decisionId) return [{ name: "explain_decision", arguments: { decisionId } }];
+  const records: SystemQueryRequest[] = [];
+  if (/笔记|notes?/i.test(question)) records.push({ name: "notes", arguments: { limit: 5, offset: 0 } });
+  if (/卡片|复习队列|cards?|review queue/i.test(question)) records.push({ name: "cards", arguments: { ...(focus?.courseId ? { courseId: focus.courseId } : {}), limit: 5, offset: 0 } });
+  if (/冲刺|sprint/i.test(question)) records.push({ name: "exam_sprint", arguments: {} });
+  if (/学习状态|学到哪里|learner.?state/i.test(question)) records.push({ name: "learner_state", arguments: { ...(focus?.courseId ? { courseId: focus.courseId } : {}), limit: 5 } });
+  if (/设置|模型|生效|settings|model/i.test(question)) records.push({ name: "settings", arguments: {} });
+  if (/任务.*(成功|完成|状态)|后台|job|worker/i.test(question)) records.push({ name: "jobs", arguments: { limit: 5, offset: 0 } });
+  if (/哪页|原文|材料|source|page/i.test(question)) records.push({ name: "materials", arguments: { ...(focus?.sourceId
     ? { sourceId: focus.sourceId, ...(focus.sourceVersion === undefined ? {} : { sourceVersion: focus.sourceVersion }), ...(focus.physicalPage ? { physicalPage: focus.physicalPage } : {}) }
-    : { query: question.slice(0, 240) }), limit: 5, offset: 0 } }];
-  if (/计划|安排|时间|plan|schedule/i.test(question)) return [{ name: "planning", arguments: { limit: 5, offset: 0 } }];
+    : { query: question.slice(0, 240) }), limit: 5, offset: 0 } });
+  if (/计划|安排|时间|plan|schedule/i.test(question)) records.push({ name: "planning", arguments: { limit: 5, offset: 0 } });
+  if (records.length) return records;
   if (focus?.courseId && !/目标|课程列表|哪些课|courses|goal/i.test(question)) {
     const name = /为何|为什么|推荐|why|recommend/i.test(question) ? "recommendation" : /教学|自学|串讲|拔高|teach/i.test(question) ? "teaching" : "learning";
     return name === "recommendation" ? [{ name, arguments: { courseId: focus.courseId } }]
@@ -111,7 +125,11 @@ export async function runSystemQuery(input: {
       if (reason === "repeated_query") break;
       if (round === SYSTEM_QUERY_LIMITS.modelRounds - 1 || results.length === SYSTEM_QUERY_LIMITS.calls) reason = "limit";
     }
-    if (!results.length) for (const request of fallbackSystemQuery(input.question, input.focus)) await execute(request);
+    if (!results.length) {
+      const fallback = fallbackSystemQuery(input.question, input.focus);
+      if (fallback.length > SYSTEM_QUERY_LIMITS.calls) reason = "limit";
+      for (const request of fallback) await execute(request);
+    }
     // The fallback resolves a unique course before reading facts; ambiguity stays visible.
     if (mode === "deterministic" && results[0]?.name === "courses" && results[0].status === "ok" && results[0].data.length === 1) {
       const courseId = results[0].data[0]!.id;
@@ -124,24 +142,28 @@ export async function runSystemQuery(input: {
     throw new Error(controller.signal.aborted ? "system query cancelled or timed out" : "system query context changed");
   } finally { clearTimeout(timer); input.signal?.removeEventListener("abort", abort); }
   const status = results.every(row => row.status === "unknown") ? "unknown"
-    : results.some(row => row.status !== "ok") || (mode === "native_tools" && reason !== "read") ? "partial" : "ok";
-  return systemQueryReceiptSchema.parse({ authorization: input.authorization, version: "study-query-v1", asOf, privacyEpoch: input.privacyEpoch, mode, status, reason, results });
+    : results.some(row => row.status !== "ok") || reason === "limit" || (mode === "native_tools" && reason !== "read") ? "partial" : "ok";
+  return validateSystemQueryDelivery(systemQueryReceiptSchema.parse({ authorization: input.authorization, version: "study-query-v1", asOf: (input.now?.() ?? new Date()).toISOString(), privacyEpoch: input.privacyEpoch, mode, status, reason, results }));
 }
 
 /** Only server-returned records become the answer; free model prose is never authoritative. */
-export function renderSystemQuery(receipt: SystemQueryReceipt): string {
+export function renderSystemQuery(raw: SystemQueryReceipt): string {
+  const receipt = validateSystemQueryDelivery(raw);
   const escape = (value: string) => value.replace(/[\\`*_[\]<>]/g, "\\$&");
-  const labels: Record<string, string> = { courses: "课程与目标", learning: "作答与学习证据", recommendation: "活动规则的建议依据", materials: "材料原文", planning: "已确认计划", jobs: "任务执行状态", settings: "非秘密设置", teaching: "教学活动" };
+  const labels: Record<string, string> = { learner_state: "学习状态", explain_decision: "已保存决策", notes: "笔记元数据", cards: "卡片复习安排", exam_sprint: "冲刺快照", courses: "课程与目标", learning: "作答与学习证据", recommendation: "活动规则的建议依据", materials: "材料原文", planning: "已确认计划", jobs: "任务执行状态", settings: "非秘密设置", teaching: "教学活动" };
   const reasons: Record<SystemQueryResult["reason"], string> = { read: "已读取", no_data: "没有匹配记录", not_available: "部分依赖未核实或不可用", invalid_arguments: "查询条件不完整或无效", truncated: "结果仅覆盖部分记录或节选", stale: "证据或来源版本待更新", timeout: "查询超时", unavailable: "暂时无法读取", limit: "已达到查询上限", repeated_query: "已停止重复查询", model_unavailable: "模型暂不可用", model_unsupported: "未取得模型工具调用" };
   const lines = [`系统记录查询 · ${receipt.asOf}`, receipt.mode === "deterministic"
     ? receipt.reason === "native_tools_not_enabled" ? "本轮使用固定规则查询系统记录；未发起模型请求。" : "本轮采用有限的固定规则查询；未取得可用的模型工具调用。"
     : "以下来自实际只读查询。", "这些记录不代表已掌握或已证明学习效果。"];
   for (const result of receipt.results) {
-    lines.push(`\n${labels[result.name] ?? "查询"}：${reasons[result.reason]}。`);
+    lines.push(`\n${labels[result.name] ?? "查询"}：${reasons[result.reason]}。数据截止 ${result.asOf}；版本 ${escape(result.version)}；完整性 ${result.status === "ok" ? "本次范围完整" : result.status === "partial" ? "部分" : "无法确认"}。`);
     if (!result.data.length) lines.push("没有可确认的数据；不据此推断未学习、任务失败或没有问题。");
     for (const row of result.data) if (typeof row.summary === "string") lines.push(`\n${escape(row.summary)}`);
     for (const evidence of result.evidence) lines.push(`[${escape(evidence.title)}](${evidence.href})`);
     if (result.nextOffset !== null) lines.push("还有记录未展示，可缩小查询范围后继续。");
   }
+  lines.push("\n解释：以上只说明所列时间、版本与范围内的系统记录；缺失或过期的记录不能用来推断当前掌握。");
+  lines.push(receipt.status === "unknown" ? "下一步：重新查询或打开相关记录核实；查询失败不会更改学习状态。"
+    : "下一步：打开上方记录核对；需要调整时先生成草稿，再由你确认。");
   return lines.join("\n");
 }

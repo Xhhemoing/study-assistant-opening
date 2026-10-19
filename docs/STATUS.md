@@ -2,7 +2,7 @@
 
 每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
 
-**更新：** 2026-10-17
+**更新：** 2026-10-19
 **目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
 
 ## 主干
@@ -16,6 +16,9 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| UI 审计逐项整改 | Codex | `codex/study-ui-audit-fixes-20261019` | D01–D10、IL01–IL08 的上下文/资料意图/临时分支、阅读适宽与紧凑问答、入口与视觉层级已编码；392 项相关回归分批通过，Web 类型、改动 lint、边界及生产构建通过；未合并/部署，浏览器/窄屏/真实模型待用户复验。基于本地助理升级父提交；不覆盖另会话远端导航/查询成果。见 [逐项记录](operations/ui-audit-remediation-2026-10-19.md) |
+| 有效内容展示面积第二轮 | Codex | `codex/study-content-space-round2` | 基于b131cc9补齐阅读器信息合行、紧凑输入设置、练习开始动作置顶、资料行密度与确认空队列后收起；190项相关回归、最终14项重检、Web类型/lint/边界通过；Web生产构建通过。原31条历史保持，浏览器复验未执行，见同一[整改记录](operations/ui-audit-remediation-2026-10-19.md) |
+| Study 助理升级最终计划 | Codex + GPT-6.1 Sol high 子代理 | `codex/study-upgrade-20261019` · [#71](https://github.com/Xhhemoing/study-assistant-opening/pull/71) | 全部可实现板块已分部分本地提交并独立复核：0075–0081、锚点/交付、父预算、精确span三模式、状态/Decision/影子比较、意图、Composer/13读工具/6提案、39表恢复及检索评测。662文件5059单元/契约、类型、lint、边界及Web/worker构建通过。最新源码推送被自动审批拒绝，待明确授权；#71仍非完整实现，真实PG/handler完整CI未完成。未合并、未部署；浏览器与真实学习效果待验收，见 [计划](plans/2026-10-19-study-assistant-upgrade.md) |
 | Study 独立回归修复 ST-001–004 | Codex | [#68](https://github.com/Xhhemoing/study-assistant-opening/pull/68) | c283e78 经完整 CI 39206856601 和主线程独立复核后，已合入 feat/opening-release（b140d548）；四项独立缺陷修复不等于新架构验收。dc792e0/ce4de2a 尚未从合法可见仓库/refs/制品取得，不宣称源码丢失。未部署 |
 | Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89修复五项P2及请求/结果工具配对，完整CI39216797557成功。后续接保存/临时聊天与显式开关（默认0），绑定用途/owner grant、核验完整祖先来源；只查元数据，不发起模型请求。含0074与临时24h来源元数据，回滚先停/取消遗留查询再启旧worker并保留DDL。相关222单元及补跑35项、60真实PG（含10聊天/竞态）、4HTTP、七包类型和改动lint通过；#70初轮CI两项旧workspace mock已补，terminal15项回归通过；独立review/新head完整CI待收口；[边界与用户验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。不等于26项新架构或单元三模式完成；原生模型C1/C2、release/ack、M4试验与用户浏览器待完成，无生产操作 |
 | 专注学习界面改版 P0–P2 | Codex + 独立交叉审查 | [#67](https://github.com/Xhhemoing/study-assistant-opening/pull/67) · `codex/focused-learning-ui` | 编码已补齐：课程断点、固定版本资料阅读、练习草稿保留/另开/切回、完整教学单元与统一工具、关联真实作答的提问/笔记、矩阵平面概念课及真实迁移题。102 文件 847 项整合单元、最终 126 项定向回归、Web/34 份测试/E2E 类型、94 文件 lint、边界检查及 worker/Web 生产构建通过；无新迁移或依赖。已维护旧 E2E；最新 CI 暴露的 Today C5 旧断言已按默认收起工具语义修正，37 项最近回归通过。用户已授权合并，完整 CI 与合并状态见 #67；未部署，用户交互与真实学习效果待验收 |

@@ -58,7 +58,7 @@ describe("Today learning context", () => {
 
   it("shows automatic and manual material counts distinctly while keeping existing navigation", () => {
     const html = renderToStaticMarkup(createElement(TodayLearningContext, { item: { conversationId: "conversation", title: "矩阵复习", courseId: "course", currentPage: null, sourceVersions: { sourceA: 3 }, manualSourceCount: 1 } }));
-    expect(html).toContain("上次学习：矩阵复习");
+    expect(html).toContain("上次对话：矩阵复习");
     expect(html).toContain("可恢复 1 份材料");
     expect(html).toContain("1 份材料仅供手工阅读");
     expect(html).not.toContain("可恢复 2 份材料");
@@ -83,4 +83,12 @@ describe("Today learning context", () => {
     expect(html.match(/href="\/opening\/courses"/g)).toHaveLength(1);
     expect(html).toContain('href="/opening/courses"');
   });
+});
+
+it("describes the selected teaching activity instead of an unrelated recent chat", () => {
+  const html = renderToStaticMarkup(createElement(TodayLearningContext, { item: { conversationId: "a", title: "课程甲聊天", courseId: "a", currentPage: 8, sourceVersions: {} }, activity: { title: "课程乙的 span 练习", courseId: "b" } }));
+  expect(html).toContain("继续学习：课程乙的 span 练习");
+  expect(html).toContain('href="/opening/courses/b"');
+  expect(html).not.toContain("课程甲聊天");
+  expect(html).not.toContain("上次读到第 8 页");
 });

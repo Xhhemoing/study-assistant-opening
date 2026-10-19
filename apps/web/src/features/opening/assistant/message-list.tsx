@@ -23,6 +23,7 @@ export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请�
 
 type Props = {
   messages: ChatMessageView[];
+  compact?: boolean;
   historyTruncated?: boolean;
   currentVersions?: Readonly<Record<string, number>>;
   sourceNames?: Readonly<Record<string, string>>;
@@ -49,7 +50,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export const MessageList = memo(function MessageList({ messages, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -86,7 +87,7 @@ export const MessageList = memo(function MessageList({ messages, historyTruncate
   }
   return <div className="relative flex min-h-0 flex-1"><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-gradient-to-b from-zinc-50/30 to-white px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
     {historyTruncated ? <p className="mb-5 rounded-lg bg-amber-50 px-3.5 py-2.5 text-xs leading-6 text-amber-900 ring-1 ring-amber-600/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
-    {!messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
+    {!messages.length && compact ? <p className="text-xs leading-6 text-zinc-500">围绕当前页或选段提问。输入后发送，回答会保留在这里。</p> : !messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
       <span className="mb-5 inline-flex size-14 items-center justify-center self-start rounded-2xl bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-lg shadow-zinc-900/20 ring-1 ring-white/10" aria-hidden="true"><PanelsTopLeft size={24} strokeWidth={1.75} /></span>
       <h2 className="text-xl font-semibold tracking-tight text-zinc-950">今天，想弄懂什么？</h2>
       <p className="mt-2 text-[15px] leading-7 text-zinc-500">还没有消息。自由交流，或选一份材料一起读。</p>

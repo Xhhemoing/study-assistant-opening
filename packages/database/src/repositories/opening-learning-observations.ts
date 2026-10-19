@@ -8,6 +8,7 @@ import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
+import { evaluateOpeningSpanAttempt } from "./opening-span-evaluation";
 import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
 import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
 
@@ -87,8 +88,9 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   }
   if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
   const examEvaluation = await evaluateOpeningExamAttempt(tx, scope, attempt, input.answer, attemptSources, opts.examSprintPublication === true);
-  const matrixEvaluation = examEvaluation ? null : await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
-  const controlledEvaluation = examEvaluation ?? (matrixEvaluation ? { ...matrixEvaluation, specVersion: "matrix-arithmetic-v1" as const } : null);
+  const spanEvaluation = examEvaluation ? null : await evaluateOpeningSpanAttempt(tx, scope, attempt, input.answer, attemptSources);
+  const matrixEvaluation = examEvaluation || spanEvaluation ? null : await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
+  const controlledEvaluation = examEvaluation ?? spanEvaluation ?? (matrixEvaluation ? { ...matrixEvaluation, specVersion: "matrix-arithmetic-v1" as const } : null);
   if ((attempt?.create_intent as { teachingBlock?: unknown } | undefined)?.teachingBlock) {
     const activities = await tx`SELECT status,content_version FROM opening_teaching_activities
       WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -120,9 +122,10 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     requirementKey: String(attempt!.requirement_key), evaluatorVersion: controlledEvaluation.evaluatorVersion,
     specVersion: controlledEvaluation.specVersion, decision: controlledEvaluation.decision, outcome: controlledEvaluation.outcome,
     reasonCodes: controlledEvaluation.reasonCodes, evaluatedAt: recordedAt,
+    ...(spanEvaluation ? { skills: spanEvaluation.skills, coreEvidenceComplete: spanEvaluation.coreEvidenceComplete, membershipOutcome: spanEvaluation.membershipOutcome } : {}),
   } : null;
   const effectiveOutcome = controlledEvaluation?.outcome ?? input.outcome;
-  const effectiveAssistance = matrixEvaluation?.priorFeedback ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
+  const effectiveAssistance = (matrixEvaluation?.priorFeedback || spanEvaluation?.priorFeedback) ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
   const effectiveVerdictSource = controlledEvaluation ? "deterministic" : verdictSource;
   const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
   const activityId = String(session.activity_id);

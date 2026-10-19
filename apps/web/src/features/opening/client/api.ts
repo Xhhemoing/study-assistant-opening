@@ -1,3 +1,5 @@
+import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { createAssistantProposalClient } from "./assistant-proposal-client";
 import { createOpeningCoachClient } from "./coach-client";
 import {
   snippetCreateInputSchema,
@@ -184,6 +186,7 @@ async function request(
       reason,
     );
   }
+  acknowledgeStudyExposureHeaders(res, fetchImpl);
   return body;
 }
 
@@ -226,6 +229,7 @@ export function sourceDownloadHref(sourceId: string, version: number): string {
 export function createOpeningApi(fetchImpl: FetchLike = fetch) {
   return {
     ...createOpeningCoachClient(fetchImpl),
+    ...createAssistantProposalClient(fetchImpl),
     async listConversations(): Promise<ConversationSummary[]> {
       const body = await request("/api/opening/conversations", { method: "GET" }, fetchImpl);
       return summaryListSchema.parse(body);

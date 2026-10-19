@@ -6,6 +6,11 @@ const page = { limit: z.number().int().min(1).max(10).default(5), offset: z.numb
 const course = { courseId: uuidSchema };
 /** Workspace/owner and executable code are deliberately absent from every tool argument. */
 export const systemQueryRequestSchema = z.discriminatedUnion("name", [
+  z.object({ name: z.literal("learner_state"), arguments: z.object({ courseId: uuidSchema.optional(), limit: page.limit }).strict() }).strict(),
+  z.object({ name: z.literal("explain_decision"), arguments: z.object({ decisionId: uuidSchema }).strict() }).strict(),
+  z.object({ name: z.literal("notes"), arguments: z.object({ query: z.string().max(240).optional(), ...page }).strict() }).strict(),
+  z.object({ name: z.literal("cards"), arguments: z.object({ courseId: uuidSchema.optional(), ...page }).strict() }).strict(),
+  z.object({ name: z.literal("exam_sprint"), arguments: z.object({}).strict() }).strict(),
   z.object({ name: z.literal("courses"), arguments: z.object({ courseId: uuidSchema.optional(), query: z.string().max(240).optional(), ...page }).strict() }).strict(),
   z.object({ name: z.literal("learning"), arguments: z.object({ ...course, ...page }).strict() }).strict(),
   z.object({ name: z.literal("recommendation"), arguments: z.object(course).strict() }).strict(),
@@ -46,6 +51,7 @@ function resultFor<Name extends keyof typeof systemQueryDataSchemas>(name: Name)
 export const systemQueryResultSchema = z.discriminatedUnion("name", [
   resultFor("courses"), resultFor("learning"), resultFor("recommendation"), resultFor("materials"),
   resultFor("planning"), resultFor("jobs"), resultFor("settings"), resultFor("teaching"),
+  resultFor("learner_state"), resultFor("explain_decision"), resultFor("notes"), resultFor("cards"), resultFor("exam_sprint"),
   z.object({ ...resultFields, name: z.literal("rejected"), data: z.array(z.never()).max(0) }).strict(),
 ]);
 export type SystemQueryResult = z.infer<typeof systemQueryResultSchema>;

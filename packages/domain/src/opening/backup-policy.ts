@@ -1,3 +1,4 @@
+import { validateBackupStudy } from "./backup-study";
 import { validateOpeningBackupCards } from "./backup-cards";
 import { validateBackupCourseMilestones } from "./backup-course-milestones";
 import { validateBackupPlanControl } from "./backup-plan-control";
@@ -43,6 +44,7 @@ const TABLE_ALLOWLIST = [
   "cards", "card_review_states", "learning_events",
   "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
   "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
+  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
   "opening_source_chunks",
   "opening_conversations",
   "opening_turns",
@@ -375,6 +377,7 @@ export function validateOpeningRestore(
   validateBackupCourseMilestones(tables, errors);
   validateBackupLearningState(tables, errors);
   validateOpeningBackupCards(tables, errors);
+  validateBackupStudy(tables, errors);
   for (const object of backup.objects as OpeningBackupObject[]) {
     if (deleted.has(object.sourceId.toLowerCase())) errors.push(`deleted source ${object.sourceId} cannot be restored`);
     if (object.actualSha256 !== undefined && object.actualSha256.toLowerCase() !== object.sha256.toLowerCase()) {

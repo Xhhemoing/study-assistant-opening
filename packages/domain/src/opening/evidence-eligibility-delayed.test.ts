@@ -35,3 +35,11 @@ describe("evaluateEvidenceEligibility delayed", () => {
     }).usableForDelayedCheck).toBe("unknown");
   });
 });
+
+it("distinguishes an elapsed diagnostic check from retention of established prior performance", () => {
+  const result = evaluateEvidenceEligibility(observation, { ...context, delayedCheck: { ...context.delayedCheck!, baselineEstablished: false } });
+  expect(result.usableForDelayedCheck).toBe("unknown");
+  expect(result.reasonCodes).toContain("delayed_baseline_not_established");
+  expect(evaluateEvidenceEligibility(observation, { ...context, delayedCheck: { ...context.delayedCheck!, baselineEstablished: true,
+    intervalExposure: { from: 0, to: 200, recordedCount: 1, recordedPracticeCount: 1, complete: false } } }).usableForDelayedCheck).toBe("yes");
+});

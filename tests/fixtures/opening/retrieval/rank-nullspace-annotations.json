@@ -1,0 +1,257 @@
+{
+  "protocolVersion": "study-material-retrieval-v1",
+  "datasetId": "rank-nullspace-allowlisted-pages-v1",
+  "corpusVersion": "existing-V2-02-materials-v1",
+  "annotationProvenance": "development_fixture",
+  "scope": {
+    "workspaceId": "99000000-0000-4000-8000-000000000001",
+    "ownerUserId": "99000000-0000-4000-8000-000000000002"
+  },
+  "k": 3,
+  "sources": [
+    {
+      "sourceId": "11000000-0000-4000-8000-000000000001",
+      "sourceVersion": 1,
+      "label": "SRC-RN-01 teaching material"
+    },
+    {
+      "sourceId": "11000000-0000-4000-8000-000000000002",
+      "sourceVersion": 1,
+      "label": "SRC-RN-02 teaching material"
+    },
+    {
+      "sourceId": "11000000-0000-4000-8000-000000000003",
+      "sourceVersion": 1,
+      "label": "SRC-RN-03 teaching material"
+    },
+    {
+      "sourceId": "11000000-0000-4000-8000-000000000004",
+      "sourceVersion": 1,
+      "label": "SRC-RN-04 teaching material"
+    },
+    {
+      "sourceId": "11000000-0000-4000-8000-000000000005",
+      "sourceVersion": 1,
+      "label": "SRC-RN-05 teaching material"
+    }
+  ],
+  "aliases": [
+    {
+      "phrase": "nullspace",
+      "alternatives": [
+        "零空间"
+      ]
+    },
+    {
+      "phrase": "kernel",
+      "alternatives": [
+        "零空间"
+      ]
+    },
+    {
+      "phrase": "核空间",
+      "alternatives": [
+        "零空间"
+      ]
+    },
+    {
+      "phrase": "列生成",
+      "alternatives": [
+        "列空间"
+      ]
+    },
+    {
+      "phrase": "column space",
+      "alternatives": [
+        "列空间"
+      ]
+    },
+    {
+      "phrase": "rank-nullity",
+      "alternatives": [
+        "秩—零度",
+        "列数"
+      ]
+    },
+    {
+      "phrase": "压到原点",
+      "alternatives": [
+        "零空间"
+      ]
+    },
+    {
+      "phrase": "输出方向",
+      "alternatives": [
+        "rank",
+        "像"
+      ]
+    },
+    {
+      "phrase": "迁移",
+      "alternatives": [
+        "迁移成功"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "en-nullspace",
+      "group": "english",
+      "query": "nullspace",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000201"
+      ]
+    },
+    {
+      "id": "en-column",
+      "group": "english",
+      "query": "column space",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000202"
+      ]
+    },
+    {
+      "id": "en-theorem",
+      "group": "english",
+      "query": "rank-nullity",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000301"
+      ]
+    },
+    {
+      "id": "zh-kernel",
+      "group": "chinese_alias",
+      "query": "核空间的定义在哪",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000201"
+      ]
+    },
+    {
+      "id": "zh-column",
+      "group": "chinese_alias",
+      "query": "列生成的范围是什么",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000202"
+      ]
+    },
+    {
+      "id": "zh-nullity",
+      "group": "chinese_alias",
+      "query": "零度",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000201",
+        "22000000-0000-4000-8000-000000000301"
+      ]
+    },
+    {
+      "id": "syn-input",
+      "group": "synonym",
+      "query": "把输入压到原点的方向如何定义",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000201"
+      ]
+    },
+    {
+      "id": "syn-directions",
+      "group": "synonym",
+      "query": "还剩几个独立输出方向",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000203"
+      ]
+    },
+    {
+      "id": "context-column-count",
+      "group": "context",
+      "query": "为什么右边是输入维数",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000301"
+      ],
+      "context": {
+        "sourceId": "11000000-0000-4000-8000-000000000003",
+        "sourceVersion": 1,
+        "physicalPage": 1,
+        "terms": [
+          "列数"
+        ]
+      }
+    },
+    {
+      "id": "context-pivots",
+      "group": "context",
+      "query": "主元",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000401",
+        "22000000-0000-4000-8000-000000000402",
+        "22000000-0000-4000-8000-000000000403"
+      ],
+      "context": {
+        "sourceId": "11000000-0000-4000-8000-000000000004",
+        "sourceVersion": 1
+      }
+    },
+    {
+      "id": "context-rref",
+      "group": "context",
+      "query": "三阶矩阵的消元过程在哪",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000402"
+      ],
+      "context": {
+        "sourceId": "11000000-0000-4000-8000-000000000004",
+        "sourceVersion": 1,
+        "physicalPage": 2,
+        "terms": [
+          "RREF"
+        ]
+      }
+    },
+    {
+      "id": "en-rref",
+      "group": "english",
+      "query": "RREF",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000303",
+        "22000000-0000-4000-8000-000000000401",
+        "22000000-0000-4000-8000-000000000402",
+        "22000000-0000-4000-8000-000000000403",
+        "22000000-0000-4000-8000-000000000502"
+      ]
+    },
+    {
+      "id": "syn-transfer",
+      "group": "synonym",
+      "query": "换两个数字能算迁移吗",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000502"
+      ]
+    },
+    {
+      "id": "literal-collection",
+      "group": "chinese_alias",
+      "query": "同一个集合",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000000502"
+      ]
+    },
+    {
+      "id": "negative-topic",
+      "group": "negative",
+      "query": "Jordan normal form",
+      "relevantChunkIds": []
+    },
+    {
+      "id": "unjudged-visual",
+      "group": "unjudged",
+      "query": "我需要更直观的图",
+      "relevantChunkIds": null
+    },
+    {
+      "id": "unavailable-label",
+      "group": "unjudged",
+      "query": "正交分解",
+      "relevantChunkIds": [
+        "22000000-0000-4000-8000-000000009901"
+      ]
+    }
+  ]
+}

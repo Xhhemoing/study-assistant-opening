@@ -32,7 +32,9 @@ describe("parsed source content", () => {
   });
 
   it("names the specified physical page and does not offer current-version analysis for old, empty, or section evidence", () => {
-    expect(sourceContentExplanation(content)).toEqual({ href: `/opening/assistant?source=${content.sourceId}&page=2`, label: "解释第 2 页" });
+    const explanation = sourceContentExplanation(content);
+    expect(explanation?.label).toBe("解释第 2 页");
+    expect(Object.fromEntries(new URL(explanation!.href, "https://study.test").searchParams)).toMatchObject({ source: content.sourceId, version: String(content.version), page: "2", purpose: "material_read" });
     expect(sourceContentExplanation({ ...content, currentVersion: 1 })).toBeNull();
     expect(sourceContentExplanation({ ...content, text: "  " })).toBeNull();
     expect(sourceContentExplanation({ ...content, pageKind: "section" })).toBeNull();

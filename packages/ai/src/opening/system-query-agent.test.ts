@@ -8,6 +8,7 @@ const asOf = "2026-10-19T00:00:00.000Z";
 const authorization = { purpose: "system_record_lookup" as const, workspaceId: courseId, principalId: sourceId, role: "workspace_owner" as const, permissionRevision: `owner:${sourceId}:privacy:7` };
 const result = (name: string, data: Array<Record<string, unknown>> = [{ summary: "真实记录" }]): SystemQueryResult => {
   const defaults: Record<string, Record<string, unknown>> = {
+    learner_state: { stateVersion: "current", dataAsOf: asOf, completeness: "complete", limitations: [] },
     courses: { id: courseId, title: "数学", updatedAt: asOf, goal: null, goalStatus: "not_configured" },
     learning: { id: courseId, rootId: courseId, attemptId: null, itemVersionId: null, projectionFresh: true, versionApplicability: "exact", liveHelpRevision: 0, submittedAt: asOf },
     materials: { id: courseId, sourceId, sourceVersion: 1, physicalPage: 1, truncated: false, exposure: "not_assessed" },
@@ -51,7 +52,7 @@ describe("bounded system query planner", () => {
   it("does not treat an unsupported tool response or a missing model as a learner failure", async () => {
     const receipt = await runSystemQuery({ ...base(), callModel: async () => output() });
     expect(receipt.reason).toBe("model_unsupported");
-    expect(receipt.results[0]?.name).toBe("courses");
+    expect(receipt.results[0]?.name).toBe("learner_state");
     const unavailable = await runSystemQuery({ ...base(), callModel: async () => { throw new Error("missing configuration"); } });
     expect(unavailable.reason).toBe("model_unavailable");
     expect(unavailable.results[0]?.status).toBe("ok");
@@ -106,7 +107,7 @@ describe("bounded system query planner", () => {
     await expect(runSystemQuery(input)).rejects.toThrow("context changed");
   });
   it("checks privacy after the last read and retains the exact lineage of displayed material", async () => {
-    const input = base(); input.read.mockResolvedValue({ ...result("materials"), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
+    const input = base(); input.read.mockResolvedValue({ ...result("materials", [{ sourceVersion: 3 }]), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
     const receipt = await runSystemQuery({ ...input, question: "哪页材料？" });
     expect(input.assertCurrent).toHaveBeenCalledTimes(3);
     expect(receipt.results[0]?.sourceRefs).toEqual([{ sourceId, sourceVersion: 3 }]);

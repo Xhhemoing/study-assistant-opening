@@ -6,6 +6,7 @@ import { createOpeningTeachingCommandService } from "./teaching/command-service"
 import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
   createOpeningConversationRepository, readOpeningConversationSelection,
+  createOpeningStudyContextRepository, createOpeningStudyExposureRepository,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
   createOpeningCourseReadySourcesRepository,
@@ -111,7 +112,7 @@ export function setEphemeralTutorDepsForTests(
 
 export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
   return { replyEphemeral(scope, input, signal) {
-    if (input?.querySystem) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web"),
+    if (input?.querySystem || input?.purpose === "query" || input?.purpose === "explain_state") return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web"),
       provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
     return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
   } };
@@ -155,6 +156,8 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
           },
         },
         chunks,
+        studyContext: createOpeningStudyContextRepository(sql),
+        exposures: createOpeningStudyExposureRepository(sql),
         pageImages: createSourcePageImages(sql, openingPageStorage()),
         provenance: createOpeningEphemeralProvenanceRepository(sql),
         privacy: {

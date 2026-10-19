@@ -68,3 +68,24 @@ describe("context note creation", () => {
     expect(api.createDocument).toHaveBeenCalledTimes(2);
   });
 });
+
+it("carries unknown legacy note-create receipts into an enriched attempt anchor without a duplicate post", async () => {
+  storage(); const ctx = context(), api = { createDocument: vi.fn().mockRejectedValue(new Error("reply lost")) };
+  const draft = { ...readStudyNote(ctx), text: "原稿" };
+  await saveStudyNote(ctx, draft, api, vi.fn());
+  const enriched = { ...ctx, attemptId: crypto.randomUUID(), itemVersionId: crypto.randomUUID(), purpose: "learning_help" as const };
+  expect(readStudyNote(enriched)).toMatchObject({ status: "unknown", text: "原稿" });
+  await saveStudyNote(enriched, draft, api, vi.fn());
+  expect(api.createDocument).toHaveBeenCalledTimes(1);
+});
+
+it("does not create an empty course note and keeps drafts isolated between two courses", async () => {
+  storage();
+  const a = { courseId, label: "数学甲" }, b = { courseId: crypto.randomUUID(), label: "物理乙" };
+  const api = { createDocument: vi.fn().mockResolvedValue(document) }, associate = vi.fn();
+  await saveStudyNote(a, readStudyNote(a), api, associate);
+  expect(api.createDocument).not.toHaveBeenCalled();
+  writeStudyNote(a, { ...readStudyNote(a), text: "甲课理解" });
+  expect(readStudyNote(b).text).toBe("");
+  expect(JSON.stringify(studyNoteDocument(a, readStudyNote(a)))).toContain(`/opening/courses/${courseId}`);
+});
