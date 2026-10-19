@@ -59,6 +59,7 @@ export async function runSystemQuery(input: {
     else {
       seen.add(key);
       try { result = systemQueryResultSchema.parse(await bounded(input.read(parsed.data, controller.signal)));
+        if (result.name !== parsed.data.name) throw new Error("query tool mismatch");
         if ((["purpose", "workspaceId", "principalId", "role", "permissionRevision"] as const).some(key => result.authorization[key] !== input.authorization[key])) throw new Error("query grant mismatch"); }
       catch { result = unknown(parsed.data.name, controller.signal.aborted ? "timeout" : "unavailable", asOf); }
     }

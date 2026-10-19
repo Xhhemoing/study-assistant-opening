@@ -5,7 +5,8 @@ const input = { instruction: "read", text: "what?", chunks: [], mode: "listen", 
   tools: [{ name: "courses", description: "read", parameters: {} }] };
 describe("read-only query contracts", () => {
   it("rejects invented result tools, invalid qualification values and extra secret fields", () => {
-    const common = { status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
+    const common = { authorization: { purpose: "system_record_lookup", workspaceId: "00000000-0000-4000-8000-000000000001", principalId: "00000000-0000-4000-8000-000000000002", role: "workspace_owner", permissionRevision: "owner-fixture" },
+      status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
     const id = "00000000-0000-4000-8000-000000000001";
     const observation = { id, rootId: id, attemptId: null, itemVersionId: null, projectionFresh: true, versionApplicability: "exact", liveHelpRevision: 0,
       submittedAt: common.asOf, summary: "actual record", eligibility: { independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "yes", usableForDelayedCheck: "unknown", reasonCodes: [], policyVersion: "opening-evidence-v3" } };

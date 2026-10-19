@@ -25,11 +25,11 @@
 
 Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`；验证注册名称、调用 ID、完整参数、回执配对，普通聊天拒绝未请求的工具调用。模型只选择查询步骤，其自由文本不进入权威答案；答案由服务端实际记录的摘要和证据链接构成。材料正文是非可信数据，即使包含指令也不能改变注册表、作用域或增加写权限。
 
-单次查询最多 3 次 `callModel`、4 个实际工具调用、12 秒总等待、60,000 字符的完整模型输入、每份回执 10,000 字符、累计回执 24,000 字符。重复规范化参数停止循环；预算截断时同时丢弃正文和其 lineage，不产生缺失来源的正文。授权检查同样受等待上限约束。数据库取消是协作式，已经发送的只读 SQL 仍受 2 秒 statement timeout 限制。
+单次查询最多 2 次 `callModel`、4 个实际工具调用、12 秒总等待、60,000 字符的完整模型输入、每份回执 10,000 字符、累计回执 24,000 字符。重复规范化参数停止循环；预算截断时同时丢弃正文和其 lineage，不产生缺失来源的正文。授权检查同样受等待上限约束。数据库取消是协作式，已经发送的只读 SQL 仍受 2 秒 statement timeout 限制。
 
 没有模型、工具协议不受支持、模型无工具调用时，采用明确标记的有限规则读取；歧义课程不猜 ID。调用者没有注入 callModel 时不会发送模型请求；后续 runtime 负责安全配置与授权。本模块没有绑定任何真实模型，不会读取环境中的凭据。
 
-这些是次数/大小/时间上限，**尚不是父交互费用预算**。后续 runtime 必须接既有 model gateway/ledger，并为每轮派生稳定 operationId；gateway 如使用一次显式 fallback，最多可能产生 6 次 provider 请求，不能把 3 次 callback 误称最多 3 次网络请求。未知结果不能自动重发。当前 provider usage 仅有 prompt/completion token，不能宣称已核算所有厂商的缓存/推理计费。
+这些是次数/大小/时间上限，**尚不是父交互费用预算**。后续 runtime 必须接既有 model gateway/ledger，并为每轮派生稳定 operationId；gateway 如使用一次显式 fallback，最多可能产生 4 次 provider 请求，不能把 2 次 callback 误称最多 2 次网络请求。未知结果不能自动重发。当前 provider usage 仅有 prompt/completion token，不能宣称已核算所有厂商的缓存/推理计费。
 
 ## 接入前需统一设计决定
 
@@ -59,7 +59,9 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 | 当前答案/原始首答测量分离、可信 Assessment 选择 | 当前查询只读 effective head 和既有资格，不实现新测量归约 | A1–A3 扩机会/答案及测量修订；迟到可信重判修正原始首答，不覆盖新答案；自评/模型不覆盖可信评分 |
 | release/ack、独立/历史曝光/迁移新颖性 | 复用现有帮助证据，材料返回 exposure=not_assessed | 接入交付层前完成 release/ack；不以数据库提交证明客户端收到；挑战池与正式测评池隔离 |
 | 完整 provider receipt 与父交互额度 | `provider.ts` 支持原生 calls；`system-query-agent.ts` 有次数/字符/时间上限 | C1/C2 补结束原因/原始 usage/真实超额与晚账务，再由 C3 接 gateway，不能误称已有父预算 |
-| 两轮/四工具、真实 tokenizer 与能力表 | 当前可配置代码常量为三轮/四工具，字符预算；不支持时有限预检索 | 三轮是待比较的实现起点偏差，不宣称满足报告建议的两轮；通过能力表、真实 usage 和质量验证后收敛 |
+| 两轮/四工具、真实 tokenizer 与能力表 | 当前代码常量为两轮/四工具，字符预算；不支持时有限预检索 | 已统一报告的两轮起点；能力表、真实 tokenizer/usage 和质量验证仍待完成 |
 | 查询实际闭环、单元三模式 | 本 PR 为后端基础，无聊天/API 接线，无新 DDL | 先完成 A0/C1/C2/C3；三态/唯一 reducer 及核验内容通过 A1–A4/B1–B3 后，沿 B4/A5 复用原 compiler/workspace 接一个单元三模式；本轮未实现这些后续能力 |
 
 2026-10-19 独立审查修复：未接受的 version 0 计划返回 unknown；教学引用取与 contentVersion 匹配的已发布 spec.source_refs，并核对该确切版本的可用性，缺 spec/版本不猜当前版本。八类结果改为精确 schema 的判别联合，拒绝额外字段、虚构工具名和非法资格。末次权限查询也使用只读事务、2 秒 statement timeout，全读取链受 12 秒截止控制，并在 await 后复查取消；native calls 仅接受成功的 tool_calls 结束状态。定向 76 项 unit、17 项真实 PG 与 Contracts/AI/Database 类型检查通过；独立复审和新 head 的完整 CI 仍需另核对。
+
+后续证据切片：所有回执绑定服务端 purpose、workspace/principal、owner 角色及 permissionRevision（owner grant身份与privacy epoch，不冒充通用ACL计数器）；查询不接受模型改变用途/主体。逐根读取完整修订祖先的捕获版本，未知版本不使用今天的版本代填；祖先版本变化、不可用或捕获缺失时不返回派生记录。默认 system_record_lookup 不释放材料正文/历史答案；source_review 仅为服务端显式用途，不接入聊天。两轮调度与权限/用途不匹配反例已覆盖；严格输出契约与PR69审查修复共同保留。

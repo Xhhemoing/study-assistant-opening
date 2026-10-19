@@ -1,18 +1,22 @@
 import type { Sql, TransactionSql } from "postgres";
 import { systemQueryAuthorizationSchema, type Scope, type SystemQueryAuthorization } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
+import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
 
 export function systemQueryOwnerGrant(scope: Scope, epoch: number, purpose: SystemQueryAuthorization["purpose"]): SystemQueryAuthorization {
   return systemQueryAuthorizationSchema.parse({ workspaceId: scope.workspaceId, principalId: scope.ownerUserId,
     role: "workspace_owner", purpose, permissionRevision: `owner:${scope.ownerUserId}:privacy:${epoch}` });
 }
-export async function readOpeningSystemQueryAuthorization(sql: Sql, scope: Scope, purpose: SystemQueryAuthorization["purpose"] = "system_record_lookup") {
+export async function readOpeningSystemQueryAuthorization(sql: Sql, scope: Scope, purpose: SystemQueryAuthorization["purpose"] = "system_record_lookup", outerSignal = new AbortController().signal) {
+  return withSystemQueryReadDeadline(outerSignal, async signal => {
   const [owner] = await sql.begin("read only", async tx => {
     await tx`SET LOCAL statement_timeout='2000ms'`;
     return tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   });
+  if (signal.aborted) throw new Error("system query cancelled");
   if (!owner) throw new Error("system query permission unavailable");
   return { authorization: systemQueryOwnerGrant(scope, Number(owner.privacy_epoch), purpose), privacyEpoch: Number(owner.privacy_epoch) };
+  });
 }
 
 /** Complete ancestry only; an omitted/unknown captured version can never be replaced with today's version. */
