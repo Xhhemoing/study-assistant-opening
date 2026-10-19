@@ -496,3 +496,9 @@ export { reportExamBkt } from "./opening/exam-sprint/analytics";
 export { forecastExamTopics } from "./opening/exam-sprint/forecast";
 export * from "./opening/evaluation/exam-choice-evaluator";
 export { sameKnowledgeNodeIdentity } from "./opening/knowledge-node-identity";
+
+export * from "./opening/span-verifier";
+
+export * from "./opening/span-teaching";
+
+export * from "./opening/span-teaching-catalog";

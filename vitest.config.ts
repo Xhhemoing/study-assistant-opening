@@ -6,6 +6,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const openingDbSetup = path.resolve(root, "scripts/opening-test-db.mjs");
 
 const alias = {
+  "@aistudy/domain/span-heldout-catalog": path.resolve(root, "packages/domain/src/opening/span-heldout-catalog.ts"),
   "@aistudy/domain/exam-sprint-catalog": path.resolve(root, "packages/domain/src/opening/exam-sprint/catalog.ts"),
   "@aistudy/domain/measurement-catalog": path.resolve(root, "packages/domain/src/opening/measurement/catalog.ts"),
   "@aistudy/domain/native": path.resolve(root, "packages/domain/src/portability/native/index.ts"),
