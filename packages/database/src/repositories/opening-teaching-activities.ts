@@ -215,10 +215,26 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             FOR SHARE`;
           if (!course.length) throw learningError("NOT_FOUND", "course not found");
         }
+        // Budget lineage is accepted only through the typed, owned user-turn reference.
+        // Arbitrary createIntent JSON cannot select a fresh or foreign parent budget.
+        if (input.createIntent.parentInteractionId !== undefined || input.createIntent.sourceTurnId !== undefined) {
+          throw learningError("CONFLICT", "budget lineage must use sourceTurnId");
+        }
+        if (input.sourceTurnId) {
+          const source = await tx`SELECT t.id FROM opening_turns t
+            JOIN opening_conversations c ON c.id = t.conversation_id
+            WHERE t.id = ${input.sourceTurnId} AND t.role = 'user'
+              AND t.workspace_id = ${scope.workspaceId} AND c.workspace_id = ${scope.workspaceId}
+              AND c.owner_user_id = ${scope.ownerUserId}
+              AND c.course_id IS NOT DISTINCT FROM ${input.courseId ?? null}::uuid
+            FOR SHARE OF t, c`;
+          if (!source.length) throw learningError("NOT_FOUND", "source user turn not found in this course");
+        }
+        const initialCreateIntent = { ...input.createIntent, ...(input.sourceTurnId ? { sourceTurnId: input.sourceTurnId } : {}) };
         // A completed activity is final; with continueAfterCompleted the same request
         // walks to the next key in its chain, so repeats still land on one activity.
         let clientKey = input.clientKey;
-        let createIntent: Record<string, unknown> = input.createIntent;
+        let createIntent: Record<string, unknown> = initialCreateIntent;
         for (let hop = 0; ; hop += 1) {
           const replay = await tx`
             SELECT * FROM opening_teaching_activities
@@ -236,7 +252,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           if (hop >= MAX_ACTIVITY_CONTINUATIONS) throw learningError("CONFLICT", "too many continued activities for this clientKey");
           const previousId = String(replay[0].id);
           clientKey = `${input.clientKey}:next:${previousId}`;
-          createIntent = { ...input.createIntent, continuesActivityId: previousId };
+          createIntent = { ...initialCreateIntent, continuesActivityId: previousId };
         }
         const id = randomUUID();
         const goalJson = input.goalJson ?? {};

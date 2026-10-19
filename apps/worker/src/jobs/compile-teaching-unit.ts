@@ -12,6 +12,7 @@ import {
   isTeachingCompilerEnabled,
   isTeachingValidationEnabled,
   type BuildCompilerPublishInputOptions,
+  type ParentInteractionBudget,
 } from "@aistudy/ai";
 import type { NextVerificationStatus, ValidationReport } from "@aistudy/domain";
 import {
@@ -58,10 +59,11 @@ export type CompileTeachingUnitDeps = {
    * sizing, snapshot and settle all happen there. Budget replay errors propagate
    * exactly as from runBudgetedCall.
    */
+  resolveParentBudget?(scope: Scope, payload: CompileTeachingUnitPayload): Promise<ParentInteractionBudget>;
   callModel?(
     scope: Scope,
     input: ProviderInput,
-    options: { operationId: string; resultRef: string; beforeSend?: () => Promise<void> },
+    options: { operationId: string; resultRef: string; parentBudget?: ParentInteractionBudget; beforeSend?: () => Promise<void> },
   ): Promise<ProviderOutput>;
   /** Prompt with outline + authorized evidence; defaults to the V2-07 stub prompt. */
   buildProviderInput?(scope: Scope, payload: CompileTeachingUnitPayload): Promise<ProviderInput>;
@@ -239,6 +241,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
       let providerOutput: ProviderOutput | null = null;
 
       if (!skipProvider) {
+        const parentBudget = deps.resolveParentBudget
+          ? await deps.resolveParentBudget(scope, body)
+          : { id: `study-activity:${body.activityId}` };
         const input: ProviderInput = deps.buildProviderInput
           ? await deps.buildProviderInput(scope, { ...body, sourceIds: allowedSources })
           : {
@@ -268,7 +273,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         const resultRef = `teaching_activity:${body.activityId}`;
         try {
           providerOutput = deps.callModel
-            ? await deps.callModel(scope, input, { operationId, resultRef, ...(beforeSend ? { beforeSend } : {}) })
+            ? await deps.callModel(scope, input, { operationId, resultRef, parentBudget, ...(beforeSend ? { beforeSend } : {}) })
             : await runBudgetedCall({
                 provider: deps.provider,
                 budget: scopedBudget,
@@ -276,6 +281,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
                 requestId: operationId,
                 operationId,
                 purpose: "compile-teaching-unit",
+                parentBudget,
                 resultRef,
                 reservedCents: deps.reservedCents ?? 100,
                 actualCents: () => Math.min(deps.reservedCents ?? 100, 50),

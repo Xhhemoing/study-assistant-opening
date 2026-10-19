@@ -131,3 +131,52 @@ describe("model gateway fallback and free tier", () => {
     expect(() => reservationTerms({ ...fallbackModel(), dailyRequestCap: null }, input)).toThrow(OpeningModelRoutingError);
   });
 });
+
+describe("parent interaction through gateway fallback", () => {
+  it("uses one shared parent across separate rounds and the fallback key", async () => {
+    const { OpeningProviderError } = await import("./provider");
+    const { calls, repo } = budget();
+    const parentBudget = { id: "study-turn:user-1", budgetCents: 500 };
+    const gateway = createModelGateway({
+      resolve: async () => model(vi.fn(async () => { throw new OpeningProviderError("PROVIDER_AUTH", "bad key"); })),
+      resolveFallback: async () => model(),
+    });
+    await gateway.call(scope, "tutor.explain", { budget: repo, input, operationId: "round:1", parentBudget });
+    await gateway.call(scope, "tutor.explain", { budget: repo, input, operationId: "round:2", parentBudget });
+    expect(calls.reserve.map(r => r.parentBudget)).toEqual([parentBudget, parentBudget, parentBudget, parentBudget]);
+    expect(calls.reserve.map(r => r.requestId)).toEqual(["round:1", "round:1:fallback", "round:2", "round:2:fallback"]);
+  });
+});
+
+describe("priced transport input bound", () => {
+  it("reserves the full transmitted prompt including style and history, and enforces the output cap on wire", async () => {
+    const { createOpeningProvider } = await import("./provider");
+    const { calls, repo } = budget();
+    let wireBody = "";
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "test", model: "m", answerStyle: true,
+      fetchImpl: (async (_url, init) => {
+        wireBody = String(init?.body);
+        return new Response(JSON.stringify({ choices: [{ message: { content: '{"text":"ok","citedChunkIds":[],"candidates":[]}' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 });
+      }) as typeof fetch,
+    });
+    const gateway = createModelGateway({ resolve: async () => ({ ...model(), provider, inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000 }) });
+    await gateway.call(scope, "tutor.explain", { budget: repo, operationId: "wire-bound", input: { ...input,
+      instruction: "说明".repeat(200), history: [{ role: "assistant", text: "步骤".repeat(500) }], maxOutputTokens: 123,
+    } });
+    expect(calls.reserve[0]!.amountCents).toBeGreaterThanOrEqual(new TextEncoder().encode(wireBody).length + 123);
+    expect(JSON.parse(wireBody).max_tokens).toBe(123);
+    expect(JSON.parse(wireBody).messages[0].content).toContain("写作规则");
+  });
+});
+
+it("prices verified media context limits independently from encoded image byte count", () => {
+  const snapshot = { ...model().modelSnapshot, mediaInputTokenUpperBound: 8000, mediaMaxInputBytes: 10000, mediaInputCentsPerMillion: 1_000_000 };
+  const mediaModel = { ...model(), modelSnapshot: snapshot, ...snapshot };
+  const mediaInput = { ...input, mediaCapability: "text_plus_page_images" as const,
+    imageParts: [{ mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=" }] };
+  const first = reservationTerms(mediaModel, mediaInput);
+  const largerEncoded = reservationTerms(mediaModel, { ...mediaInput, imageParts: [{ ...mediaInput.imageParts[0]!, data: `data:image/png;base64,${"A".repeat(8000)}` }] });
+  expect(first.reservedCents).toBeGreaterThan(8000);
+  expect(largerEncoded.reservedCents).toBe(first.reservedCents);
+  expect(first.actualCents({ ...output, inputTokens: 123, outputTokens: 0 })).toBe(123);
+});

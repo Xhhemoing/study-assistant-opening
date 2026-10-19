@@ -1,5 +1,6 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { OpeningProviderError } from "./provider";
+import { assertParentInteractionBudget, hasMediaInput, mediaInputCostBound, mediaInputBytes, type ParentInteractionBudget } from "./parent-interaction-budget";
 
 export type BudgetedProvider = {
   complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput>;
@@ -15,6 +16,7 @@ export type OverageAudit = {
 export type BudgetedRepository = {
   reserve(input: {
     purpose: string;
+    parentBudget?: ParentInteractionBudget;
     modelSnapshot?: OpeningModelSnapshot;
     amountCents: number;
     requestId: string;
@@ -26,7 +28,7 @@ export type BudgetedRepository = {
    * reservation. Exactly one concurrent caller gets true.
    */
   claimExecution(reservationId: string): Promise<boolean>;
-  settle(reservationId: string, actualCents: number, options?: { resultRef?: string }): Promise<unknown>;
+  settle(reservationId: string, actualCents: number, options?: { resultRef?: string; costBasis?: "usage_pricing" | "media_usage_upper_bound" | "vendor_receipt" }): Promise<unknown>;
   markUnknown(reservationId: string): Promise<unknown>;
   /** Optional audit hook when settle caps actual spend to the reservation. */
   noteOverage?(audit: OverageAudit): Promise<void>;
@@ -98,6 +100,7 @@ export function isBudgetReplayError(error: unknown): error is BudgetReplayError 
 }
 
 export type BudgetedCallOptions = {
+  parentBudget?: ParentInteractionBudget;
   modelSnapshot?: OpeningModelSnapshot;
   provider: BudgetedProvider | null;
   budget: BudgetedRepository;
@@ -195,6 +198,14 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   if (!options.provider) {
     throw new BudgetedCallError("PROVIDER_DISABLED", "opening provider is disabled");
   }
+  if (options.parentBudget && hasMediaInput(options.input)) {
+    const bound = mediaInputCostBound(options.modelSnapshot ?? {});
+    if (!bound) throw new BudgetedCallError("BUDGET_MEDIA_COST_UNBOUNDED", "当前模型未配置可核验的媒体计费上界，请改用文本或先完成材料解析。");
+    let bytes: number;
+    try { bytes = mediaInputBytes(options.input); }
+    catch { throw new BudgetedCallError("BUDGET_MEDIA_INPUT_INVALID", "媒体内容编码无效。"); }
+    if (bytes > bound.mediaMaxInputBytes) throw new BudgetedCallError("BUDGET_MEDIA_INPUT_TOO_LARGE", "媒体内容超过已配置计费上界适用的大小限制。");
+  }
   // Family 1: illegal per-call reserve never reaches provider or ledger reserve.
   const freeTier = options.requestCapPerDay !== undefined;
   if (!Number.isSafeInteger(options.reservedCents) || options.reservedCents < 0 || (options.reservedCents === 0) !== freeTier) {
@@ -203,10 +214,12 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
       "reservedCents must be a positive integer",
     );
   }
+  if (options.parentBudget) assertParentInteractionBudget(options.parentBudget);
   // operationId (when present) is the ledger idempotency key; requestId stays caller-visible.
   const ledgerRequestId = options.operationId ?? options.requestId;
   const reservation = await options.budget.reserve({
     purpose: options.purpose ?? "tutor",
+    ...(options.parentBudget ? { parentBudget: options.parentBudget } : {}),
     ...(options.modelSnapshot ? { modelSnapshot: options.modelSnapshot } : {}),
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,
@@ -231,7 +244,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     output = await options.provider.complete(options.input, options.signal);
   } catch (error) {
     if (error instanceof OpeningProviderError) {
-      const action = ledgerActionForProviderError(error.code);
+      const action = ledgerActionForProviderError(error.code, { requestSent: error.requestSent });
       if (action === "release") {
         await options.budget.release(ledgerRequestId, "not_sent");
       } else {
@@ -242,9 +255,15 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     }
     throw error;
   }
-  const settlement = output.inputTokens === null || output.outputTokens === null
-    ? null
-    : settleCentsForActual(options.reservedCents, options.actualCents(output));
+  const actual = output.inputTokens === null || output.outputTokens === null ? null : options.actualCents(output);
+  if (actual !== null && (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier))) {
+    await options.budget.markUnknown(reservation.id);
+    throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
+  }
+  const settlement = actual === null ? null
+    : options.parentBudget
+      ? { settledCents: actual, overage: actual > options.reservedCents }
+      : settleCentsForActual(options.reservedCents, actual);
   try {
     await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
   } catch (error) {
@@ -256,19 +275,21 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   if (output.inputTokens === null || output.outputTokens === null) {
     await options.budget.markUnknown(reservation.id);
   } else {
-    const actual = options.actualCents(output);
     const { settledCents, overage } = settlement!;
     // Settlement failures must leave the reservation intact, never release it.
     await options.budget.settle(
       reservation.id,
       settledCents,
-      ...(options.resultRef ? [{ resultRef: options.resultRef }] : []),
+      ...(options.resultRef || hasMediaInput(options.input) ? [{
+        ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+        ...(hasMediaInput(options.input) ? { costBasis: "media_usage_upper_bound" as const } : {}),
+      }] : []),
     );
     if (overage) {
       await options.budget.noteOverage?.({
         reservationId: reservation.id,
         reservedCents: options.reservedCents,
-        actualCents: actual,
+        actualCents: actual!,
         settledCents,
       });
     }

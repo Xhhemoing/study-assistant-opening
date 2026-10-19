@@ -7,15 +7,16 @@ import {
   type BudgetedRepository,
   type BudgetedCallOptions,
 } from "./budgeted-call";
+import { hasMediaInput, mediaInputCostBound, type MediaInputCostBound, type ParentInteractionBudget } from "./parent-interaction-budget";
 import { OpeningModelRoutingError } from "./model-routing";
 import { modelTaskSpec, type ModelTaskKey } from "./model-tasks";
-import { OpeningProviderError } from "./provider";
+import { OpeningProviderError, openingProviderRequestBody } from "./provider";
 import { actualCentsForOutput, reservationCentsForInput } from "./usage";
 
 export type GatewayScope = { workspaceId: string; ownerUserId: string };
 
 /** One selection supplies the provider, the ledger snapshot and the prices. */
-export type ResolvedTaskModel = {
+export type ResolvedTaskModel = Partial<MediaInputCostBound> & {
   provider: BudgetedProvider;
   modelSnapshot: OpeningModelSnapshot;
   inputCentsPerMillion: number;
@@ -27,6 +28,7 @@ export type ResolvedTaskModel = {
 };
 
 export type ModelGatewayCallOptions = {
+  parentBudget?: ParentInteractionBudget;
   budget: BudgetedRepository;
   input: ProviderInput;
   /** Durable ledger key: retries of one logical operation reuse one reservation. */
@@ -58,9 +60,17 @@ export function reservationTerms(model: ResolvedTaskModel, input: ProviderInput,
     }
     return { reservedCents: 0, actualCents: () => 0, requestCapPerDay: model.dailyRequestCap };
   }
-  const rates = { inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
+  const media = hasMediaInput(input);
+  const bound = media ? mediaInputCostBound(model) ?? mediaInputCostBound(model.modelSnapshot) : null;
+  const rates = { inputCentsPerMillion: bound?.mediaInputCentsPerMillion ?? model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
+  // Encoded media bytes are transport, not text tokens. A verified provider
+  // context limit supplies the media bound; all textual frames remain priced.
+  const pricedInput = media ? { ...input, imageParts: input.imageParts.map(part => ({ ...part, data: "" })),
+    ...(input.audioParts ? { audioParts: input.audioParts.map(part => ({ ...part, data: "" })) } : {}) } : input;
+  const textReservation = reservationCentsForInput(JSON.stringify(openingProviderRequestBody(pricedInput, { model: model.modelSnapshot.modelName, answerStyle: true })), input.maxOutputTokens, rates);
+  const mediaReservation = bound ? Math.ceil(bound.mediaInputTokenUpperBound * bound.mediaInputCentsPerMillion / 1_000_000) : 0;
   return {
-    reservedCents: Math.max(floorCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
+    reservedCents: Math.max(floorCents, textReservation + mediaReservation),
     actualCents: (output) => actualCentsForOutput(output, rates),
   };
 }
@@ -74,7 +84,7 @@ export function reservationTerms(model: ResolvedTaskModel, input: ProviderInput,
  */
 export function isNotSentFailure(error: unknown): boolean {
   if (error instanceof OpeningModelRoutingError) return true;
-  if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code) === "release";
+  if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "release";
   if (isBudgetReplayError(error)) return error.disposition.kind === "released";
   const code = (error as { code?: unknown } | null)?.code;
   return code === "BUDGET_EXCEEDED" || code === "REQUEST_CAP_EXCEEDED";
@@ -127,6 +137,7 @@ export function createModelGateway(deps: {
           requestId: operationId,
           operationId,
           purpose: modelTaskSpec(task).purpose,
+          parentBudget: options.parentBudget ?? { id: options.operationId },
           ...(options.resultRef ? { resultRef: options.resultRef } : {}),
           ...(options.persistResult ? { persistResult: options.persistResult } : {}),
           reservedCents: terms.reservedCents,

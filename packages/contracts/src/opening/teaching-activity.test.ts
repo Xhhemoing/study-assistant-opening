@@ -109,3 +109,9 @@ it("accepts a server-built learner focus and rejects unknown kinds or extra fiel
   expect(teachingLearnerFocusSchema.safeParse({ ...focus, mastery: 0.9 }).success).toBe(false);
   expect(teachingLearnerFocusSchema.safeParse({ ...focus, recentAssistance: ["hinted", "hinted", "hinted", "hinted"] }).success).toBe(false);
 });
+
+it("validates the optional source user turn reference", () => {
+  const input = { clientKey: "source-turn-test", intentKind: "question", intentSummary: "Explain this", createIntent: {} };
+  expect(teachingActivityCreateInputSchema.parse({ ...input, sourceTurnId: uuid }).sourceTurnId).toBe(uuid);
+  expect(teachingActivityCreateInputSchema.safeParse({ ...input, sourceTurnId: "another-parent" }).success).toBe(false);
+});

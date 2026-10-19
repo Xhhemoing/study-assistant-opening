@@ -119,7 +119,7 @@ describe("tutor turn handler", () => {
     const { deps, provider, tutorJobs } = setup();
     const image = { mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: chunkA.sourceId, physicalPage: 1 };
     const pageImages = vi.fn(async () => [image]);
-    await createTutorTurnHandler({ ...deps, resolveModel: async () => ({ provider, supportsVision: true, modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 }, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }), pageImages })(claimedJob.id);
+    await createTutorTurnHandler({ ...deps, resolveModel: async () => ({ provider, supportsVision: true, modelSnapshot: { id: "visual", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }, inputCentsPerMillion: 100, outputCentsPerMillion: 200 }), pageImages })(claimedJob.id);
     expect(pageImages).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: claimedJob.workspaceId }), expect.objectContaining({ sourceIds: [chunkA.sourceId], sourceVersions: { [chunkA.sourceId]: 0 }, physicalPage: 1 }));
     expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [image] });
     expect(tutorJobs.completeTurn).toHaveBeenCalled();
@@ -149,7 +149,7 @@ describe("tutor turn handler", () => {
       ...deps,
       resolveModel: async () => ({
         provider, supportsVision: true,
-        modelSnapshot: { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+        modelSnapshot: { id: "visual", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
         inputCentsPerMillion: 100, outputCentsPerMillion: 200,
       }),
       pageImages,

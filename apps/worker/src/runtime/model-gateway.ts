@@ -59,6 +59,8 @@ function toResolved(model: MergedModel): ResolvedTaskModel {
     provider: createOpeningProvider({
       baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName,
       supportsVision: model.supportsVision, supportsAudio: model.supportsAudio,
+      mediaInputTokenUpperBound: model.mediaInputTokenUpperBound, mediaMaxInputBytes: model.mediaMaxInputBytes,
+      mediaInputCentsPerMillion: model.mediaInputCentsPerMillion,
       answerStyle: parseBooleanEnv(process.env, "OPENING_ANSWER_STYLE", true),
     }),
     modelSnapshot: openingModelSnapshot(model),
@@ -66,6 +68,8 @@ function toResolved(model: MergedModel): ResolvedTaskModel {
     outputCentsPerMillion: model.outputCentsPerMillion,
     supportsVision: model.supportsVision,
     supportsAudio: model.supportsAudio ?? false,
+    mediaInputTokenUpperBound: model.mediaInputTokenUpperBound, mediaMaxInputBytes: model.mediaMaxInputBytes,
+    mediaInputCentsPerMillion: model.mediaInputCentsPerMillion,
     billing: model.billing ?? "metered",
     dailyRequestCap: model.dailyRequestCap ?? null,
   };

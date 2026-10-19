@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import { openingModelSnapshotSchema, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
+  DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS,
+  assertParentInteractionBudget,
+  type ParentInteractionBudget,
   resolveBudgetLocalDay,
   resolveBudgetTimeZone,
   resolveEffectiveDailyCap,
@@ -10,7 +13,7 @@ import {
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
-export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE" | "REQUEST_CAP_EXCEEDED";
+export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE" | "REQUEST_CAP_EXCEEDED" | "PARENT_BUDGET_EXCEEDED" | "PARENT_BUDGET_CALL_LIMIT" | "PARENT_BUDGET_OUTCOME_UNKNOWN" | "PARENT_BUDGET_BLOCKED";
 
 export class OpeningBudgetError extends Error {
   readonly code: OpeningBudgetErrorCode;
@@ -25,6 +28,8 @@ export class OpeningBudgetError extends Error {
 export type BudgetReservationRecord = {
   id: string;
   workspaceId: string;
+  parentInteractionId: string | null;
+  settlementCostBasis: "usage_pricing" | "media_usage_upper_bound" | "vendor_receipt" | null;
   purpose: string;
   amountCents: number;
   requestId: string;
@@ -83,6 +88,7 @@ function mapEvent(row: Record<string, unknown>): BudgetReconcileEvent {
 }
 
 export type ReserveInput = {
+  parentBudget?: ParentInteractionBudget;
   modelSnapshot?: OpeningModelSnapshot;
   purpose: string;
   amountCents: number;
@@ -119,7 +125,7 @@ export type OpeningBudgetRepository = {
     scope: OpeningScope,
     reservationId: string,
     actualCents: number,
-    options?: { resultRef?: string },
+    options?: { resultRef?: string; costBasis?: "usage_pricing" | "media_usage_upper_bound" | "vendor_receipt" },
   ): Promise<BudgetReservationRecord>;
   /**
    * Unknown remote outcome: the reservation RETAINS its cap space (stays
@@ -177,6 +183,8 @@ function mapReservation(row: Record<string, unknown>, replayed = false): BudgetR
   return {
     id: row.id as string,
     workspaceId: row.workspace_id as string,
+    parentInteractionId: (row.parent_interaction_id as string | null) ?? null,
+    settlementCostBasis: (row.settlement_cost_basis as BudgetReservationRecord["settlementCostBasis"]) ?? null,
     purpose: row.purpose as string,
     amountCents: Number(row.amount_cents),
     requestId: row.request_id as string,
@@ -296,6 +304,10 @@ export function createOpeningBudgetRepository(
 
   return {
     async reserve(scope, input) {
+      if (input.parentBudget) {
+        try { assertParentInteractionBudget(input.parentBudget); }
+        catch { throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "invalid parent interaction budget"); }
+      }
       const requestCap = input.requestCapPerDay;
       const zeroCost = input.amountCents === 0;
       if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 0) {
@@ -323,6 +335,7 @@ export function createOpeningBudgetRepository(
           WITH reconciled AS (
             UPDATE opening_budget_reservations
             SET state = 'completed', updated_at = now(), reconciled_at = now(),
+                outcome_unknown_at = COALESCE(outcome_unknown_at, now()),
                 pending_reconcile_cents = amount_cents
             WHERE workspace_id = ${scope.workspaceId}
               AND state = 'reserved'
@@ -338,22 +351,64 @@ export function createOpeningBudgetRepository(
         const { capCents, budgetDay } = await capAndDay(tx as unknown as Sql, scope.workspaceId);
 
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
-        if (existing.length) {
-          const row = mapReservation(existing[0] as Record<string, unknown>);
-          // Identity = workspace + purpose + ORIGINAL reserved amount + model, in
-          // every state. settle() may lower amount_cents, so compare against
-          // reserved_amount_cents; pre-0059 rows (null) fall back to amount_cents
-          // only while still reserved.
-          const originalAmount = row.reservedAmountCents ?? (row.state === "reserved" ? row.amountCents : null);
-          const amountChanged = originalAmount !== null && originalAmount !== input.amountCents;
-          if (row.workspaceId !== scope.workspaceId || row.purpose !== input.purpose || amountChanged || JSON.stringify(row.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
+        const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
+        if (existingRow) {
+          // Original amounts survive settlement. An old, unparented reservation
+          // may be adopted once below; an attributed request can never move parents.
+          const originalAmount = existingRow.reservedAmountCents ?? (existingRow.state === "reserved" ? existingRow.amountCents : null);
+          if (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
+            || (existingRow.parentInteractionId !== null && existingRow.parentInteractionId !== (input.parentBudget?.id ?? null))
+            || (originalAmount !== null && originalAmount !== input.amountCents)
+            || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
-          // Terminal / in-flight states are replayed as-is (never re-charged);
-          // the caller decides from state + flags and must claimExecution().
+        }
+        // An existing attributed key always replays, including a frozen/unknown
+        // parent: replay never authorizes a second provider request.
+        if (existingRow && (!input.parentBudget || existingRow.parentInteractionId !== null)) {
           return mapReservation(existing[0] as Record<string, unknown>, true);
         }
 
+        if (input.parentBudget) {
+          const parent = input.parentBudget;
+          await tx`
+            INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
+            VALUES (${scope.workspaceId}, ${parent.id}, ${Math.min(parent.budgetCents ?? capCents, capCents)},
+              ${parent.maxProviderCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS})
+            ON CONFLICT (workspace_id, id) DO NOTHING
+          `;
+          const [pinned] = await tx`SELECT * FROM opening_parent_interaction_budgets
+            WHERE workspace_id = ${scope.workspaceId} AND id = ${parent.id}`;
+          // Retries may omit a tighter limit but cannot silently enlarge or replace it.
+          if ((parent.budgetCents !== undefined && Math.min(parent.budgetCents, capCents) !== Number(pinned!.budget_cents))
+            || (parent.maxProviderCalls !== undefined && parent.maxProviderCalls !== Number(pinned!.max_provider_calls))) {
+            throw new OpeningBudgetError("CONFLICT", "parent interaction limits already pinned");
+          }
+          const [usage] = await tx`
+            SELECT COALESCE(sum(amount_cents) FILTER (WHERE state <> 'released'), 0) AS cents,
+              count(*)::int AS calls,
+              count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL)::int AS unknown_calls
+            FROM opening_budget_reservations
+            WHERE workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parent.id}
+          `;
+          // Existing post-send/terminal legacy rows must stay replayable and must
+          // enter this parent's accounting, even when their bill already exceeds it.
+          const replayOnly = existingRow && (existingRow.state !== "reserved" || existingRow.executionClaimedAt !== null || existingRow.outcomeUnknownAt !== null);
+          if (!replayOnly) {
+            if (pinned!.blocked_at) throw new OpeningBudgetError("PARENT_BUDGET_BLOCKED", "parent interaction cost bound was exceeded");
+            if (Number(usage!.unknown_calls) > 0) throw new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending");
+            if (Number(usage!.calls) >= Number(pinned!.max_provider_calls)) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
+            // All settled spend + outstanding reservations + next conservative bound.
+            if (Number(usage!.cents) + input.amountCents > Number(pinned!.budget_cents)) {
+              throw new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded");
+            }
+          }
+          if (existingRow) {
+            const adopted = await tx`UPDATE opening_budget_reservations SET parent_interaction_id=${parent.id}
+              WHERE id=${existingRow.id} AND workspace_id=${scope.workspaceId} RETURNING *`;
+            return mapReservation(adopted[0] as Record<string, unknown>, true);
+          }
+        }
 
         if (requestCap !== undefined && modelSnapshot) {
           const [used] = await tx`
@@ -371,8 +426,8 @@ export function createOpeningBudgetRepository(
         // using half-open [dayStart, nextDayStart) absolute instants (not UTC date).
         // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
         const rows = await tx`
-          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}
+          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id)
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${input.parentBudget?.id ?? null}
           WHERE ${zeroCost} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE workspace_id=${scope.workspaceId} AND (
@@ -420,6 +475,10 @@ export function createOpeningBudgetRepository(
       const resultRef = options.resultRef ?? null;
       const alerts: BudgetReconcileEvent[] = [];
       const settled = await sql.begin(async (tx) => {
+        // Same lock order as reserve: an unexpectedly higher bill must be visible
+        // before another parent call is authorized.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
         const current = await tx`
           SELECT * FROM opening_budget_reservations
           WHERE id = ${reservationId} AND ${inScope(scope)}
@@ -433,11 +492,22 @@ export function createOpeningBudgetRepository(
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
         }
+        if (row.parentInteractionId && actualCents > (row.reservedAmountCents ?? row.amountCents)) {
+          await tx`UPDATE opening_parent_interaction_budgets
+            SET blocked_at = COALESCE(blocked_at, now()), blocked_reason = 'actual_exceeded_conservative_bound'
+            WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
+          const event = await tx`INSERT INTO opening_budget_reconcile_events
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents)
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents})
+            ON CONFLICT (reservation_id, kind) DO NOTHING RETURNING *`;
+          if (event.length) alerts.push(mapEvent(event[0] as Record<string, unknown>));
+        }
         if (row.state === "reserved") {
           const rows = await tx`
             UPDATE opening_budget_reservations
             SET amount_cents = ${actualCents}, state = 'completed', updated_at = now(),
-                result_ref = COALESCE(${resultRef}, result_ref)
+                result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
+                settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
             WHERE id = ${reservationId}
             RETURNING *
           `;
@@ -445,8 +515,9 @@ export function createOpeningBudgetRepository(
         }
         // Free-tier TTL reconciliation has no pending cents, but its receipt is
         // still late. The unique late_receipt event below permits it only once.
-        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null
-          && (row.pendingReconcileCents > 0 || (row.reservedAmountCents === 0 && actualCents === 0));
+        const lateAfterReconcile = row.state === "completed" && ((row.reconciledAt !== null
+          && (row.pendingReconcileCents > 0 || (row.reservedAmountCents === 0 && actualCents === 0)))
+          || (row.settlementCostBasis === "media_usage_upper_bound" && options.costBasis === "vendor_receipt"));
         const lateAfterRelease = row.state === "released";
         if (!lateAfterReconcile && !lateAfterRelease) {
           // Normal completed row: duplicate receipt is rejected, never re-applied.
@@ -468,7 +539,8 @@ export function createOpeningBudgetRepository(
           UPDATE opening_budget_reservations
           SET amount_cents = ${actualCents}, state = 'completed', pending_reconcile_cents = 0,
               reconciled_at = COALESCE(reconciled_at, now()), updated_at = now(),
-              result_ref = COALESCE(${resultRef}, result_ref)
+              result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
+              settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
           WHERE id = ${reservationId}
           RETURNING *
         `;
@@ -511,7 +583,7 @@ export function createOpeningBudgetRepository(
     async listPendingReconcile(scope) {
       const rows = await sql`
         SELECT * FROM opening_budget_reservations
-        WHERE ${inScope(scope)} AND pending_reconcile_cents > 0
+        WHERE ${inScope(scope)} AND (pending_reconcile_cents > 0 OR settlement_cost_basis = 'media_usage_upper_bound')
         ORDER BY created_at, id
       `;
       return rows.map((r) => mapReservation(r as Record<string, unknown>));
@@ -530,4 +602,24 @@ export function createOpeningBudgetRepository(
       return byId(scope, reservationId);
     },
   };
+}
+
+
+/** Derive a compiler's parent from persisted, revalidated server-owned user-turn lineage. */
+export async function readOpeningTeachingParentBudget(sql: Sql, scope: OpeningScope, activityId: string): Promise<ParentInteractionBudget> {
+  const [activity] = await sql`SELECT a.course_id, a.create_intent FROM opening_teaching_activities a
+    JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+    WHERE a.id = ${activityId} AND a.workspace_id = ${scope.workspaceId} AND a.owner_user_id = ${scope.ownerUserId}`;
+  if (!activity) throw new OpeningBudgetError("NOT_FOUND", "teaching activity not found");
+  const sourceTurnId = (activity.create_intent as Record<string, unknown> | null)?.sourceTurnId;
+  if (sourceTurnId === undefined) return { id: `study-activity:${activityId}` };
+  if (typeof sourceTurnId !== "string") throw new OpeningBudgetError("CONFLICT", "invalid source user turn lineage");
+  const turns = await sql`SELECT t.id FROM opening_turns t
+    JOIN opening_conversations c ON c.id = t.conversation_id
+    WHERE t.id::text = ${sourceTurnId} AND t.role = 'user'
+      AND t.workspace_id = ${scope.workspaceId} AND c.workspace_id = ${scope.workspaceId}
+      AND c.owner_user_id = ${scope.ownerUserId}
+      AND c.course_id IS NOT DISTINCT FROM ${activity.course_id}::uuid`;
+  if (!turns.length) throw new OpeningBudgetError("NOT_FOUND", "source user turn lineage is no longer available");
+  return { id: `study-turn:${sourceTurnId}` };
 }
