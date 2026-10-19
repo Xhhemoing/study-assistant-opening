@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import pytest
 
 
 PARSER_DIR = Path(__file__).parents[1]
@@ -34,15 +35,19 @@ def write_pdf(path: Path) -> None:
     path.write_bytes(output)
 
 
-def test_two_page_pdf_preserves_provenance_and_text(tmp_path):
-    pdf = tmp_path / "two-page.pdf"
-    write_pdf(pdf)
+@pytest.mark.parametrize("use_fixture", [False, True], ids=["generated", "repository-fixture"])
+def test_two_page_pdf_preserves_provenance_and_text(tmp_path, use_fixture):
+    pdf = FIXTURE if use_fixture else tmp_path / "two-page.pdf"
+    if not use_fixture:
+        write_pdf(pdf)
     result = run_cli("--input", pdf, "--mime", "application/pdf", "--max-pages", 2)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert [page["page"] for page in payload["pages"]] == [1, 2]
     assert "page one" in payload["pages"][0]["text"]
     assert "page two" in payload["pages"][1]["text"]
+    assert "page two" not in payload["pages"][0]["text"]
+    assert "page one" not in payload["pages"][1]["text"]
     assert all(page["imagePath"] is None for page in payload["pages"])
 
 
@@ -114,4 +119,6 @@ def test_real_pptx_preserves_two_slide_text(tmp_path):
     assert [page["page"] for page in pages] == [1, 2]
     assert "slide one" in pages[0]["text"]
     assert "slide two" in pages[1]["text"]
+    assert "slide two" not in pages[0]["text"]
+    assert "slide one" not in pages[1]["text"]
     assert all(page["imagePath"] is None for page in pages)

@@ -18,6 +18,7 @@ import { MediaReader } from "../opening/sources/media-reader";
 import { createOpeningApi } from "../opening/client/api";
 import { sourceViewerHref } from "../opening/inbox/source-viewer";
 import { courseStudyHref } from "./course-study-model";
+import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 
 export function CourseContents({ courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
   const [versions, setVersions] = useState<Record<string, number>>({});
@@ -199,6 +200,7 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 /** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
 export function CourseDetail({ id, surface = "opening" }: { id: string; surface?: CourseDetailSurface }) {
   const router = useRouter();
+  const { adaptivePlanning } = useOpeningCapabilities();
   const paths = COURSE_DETAIL_PATHS[surface];
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   const [mediaOpen, setMediaOpen] = useState(false);
@@ -227,7 +229,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
       <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />
       {paths.openingActions ? <><CourseContents courseId={id} assets={assets} /><details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">概念课示例</summary><p className="mt-2 text-xs leading-6 text-zinc-500">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习断点。</p><Link className={`${ui.secondary} mt-3`} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></details></> : null}
-      {paths.openingActions ? <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">目标与学习安排</summary><div className="mt-3"><CourseGoalForm courseId={id} /></div></details> : null}
+      {paths.openingActions && adaptivePlanning ? <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">目标与学习安排</summary><div className="mt-3"><CourseGoalForm courseId={id} /></div></details> : null}
       {paths.openingActions ? <details className="scroll-mt-6 border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">学习进展与记录</summary><div className="mt-3 space-y-5"><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} /></div></details> : <CourseLearningView courseId={id} />}
       <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">知识关联与完整目录</summary><div className="mt-3"><CourseKnowledge courseId={id} /></div></details>
       <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>

@@ -4,8 +4,18 @@ import {
   OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS,
   openingAiSettingsSchema,
   openingModelSnapshotSchema,
+  modelTaskKeySchema,
 } from "./ai-settings";
 describe("AI routing settings boundary", () => {
+  it.each(["practice.grade-photo", "tutor.think_together", "group2.task-v2", `${"a".repeat(32)}.${"b".repeat(32)}`])("accepts stable task key %s in persisted routes", key => {
+    expect(modelTaskKeySchema.parse(key)).toBe(key);
+    const taskRoutes = { [key]: { primary: "custom-1", fallback: null } };
+    expect(openingAiSettingsSchema.parse({ ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes }).taskRoutes).toEqual(taskRoutes);
+  });
+  it.each(["", "practice", "practice..photo", "Practice.photo", "practice.Grade-photo", "-practice.photo", "practice.1photo", "practice/photo", "practice.photo key", `${"a".repeat(33)}.task`, `group.${"b".repeat(33)}`])("rejects malformed task key %s", key => {
+    expect(modelTaskKeySchema.safeParse(key).success).toBe(false);
+    expect(openingAiSettingsSchema.safeParse({ ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes: { [key]: { primary: null, fallback: null } } }).success).toBe(false);
+  });
   it("accepts explicit automatic mode routes and a manual model", () => {
     expect(openingAiSettingsSchema.parse(DEFAULT_OPENING_AI_SETTINGS).mode).toBe("automatic");
     expect(openingAiSettingsSchema.parse({ ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual", manualModelId: "custom-1" }).manualModelId).toBe("custom-1");

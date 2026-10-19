@@ -62,6 +62,36 @@ def test_table_body_is_kept_on_its_physical_page():
     assert cli.texts_by_page(doc)[1] == ['caption', '| x | y |\n| 1 | 2 |']
 
 
+def test_cross_page_text_uses_original_character_spans():
+    # Sanitization changes offsets (the ligature expands); charspan refers to orig.
+    original = 'ﬁrst page\n第二页'
+    doc = SimpleNamespace(pages=[1, 2], texts=[SimpleNamespace(
+        orig=original, text='first page 第二页', prov=[
+            SimpleNamespace(page_no=1, charspan=(0, 9)),
+            SimpleNamespace(page_no=2, charspan=(10, 13)),
+        ])])
+    assert cli.texts_by_page(doc) == {1: ['ﬁrst page'], 2: ['第二页']}
+
+
+def test_multiple_fragments_on_one_page_preserve_sanitized_text_once():
+    doc = SimpleNamespace(pages=[1], texts=[SimpleNamespace(
+        orig='ﬁrst second', text='first second', prov=[
+            SimpleNamespace(page_no=1, charspan=(0, 4)),
+            SimpleNamespace(page_no=1, charspan=(5, 11)),
+        ])])
+    assert cli.texts_by_page(doc) == {1: ['first second']}
+
+
+def test_cross_page_fragments_keep_their_order_and_empty_pages():
+    doc = SimpleNamespace(pages=[1, 2, 3], texts=[SimpleNamespace(
+        orig='one two three', text='one two three', prov=[
+            SimpleNamespace(page_no=1, charspan=(0, 3)),
+            SimpleNamespace(page_no=1, charspan=(4, 7)),
+            SimpleNamespace(page_no=2, charspan=(8, 13)),
+        ])])
+    assert cli.texts_by_page(doc) == {1: ['one', 'two'], 2: ['three'], 3: []}
+
+
 def test_text_cap_is_preserved(monkeypatch, tmp_path, capsys):
     file = tmp_path / "test.pdf"
     file.write_bytes(b"input")

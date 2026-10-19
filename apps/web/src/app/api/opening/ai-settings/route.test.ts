@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
+import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsResponseSchema } from "@aistudy/contracts";
+import { MODEL_TASKS } from "@aistudy/ai";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), catalog: vi.fn(), scope: vi.fn(), models: vi.fn() }));
 vi.mock("../../../../features/opening/runtime", () => ({ requireOpeningScope: mocks.scope }));
 vi.mock("@aistudy/config", async importOriginal => ({ ...await importOriginal<typeof import("@aistudy/config")>(), loadOpeningModelCatalog: mocks.catalog }));
@@ -23,6 +24,27 @@ beforeEach(() => {
   mocks.models.mockResolvedValue([]);
 });
 describe("AI settings HTTP boundary", () => {
+  it("parses the complete GET response with every public registered task", async () => {
+    const response = await GET(new Request("http://localhost/api/opening/ai-settings"));
+    expect(response.status).toBe(200);
+    const data = openingAiSettingsResponseSchema.parse(await response.json());
+    expect(data.tasks?.map(task => task.key).sort()).toEqual(Object.entries(MODEL_TASKS).filter(([, task]) => task.group !== "settings").map(([key]) => key).sort());
+    expect(data.tasks?.find(task => task.key === "practice.grade-photo")?.needs).toEqual(["vision"]);
+  });
+  it("roundtrips photo task routes through PUT and the complete GET contract", async () => {
+    mocks.catalog.mockReturnValue({ models: [{ ...model, supportsVision: true }], defaultModelId: "one", dailyCapCents: 100 });
+    mocks.set.mockImplementation(async (_scope, settings) => { mocks.get.mockResolvedValue({ settings, saved: true, invalidStoredSettings: false }); });
+    const taskRoutes = { "practice.grade-photo": { primary: "one", fallback: null } };
+    const response = await PUT(put({ ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes }));
+    expect(response.status).toBe(200);
+    expect(openingAiSettingsResponseSchema.parse(await response.json()).settings.taskRoutes).toEqual(taskRoutes);
+    const loaded = await GET(new Request("http://localhost/api/opening/ai-settings"));
+    expect(openingAiSettingsResponseSchema.parse(await loaded.json()).settings.taskRoutes).toEqual(taskRoutes);
+  });
+  it("rejects well-shaped unregistered task routes at the write boundary", async () => {
+    expect((await PUT(put({ ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes: { "practice.not-registered": { primary: "one", fallback: null } } }))).status).toBe(422);
+    expect(mocks.set).not.toHaveBeenCalled();
+  });
   it("returns only public model metadata, never keys, endpoints or key variable names", async () => {
     const response = await GET(new Request("http://localhost/api/opening/ai-settings"));
     expect(response.status).toBe(200);

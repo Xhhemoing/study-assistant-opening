@@ -10,17 +10,18 @@ import {
 } from "./backup-menu-model";
 
 type Pending = "export" | "restore" | null;
+type BackupError = { message: string; retry: { kind: "export" } | { kind: "restore"; file: File } };
 
 export function BackupMenu() {
   const [pending, setPending] = useState<Pending>(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<BackupError | null>(null);
   const [policy, setPolicy] = useState<"reject" | "skip">("reject");
   const [result, setResult] = useState<BackupRestoreResponse | null>(null);
   const copy = backupCopy(result?.warnings.length ?? 0);
 
   async function runExport() {
     setPending("export");
-    setError("");
+    setError(null);
     try {
       const response = await fetch("/api/backups/export", {
         method: "POST",
@@ -31,7 +32,7 @@ export function BackupMenu() {
       const body = await response.json() as { package: NativeBackupPackage };
       downloadFile(JSON.stringify(body.package, null, 2), "aistudy-backup.json", "application/json");
     } catch {
-      setError("暂时无法导出原生内容备份，请稍后重试。");
+      setError({ message: "暂时无法导出原生内容备份，请稍后重试。", retry: { kind: "export" } });
     } finally {
       setPending(null);
     }
@@ -39,7 +40,7 @@ export function BackupMenu() {
 
   async function runRestore(file: File) {
     setPending("restore");
-    setError("");
+    setError(null);
     setResult(null);
     try {
       const packed = JSON.parse(await file.text()) as NativeBackupPackage;
@@ -51,7 +52,7 @@ export function BackupMenu() {
       if (!response.ok) throw new Error();
       setResult(await response.json() as BackupRestoreResponse);
     } catch {
-      setError("暂时无法恢复备份。冲突记录不会被覆盖，请检查文件后重试。");
+      setError({ message: "暂时无法恢复备份。冲突记录不会被覆盖，请检查文件后重试。", retry: { kind: "restore", file } });
     } finally {
       setPending(null);
     }
@@ -103,9 +104,9 @@ export function BackupMenu() {
       </label>
       {error ? (
         <div className="flex flex-wrap items-center gap-3" role="alert">
-          <p className="text-sm text-red-700">{error}</p>
-          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-zinc-200 px-3 text-xs text-zinc-800 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={() => void runExport()} type="button">
-            <RefreshCw aria-hidden="true" size={14} />重试导出
+          <p className="text-sm text-red-700">{error.message}</p>
+          <button className="inline-flex min-h-9 items-center gap-2 rounded-md border border-zinc-200 px-3 text-xs text-zinc-800 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" disabled={pending !== null} onClick={() => void (error.retry.kind === "restore" ? runRestore(error.retry.file) : runExport())} type="button">
+            <RefreshCw aria-hidden="true" size={14} />{error.retry.kind === "restore" ? "重试恢复" : "重试导出"}
           </button>
         </div>
       ) : null}

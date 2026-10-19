@@ -7,6 +7,7 @@ import { POST as probe } from "../../../apps/web/src/app/api/opening/model-provi
 import { PUT as saveSettings } from "../../../apps/web/src/app/api/opening/ai-settings/route";
 import { POST as createModel } from "../../../apps/web/src/app/api/opening/model-providers/[id]/models/route";
 import * as providerNetwork from "../../../packages/ai/src/opening/provider-network";
+import { openingAiSettingsResponseSchema } from "@aistudy/contracts";
 
 let f: OpeningFixture;
 let runtime: ReturnType<typeof createAuthRuntime>;
@@ -71,12 +72,13 @@ describe("atomic model quick setup", () => {
       expect(response.status).toBe(200);
       const text = await response.text();
       expect(text).not.toContain(secret); expect(text).not.toContain("ciphertext");
-      const data = JSON.parse(text);
+      const data = openingAiSettingsResponseSchema.parse(JSON.parse(text));
       expect(data.settings).toMatchObject({ mode: "automatic", dailyCapCents: 0, budgetConfirmedAt: null });
       expect(data.settings).not.toHaveProperty("taskRoutes");
       expect(data.settings.routes).toEqual({ listen: null, hint: null, explain: null, think_together: null });
       expect(data.models.find((model: { id: string }) => model.id === data.settings.defaultModelId)).toMatchObject({ billing: "free_tier", supportsAudio: true, dailyRequestCap: 200 });
-      expect(data.tasks.some((task: { key: string }) => task.key === "settings.probe")).toBe(false);
+      expect(data.tasks?.some(task => task.key === "settings.probe")).toBe(false);
+      expect(data.tasks?.some(task => task.key === "practice.grade-photo")).toBe(true);
     }
     expect(await f.sql`SELECT id FROM opening_model_providers WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(await f.sql`SELECT id FROM opening_model_provider_models WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);

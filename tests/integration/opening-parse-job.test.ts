@@ -50,6 +50,8 @@ describe("opening parse job real stack", () => {
       const state = await fixture.sql`SELECT parse_state FROM opening_sources WHERE id = ${source.id}`;
       expect(state[0]?.parse_state).toBe("ready");
       expect(rows.map((row) => ({ page: row.page, text: row.text, sourceVersion: row.source_version }))).toEqual([{ page: 1, text: expect.stringContaining(text[0]), sourceVersion: source.version }, { page: 2, text: expect.stringContaining(text[1]), sourceVersion: source.version }]);
+      expect(rows[0]!.text).not.toContain(text[1]);
+      expect(rows[1]!.text).not.toContain(text[0]);
       expect(await readdir(tempDir)).toEqual([]);
       expect(await storage.objectExists(storage.stagingKey(source.id))).toBe(false);
       expect(await storage.objectExists(storage.finalKey(source.id, source.version))).toBe(true);
