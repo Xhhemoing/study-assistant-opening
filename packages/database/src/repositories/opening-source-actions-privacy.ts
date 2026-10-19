@@ -12,7 +12,11 @@ export function turnUsesDeletedSource(db: Sql | TransactionSql, alias: "t" = "t"
           WHERE lower(citation->>'sourceId')=deleted_source.source_id::text)
         OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${col("context_source_refs")})='array'
           THEN ${col("context_source_refs")} ELSE '[]'::jsonb END) ref
-          WHERE lower(ref->>'sourceId')=deleted_source.source_id::text)))`;
+          WHERE lower(ref->>'sourceId')=deleted_source.source_id::text)
+        OR EXISTS(SELECT 1 FROM jsonb_path_query(COALESCE(${col("system_query")},'null'::jsonb),'$.**.sourceId') query_ref(value)
+          WHERE lower(query_ref.value #>> '{}')=deleted_source.source_id::text)
+        OR EXISTS(SELECT 1 FROM jsonb_path_query(COALESCE(${col("system_query")},'null'::jsonb),'$.**.href') query_link(value)
+          WHERE (query_link.value #>> '{}') ~* ('[?&]source='||deleted_source.source_id::text||'([&#]|$)'))))`;
 }
 
 export function memoryUsesDeletedSource(db: Sql | TransactionSql) {

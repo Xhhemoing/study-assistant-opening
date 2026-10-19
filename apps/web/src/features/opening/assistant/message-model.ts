@@ -9,6 +9,7 @@ export type ChatMessageView = {
   status?: TurnRecord["status"];
   origin?: "saved" | "ephemeral";
   provenanceId?: string | null;
+  systemQuery?: boolean;
   /** True when this assistant turn had selected materials / context intent (T02 general label). */
   hadMaterialContext?: boolean;
 };

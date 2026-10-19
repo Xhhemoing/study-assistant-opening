@@ -84,6 +84,15 @@ function iso(value: string | Date): string {
   return new Date(value).toISOString();
 }
 
+/** A legacy/imported receipt is untrusted JSON; never display its text after provenance rejection. */
+function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationScope) {
+  const parsed = row.system_query == null ? null : systemQueryReceiptSchema.safeParse(row.system_query);
+  const invalid = parsed !== null && (!parsed.success || parsed.data.authorization.purpose !== "system_record_lookup"
+    || parsed.data.authorization.workspaceId !== scope.workspaceId || parsed.data.authorization.principalId !== scope.ownerUserId);
+  return { text: invalid ? "此查询回执的来源或权限无法核实，内容不再显示；请重新查询。" : row.text as string,
+    citations: invalid ? [] : (row.citations as Citation[] | null) ?? [], systemQuery: !invalid && parsed?.success ? parsed.data : null };
+}
+
 export function createOpeningConversationRepository(sql: Sql) {
   return {
     async create(
@@ -147,6 +156,7 @@ export function createOpeningConversationRepository(sql: Sql) {
               CASE
                 WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)}
                   THEN '关联材料已删除，此回答内容不再显示。'
+                WHEN t.system_query IS NOT NULL THEN '系统记录查询快照，请打开核对回执。'
                 ELSE coalesce(t.text, '')
               END,
               280
@@ -196,16 +206,17 @@ export function createOpeningConversationRepository(sql: Sql) {
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
+        const display = queryDisplay(r, scope);
         return {
           id: r.id as string,
           conversationId: r.conversation_id as string,
           role: r.role as TurnRecord["role"],
-          text: r.text as string,
-          citations: (r.citations as TurnRecord["citations"]) ?? [],
+          text: display.text,
+          citations: display.citations,
           createdAt: iso(r.created_at as string | Date),
           mode: r.mode as TutorMode,
           status: r.status as TurnRecord["status"],
-          systemQuery: r.system_query == null ? null : systemQueryReceiptSchema.parse(r.system_query),
+          systemQuery: display.systemQuery,
         };
       });
     },
@@ -217,7 +228,8 @@ export function createOpeningConversationRepository(sql: Sql) {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
         SELECT role, CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
-          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations,
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE system_query END AS system_query
         FROM opening_turns t
         WHERE conversation_id = ${conversationId}
           AND workspace_id = ${scope.workspaceId}
@@ -226,10 +238,11 @@ export function createOpeningConversationRepository(sql: Sql) {
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
+        const display = queryDisplay(r, scope);
         return {
           role: r.role as "user" | "assistant",
-          text: r.text as string,
-          citations: (r.citations as Citation[] | null) ?? [],
+          text: display.text,
+          citations: display.citations,
         };
       });
     },

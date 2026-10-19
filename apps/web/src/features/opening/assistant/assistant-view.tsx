@@ -203,7 +203,7 @@ export function appendEphemeralResponseIfActive(
   const citations = [...(input.output.citations ?? [])];
   const hadMaterialContext = !input.output.systemQuery && (input.sourceIds?.length ?? 0) > 0;
   return [...(input.output.historyDiscarded ? [] : current),
-    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
+    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null, systemQuery: Boolean(input.output.systemQuery) },
     {
       id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`,
       role: "assistant",
@@ -213,6 +213,7 @@ export function appendEphemeralResponseIfActive(
       status: "complete",
       origin: "ephemeral",
       provenanceId: input.output.provenanceId ?? null,
+      systemQuery: Boolean(input.output.systemQuery),
       hadMaterialContext,
     },
   ];

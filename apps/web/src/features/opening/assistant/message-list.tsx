@@ -121,7 +121,7 @@ export const MessageList = memo(function MessageList({ messages, historyTruncate
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">原请求不会自动重发，费用仍待确认。</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-amber-800">{CLARIFY_FOLLOW_UP}</p> : null}
-      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} /> : null}
+      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
     </li>; })}</ul>}
   </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-zinc-900 px-4 text-xs font-medium text-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
 });

@@ -17,7 +17,7 @@ const result = (name: string, data: Array<Record<string, unknown>> = [{ summary:
     teaching: { id: courseId, status: "active", generateStatus: "ready", pathVersion: 1, contentVersion: 1, updatedAt: asOf },
     recommendation: { recommendationStatus: "unknown" },
   };
-  return systemQueryResultSchema.parse({ authorization, name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: [], nextOffset: null });
+  return systemQueryResultSchema.parse({ authorization, name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: name === "materials" ? data.map(row => ({ sourceId: row.sourceId ?? sourceId, sourceVersion: row.sourceVersion ?? 1 })) : [], nextOffset: null });
 };
 const output = (calls?: Array<{ name: string; arguments: string; id: string }>): ProviderOutput => ({
   text: "模型编造的已掌握结论", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null, ...(calls ? { toolCalls: calls } : {}),
@@ -106,7 +106,7 @@ describe("bounded system query planner", () => {
     await expect(runSystemQuery(input)).rejects.toThrow("context changed");
   });
   it("checks privacy after the last read and retains the exact lineage of displayed material", async () => {
-    const input = base(); input.read.mockResolvedValue({ ...result("materials"), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
+    const input = base(); input.read.mockResolvedValue({ ...result("materials", [{ sourceVersion: 3 }]), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
     const receipt = await runSystemQuery({ ...input, question: "哪页材料？" });
     expect(input.assertCurrent).toHaveBeenCalledTimes(3);
     expect(receipt.results[0]?.sourceRefs).toEqual([{ sourceId, sourceVersion: 3 }]);

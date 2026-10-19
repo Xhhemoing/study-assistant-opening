@@ -2,8 +2,9 @@ import type { SnippetCreateInput, SnippetCreateResponse } from "@aistudy/contrac
 import { OpeningApiError } from "../client/api";
 import type { ChatMessageView } from "./message-model";
 
-export function snippetSaveAvailability(message: ChatMessageView): "hidden" | "missing_provenance" | "available" {
+export function snippetSaveAvailability(message: ChatMessageView): "hidden" | "missing_provenance" | "query_not_supported" | "available" {
   if (message.origin !== "ephemeral" || (message.status && message.status !== "complete")) return "hidden";
+  if (message.systemQuery) return "query_not_supported";
   return message.provenanceId ? "available" : "missing_provenance";
 }
 
