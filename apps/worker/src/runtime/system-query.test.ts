@@ -21,7 +21,7 @@ beforeEach(() => {
 });
 it("production lazy gateway plans native reads using one parent budget and real schema boundaries", async () => {
   fixture.call.mockImplementationOnce(async (_scope, _task, options) => {
-    expect(providerInputSchema.parse(options.input).tools).toHaveLength(13); await options.beforeSend();
+    expect(providerInputSchema.parse(options.input).tools?.map(tool => tool.name)).toEqual(["settings"]); await options.beforeSend();
     return { text: "不得展示的模型结论", inputTokens: 1, outputTokens: 1, citedChunkIds: [], candidates: [], requestId: null,
       toolCalls: [{ id: "read1", name: "settings", arguments: "{}" }] };
   }).mockResolvedValueOnce({ text: "ignored", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null });

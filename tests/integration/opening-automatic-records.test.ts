@@ -7,13 +7,14 @@ import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "../../apps/web/src/features/opening/tutor/ephemeral-system-query";
 import { backupRows } from "./opening-backup-records-fixture";
-import { localDateKeyInZone } from "@aistudy/domain";
+import { localDateKeyInZone, DEFAULT_WORKSPACE_TIME_ZONE } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 let f: OpeningFixture;
 const forbidden = vi.fn(async (): Promise<never> => { throw new Error("forbidden real model/RAG/mutation path"); });
 const unavailableModel = vi.fn(async (): Promise<never> => { throw new Error("SIMULATED unavailable planner"); });
 const ephemeral = (text: string, extra: Partial<EphemeralTurnInput> = {}): EphemeralTurnInput => ({ text, sourceIds: [], sourceSelection: "none", mode: "listen", purpose: "answer", history: [], ...extra });
 const queryService = () => createDbSystemQueryService(f.sql, "worker", { callModel: unavailableModel });
+const tomorrow = () => new Date(Date.parse(`${localDateKeyInZone(new Date(), DEFAULT_WORKSPACE_TIME_ZONE)}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
 function processTurn() {
   return createTutorTurnHandler({ systemQuery: queryService(), tutorJobs: createOpeningTutorJobsRepository(f.sql),
     chunks: { listForSources: forbidden, listChunksAtVersion: forbidden }, provider: { complete: forbidden }, resolveModel: forbidden,
@@ -69,7 +70,7 @@ describe("automatic scoped reads, real PostgreSQL and simulated unavailable plan
     expect(assistants[1]?.systemQuery?.results.map(row => row.name)).toEqual(["courses", "learning"]);
     expect(assistants[1]?.systemQuery?.results.at(-1)).toMatchObject({ status: "unknown", reason: "no_data" });
     expect(forbidden).not.toHaveBeenCalled();
-    const taskId = await plan("2026-10-20", id, "Saved fresh task");
+    const taskId = await plan(tomorrow(), id, "Saved fresh task");
     await ask("高数明天计划是什么");
     await f.sql`UPDATE opening_tasks SET status='done',version=version+1 WHERE id=${taskId}`;
     await ask("刷新");
@@ -86,20 +87,20 @@ describe("automatic scoped reads, real PostgreSQL and simulated unavailable plan
     expect(result.provenanceId).toBeTruthy(); expect(forbidden).not.toHaveBeenCalled();
   });
   it("refreshes changed task evidence and does not reuse the old text as facts", async () => {
-    const id = await course("高等数学"), taskId = await plan("2026-10-20", id, "Fresh task");
+    const date = tomorrow(), id = await course("高等数学"), taskId = await plan(date, id, "Fresh task");
     const first = await reply("高数明天计划是什么");
     expect(first.systemQuery?.results.at(-1)?.data[0]).toMatchObject({ taskId, taskStatus: "pending" });
     await f.sql`UPDATE opening_tasks SET status='done',version=version+1 WHERE id=${taskId}`;
     const history = [{ role: "user" as const, text: "高数明天计划是什么", provenanceId: first.provenanceId! }, { role: "assistant" as const, text: first.text, provenanceId: first.provenanceId! }];
     const second = await reply("刷新", { history, historyPrivacyEpoch: first.privacyEpoch });
-    expect(second.systemQuery?.results.at(-1)?.data[0]).toMatchObject({ taskId, taskStatus: "done", date: "2026-10-20" });
+    expect(second.systemQuery?.results.at(-1)?.data[0]).toMatchObject({ taskId, taskStatus: "done", date });
     expect(second.historyDiscarded).toBe(false);
     expect(second.systemQuery?.results.at(-1)?.evidence[0]?.revision).toBe("2");
   });
   it("switches A focus to B explicitly and isolates courses within a workspace", async () => {
-    const a = await course("高等数学"), b = await course("大学物理");
-    await plan("2026-10-20", a, "A only"); const taskId = await plan("2026-10-20", b, "B only");
-    const direct = await createScopedOpeningSystemQueryReader(f.sql, f.scope)({ name: "planning", arguments: { date: "2026-10-20", courseId: b, limit: 5, offset: 0 } }, new AbortController().signal);
+    const date = tomorrow(), a = await course("高等数学"), b = await course("大学物理");
+    await plan(date, a, "A only"); const taskId = await plan(date, b, "B only");
+    const direct = await createScopedOpeningSystemQueryReader(f.sql, f.scope)({ name: "planning", arguments: { date, courseId: b, limit: 5, offset: 0 } }, new AbortController().signal);
     expect(direct.reason).toBe("read");
     const result = await reply("《大学物理》明天计划是什么", { courseId: a });
     expect(result.systemQuery?.results.at(-1)?.reason).toBe("read");
@@ -168,4 +169,20 @@ it("uses the current course anchor consistently in saved and ephemeral reads", a
   expect(saved.status).toBe("complete");
   expect(saved.systemQuery?.results[0]?.data[0]).toMatchObject({ id, title: "大学物理" });
   expect(saved.systemQuery?.results.at(-1)?.name).toBe("learning");
+});
+
+it("clarifies a refresh after ephemeral history provenance expires", async () => {
+  await course("高等数学"); const first = await reply("高数进度怎么样");
+  await f.sql`UPDATE opening_query_ephemeral_provenance SET expires_at=now()-interval '1 second' WHERE id=${first.provenanceId!}`;
+  const refreshed = await reply("刷新", { history: [{ role: "user", text: "高数进度怎么样", provenanceId: first.provenanceId! }], historyPrivacyEpoch: first.privacyEpoch });
+  expect(refreshed.historyDiscarded).toBe(true);
+  expect(refreshed.systemQuery).toMatchObject({ status: "unknown", reason: "clarify_query", results: [] });
+  expect(refreshed.text).toContain("重新说明要查询的记录");
+});
+it("resolves a course whose title contains a temporal word without inventing a date filter", async () => {
+  const id = await course("Next.js");
+  const result = await reply("《Next.js》进度怎么样");
+  expect(result.systemQuery?.results[0]?.data[0]).toMatchObject({ id, title: "Next.js" });
+  expect(result.systemQuery?.results.at(-1)?.name).toBe("learner_state");
+  expect(result.systemQuery?.reason).not.toBe("clarify_date");
 });

@@ -359,3 +359,47 @@ it("counts rejected model calls against the existing result limit", async () => 
   expect(receipt.results).toHaveLength(SYSTEM_QUERY_LIMITS.calls);
   expect(receipt.reason).toBe("limit");
 });
+
+it.each(["刷新", "明天呢", "那大学物理呢"])("clarifies an ungrounded continuation instead of substituting a course lookup: %s", async question => {
+  const input = base(), callModel = vi.fn(async () => output());
+  const receipt = await runSystemQuery({ ...input, question, resolveObjects: true, focus: { courseId }, callModel });
+  expect(receipt).toMatchObject({ status: "unknown", reason: "clarify_query", results: [] });
+  expect(input.read).not.toHaveBeenCalled();
+  expect(callModel).not.toHaveBeenCalled();
+  expect(renderSystemQuery(receipt)).toContain("重新说明要查询的记录");
+});
+it("offers only tools needed for a resolved topic and blocks unsolicited course reads", async () => {
+  const input = base();
+  const callModel = vi.fn().mockResolvedValueOnce(output([call("courses")])).mockResolvedValueOnce(output());
+  const receipt = await runSystemQuery({ ...input, question: "模型设置生效了吗", resolveObjects: true, callModel });
+  expect(callModel.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(["settings"]);
+  expect(input.read.mock.calls.map(([request]) => request.name)).toEqual(["settings"]);
+  expect(receipt.results[0]).toMatchObject({ name: "courses", reason: "invalid_arguments" });
+});
+it("offers the resolved course topics without exposing unrelated tools", async () => {
+  const input = base(); input.read.mockImplementation(async request => request.name === "courses" ? result("courses", [{ title: "高等数学" }]) : result(request.name));
+  const callModel = vi.fn(async (_input: ProviderInput) => output());
+  await runSystemQuery({ ...input, question: "高数进度和练习情况", resolveObjects: true, callModel });
+  expect(callModel.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(["learner_state", "learning"]);
+  expect(input.read.mock.calls.map(([request]) => request.name)).toEqual(["courses", "learner_state", "learning"]);
+});
+it("does not call a model or database for an unsupported dated state snapshot", async () => {
+  const input = base(), callModel = vi.fn(async () => output());
+  const receipt = await runSystemQuery({ ...input, question: "高数昨天学习状态怎么样", resolveObjects: true, callModel });
+  expect(receipt).toMatchObject({ status: "unknown", reason: "date_scope_unavailable", results: [] });
+  expect(input.read).not.toHaveBeenCalled(); expect(callModel).not.toHaveBeenCalled();
+});
+it("keeps an explicit decision lookup even when phrased as a continuation", async () => {
+  const input = base();
+  await runSystemQuery({ ...input, question: `那查询决策 ${courseId}`, resolveObjects: true });
+  expect(input.read.mock.calls.map(([request]) => request.name)).toEqual(["explain_decision"]);
+});
+it("does not let the planner substitute a different decision identifier", async () => {
+  const input = base();
+  const callModel = vi.fn().mockResolvedValueOnce(output([call("explain_decision", { decisionId: sourceId })])).mockResolvedValueOnce(output());
+  const receipt = await runSystemQuery({ ...input, question: `查询决策 ${courseId}`, resolveObjects: true, callModel });
+  expect(callModel.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(["explain_decision"]);
+  expect(input.read).toHaveBeenCalledWith({ name: "explain_decision", arguments: { decisionId: courseId } }, expect.any(AbortSignal));
+  expect(input.read).toHaveBeenCalledOnce();
+  expect(receipt.results[0]).toMatchObject({ reason: "invalid_arguments" });
+});

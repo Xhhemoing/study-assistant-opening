@@ -140,3 +140,17 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 查询规划分别记录模型调用是否被拒和真实 reader 是否已尝试。参数/课程/日期越界的调用仍保留拒绝回执，但在剩余原有预算内按服务端已解析范围补读；真实读取返回 unknown、超时或不可用时不自动重试。拒绝回执仍占原四回执上限，补读不增加模型轮次或权限。
 
 本轮完成相关非浏览器回归、Contracts/AI/Worker/Web 类型检查与改动 lint。数据库服务不可用，未重新执行真实 PostgreSQL/HTTP、真实模型、浏览器或完整 CI；上一轮日志不能视作本轮通过。无新增 migration、依赖或 UI 改动，开关默认值不变，未 push、合并或部署。
+
+### GitHub 同步与进一步调研优化（2026-10-19）
+
+原补丁与本地4228253的源码树已逐字节同步到GitHub 0964837，见 [PR #73](https://github.com/Xhhemoing/study-assistant-opening/pull/73)。PR以精确前置分支 `codex/study-content-space-round2` 为base，尚不代表已整合到发布主干。
+
+调研采用 [OWASP Prompt Injection Prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) 的最小权限、模型外授权和工具参数校验原则，以及 [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) 的明确日历表示及公历日期约束。落地选择仍由现有服务端判定和reader控制：不新增一次LLM意图判断来决定权限，也不把JSON形状正确当作对象、日期或查询用途正确。
+
+- 已解析主题只向模型提供该轮所需工具；预先解析课程后，不再允许模型追加未请求的课程读取。全注册表仍保留13个工具；参数/作用域校验和四回执/两轮/总超时不变。减少的是工具描述和无关选择，不宣称已测得真实token成本或模型质量收益。
+- 历史被丢弃后，孤立的“刷新”“明天呢”“那大学物理呢”返回 `clarify_query`，不擅自改查某门课程的学习记录；缺失主题与明确但不支持的历史/未来状态分别提示。澄清路径仍核验当前授权，但不调用记录reader或模型。
+- 显式决策ID查询只允许该决策工具与该确切ID；模型替换对象会被拒绝，并在原预算内补读原ID。有效决策ID的续问式表达不会误作课程名。
+- 课程标题先从日期识别文本中剥离，`Next.js`、`未来简史`、带日期的课程名不再冒充日期条件；标题外的明天、下周或ISO日期仍生效。英文日期按完整单词匹配，畸形日期按完整token拒绝，不读成今天。补充闰日、月底、跨年回归。
+- 自动查询的真实PG夹具按默认工作区时区计算明天，不再依赖2026-10-20。新增临时历史过期后孤立刷新、日期词课程名两条集成用例，由现有CI的真实PostgreSQL项目执行。
+
+本轮246项相关单元/运行时回归、AI/Worker/Web类型和改动lint通过；本地缺少数据库服务，真实PG/HTTP和完整CI结果以PR当前head检查为准。真实供应商模型、用户浏览器与长期学习收益尚未验收。无需新增migration、依赖或功能开关。

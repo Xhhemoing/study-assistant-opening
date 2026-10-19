@@ -31,17 +31,20 @@ function selectQuestion(question: string, previous: QuerySelection | undefined, 
   const workspaceTopic = ownTopics.some(topic => ["courses", "settings", "notes", "jobs", "exam_sprint"].includes(topic));
   const ownCourse = courseText(question), course = ownCourse ?? (workspaceTopic ? undefined : previous?.courseText);
   const ambiguousCourse = new Set(quotedCourses.length ? quotedCourses : namedCourses).size > 1 || !ownCourse && !workspaceTopic && !!previous?.ambiguousCourse;
-  const dateText = question.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "");
-  const datePattern = /今天|明天|后天|昨天|前天|\d{4}-\d|tomorrow|today|yesterday/i;
-  const unsupportedPattern = /大后天|大前天|后日|次日|隔天|月底|月初|上周|下周|本周|这周|每周|最近|过去|未来|明年|去年|下月|本月|这月|上月|周[一二三四五六日天]|星期|礼拜|\d+\s*(?:天|日|周|个月|月|年)(?:前|后|内)|[一二三四五六七八九十]+月|[一二三四五六七八九十]+[号日]|\d{1,2}月\d{1,2}日|week|month|last|next|between|from.*to|[至到].*\d{4}-/i;
+  // A named course is an object referent, even when its title contains Next.js,
+  // 明天 or an ISO date. Only text outside that referent constrains the query date.
+  const dateText = (ownCourse ? question.replace(ownCourse, "") : question)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "");
+  const datePattern = /今天|明天|后天|昨天|前天|\d{4}-|\b(?:tomorrow|today|yesterday)\b/i;
+  const unsupportedPattern = /大后天|大前天|后日|次日|隔天|月底|月初|上周|下周|本周|这周|每周|最近|过去|未来|明年|去年|下月|本月|这月|上月|周[一二三四五六日天]|星期|礼拜|\d+\s*(?:天|日|周|个月|月|年)(?:前|后|内)|[一二三四五六七八九十]+月|[一二三四五六七八九十]+[号日]|\d{1,2}月\d{1,2}日|\b(?:weeks?|months?|last|next|between)\b|\bfrom\b.*\bto\b|[至到].*\d{4}-/i;
   const otherDatePattern = /\d{1,4}[/.]\d{1,2}(?:[/.]\d{1,2})?|今晚|明晚|昨晚|今早|明早|\d{1,2}(?:号|日)|\d{1,2}月份?|(?:19|20)\d{6}/;
   const hasDate = datePattern.test(dateText) || unsupportedPattern.test(dateText) || otherDatePattern.test(dateText);
-  const isoTokens = [...dateText.matchAll(/\b\d{4}-\d+(?:-\d+)?\b/g)].map(match => match[0]);
+  const isoTokens = [...dateText.matchAll(/\b\d{4}-[A-Za-z0-9_-]*/g)].map(match => match[0]);
   const absolute = isoTokens.filter(token => /^\d{4}-\d{2}-\d{2}$/.test(token));
-  const relative = [...dateText.matchAll(/今天|明天|后天|昨天|前天|today|tomorrow|yesterday/gi)].map(match => match[0].toLowerCase());
+  const relative = [...dateText.matchAll(/今天|明天|后天|昨天|前天|\b(?:today|tomorrow|yesterday)\b/gi)].map(match => match[0].toLowerCase());
   const offsets: Record<string, number> = { 今天: 0, 明天: 1, 后天: 2, 昨天: -1, 前天: -2, today: 0, tomorrow: 1, yesterday: -1 };
   const dates = [...absolute, ...relative.map(day => new Date(Date.parse(`${today}T00:00:00Z`) + offsets[day]! * 86400000).toISOString().slice(0, 10))];
-  const malformedDate = isoTokens.length !== absolute.length || /\d{4}-\d/.test(dateText) && !isoTokens.length || otherDatePattern.test(dateText);
+  const malformedDate = isoTokens.length !== absolute.length || /\d{4}-/.test(dateText) && !isoTokens.length || otherDatePattern.test(dateText);
   const invalidDate = hasDate ? unsupportedPattern.test(dateText) || malformedDate || new Set(dates).size > 1
     || dates.some(date => !Number.isFinite(Date.parse(`${date}T00:00:00Z`)) || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date)
     : !workspaceTopic && !!previous?.invalidDate;
@@ -55,7 +58,7 @@ export function matchingCourses(result: SystemQueryResult, requested?: string) {
 }
 /** Applied after schema validation and before every real read, including native calls. */
 export function queryWithinFocus(request: SystemQueryRequest, focus: SystemQueryFocus, selection: QuerySelection): boolean {
-  if (selection.topics.length && !selection.topics.includes(request.name as RecordTopic) && request.name !== "courses") return false;
+  if (selection.topics.length && !selection.topics.includes(request.name as RecordTopic)) return false;
   if (request.name === "planning") return !selection.invalidDate && request.arguments.date === focus.date && request.arguments.courseId === (focus.courseId ?? undefined);
   if (selection.invalidDate || selection.dateExplicit && request.name !== "courses") return false; // Other tools expose current records, not historical snapshots.
   if (request.name === "courses" && !focus.courseId && !selection.courseText) return !request.arguments.courseId;
