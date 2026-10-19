@@ -14,7 +14,7 @@ export async function replyEphemeralSystemQuery(deps: { systemQuery: SystemQuery
   if (!input.querySystem || !deps.systemQuery.enabled()) throw new EphemeralServiceError("SYSTEM_QUERY_DISABLED", "系统记录查询暂未开启。", 409);
   if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "system query cancelled", 499);
   const sourceId = input.sourceIds.length === 1 ? input.sourceIds[0] : undefined;
-  const reply = await deps.systemQuery.reply(scope, { question: input.text, focus: { courseId: input.courseId, sourceId, physicalPage: input.currentPage } }, signal)
+  const reply = await deps.systemQuery.reply(scope, { question: input.text, focus: { courseId: input.courseId, sourceId, sourceIds: input.sourceIds, physicalPage: input.currentPage } }, signal)
     .catch(() => { throw new EphemeralServiceError(signal?.aborted ? "ABORTED" : "SYSTEM_QUERY_UNAVAILABLE", "当前系统记录无法核实，请保留问题后重试。", signal?.aborted ? 499 : 503); });
   const historyInvalid = input.history.length > 0 && (input.historyPrivacyEpoch !== reply.privacyEpoch
     || await deps.provenance.resolveHistory(scope, input.history, reply.privacyEpoch) === null);

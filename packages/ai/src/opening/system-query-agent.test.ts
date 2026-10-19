@@ -107,7 +107,7 @@ describe("bounded system query planner", () => {
   });
   it("checks privacy after the last read and retains the exact lineage of displayed material", async () => {
     const input = base(); input.read.mockResolvedValue({ ...result("materials", [{ sourceVersion: 3 }]), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
-    const receipt = await runSystemQuery({ ...input, question: "哪页材料？" });
+    const receipt = await runSystemQuery({ ...input, question: "哪页材料？", focus: { sourceId, sourceVersion: 3 } });
     expect(input.assertCurrent).toHaveBeenCalledTimes(3);
     expect(receipt.results[0]?.sourceRefs).toEqual([{ sourceId, sourceVersion: 3 }]);
   });

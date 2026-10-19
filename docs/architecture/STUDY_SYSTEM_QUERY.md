@@ -74,7 +74,7 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 
 临时路径在加载模型 catalog/存储/预算前分流。0074 新表只保存 owner/workspace、request id、epoch、来源版本、时间戳，不保存问答/候选/学习记录，不伪造0元模型账单。24小时后历史准入立即失效；worker 维护任务每轮最多删除1000条过期元数据。该记录只证明服务端准备了回复，不证明 HTTP 送达。它不进入备份/恢复；保存聊天的 query intent/receipt 进入现有备份，并验证授权作用域、完整 lineage 和受保护正文禁令。
 
-首版只运行有限固定规则，receipt 明确 `mode=deterministic / native_tools_not_enabled`，不读取密钥、不发起真实模型请求，不以缺密钥为模型失败。材料查询应先选择一个来源和物理页；无唯一来源时仅按整句有限检索，查不到返回 unknown。规划只查询今天的已确认计划，不承诺任意自然语言日期解析。课程绑定优先来自保存会话或显式临时课程，并由实际 SQL 重新鉴权。未提供唯一课程时不猜课程；不覆盖 notes、复习队列、历史材料正文、费用汇总或持久化决策。
+生产默认只运行有限意图规则，receipt 明确 `mode=deterministic / native_tools_not_enabled`，不读取密钥、不发起真实模型请求，不以缺密钥为模型失败。材料查询先选择一个来源和物理页，或用引号提供原文关键词；多份材料匹配会要求选择，不按整句猜检索词。规划支持一个真实ISO日期及今天/明天/后天/昨天等明确相对日期，以服务端工作区时区解析；无日期、无效日期、星期或范围表达要求补充，不静默查今天。课程绑定优先来自保存会话或显式临时课程，并由实际 SQL 重新鉴权；未绑定时只允许从未截断且自第一页起的实际课程候选唯一解析，不能把最后一页单条当作全库唯一。“我有哪些任务”要求区分后台状态与某日学习计划，不把后台成功等同学习完成。不覆盖任意系统问答、全部待办汇总、notes、复习队列、历史材料正文、费用汇总或持久化决策。
 
 验证包括真实 PostgreSQL 的 saved/ephemeral 闭环及 adaptivePlanning=0/1、幂等与意图冲突、无模型/RAG/预算调用、只存临时元数据、24小时过期、来源变化/撤回/owner变更、查询到写回间的privacy竞态、资产删除隐藏、真实备份执行器往返。HTTP 覆盖显式查询、非法类型/伪造作用域、关闭开关与 no-store。PR69 的 `fa322b89` 完整 CI39216797557成功；不能将它当本后续切片的CI结果。
 
@@ -89,3 +89,11 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 临时查询的24小时provenance只用于历史准入，本批不支持据此存笔记或做卡片：消息携带明确类型，两个按钮禁用并说明原因，草稿准备也拒绝，不再误启用后返回NOT_FOUND。复制仍可用；需要保留查询时选择保存会话。普通临时导师消息的显式保存路径保持原有授权/来源校验。
 
 真实PG反例覆盖 lookup隐藏已删来源、source_review节选、仅URL引用、无journal的schema-valid source_review、实际恢复拒绝/安全恢复读取，以及旧JSON来源仅在data/evidence/href时的删除后隐藏；两项临时保存操作有非浏览器回归。日期默认今天、多对象定位与受控意图解析另属本轮新增审查范围；未修复并复核前不把固定规则称为任意系统问答。
+
+### PR70 F3：有限意图解析与受控 planner 接线
+
+`system-query-intent.ts` 负责有限问法、相对日期及明确不支持/追问；`system-query-routing.ts` 负责日期、当前绑定、唯一候选的语义准入，PR69 engine继续负责八类严格schema、权限用途、来源、取消及两轮/四工具限制。原生planner提出今天替代明天、猜选课程/材料、替换绑定版本或用非首页单条伪装唯一对象时，服务端拒绝，不执行那个读取。未知问法在未提供planner时明确追问，不默认改查课程。回执新增可选clarification并显示提示。
+
+`createDbSystemQueryService(...,{planner})` 与 ephemeral runtime 的受信构造选项现在把callback接入原PR69 `callModel`；HTTP输入不能注入这个选项。planner获得服务端日期/时区/绑定和实际工具结果，不获得旧history；自由正文仍不成为答案。测试用模拟模型走真实PG的saved Worker handler与ephemeral runtime，两轮实际读取并验证错日期/对象/权限边界。**生产bootstrap仍未注入模型gateway**，也未读取任何真实密钥；真实模型、供应商协议/质量、完整provider receipt、原子父预算及晚账务仍属C1/C2与并行升级计划后续，不由模拟通过证明。
+
+并行协调：`codex/study-upgrade-20261019@ad4c668` 基于本PR的93e455f5；复用相同0074 blob，本批不占其计划的0075–0078。后续W1.7需保留19ac815恢复/临时保存修复及本F3路由改动，不能从旧93快照覆盖。仅核对该仓库合法远端refs，未访问其他私有会话目录。
