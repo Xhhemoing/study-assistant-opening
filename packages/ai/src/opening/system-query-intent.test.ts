@@ -6,7 +6,7 @@ describe("finite query intent and object/date admission", () => {
   it.each([["明天的计划", "2027-01-01"], ["明日安排", "2027-01-01"], ["today plan", "2026-12-31"], ["后天日程", "2027-01-02"], ["昨天的计划", "2026-12-30"], ["2028-02-29 计划", "2028-02-29"]])("resolves %s as one local calendar date", (question, date) => {
     expect(resolveSystemQueryDate(question, clock)).toEqual({ date });
   });
-  it.each(["下周的计划", "周一安排", "我有哪些计划", "2026-02-30计划", "2026-1-2计划", "今天和明天的计划", "2026-10-190计划", "2026-10-19到21的计划", "明天之前的计划", "明年的今天计划", "明天起三天的计划"])("asks instead of silently querying today for %s", question => {
+  it.each(["下周的计划", "周一安排", "我有哪些计划", "2026-02-30计划", "2026-1-2计划", "今天和明天的计划", "2026-10-190计划", "2026-10-19到21的计划", "明天之前的计划", "明年的今天计划", "明天起三天的计划", "2026-10-19 - 21计划", "tomorrow to Friday plan", "明天前两天的计划"])("asks instead of silently querying today for %s", question => {
     expect(parseSystemQueryIntent(question, clock)).toMatchObject({ blocked: true, clarification: expect.any(String) });
     expect(createSystemQueryRoute(question, clock).fallback()).toEqual([]);
   });
