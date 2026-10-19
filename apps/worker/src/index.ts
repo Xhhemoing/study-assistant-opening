@@ -26,6 +26,8 @@ import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
+import { createDbSystemQueryService } from "./runtime/system-query";
+import { createOpeningEphemeralProvenanceRepository } from "@aistudy/database";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -164,6 +166,7 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    systemQuery: createDbSystemQueryService(sql, "worker"),
     tutorJobs,
     chunks,
     budget,
@@ -218,7 +221,7 @@ export async function main(): Promise<void> {
   const sweepPendingUploads = createSweepPendingUploadsJob({
     sweepAll: (options) => sweepExpiredPendingUploadsAll(sql, options),
   });
-  const sweep = createSerialTask(sweepPendingUploads, reportError);
+  const sweep = createSerialTask(async () => { await sweepPendingUploads(); await createOpeningEphemeralProvenanceRepository(sql).purgeExpiredQueries?.(); }, reportError);
   tasks.push(sweep);
   timers.push(setInterval(() => { void sweep.run(); }, PENDING_UPLOAD_SWEEP_INTERVAL_MS));
   process.once("SIGINT", () => { void shutdown().catch(reportError); });

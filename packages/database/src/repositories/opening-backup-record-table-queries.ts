@@ -40,7 +40,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_turns = asRows(await tx`
     SELECT t.id, t.workspace_id, t.conversation_id, t.role, t.text, t.mode, t.status, t.client_key,
       t.learning_session_id, t.current_page, t.chunk_id, t.source_ids, t.citations, t.created_at,
-      t.intent_hash, t.source_versions, t.context_source_refs, t.attempt_id
+      t.intent_hash, t.source_versions, t.context_source_refs, t.attempt_id,t.query_system,t.system_query
     FROM opening_turns t
     WHERE ${includedTurn(tx, id, userId, "t")}
     ORDER BY t.id`);

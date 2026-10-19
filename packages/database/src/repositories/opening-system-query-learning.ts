@@ -5,6 +5,7 @@ import { openingEligibilityStateQuery, openingEligibilityPolicyVersion } from ".
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { mapLearningObservation } from "./opening-learning-facts";
 import type { OpeningSystemQueryDraft } from "./opening-system-query";
+import { readSystemQueryAncestry } from "./opening-system-query-admission";
 const qualification = (value: unknown) => ({ yes: "是", no: "否", unknown: "未知" })[String(value)] ?? "未知";
 const helpLabel = (value: unknown) => ({ independent: "独立完成", hinted: "获得提示", revealed: "已展示解法", unknown: "未知" })[String(value)] ?? "未知";
 const outcomeLabel = (value: unknown) => ({ correct: "正确", incorrect: "错误", partial: "部分正确", unverified: "未核验" })[String(value)] ?? "未核验";
@@ -21,32 +22,29 @@ export async function readSystemLearningQuery(tx: TransactionSql, scope: Scope,
   out.version += `:${openingEligibilityPolicyVersion()}`;
   if (rows.length > limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = offset + limit; }
   const selected = rows.slice(0, limit);
-  // Only fresh, currently applicable content reaches the model; stale heads expose identity/status only.
-  const safeRows = selected.filter(row => row.fresh && ["exact", "equivalent_confirmed"].includes(String(row.version_applicability)));
+  const ancestry = await readSystemQueryAncestry(tx, scope, selected.map(row => String(row.current_root_id)));
+  // Only fresh, currently applicable records with fully admitted ancestry reach the model.
+  const safeRows = selected.filter(row => ancestry.admitted.has(String(row.current_root_id)) && row.fresh && ["exact", "equivalent_confirmed"].includes(String(row.version_applicability)));
   const mapped = safeRows.map(mapLearningObservation), contexts = await readOpeningLearningEvidenceContexts(tx, scope, mapped);
   const effectiveAssistance = new Map(mapped.map(row => [row.id, resolveEvidenceAssistance(contexts[row.id]!.observation, contexts[row.id]!.context)]));
-  const privacyIds = [...new Set(selected.flatMap(row => (row.live_privacy_ids ?? []) as string[]))];
-  const sources = privacyIds.length ? await tx`SELECT id,version FROM opening_sources WHERE workspace_id=${scope.workspaceId} AND id=ANY(${privacyIds}::uuid[])` : [];
-  out.sourceRefs.push(...sources.map(row => ({ sourceId: String(row.id), sourceVersion: Number(row.version) })));
-  for (const row of selected) for (const [sourceId, sourceVersion] of Object.entries((row.source_versions ?? {}) as Record<string, number>)) {
-    out.sourceRefs.push({ sourceId, sourceVersion });
-  }
+  for (const row of safeRows) out.sourceRefs.push(...ancestry.admitted.get(String(row.current_root_id))!);
   if (safeRows.length !== selected.length) { out.status = "partial"; if (out.reason !== "truncated") out.reason = selected.some(row => !row.fresh || row.version_applicability === "changed_needs_check") ? "stale" : "not_available"; }
+  if (!ancestry.complete) { out.status = "unknown"; out.reason = "truncated"; }
   if (safeRows.some(row => String(row.answer).length > 800)) { out.status = "partial"; out.reason = "truncated"; }
-  out.data = selected.map(row => {
-    const fresh = safeRows.includes(row);
+  out.data = safeRows.map(row => {
     out.evidence.push({ id: `observation:${row.id}`, kind: "observation", title: "实际作答记录", href: `/opening/courses/${courseId}?tab=records`,
       recordId: String(row.id), ...(row.attempt_id ? { attemptId: String(row.attempt_id) } : {}),
       ...(row.item_version_id ? { itemVersionId: String(row.item_version_id) } : {}), revision: String(row.workspace_history_revision) });
     return { id: row.id, rootId: row.current_root_id, attemptId: row.attempt_id, itemVersionId: row.item_version_id,
-      ...(fresh ? { skillLabel: row.skill_label, requirementKey: row.requirement_key, answerExcerpt: String(row.answer).slice(0, 800), answerTruncated: String(row.answer).length > 800,
+      skillLabel: row.skill_label, requirementKey: row.requirement_key,
+        ...(out.authorization.purpose === "source_review" ? { answerExcerpt: String(row.answer).slice(0, 800), answerTruncated: String(row.answer).length > 800 } : { answerWithheld: true }),
         outcome: row.outcome, recordedAssistance: row.assistance, effectiveAssistance: effectiveAssistance.get(String(row.id)), eligibility: { independentAttempt: row.independent_attempt, verifiedCorrect: row.verified_correct,
-          usableForCurrentVersion: row.usable_for_current_version, usableForDelayedCheck: row.usable_for_delayed_check, reasonCodes: row.reason_codes, policyVersion: row.projected_policy_version } } : {}),
-      projectionFresh: Boolean(row.fresh), versionApplicability: row.fresh ? row.version_applicability : "unknown",
+          usableForCurrentVersion: row.usable_for_current_version, usableForDelayedCheck: row.usable_for_delayed_check, reasonCodes: row.reason_codes, policyVersion: row.projected_policy_version },
+      projectionFresh: true, versionApplicability: row.version_applicability,
       liveHelpRevision: Number(row.live_help_revision), submittedAt: new Date((row.submitted_at ?? row.occurred_at) as Date).toISOString(),
-      summary: fresh ? `${row.skill_label}：记录结果为${outcomeLabel(row.outcome)}，实际帮助情况为${helpLabel(effectiveAssistance.get(String(row.id)))}；服务端资格：独立作答${qualification(row.independent_attempt)}，核验正确${qualification(row.verified_correct)}，适用当前版本${qualification(row.usable_for_current_version)}，可作延迟检查证据${qualification(row.usable_for_delayed_check)}。这些资格不等于已掌握`
-        : `作答记录 ${row.id} 的资格或来源适用性不可确认；未返回来源派生正文，不能确认当前学习状态` };
+      summary: `${row.skill_label}：记录结果为${outcomeLabel(row.outcome)}，实际帮助情况为${helpLabel(effectiveAssistance.get(String(row.id)))}；服务端资格：独立作答${qualification(row.independent_attempt)}，核验正确${qualification(row.verified_correct)}，适用当前版本${qualification(row.usable_for_current_version)}，可作延迟检查证据${qualification(row.usable_for_delayed_check)}。这些资格不等于已掌握` };
   });
+  if (!safeRows.length && selected.length) out.status = "unknown";
   if (request.name !== "recommendation" || !selected.length) return;
   // A display limit must never turn into an apparently complete mastery/teaching decision.
   if (rows.length > limit || safeRows.length !== selected.length) {

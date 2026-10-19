@@ -36,6 +36,9 @@ import {
 import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
+import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
+import { replyEphemeralSystemQuery } from "./tutor/ephemeral-system-query";
+import type { SystemQueryPlanner } from "@aistudy/ai";
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -57,6 +60,7 @@ export function getTutorService(sql: Sql): TutorService {
   const sourceChunks: OpeningSourceChunksRepository =
     createOpeningSourceChunksRepository(sql);
   return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
+    systemQueryEnabled: () => loadFeatureSwitches().systemQuery,
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
     listReadySourceIdsForCourse: (scope, courseId) =>
       createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, courseId),
@@ -106,7 +110,15 @@ export function setEphemeralTutorDepsForTests(
   ephemeralOverride = deps;
 }
 
-export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
+export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
+  return { replyEphemeral(scope, input, signal) {
+    if (input?.querySystem) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
+      provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
+    return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
+  } };
+}
+
+function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const override = ephemeralOverride;
   const catalog = override ? null : loadOpeningModelCatalog();
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };

@@ -18,6 +18,7 @@ export const OPENING_RESTORE_NEVER_TABLES = [
   "opening_connections",
   "opening_connection_credentials",
   "opening_model_provider_credentials",
+  "opening_query_ephemeral_provenance",
 ] as const;
 
 export type OpeningRestoreNamespaceCounts = Record<OpeningBackupTable, number>;

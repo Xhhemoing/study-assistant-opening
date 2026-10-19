@@ -54,6 +54,14 @@ describe("composer keyboard shortcut", () => {
 });
 
 describe("composer logical-send idempotency", () => {
+  it("changes the logical send when query intent changes and preserves ordinary retry keys", () => {
+    const input = { text: "模型设置", mode: "explain" as const, sourceIds: [] };
+    const ordinary = logicalSendFingerprint(input);
+    expect(logicalSendFingerprint({ ...input, querySystem: false })).toBe(ordinary);
+    const query = logicalSendFingerprint({ ...input, querySystem: true });
+    expect(query).not.toBe(ordinary);
+    expect(nextClientKey({ clientKey: "old-key", fingerprint: ordinary, nextFingerprint: query, mint: () => "new-key" }).clientKey).toBe("new-key");
+  });
   it("reuses the same client key for an unchanged unconfirmed retry and mints on content drift", () => {
     const fingerprint = logicalSendFingerprint({
       text: "  explain this  ", mode: "explain", sourceIds: ["b", "a"], currentPage: 2,

@@ -29,7 +29,7 @@ export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][])
 
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */
 export function contextSourceRefsIncluded(
-  db: Db, workspaceId: string, refs: Fragment, allowHistoricalVersions = false,
+  db: Db, workspaceId: string, refs: Fragment, allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
 ): Fragment {
   return db`
     COALESCE(jsonb_typeof(${refs}) = 'array', false)
@@ -50,6 +50,9 @@ export function contextSourceRefsIncluded(
           WHERE provenance_source.id::text = lower(provenance_ref->>'sourceId')
             AND provenance_source.workspace_id = ${workspaceId}
             AND provenance_source.upload_state = 'uploaded'
+            AND (${!requireAvailability} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
+              WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
+                AND provenance_version.version::text=provenance_ref->>'sourceVersion' AND provenance_version.availability='unavailable'))
             AND (${allowHistoricalVersions} OR provenance_source.version::text = provenance_ref->>'sourceVersion')
             AND NOT EXISTS (
               SELECT 1 FROM opening_privacy_exclusions provenance_exclusion

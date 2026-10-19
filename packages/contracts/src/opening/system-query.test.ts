@@ -1,11 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { systemQueryRequestSchema, systemQueryEvidenceSchema, systemQueryResultSchema } from "./system-query";
+import { systemQueryRequestSchema, systemQueryEvidenceSchema, systemQueryResultSchema, systemQueryReceiptSchema } from "./system-query";
 import { providerInputSchema } from "./tutor";
 const input = { instruction: "read", text: "what?", chunks: [], mode: "listen", maxOutputTokens: 100, mediaCapability: "text_only", imageParts: [],
   tools: [{ name: "courses", description: "read", parameters: {} }] };
 describe("read-only query contracts", () => {
+  it("binds every result grant, rejects protected bodies in record lookup and bounds UTF-8 receipts", () => {
+    const id = "00000000-0000-4000-8000-000000000001", asOf = "2026-10-19T00:00:00Z";
+    const authorization = { purpose: "system_record_lookup", workspaceId: id, principalId: id, role: "workspace_owner", permissionRevision: "owner-fixture" };
+    const result = { authorization, name: "materials", status: "ok", reason: "read", asOf, version: "1", evidence: [], sourceRefs: [{ sourceId: id, sourceVersion: 1 }], nextOffset: null,
+      data: [{ id, sourceId: id, sourceVersion: 1, physicalPage: 1, truncated: false, exposure: "content_withheld", summary: "location only" }] };
+    const receipt = { authorization, version: "study-query-v1", asOf, privacyEpoch: 0, mode: "deterministic", status: "ok", reason: "read", results: [result] };
+    expect(systemQueryReceiptSchema.safeParse(receipt).success).toBe(true);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, sourceRefs: [] }] }).success).toBe(false);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, evidence: [{ id: "link", kind: "material", title: "x", href: `/opening/library?source=${id}&version=2` }] }] }).success).toBe(false);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, evidence: [{ id: "link", kind: "material", title: "x", href: `/opening/library?source=${id}&source=${id}&version=1` }] }] }).success).toBe(false);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, authorization: { ...authorization, principalId: "00000000-0000-4000-8000-000000000002" } }] }).success).toBe(false);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, data: [{ ...result.data[0], excerpt: "protected answer" }] }] }).success).toBe(false);
+    expect(systemQueryReceiptSchema.safeParse({ ...receipt, results: [{ ...result, data: Array.from({ length: 3 }, () => ({ ...result.data[0], summary: "中".repeat(12000) })) }] }).success).toBe(false);
+  });
   it("rejects invented result tools, invalid qualification values and extra secret fields", () => {
-    const common = { status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
+    const common = { authorization: { purpose: "system_record_lookup", workspaceId: "00000000-0000-4000-8000-000000000001", principalId: "00000000-0000-4000-8000-000000000002", role: "workspace_owner", permissionRevision: "owner-fixture" },
+      status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
     const id = "00000000-0000-4000-8000-000000000001";
     const observation = { id, rootId: id, attemptId: null, itemVersionId: null, projectionFresh: true, versionApplicability: "exact", liveHelpRevision: 0,
       submittedAt: common.asOf, summary: "actual record", eligibility: { independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "yes", usableForDelayedCheck: "unknown", reasonCodes: [], policyVersion: "opening-evidence-v3" } };

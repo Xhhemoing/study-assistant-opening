@@ -4,8 +4,10 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
+import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
 import Link from "next/link";
@@ -193,15 +195,16 @@ export function appendEphemeralResponseIfActive(
       historyDiscarded?: boolean;
       provenanceId?: string | null;
       citations?: ChatMessageView["citations"];
+      systemQuery?: import("@aistudy/contracts").SystemQueryReceipt;
     };
   },
   signal: AbortSignal,
 ): ChatMessageView[] {
   if (signal.aborted) return current;
   const citations = [...(input.output.citations ?? [])];
-  const hadMaterialContext = (input.sourceIds?.length ?? 0) > 0;
+  const hadMaterialContext = !input.output.systemQuery && (input.sourceIds?.length ?? 0) > 0;
   return [...(input.output.historyDiscarded ? [] : current),
-    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
+    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null, systemQuery: Boolean(input.output.systemQuery) },
     {
       id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`,
       role: "assistant",
@@ -211,6 +214,8 @@ export function appendEphemeralResponseIfActive(
       status: "complete",
       origin: "ephemeral",
       provenanceId: input.output.provenanceId ?? null,
+      systemQuery: Boolean(input.output.systemQuery),
+      queryEvidenceLinks: queryEvidenceLinks(input.output.systemQuery),
       hadMaterialContext,
     },
   ];
@@ -279,6 +284,7 @@ export function AssistantView(props: Props) {
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", embedded = false,
   studyContext, studyContextError, onNew }: Props & { onNew: (sourceIds: string[], page: number | null) => void }) {
+  const systemQueryAvailable = useOpeningCapabilities().systemQuery;
   const initialCourseId = studyContext?.courseId ?? courseIdProp;
   const entrySourceKey = sourceIdsProp.join(",");
   const initialSourceIds = useMemo(() => {
@@ -629,8 +635,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
     setAutoSelectNotice(null);
-    if (studyContextError) { setError(studyContextError); return { accepted: false }; }
-    if (studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
+    if (!input.querySystem && studyContextError) { setError(studyContextError); return { accepted: false }; }
+    if (!input.querySystem && studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
       try {
         const sequence = ++sourceRequestSequence.current;
         const latestSources = await api.listSources();
@@ -639,7 +645,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         if (problem) { setError(problem); return { accepted: false }; }
       } catch { setError("无法核对指定材料版本，本次未发送；问题草稿已保留。"); return { accepted: false }; }
     }
-    const submittedText = questionWithStudyContext(input.text, studyContext);
+    const submittedText = input.querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
     if (submittedText.length > 20000) { setError("问题和携入背景合计超过 20000 字，请缩短问题或选中片段后再发送。"); return { accepted: false }; }
     let page: number | null | undefined;
     try {
@@ -650,7 +656,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     }
 
     // Package A soft confirm; Package B supplies membership-ready flag + query courseId.
-    if (shouldConfirmEmptyCourseSources({
+    if (!input.querySystem && shouldConfirmEmptyCourseSources({
       sourceIds: selectedSourceIds,
       courseId: boundCourseId,
       hasReadyCourseMaterials: readyCourseMaterials,
@@ -669,6 +675,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       if (input.privacy === "ephemeral" && !learningAttempt) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
         const output = await api.replyEphemeral({
+          ...(input.querySystem ? { querySystem: true } : {}),
           text: submittedText,
           sourceIds: selectedSourceIds,
           mode: input.mode,
@@ -706,6 +713,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       const id = await ensureConversation();
       const submitted = await api.submitTurn({
+        ...(input.querySystem ? { querySystem: true } : {}),
         conversationId: id,
         text: submittedText,
         sourceIds: selectedSourceIds,
@@ -864,7 +872,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
 
       {!learningAttempt ? <AiReadinessChecklist className="mx-5 mb-2" /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-amber-800">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
-      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || !!contextProblem} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      <Composer key={retryDraftVersion} draftId={draftId} practiceMode={Boolean(learningAttempt)} draft={draft} modePrefill={modePrefill} intent={{ sourceIds: selectedSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError)} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}

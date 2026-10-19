@@ -2,7 +2,8 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, type Citation } from "@aistudy/contracts";
+import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt } from "@aistudy/contracts";
+import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
@@ -120,8 +121,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
         UPDATE opening_tutor_jobs j SET status = 'running', claim_token = ${randomUUID()}, updated_at = now()
-        FROM workspaces w
+        FROM workspaces w,opening_conversations c
         WHERE j.id = ${id} AND j.workspace_id = w.id
+          AND c.id=j.conversation_id AND c.workspace_id=j.workspace_id AND c.owner_user_id=w.owner_user_id
           AND j.status = 'queued'
         RETURNING j.*, w.owner_user_id
       `;
@@ -253,6 +255,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       citations: Citation[];
       candidates: Array<{ payload: unknown; sourceIds: string[] }>;
       contextSourceRefs?: ContextSourceRef[];
+      systemQuery?: SystemQueryReceipt;
       helpExposure?: {
         id: string;
         sessionId: string;
@@ -271,8 +274,19 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       await sql.begin(async (tx) => {
         if (input.helpExposure) await lockWorkspaceLearningHistory(tx, input.scope);
         const workspace = await tx`
-          SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} FOR UPDATE
+          SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
+        if (!workspace.length) throw new Error("workspace permission changed");
+        const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
+        if (receipt) {
+          if (receipt.authorization.purpose !== "system_record_lookup" || receipt.authorization.workspaceId !== input.scope.workspaceId
+            || receipt.authorization.principalId !== input.scope.ownerUserId || receipt.privacyEpoch !== Number(workspace[0]!.privacy_epoch)) throw new Error("query receipt grant changed");
+          const refs = mergeContextSourceRefs(...receipt.results.map(result => result.sourceRefs));
+          const provided = input.contextSourceRefs ?? [];
+          if (refs.some(ref => !provided.some(item => item.sourceId === ref.sourceId && item.sourceVersion === ref.sourceVersion))) throw new Error("query lineage incomplete");
+          const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, input.scope.workspaceId, tx`${tx.json(provided)}::jsonb`, true, true)} AS included`;
+          if (!admitted?.included) throw new Error("query source unavailable before persistence");
+        }
         if (input.expectedPrivacyEpoch !== undefined) {
           const currentEpoch = Number((workspace[0] as { privacy_epoch?: number } | undefined)?.privacy_epoch);
           if (currentEpoch !== input.expectedPrivacyEpoch) {
@@ -292,8 +306,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         if (!claimed.length) return;
         const assistant = await tx`
           UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
+            system_query=${receipt ? tx.json(receipt as never) : null},
             context_source_refs = ${input.contextSourceRefs === undefined ? null : tx.json(input.contextSourceRefs as never)}, status = 'complete'
-          WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
+          WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND (${receipt === null} OR query_system)
           RETURNING id
         `;
         if (!assistant.length) throw new Error("assistant turn was not persisted");
@@ -323,10 +338,13 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       learningSessionId: string | null;
       attemptId?: string | null;
       strategyTemplateId: string | null;
+      querySystem?: boolean;
+      courseId?: string | null;
     } | null> {
       const rows = await sql`
-        SELECT text, mode, source_ids, source_versions, current_page, chunk_id, learning_session_id, attempt_id, strategy_template_id FROM opening_turns
-        WHERE id = ${id} AND workspace_id = ${workspaceId} LIMIT 1
+        SELECT t.text,t.mode,t.source_ids,t.source_versions,t.current_page,t.chunk_id,t.learning_session_id,t.attempt_id,t.strategy_template_id,t.query_system,c.course_id
+        FROM opening_turns t JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+        WHERE t.id = ${id} AND t.workspace_id = ${workspaceId} LIMIT 1
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;
@@ -340,6 +358,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         learningSessionId: (row.learning_session_id as string | null) ?? null,
         attemptId: (row.attempt_id as string | null) ?? null,
         strategyTemplateId: (row.strategy_template_id as string | null) ?? null,
+        querySystem: row.query_system === true, courseId: (row.course_id as string | null) ?? null,
       };
     },
 

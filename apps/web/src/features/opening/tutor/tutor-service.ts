@@ -58,6 +58,7 @@ export function exposureLevelForMode(
 }
 
 export function createTutorService(deps: {
+  systemQueryEnabled?: () => boolean;
   conversations: OpeningConversationRepository;
   sourceChunks: OpeningSourceChunksRepository;
   attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
@@ -153,6 +154,13 @@ export function createTutorService(deps: {
       }
 
       const owned = await deps.conversations.getOwned(scope, input.conversationId);
+      if (input.querySystem) {
+        if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
+        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: input.text, mode: input.mode,
+          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+          learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
+        return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null };
+      }
       const existing = await deps.conversations.findTurnByClientKey(
         scope,
         input.clientKey,

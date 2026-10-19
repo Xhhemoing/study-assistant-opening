@@ -213,6 +213,7 @@ describe("opening tutor jobs repository", () => {
 
   it("writes help exposure only after the assistant turn update succeeds", async () => {
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
       if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) {
         return [{ id: "job-1" }];
       }
@@ -265,6 +266,7 @@ describe("opening tutor jobs repository", () => {
 
   it("does not write help exposure when the assistant turn was not persisted", async () => {
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
       if (query.includes("SELECT id FROM workspaces") && !query.includes("privacy_epoch")) return [{ id: scope.workspaceId }];
       if (query.includes("INSERT INTO opening_workspace_history_revisions")) return [];
       if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];
@@ -332,6 +334,14 @@ describe("opening tutor jobs repository", () => {
     expect(sql.calls).not.toEqual(expect.arrayContaining([
       expect.stringContaining("INSERT"),
     ]));
+  });
+
+  it("refuses completion before any durable write when workspace ownership no longer matches", async () => {
+    const sql = fakeSql();
+    await expect(createOpeningTutorJobsRepository(sql).completeTurn({ scope, jobId: "job-1", assistantTurnId: "assistant-turn-1",
+      text: "answer", citations: [], candidates: [] })).rejects.toThrow("workspace permission changed");
+    expect(sql.calls[0]).toContain("owner_user_id");
+    expect(sql.calls.some(query => /UPDATE|INSERT/.test(query.replace("FOR UPDATE", "")))).toBe(false);
   });
 });
 

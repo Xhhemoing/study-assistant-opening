@@ -8,7 +8,7 @@ import {
   type TutorMode,
   type ConversationPlanningContext,
 } from "@aistudy/contracts";
-import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext } from "@aistudy/ai";
+import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -50,6 +50,7 @@ import {
 type Scope = { workspaceId: string; ownerUserId: string };
 
 export type TutorTurnDeps = {
+  systemQuery?: SystemQueryService;
   tutorJobs: OpeningTutorJobsRepository;
   chunks: {
     listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
@@ -130,6 +131,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const jobEpoch = deps.privacy
         ? await deps.privacy.getWorkspaceEpoch(scope)
         : null;
+      if (turn.querySystem) {
+        if (!deps.systemQuery?.enabled()) throw new Error("系统记录查询暂未开启，请保留问题后重试。");
+        const sourceId = turn.sourceIds.length === 1 ? turn.sourceIds[0] : undefined;
+        const reply = await deps.systemQuery.reply(scope, { question: turn.text, focus: {
+          courseId: turn.courseId, sourceId, sourceIds: turn.sourceIds, sourceVersion: sourceId ? turn.sourceVersions[sourceId] : undefined, physicalPage: turn.currentPage,
+        } });
+        if (jobEpoch !== null && reply.privacyEpoch !== jobEpoch) throw new Error("query privacy changed");
+        await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId, text: reply.text,
+          citations: [], candidates: [], contextSourceRefs: reply.contextSourceRefs, systemQuery: reply.receipt,
+          expectedPrivacyEpoch: reply.privacyEpoch, claimToken: claimed.claimToken });
+        return { skipped: false };
+      }
       const excluded = new Set(
         deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
       );

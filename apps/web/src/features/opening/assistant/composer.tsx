@@ -10,10 +10,11 @@ const MODES: { value: TutorMode; label: string }[] = [
   { value: "listen", label: "听我讲一遍" }, { value: "think_together", label: "一起想一想" },
 ];
 export type ComposerPrivacy = "saved" | "ephemeral";
-export type ComposerSubmit = { text: string; mode: TutorMode; privacy: ComposerPrivacy; clientKey: string };
+export type ComposerSubmit = { text: string; mode: TutorMode; privacy: ComposerPrivacy; clientKey: string; querySystem?: boolean };
 export type ComposerSubmitResult = { accepted: boolean };
 type Props = {
   practiceMode?: boolean; disabled?: boolean; pending?: boolean; privacy?: ComposerPrivacy;
+  queryAvailable?: boolean; contextBlocked?: boolean;
   onPrivacyChange?: (privacy: ComposerPrivacy) => void; onCancel?: () => void;
   onContext?: () => void; contextLabel?: string; draft: string;
   draftId?: string;
@@ -29,9 +30,9 @@ function newClientKey(): string {
 }
 /** Retries of an unchanged logical send reuse the original client key. */
 export function logicalSendFingerprint(input: {
-  text: string; mode: TutorMode; sourceIds?: readonly string[]; currentPage?: number | null; chunkId?: string | null;
+  text: string; mode: TutorMode; sourceIds?: readonly string[]; currentPage?: number | null; chunkId?: string | null; querySystem?: boolean;
 }): string {
-  return `${input.mode}\u0000${input.text.trim()}\u0000${[...(input.sourceIds ?? [])].sort().join(",")}\u0000${input.currentPage ?? ""}\u0000${input.chunkId ?? ""}`;
+  return `${input.querySystem ? "query\u0000" : ""}${input.mode}\u0000${input.text.trim()}\u0000${[...(input.sourceIds ?? [])].sort().join(",")}\u0000${input.currentPage ?? ""}\u0000${input.chunkId ?? ""}`;
 }
 export function nextClientKey(state: {
   clientKey: string | null; fingerprint: string | null; nextFingerprint: string; mint?: () => string;
@@ -43,7 +44,9 @@ export function shouldSubmitShortcut(event: { key: string; ctrlKey: boolean; met
   return (event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing;
 }
 export function Composer({ practiceMode = false, disabled, pending, privacy = "saved", onPrivacyChange,
-  onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, onDraftChange, onSubmit }: Props) {
+  onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, onDraftChange, onSubmit, queryAvailable = false, contextBlocked = false }: Props) {
+  const [queryRequested, setQueryRequested] = useState(false);
+  const querySystem = queryAvailable && queryRequested;
   const [selectedMode, setMode] = useState<TutorMode>("explain");
   const lastPrefill = useRef<number | null>(null);
   if (modePrefill && modePrefill.nonce !== lastPrefill.current) {
@@ -58,17 +61,17 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
   const effectivePrivacy = practiceMode ? "saved" : privacy;
   const sendKey = useRef<{ clientKey: string; fingerprint: string } | null>(null);
   const locked = useRef(false), composing = useRef(false), form = useRef<HTMLFormElement>(null);
-  const blocked = Boolean(pending || disabled || sending);
+  const blocked = Boolean(pending || disabled || sending || (contextBlocked && !querySystem));
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = draft.trim();
     if (!text || blocked || locked.current || composing.current) return;
     locked.current = true; setSending(true);
     const issued = nextClientKey({ clientKey: sendKey.current?.clientKey ?? null, fingerprint: sendKey.current?.fingerprint ?? null,
-      nextFingerprint: logicalSendFingerprint({ text, mode, ...intent }) });
+      nextFingerprint: logicalSendFingerprint({ text, mode, ...intent, querySystem }) });
     sendKey.current = issued;
     try {
-      const result = await onSubmit({ text, mode, privacy: effectivePrivacy, clientKey: issued.clientKey });
+      const result = await onSubmit({ text, mode, privacy: effectivePrivacy, clientKey: issued.clientKey, ...(querySystem ? { querySystem: true } : {}) });
       if (result?.accepted !== false) sendKey.current = null;
     } catch {
       // The parent shows the error; retain this intent's idempotency key.
@@ -83,6 +86,9 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
         placeholder="自由交流，或基于已选材料提问…" aria-label="消息输入" />
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/50 px-3 py-2.5">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          {queryAvailable ? <label className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-700 md:min-h-8" title="读取课程、作答和计划记录；材料仅返回定位">
+            <input type="checkbox" className="size-4 accent-emerald-700" checked={querySystem} disabled={Boolean(pending || disabled || sending)} onChange={event => setQueryRequested(event.target.checked)} />查询系统记录
+          </label> : null}
           {onContext ? <button type="button" className={secondaryButtonClass} aria-label="选择参考材料" title={contextLabel} onClick={onContext}><Paperclip size={14} aria-hidden /></button> : null}
           <select className="min-h-10 max-w-40 rounded-lg bg-white px-2.5 text-xs text-zinc-700 shadow-xs ring-1 ring-zinc-900/5 transition-[box-shadow,ring] duration-150 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-50 motion-reduce:transition-none md:min-h-8" value={mode} disabled={blocked} onChange={(event) => setMode(event.target.value as TutorMode)} aria-label="辅导模式">
             {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, loadOpeningUploadQuota, EnvValidationError } from "./env";
 import { loadOpeningTutorConfig } from "./opening-model";
+import { loadFeatureSwitches } from "./server-config";
+
+it("keeps system queries independent from adaptive planning and validates their switch", () => {
+  expect(loadFeatureSwitches({}).systemQuery).toBe(false);
+  for (const adaptive of ["0", "1"]) expect(loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "1", OPENING_ADAPTIVE_PLANNING: adaptive }).systemQuery).toBe(true);
+  expect(() => loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "perhaps" })).toThrow(EnvValidationError);
+});
 
 describe("loadEnv", () => {
   const valid = {

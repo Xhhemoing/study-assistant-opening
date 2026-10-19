@@ -191,6 +191,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "id", "workspace_id", "conversation_id", "role", "text", "mode", "status", "client_key",
     "learning_session_id", "current_page", "chunk_id", "source_ids", "citations", "created_at",
     "intent_hash", "source_versions", "context_source_refs", "attempt_id",
+    "query_system", "system_query",
   ],
   opening_assistant_candidates: [
     "id", "workspace_id", "conversation_id", "source_turn_id", "source_ids", "payload", "status",

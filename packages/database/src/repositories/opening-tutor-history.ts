@@ -39,6 +39,9 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         AND current.workspace_id=${scope.workspaceId} AND c.workspace_id=${scope.workspaceId}
         AND c.owner_user_id=${scope.ownerUserId}
         AND u.created_at < current.created_at AND u.status='complete' AND a.status='complete'
+        -- Query snapshots are separate authority records, including legacy imported receipts.
+        -- Never promote their text into a later ordinary model conversation.
+        AND NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL
     )
     SELECT left(question,12001) AS question, left(answer,12001) AS answer, user_source_refs, assistant_source_refs
     FROM prior WHERE NOT EXISTS (SELECT 1 FROM prior WHERE invalid)

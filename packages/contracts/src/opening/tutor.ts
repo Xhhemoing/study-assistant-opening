@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { citationSchema, sourceChunkSchema } from "./sources";
-import { providerToolCallSchema, providerToolSchema, providerToolMessageSchema } from "./system-query";
+import { providerToolCallSchema, providerToolSchema, providerToolMessageSchema, systemQueryReceiptSchema } from "./system-query";
 
 export const tutorModeSchema = z.enum([
   "hint",
@@ -29,6 +29,7 @@ export const turnInputSchema = z
     currentPage: z.number().int().positive().nullable().optional(),
     chunkId: uuidSchema.nullable().optional(),
     strategyTemplateId: z.string().min(1).max(100).optional(),
+    querySystem: z.boolean().optional(),
   })
   .strict();
 
@@ -178,6 +179,7 @@ export const turnRecordSchema = z
     createdAt: isoDateTimeSchema,
     mode: tutorModeSchema,
     status: turnStatusSchema,
+    systemQuery: systemQueryReceiptSchema.nullable().optional(),
   })
   .strict();
 
@@ -191,6 +193,7 @@ export const budgetReservationSchema = z
   .strict();
 
 export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
+  systemQuery: systemQueryReceiptSchema.optional(),
   provenanceId: uuidSchema.nullable().default(null),
   privacyEpoch: z.number().int().nonnegative(),
   historyDiscarded: z.boolean(),
@@ -206,6 +209,7 @@ export const ephemeralTurnResponseSchema = providerOutputSchema.extend({
 
 export const ephemeralTurnInputSchema = z
   .object({
+    querySystem: z.boolean().optional(),
     historyPrivacyEpoch: z.number().int().nonnegative().optional(),
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),

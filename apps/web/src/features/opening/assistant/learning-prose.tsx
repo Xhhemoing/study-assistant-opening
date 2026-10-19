@@ -8,6 +8,7 @@ import Markdown, { type Components } from "react-markdown";
 import rehypeKatex, { type Options as KatexOptions } from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { isQueryEvidenceHref, type QueryEvidenceLink } from "./query-evidence-links";
 
 /** Model text is untrusted: no `trust` commands, capped sizes and macro expansion. */
 const KATEX_OPTIONS: KatexOptions = { trust: false, strict: "ignore", maxSize: 10, maxExpand: 200, errorColor: "#b91c1c" };
@@ -128,11 +129,15 @@ export class PlainTextFallback extends Component<{ text: string; children: React
 
 const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-emerald-700 no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50";
 const NO_CITATIONS: readonly CitationLink[] = [];
-type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[] };
+type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[] };
 
 /** Citation links are derived by the message list; equivalent links do not require reparsing math. */
 export function sameLearningProseContent(previous: LearningProseProps, next: LearningProseProps): boolean {
   if (previous.text !== next.text) return false;
+  const beforeEvidence = previous.queryEvidenceLinks ?? NO_CITATIONS;
+  const afterEvidence = next.queryEvidenceLinks ?? NO_CITATIONS;
+  if (beforeEvidence.length !== afterEvidence.length || beforeEvidence.some((link, index) =>
+    link.href !== afterEvidence[index]?.href || link.label !== afterEvidence[index]?.label)) return false;
   const before = previous.citationLinks ?? NO_CITATIONS;
   const after = next.citationLinks ?? NO_CITATIONS;
   return before.length === after.length && before.every((link, index) =>
@@ -143,7 +148,8 @@ export function sameLearningProseContent(previous: LearningProseProps, next: Lea
  * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
-export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS }: LearningProseProps) {
+export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS }: LearningProseProps) {
+  const approvedHrefs = useMemo(() => new Set(queryEvidenceLinks.map(link => link.href).filter(isQueryEvidenceHref)), [queryEvidenceLinks]);
   const withCitations = useMemo<Components>(() => citationLinks.length ? {
     ...components,
     sup: ({ children, ...props }) => {
@@ -159,7 +165,7 @@ export const LearningProse = memo(function LearningProse({ text, citationLinks =
         remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
         rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS]]}
         skipHtml
-        urlTransform={proseUrlTransform}
+        urlTransform={(url, key) => key === "href" && approvedHrefs.has(url) ? url : proseUrlTransform(url)}
         components={withCitations}
       >{text}</Markdown>
     </div>

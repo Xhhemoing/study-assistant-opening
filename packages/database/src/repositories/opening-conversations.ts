@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
+import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import type {
   Citation,
   ConversationCreateInput,
@@ -45,6 +46,7 @@ export function clipLastTurnPreview(value: string | null | undefined): string | 
 
 
 type SavedTurnIntent = {
+  querySystem?: true;
   conversationId: string;
   text: string;
   mode: TutorMode;
@@ -80,6 +82,15 @@ export type StoredTurn = {
 
 function iso(value: string | Date): string {
   return new Date(value).toISOString();
+}
+
+/** A legacy/imported receipt is untrusted JSON; never display its text after provenance rejection. */
+function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationScope) {
+  const parsed = row.system_query == null ? null : systemQueryReceiptSchema.safeParse(row.system_query);
+  const invalid = parsed !== null && (!parsed.success || parsed.data.authorization.purpose !== "system_record_lookup"
+    || parsed.data.authorization.workspaceId !== scope.workspaceId || parsed.data.authorization.principalId !== scope.ownerUserId);
+  return { text: invalid ? "此查询回执的来源或权限无法核实，内容不再显示；请重新查询。" : row.text as string,
+    citations: invalid ? [] : (row.citations as Citation[] | null) ?? [], systemQuery: !invalid && parsed?.success ? parsed.data : null };
 }
 
 export function createOpeningConversationRepository(sql: Sql) {
@@ -145,6 +156,7 @@ export function createOpeningConversationRepository(sql: Sql) {
               CASE
                 WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)}
                   THEN '关联材料已删除，此回答内容不再显示。'
+                WHEN t.system_query IS NOT NULL THEN '系统记录查询快照，请打开核对回执。'
                 ELSE coalesce(t.text, '')
               END,
               280
@@ -179,7 +191,8 @@ export function createOpeningConversationRepository(sql: Sql) {
       const rows = await sql`
         SELECT t.id, t.conversation_id, t.role,
           CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
-          t.mode, t.status, t.created_at, CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
+          t.mode, t.status, t.created_at, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
         LEFT JOIN opening_tutor_jobs j
           ON j.workspace_id = t.workspace_id AND j.conversation_id = t.conversation_id
@@ -193,15 +206,17 @@ export function createOpeningConversationRepository(sql: Sql) {
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
+        const display = queryDisplay(r, scope);
         return {
           id: r.id as string,
           conversationId: r.conversation_id as string,
           role: r.role as TurnRecord["role"],
-          text: r.text as string,
-          citations: (r.citations as TurnRecord["citations"]) ?? [],
+          text: display.text,
+          citations: display.citations,
           createdAt: iso(r.created_at as string | Date),
           mode: r.mode as TutorMode,
           status: r.status as TurnRecord["status"],
+          systemQuery: display.systemQuery,
         };
       });
     },
@@ -213,7 +228,8 @@ export function createOpeningConversationRepository(sql: Sql) {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
         SELECT role, CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
-          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations,
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE system_query END AS system_query
         FROM opening_turns t
         WHERE conversation_id = ${conversationId}
           AND workspace_id = ${scope.workspaceId}
@@ -222,10 +238,11 @@ export function createOpeningConversationRepository(sql: Sql) {
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
+        const display = queryDisplay(r, scope);
         return {
           role: r.role as "user" | "assistant",
-          text: r.text as string,
-          citations: (r.citations as Citation[] | null) ?? [],
+          text: display.text,
+          citations: display.citations,
         };
       });
     },
@@ -263,6 +280,7 @@ export function createOpeningConversationRepository(sql: Sql) {
     },
 
     async appendSavedTurn(input: {
+      querySystem?: boolean;
       scope: OpeningConversationScope;
       conversationId: string;
       text: string;
@@ -345,6 +363,7 @@ export function createOpeningConversationRepository(sql: Sql) {
             chunkId: input.chunkId,
             learningSessionId: input.learningSessionId,
             ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+            ...(input.querySystem ? { querySystem: true as const } : {}),
           });
           if (String(existing.intent_hash) !== intentHash) {
             throw new OpeningConversationError(
@@ -392,6 +411,7 @@ export function createOpeningConversationRepository(sql: Sql) {
           chunkId: input.chunkId,
           learningSessionId: input.learningSessionId,
           ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+          ...(input.querySystem ? { querySystem: true as const } : {}),
         };
         const intentHash = hashSavedTurnIntent(intent);
         const sourceVersionsJson = tx.json(sourceVersions as never);
@@ -400,13 +420,13 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            intent_hash, source_versions, attempt_id, strategy_template_id
+            intent_hash, source_versions, attempt_id, strategy_template_id,query_system
           ) VALUES (
             ${turnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'user', ${input.text}, ${input.mode}, 'complete',
             ${input.clientKey}, ${input.learningSessionId}, ${input.currentPage},
             ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}, ${input.attemptId ?? null},
-            ${input.strategyTemplateId ?? null}
+            ${input.strategyTemplateId ?? null},${input.querySystem ?? false}
           )
           ON CONFLICT (workspace_id, client_key) WHERE client_key IS NOT NULL
           DO NOTHING
@@ -434,13 +454,13 @@ export function createOpeningConversationRepository(sql: Sql) {
           INSERT INTO opening_turns (
             id, workspace_id, conversation_id, role, text, mode, status,
             client_key, learning_session_id, current_page, chunk_id, source_ids,
-            source_versions, attempt_id, strategy_template_id
+            source_versions, attempt_id, strategy_template_id,query_system
           ) VALUES (
             ${assistantTurnId}, ${input.scope.workspaceId}, ${input.conversationId},
             'assistant', '', ${input.mode}, 'pending',
             NULL, ${input.learningSessionId}, ${input.currentPage},
             ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}, ${input.attemptId ?? null},
-            ${input.strategyTemplateId ?? null}
+            ${input.strategyTemplateId ?? null},${input.querySystem ?? false}
           )
         `;
         await tx`
