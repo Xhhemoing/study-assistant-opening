@@ -5,6 +5,7 @@ import { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_LIMITS } from "./system
 const courseId = "00000000-0000-4000-8000-000000000001";
 const sourceId = "00000000-0000-4000-8000-000000000002";
 const asOf = "2026-10-19T00:00:00.000Z";
+const authorization = { purpose: "system_record_lookup" as const, workspaceId: courseId, principalId: sourceId, role: "workspace_owner" as const, permissionRevision: `owner:${sourceId}:privacy:7` };
 const result = (name: string, data: Array<Record<string, unknown>> = [{ summary: "真实记录" }]): SystemQueryResult => {
   const defaults: Record<string, Record<string, unknown>> = {
     courses: { id: courseId, title: "数学", updatedAt: asOf, goal: null, goalStatus: "not_configured" },
@@ -16,13 +17,13 @@ const result = (name: string, data: Array<Record<string, unknown>> = [{ summary:
     teaching: { id: courseId, status: "active", generateStatus: "ready", pathVersion: 1, contentVersion: 1, updatedAt: asOf },
     recommendation: { recommendationStatus: "unknown" },
   };
-  return systemQueryResultSchema.parse({ name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: [], nextOffset: null });
+  return systemQueryResultSchema.parse({ authorization, name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: [], nextOffset: null });
 };
 const output = (calls?: Array<{ name: string; arguments: string; id: string }>): ProviderOutput => ({
   text: "模型编造的已掌握结论", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null, ...(calls ? { toolCalls: calls } : {}),
 });
 const call = (name: string, args: unknown = {}, id = "c1") => ({ name, arguments: JSON.stringify(args), id });
-const base = () => ({ question: "我现在学到哪里？", privacyEpoch: 7, assertCurrent: vi.fn().mockResolvedValue(undefined),
+const base = () => ({ authorization, question: "我现在学到哪里？", privacyEpoch: 7, assertCurrent: vi.fn().mockResolvedValue(undefined),
   read: vi.fn(async (request: SystemQueryRequest) => result(request.name)), now: () => new Date(asOf) });
 afterEach(() => vi.useRealTimers());
 
@@ -33,7 +34,7 @@ describe("bounded system query planner", () => {
     const callModel = vi.fn().mockResolvedValueOnce(output([call("courses", { limit: 5, offset: 0 })]))
       .mockResolvedValueOnce(output([call("learning", { courseId, limit: 5, offset: 0 }, "c2")])).mockResolvedValueOnce(output());
     const receipt = await runSystemQuery({ ...input, callModel });
-    expect(receipt).toMatchObject({ mode: "native_tools", privacyEpoch: 7, status: "ok" });
+    expect(receipt).toMatchObject({ mode: "native_tools", privacyEpoch: 7, status: "partial", reason: "limit" });
     expect(input.read.mock.calls.map(([q]) => q.name)).toEqual(["courses", "learning"]);
     expect(callModel.mock.calls[1]![0].toolMessages[1].text).toContain(courseId);
     expect(renderSystemQuery(receipt)).toContain("真实记录");
@@ -92,9 +93,9 @@ describe("bounded system query planner", () => {
     const receipt = await runSystemQuery({ ...input, question: "设置" });
     expect(receipt.results[0]).toMatchObject({ reason: "truncated", data: [], sourceRefs: [] });
   });
-  it("caps aggregate results and stops after three model rounds", async () => {
+  it("caps aggregate results and stops after two model rounds", async () => {
     const input = base(); input.read.mockResolvedValue({ ...result("courses", [{ summary: "X".repeat(8800) }]), sourceRefs: [{ sourceId, sourceVersion: 1 }] });
-    const callModel = vi.fn(async (_input, round: number) => output([call("courses", { limit: 1, offset: round }, `c${round}`)]));
+    const callModel = vi.fn(async (_input, round: number) => output([0, 1].map(index => call("courses", { limit: 1, offset: round * 2 + index }, `c${round}-${index}`))));
     const receipt = await runSystemQuery({ ...input, callModel });
     expect(callModel).toHaveBeenCalledTimes(SYSTEM_QUERY_LIMITS.modelRounds);
     expect(receipt.reason).toBe("limit");

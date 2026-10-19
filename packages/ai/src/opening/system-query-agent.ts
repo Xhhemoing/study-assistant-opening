@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { systemQueryRequestSchema, systemQueryResultSchema, systemQueryReceiptSchema, type ProviderInput, type ProviderOutput, type SystemQueryReceipt, type SystemQueryRequest, type SystemQueryResult } from "@aistudy/contracts";
+import { systemQueryRequestSchema, systemQueryResultSchema, systemQueryReceiptSchema, type ProviderInput, type ProviderOutput, type SystemQueryReceipt, type SystemQueryRequest, type SystemQueryResult, type SystemQueryAuthorization } from "@aistudy/contracts";
 
-export const SYSTEM_QUERY_LIMITS = { calls: 4, modelRounds: 3, inputCharacters: 60000, resultCharacters: 10000, totalCharacters: 24000, timeoutMs: 12000 } as const;
+export const SYSTEM_QUERY_LIMITS = { calls: 4, modelRounds: 2, inputCharacters: 60000, resultCharacters: 10000, totalCharacters: 24000, timeoutMs: 12000 } as const;
 const descriptions: Record<SystemQueryRequest["name"], string> = {
   courses: "读取当前工作区课程和课程目标；可按标题查询。先读取课程以取得真实courseId，不猜ID。",
   learning: "读取课程当前有效作答、实际帮助、版本和服务端资格。四个资格标志不等于已掌握。",
   recommendation: "解释现有规则建议的下一学习活动；证据不足或结果不全必须说明。",
-  materials: "按关键词或指定原件版本/物理页查询可供AI使用的材料正文，返回可追溯页码。",
+  materials: "按关键词或指定当前版本/物理页查询材料，返回可追溯页码。记录查询只返回定位元数据，不能请求隐藏答案或改变服务端用途。",
   planning: "读取已确认的计划与任务，不能创建或接受计划。",
   jobs: "读取本人后台任务状态，不读取密钥、原始payload或内部错误堆栈。",
   settings: "读取当前进程的非秘密设置与模型路由，不提供密钥、内部提示词或安全配置。",
@@ -18,7 +18,6 @@ export const SYSTEM_QUERY_TOOLS = systemQueryRequestSchema.options.map(option =>
 }));
 export type SystemQueryReader = (request: SystemQueryRequest, signal: AbortSignal) => Promise<SystemQueryResult>;
 type CallModel = (input: ProviderInput, round: number, signal: AbortSignal) => Promise<ProviderOutput>;
-const unknown = (name: SystemQueryResult["name"], reason: SystemQueryResult["reason"], asOf: string): SystemQueryResult => systemQueryResultSchema.parse({ name, status: "unknown", reason, asOf, version: "study-query-v1", data: [], evidence: [], sourceRefs: [], nextOffset: null });
 
 /** Deterministic fallback is a real limited read, never a claimed model/tool success. */
 export function fallbackSystemQuery(question: string): SystemQueryRequest[] {
@@ -30,10 +29,11 @@ export function fallbackSystemQuery(question: string): SystemQueryRequest[] {
 }
 
 export async function runSystemQuery(input: {
-  question: string; privacyEpoch: number; read: SystemQueryReader; callModel?: CallModel;
+  question: string; privacyEpoch: number; authorization: SystemQueryAuthorization; read: SystemQueryReader; callModel?: CallModel;
   assertCurrent: () => Promise<void>; signal?: AbortSignal; now?: () => Date;
 }): Promise<SystemQueryReceipt> {
   const asOf = (input.now?.() ?? new Date()).toISOString();
+  const unknown = (name: SystemQueryResult["name"], reason: SystemQueryResult["reason"], at: string): SystemQueryResult => systemQueryResultSchema.parse({ authorization: input.authorization, name, status: "unknown", reason, asOf: at, version: "study-query-v1", data: [], evidence: [], sourceRefs: [], nextOffset: null });
   const controller = new AbortController();
   const abort = () => controller.abort();
   input.signal?.addEventListener("abort", abort, { once: true });
@@ -58,7 +58,8 @@ export async function runSystemQuery(input: {
     else if (seen.has(key)) result = unknown(parsed.data.name, "repeated_query", asOf);
     else {
       seen.add(key);
-      try { result = systemQueryResultSchema.parse(await bounded(input.read(parsed.data, controller.signal))); }
+      try { result = systemQueryResultSchema.parse(await bounded(input.read(parsed.data, controller.signal)));
+        if ((["purpose", "workspaceId", "principalId", "role", "permissionRevision"] as const).some(key => result.authorization[key] !== input.authorization[key])) throw new Error("query grant mismatch"); }
       catch { result = unknown(parsed.data.name, controller.signal.aborted ? "timeout" : "unavailable", asOf); }
     }
     await check();
@@ -109,7 +110,7 @@ export async function runSystemQuery(input: {
   } finally { clearTimeout(timer); input.signal?.removeEventListener("abort", abort); }
   const status = results.every(row => row.status === "unknown") ? "unknown"
     : results.some(row => row.status !== "ok") || (mode === "native_tools" && reason !== "read") ? "partial" : "ok";
-  return systemQueryReceiptSchema.parse({ version: "study-query-v1", asOf, privacyEpoch: input.privacyEpoch, mode, status, reason, results });
+  return systemQueryReceiptSchema.parse({ authorization: input.authorization, version: "study-query-v1", asOf, privacyEpoch: input.privacyEpoch, mode, status, reason, results });
 }
 
 /** Only server-returned records become the answer; free model prose is never authoritative. */

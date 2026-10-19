@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createScopedOpeningSystemQueryReader, createOpeningTeachingContentRepository } from "@aistudy/database";
+import { createScopedOpeningSystemQueryReader, createOpeningTeachingContentRepository, readOpeningSystemQueryAuthorization } from "@aistudy/database";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS, DEFAULT_OPENING_AI_SETTINGS, systemQueryRequestSchema, type SystemQueryResult } from "@aistudy/contracts";
 import { runSystemQuery, renderSystemQuery } from "@aistudy/ai";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { refreshOpeningLearningEligibility, openingEligibilityStateQuery } from "../../packages/database/src/repositories/opening-learning-eligibility";
+import { contextSourceRefsIncluded } from "../../packages/database/src/repositories/opening-context-provenance";
 
 let fixture: OpeningFixture;
 const signal = () => new AbortController().signal;
-const read = (request: unknown) => createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope)(systemQueryRequestSchema.parse(request), signal());
+const read = (request: unknown) => createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope, { purpose: "source_review" })(systemQueryRequestSchema.parse(request), signal());
 async function publishTeaching(f: Awaited<ReturnType<typeof learningAttemptFixture>>) {
   const [activity] = await fixture.sql`SELECT activity_id FROM opening_learning_sessions WHERE id=${f.sessionId}`;
   const content = createOpeningTeachingContentRepository(fixture.sql), blockId = randomUUID();
@@ -37,6 +39,45 @@ afterEach(async () => {
 });
 
 describe("owned read-only system query against PostgreSQL", () => {
+  it("binds the server owner grant and purpose, withholding source and answer bodies in record lookup", async () => {
+    const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
+    const bound = await readOpeningSystemQueryAuthorization(fixture.sql, fixture.scope);
+    expect(bound.authorization).toMatchObject({ workspaceId: fixture.scope.workspaceId, principalId: fixture.scope.ownerUserId, purpose: "system_record_lookup", role: "workspace_owner" });
+    const reader = createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope);
+    const material = await reader(systemQueryRequestSchema.parse({ name: "materials", arguments: { sourceId: f.sourceId } }), signal());
+    expect(material.authorization).toEqual(bound.authorization);
+    expect(material.data[0]).toMatchObject({ exposure: "content_withheld", physicalPage: 1 });
+    expect(material.data[0]).not.toHaveProperty("excerpt");
+    const learning = await reader(systemQueryRequestSchema.parse({ name: "learning", arguments: { courseId: f.courseId } }), signal());
+    expect(learning.data[0]).toMatchObject({ answerWithheld: true });
+    expect(learning.data[0]).not.toHaveProperty("answerExcerpt");
+    expect(systemQueryRequestSchema.safeParse({ name: "materials", arguments: { sourceId: f.sourceId, purpose: "source_review" } }).success).toBe(false);
+  });
+  it.each(["changed", "unavailable", "unknown_capture"])("refuses invalid ancestor versions (%s) even when the current head projection is fresh", async invalid => {
+    const f = await learningAttemptFixture(fixture), observation = await f.submit(await f.start());
+    await f.learning.reviseObservation(fixture.scope, { rootObservationId: observation.id, revisesObservationId: observation.id, expectedHead: observation.id,
+      revisionKind: "replace", reason: "new answer", clientKey: randomUUID(), replacement: { answer: "PRIVATE_REVISED_ANSWER", outcome: "unverified", assistance: "independent" } });
+    const ancestor = await backupRows(fixture.sql, fixture.scope).source();
+    // Seed a historical reference removed from today's head, then rebuild the existing projection explicitly in fixture setup.
+    await fixture.sql`UPDATE opening_learning_observations SET reference_source_id=${ancestor},source_versions=source_versions||${JSON.stringify({ [ancestor]: 1 })}::text::jsonb WHERE id=${observation.id}`;
+    await fixture.sql.begin(tx => refreshOpeningLearningEligibility(tx, fixture.scope, [observation.id]));
+    if (invalid === "changed") await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${ancestor}`;
+    if (invalid === "unavailable") await fixture.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,availability) VALUES (${ancestor},1,${fixture.scope.workspaceId},'unavailable')`;
+    if (invalid === "unknown_capture") await fixture.sql`UPDATE opening_learning_observations SET source_versions=source_versions-${ancestor}::text WHERE id=${observation.id}`;
+    const [head] = await openingEligibilityStateQuery(fixture.sql, fixture.scope, { rootIds: [observation.id] });
+    expect(head?.fresh).toBe(true);
+    const result = await read({ name: "learning", arguments: { courseId: f.courseId } });
+    expect(result).toMatchObject({ status: "unknown", reason: "not_available", data: [], evidence: [], sourceRefs: [] });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_REVISED_ANSWER");
+  });
+  it("invalidates AI context for unavailable source versions while preserving historical backup metadata", async () => {
+    const sourceId = await backupRows(fixture.sql, fixture.scope).source();
+    await fixture.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,availability) VALUES (${sourceId},1,${fixture.scope.workspaceId},'unavailable')`;
+    const refs = fixture.sql`${JSON.stringify([{ sourceId, sourceVersion: 1 }])}::text::jsonb`;
+    const [admission] = await fixture.sql`SELECT ${contextSourceRefsIncluded(fixture.sql, fixture.scope.workspaceId, refs)} AS ai,
+      ${contextSourceRefsIncluded(fixture.sql, fixture.scope.workspaceId, refs, true)} AS backup`;
+    expect(admission).toMatchObject({ ai: false, backup: true });
+  });
   it("executes all eight tools in enforced read-only transactions with zero row writes", async () => {
     const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
     let checked = 0;
@@ -87,9 +128,7 @@ describe("owned read-only system query against PostgreSQL", () => {
     await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${observation.id}`;
     await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
     const result = await read({ name: "learning", arguments: { courseId: f.courseId } });
-    expect(result).toMatchObject({ status: "partial", reason: "stale" });
-    expect(result.data[0]).not.toHaveProperty("answerExcerpt");
-    expect(result.data[0]).not.toHaveProperty("eligibility");
+    expect(result).toMatchObject({ status: "unknown", reason: "stale", data: [], evidence: [], sourceRefs: [] });
     const [projection] = await fixture.sql`SELECT policy_version FROM opening_learning_eligibility WHERE root_observation_id=${observation.id}`;
     expect(projection?.policy_version).toBe("old-policy");
   });
@@ -113,7 +152,7 @@ describe("owned read-only system query against PostgreSQL", () => {
     expect(result).toMatchObject({ status: "partial", reason: "not_available" });
     expect(result.data[0]).toMatchObject({ step: { activityKind: "diagnose", reasonCode: "unverified_only" } });
     expect(result.data[0]?.evidenceIds).toHaveLength(1);
-    const receipt = await runSystemQuery({ question: "为什么建议我继续诊断？", privacyEpoch: 0,
+    const receipt = await runSystemQuery({ ...await readOpeningSystemQueryAuthorization(fixture.sql, fixture.scope), question: "为什么建议我继续诊断？",
       read: createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope), assertCurrent: async () => {} });
     expect(receipt.results.map(row => row.name)).toEqual(["courses", "recommendation"]);
     expect(renderSystemQuery(receipt)).toContain("现有结果尚未核验");
@@ -157,7 +196,7 @@ describe("owned read-only system query against PostgreSQL", () => {
     const result = await read({ name: "jobs", arguments: {} });
     expect(result.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: background, status: "succeeded" }), expect.objectContaining({ id: tutor, status: "failed" })]));
     expect(JSON.stringify(result)).not.toContain("PRIVATE_PAYLOAD");
-    const receipt = await runSystemQuery({ question: "后台任务成功了吗？", privacyEpoch: 0, read: createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope), assertCurrent: async () => {} });
+    const receipt = await runSystemQuery({ ...await readOpeningSystemQueryAuthorization(fixture.sql, fixture.scope), question: "后台任务成功了吗？", read: createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope), assertCurrent: async () => {} });
     expect(renderSystemQuery(receipt)).toContain(background);
     expect(renderSystemQuery(receipt)).toContain("不能证明内容质量或学习效果");
   });

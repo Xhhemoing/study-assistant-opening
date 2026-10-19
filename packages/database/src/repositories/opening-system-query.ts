@@ -3,18 +3,19 @@ import {
   DEFAULT_OPENING_AI_SETTINGS, openingAdaptivePrefsSchema, openingAiSettingsSchema,
   plannedBlockSchema, systemQueryRequestSchema, systemQueryResultSchema,
   teachingSourceRefSchema,
-  type Scope, type SystemQueryRequest, type SystemQueryResult,
+  type Scope, type SystemQueryRequest, type SystemQueryResult, type SystemQueryAuthorization,
 } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
 import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
+import { systemQueryOwnerGrant } from "./opening-system-query-admission";
 
 type Row = Record<string, unknown>;
 export type OpeningSystemQueryDraft = Omit<SystemQueryResult, "name" | "data"> & { name: SystemQueryRequest["name"]; data: Row[] };
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 const literalSearch = (value: string) => `%${value.replace(/[\\%_]/g, "\\$&")}%`;
 export type SystemQueryPublicSettings = { process: "web" | "worker"; adaptivePlanning: boolean; teachingLoop: boolean };
-export type SystemQueryReadOptions = { now?: () => Date; publicSettings?: () => SystemQueryPublicSettings };
+export type SystemQueryReadOptions = { now?: () => Date; publicSettings?: () => SystemQueryPublicSettings; purpose?: SystemQueryAuthorization["purpose"] };
 
 /** Fixed SELECTs in a read-only snapshot. Scope comes from authenticated server code, never model arguments. */
 export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, options: SystemQueryReadOptions = {}) {
@@ -30,6 +31,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         LEFT JOIN opening_workspace_history_revisions r ON r.workspace_id=w.id AND r.owner_user_id=w.owner_user_id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
       const out: OpeningSystemQueryDraft = { name: request.name, status: "ok", reason: "read", asOf: now.toISOString(),
+        authorization: systemQueryOwnerGrant(scope, Number(owner?.privacy_epoch ?? 0), options.purpose ?? "system_record_lookup"),
         version: `query-v1:epoch:${owner?.privacy_epoch ?? "unknown"}:history:${owner?.history_revision ?? "unknown"}`,
         data: [], evidence: [], sourceRefs: [], nextOffset: null };
       if (!owner) return { ...out, status: "unknown" as const, reason: "not_available" as const };
@@ -79,15 +81,17 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
             AND ${a.query?.trim() ? tx`c.text ILIKE ${literalSearch(a.query.trim())}` : tx`TRUE`}
           ORDER BY s.id,c.page NULLS LAST,c.id LIMIT ${limit + 1} OFFSET ${offset}`;
         out.data = page(rows).map(row => {
-          const truncated = Number(row.full_length) > 1200;
+          const showContent = out.authorization.purpose === "source_review";
+          const truncated = showContent && Number(row.full_length) > 1200;
           if (truncated) { out.status = "partial"; out.reason = "truncated"; }
           const sourceId = String(row.source_id), version = Number(row.source_version), physicalPage = row.page == null ? null : Number(row.page);
           out.sourceRefs.push({ sourceId, sourceVersion: version });
           out.evidence.push({ id: `chunk:${row.id}`, kind: "material", title: `${String(row.name).slice(0, 150)} · ${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}`,
             href: `/opening/library?tab=materials&source=${sourceId}&version=${version}${physicalPage ? `&page=${physicalPage}` : ""}`,
             recordId: String(row.id), sourceId, sourceVersion: version, physicalPage });
-          return { id: row.id, sourceId, sourceVersion: version, physicalPage, excerpt: row.excerpt, truncated, exposure: "not_assessed",
-            summary: `${String(row.name).slice(0, 100)}，${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}：${row.excerpt}${truncated ? "（节选，未覆盖完整内容）" : ""}` };
+          return { id: row.id, sourceId, sourceVersion: version, physicalPage, ...(showContent ? { excerpt: row.excerpt } : {}), truncated,
+            exposure: showContent ? "not_assessed" : "content_withheld",
+            summary: `${String(row.name).slice(0, 100)}，${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}${showContent ? `：${row.excerpt}${truncated ? "（节选，未覆盖完整内容）" : ""}` : "；此记录查询仅显示定位，正文及可能包含的答案未释放"}` };
         });
       } else if (request.name === "jobs") {
         const a = request.arguments;

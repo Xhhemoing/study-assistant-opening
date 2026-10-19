@@ -16,6 +16,13 @@ export const systemQueryRequestSchema = z.discriminatedUnion("name", [
   z.object({ name: z.literal("teaching"), arguments: z.object({ ...course, ...page }).strict() }).strict(),
 ]);
 export type SystemQueryRequest = z.infer<typeof systemQueryRequestSchema>;
+/** Server-minted grant identity. This describes the owner-only ACL, not a general role revision counter. */
+export const systemQueryAuthorizationSchema = z.object({
+  purpose: z.enum(["system_record_lookup", "source_review"]),
+  workspaceId: uuidSchema, principalId: uuidSchema, role: z.literal("workspace_owner"),
+  permissionRevision: z.string().min(1).max(100),
+}).strict();
+export type SystemQueryAuthorization = z.infer<typeof systemQueryAuthorizationSchema>;
 export const systemQueryEvidenceSchema = z.object({
   id: z.string().min(1).max(160), kind: z.string().min(1).max(40), title: z.string().max(200),
   href: z.string().max(500).regex(/^\/opening\/[A-Za-z0-9/?=&%#._-]*$/)
@@ -25,41 +32,5 @@ export const systemQueryEvidenceSchema = z.object({
   revision: z.string().max(100).optional(),
 }).strict();
 const resultFields = {
+  authorization: systemQueryAuthorizationSchema,
   status: z.enum(["ok", "partial", "unknown"]),
-  reason: z.enum(["read", "no_data", "not_available", "invalid_arguments", "truncated", "stale", "timeout", "unavailable", "limit", "repeated_query", "model_unavailable", "model_unsupported"]),
-  asOf: isoDateTimeSchema, version: z.string().max(100),
-  evidence: z.array(systemQueryEvidenceSchema).max(10),
-  sourceRefs: z.array(z.object({ sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative() }).strict()).max(64),
-  nextOffset: z.number().int().nonnegative().nullable(),
-};
-function resultFor<Name extends keyof typeof systemQueryDataSchemas>(name: Name) {
-  return z.object({ ...resultFields, name: z.literal(name), data: z.array(systemQueryDataSchemas[name]).max(10) }).strict();
-}
-export const systemQueryResultSchema = z.discriminatedUnion("name", [
-  resultFor("courses"), resultFor("learning"), resultFor("recommendation"), resultFor("materials"),
-  resultFor("planning"), resultFor("jobs"), resultFor("settings"), resultFor("teaching"),
-  z.object({ ...resultFields, name: z.literal("rejected"), data: z.array(z.never()).max(0) }).strict(),
-]);
-export type SystemQueryResult = z.infer<typeof systemQueryResultSchema>;
-export const systemQueryReceiptSchema = z.object({
-  version: z.literal("study-query-v1"), asOf: isoDateTimeSchema,
-  privacyEpoch: z.number().int().nonnegative(),
-  mode: z.enum(["native_tools", "deterministic"]),
-  status: z.enum(["ok", "partial", "unknown"]),
-  reason: z.string().max(100),
-  results: z.array(systemQueryResultSchema).max(4),
-}).strict();
-export type SystemQueryReceipt = z.infer<typeof systemQueryReceiptSchema>;
-
-export const providerToolCallSchema = z.object({
-  id: z.string().min(1).max(200), name: z.string().min(1).max(80),
-  arguments: z.string().max(4000),
-}).strict();
-export const providerToolSchema = z.object({
-  name: z.string().min(1).max(80), description: z.string().max(1000),
-  parameters: z.record(z.string(), z.unknown()),
-}).strict();
-export const providerToolMessageSchema = z.discriminatedUnion("role", [
-  z.object({ role: z.literal("assistant"), calls: z.array(providerToolCallSchema).min(1).max(4) }).strict(),
-  z.object({ role: z.literal("tool"), callId: z.string().min(1).max(200), text: z.string().max(16000) }).strict(),
-]);

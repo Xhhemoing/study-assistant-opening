@@ -50,6 +50,9 @@ export function contextSourceRefsIncluded(
           WHERE provenance_source.id::text = lower(provenance_ref->>'sourceId')
             AND provenance_source.workspace_id = ${workspaceId}
             AND provenance_source.upload_state = 'uploaded'
+            AND (${allowHistoricalVersions} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
+              WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
+                AND provenance_version.version::text=provenance_ref->>'sourceVersion' AND provenance_version.availability='unavailable'))
             AND (${allowHistoricalVersions} OR provenance_source.version::text = provenance_ref->>'sourceVersion')
             AND NOT EXISTS (
               SELECT 1 FROM opening_privacy_exclusions provenance_exclusion
