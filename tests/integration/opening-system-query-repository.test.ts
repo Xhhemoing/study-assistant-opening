@@ -171,6 +171,10 @@ describe("owned read-only system query against PostgreSQL", () => {
     expect(String(result.data[0]?.excerpt)).toHaveLength(1200);
     expect(result.evidence[0]).toMatchObject({ recordId: chunkId, sourceId, sourceVersion: 1, physicalPage: 1 });
     expect(result.evidence[0]?.href).toContain("&page=1");
+    await fixture.sql`UPDATE opening_source_chunks SET text=${"😀".repeat(1000)} WHERE id=${chunkId}`;
+    const emoji = await read({ name: "materials", arguments: { sourceId, physicalPage: 1 } });
+    expect(emoji).toMatchObject({ status: "partial", reason: "truncated" });
+    expect(emoji.data[0]?.excerpt).toBe("😀".repeat(600));
     expect(await read({ name: "materials", arguments: { sourceId, sourceVersion: 2 } })).toMatchObject({ status: "unknown", reason: "stale", data: [] });
     expect(await read({ name: "materials", arguments: {} })).toMatchObject({ status: "unknown", reason: "invalid_arguments" });
   });

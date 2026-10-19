@@ -2,6 +2,7 @@ import { validateOpeningBackupCards } from "./backup-cards";
 import { validateBackupCourseMilestones } from "./backup-course-milestones";
 import { validateBackupPlanControl } from "./backup-plan-control";
 import { validateBackupPlanFeedback } from "./backup-plan-feedback";
+import { validateBackupSystemQuery } from "./backup-system-query";
 import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
@@ -319,6 +320,7 @@ export function validateOpeningRestore(
         errors.push(`table ${name} has a foreign or missing workspace`);
       }
       if (name === "opening_turns") {
+        errors.push(...validateBackupSystemQuery(row));
         if (row.role !== "user" && row.role !== "assistant") errors.push("turn role is missing or invalid");
         if (row.role === "assistant" && row.context_source_refs == null) {
           errors.push("assistant context provenance is missing or unknown");

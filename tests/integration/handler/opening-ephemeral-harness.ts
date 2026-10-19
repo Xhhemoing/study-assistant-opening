@@ -51,7 +51,7 @@ export async function startEphemeralHandler() {
 
 export async function resetEphemeralRows() {
   complete.mockReset();
-  await sql`TRUNCATE opening_assistant_candidates, opening_tutor_jobs, opening_turns, opening_source_chunks, opening_sources, opening_conversations, opening_budget_reservations, opening_memories, opening_help_exposures, opening_learning_sessions RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE opening_query_ephemeral_provenance, opening_assistant_candidates, opening_tutor_jobs, opening_turns, opening_source_chunks, opening_sources, opening_conversations, opening_budget_reservations, opening_memories, opening_help_exposures, opening_learning_sessions RESTART IDENTITY CASCADE`;
 }
 
 export async function stopEphemeralHandler() {
@@ -111,7 +111,7 @@ export async function tablesContainingEphemeralMarker(marker: string) {
     "explorations", "exploration_branches", "exploration_blocks", "opening_plan_drafts",
     "opening_conversations", "opening_turns", "opening_tutor_jobs", "opening_jobs", "opening_outbox",
     "opening_assistant_candidates", "opening_memories", "opening_learning_observations",
-    "opening_budget_reservations", "opening_ephemeral_provenance", "opening_note_provenance", "sessions",
+    "opening_budget_reservations", "opening_ephemeral_provenance", "opening_query_ephemeral_provenance", "opening_note_provenance", "sessions",
   ];
   const matching: string[] = [];
   for (const table of tables) {

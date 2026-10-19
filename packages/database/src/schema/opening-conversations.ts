@@ -1,4 +1,4 @@
-import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./library";
 
 export const openingConversations = pgTable("opening_conversations", {
@@ -28,6 +28,8 @@ export const openingTurns = pgTable("opening_turns", {
   intentHash: text("intent_hash"),
   sourceVersions: jsonb("source_versions").notNull().default({}),
   contextSourceRefs: jsonb("context_source_refs").$type<Array<{ sourceId: string; sourceVersion: number }> | null>(),
+  querySystem: boolean("query_system").notNull().default(false),
+  systemQuery: jsonb("system_query"),
   citations: jsonb("citations").$type<unknown[]>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

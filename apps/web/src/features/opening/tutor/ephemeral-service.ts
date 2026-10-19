@@ -10,6 +10,10 @@ import {
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
+import type { SystemQueryService } from "@aistudy/ai";
+import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
+import { EphemeralServiceError } from "./ephemeral-error";
+export { EphemeralServiceError } from "./ephemeral-error";
 import {
   assertEphemeralInput,
   canProposeTask,
@@ -45,18 +49,6 @@ import {
 
 export type EphemeralScope = { workspaceId: string; ownerUserId: string };
 
-export class EphemeralServiceError extends Error {
-  readonly status: number;
-  readonly code: string;
-
-  constructor(code: string, message: string, status: number) {
-    super(message);
-    this.name = "EphemeralServiceError";
-    this.code = code;
-    this.status = status;
-  }
-}
-
 type CompleteWithSignal = (
   input: ProviderInput,
   signal?: AbortSignal,
@@ -67,6 +59,7 @@ export type EphemeralProvider = {
 };
 
 export type EphemeralTutorDeps = {
+  systemQuery?: SystemQueryService;
   sources: { listOwnedIds(scope: EphemeralScope, sourceIds: string[]): Promise<string[]> };
   chunks: { listForSources(scope: EphemeralScope, sourceIds: string[]): Promise<SourceChunk[]> };
   privacy: {
@@ -117,6 +110,10 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       }
       if (signal?.aborted) {
         throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
+      }
+      if (input.querySystem) {
+        if (!deps.systemQuery?.enabled() || !deps.provenance) throw new EphemeralServiceError("SYSTEM_QUERY_DISABLED", "系统记录查询暂未开启。", 409);
+        return replyEphemeralSystemQuery({ systemQuery: deps.systemQuery, provenance: deps.provenance, requestId: deps.requestKey }, scope, input, signal);
       }
       const clientSourceIds = [...input.sourceIds];
       // Explicit client sourceIds outrank course pool. Empty + courseId → membership fill.

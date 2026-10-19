@@ -6,7 +6,7 @@ const page = { limit: z.number().int().min(1).max(10).default(5), offset: z.numb
 const course = { courseId: uuidSchema };
 /** Workspace/owner and executable code are deliberately absent from every tool argument. */
 export const systemQueryRequestSchema = z.discriminatedUnion("name", [
-  z.object({ name: z.literal("courses"), arguments: z.object({ query: z.string().max(240).optional(), ...page }).strict() }).strict(),
+  z.object({ name: z.literal("courses"), arguments: z.object({ courseId: uuidSchema.optional(), query: z.string().max(240).optional(), ...page }).strict() }).strict(),
   z.object({ name: z.literal("learning"), arguments: z.object({ ...course, ...page }).strict() }).strict(),
   z.object({ name: z.literal("recommendation"), arguments: z.object(course).strict() }).strict(),
   z.object({ name: z.literal("materials"), arguments: z.object({ sourceId: uuidSchema.optional(), sourceVersion: z.number().int().nonnegative().optional(), query: z.string().max(240).optional(), physicalPage: z.number().int().positive().max(10000).optional(), ...page }).strict() }).strict(),
@@ -57,7 +57,17 @@ export const systemQueryReceiptSchema = z.object({
   status: z.enum(["ok", "partial", "unknown"]),
   reason: z.string().max(100),
   results: z.array(systemQueryResultSchema).max(4),
-}).strict();
+}).strict().superRefine((receipt, ctx) => {
+  if (new TextEncoder().encode(JSON.stringify(receipt)).byteLength > 100000) ctx.addIssue({ code: "custom", message: "query receipt exceeds storage budget" });
+  for (const result of receipt.results) {
+    if ((["purpose", "workspaceId", "principalId", "role", "permissionRevision"] as const).some(key => result.authorization[key] !== receipt.authorization[key])) {
+      ctx.addIssue({ code: "custom", message: "query result grant differs from receipt", path: ["results"] });
+    }
+    if (receipt.authorization.purpose === "system_record_lookup" && result.data.some(row => "excerpt" in row || "answerExcerpt" in row)) {
+      ctx.addIssue({ code: "custom", message: "record lookup cannot release protected bodies", path: ["results"] });
+    }
+  }
+});
 export type SystemQueryReceipt = z.infer<typeof systemQueryReceiptSchema>;
 
 export const providerToolCallSchema = z.object({

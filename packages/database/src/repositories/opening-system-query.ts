@@ -47,6 +47,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       if (request.name === "courses") {
         const prefs = openingAdaptivePrefsSchema.safeParse(owner.adaptive_planning);
         const rows = await tx`SELECT id,title,updated_at FROM courses WHERE workspace_id=${scope.workspaceId} AND archived_at IS NULL
+          AND ${request.arguments.courseId ? tx`id=${request.arguments.courseId}` : tx`TRUE`}
           AND ${request.arguments.query ? tx`title ILIKE ${literalSearch(request.arguments.query)}` : tx`TRUE`}
           ORDER BY title COLLATE "C",id LIMIT ${limit + 1} OFFSET ${offset}`;
         out.data = page(rows).map(row => {
@@ -82,16 +83,18 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
           ORDER BY s.id,c.page NULLS LAST,c.id LIMIT ${limit + 1} OFFSET ${offset}`;
         out.data = page(rows).map(row => {
           const showContent = out.authorization.purpose === "source_review";
-          const truncated = showContent && Number(row.full_length) > 1200;
+          // PostgreSQL counts code points; public string bounds count UTF-16 units.
+          const excerpt = String(row.excerpt).slice(0, 1200).replace(/[\uD800-\uDBFF]$/, "");
+          const truncated = showContent && (Number(row.full_length) > 1200 || excerpt.length < String(row.excerpt).length);
           if (truncated) { out.status = "partial"; out.reason = "truncated"; }
           const sourceId = String(row.source_id), version = Number(row.source_version), physicalPage = row.page == null ? null : Number(row.page);
           out.sourceRefs.push({ sourceId, sourceVersion: version });
           out.evidence.push({ id: `chunk:${row.id}`, kind: "material", title: `${String(row.name).slice(0, 150)} · ${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}`,
             href: `/opening/library?tab=materials&source=${sourceId}&version=${version}${physicalPage ? `&page=${physicalPage}` : ""}`,
             recordId: String(row.id), sourceId, sourceVersion: version, physicalPage });
-          return { id: row.id, sourceId, sourceVersion: version, physicalPage, ...(showContent ? { excerpt: row.excerpt } : {}), truncated,
+          return { id: row.id, sourceId, sourceVersion: version, physicalPage, ...(showContent ? { excerpt } : {}), truncated,
             exposure: showContent ? "not_assessed" : "content_withheld",
-            summary: `${String(row.name).slice(0, 100)}，${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}${showContent ? `：${row.excerpt}${truncated ? "（节选，未覆盖完整内容）" : ""}` : "；此记录查询仅显示定位，正文及可能包含的答案未释放"}` };
+            summary: `${String(row.name).slice(0, 100)}，${physicalPage ? `物理页 ${physicalPage}` : "页码未知"}${showContent ? `：${excerpt}${truncated ? "（节选，未覆盖完整内容）" : ""}` : "；此记录查询仅显示定位，正文及可能包含的答案未释放"}` };
         });
       } else if (request.name === "jobs") {
         const a = request.arguments;

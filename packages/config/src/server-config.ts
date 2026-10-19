@@ -126,6 +126,7 @@ export type FeatureSwitches = {
   openingRelease: boolean;
   adaptivePlanning: boolean;
   planAgent: boolean;
+  systemQuery: boolean;
 };
 
 /** Strict, infrastructure-free switches (used per request for re-authorization). */
@@ -145,6 +146,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
+  const systemQuery = read("OPENING_SYSTEM_QUERY", false);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
   let rolloutPercent = 100;
   if (rolloutRaw !== undefined) {
@@ -155,7 +157,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   if (issues.length) throw new EnvValidationError(issues);
   return {
     teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, openingRelease,
-    adaptivePlanning, planAgent,
+    adaptivePlanning, planAgent, systemQuery,
   };
 }
 
@@ -182,6 +184,7 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     registrationOpen: !switches.openingRelease,
     adaptivePlanning: switches.adaptivePlanning,
     planAgent: switches.adaptivePlanning && switches.planAgent,
+    systemQuery: userId !== null && switches.systemQuery,
   };
 }
 

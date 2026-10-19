@@ -17,19 +17,33 @@ export const SYSTEM_QUERY_TOOLS = systemQueryRequestSchema.options.map(option =>
   parameters: z.toJSONSchema(option.shape.arguments) as Record<string, unknown>,
 }));
 export type SystemQueryReader = (request: SystemQueryRequest, signal: AbortSignal) => Promise<SystemQueryResult>;
+export type SystemQueryFocus = { courseId?: string | null; sourceId?: string; sourceVersion?: number; physicalPage?: number | null };
+export type SystemQueryService = {
+  enabled(): boolean;
+  reply(scope: { workspaceId: string; ownerUserId: string }, input: { question: string; focus?: SystemQueryFocus }, signal?: AbortSignal): Promise<{
+    text: string; receipt: SystemQueryReceipt; contextSourceRefs: SystemQueryResult["sourceRefs"]; privacyEpoch: number;
+  }>;
+};
 type CallModel = (input: ProviderInput, round: number, signal: AbortSignal) => Promise<ProviderOutput>;
 
 /** Deterministic fallback is a real limited read, never a claimed model/tool success. */
-export function fallbackSystemQuery(question: string): SystemQueryRequest[] {
+export function fallbackSystemQuery(question: string, focus?: SystemQueryFocus): SystemQueryRequest[] {
   if (/设置|模型|生效|settings|model/i.test(question)) return [{ name: "settings", arguments: {} }];
   if (/任务.*(成功|完成|状态)|后台|job|worker/i.test(question)) return [{ name: "jobs", arguments: { limit: 5, offset: 0 } }];
-  if (/哪页|原文|材料|source|page/i.test(question)) return [{ name: "materials", arguments: { query: question.slice(0, 240), limit: 5, offset: 0 } }];
+  if (/哪页|原文|材料|source|page/i.test(question)) return [{ name: "materials", arguments: { ...(focus?.sourceId
+    ? { sourceId: focus.sourceId, ...(focus.sourceVersion === undefined ? {} : { sourceVersion: focus.sourceVersion }), ...(focus.physicalPage ? { physicalPage: focus.physicalPage } : {}) }
+    : { query: question.slice(0, 240) }), limit: 5, offset: 0 } }];
   if (/计划|安排|时间|plan|schedule/i.test(question)) return [{ name: "planning", arguments: { limit: 5, offset: 0 } }];
-  return [{ name: "courses", arguments: { limit: 5, offset: 0 } }];
+  if (focus?.courseId && !/目标|课程列表|哪些课|courses|goal/i.test(question)) {
+    const name = /为何|为什么|推荐|why|recommend/i.test(question) ? "recommendation" : /教学|自学|串讲|拔高|teach/i.test(question) ? "teaching" : "learning";
+    return name === "recommendation" ? [{ name, arguments: { courseId: focus.courseId } }]
+      : [{ name, arguments: { courseId: focus.courseId, limit: 5, offset: 0 } }];
+  }
+  return [{ name: "courses", arguments: { ...(focus?.courseId ? { courseId: focus.courseId } : {}), limit: 5, offset: 0 } }];
 }
 
 export async function runSystemQuery(input: {
-  question: string; privacyEpoch: number; authorization: SystemQueryAuthorization; read: SystemQueryReader; callModel?: CallModel;
+  question: string; privacyEpoch: number; authorization: SystemQueryAuthorization; focus?: SystemQueryFocus; read: SystemQueryReader; callModel?: CallModel;
   assertCurrent: () => Promise<void>; signal?: AbortSignal; now?: () => Date;
 }): Promise<SystemQueryReceipt> {
   const asOf = (input.now?.() ?? new Date()).toISOString();
@@ -97,7 +111,7 @@ export async function runSystemQuery(input: {
       if (reason === "repeated_query") break;
       if (round === SYSTEM_QUERY_LIMITS.modelRounds - 1 || results.length === SYSTEM_QUERY_LIMITS.calls) reason = "limit";
     }
-    if (!results.length) for (const request of fallbackSystemQuery(input.question)) await execute(request);
+    if (!results.length) for (const request of fallbackSystemQuery(input.question, input.focus)) await execute(request);
     // The fallback resolves a unique course before reading facts; ambiguity stays visible.
     if (mode === "deterministic" && results[0]?.name === "courses" && results[0].status === "ok" && results[0].data.length === 1) {
       const courseId = results[0].data[0]!.id;
@@ -119,7 +133,9 @@ export function renderSystemQuery(receipt: SystemQueryReceipt): string {
   const escape = (value: string) => value.replace(/[\\`*_[\]<>]/g, "\\$&");
   const labels: Record<string, string> = { courses: "课程与目标", learning: "作答与学习证据", recommendation: "活动规则的建议依据", materials: "材料原文", planning: "已确认计划", jobs: "任务执行状态", settings: "非秘密设置", teaching: "教学活动" };
   const reasons: Record<SystemQueryResult["reason"], string> = { read: "已读取", no_data: "没有匹配记录", not_available: "部分依赖未核实或不可用", invalid_arguments: "查询条件不完整或无效", truncated: "结果仅覆盖部分记录或节选", stale: "证据或来源版本待更新", timeout: "查询超时", unavailable: "暂时无法读取", limit: "已达到查询上限", repeated_query: "已停止重复查询", model_unavailable: "模型暂不可用", model_unsupported: "未取得模型工具调用" };
-  const lines = [`系统记录查询 · ${receipt.asOf}`, receipt.mode === "deterministic" ? "本轮采用有限的固定规则查询；未取得可用的模型工具调用。" : "以下来自实际只读查询。", "这些记录不代表已掌握或已证明学习效果。"];
+  const lines = [`系统记录查询 · ${receipt.asOf}`, receipt.mode === "deterministic"
+    ? receipt.reason === "native_tools_not_enabled" ? "本轮使用固定规则查询系统记录；未发起模型请求。" : "本轮采用有限的固定规则查询；未取得可用的模型工具调用。"
+    : "以下来自实际只读查询。", "这些记录不代表已掌握或已证明学习效果。"];
   for (const result of receipt.results) {
     lines.push(`\n${labels[result.name] ?? "查询"}：${reasons[result.reason]}。`);
     if (!result.data.length) lines.push("没有可确认的数据；不据此推断未学习、任务失败或没有问题。");
