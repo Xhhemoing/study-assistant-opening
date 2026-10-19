@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProviderOutput, SystemQueryRequest, SystemQueryResult } from "@aistudy/contracts";
+import { DEFAULT_OPENING_AI_SETTINGS, systemQueryResultSchema, type ProviderOutput, type SystemQueryRequest, type SystemQueryResult } from "@aistudy/contracts";
 import { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_LIMITS } from "./system-query-agent";
 
 const courseId = "00000000-0000-4000-8000-000000000001";
 const sourceId = "00000000-0000-4000-8000-000000000002";
 const asOf = "2026-10-19T00:00:00.000Z";
-const result = (name: string, data: SystemQueryResult["data"] = [{ summary: "真实记录" }]): SystemQueryResult => ({ name,
-  status: "ok", reason: "read", asOf, version: "current", data, evidence: [], sourceRefs: [], nextOffset: null });
+const result = (name: string, data: Array<Record<string, unknown>> = [{ summary: "真实记录" }]): SystemQueryResult => {
+  const defaults: Record<string, Record<string, unknown>> = {
+    courses: { id: courseId, title: "数学", updatedAt: asOf, goal: null, goalStatus: "not_configured" },
+    learning: { id: courseId, rootId: courseId, attemptId: null, itemVersionId: null, projectionFresh: true, versionApplicability: "exact", liveHelpRevision: 0, submittedAt: asOf },
+    materials: { id: courseId, sourceId, sourceVersion: 1, physicalPage: 1, truncated: false, exposure: "not_assessed" },
+    planning: { date: "2026-10-19", timeZone: "UTC", acceptedVersion: 1 },
+    jobs: { id: courseId, kind: "parse", status: "succeeded", category: "background", updatedAt: asOf },
+    settings: { ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes: {}, savedAt: null },
+    teaching: { id: courseId, status: "active", generateStatus: "ready", pathVersion: 1, contentVersion: 1, updatedAt: asOf },
+    recommendation: { recommendationStatus: "unknown" },
+  };
+  return systemQueryResultSchema.parse({ name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: [], nextOffset: null });
+};
 const output = (calls?: Array<{ name: string; arguments: string; id: string }>): ProviderOutput => ({
   text: "模型编造的已掌握结论", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null, ...(calls ? { toolCalls: calls } : {}),
 });
@@ -113,11 +124,18 @@ describe("bounded system query planner", () => {
     await expect(runSystemQuery({ ...input, signal: controller.signal })).rejects.toThrow("cancelled");
     expect(input.read).not.toHaveBeenCalled();
   });
-  it("escapes source text and omits raw payload fields in the human answer", async () => {
-    const input = base(); input.read.mockResolvedValue(result("settings", [{ summary: "[click](https://evil.test) <script>", payload: "private implementation" }]));
+  it("escapes source text in the human answer", async () => {
+    const input = base(); input.read.mockResolvedValue(result("settings", [{ summary: "[click](https://evil.test) <script>" }]));
     const text = renderSystemQuery(await runSystemQuery({ ...input, question: "设置" }));
     expect(text).toContain("\\[click\\]");
-    expect(text).not.toContain("private implementation");
     expect(text).not.toContain("<script>");
+  });
+  it("rejects invalid tool output before sending any extra fields to the planner", async () => {
+    const input = base();
+    input.read.mockResolvedValue({ ...result("settings"), data: [{ ...result("settings").data[0], apiKey: "PRIVATE_CREDENTIAL" }] } as never);
+    const callModel = vi.fn().mockResolvedValueOnce(output([call("settings")])).mockResolvedValueOnce(output());
+    const receipt = await runSystemQuery({ ...input, callModel });
+    expect(receipt.results[0]).toMatchObject({ status: "unknown", reason: "unavailable", data: [] });
+    expect(JSON.stringify(callModel.mock.calls[1]![0])).not.toContain("PRIVATE_CREDENTIAL");
   });
 });

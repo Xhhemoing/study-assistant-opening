@@ -144,7 +144,7 @@ function parseOutput(body: unknown, format: "answer" | "json" = "answer", allowe
   }
   const calls = messageValue.tool_calls;
   if (Array.isArray(calls) && calls.length) {
-    if (!allowedTools.length || (Array.isArray(choices) && choices[0]?.finish_reason === "length")) throw new OpeningProviderError("PROVIDER_RESPONSE", "unexpected or incomplete tool call");
+    if (!allowedTools.length || !Array.isArray(choices) || choices[0]?.finish_reason !== "tool_calls") throw new OpeningProviderError("PROVIDER_RESPONSE", "unexpected or incomplete tool call");
     const parsed = providerToolCallSchema.array().min(1).max(4).safeParse(calls.map((raw: unknown) => {
       const call = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
       const fn = call.function && typeof call.function === "object" ? call.function as Record<string, unknown> : {};

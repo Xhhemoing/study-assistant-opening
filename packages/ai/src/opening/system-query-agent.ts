@@ -18,7 +18,7 @@ export const SYSTEM_QUERY_TOOLS = systemQueryRequestSchema.options.map(option =>
 }));
 export type SystemQueryReader = (request: SystemQueryRequest, signal: AbortSignal) => Promise<SystemQueryResult>;
 type CallModel = (input: ProviderInput, round: number, signal: AbortSignal) => Promise<ProviderOutput>;
-const unknown = (name: string, reason: SystemQueryResult["reason"], asOf: string): SystemQueryResult => ({ name, status: "unknown", reason, asOf, version: "study-query-v1", data: [], evidence: [], sourceRefs: [], nextOffset: null });
+const unknown = (name: SystemQueryResult["name"], reason: SystemQueryResult["reason"], asOf: string): SystemQueryResult => systemQueryResultSchema.parse({ name, status: "unknown", reason, asOf, version: "study-query-v1", data: [], evidence: [], sourceRefs: [], nextOffset: null });
 
 /** Deterministic fallback is a real limited read, never a claimed model/tool success. */
 export function fallbackSystemQuery(question: string): SystemQueryRequest[] {
@@ -54,7 +54,7 @@ export async function runSystemQuery(input: {
     const parsed = systemQueryRequestSchema.safeParse(raw);
     let result: SystemQueryResult;
     const key = parsed.success ? JSON.stringify(parsed.data) : "invalid";
-    if (!parsed.success) result = unknown("invalid", "invalid_arguments", asOf);
+    if (!parsed.success) result = unknown("rejected", "invalid_arguments", asOf);
     else if (seen.has(key)) result = unknown(parsed.data.name, "repeated_query", asOf);
     else {
       seen.add(key);

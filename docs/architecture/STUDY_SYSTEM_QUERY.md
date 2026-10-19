@@ -61,3 +61,5 @@ Provider 使用标准 OpenAI-compatible `tools` / `tool_calls` / `tool_call_id`�
 | 完整 provider receipt 与父交互额度 | `provider.ts` 支持原生 calls；`system-query-agent.ts` 有次数/字符/时间上限 | C1/C2 补结束原因/原始 usage/真实超额与晚账务，再由 C3 接 gateway，不能误称已有父预算 |
 | 两轮/四工具、真实 tokenizer 与能力表 | 当前可配置代码常量为三轮/四工具，字符预算；不支持时有限预检索 | 三轮是待比较的实现起点偏差，不宣称满足报告建议的两轮；通过能力表、真实 usage 和质量验证后收敛 |
 | 查询实际闭环、单元三模式 | 本 PR 为后端基础，无聊天/API 接线，无新 DDL | 先完成 A0/C1/C2/C3；三态/唯一 reducer 及核验内容通过 A1–A4/B1–B3 后，沿 B4/A5 复用原 compiler/workspace 接一个单元三模式；本轮未实现这些后续能力 |
+
+2026-10-19 独立审查修复：未接受的 version 0 计划返回 unknown；教学引用取与 contentVersion 匹配的已发布 spec.source_refs，并核对该确切版本的可用性，缺 spec/版本不猜当前版本。八类结果改为精确 schema 的判别联合，拒绝额外字段、虚构工具名和非法资格。末次权限查询也使用只读事务、2 秒 statement timeout，全读取链受 12 秒截止控制，并在 await 后复查取消；native calls 仅接受成功的 tool_calls 结束状态。定向 76 项 unit、17 项真实 PG 与 Contracts/AI/Database 类型检查通过；独立复审和新 head 的完整 CI 仍需另核对。

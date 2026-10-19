@@ -1,16 +1,17 @@
 import type { TransactionSql } from "postgres";
-import type { Scope, SystemQueryRequest, SystemQueryResult } from "@aistudy/contracts";
+import type { Scope, SystemQueryRequest } from "@aistudy/contracts";
 import { nextLearningStep, summarizeObservations, resolveEvidenceAssistance } from "@aistudy/domain";
 import { openingEligibilityStateQuery, openingEligibilityPolicyVersion } from "./opening-learning-eligibility";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { mapLearningObservation } from "./opening-learning-facts";
+import type { OpeningSystemQueryDraft } from "./opening-system-query";
 const qualification = (value: unknown) => ({ yes: "是", no: "否", unknown: "未知" })[String(value)] ?? "未知";
 const helpLabel = (value: unknown) => ({ independent: "独立完成", hinted: "获得提示", revealed: "已展示解法", unknown: "未知" })[String(value)] ?? "未知";
 const outcomeLabel = (value: unknown) => ({ correct: "正确", incorrect: "错误", partial: "部分正确", unverified: "未核验" })[String(value)] ?? "未核验";
 
 /** Uses the existing projection's live dependency checks, without ensure/repair or authority upgrades. */
 export async function readSystemLearningQuery(tx: TransactionSql, scope: Scope,
-  request: Extract<SystemQueryRequest, { name: "learning" | "recommendation" }>, out: SystemQueryResult, limit: number, offset: number) {
+  request: Extract<SystemQueryRequest, { name: "learning" | "recommendation" }>, out: OpeningSystemQueryDraft, limit: number, offset: number) {
   const courseId = request.arguments.courseId;
   const [course] = await tx`SELECT id FROM courses WHERE workspace_id=${scope.workspaceId} AND id=${courseId} AND archived_at IS NULL`;
   if (!course) { out.status = "unknown"; out.reason = "not_available"; return; }

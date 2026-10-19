@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { systemQueryDataSchemas } from "./system-query-data";
 
 const page = { limit: z.number().int().min(1).max(10).default(5), offset: z.number().int().min(0).max(1000).default(0) };
 const course = { courseId: uuidSchema };
@@ -23,15 +24,22 @@ export const systemQueryEvidenceSchema = z.object({
   sourceId: uuidSchema.optional(), sourceVersion: z.number().int().nonnegative().optional(), physicalPage: z.number().int().positive().nullable().optional(),
   revision: z.string().max(100).optional(),
 }).strict();
-export const systemQueryResultSchema = z.object({
-  name: z.string().max(40), status: z.enum(["ok", "partial", "unknown"]),
+const resultFields = {
+  status: z.enum(["ok", "partial", "unknown"]),
   reason: z.enum(["read", "no_data", "not_available", "invalid_arguments", "truncated", "stale", "timeout", "unavailable", "limit", "repeated_query", "model_unavailable", "model_unsupported"]),
   asOf: isoDateTimeSchema, version: z.string().max(100),
-  data: z.array(z.record(z.string(), z.unknown())).max(10),
   evidence: z.array(systemQueryEvidenceSchema).max(10),
   sourceRefs: z.array(z.object({ sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative() }).strict()).max(64),
   nextOffset: z.number().int().nonnegative().nullable(),
-}).strict();
+};
+function resultFor<Name extends keyof typeof systemQueryDataSchemas>(name: Name) {
+  return z.object({ ...resultFields, name: z.literal(name), data: z.array(systemQueryDataSchemas[name]).max(10) }).strict();
+}
+export const systemQueryResultSchema = z.discriminatedUnion("name", [
+  resultFor("courses"), resultFor("learning"), resultFor("recommendation"), resultFor("materials"),
+  resultFor("planning"), resultFor("jobs"), resultFor("settings"), resultFor("teaching"),
+  z.object({ ...resultFields, name: z.literal("rejected"), data: z.array(z.never()).max(0) }).strict(),
+]);
 export type SystemQueryResult = z.infer<typeof systemQueryResultSchema>;
 export const systemQueryReceiptSchema = z.object({
   version: z.literal("study-query-v1"), asOf: isoDateTimeSchema,

@@ -2,12 +2,15 @@ import type { Sql, TransactionSql } from "postgres";
 import {
   DEFAULT_OPENING_AI_SETTINGS, openingAdaptivePrefsSchema, openingAiSettingsSchema,
   plannedBlockSchema, systemQueryRequestSchema, systemQueryResultSchema,
+  teachingSourceRefSchema,
   type Scope, type SystemQueryRequest, type SystemQueryResult,
 } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
+import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
 
 type Row = Record<string, unknown>;
+export type OpeningSystemQueryDraft = Omit<SystemQueryResult, "name" | "data"> & { name: SystemQueryRequest["name"]; data: Row[] };
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 const literalSearch = (value: string) => `%${value.replace(/[\\%_]/g, "\\$&")}%`;
 export type SystemQueryPublicSettings = { process: "web" | "worker"; adaptivePlanning: boolean; teachingLoop: boolean };
@@ -15,7 +18,7 @@ export type SystemQueryReadOptions = { now?: () => Date; publicSettings?: () => 
 
 /** Fixed SELECTs in a read-only snapshot. Scope comes from authenticated server code, never model arguments. */
 export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, options: SystemQueryReadOptions = {}) {
-  return async (raw: SystemQueryRequest, signal: AbortSignal): Promise<SystemQueryResult> => {
+  return async (raw: SystemQueryRequest, outerSignal: AbortSignal): Promise<SystemQueryResult> => withSystemQueryReadDeadline(outerSignal, async signal => {
     const request = systemQueryRequestSchema.parse(raw);
     const now = options.now?.() ?? new Date();
     if (signal.aborted) throw new Error("system query cancelled");
@@ -26,7 +29,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         FROM workspaces w LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
         LEFT JOIN opening_workspace_history_revisions r ON r.workspace_id=w.id AND r.owner_user_id=w.owner_user_id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
-      const out: SystemQueryResult = { name: request.name, status: "ok", reason: "read", asOf: now.toISOString(),
+      const out: OpeningSystemQueryDraft = { name: request.name, status: "ok", reason: "read", asOf: now.toISOString(),
         version: `query-v1:epoch:${owner?.privacy_epoch ?? "unknown"}:history:${owner?.history_revision ?? "unknown"}`,
         data: [], evidence: [], sourceRefs: [], nextOffset: null };
       if (!owner) return { ...out, status: "unknown" as const, reason: "not_available" as const };
@@ -118,21 +121,38 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         await readPlanning(tx, scope, request, owner, out, now, page, evidence);
       } else if (request.name === "teaching") {
         const a = request.arguments;
-        const rows = await tx`SELECT a.id,a.status,a.generate_status,a.path_version,a.content_version,a.updated_at,
-            COALESCE((SELECT jsonb_agg(jsonb_build_object('sourceId',s.id,'sourceVersion',s.version)) FROM opening_sources s
-              WHERE s.workspace_id=a.workspace_id AND s.id=ANY(a.source_ids)),'[]'::jsonb) AS source_refs
+        const rows = await tx`SELECT a.id,a.status,a.generate_status,a.path_version,a.content_version,a.updated_at,a.source_ids,
+            spec.source_refs AS compiled_source_refs
           FROM opening_teaching_activities a JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
+          LEFT JOIN opening_teaching_activity_specs spec ON spec.activity_id=a.id AND spec.workspace_id=a.workspace_id
+            AND spec.owner_user_id=a.owner_user_id AND spec.version=a.content_version
           WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${a.courseId}
             AND NOT EXISTS(SELECT 1 FROM unnest(a.source_ids) sid LEFT JOIN opening_sources s ON s.id=sid AND s.workspace_id=a.workspace_id
-              WHERE s.id IS NULL OR s.upload_state<>'uploaded' OR EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=a.workspace_id AND e.source_id=sid)
-                OR EXISTS(SELECT 1 FROM opening_source_versions v WHERE v.workspace_id=a.workspace_id AND v.source_id=sid AND v.version=s.version AND v.availability='unavailable'))
+              WHERE s.id IS NULL OR s.upload_state<>'uploaded' OR EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=a.workspace_id AND e.source_id=sid))
           ORDER BY a.updated_at DESC,a.id LIMIT ${limit + 1} OFFSET ${offset}`;
-        out.data = page(rows).map(row => {
-          out.sourceRefs.push(...row.source_refs as SystemQueryResult["sourceRefs"]);
+        out.data = [];
+        for (const row of page(rows)) {
+          const parsed = teachingSourceRefSchema.array().max(64).safeParse(row.compiled_source_refs);
+          if (!parsed.success || !(row.source_ids as string[]).every(id => parsed.data.some(ref => ref.sourceId === id))) {
+            out.status = "partial"; out.reason = "not_available"; continue;
+          }
+          const refs = parsed.data.map(ref => ({ sourceId: ref.sourceId, sourceVersion: ref.version != null && /^\d+$/.test(String(ref.version)) ? Number(ref.version) : NaN }));
+          if (refs.some(ref => !Number.isSafeInteger(ref.sourceVersion))) { out.status = "partial"; out.reason = "not_available"; continue; }
+          const states = refs.length ? await tx`SELECT captured."sourceId",captured."sourceVersion",s.version AS current_version,
+              (s.id IS NOT NULL AND s.upload_state='uploaded'
+                AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)
+                AND COALESCE(v.availability,CASE WHEN s.version=captured."sourceVersion" THEN 'available' ELSE 'unknown' END)='available') AS available
+            FROM jsonb_to_recordset(${JSON.stringify(refs)}::text::jsonb) AS captured("sourceId" uuid,"sourceVersion" int)
+            LEFT JOIN opening_sources s ON s.workspace_id=${scope.workspaceId} AND s.id=captured."sourceId"
+            LEFT JOIN opening_source_versions v ON v.workspace_id=${scope.workspaceId} AND v.source_id=captured."sourceId" AND v.version=captured."sourceVersion"` : [];
+          if (states.some(state => !state.available)) { out.status = "partial"; out.reason = "not_available"; continue; }
+          if (states.some(state => Number(state.current_version) !== Number(state.sourceVersion))) { out.status = "partial"; out.reason = "stale"; }
+          out.sourceRefs.push(...refs);
           evidence(row, "teaching_activity", `教学活动 ${row.id}`, `/opening/courses/${a.courseId}/study`, `path:${row.path_version}:content:${row.content_version}`);
-          return { id: row.id, status: row.status, generateStatus: row.generate_status, pathVersion: Number(row.path_version), contentVersion: Number(row.content_version),
-            updatedAt: iso(row.updated_at), summary: `教学活动 ${row.id}：${row.status}，生成状态 ${row.generate_status}；元数据不证明内容已独立复核、已完成学习或已掌握` };
-        });
+          out.data.push({ id: row.id, status: row.status, generateStatus: row.generate_status, pathVersion: Number(row.path_version), contentVersion: Number(row.content_version),
+            updatedAt: iso(row.updated_at), summary: `教学活动 ${row.id}：${row.status}，生成状态 ${row.generate_status}；引用绑定实际编译版本，元数据不证明内容已独立复核、已完成学习或已掌握` });
+        }
+        if (!out.data.length && out.reason !== "read") out.status = "unknown";
       }
       if (!out.data.length && out.status === "ok") { out.status = "unknown"; out.reason = "no_data"; }
       out.sourceRefs = [...new Map(out.sourceRefs.map(ref => [`${ref.sourceId}:${ref.sourceVersion}`, ref])).values()];
@@ -141,18 +161,23 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
     });
     if (signal.aborted) throw new Error("system query cancelled");
     // A privacy change committed outside the snapshot invalidates every byte of the result.
-    const [current] = await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    const [current] = await sql.begin("read only", async tx => {
+      await tx`SET LOCAL statement_timeout='2000ms'`;
+      return tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    });
+    if (signal.aborted) throw new Error("system query cancelled");
     if (!current || !result.version.includes(`:epoch:${current.privacy_epoch}:`)) throw new Error("system query privacy changed");
     return systemQueryResultSchema.parse(result);
-  };
+  });
 }
 
 async function readPlanning(tx: TransactionSql, scope: Scope, request: Extract<SystemQueryRequest, { name: "planning" }>, owner: Row,
-  out: SystemQueryResult, now: Date, page: (rows: Row[]) => Row[], evidence: (row: Row, kind: string, title: string, href: string, revision: string) => void) {
+  out: OpeningSystemQueryDraft, now: Date, page: (rows: Row[]) => Row[], evidence: (row: Row, kind: string, title: string, href: string, revision: string) => void) {
   const a = request.arguments, timeZone = resolveWorkspaceTimeZone((owner.planning_settings as { timeZone?: string } | null)?.timeZone);
   const date = a.date ?? localDateKeyInZone(now, timeZone);
   const [state] = await tx`SELECT accepted_version,accepted_blocks,updated_at FROM opening_plan_state WHERE workspace_id=${scope.workspaceId} AND day=${date}::date`;
   if (!state) { out.status = "unknown"; out.reason = "no_data"; return; }
+  if (Number(state.accepted_version) < 1) { out.status = "unknown"; out.reason = "not_available"; return; }
   const parsed = plannedBlockSchema.array().max(200).safeParse(state.accepted_blocks);
   if (!parsed.success) { out.status = "unknown"; out.reason = "unavailable"; return; }
   out.version += `:plan:${state.accepted_version}`;

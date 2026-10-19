@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { systemQueryRequestSchema, systemQueryEvidenceSchema } from "./system-query";
+import { systemQueryRequestSchema, systemQueryEvidenceSchema, systemQueryResultSchema } from "./system-query";
 import { providerInputSchema } from "./tutor";
 const input = { instruction: "read", text: "what?", chunks: [], mode: "listen", maxOutputTokens: 100, mediaCapability: "text_only", imageParts: [],
   tools: [{ name: "courses", description: "read", parameters: {} }] };
 describe("read-only query contracts", () => {
+  it("rejects invented result tools, invalid qualification values and extra secret fields", () => {
+    const common = { status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
+    const id = "00000000-0000-4000-8000-000000000001";
+    const observation = { id, rootId: id, attemptId: null, itemVersionId: null, projectionFresh: true, versionApplicability: "exact", liveHelpRevision: 0,
+      submittedAt: common.asOf, summary: "actual record", eligibility: { independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "yes", usableForDelayedCheck: "unknown", reasonCodes: [], policyVersion: "opening-evidence-v3" } };
+    expect(systemQueryResultSchema.safeParse({ ...common, name: "learning", data: [observation] }).success).toBe(true);
+    for (const row of [{ name: "vault", data: [] }, { name: "learning", data: [{ ...observation, eligibility: { ...observation.eligibility, verifiedCorrect: "mastered" } }] },
+      { name: "courses", data: [{ id: "00000000-0000-4000-8000-000000000001", title: "x", updatedAt: "2026-10-19T00:00:00Z", goal: null, goalStatus: "not_configured", summary: "x", apiKey: "secret" }] }]) {
+      expect(systemQueryResultSchema.safeParse({ ...common, ...row }).success).toBe(false);
+    }
+  });
   it.each(systemQueryRequestSchema.options.map(option => option.shape.name.value))("has no model-controlled scope or code for %s", name => {
     expect(systemQueryRequestSchema.safeParse({ name, arguments: { workspaceId: "00000000-0000-4000-8000-000000000001", sql: "SELECT 1" } }).success).toBe(false);
   });

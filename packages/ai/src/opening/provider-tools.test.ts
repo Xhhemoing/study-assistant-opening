@@ -31,6 +31,9 @@ describe("OpenAI-compatible native tool transport", () => {
     await expect(provider(vi.fn().mockResolvedValue(response([native]))).complete(base)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
     await expect(provider(vi.fn().mockResolvedValue(response([native], "length"))).complete({ ...base, tools })).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
   });
+  it.each(["content_filter", "refusal", "error", "stop"])("does not execute complete-looking calls after %s termination", async finish => {
+    await expect(provider(vi.fn().mockResolvedValue(response([native], finish))).complete({ ...base, tools })).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+  });
   it("does not silently replay a request to discover unsupported tools", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response("unsupported tools", { status: 400 }));
     await expect(provider(fetchImpl).complete({ ...base, tools })).rejects.toMatchObject({ code: "PROVIDER_REQUEST" });
