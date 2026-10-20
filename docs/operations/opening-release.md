@@ -86,6 +86,30 @@ Default `npm run preview` builds and starts on port 3000. Browser interaction
 acceptance belongs to the user; successful HTTP shell responses are not acceptance.
 These are local preview commands, not replacements for release CI gates.
 
+### FACDA 恢复材料的结论与复验（2026-10-19）
+
+用户提供的 `study-facda-final-ui-recovery-evidence.zip` 和
+`study-facda-ui-recovery-and-unexecuted-cases-evidence.zip` 针对 `facda242b`：
+登录 POST 200 已记录，`/opening/today` 最终编译耗时 2243.9 秒（3691 modules）。
+编译完成后的浏览器观察超时，因此页面渲染、自动查询 GUI 和 ST001–004 均不能记为通过。
+原 Web 曾退出，退出原因未确定；恢复后也缺少资源快照，不能认定 OOM。
+本轮本地优化基于 `6c4a4ea8`，本地未取得 `facda242b` 对象，不等同于复现该候选版本。
+
+验收环境优先使用上面的预编译预览，构建成功后再开始用户浏览器验收。
+隔离 E2E 环境仍保留 `OPENING_E2E=1` 及原数据库、Redis、存储和认证配置；
+停止该测试 Web 后，在 `apps/web` 目录用同一环境先执行 `next build`，成功后执行 `next start`；
+不要为了使用 preview 脚本关闭隔离开关。
+`Ready`、端口监听、登录 200 和编译完成分别说明不同阶段；都不替代目标页面可操作。
+Today 的加载提示只覆盖路由可用后的等待，不能保证开发服务器冷编译期间出现。
+
+本轮用户复验入口：`/login` → `/opening/today`。前提是已有可登录账户及匹配的服务配置。
+成功登录后应显示进入状态，重复点击不再发起登录 POST；跳转迟滞时可点“点此继续”。
+Today 等待读取期间应有明确提示，完成后保留工作区时区、任务定位和错误反馈。
+再到 `/opening/assistant` 复验默认自然问句、显式查询、保存后刷新和临时会话。
+ST001 需要真实 PDF 和可用对象存储；ST002 需要在专门验收环境启用自适应规划；
+ST003 的无密钥校验/取消/不可用提示不代表真实模型可用；ST004 应操作原生内容备份的冲突拒绝/跳过恢复流程。
+以上浏览器项目均待用户验收，空模型目录与零预算下的结果不证明模型质量。
+
 ## Connection credential foundation (C01)
 
 Migrations `0041_opening_connections.sql` and `0042_opening_connection_lifecycle.sql`
