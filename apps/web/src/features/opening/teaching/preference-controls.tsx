@@ -23,14 +23,7 @@ import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui } from "../design/ui";
-import {
-  DEFAULT_INTERVENTION_UI_DECISION_CONTEXT,
-  INTERVENTION_DECISION_PERSIST_SOFT_GAP,
-  clearProactiveRejects,
-  withProactiveReject,
-  withUserTyping,
-  type InterventionUiDecisionContext,
-} from "./intervention-decision-context";
+
 
 export type PreferenceControlsScope = "global" | "session";
 
@@ -43,8 +36,6 @@ export type PreferenceControlsProps = {
   expectedUpdatedAt?: string | null;
   compact?: boolean;
   api?: OpeningApi;
-  /** Notify parent when typing / reject context changes (for tutor gate callers). */
-  onDecisionContextChange?: (ctx: InterventionUiDecisionContext) => void;
 };
 
 export type WinningLayer = "session" | "course" | "global";
@@ -257,14 +248,10 @@ export type PreferenceControlsViewProps = {
   busy: boolean;
   error?: string;
   notice?: string;
-  decisionCtx: InterventionUiDecisionContext;
   onDraftChange: (next: InterventionPrefs) => void;
   onSave: () => void;
   onReset: () => void;
   onReload: () => void;
-  onTyping: (typing: boolean) => void;
-  onRejectOffer: () => void;
-  onClearRejects: () => void;
 };
 
 /** Presentational form — SSR / unit friendly; container wires fetch. */
@@ -276,14 +263,10 @@ export function PreferenceControlsView({
   busy,
   error = "",
   notice = "",
-  decisionCtx,
   onDraftChange,
   onSave,
   onReset,
   onReload,
-  onTyping,
-  onRejectOffer,
-  onClearRejects,
 }: PreferenceControlsViewProps) {
   const idPrefix = scope === "session" ? "intervention-session" : "intervention-global";
   const heading =
@@ -298,7 +281,6 @@ export function PreferenceControlsView({
       className={compact ? "space-y-3" : "space-y-4"}
       data-preference-controls="true"
       data-intervention-scope={scope}
-      data-decision-persist-gap={INTERVENTION_DECISION_PERSIST_SOFT_GAP}
     >
       {!compact ? (
         <div>
@@ -346,48 +328,6 @@ export function PreferenceControlsView({
         </button>
       </div>
 
-      <div
-        className="space-y-2 border-t border-zinc-100 pt-3"
-        data-intervention-decision-feed="true"
-      >
-        <p className="text-[11px] leading-5 text-zinc-500">
-          决策上下文（本地）：打字中会抑制主动提议；连续拒绝主动提议会计数。服务端决策环写入 API 尚未对客户端开放（
-          {INTERVENTION_DECISION_PERSIST_SOFT_GAP}）。
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <label className="flex min-h-10 cursor-pointer items-center gap-2 text-xs text-zinc-700">
-            <input
-              type="checkbox"
-              className="size-4 accent-emerald-700"
-              checked={decisionCtx.userIsTyping}
-              onChange={(e) => onTyping(e.target.checked)}
-              data-intervention-typing="true"
-            />
-            我正在输入
-          </label>
-          <button
-            type="button"
-            className={ui.quiet}
-            onClick={onRejectOffer}
-            data-intervention-reject="true"
-          >
-            拒绝本次主动提议
-          </button>
-          <button
-            type="button"
-            className={ui.quiet}
-            onClick={onClearRejects}
-            data-intervention-clear-rejects="true"
-          >
-            清除拒绝计数 / 我要求助
-          </button>
-        </div>
-        <p className="text-[11px] tabular-nums text-zinc-500" data-intervention-reject-count="true">
-          连续拒绝主动：{decisionCtx.consecutiveProactiveRejects}
-          {decisionCtx.userIsTyping ? " · 打字中" : ""}
-        </p>
-      </div>
-
       {notice ? (
         <p role="status" className="text-sm leading-6 text-emerald-700">
           {notice}
@@ -408,7 +348,6 @@ export function PreferenceControls({
   expectedUpdatedAt = null,
   compact = false,
   api: suppliedApi,
-  onDecisionContextChange,
 }: PreferenceControlsProps) {
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
   const [data, setData] = useState<InterventionSettingsResponse | null>(null);
@@ -416,9 +355,7 @@ export function PreferenceControls({
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [decisionCtx, setDecisionCtx] = useState<InterventionUiDecisionContext>(
-    DEFAULT_INTERVENTION_UI_DECISION_CONTEXT,
-  );
+
 
   const query = useMemo(
     () => ({
@@ -462,9 +399,7 @@ export function PreferenceControls({
     return () => controller.abort();
   }, [load]);
 
-  useEffect(() => {
-    onDecisionContextChange?.(decisionCtx);
-  }, [decisionCtx, onDecisionContextChange]);
+
 
   async function save(value: InterventionPrefs | InterventionPrefsPatch | null) {
     if (busy) return;
@@ -498,18 +433,6 @@ export function PreferenceControls({
     }
   }
 
-  function setTyping(typing: boolean) {
-    setDecisionCtx((prev) => withUserTyping(prev, typing));
-  }
-
-  function rejectOffer() {
-    setDecisionCtx((prev) => withProactiveReject(prev));
-  }
-
-  function acceptOrAskHelp() {
-    setDecisionCtx((prev) => clearProactiveRejects(prev));
-  }
-
   if (scope === "session" && !activityId) {
     return (
       <p className="text-xs text-zinc-500" role="status" data-intervention-session-missing="true">
@@ -524,7 +447,6 @@ export function PreferenceControls({
         className={compact ? "space-y-3" : "space-y-4"}
         data-preference-controls="true"
         data-intervention-scope={scope}
-        data-decision-persist-gap={INTERVENTION_DECISION_PERSIST_SOFT_GAP}
       >
         {error ? (
           <p role="alert" className="text-sm leading-6 text-red-700">
@@ -546,7 +468,6 @@ export function PreferenceControls({
       <div
         data-preference-controls="true"
         data-intervention-scope={scope}
-        data-decision-persist-gap={INTERVENTION_DECISION_PERSIST_SOFT_GAP}
       >
         {error ? (
           <p role="alert" className="text-sm leading-6 text-red-700">
@@ -570,7 +491,6 @@ export function PreferenceControls({
       busy={busy}
       error={error}
       notice={notice}
-      decisionCtx={decisionCtx}
       onDraftChange={(next) => {
         setDraft(next);
         setNotice("");
@@ -580,9 +500,6 @@ export function PreferenceControls({
       }
       onReset={() => void save(null)}
       onReload={() => void load()}
-      onTyping={setTyping}
-      onRejectOffer={rejectOffer}
-      onClearRejects={acceptOrAskHelp}
     />
   );
 }

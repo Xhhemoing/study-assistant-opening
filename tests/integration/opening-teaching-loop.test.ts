@@ -232,6 +232,7 @@ describe("V2-16 teaching loop L1–L6", () => {
     const attempt = await attempts.create(f.scope, {
       sessionId,
       clientKey: `loop-attempt-${randomUUID()}`,
+      teachingBlock: { blockId: blockB, contentVersion: readyActivity.contentVersion },
       problem: {
         sourceId,
         chunkId,
@@ -240,7 +241,7 @@ describe("V2-16 teaching loop L1–L6", () => {
         artifactKind: "reference_item",
       },
     });
-    await learning.insertObservation(f.scope, {
+    const saved = await learning.insertObservation(f.scope, {
       attemptId: attempt.id,
       sessionId,
       courseId,
@@ -301,6 +302,31 @@ describe("V2-16 teaching loop L1–L6", () => {
 
     // L7 optional — openProblems derive without inventing eligibility
     expect(Array.isArray(parsed.openProblems)).toBe(true);
+
+    // QA-01: fresh reads recover the durable answer without any browser draft or replay.
+    const content = createOpeningTeachingContentRepository(f.sql);
+    const readSaved = () => content.getSubmittedAttempt(f.scope, created.id, blockB, readyActivity.contentVersion);
+    expect(await readSaved()).toMatchObject({ attempt: { id: attempt.id }, observation: { id: saved.id, answer: "2" } });
+    expect(await content.getSubmittedAttempt(f.scope, created.id, blockA, readyActivity.contentVersion)).toBeNull();
+    await expect(content.getSubmittedAttempt(f.otherScope, created.id, blockB, readyActivity.contentVersion)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(content.getSubmittedAttempt(f.scope, created.id, blockB, readyActivity.contentVersion + 1)).rejects.toMatchObject({ code: "CONFLICT" });
+    await resume.setStatus(f.scope, created.id, { status: "completed" });
+    expect(await readSaved()).toMatchObject({ observation: { answer: "2" } });
+    await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES (${f.scope.workspaceId},${sourceId})`;
+    await expect(readSaved()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await f.sql`DELETE FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId} AND source_id=${sourceId}`;
+    expect(await readSaved()).toMatchObject({ observation: { id: saved.id, answer: "2" } });
+    const revised = await learning.reviseObservation(f.scope, {
+      rootObservationId: saved.id, revisesObservationId: saved.id, expectedHead: saved.id,
+      clientKey: randomUUID(), reason: "Correct my answer", revisionKind: "replace",
+      replacement: { answer: "rank is 2", outcome: "unverified", assistance: "independent" },
+    });
+    expect(await readSaved()).toMatchObject({ observation: { id: revised.headObservationId, answer: "rank is 2" } });
+    await learning.reviseObservation(f.scope, {
+      rootObservationId: saved.id, revisesObservationId: revised.headObservationId, expectedHead: revised.headObservationId,
+      clientKey: randomUUID(), reason: "Retract this answer", revisionKind: "retract",
+    });
+    expect(await readSaved()).toMatchObject({ attempt: { id: attempt.id }, observation: null });
   });
 });
 

@@ -80,7 +80,7 @@ describe("ledgerActionForProviderError", () => {
 });
 
 describe("durable provider receipts", () => {
-  it("persists the response with its capped charge before settlement", async () => {
+  it("persists the response with its actual charge before settlement", async () => {
     const b = fakeBudget();
     const order: string[] = [];
     const budget = { ...b.api, settle: async (...args: Parameters<typeof b.api.settle>) => {
@@ -118,8 +118,8 @@ describe("durable provider receipts", () => {
 });
 
 describe("settleCentsForActual", () => {
-  it("caps overage to reserved and flags audit", () => {
-    expect(settleCentsForActual(10, 999)).toEqual({ settledCents: 10, overage: true });
+  it("preserves actual overage and flags audit", () => {
+    expect(settleCentsForActual(10, 999)).toEqual({ settledCents: 999, overage: true });
     expect(settleCentsForActual(500, 120)).toEqual({ settledCents: 120, overage: false });
   });
 });
@@ -155,7 +155,7 @@ describe("runBudgetedCall", () => {
     expect(repo.unknowns).toHaveLength(0);
   });
 
-  it("caps settle when actual exceeds reserved and notes overage audit", async () => {
+  it("settles full actual cost when it exceeds reserved and notes overage audit", async () => {
     const { repo, api } = fakeBudget();
     await runBudgetedCall({
       ...options,
@@ -164,12 +164,12 @@ describe("runBudgetedCall", () => {
       provider: { complete: async () => output },
       budget: api,
     });
-    expect(repo.settled).toEqual([{ reservationId: "res-1", actualCents: 50 }]);
+    expect(repo.settled).toEqual([{ reservationId: "res-1", actualCents: 80 }]);
     expect(repo.overages).toEqual([{
       reservationId: "res-1",
       reservedCents: 50,
       actualCents: 80,
-      settledCents: 50,
+      settledCents: 80,
     }]);
     expect(repo.unknowns).toHaveLength(0);
   });

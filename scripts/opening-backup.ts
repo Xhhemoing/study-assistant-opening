@@ -58,6 +58,7 @@ function failClosed(message: string, details: string[] = []): never {
 }
 
 async function main(): Promise<void> {
+  stderr.write("Scope limit: measurement trials, answers and delayed retests are excluded; their recovery requires an administrator full database backup.\n");
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) usage();
   if (!args.includes(CONFIRM)) {

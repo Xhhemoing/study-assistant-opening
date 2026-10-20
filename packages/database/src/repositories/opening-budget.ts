@@ -492,10 +492,12 @@ export function createOpeningBudgetRepository(
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
         }
-        if (row.parentInteractionId && actualCents > (row.reservedAmountCents ?? row.amountCents)) {
-          await tx`UPDATE opening_parent_interaction_budgets
-            SET blocked_at = COALESCE(blocked_at, now()), blocked_reason = 'actual_exceeded_conservative_bound'
-            WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
+        if (actualCents > (row.reservedAmountCents ?? row.amountCents)) {
+          if (row.parentInteractionId) {
+            await tx`UPDATE opening_parent_interaction_budgets
+              SET blocked_at = COALESCE(blocked_at, now()), blocked_reason = 'actual_exceeded_conservative_bound'
+              WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
+          }
           const event = await tx`INSERT INTO opening_budget_reconcile_events
             (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents)
             VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents})

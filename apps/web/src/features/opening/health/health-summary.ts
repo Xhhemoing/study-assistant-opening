@@ -1,8 +1,8 @@
 /**
- * Public health projection: only coarse up/down per dependency, never probe details.
+ * Authenticated health projection: only coarse up/down per dependency, never probe details.
  * Full §Q03 readiness (ownerSetup, registration403, HTTPS, provider, dailyCap,
  * backupFreshness, honest alertDelivery) lives in `scripts/opening-readiness.mjs`,
- * not this public route — keep secrets and supervision metadata off the wire.
+ * not the health route — keep secrets and supervision metadata off the wire.
  */
 type ProbeResult = { ok?: boolean };
 type ProbeSet = Record<string, ProbeResult | undefined>;

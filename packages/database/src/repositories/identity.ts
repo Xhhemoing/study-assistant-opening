@@ -236,10 +236,12 @@ export function createIdentityRepository(sql: Sql): IdentityRepository {
     async findValidSession(sessionId) {
       assertUuid(sessionId, "sessionId");
       const rows = await sql`
-        SELECT * FROM sessions
-        WHERE id = ${sessionId}
-          AND revoked_at IS NULL
-          AND expires_at > now()
+        SELECT s.* FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.id = ${sessionId}
+          AND s.revoked_at IS NULL
+          AND s.expires_at > now()
+          AND u.disabled_at IS NULL
         LIMIT 1
       `;
       if (!rows.length) return null;

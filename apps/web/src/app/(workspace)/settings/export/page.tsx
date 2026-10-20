@@ -6,7 +6,7 @@ import { PageHeading, ui } from "../../../../features/opening/design/ui";
 
 export default function ExportPage() {
   return <main className="min-w-0 bg-white">
-    <PageHeading title="数据导出与备份" description="Markdown 和 Anki 是内容投影；本页原生内容备份只覆盖笔记、课程、卡片等库内数据，不包含 Opening 学习记录、材料原件与助理记忆。完整工作区恢复请使用 Opening 备份契约（见运维文档），而非本页导出。" action={<Link className={ui.quiet} href="/settings"><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>} />
+    <PageHeading title="数据导出与备份" description="Markdown 和 Anki 是内容投影；本页原生内容备份只覆盖笔记、课程、卡片等库内数据，不包含 Opening 学习记录、材料原件与助理记忆。Opening 备份可恢复其支持的学习数据；学习测试记录仍需管理员的完整数据库备份。" action={<Link className={ui.quiet} href="/settings"><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>} />
     <div className="mx-auto max-w-4xl space-y-6 px-5 py-5"><ExportMenu /><BackupMenu /></div>
   </main>;
 }

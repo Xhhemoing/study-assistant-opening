@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { runReadinessProbes } from "./opening-readiness-probes.mjs";
 
 export const REQUIRED_ENV = [
   "DATABASE_URL",
@@ -137,15 +138,12 @@ async function fetchJson(url) {
   return { status: response.status, body };
 }
 
-function projectHealth(result) {
-  if (!result || typeof result.body !== "object" || result.body === null) return { status: "unreachable" };
-  const status = result.body.status === "ok" || result.body.status === "down" ? result.body.status : "unreachable";
-  const checks = {};
-  for (const name of HEALTH_CHECKS) {
-    const value = result.body.checks?.[name];
-    if (value === "up" || value === "down") checks[name] = value;
-  }
-  return { status, checks };
+export async function collectLocalHealth(env, probe = runReadinessProbes) {
+  const probes = await probe(env);
+  const checks = Object.fromEntries(HEALTH_CHECKS.map((name) => [
+    name, probes[name]?.ok === true ? "up" : "down",
+  ]));
+  return { status: Object.values(checks).every((value) => value === "up") ? "ok" : "down", checks };
 }
 
 function projectReadiness(result) {
@@ -173,7 +171,7 @@ export async function collectOpeningLocalCheck(root = process.cwd()) {
   let health = { status: "unreachable" };
   let readiness = { state: "unreachable" };
   try {
-    health = projectHealth(await fetchJson("http://127.0.0.1:3000/api/opening/health"));
+    health = await collectLocalHealth(env);
   } catch {
     health = { status: "unreachable" };
   }

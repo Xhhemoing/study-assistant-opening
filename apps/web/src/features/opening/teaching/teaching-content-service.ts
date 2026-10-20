@@ -7,6 +7,7 @@ import {
 } from "@aistudy/contracts";
 import { createOpeningTeachingContentRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
+import { z } from "zod";
 import { ApiError } from "../../auth/service";
 
 function mapError(error: unknown): never {
@@ -24,6 +25,13 @@ function mapError(error: unknown): never {
 export function createOpeningTeachingContentService(sql: Sql) {
   const repo = createOpeningTeachingContentRepository(sql);
   return {
+    async getSubmittedAttempt(scope: Scope, activityIdRaw: string, blockIdRaw: string | null, versionRaw: string | null) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      const blockId = uuidSchema.parse(blockIdRaw);
+      const version = z.coerce.number().int().positive().parse(versionRaw);
+      try { return await repo.getSubmittedAttempt(scope, activityId, blockId, version); }
+      catch (error) { mapError(error); }
+    },
     async getSubmittedAnswerKey(scope: Scope, activityIdRaw: string, blockIdRaw: string | null, attemptIdRaw: string | null) {
       const activityId = uuidSchema.parse(activityIdRaw);
       const blockId = uuidSchema.parse(blockIdRaw);
