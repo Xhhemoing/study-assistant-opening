@@ -92,7 +92,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   useEffect(() => {
     if (!ready) return;
     let active = true;
-    setRestoring(true); setRestoreFailed(false);
+    setRestoring(true); setRestoreFailed(false); setError("");
     void teaching.getSubmittedAttempt(context.id, blockId, context.contentVersion).then(async saved => {
       if (!active) return;
       if (!saved) return;

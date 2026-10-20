@@ -50,6 +50,23 @@ it("does not present a new answer form after a failed recovery read", async () =
   api.getSubmittedAttempt.mockRejectedValueOnce(new Error("offline")); render(); await settle();
   expect(text(render())).toContain("重新读取已保存的作答"); expect(text(render())).not.toContain("提交原答案");
 });
+it("clears the failed recovery error when retry succeeds", async () => {
+  api.getSubmittedAttempt.mockRejectedValueOnce(new Error("offline")); render(); await settle();
+  const failed = render();
+  expect(text(failed)).toContain("offline");
+  function findRetry(node: ReactNode): (() => void) | undefined {
+    if (Array.isArray(node)) return node.map(findRetry).find(Boolean);
+    if (!isValidElement<{ children?: ReactNode; onClick?: () => void }>(node)) return undefined;
+    if (node.type === "button" && text(node) === "重新读取已保存的作答") return node.props.onClick;
+    return findRetry(node.props.children);
+  }
+  const retry = findRetry(failed);
+  expect(retry).toBeDefined(); retry!(); render(); await settle();
+  const restored = text(render());
+  expect(restored).toContain(saved.observation.answer);
+  expect(restored).not.toContain("offline");
+  expect(api.getSubmittedAttempt).toHaveBeenCalledTimes(2);
+});
 it("does not restore retracted answers or unlock their reference", async () => {
   api.getSubmittedAttempt.mockResolvedValueOnce({ ...saved, observation: null }); render(); await settle();
   expect(text(render())).toContain("已撤回或不可用"); expect(api.getAnswerKey).not.toHaveBeenCalled();
