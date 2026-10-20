@@ -119,6 +119,15 @@ class WorkerProvisionTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "requires the real systemd unit parser")
     def test_generated_paths_are_accepted_by_systemd(self):
+        # CI installs Node in its toolcache, while Hermes uses /usr/bin/node.
+        # Verify the path directives with an executable available on this host.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required by the deployment test runner")
+        template = self.base / "worker-template.service"
+        template.write_text(
+            (ROOT / "infra/deploy/aistudy-worker.service").read_text(encoding="utf-8").replace(
+                "ExecStart=/usr/bin/node ", f'ExecStart={worker.quoted(node).replace("%", "%%")} '),
+            encoding="utf-8")
         def verify_candidate(argv, **kwargs):
             if argv[:2] == ["systemd-analyze", "verify"]:
                 result = real_subprocess_run(argv, capture_output=True, text=True)
@@ -127,7 +136,7 @@ class WorkerProvisionTests(unittest.TestCase):
                 return result
             return self.record_run(argv, **kwargs)
         with patch.object(worker, "run", verify_candidate):
-            worker.main(self.args())
+            worker.main(self.args("--unit-file", str(template)))
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "requires the real systemd unit parser")
     def test_systemd_paths_preserve_spaces_and_literal_specifiers(self):
