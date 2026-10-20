@@ -40,6 +40,7 @@ import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "./tutor/ephemeral-system-query";
+import type { SystemQueryPlanner } from "@aistudy/ai";
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -111,9 +112,9 @@ export function setEphemeralTutorDepsForTests(
   ephemeralOverride = deps;
 }
 
-export function getEphemeralTutorService(sql: Sql): EphemeralTutorService {
+export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
   return { replyEphemeral(scope, input, signal) {
-    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web"),
+    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
       provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
     return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
   } };

@@ -18,7 +18,7 @@ const result = (name: string, data: Array<Record<string, unknown>> = [{ summary:
     teaching: { id: courseId, status: "active", generateStatus: "ready", pathVersion: 1, contentVersion: 1, updatedAt: asOf },
     recommendation: { recommendationStatus: "unknown" },
   };
-  return systemQueryResultSchema.parse({ authorization, name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: [], nextOffset: null });
+  return systemQueryResultSchema.parse({ authorization, name, status: "ok", reason: "read", asOf, version: "current", data: data.map(row => ({ summary: "真实记录", ...defaults[name], ...row })), evidence: [], sourceRefs: name === "materials" ? data.map(row => ({ sourceId: row.sourceId ?? sourceId, sourceVersion: row.sourceVersion ?? 1 })) : [], nextOffset: null });
 };
 const output = (calls?: Array<{ name: string; arguments: string; id: string }>): ProviderOutput => ({
   text: "模型编造的已掌握结论", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null, ...(calls ? { toolCalls: calls } : {}),
@@ -50,10 +50,10 @@ describe("bounded system query planner", () => {
     expect(renderSystemQuery(receipt)).toContain("固定规则查询");
   });
   it("does not treat an unsupported tool response or a missing model as a learner failure", async () => {
-    const receipt = await runSystemQuery({ ...base(), callModel: async () => output() });
+    const receipt = await runSystemQuery({ ...base(), question: "模型设置", callModel: async () => output() });
     expect(receipt.reason).toBe("model_unsupported");
-    expect(receipt.results[0]?.name).toBe("learner_state");
-    const unavailable = await runSystemQuery({ ...base(), callModel: async () => { throw new Error("missing configuration"); } });
+    expect(receipt.results[0]?.name).toBe("settings");
+    const unavailable = await runSystemQuery({ ...base(), question: "模型设置", callModel: async () => { throw new Error("missing configuration"); } });
     expect(unavailable.reason).toBe("model_unavailable");
     expect(unavailable.results[0]?.status).toBe("ok");
   });
@@ -108,7 +108,7 @@ describe("bounded system query planner", () => {
   });
   it("checks privacy after the last read and retains the exact lineage of displayed material", async () => {
     const input = base(); input.read.mockResolvedValue({ ...result("materials", [{ sourceVersion: 3 }]), sourceRefs: [{ sourceId, sourceVersion: 3 }] });
-    const receipt = await runSystemQuery({ ...input, question: "哪页材料？" });
+    const receipt = await runSystemQuery({ ...input, question: "哪页材料？", focus: { sourceId, sourceVersion: 3 } });
     expect(input.assertCurrent).toHaveBeenCalledTimes(3);
     expect(receipt.results[0]?.sourceRefs).toEqual([{ sourceId, sourceVersion: 3 }]);
   });
@@ -402,4 +402,19 @@ it("does not let the planner substitute a different decision identifier", async 
   expect(input.read).toHaveBeenCalledWith({ name: "explain_decision", arguments: { decisionId: courseId } }, expect.any(AbortSignal));
   expect(input.read).toHaveBeenCalledOnce();
   expect(receipt.results[0]).toMatchObject({ reason: "invalid_arguments" });
+});
+
+it.each([false, true])("uses the quoted material keyword in deterministic fallback (resolved=%s)", async resolveObjects => {
+  const input = base();
+  const receipt = await runSystemQuery({ ...input, question: "材料「原文关键词」在哪页", resolveObjects });
+  expect(input.read).toHaveBeenCalledWith({ name: "materials", arguments: { query: "原文关键词", limit: 5, offset: 0 } }, expect.any(AbortSignal));
+  expect(receipt.status).toBe("ok");
+});
+it("does not retain a missing-source clarification after a bound course material listing", async () => {
+  const input = base();
+  const receipt = await runSystemQuery({ ...input, question: "材料记录有哪些", focus: { courseId }, resolveObjects: true });
+  expect(input.read).toHaveBeenCalledWith({ name: "materials", arguments: { courseId, limit: 5, offset: 0 } }, expect.any(AbortSignal));
+  expect(receipt.status).toBe("ok");
+  expect(receipt.clarification).toBeUndefined();
+  expect(renderSystemQuery(receipt)).not.toContain("请先选择一份材料");
 });

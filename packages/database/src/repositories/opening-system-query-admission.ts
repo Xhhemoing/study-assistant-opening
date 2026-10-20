@@ -20,7 +20,9 @@ export async function readOpeningSystemQueryAuthorization(sql: Sql, scope: Scope
   });
   if (signal.aborted) throw new Error("system query cancelled");
   if (!owner) throw new SystemQueryPermissionError();
-  return { authorization: systemQueryOwnerGrant(scope, Number(owner.privacy_epoch), purpose), privacyEpoch: Number(owner.privacy_epoch), localDate: localDateKeyInZone(new Date(), resolveWorkspaceTimeZone(owner.planning_settings?.timeZone)) };
+  const timeZone = resolveWorkspaceTimeZone(owner.planning_settings?.timeZone);
+  const localDate = localDateKeyInZone(new Date(), timeZone);
+  return { authorization: systemQueryOwnerGrant(scope, Number(owner.privacy_epoch), purpose), privacyEpoch: Number(owner.privacy_epoch), localDate, clock: { timeZone, today: localDate } };
   });
 }
 

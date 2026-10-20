@@ -39,7 +39,7 @@ export const systemQueryEvidenceSchema = z.object({
 const resultFields = {
   authorization: systemQueryAuthorizationSchema,
   status: z.enum(["ok", "partial", "unknown"]),
-  reason: z.enum(["read", "no_data", "not_available", "invalid_arguments", "truncated", "stale", "timeout", "unavailable", "limit", "repeated_query", "model_unavailable", "model_unsupported"]),
+  reason: z.enum(["read", "no_data", "not_available", "invalid_arguments", "clarification_required", "truncated", "stale", "timeout", "unavailable", "limit", "repeated_query", "model_unavailable", "model_unsupported"]),
   asOf: isoDateTimeSchema, version: z.string().max(100),
   evidence: z.array(systemQueryEvidenceSchema).max(10),
   sourceRefs: z.array(z.object({ sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative() }).strict()).max(64),
@@ -53,7 +53,27 @@ export const systemQueryResultSchema = z.discriminatedUnion("name", [
   resultFor("planning"), resultFor("jobs"), resultFor("settings"), resultFor("teaching"),
   resultFor("learner_state"), resultFor("explain_decision"), resultFor("notes"), resultFor("cards"), resultFor("exam_sprint"),
   z.object({ ...resultFields, name: z.literal("rejected"), data: z.array(z.never()).max(0) }).strict(),
-]);
+]).superRefine((result, ctx) => {
+  const included = (sourceId: string, sourceVersion: unknown) => result.sourceRefs.some(ref =>
+    ref.sourceId.toLowerCase() === sourceId.toLowerCase() && ref.sourceVersion === sourceVersion);
+  for (const [index, row] of result.data.entries()) {
+    if ("sourceId" in row && !included(row.sourceId, row.sourceVersion)) ctx.addIssue({ code: "custom", message: "query data source is absent from lineage", path: ["data", index] });
+  }
+  for (const [index, evidence] of result.evidence.entries()) {
+    if ((evidence.sourceId !== undefined || evidence.sourceVersion !== undefined)
+      && (!evidence.sourceId || !included(evidence.sourceId, evidence.sourceVersion))) ctx.addIssue({ code: "custom", message: "query evidence source is absent from lineage", path: ["evidence", index] });
+    const target = new URL(evidence.href, "https://query.invalid").searchParams;
+    if (target.has("source")) {
+      const id = target.get("source")!, version = target.get("version");
+      if (target.getAll("source").length !== 1 || target.getAll("version").length !== 1
+        || !uuidSchema.safeParse(id).success || version === null || !/^\d+$/.test(version) || !included(id, Number(version))
+        || (evidence.sourceId !== undefined && evidence.sourceId.toLowerCase() !== id.toLowerCase())
+        || (evidence.sourceVersion !== undefined && evidence.sourceVersion !== Number(version))) {
+        ctx.addIssue({ code: "custom", message: "query evidence link differs from lineage", path: ["evidence", index, "href"] });
+      }
+    }
+  }
+});
 export type SystemQueryResult = z.infer<typeof systemQueryResultSchema>;
 export const systemQueryReceiptSchema = z.object({
   authorization: systemQueryAuthorizationSchema,
@@ -62,6 +82,7 @@ export const systemQueryReceiptSchema = z.object({
   mode: z.enum(["native_tools", "deterministic"]),
   status: z.enum(["ok", "partial", "unknown"]),
   reason: z.string().max(100),
+  clarification: z.string().min(1).max(400).optional(),
   results: z.array(systemQueryResultSchema).max(4),
 }).strict().superRefine((receipt, ctx) => {
   if (new TextEncoder().encode(JSON.stringify(receipt)).byteLength > 100000) ctx.addIssue({ code: "custom", message: "query receipt exceeds storage budget" });

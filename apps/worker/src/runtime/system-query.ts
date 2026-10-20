@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { runSystemQuery, renderSystemQuery, type SystemQueryService } from "@aistudy/ai";
+import { runSystemQuery, renderSystemQuery, type SystemQueryService, type SystemQueryPlanner } from "@aistudy/ai";
 import { createScopedOpeningSystemQueryReader, readOpeningSystemQueryAuthorization, mergeContextSourceRefs, parseContextSourceRefs } from "@aistudy/database";
 import { loadFeatureSwitches } from "@aistudy/config";
 
@@ -28,7 +28,7 @@ async function callDbQueryModel(sql: Sql, scope: import("@aistudy/contracts").Sc
   return createDbModelGateway(sql).call(scope, "tutor.listen", { ...options, input, budget: scopeBudget(budget, scope) });
 }
 /** Native planning is bounded; deterministic reads remain available when models cannot provide tools. */
-export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", options: { callModel?: QueryModelCall } = {}): SystemQueryService {
+export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", options: { callModel?: QueryModelCall; planner?: SystemQueryPlanner } = {}): SystemQueryService {
   const enabled = () => loadFeatureSwitches().systemQuery;
   return { enabled, async reply(scope, input, outerSignal) {
     if (!enabled()) throw new Error("系统记录查询暂未开启。");
@@ -50,9 +50,9 @@ export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", 
       };
       const parentBudget = input.parentBudget ?? { id: `study-query:${scope.workspaceId}:${randomUUID()}` };
       const receipt = await runSystemQuery({ ...frame,
-        callModel: (request, round, signal) => (options.callModel ?? ((owner, request, context) => callDbQueryModel(sql, owner, request, context)))(scope, request, {
+        callModel: options.planner ?? ((request, round, signal) => (options.callModel ?? ((owner, request, context) => callDbQueryModel(sql, owner, request, context)))(scope, request, {
           parentBudget, operationId: `system-query:${parentBudget.id}:round:${round}`, signal, beforeSend: assertCurrent,
-        }), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: true, focus: input.focus, signal: controller.signal, assertCurrent,
+        })), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: true, focus: input.focus, signal: controller.signal, assertCurrent,
         read: createScopedOpeningSystemQueryReader(sql, scope, { purpose: "system_record_lookup", publicSettings: () => {
           const flags = loadFeatureSwitches(); return { process, adaptivePlanning: flags.adaptivePlanning, teachingLoop: flags.teachingLoop.api };
         } }),

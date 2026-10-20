@@ -7,6 +7,7 @@ import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer"
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
+import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
 import Link from "next/link";
@@ -189,7 +190,7 @@ export function appendEphemeralResponseIfActive(
   const citations = [...(input.output.citations ?? [])];
   const hadMaterialContext = !input.output.systemQuery && (input.sourceIds?.length ?? 0) > 0;
   return [...(input.output.historyDiscarded ? [] : current),
-    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null },
+    { id: `ephemeral-user-${input.clientKey}`, role: "user", text: input.text, citations: [], citationLabels: [], origin: "ephemeral", provenanceId: input.output.provenanceId ?? null, systemQuery: Boolean(input.output.systemQuery) },
     {
       id: `ephemeral-assistant-${input.output.requestId ?? input.clientKey}`,
       role: "assistant",
@@ -199,6 +200,8 @@ export function appendEphemeralResponseIfActive(
       status: "complete",
       origin: "ephemeral",
       provenanceId: input.output.provenanceId ?? null,
+      systemQuery: Boolean(input.output.systemQuery),
+      queryEvidenceLinks: queryEvidenceLinks(input.output.systemQuery),
       hadMaterialContext,
     },
   ];

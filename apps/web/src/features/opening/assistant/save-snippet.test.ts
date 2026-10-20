@@ -15,6 +15,16 @@ const message: ChatMessageView = { id: "ephemeral", origin: "ephemeral", provena
 const draft = { title: "片段笔记", text: "仅保存这一句。", provenanceId: PROVENANCE_ID };
 
 describe("explicit snippet save", () => {
+  it.each(["user", "assistant"] as const)("disables both note/card actions for a temporary query %s even with a provenance id", role => {
+    const query = { ...message, role, systemQuery: true };
+    expect(snippetSaveAvailability(query)).toBe("query_not_supported");
+    expect(prepareSnippetDraft(query)).toBeNull();
+    const save = vi.fn(), card = vi.fn();
+    const html = renderToStaticMarkup(createElement(MessageList, { messages: [query], onSaveSnippet: save, onCreateCard: card }));
+    expect(html).toMatch(/disabled=""[^>]*>.*?保存片段/);
+    expect(html).toMatch(/disabled=""[^>]*>.*?制成卡片/);
+    expect(html).toContain("临时系统查询暂不支持"); expect(save).not.toHaveBeenCalled(); expect(card).not.toHaveBeenCalled();
+  });
   it.each(["user", "assistant"] as const)("allows a sourced ephemeral %s message", (role) => {
     expect(snippetSaveAvailability({ ...message, role })).toBe("available");
   });

@@ -1,6 +1,6 @@
 import { recordTopics, isRecordFollowup, type RecordQuestionContext, type RecordTopic, type SystemQueryRequest, type SystemQueryResult } from "@aistudy/contracts";
 
-export type SystemQueryFocus = { courseId?: string | null; sourceId?: string; sourceVersion?: number; physicalPage?: number | null; date?: string };
+export type SystemQueryFocus = { courseId?: string | null; sourceId?: string; sourceIds?: string[]; sourceVersion?: number; physicalPage?: number | null; date?: string };
 export type QuerySelection = { topics: RecordTopic[]; courseQuery?: string; courseText?: string; date?: string; dateExplicit: boolean; invalidDate: boolean; ambiguousCourse: boolean };
 const normalize = (text: string) => text.toLowerCase().replace(/高数/g, "高等数学").replace(/\s|[《》“”"']/g, "");
 function courseText(text: string): string | undefined {

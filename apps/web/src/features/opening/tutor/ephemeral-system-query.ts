@@ -25,7 +25,7 @@ export async function replyEphemeralSystemQuery(deps: { systemQuery: SystemQuery
   };
   const reply = await deps.systemQuery.reply(scope, { question: input.text, parentBudget,
     resolvePreviousQuestion,
-    focus: { courseId: input.courseId ?? input.contextAnchor?.courseId, sourceId, physicalPage: input.currentPage } }, signal)
+    focus: { courseId: input.courseId ?? input.contextAnchor?.courseId, sourceId, sourceIds: input.sourceSelection === "none" ? [] : input.sourceIds, physicalPage: input.currentPage } }, signal)
     .catch(error => {
       if (error instanceof SystemQueryPermissionError) throw new EphemeralServiceError("SYSTEM_QUERY_FORBIDDEN", error.message, 403);
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "system query cancelled", 499);
