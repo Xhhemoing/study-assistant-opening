@@ -48,4 +48,3 @@ describe("Opening health visibility", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
-
