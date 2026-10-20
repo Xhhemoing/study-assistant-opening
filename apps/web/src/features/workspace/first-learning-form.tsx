@@ -54,7 +54,7 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
     <p className="text-xs leading-6 text-zinc-500">按 {draft.timeZone} 记录。已有学习时间设置会保留；新计划需由你确认。</p>
     <FirstLearningMaterials selected={draft.sourceIds} disabled={busy} onChange={sourceIds => update({ sourceIds })} />
     {error ? <div className="space-y-2 text-sm leading-6 text-red-700" role="alert"><p>{error}</p><Link className={ui.quiet} href="/opening/today">查看今日页</Link><Link className={ui.quiet} href="/opening/settings">检查学习设置</Link></div> : null}
-    {destination ? <p className="text-sm text-zinc-600" role="status">学习意图已保存，正在进入今日页。<Link className={ui.quiet} href={destination}>继续进入</Link></p> : null}
+    {destination ? <p className="text-sm text-zinc-600" role="status">学习意图已保存，正在进入今日页。<a className={ui.quiet} href={destination}>继续进入</a></p> : null}
     <button className={`${ui.primary} w-full sm:w-auto`} disabled={busy} type="submit">{busy ? <LoaderCircle className="motion-safe:animate-spin" size={16} aria-hidden /> : <ArrowRight size={16} aria-hidden />}{busy ? "正在准备…" : "保存目标并开始"}</button>
     <p className="text-xs leading-6 text-zinc-500">按当前配置准备主讲内容。AI 不可用时仍保留目标与任务，可以继续向助理提问或记笔记。</p>
   </form>;
