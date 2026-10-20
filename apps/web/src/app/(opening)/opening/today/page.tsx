@@ -17,10 +17,12 @@ async function loadPage(): Promise<{ state: TodayResumeState; timeZone: string }
   try {
     const request = new Request("http://opening.local/today", { headers: await headers() });
     const { scope, sql } = await requireOpeningScope(request);
-    const state = await loadTodayResumeState({ scope, reader: createTodayResumeReader(sql) });
     // Workspace business zone (planning_settings.timeZone, default Asia/Shanghai);
     // the client must not derive "today" from the browser zone.
-    const preference = await getPlanningSettingsService(sql).get(scope);
+    const [state, preference] = await Promise.all([
+      loadTodayResumeState({ scope, reader: createTodayResumeReader(sql) }),
+      getPlanningSettingsService(sql).get(scope),
+    ]);
     return { state, timeZone: resolveWorkspaceTimeZone(preference.settings?.timeZone) };
   } catch (error) {
     return {
