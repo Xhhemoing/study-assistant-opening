@@ -11,7 +11,7 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
-import { loadTutorHistory, loadTutorHistoryContext } from "./opening-tutor-history";
+import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
 
 /** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
 export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
@@ -122,7 +122,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
 
   return {
     loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
-    loadHistoryContext: (scope: OpeningScope, currentTurnId: string) => loadTutorHistoryContext(sql, scope, currentTurnId),
+    loadHistoryContext: (scope: OpeningScope, currentTurnId: string, purpose?: TutorHistoryPurpose) => loadTutorHistoryContext(sql, scope, currentTurnId, purpose),
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
       const rows = await sql`
         UPDATE opening_tutor_jobs j SET status = 'running', claim_token = ${randomUUID()}, updated_at = now()

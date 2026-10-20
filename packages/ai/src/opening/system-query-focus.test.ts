@@ -33,3 +33,9 @@ it("does not interpret a temporal English substring in a setting name as a date"
   expect(selectSystemQuery("nextLearningStep设置生效了吗", undefined, "2026-10-19"))
     .toMatchObject({ dateExplicit: false, invalidDate: false, topics: ["settings"] });
 });
+it.each([["明日安排", "2026-10-20"], ["今日计划", "2026-10-19"], ["昨日安排", "2026-10-18"]])("resolves calendar synonym %s", (question, date) => {
+  expect(selectSystemQuery(question, undefined, "2026-10-19")).toMatchObject({ date, dateExplicit: true, invalidDate: false });
+});
+it.each(["我的后台任务有哪些", "解析进度怎样", "后台处理完成了吗"])("keeps background query %s outside learner/course scopes", question => {
+  expect(selectSystemQuery(question, undefined, "2026-10-19")).toMatchObject({ topics: ["jobs"], courseText: undefined });
+});

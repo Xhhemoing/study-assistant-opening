@@ -70,4 +70,5 @@ it.each(["data", "evidence", "link"])("redacts legacy query history after asset 
   expect(JSON.stringify(await repo.listSummaries(scope))).not.toContain("LEGACY_DELETED_INFORMATION");
   const next = await repo.appendSavedTurn({ scope, conversationId: conversation.id, text: "跟进", mode: "listen", clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
   expect((await createOpeningTutorJobsRepository(sql).loadHistoryContext(scope, next.turnId)).history).toEqual([]);
+  expect((await createOpeningTutorJobsRepository(sql).loadHistoryContext(scope, next.turnId, "record_referents")).history).toEqual([]);
 });

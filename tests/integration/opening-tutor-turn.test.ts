@@ -168,7 +168,7 @@ describe("opening tutor turn durable path (guarded)", () => {
     expect(candidates[0].count).toBe(1);
   });
 
-  it("persists delivered help exposure with the completed assistant turn", async () => {
+  it("persists inert help exposure until the completed assistant turn is delivered", async () => {
     const seeded = await seedConversationAndSource();
     const sessionId = randomUUID(), courseId = randomUUID();
     await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Help course',${courseId})`;
@@ -189,7 +189,7 @@ describe("opening tutor turn durable path (guarded)", () => {
     await createTutorTurnHandler(deps)(seeded.jobId);
 
     const rows = await fixture.sql`
-      SELECT e.session_id, e.turn_id, e.level, e.delivered, t.status AS turn_status
+      SELECT e.session_id, e.turn_id, e.level, e.delivered, e.delivered_at, t.status AS turn_status
       FROM opening_help_exposures e
       JOIN opening_turns t ON t.id = e.turn_id
       WHERE e.session_id = ${sessionId}
@@ -198,7 +198,8 @@ describe("opening tutor turn durable path (guarded)", () => {
       session_id: sessionId,
       turn_id: seeded.assistantTurnId,
       level: "revealed",
-      delivered: true,
+      delivered: false,
+      delivered_at: null,
       turn_status: "complete",
     }]);
   });

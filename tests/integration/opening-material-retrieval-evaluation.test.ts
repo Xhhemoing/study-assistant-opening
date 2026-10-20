@@ -13,6 +13,9 @@ const chunks = await loadMaterialRetrievalFixture(root);
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 beforeEach(async () => {
   await fixture.reset();
+  // Version history intentionally survives source deletion; this fixture reuses
+  // stable corpus IDs across cases, so clear only its own previous versions.
+  await fixture.sql`DELETE FROM opening_source_versions WHERE workspace_id=${fixture.scope.workspaceId}`;
   for (const source of annotations.sources) {
     await fixture.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
       VALUES(${source.sourceId},${fixture.scope.workspaceId},${source.label!},'text/markdown',100,${'11'.repeat(32)},1,'uploaded','ready')`;
@@ -24,7 +27,12 @@ beforeEach(async () => {
 afterAll(async () => { await fixture?.close(); });
 it("runs the actual owner-scoped material reader and matches replay rankings without changing learning facts", async () => {
   const [before] = await fixture.sql`SELECT count(*)::int AS n FROM opening_help_exposures WHERE workspace_id=${fixture.scope.workspaceId}`;
-  const live = await runMaterialRetrievalEvaluation({ ...annotations, scope: fixture.scope }, createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope, { purpose: "system_record_lookup" }));
+  const reader = createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope, { purpose: "system_record_lookup" });
+  const source = annotations.sources[0]!;
+  const inventory = await reader({ name: "materials", arguments: { sourceId: source.sourceId, sourceVersion: source.sourceVersion, limit: 10, offset: 0 } }, new AbortController().signal);
+  expect(inventory.status).toBe("ok");
+  expect(inventory.data).toHaveLength(chunks.filter(chunk => chunk.sourceId === source.sourceId).length);
+  const live = await runMaterialRetrievalEvaluation({ ...annotations, scope: fixture.scope }, reader);
   const replay = await runMaterialRetrievalEvaluation(annotations, createFixtureMaterialReader(chunks, annotations.scope), { mode: "fixture_replay" });
   expect(live.mode).toBe("scoped_postgres_reader");
   expect(live.coverage).toEqual(replay.coverage);

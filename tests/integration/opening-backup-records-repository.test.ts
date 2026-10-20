@@ -19,10 +19,11 @@ it("exports durable tables and version metadata with owner isolation and no obje
   const snapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
   expect(Object.keys(snapshot.tables).sort()).toEqual([...OPENING_BACKUP_TABLES].sort());
   // The seed graph creates one teaching activity (sessions require one since 0053) but no units/specs
-  // and no K02 skill evidence (that needs a knowledge node).
+  // and no K02 skill evidence (that needs a knowledge node), decisions, shadow predictions or intent events.
   const empty = ["cards", "card_review_states", "learning_events", "workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions",
     "opening_plan_feedback", "opening_suggestion_feedback", "opening_learning_history_revisions", "opening_retest_activities", "opening_teaching_units", "opening_teaching_activity_specs",
-    "opening_learning_activity_history_revisions", "opening_skill_evidence"];
+    "opening_learning_activity_history_revisions", "opening_skill_evidence",
+    "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events"];
   for (const [name, rows] of Object.entries(snapshot.tables)) expect(rows, name).toHaveLength(empty.includes(name) ? 0 : 1);
   expect(snapshot.privacyEpoch).toBe(1);
   expect(snapshot.deletionJournal).toHaveLength(1);

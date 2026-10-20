@@ -37,3 +37,9 @@ describe("record demand and follow-up boundaries", () => {
     expect(hasRecordReadDemand(text)).toBe(true);
   });
 });
+it.each(["明日安排", "今日计划", "昨日安排"])("automatically recognizes the calendar query %s", question => {
+  expect(hasRecordReadDemand(question)).toBe(true);
+});
+it("retains independent learner and plan topics alongside background jobs", () => {
+  expect(recordTopics("解析进度怎样，学习进度怎样，今天计划有哪些")).toEqual(["learner_state", "planning", "jobs"]);
+});

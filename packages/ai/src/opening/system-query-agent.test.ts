@@ -418,3 +418,21 @@ it("does not retain a missing-source clarification after a bound course material
   expect(receipt.clarification).toBeUndefined();
   expect(renderSystemQuery(receipt)).not.toContain("请先选择一份材料");
 });
+it("stops a rejected legacy planner before a second model round and includes the workspace clock", async () => {
+  const input = base();
+  const callModel = vi.fn(async (request: ProviderInput) => {
+    expect(request.text).toContain("Pacific/Honolulu");
+    return output([call("planning", { date: "2026-10-19", limit: 5, offset: 0 })]);
+  });
+  const receipt = await runSystemQuery({ ...input, question: "明天的计划", clock: { today: "2026-10-19", timeZone: "Pacific/Honolulu" }, callModel });
+  expect(callModel).toHaveBeenCalledOnce();
+  expect(receipt.clarification).toContain("不一致");
+  expect(input.read).not.toHaveBeenCalled();
+});
+it.each(["下周的计划", "周一安排", "2026-02-30计划", "我有哪些任务", "我有哪些计划"])("returns structured clarification without substituted reads for %s", async question => {
+  const input = base();
+  const receipt = await runSystemQuery({ ...input, question, resolveObjects: true });
+  expect(receipt).toMatchObject({ status: "unknown", clarification: expect.any(String) });
+  expect(receipt.results.every(row => row.name === "rejected" && row.data.length === 0)).toBe(true);
+  expect(input.read).not.toHaveBeenCalled();
+});

@@ -52,7 +52,7 @@ export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", 
       const receipt = await runSystemQuery({ ...frame,
         callModel: options.planner ?? ((request, round, signal) => (options.callModel ?? ((owner, request, context) => callDbQueryModel(sql, owner, request, context)))(scope, request, {
           parentBudget, operationId: `system-query:${parentBudget.id}:round:${round}`, signal, beforeSend: assertCurrent,
-        })), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: true, focus: input.focus, signal: controller.signal, assertCurrent,
+        })), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: !options.planner, focus: input.focus, signal: controller.signal, assertCurrent,
         read: createScopedOpeningSystemQueryReader(sql, scope, { purpose: "system_record_lookup", publicSettings: () => {
           const flags = loadFeatureSwitches(); return { process, adaptivePlanning: flags.adaptivePlanning, teachingLoop: flags.teachingLoop.api };
         } }),

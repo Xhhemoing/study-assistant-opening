@@ -71,3 +71,11 @@ it("passes authenticated history as separate questions through the shared runtim
   expect(fixture.read).toHaveBeenLastCalledWith({ name: "planning", arguments: { courseId: id, date: "2026-10-19", limit: 5, offset: 0 } }, expect.any(AbortSignal));
   expect(reply.receipt.results.at(-1)?.reason).toBe("read");
 });
+it("preserves explicit trusted planner protocol without production pre-resolution", async () => {
+  const planner = vi.fn(async () => ({ text: "ignored", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null,
+    toolCalls: [{ id: "settings", name: "settings", arguments: "{}" }] }));
+  await createDbSystemQueryService({} as Sql, "web", { planner }).reply(scope, { question: "我现在学到哪里" });
+  expect(planner).toHaveBeenCalled();
+  expect(fixture.read.mock.calls[0]?.[0].name).toBe("settings");
+  expect(fixture.call).not.toHaveBeenCalled();
+});

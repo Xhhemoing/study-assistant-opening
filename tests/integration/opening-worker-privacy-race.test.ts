@@ -90,13 +90,13 @@ describe("opening worker privacy race (handler/repository)", () => {
         SELECT privacy_epoch FROM workspaces WHERE id = ${fixture.scope.workspaceId}`;
       expect(Number(epoch[0]?.privacy_epoch)).toBe(0);
       barrier.release();
-      await waitUntilBlocked(observer.sql, writerPid, deletePid, "completeTurn", /opening_workspace_history_revisions|FROM workspaces[\s\S]*FOR UPDATE/i);
+      await waitUntilBlocked(observer.sql, writerPid, deletePid, "post-model settlement", /FROM workspaces[\s\S]*FOR UPDATE/i);
       held.release();
       const gateDone = held.done;
       held = undefined;
       await gateDone;
       await expect(deleted).resolves.toMatchObject({ privacyEpoch: 1, excludedSourceIds: [seeded.sourceId] });
-      await expect(processed).rejects.toThrow(/privacy epoch drift/);
+      await expect(processed).rejects.toMatchObject({ code: "PRIVACY_EPOCH_MISMATCH", message: "privacy epoch mismatch: job=0 current=1" });
       const again = await handler(writer.sql, barrier.fetchImpl)(seeded.jobId);
       expect(again).toEqual({ skipped: true });
       expect(barrier.calls).toHaveLength(1);
@@ -110,9 +110,9 @@ describe("opening worker privacy race (handler/repository)", () => {
       const budget = await fixture.sql<{ state: string; amount_cents: number }[]>`
         SELECT state, amount_cents FROM opening_budget_reservations WHERE request_id = ${`tutor:${seeded.jobId}`}`;
       expect(job?.status).toBe("failed");
-      expect(job?.error?.message).toMatch(/privacy epoch drift/);
+      expect(job?.error?.message).toBe("privacy epoch mismatch: job=0 current=1");
       expect(turn[0]?.status).toBe("failed");
-      expect(turn[0]?.text).toMatch(/privacy epoch drift/);
+      expect(turn[0]?.text).toBe("privacy epoch mismatch: job=0 current=1");
       expect(turn[0]?.text).not.toContain(SECRET_ANSWER);
       expect(turn[0]?.citations).toEqual([]);
       expect(candidates).toHaveLength(0);

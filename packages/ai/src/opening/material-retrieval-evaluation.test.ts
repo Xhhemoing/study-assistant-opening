@@ -34,6 +34,29 @@ describe("material retrieval evaluation against existing allowlisted teaching pa
     expect(result.cases[0]!.contextAlias.retrievedChunkIds).toEqual(result.cases[1]!.contextAlias.retrievedChunkIds);
     expect(result.cases[0]!.contextAlias.metrics).not.toEqual(result.cases[1]!.contextAlias.metrics);
   });
+  it("scores authorized empty search results like the live reader's no_data receipt", async () => {
+    const { dataset, reader } = await fixture();
+    const liveStatusReader = async (...args: Parameters<typeof reader>): Promise<SystemQueryResult> => {
+      const result = await reader(...args);
+      return result.data.length ? result : { ...result, status: "unknown", reason: "no_data" };
+    };
+    const replay = await runMaterialRetrievalEvaluation(dataset, reader);
+    const live = await runMaterialRetrievalEvaluation(dataset, liveStatusReader);
+    expect(live.coverage).toEqual(replay.coverage);
+    expect(live.aggregate).toEqual(replay.aggregate);
+    expect(live.cases).toEqual(replay.cases);
+  });
+  it.each(["not_available", "stale", "unavailable"] as const)("does not score an inaccessible search as a miss: %s", async reason => {
+    const { dataset, reader } = await fixture();
+    const unavailableReader = async (...args: Parameters<typeof reader>): Promise<SystemQueryResult> => {
+      const result = await reader(...args);
+      return args[0].name === "materials" && args[0].arguments.query
+        ? { ...result, status: "unknown", reason, data: [], evidence: [], sourceRefs: [], nextOffset: null } : result;
+    };
+    const result = await runMaterialRetrievalEvaluation(dataset, unavailableReader);
+    expect(result.coverage.pairedScored).toBe(0);
+    expect(result.aggregate.baseline.mrrAtK).toBeNull();
+  });
   it("rejects a permission revision change instead of comparing two grants", async () => {
     const { dataset, reader } = await fixture();
     let calls = 0;

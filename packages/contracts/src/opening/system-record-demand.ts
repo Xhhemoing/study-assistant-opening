@@ -6,13 +6,16 @@ export type QueryHistory = readonly { role: string; text: string }[];
 export type RecordQuestionContext = string | readonly string[];
 export function recordTopics(text: string): RecordTopic[] {
   const topics = new Set<RecordTopic>();
-  if (/进度|学到哪|学习状态|学习情况|\blearner[ _-]?state\b|\bprogress\b/i.test(text)) topics.add("learner_state");
+  const jobPattern = /(?:后台(?:处理|任务)?|(?:解析|导入|编译)(?:任务|进度|完成|成功|失败|了吗)|处理进度|\bjobs?\b|\bworkers?\b)/gi;
+  const jobDemand = jobPattern.test(text);
+  const learningText = text.replace(jobPattern, "");
+  if (/进度|学到哪|学习状态|学习情况|\blearner[ _-]?state\b|\bprogress\b/i.test(learningText)) topics.add("learner_state");
   if (/练习|作答|测验|测试记录|核验|答对|做了几|掌握|\battempts?\b|\bquiz(?:zes)?\b/i.test(text)) topics.add("learning");
-  if (/计划|安排|日程|当前任务|学习任务|今天.*任务|明天.*任务|任务.*(有哪些|是什么|完成)|\bplans?\b|\bschedules?\b/i.test(text)) topics.add("planning");
+  if (/计划|安排|日程|当前任务|学习任务|今天.*任务|明天.*任务|任务.*(有哪些|是什么|完成)|\bplans?\b|\bschedules?\b/i.test(learningText)) topics.add("planning");
   if (/课程列表|哪些课|课程目标|\bcourses\b|\bgoals?\b/i.test(text)) topics.add("courses");
   if (/卡片|复习队列|\bcards?\b|\breview queue\b/i.test(text)) topics.add("cards");
   if (/笔记|\bnotes?\b/i.test(text)) topics.add("notes");
-  if (/后台|后台任务|任务.*(成功|失败)|\bjobs?\b|\bworkers?\b/i.test(text)) topics.add("jobs");
+  if (jobDemand || /任务.*(成功|失败)/.test(text)) topics.add("jobs");
   if (/设置|模型.*(生效|配置|路由)|\bsettings\b/i.test(text)) topics.add("settings");
   if (/教学活动|自学记录|串讲记录|\bteaching\b/i.test(text)) topics.add("teaching");
   if (/为什么.*推荐|为何.*建议|推荐依据|why.*recommend/i.test(text)) topics.add("recommendation");
@@ -54,7 +57,7 @@ export function hasRecordReadDemand(text: string, history: QueryHistory = []): b
   const topics = recordTopics(text);
   const asksForRecords = /记录|进度|情况|状态|学到哪|核验|[吗么？?]|怎么样|如何了|哪些|多少|几次|几道|查询|查一下|看看|当前任务|课程列表|生效|\b(?:my|our|current|saved|progress|show|list|check|find|read)\b/i.test(text)
     || /^我的(?:笔记|卡片|设置|复习队列)(?:呢)?$/.test(text.trim())
-    || /^(?:我的?|当前|现在|今天|明天|后天|昨天|前天|的|学习|已确认)*(?:计划|任务|作答|练习)(?:呢|是什么|有哪些)?$/.test(text.trim());
+    || /^(?:我的?|当前|现在|今天|今日|明天|明日|后天|昨天|昨日|前天|的|学习|已确认)*(?:计划|安排|日程|任务|作答|练习)(?:呢|是什么|有哪些)?$/.test(text.trim());
   if (topics.length && asksForRecords) return true;
   return isRecordFollowup(text) && !!previousRecordQuestion(history);
 }

@@ -37,7 +37,10 @@ it("generic note release only narrows already-open attempts, and replay never ad
 });
 it("generic note release does not target a paused activity or a foreign document", async () => {
   const f = await learningAttemptFixture(fixture), open = await f.start(), document = await note();
-  await fixture.sql`UPDATE opening_teaching_activities SET status='paused' WHERE id=${open.activityId}`;
+  const paused = await fixture.sql`UPDATE opening_teaching_activities a SET status='paused'
+    FROM opening_learning_sessions s WHERE s.id=${open.sessionId} AND s.workspace_id=${fixture.scope.workspaceId}
+      AND a.id=s.activity_id AND a.workspace_id=s.workspace_id RETURNING a.id`;
+  expect(paused).toHaveLength(1);
   const delivery = createOpeningContentDeliveryRepository(fixture.sql);
   const receipts = await delivery.note(fixture.scope, randomUUID(), document);
   expect(receipts).toHaveLength(1);

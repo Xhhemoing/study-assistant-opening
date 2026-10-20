@@ -152,7 +152,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (turn.querySystem || turn.purpose === "query" || turn.purpose === "explain_state") {
         if (!deps.systemQuery?.enabled()) throw new Error("系统记录查询暂未开启，请保留问题后重试。");
         const sourceId = turn.sourceIds.length === 1 ? turn.sourceIds[0] : undefined;
-        const reply = await deps.systemQuery.reply(scope, { question: turn.text, resolvePreviousQuestion: async () => previousRecordQuestion((await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId)).history), parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}), focus: {
+        const reply = await deps.systemQuery.reply(scope, { question: turn.text, resolvePreviousQuestion: async () => previousRecordQuestion((await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId, "record_referents")).history), parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}), focus: {
           courseId: turn.courseId ?? turn.contextAnchor?.courseId, sourceId, sourceIds: turn.sourceIds, sourceVersion: sourceId ? turn.sourceVersions[sourceId] : undefined, physicalPage: turn.currentPage,
         } });
         if (jobEpoch !== null && reply.privacyEpoch !== jobEpoch) throw new Error("query privacy changed");

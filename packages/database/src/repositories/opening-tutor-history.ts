@@ -1,16 +1,20 @@
 import type { Sql } from "postgres";
+import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 type HistoryTurn = { role: "user" | "assistant"; text: string };
+export type TutorHistoryPurpose = "model" | "record_referents";
 
 /** Completed exchanges only. A revoked or excluded ancestor invalidates all derived history. */
-export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, currentTurnId: string): Promise<{ history: HistoryTurn[]; sourceRefs: ContextSourceRef[] }> {
+export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, currentTurnId: string, purpose: TutorHistoryPurpose = "model"): Promise<{ history: HistoryTurn[]; sourceRefs: ContextSourceRef[] }> {
+  const recordReferents = purpose === "record_referents";
   const excludedSourceIds = await createOpeningPrivacyRepository(sql).listExcludedSourceIds(scope);
   const rows = await sql`
     WITH prior AS (
       SELECT u.text AS question, a.text AS answer, u.created_at, u.id,
+        a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
         ${turnContextSourceRefs(sql, "u")} AS user_source_refs,
         ${turnContextSourceRefs(sql, "a")} AS assistant_source_refs,
         EXISTS (
@@ -32,6 +36,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, turnContextSourceRefs(sql, "a"))}) AS invalid
       FROM opening_turns current
       JOIN opening_conversations c ON c.id=current.conversation_id
+      JOIN workspaces w ON w.id=c.workspace_id
       JOIN opening_tutor_jobs j ON j.conversation_id=c.id AND j.workspace_id=c.workspace_id
       JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=c.workspace_id
       JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=c.workspace_id
@@ -41,9 +46,11 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         AND u.created_at < current.created_at AND u.status='complete' AND a.status='complete'
         -- Query snapshots are separate authority records, including legacy imported receipts.
         -- Never promote their text into a later ordinary model conversation.
-        AND NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL
+        AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL))
     )
-    SELECT left(question,12001) AS question, left(answer,12001) AS answer, user_source_refs, assistant_source_refs
+    SELECT left(question,12001) AS question,
+      CASE WHEN ${recordReferents} THEN '' ELSE left(answer,12001) END AS answer,
+      user_source_refs, assistant_source_refs, query_system, system_query, current_privacy_epoch
     FROM prior WHERE NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
     ORDER BY created_at DESC, id DESC LIMIT 20
   `;
@@ -51,10 +58,24 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   let characters = 0;
   const sourceRefs: ContextSourceRef[] = [];
   for (const row of rows) {
+    if (recordReferents && (row.query_system || row.system_query != null)) {
+      const receipt = systemQueryReceiptSchema.safeParse(row.system_query);
+      const lineage = parseContextSourceRefs(row.assistant_source_refs) ?? [];
+      if (!receipt.success || receipt.data.authorization.purpose !== "system_record_lookup"
+        || receipt.data.authorization.workspaceId !== scope.workspaceId
+        || receipt.data.authorization.principalId !== scope.ownerUserId
+        || receipt.data.privacyEpoch !== Number(row.current_privacy_epoch)
+        || receipt.data.results.some(result => result.sourceRefs.some(ref =>
+          !lineage.some(parent => parent.sourceId === ref.sourceId.toLowerCase() && parent.sourceVersion === ref.sourceVersion)))) {
+        return { history: [], sourceRefs: [] };
+      }
+    }
     const question = row.question as string;
-    const answer = row.answer as string;
+    const answer = recordReferents ? "" : row.answer as string;
     if (characters + question.length + answer.length > 12_000) break;
-    history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
+    // Record follow-ups inherit the user's referent, never prior assistant claims.
+    if (recordReferents) history.unshift({ role: "user", text: question });
+    else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
     characters += question.length + answer.length;
   }

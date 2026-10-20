@@ -53,8 +53,8 @@ it("loads owned continuity turns with citations and hides other owners", async (
 
   const turns = await repo.loadContinuityTurns(fixture.scope, owned.id);
   expect(turns).toEqual([
-    { role: "user", text: "q", citations: [] },
-    { role: "assistant", text: "a", citations: [citation] },
+    { id: saved.turnId, role: "user", text: "q", citations: [] },
+    { id: saved.assistantTurnId, role: "assistant", text: "a", citations: [citation] },
   ]);
   await expect(repo.loadContinuityTurns(fixture.otherScope, owned.id)).rejects.toMatchObject({
     code: "NOT_FOUND",

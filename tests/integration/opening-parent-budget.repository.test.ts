@@ -30,12 +30,13 @@ describe("durable parent interaction budget", () => {
     }));
     await opened;
     const answer = track(repoA.reserve(fixture.scope, { purpose: "tutor", amountCents: 50, requestId: randomUUID(), parentBudget }));
-    const compile = track(repoB.reserve(fixture.scope, { purpose: "compile-teaching-unit", amountCents: 50, requestId: randomUUID(), parentBudget }));
+    let compile: ReturnType<typeof repoB.reserve> | undefined;
     try {
-      await Promise.all([
-        waitUntilBlocked(fixture.sql, a.pid, observer.pid, "answer parent reserve", /SELECT id FROM workspaces/),
-        waitUntilBlocked(fixture.sql, b.pid, observer.pid, "compile parent reserve", /SELECT id FROM workspaces/),
-      ]);
+      await waitUntilBlocked(fixture.sql, a.pid, observer.pid, "answer parent reserve", /SELECT id FROM workspaces/);
+      compile = track(repoB.reserve(fixture.scope, { purpose: "compile-teaching-unit", amountCents: 50, requestId: randomUUID(), parentBudget }));
+      // PostgreSQL queues the second tuple locker behind the first waiter.
+      // Prove both links, rather than assuming both wait directly on the holder.
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "compile parent reserve", /SELECT id FROM workspaces/);
     } finally { unlock(); await hold; await closeRace(observer.sql); }
     const results = await Promise.allSettled([answer, compile]);
     expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);

@@ -169,7 +169,7 @@ it.each([true, false])("uses the formal three-day protocol without inventing no-
   const f = await start("span-example-2d"), problem = getSpanProblem("span-example-2d")!;
   const baseline = await f.submit({ membership: "in_span", coefficients: correct ? ["3", "-1/2"] : ["0", "0"], equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: correct ? ["3", "-1"] : ["0", "0"] });
   const scheduled = await createSpanDelayedRetestService(fixture.sql).schedule(fixture.scope, { observationId: baseline.id, clientKey: randomUUID() });
-  await fixture.sql`UPDATE opening_learning_observations SET recorded_at=now()-interval '4 days',submitted_at=now()-interval '4 days',occurred_at=now()-interval '4 days' WHERE id=${baseline.id}`;
+  await fixture.sql`UPDATE opening_learning_observations SET started_at=now()-interval '4 days 1 minute',recorded_at=now()-interval '4 days',submitted_at=now()-interval '4 days',occurred_at=now()-interval '4 days' WHERE id=${baseline.id}`;
   await fixture.sql`UPDATE opening_learning_attempts SET started_at=now()-interval '4 days 1 minute',submitted_at=now()-interval '4 days' WHERE id=${f.attempt.id}`;
   await fixture.sql`UPDATE opening_retest_activities SET not_before_at=now()-interval '1 hour',recommended_at=now()-interval '1 hour',scheduled_start_at=now()-interval '1 hour' WHERE candidate_id=${scheduled.candidateId}`;
   const session = await f.learning.createSession(fixture.scope, { courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId] });

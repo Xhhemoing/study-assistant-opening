@@ -33,7 +33,11 @@ export async function runMaterialRetrievalEvaluation(dataset: MaterialRetrievalE
       if (permissionRevision !== null && permissionRevision !== result.authorization.permissionRevision) authorizationChanged = true;
       permissionRevision ??= result.authorization.permissionRevision;
       receipts.push({ asOf: result.asOf, version: result.version });
-      if (result.status === "unknown" || result.status === "partial" && (result.reason !== "truncated" || result.nextOffset === null)) return { chunks: [], complete: false, reason: result.reason, nextOffset: null };
+      // The scoped reader reports a valid search with no matches as no_data.
+      // Corpus inventory and unavailable/stale reads still cannot be scored.
+      const emptySearch = Boolean(query) && result.status === "unknown" && result.reason === "no_data"
+        && result.data.length === 0 && result.nextOffset === null;
+      if (result.status === "unknown" && !emptySearch || result.status === "partial" && (result.reason !== "truncated" || result.nextOffset === null)) return { chunks: [], complete: false, reason: result.reason, nextOffset: null };
       const chunks = result.data.map(row => ({ id: row.id, sourceId: row.sourceId, sourceVersion: row.sourceVersion, physicalPage: row.physicalPage }));
       if (chunks.some(chunk => chunk.sourceId !== source.sourceId || chunk.sourceVersion !== source.sourceVersion)) return { chunks: [], complete: false, reason: "source_version_mismatch", nextOffset: null };
       return { chunks, complete: true, reason: null, nextOffset: result.nextOffset };
