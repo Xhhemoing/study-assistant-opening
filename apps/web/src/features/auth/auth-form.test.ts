@@ -1,18 +1,20 @@
 import type { FormEvent } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthForm } from "./auth-form";
 
-const { replace, refresh, stateUpdates } = vi.hoisted(() => ({
-  replace: vi.fn(), refresh: vi.fn(), stateUpdates: [] as ReturnType<typeof vi.fn>[],
+const { replace, refresh, stateUpdates, stateValues } = vi.hoisted(() => ({
+  replace: vi.fn(), refresh: vi.fn(), stateUpdates: [] as ReturnType<typeof vi.fn>[], stateValues: [] as unknown[],
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace, refresh }) }));
 // The unit suite has no DOM runtime; exercise the form's submit handler with hook state captured.
 vi.mock("react", async importOriginal => ({
   ...await importOriginal<typeof import("react")>(),
   useState: (initial: unknown) => {
+    const slot = stateUpdates.length;
     const update = vi.fn();
     stateUpdates.push(update);
-    return [initial, update];
+    return [slot in stateValues ? stateValues[slot] : initial, update];
   },
   useRef: (initial: unknown) => ({ current: initial }),
 }));
@@ -34,6 +36,7 @@ function submitEvent(input: Record<string, string> = validInput) {
 beforeEach(() => {
   vi.useFakeTimers();
   stateUpdates.length = 0;
+  stateValues.length = 0;
   vi.stubGlobal("fetch", vi.fn());
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -75,7 +78,9 @@ describe("auth form submission", () => {
     await pending;
     expect(replace).toHaveBeenCalledWith("/onboarding");
     expect(refresh).toHaveBeenCalledOnce();
-    expect(stateUpdates[2]).toHaveBeenLastCalledWith(false);
+    expect(stateUpdates[2]).toHaveBeenLastCalledWith(true);
+    await form.props.onSubmit(event);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("preserves the server's error message and does not navigate", async () => {
@@ -107,6 +112,30 @@ describe("auth form submission", () => {
       body: JSON.stringify({ email: validInput.email, password: validInput.password }),
     }));
     expect(replace).toHaveBeenCalledWith("/library?course=c1#note");
+    expect(stateUpdates[3]).toHaveBeenCalledWith("/library?course=c1#note");
+    expect(stateUpdates[2]).toHaveBeenLastCalledWith(true);
+    await form.props.onSubmit(submitEvent().event);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a normal navigation link visible after authentication", () => {
+    stateValues[2] = true;
+    stateValues[3] = "/library?course=c1#note";
+    const html = renderToStaticMarkup(AuthForm({ mode: "login" }));
+    expect(html).toContain('href="/library?course=c1#note"');
+    expect(html).toContain('role="status"');
+    expect(html).toContain("登录成功");
+  });
+
+  it("does not resend credentials if client navigation throws after authentication", async () => {
+    vi.mocked(fetch).mockResolvedValue({ ok: true } as Response);
+    replace.mockImplementationOnce(() => { throw new Error("router unavailable"); });
+    const form = AuthForm({ mode: "login" });
+    await form.props.onSubmit(submitEvent().event);
+    expect(stateUpdates[3]).toHaveBeenLastCalledWith("/");
+    expect(stateUpdates[1]).toHaveBeenLastCalledWith("");
+    await form.props.onSubmit(submitEvent().event);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -171,7 +200,7 @@ describe("auth form submission", () => {
   });
 
   it("uses the fallback for invalid JSON without leaving a timeout", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce({ ok: false, json: async () => { throw new SyntaxError("Invalid JSON"); } } as Response);
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("invalid-json", { status: 500 }));
     const form = AuthForm({ mode: "login" });
     await form.props.onSubmit(submitEvent().event);
     expect(stateUpdates[1]).toHaveBeenLastCalledWith("暂时无法完成请求，请稍后重试");
