@@ -6,6 +6,8 @@ import {
   checkStorage,
 } from "../../../server/dependency-checks";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(): Promise<Response> {
   let env;
   try {
@@ -19,7 +21,7 @@ export async function GET(): Promise<Response> {
         storage: { status: "down", errorCode: "config" },
       },
     });
-    return Response.json(body, { status: 503 });
+    return Response.json({ status: body.status }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 
   const [database, redis, storage] = await Promise.all([
@@ -34,5 +36,5 @@ export async function GET(): Promise<Response> {
   });
 
   const httpStatus = body.status === "ok" ? 200 : 503;
-  return Response.json(body, { status: httpStatus });
+  return Response.json({ status: body.status }, { status: httpStatus, headers: { "Cache-Control": "no-store" } });
 }

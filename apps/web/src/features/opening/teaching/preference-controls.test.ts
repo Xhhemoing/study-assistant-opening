@@ -81,14 +81,10 @@ describe("PreferenceControlsView", () => {
         data,
         draft: data.settings,
         busy: false,
-        decisionCtx: DEFAULT_INTERVENTION_UI_DECISION_CONTEXT,
         onDraftChange: () => undefined,
         onSave: () => undefined,
         onReset: () => undefined,
         onReload: () => undefined,
-        onTyping: () => undefined,
-        onRejectOffer: () => undefined,
-        onClearRejects: () => undefined,
       }),
     );
     expect(html).toContain('data-preference-controls="true"');
@@ -100,11 +96,11 @@ describe("PreferenceControlsView", () => {
     expect(html).toContain("保存介入偏好");
     expect(html).toContain("重置为默认");
     expect(html).toContain("求助不等于打断");
-    expect(html).toContain('data-intervention-typing="true"');
-    expect(html).toContain('data-intervention-reject="true"');
+    expect(html).not.toContain('data-intervention-typing="true"');
+    expect(html).not.toContain('data-intervention-reject="true"');
     expect(html).toContain('data-no-nag-interval="true"');
     expect(html).toContain('data-no-dwell-stuck="true"');
-    expect(html).toContain("appendDecision");
+    expect(html).not.toContain("appendDecision");
     expect(html).not.toMatch(/\bmustAskEvery\b|\bintervalMinutes\b|\bdwellStuck\b/);
     expect(html).not.toMatch(/type="number"[^>]*nag|nag-interval-input/);
   });
@@ -118,21 +114,17 @@ describe("PreferenceControlsView", () => {
         data,
         draft: data.effective,
         busy: false,
-        decisionCtx: withUserTyping(DEFAULT_INTERVENTION_UI_DECISION_CONTEXT, true),
         onDraftChange: () => undefined,
         onSave: () => undefined,
         onReset: () => undefined,
         onReload: () => undefined,
-        onTyping: () => undefined,
-        onRejectOffer: () => undefined,
-        onClearRejects: () => undefined,
       }),
     );
     expect(html).toContain('data-intervention-scope="session"');
     expect(html).toContain("保存本课临时");
     expect(html).toContain("清除本课临时");
     expect(html).toContain("与永久设置分开保存");
-    expect(html).toContain("打字中");
+    expect(html).not.toContain("我正在输入");
   });
 });
 
@@ -145,7 +137,7 @@ describe("PreferenceControls container", () => {
     expect(html).toContain("无教学活动时无法设置本课临时偏好");
   });
 
-  it("SSR loading shell carries soft-gap and no-nag markers", () => {
+  it("SSR loading shell omits diagnostics and retains preference loading feedback", () => {
     const html = renderToStaticMarkup(
       createElement(PreferenceControls, {
         scope: "global",
@@ -157,7 +149,7 @@ describe("PreferenceControls container", () => {
     );
     expect(html).toContain('data-preference-controls="true"');
     expect(html).toContain("正在读取介入偏好");
-    expect(html).toContain("data-decision-persist-gap");
+    expect(html).not.toContain("data-decision-persist-gap");
     expect(html).toContain('data-no-nag-interval="true"');
   });
 });

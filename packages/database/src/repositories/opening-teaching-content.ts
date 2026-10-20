@@ -21,6 +21,8 @@ import type {
   TeachingVerificationStatus,
 } from "@aistudy/contracts";
 import { mergeCheckpointResumePatch } from "@aistudy/domain";
+import { mapLearningAttempt } from "./opening-learning-attempts";
+import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import {
   assertOwnedActivity,
 } from "./opening-teaching-activities";
@@ -207,6 +209,35 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
   const library = createLibraryRepository(sql);
 
   return {
+    /** Restore a precise question, including its current revision, without replaying writes. */
+    async getSubmittedAttempt(scope: Scope, activityId: string, blockId: string, contentVersion: number) {
+      return sql.begin(async tx => {
+        await lockLearningOwner(tx, scope);
+        const activities = await tx`SELECT a.content_version FROM opening_teaching_activities a
+          JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=${scope.ownerUserId}
+          WHERE a.id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} FOR SHARE OF a`;
+        if (!activities[0]) throw learningError("NOT_FOUND", "teaching activity not found");
+        if (Number(activities[0].content_version) !== contentVersion) throw learningError("CONFLICT", "teaching content changed; reread the activity");
+        const rows = await tx`SELECT a.* FROM opening_learning_attempts a
+          WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
+            AND a.activity_id=${activityId} AND a.submitted_at IS NOT NULL
+            AND a.create_intent->'teachingBlock'->>'blockId'=${blockId}
+            AND a.create_intent->'teachingBlock'->>'contentVersion'=${String(contentVersion)}
+          ORDER BY a.submitted_at DESC, a.id DESC LIMIT 1`;
+        if (!rows[0]) return null;
+        const attempt = mapLearningAttempt(rows[0]);
+        const heads = await tx`SELECT head.* FROM opening_learning_observations root
+          JOIN opening_learning_observations head ON head.id=COALESCE(root.effective_head_id,root.id)
+            AND head.workspace_id=root.workspace_id AND head.owner_user_id=root.owner_user_id
+          WHERE root.id=${attempt.observationId} AND root.workspace_id=${scope.workspaceId}
+            AND root.owner_user_id=${scope.ownerUserId} AND root.activity_id=${activityId}
+            AND root.attempt_id=${attempt.id}`;
+        const head = heads[0];
+        const observation = head && head.revision_kind !== "retract" ? await qualifyObservationRevision(tx, scope, head) : null;
+        await admitLearningSources(tx, scope, attempt.sourceIds);
+        return { attempt, observation };
+      });
+    },
     /** Never unlock a different prompt or a changed revision using an old answer. */
     async getSubmittedAnswerKey(scope: Scope, activityId: string, blockId: string, attemptId: string): Promise<TeachingAnswerKey> {
       return sql.begin(async (tx) => {

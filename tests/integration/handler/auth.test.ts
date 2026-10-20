@@ -801,6 +801,39 @@ describe("workspace authorization via direct API access", () => {
     expect(meAgain.status).toBe(200);
   });
 
+  it("rejects existing sessions and new login for a disabled account without affecting other users", async () => {
+    const account = await registerAs("disabled-account");
+    const other = await registerAs("active-account");
+    const requestMe = (cookie: string) => me(new Request("http://localhost/api/auth/me", {
+      headers: withCookie(cookie),
+    }));
+    expect((await requestMe(account.cookie)).status).toBe(200);
+
+    // Do not revoke the session here: the account status must itself deny access.
+    await sql`UPDATE users SET disabled_at = now() WHERE id = ${account.user.id}`;
+    expect((await requestMe(account.cookie)).status).toBe(401);
+    const deniedLogin = await login(new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: "password123" }),
+    }));
+    expect(deniedLogin.status).toBe(401);
+    expect((await requestMe(other.cookie)).status).toBe(200);
+
+    // A maintenance suspension revokes all sessions before re-enabling access.
+    await sql.begin(async tx => {
+      await tx`UPDATE sessions SET revoked_at = now() WHERE user_id = ${account.user.id} AND revoked_at IS NULL`;
+      await tx`UPDATE users SET disabled_at = NULL WHERE id = ${account.user.id}`;
+    });
+    expect((await requestMe(account.cookie)).status).toBe(401);
+    const resumedLogin = await login(new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: "password123" }),
+    }));
+    expect(resumedLogin.status).toBe(200);
+    expect((await requestMe(cookieFrom(resumedLogin))).status).toBe(200);
+  });
   it("rejects invalid credentials without leaking existence details", async () => {
     const res = await login(
       new Request("http://localhost/api/auth/login", {

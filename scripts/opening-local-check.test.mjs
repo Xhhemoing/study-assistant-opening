@@ -139,3 +139,15 @@ test("does not disclose credentials when checks pass", () => {
   assert.equal(report.ok, true);
   assert.equal(report.lines.join("\n").includes(SECRET), false);
 });
+
+
+test("local dependency diagnostics remain available without anonymous health details", async () => {
+  const { collectLocalHealth } = await import("./opening-local-check.mjs");
+  const env = { DATABASE_URL: "private" };
+  const health = await collectLocalHealth(env, async (actualEnv) => {
+    assert.equal(actualEnv, env);
+    return { database: { ok: true, detail: "private" }, redis: { ok: false }, storage: { ok: true }, workerBacklog: { ok: true } };
+  });
+  assert.deepEqual(health, { status: "down", checks: { database: "up", redis: "down", storage: "up", workerBacklog: "up" } });
+  assert.equal(JSON.stringify(health).includes("private"), false);
+});

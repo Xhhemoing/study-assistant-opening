@@ -90,6 +90,26 @@ async function ageAndReconcile(requestId: string) {
 }
 
 describe("PR-D budget matrix (plan §5.3)", () => {
+  it("records unparented overage in full with a durable audit and prevents further spend above the cap", async () => {
+    const { api, repo } = ledger(fixture.sql, fixture.scope, { envCapCents: 150 });
+    const p = countingProvider();
+    let receiptCents: number | null = null;
+    await call(api, p, "overage", {
+      reservedCents: 1, actualCents: () => 500,
+      persistResult: async (_output: ProviderOutput, receipt: { settledCents: number | null }) => { receiptCents = receipt.settledCents; },
+    });
+    expect(receiptCents).toBe(500);
+    expect(await amounts(fixture.scope.workspaceId)).toMatchObject({ used: 500, reserved: 0 });
+    const [row] = await fixture.sql`SELECT reserved_amount_cents, amount_cents FROM opening_budget_reservations WHERE request_id='overage'`;
+    expect(row).toMatchObject({ reserved_amount_cents: 1, amount_cents: 500 });
+    expect(await repo.listReconcileEvents(fixture.scope, { kind: "cap_overrun" })).toMatchObject([
+      { amountBeforeCents: 1, amountAfterCents: 500, reportedActualCents: 500, capCents: 1 },
+    ]);
+    await expect(call(api, p, "next")).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    await expect(call(api, p, "overage", { reservedCents: 1, actualCents: () => 500 })).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
+    expect(p.calls).toBe(1);
+  });
+
   it("reserve/retry: retry of an in-flight key returns the same reservation, never a second hold", async () => {
     const { repo } = ledger(fixture.sql, fixture.scope);
     const first = await repo.reserve(fixture.scope, { purpose: "tutor", amountCents: RESERVE, requestId: "k" });

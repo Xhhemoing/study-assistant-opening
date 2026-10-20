@@ -30,7 +30,7 @@ export type BudgetedRepository = {
   claimExecution(reservationId: string): Promise<boolean>;
   settle(reservationId: string, actualCents: number, options?: { resultRef?: string; costBasis?: "usage_pricing" | "media_usage_upper_bound" | "vendor_receipt" }): Promise<unknown>;
   markUnknown(reservationId: string): Promise<unknown>;
-  /** Optional audit hook when settle caps actual spend to the reservation. */
+  /** Optional notification; settle must persist any overage audit atomically. */
   noteOverage?(audit: OverageAudit): Promise<void>;
 };
 
@@ -178,8 +178,8 @@ export function ledgerActionForProviderError(
 }
 
 /**
- * Cap actual settle amount to the reservation; forbid unpolicied over-booking.
- * Policy: cap-to-reserved + audit (NOT markUnknown for overage).
+ * The reservation is a pre-send bound, never a ceiling on recorded spend.
+ * Preserve actual cost so settlement can audit it and enforce remaining budgets.
  */
 export function settleCentsForActual(reservedCents: number, actualCents: number): {
   settledCents: number;
@@ -189,7 +189,7 @@ export function settleCentsForActual(reservedCents: number, actualCents: number)
     return { settledCents: actualCents, overage: false };
   }
   if (actualCents > reservedCents) {
-    return { settledCents: reservedCents, overage: true };
+    return { settledCents: actualCents, overage: true };
   }
   return { settledCents: actualCents, overage: false };
 }
@@ -260,10 +260,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     await options.budget.markUnknown(reservation.id);
     throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
   }
-  const settlement = actual === null ? null
-    : options.parentBudget
-      ? { settledCents: actual, overage: actual > options.reservedCents }
-      : settleCentsForActual(options.reservedCents, actual);
+  const settlement = actual === null ? null : settleCentsForActual(options.reservedCents, actual);
   try {
     await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
   } catch (error) {

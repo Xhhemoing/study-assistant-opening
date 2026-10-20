@@ -102,7 +102,7 @@ describe("P0 family 2 — cost / spend receipts", () => {
     expect(repo.unknowns).toEqual(["res-1"]);
   });
 
-  it("settle caps actualCents that exceed reserved and records overage audit", async () => {
+  it("settle preserves actualCents that exceed reserved and records overage audit", async () => {
     const { repo, api } = fakeBudget();
     await runBudgetedCall({
       ...base, requestId: "req-over", reservedCents: 10,
@@ -110,19 +110,19 @@ describe("P0 family 2 — cost / spend receipts", () => {
       provider: { complete: async () => output },
       budget: api,
     });
-    expect(repo.settled[0]?.actualCents).toBeLessThanOrEqual(10);
-    expect(repo.settled[0]?.actualCents).toBe(10);
+
+    expect(repo.settled[0]?.actualCents).toBe(999);
     expect(repo.unknowns).toEqual([]);
     expect(repo.overages).toEqual([{
       reservationId: "res-1",
       reservedCents: 10,
       actualCents: 999,
-      settledCents: 10,
+      settledCents: 999,
     }]);
   });
 
-  it("settleCentsForActual forbids unpolicied over-booking (cap policy)", () => {
-    expect(settleCentsForActual(10, 999)).toEqual({ settledCents: 10, overage: true });
+  it("settleCentsForActual never hides provider spend behind a reservation", () => {
+    expect(settleCentsForActual(10, 999)).toEqual({ settledCents: 999, overage: true });
     expect(settleCentsForActual(500, 120)).toEqual({ settledCents: 120, overage: false });
   });
 });

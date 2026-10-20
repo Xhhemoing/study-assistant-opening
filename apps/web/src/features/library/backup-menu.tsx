@@ -65,9 +65,13 @@ export function BackupMenu() {
         <p className="text-sm leading-6 text-zinc-500">{copy.disclaimer}</p>
         <p className="text-sm leading-6 text-zinc-500">{copy.restoreHint}</p>
       </div>
+      <p id="measurement-backup-limit" role="note" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+        学习测试记录不在本页原生内容备份或 Opening 备份中，恢复这些备份也无法恢复测试进度、作答与延迟复测状态。学习测试页的 JSON 仅供分析；恢复这些记录需要站点管理员的完整数据库备份。
+      </p>
       <div className="flex flex-wrap gap-3">
         <button
           className="inline-flex min-h-10 items-center gap-2 rounded-md bg-zinc-900 px-3 text-sm font-semibold text-white hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+          aria-describedby="measurement-backup-limit"
           disabled={pending !== null}
           onClick={() => void runExport()}
           type="button"
@@ -92,6 +96,7 @@ export function BackupMenu() {
         恢复备份
         <input
           accept="application/json,.json"
+          aria-describedby="measurement-backup-limit"
           className="sr-only"
           disabled={pending !== null}
           onChange={(event) => {

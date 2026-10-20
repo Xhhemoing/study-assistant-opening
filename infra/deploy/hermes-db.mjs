@@ -66,7 +66,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", HF_HUB_OFFLINE: "1",
       ...(configured.PARSER_OCR_MODEL_DIR ? { PARSER_OCR_MODEL_DIR: configured.PARSER_OCR_MODEL_DIR } : {}),
     };
-    run(parserPython, ["-m", "opening_parser", "--check"], { cwd: env.PARSER_CWD, timeout: 30_000 });
+    // Match provision-worker's cold-import allowance on the shared host.
+    run(parserPython, ["-m", "opening_parser", "--check"], { cwd: env.PARSER_CWD, timeout: 90_000 });
   } else {
     fail("Unknown database/preflight action.");
   }

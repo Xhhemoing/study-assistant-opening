@@ -15,5 +15,8 @@ describe("native backup menu", () => {
     expect(html).not.toContain("完整恢复");
     expect(html).toMatch(/不是完整工作区恢复|Opening 学习/);
     expect(html).not.toContain("style=");
+    expect(html).toContain("学习测试记录不在");
+    expect(html).toContain("无法恢复测试进度、作答与延迟复测状态");
+    expect(html.match(/aria-describedby="measurement-backup-limit"/g)).toHaveLength(2);
   });
 });

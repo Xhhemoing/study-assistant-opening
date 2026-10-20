@@ -50,7 +50,7 @@ function submissionDraft(checkpoint: InlineAttemptSubmissionCheckpoint): InlineA
   return { answer: checkpoint.input.answer, skillLabel: checkpoint.input.skillLabel, prompt: checkpoint.input.prompt, submission: checkpoint };
 }
 
-function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDraftChange }: { blockId: string; prompt: string; context: InlineAttemptContext; ready: boolean; initialDraft?: InlineAttemptDraft; onDraftChange: (draft: InlineAttemptDraft | null) => void }) {
+export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDraftChange }: { blockId: string; prompt: string; context: InlineAttemptContext; ready: boolean; initialDraft?: InlineAttemptDraft; onDraftChange: (draft: InlineAttemptDraft | null) => void }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const api = useMemo(() => createOpeningApi(), []);
   const teaching = useMemo(() => createTeachingActivityClient(), []);
@@ -75,6 +75,9 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
   const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
   const [courseId, setCourseId] = useState("");
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(true);
+  const [restoreFailed, setRestoreFailed] = useState(false);
+  const [restoreRetry, setRestoreRetry] = useState(0);
   const submission = useRef<ReturnType<typeof createInlineAttemptSubmission> | null>(null);
   if (!submission.current && initialDraft?.submission) submission.current = createInlineAttemptSubmission(initialDraft.submission.input, client, {
     checkpoint: initialDraft.submission, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)),
@@ -83,6 +86,32 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const inFlight = useRef(false);
   const revision = useRef<{ intent: string; clientKey: string } | null>(null);
+  const onAttemptReady = useRef(context.onAttemptReady);
+  onAttemptReady.current = context.onAttemptReady;
+
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+    setRestoring(true); setRestoreFailed(false);
+    void teaching.getSubmittedAttempt(context.id, blockId, context.contentVersion).then(async saved => {
+      if (!active) return;
+      if (!saved) return;
+      if (!saved.observation) {
+        setUnavailable(true); setError("这条作答记录已撤回或不可用，无法继续核对。"); return;
+      }
+      setRecorded(saved.observation); setAttemptId(saved.attempt.id);
+      setChecked(Boolean(saved.observation.referenceCheck));
+      onAttemptReady.current?.(blockId, saved.attempt);
+      // A reference failure must not hide the original answer that was just recovered.
+      try {
+        const key = await teaching.getAnswerKey(context.id, blockId, saved.attempt.id);
+        if (active) setAnswerKey(key);
+      } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : "无法读取参考答案"); }
+    }).catch((reason: unknown) => {
+      if (active) { setRestoreFailed(true); setError(reason instanceof Error ? reason.message : "无法恢复已保存的作答，请重试。"); }
+    }).finally(() => { if (active) setRestoring(false); });
+    return () => { active = false; };
+  }, [ready, teaching, context.id, blockId, context.contentVersion, restoreRetry]);
 
   useEffect(() => {
     if (!ready || context.courseId || context.status === "completed") return;
@@ -127,7 +156,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!ready || draftConflict || !context.courseId || inFlight.current || context.status === "completed") return;
+    if (!ready || restoring || restoreFailed || draftConflict || !context.courseId || inFlight.current || context.status === "completed") return;
     inFlight.current = true; setPending(true); setError("");
     submission.current ??= createInlineAttemptSubmission({ activityId: context.id, courseId: context.courseId, blockId, contentVersion: context.contentVersion, sourceIds: context.sourceIds, prompt, skillLabel: skillLabel.trim(), answer }, client, { onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)) });
     try {
@@ -143,7 +172,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
     finally { inFlight.current = false; setPending(false); }
   }
   async function compare(choice: "match" | "mismatch") {
-    if (!recorded || !answerKey?.referenceSourceId || inFlight.current || checked || rereadNeeded) return;
+    if (context.status === "completed" || !recorded || !answerKey?.referenceSourceId || inFlight.current || checked || rereadNeeded) return;
     const intent = selfCompareRevisionIntentKey(recorded.id, choice, null);
     if (revision.current?.intent !== intent) revision.current = { intent, clientKey: `teaching-compare:${crypto.randomUUID()}` };
     const input = buildSelfCompareRevision({ observation: recorded, referenceSourceId: answerKey.referenceSourceId, choice, clientKey: revision.current.clientKey });
@@ -182,7 +211,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
       <button type="button" className={ui.secondary} disabled={!courseId || pending} onClick={() => { void bindCourse(); }}>关联此课程</button>
       {!courses.length ? <p className="text-xs text-zinc-500">可先到课程页创建课程，再返回作答。</p> : null}
     </div> : null}
-    {!recorded || draftConflict ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
+    {ready && restoring ? <p role="status" className="text-xs text-zinc-600">正在恢复已保存的作答…</p> : restoreFailed ? <button type="button" className={ui.secondary} onClick={() => setRestoreRetry(value => value + 1)}>重新读取已保存的作答</button> : !recorded && context.status === "completed" ? <p className="text-xs text-zinc-600">本题没有可恢复的已提交作答。{initialDraft?.answer ? "本标签页保留的草稿尚未确认保存：" : ""}{initialDraft?.answer ? <span className="block whitespace-pre-wrap">{initialDraft.answer}</span> : null}</p> : !recorded ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
       {draftConflict ? <div role="status" className="space-y-1 text-xs text-amber-800"><p>{draftConflict === "course_changed" ? "此答案提交时所属课程已改变。原答案和提交请求已保留为只读，请到原课程的学习记录核实保存结果。" : "当前题干与原草稿不一致。原草稿已保留为只读，请重新读取活动，避免将旧答案提交到新题目。"}</p><p className="whitespace-pre-wrap">原草稿题目：{initialDraft?.prompt}</p></div> : null}
       {initialDraft?.submission && !draftConflict ? <p role="status" className="text-xs text-zinc-600">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
       <p className="break-words text-xs leading-6 text-zinc-600">记录到：{skillLabel.trim() || "尚未选择技能"}</p>
@@ -199,7 +228,7 @@ function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDr
     </form> : <div className="space-y-2">
       <p className="text-xs font-medium text-zinc-700">原答案已保存</p><p className="whitespace-pre-wrap text-sm text-zinc-800">{recorded.answer}</p>
       {answerKey ? <div className="rounded-lg bg-white p-3 ring-1 ring-zinc-900/5"><p className="mb-2 text-xs font-medium text-zinc-600">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-zinc-500">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <button type="button" className={ui.secondary} disabled={pending || !attemptId} onClick={() => { if (attemptId) void readAnswer(attemptId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取参考答案")); }}>重新读取参考答案</button>}
-      {!checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
+      {context.status !== "completed" && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
       {answerKey?.answer && !answerKey.referenceSourceId ? <p className="text-xs text-zinc-600">参考答案没有关联可核验材料，本次保留为未核对。</p> : null}
       {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? "已保存你自对照后的正确判断，仍未经独立评分。" : recorded.outcome === "incorrect" ? "已记录需要复查，后续可安排复测。" : "已保留未核对记录。"}</p> : null}
