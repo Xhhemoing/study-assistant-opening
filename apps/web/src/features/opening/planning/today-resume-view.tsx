@@ -79,6 +79,7 @@ export function TodayResumeBody({
       ) : (
         <>
           <EmptyState title="还没有可继续的对话" description="可以向助理提问，或从今日工作台开始一条教学活动。" />
+          <p className="px-5 text-sm"><Link href="/onboarding" className={ui.quiet}>先填写学习目标与每日时间</Link></p>
           {onPrimaryCta ? (
             <button type="button" className={primary} data-today-primary-cta="true" onClick={onPrimaryCta} disabled={primaryBusy}>
               {primaryBusy ? "处理中…" : "开始学习"}

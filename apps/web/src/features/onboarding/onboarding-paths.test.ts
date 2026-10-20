@@ -6,6 +6,10 @@ import {
 } from "./onboarding-paths";
 
 describe("onboarding paths", () => {
+  it("opens working Opening routes without returning exploration to the empty Today page", () => {
+    expect(onboardingPathById("free-exploration")?.href).toBe("/opening/assistant");
+    expect(onboardingPathById("goal-course")?.href).toBe("/opening/courses/new");
+  });
   it("defines the four optional onboarding paths", () => {
     expect(ONBOARDING_PATHS.map((path) => path.id)).toEqual([
       "free-exploration",
@@ -17,7 +21,7 @@ describe("onboarding paths", () => {
 
   it("gives every path a valid workspace route", () => {
     for (const path of ONBOARDING_PATHS) {
-      expect(path.href).toMatch(/^\/(learn|explore|library)/);
+      expect(path.href).toMatch(/^\/opening\/(courses|assistant|library)(\/|$)/);
     }
   });
 

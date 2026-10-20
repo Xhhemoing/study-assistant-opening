@@ -29,7 +29,7 @@ export const ONBOARDING_PATHS: readonly OnboardingPath[] = [
     entry: "explore",
     title: "自由探索",
     description: "从问题、资料或一个想法直接开始，无需先创建课程或目标。",
-    href: "/explore",
+    href: "/opening/assistant",
     suggestsGoal: false,
   },
   {
@@ -37,7 +37,7 @@ export const ONBOARDING_PATHS: readonly OnboardingPath[] = [
     entry: "learn",
     title: "目标驱动课程",
     description: "创建课程并设置一个明确的考试目标，让计划围绕它展开。",
-    href: "/learn/courses/new",
+    href: "/opening/courses/new",
     suggestsGoal: true,
   },
   {
@@ -45,7 +45,7 @@ export const ONBOARDING_PATHS: readonly OnboardingPath[] = [
     entry: "learn",
     title: "仅知识课程",
     description: "只创建课程积累知识，暂不设置学习计划。",
-    href: "/learn/courses/new",
+    href: "/opening/courses/new",
     suggestsGoal: false,
   },
   {
@@ -53,7 +53,7 @@ export const ONBOARDING_PATHS: readonly OnboardingPath[] = [
     entry: "explore",
     title: "从探索沉淀课程",
     description: "把探索中的候选内容提升为一门新课程。",
-    href: "/explore",
+    href: "/opening/assistant",
     suggestsGoal: false,
   },
 ];

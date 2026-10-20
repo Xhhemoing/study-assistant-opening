@@ -57,6 +57,7 @@ export function TeachingLoopTrialEmpty({
         试运行关闭时保留既有活动与断点内容；不会伪造讲义或假装主讲已可用。
       </p>
       <p className="mt-4">
+        <Link href="/onboarding" className={ui.quiet}>先填写学习目标与每日时间</Link>
         <Link href={assistantHref ?? "/opening/assistant"} className={ui.quiet}>
           打开自由对话（次要）
         </Link>

@@ -17,15 +17,16 @@ test("creates a knowledge-only course with no plan (Path D)", async ({ browser, 
     await register(context, "path-d");
     const page = await context.newPage();
     await page.goto("/onboarding");
+    await page.getByText("跳过设置，选择其他入口", { exact: true }).click();
     await page.locator('[data-onboarding-path="knowledge-course"]').click();
-    await expect(page).toHaveURL(/\/learn\/courses\/new/);
+    await expect(page).toHaveURL(/\/opening\/courses\/new/);
 
     await page.locator("#course-title").fill("Knowledge Only");
     await page.locator("#course-slug").fill(`knowledge-only-${Date.now()}`);
     await page.getByRole("button", { name: "创建课程" }).click();
-    await expect(page).toHaveURL(/\/learn\/courses\//);
+    await expect(page).toHaveURL(/\/opening\/courses\//);
 
-    // PR #20: /learn/courses/* renders the real course page; legacy goals are gone.
+    // The optional course path stays in the real Opening workspace.
     await expect(page.getByRole("heading", { name: "Knowledge Only" })).toBeVisible();
   } finally {
     await context.close();
