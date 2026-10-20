@@ -40,7 +40,10 @@ atomic_link() {
 }
 validate_target() {
   local target=$1
-  [[ "$target" == "$DIR" || "$target" == "$RELEASES_DIR/"* ]] || fail 'Release pointer escapes managed directories.'
+  # Retain the original managed root when new releases move to another disk,
+  # so both preflight and rollback still recognize the previous application.
+  [[ "$target" == "$DIR" || "$target" == "$RELEASES_DIR/"* || "$target" == "${DIR}-releases/"* ]] \
+    || fail 'Release pointer escapes managed directories.'
   [[ -f "$target/apps/web/.next/standalone/apps/web/server.js" ]] || fail 'Release has no prepared standalone server.'
 }
 current_target() {
@@ -73,7 +76,11 @@ report_incomplete() {
   echo 'INCOMPLETE: deployment/rollback activation did not complete; inspect the current pointer and service configuration before restarting.' >&2
 }
 lease_worker() {
-  [[ -f "$1/.worker-protocol" && "$(cat "$1/.worker-protocol")" == "$WORKER_PROTOCOL" ]]
+  [[ -f "$1/.worker-protocol" ]] || return 1
+  case "$(cat "$1/.worker-protocol")" in delivery-leases-v1|delivery-leases-study-v1) return 0 ;; *) return 1 ;; esac
+}
+study_release() {
+  [[ -f "$1/.worker-protocol" && "$(cat "$1/.worker-protocol")" == delivery-leases-study-v1 ]]
 }
 worker_pause_file() {
   local hash
@@ -113,6 +120,10 @@ report_worker_pause() {
 }
 restoration_worker_requirement() {
   local target=$1 required=$2 saved=$3
+  if [[ -f "$saved/study-app-start-attempted" ]] && ! study_release "$target"; then
+    echo 'Refusing recovery to a pre-Study application after Study Web startup; retain the compatible release and inspect the incomplete activation.' >&2
+    return 1
+  fi
   if ! lease_worker "$target" && [[ -f "$saved/lease-worker-start-attempted" ]]; then
     pause_worker "$target" "$required" || return 1
   fi
@@ -166,6 +177,8 @@ restart_services() {
   local required=$1 target=$2
   [[ "$required" == 0 || "$required" == 1 ]] || return 1
   install_worker_guard "$target" || return 1
+  # Web can persist Study answer conditions even when the worker is disabled.
+  if study_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-app-start-attempted" || return 1; fi
   systemctl restart aistudy-web.service || return 1
   if [[ "$required" == 1 ]]; then
     if worker_paused "$target"; then report_worker_pause "$target"; return 1; fi
@@ -286,6 +299,9 @@ if [[ "$ACTION" == rollback ]]; then
   [[ "$PREVIOUS_STATE" == "$STATE/releases/"* && ( -f "$PREVIOUS_STATE/succeeded" || -f "$PREVIOUS_STATE/degraded" ) ]] || fail 'Previous release metadata is incomplete.'
   RELEASE=$(cat "$PREVIOUS_STATE/from-target")
   validate_target "$RELEASE"
+  if study_release "$OLD_TARGET" && ! study_release "$RELEASE"; then
+    fail 'Refusing rollback to a pre-Study application; use a release that preserves Study answer conditions.'
+  fi
   [[ "$RELEASE" != "$OLD_TARGET" ]] || fail 'Rollback target equals the current release.'
   WORKER_HELPER="$OLD_TARGET/infra/deploy/provision-worker.sh"
   if [[ ! -f "$WORKER_HELPER" ]]; then WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"; fi
@@ -316,6 +332,14 @@ else
   RELEASE="$RELEASES_DIR/$COMMIT-$(date -u +%Y%m%dT%H%M%S)-$$"
   mkdir -m 755 -- "$RELEASE"
   tar -xzf "$ARCHIVE" -C "$RELEASE"
+  # The version travels with the reviewed source. Unmarked historical archives
+  # retain their original delivery-leases protocol, never acquire Study support.
+  release_protocol=$WORKER_PROTOCOL
+  if [[ -f "$RELEASE/.worker-protocol" ]]; then release_protocol=$(cat "$RELEASE/.worker-protocol"); fi
+  case "$release_protocol" in delivery-leases-v1|delivery-leases-study-v1) ;; *) fail 'Unknown release data protocol.' ;; esac
+  if study_release "$OLD_TARGET" && [[ "$release_protocol" != delivery-leases-study-v1 ]]; then
+    fail 'Refusing deployment of a pre-Study application; preserve Study answer conditions.'
+  fi
   chmod -R a+rX -- "$RELEASE"
   ln -s -- "$CONFIG" "$RELEASE/.env.production"
   node "$RELEASE/infra/deploy/hermes-health.mjs" capture "$CONFIG" "$OLD_TARGET" "$WORKER_REQUIRED" "$TRANSITION/worker-identity.json"
@@ -344,7 +368,7 @@ else
   node "$RELEASE/infra/deploy/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
   touch "$TRANSITION/migration-succeeded"
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
-  printf '%s\n' "$WORKER_PROTOCOL" > "$RELEASE/.worker-protocol"
+  printf '%s\n' "$release_protocol" > "$RELEASE/.worker-protocol"
   bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python"

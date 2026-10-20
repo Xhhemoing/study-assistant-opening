@@ -34,3 +34,11 @@
 数据库只读查询确认最新迁移`0074_opening_system_query_receipts.sql`，verification_state为verified。配置文件显示OPENING_RELEASE=0、三个TEACHING开关为1，SYSTEM_QUERY/ADAPTIVE_PLANNING/AUTH_TRUSTED_IP_HEADER未设置；未据此声称所有运行进程的有效配置相同。nginx设置X-Real-IP及X-Forwarded-For，真实客户端IP限流隔离尚未实测。
 
 最近备份dump为510334字节。系统默认pg_restore 14.24不能读取该1.15格式；现有`/usr/lib/postgresql/16/bin/pg_restore`16.14成功列出700项目录。备份恢复演练仍待执行，目录可读不等于已证明可恢复。后续部署前核对发布记录与实际制品版本，并用匹配的pg_restore执行隔离恢复验证。
+
+## 发布接管与修复（2026-10-20）
+
+用户授权清理或迁往 /www，随后明确授权核实并安全停止已有发布流程。已核对 `/tmp/study-stage-20261020.sh` 与待发布阶段脚本一致、仅构建未激活，再停止该进程树；线上 Web / Worker PID 1462026 / 1462033 及 current 均未变化。/www 为独立 ext4 磁盘，约13.6GiB可用，保留 /opt 当前应用、回退文件与备份，无空间清理删除。
+
+已用 PostgreSQL 16 将510334字节现有备份恢复至专用隔离数据库，实查93张public表、74项已验证迁移，再删除仅本轮创建的隔离库。生产数据库未改。实际源码与6c4a4ea8归档对照，除换行外，仅 Worker provisioning 的 systemd 路径引号存在部署侧修补；本轮将有效修复及真实systemd解析测试归入源码。
+
+#76 整合c5cb6424后66项最近单元与Web/Database类型检查通过。发布脚本保留既有CI、4GiB空间、身份与备份检查，允许新release/backup迁往/www，状态与锁仍用/opt；同时按0081实际数据语义禁止Study启动后恢复不理解作答条件的旧Web。最终CI、合并与发布结果以PR和发布transition为准，此记录不表示已部署。用户浏览器/真实模型/学习收益仍待验收。

@@ -263,16 +263,18 @@ def configure(args):
          str(python), "-m", "opening_parser", "--check"], cwd=parser_cwd, timeout=90,
         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
     template = args.unit_file.read_text()
-    replacements = {"WorkingDirectory=": str(args.app_dir), "ReadWritePaths=": str(cache)}
+    # Single-path directives retain surrounding quotes literally; path lists
+    # such as ReadWritePaths use systemd's quoted-word parser instead.
+    replacements = {"WorkingDirectory=": str(args.app_dir), "ReadWritePaths=": quoted(cache)}
     lines = []
     for line in template.splitlines():
         if line == "EnvironmentFile=/opt/aistudy/.env.production":
-            line = "EnvironmentFile=" + quoted(config).replace("%", "%%")
+            line = "EnvironmentFile=" + str(config).replace("%", "%%")
         elif line == "EnvironmentFile=/etc/aistudy/worker-runtime.env":
-            line = "EnvironmentFile=" + quoted(args.config_dir / "worker-runtime.env").replace("%", "%%")
+            line = "EnvironmentFile=" + str(args.config_dir / "worker-runtime.env").replace("%", "%%")
         for prefix, value in replacements.items():
             if line.startswith(prefix):
-                line = prefix + quoted(value).replace("%", "%%")
+                line = prefix + value.replace("%", "%%")
         lines.append(line)
     unit = "\n".join(lines) + "\n"
     for required in (f"User={USER}", f"Group={USER}", "ProtectSystem=strict", "PrivateTmp=true"):

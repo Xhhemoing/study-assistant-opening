@@ -69,6 +69,7 @@ function fixture(t, overrides = {}) {
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
   for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
+  if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {
     const result = spawnSync(realGit, args, { cwd: repo, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
@@ -233,6 +234,90 @@ function assertLegacyIntact(f) {
   assert(!existsSync(join(f.repo, "should-not-execute")));
   assert(!existsSync(join(f.server, "should-not-execute")));
 }
+
+for (const scenario of [{ worker: "active", failure: "worker" }, { worker: "disabled", failure: "health" }]) {
+  test(`Study startup failure with ${scenario.worker} worker cannot restore a pre-Study Web`, t => {
+    const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v1", MOCK_WORKER: scenario.worker });
+    const failed = f.run("deploy", { MOCK_FAIL: scenario.failure });
+    assert.notEqual(failed.status, 0);
+    assert.notEqual(readlinkSync(f.current), f.server);
+    assert.match(failed.stderr, /Refusing recovery to a pre-Study application/);
+    assert(existsSync(join(f.state, "activation-incomplete")));
+    assert(existsSync(f.env.MOCK_STOPPED));
+    assert.doesNotMatch(failed.log, /worker --restore/);
+    assert.equal(failed.log.match(/systemctl restart aistudy-web.service/g)?.length, 1);
+    const transition = readdirSync(join(f.state, "releases"))[0];
+    assert(existsSync(join(f.state, "releases", transition, "study-app-start-attempted")));
+    assert.equal(f.run("restart").status, 3);
+  });
+}
+
+test("Study rollback rejects a pre-Study target before stopping or changing services", t => {
+  const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v1" });
+  assert.equal(f.run().status, 0);
+  const current = readlinkSync(f.current);
+  const rejected = f.run("rollback");
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /Refusing rollback to a pre-Study application/);
+  assert.equal(readlinkSync(f.current), current);
+  assert.doesNotMatch(rejected.deltaLog, /systemctl stop|systemctl restart|worker --restore/);
+});
+
+test("Study releases retain ordinary rollback to another compatible Study release", t => {
+  const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v1" });
+  assert.equal(f.run().status, 0);
+  const previous = readlinkSync(f.current);
+  assert.equal(f.run().status, 0);
+  const rollback = f.run("rollback");
+  assert.equal(rollback.status, 0, rollback.stderr);
+  assert.equal(readlinkSync(f.current), previous);
+  assert(!existsSync(f.env.MOCK_STOPPED));
+});
+
+for (const protocol of ["delivery-leases-v1", null]) {
+  test(`Study deploy rejects ${protocol ?? "unmarked"} artifacts before building or changing services`, t => {
+    const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v1" });
+    assert.equal(f.run().status, 0);
+    const current = readlinkSync(f.current);
+    if (protocol) writeFileSync(join(f.repo, ".worker-protocol"), `${protocol}\n`);
+    else rmSync(join(f.repo, ".worker-protocol"));
+    f.git("add", ".worker-protocol");
+    f.git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "commit", "-m", "older protocol artifact");
+    const head = f.git("rev-parse", "HEAD");
+    f.setRuns([f.ciRun({ head_sha: head })]);
+    const rejected = f.run("deploy", { MOCK_RELEASE_SHA: head });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /Refusing deployment of a pre-Study application/);
+    assert.equal(readlinkSync(f.current), current);
+    assert.doesNotMatch(rejected.deltaLog, /npm|migrate|systemctl stop|systemctl restart|worker --restore/);
+  });
+}
+
+test("deployment can move to another disk and roll back to the original managed release root", t => {
+  const f = fixture(t);
+  const first = f.run("deploy", { RELEASES_DIR: `${f.server}-releases` });
+  assert.equal(first.status, 0, first.stderr);
+  const previous = readlinkSync(f.current);
+  const moved = f.run("deploy");
+  assert.equal(moved.status, 0, moved.stderr);
+  assert(readlinkSync(f.current).startsWith(`${f.releases}/`));
+  const rollback = f.run("rollback");
+  assert.equal(rollback.status, 0, rollback.stderr);
+  assert.equal(readlinkSync(f.current), previous);
+  assertLegacyIntact(f);
+  assert(!existsSync(f.env.MOCK_STOPPED));
+});
+
+test("moving release roots still rejects a previous target outside both managed roots", t => {
+  const f = fixture(t);
+  assert.equal(f.run("deploy", { RELEASES_DIR: join(f.root, "unmanaged") }).status, 0);
+  const previous = readlinkSync(f.current);
+  const refused = f.run("deploy");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /Release pointer escapes managed directories/);
+  assert.equal(readlinkSync(f.current), previous);
+  assert.doesNotMatch(refused.deltaLog, /npm|migrate|systemctl stop|systemctl restart/);
+});
 
 test("deploy prepares a separate release, verifies a retained PG backup, and atomically switches services", t => {
   const f = fixture(t);
