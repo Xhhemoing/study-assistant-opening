@@ -2,12 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 
 const create = vi.hoisted(() => vi.fn());
+const get = vi.hoisted(() => vi.fn());
 const requestCompile = vi.hoisted(() => vi.fn());
 const readTask = vi.hoisted(() => vi.fn());
 const readySources = vi.hoisted(() => vi.fn());
 
 vi.mock("@aistudy/database", () => ({
-  createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, requestCompile })),
+  createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, get, requestCompile })),
   readOpeningTeachingTaskFocus: readTask,
   createOpeningCourseReadySourcesRepository: vi.fn(() => ({ listReadySourceIdsForCourse: readySources })),
 }));
@@ -30,12 +31,28 @@ const sql = {} as Sql;
 
 beforeEach(() => {
   create.mockReset().mockResolvedValue({ id: activityId, generateStatus: "queued" });
+  get.mockReset();
   requestCompile.mockReset().mockResolvedValue({ activity: { id: activityId }, jobId: "job" });
   readTask.mockReset();
   readySources.mockReset().mockResolvedValue([activityId]);
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
+  it("resumes the activity bound to a first-learning task instead of compiling another empty lesson", async () => {
+    readTask.mockResolvedValue({ title: "首次学习", courseId: null, skillLabel: null, clientKey: `first-learning-activity:${activityId}` });
+    const original = { id: activityId, clientKey: "first-learning:original-request:activity", sourceIds: [activityId], intentSummary: "原目标与材料" };
+    get.mockResolvedValue(original);
+    const result = await createOpeningTeachingActivityService(sql, {}).create(scope, { ...input, createIntent: { source: "task", taskId: activityId } });
+    expect(result).toEqual(original);
+    expect(get).toHaveBeenCalledWith(scope, activityId);
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("does not manufacture a replacement if the first-learning activity is no longer owned or available", async () => {
+    readTask.mockResolvedValue({ title: "首次学习", courseId: null, clientKey: `first-learning-activity:${activityId}` });
+    get.mockResolvedValue(null);
+    await expect(createOpeningTeachingActivityService(sql, {}).create(scope, { ...input, createIntent: { source: "task", taskId: activityId } })).rejects.toMatchObject({ status: 404 });
+    expect(create).not.toHaveBeenCalled();
+  });
   it.each(["0", "1"])("does not compile a card-review task as an empty teaching activity with adaptive=%s", async flag => {
     readTask.mockResolvedValue({ title: "Review cards", courseId: null, skillLabel: null, suggestionKind: "review_cards" });
     await expect(createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: flag, OPENING_TEACHING_COMPILER_ENABLED: "1" }).create(scope, {

@@ -19,7 +19,7 @@ test.describe("authentication through the live web server", () => {
     await page.getByRole("button", { name: "创建账户" }).click();
 
     await expect(page).toHaveURL(/\/onboarding$/);
-    await expect(page.getByRole("heading", { name: "你想从哪里开始？" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "从你想学的内容开始" })).toBeVisible();
   });
 
   test("blocks cross-user document access through live HTTP", async ({ browser, baseURL }) => {

@@ -8,6 +8,24 @@ import type { Sql } from "postgres";
 import { WorkspacePreferencesError } from "./preferences";
 
 export function createOpeningPlanningSettingsRepository(sql: Sql) {
+  async function write(scope: Scope, value: OpeningPlanningSettings | null, onlyIfMissing: boolean) {
+    const parsed = value === null ? null : openingPlanningSettingsSchema.parse(value);
+    if (parsed !== null) {
+      try { resolveWorkspaceTimeZone(parsed.timeZone); } catch {
+        throw new WorkspacePreferencesError("VALIDATION", `invalid timeZone: ${parsed.timeZone}`);
+      }
+    }
+    return sql.begin(async tx => {
+      const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+      if (!owner.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
+      const written = await tx`INSERT INTO workspace_preferences (workspace_id,planning_settings)
+        VALUES (${scope.workspaceId},${parsed === null ? null : tx.json(parsed)})
+        ON CONFLICT(workspace_id) DO UPDATE SET planning_settings=EXCLUDED.planning_settings,updated_at=now()
+        WHERE ${!onlyIfMissing} OR workspace_preferences.planning_settings IS NULL RETURNING workspace_id`;
+      return written.length > 0;
+    });
+  }
   return {
     async get(scope: Scope) {
       const rows = await sql`SELECT p.planning_settings FROM workspaces w
@@ -23,24 +41,11 @@ export function createOpeningPlanningSettingsRepository(sql: Sql) {
       };
     },
     async set(scope: Scope, value: OpeningPlanningSettings | null) {
-      const parsed = value === null ? null : openingPlanningSettingsSchema.parse(value);
-      // PR-B: reject an invalid IANA zone at write time so new bad values never reach storage.
-      // Read path (get) is unchanged: stored values are surfaced as-is and fail loudly where used.
-      if (parsed !== null) {
-        try {
-          resolveWorkspaceTimeZone(parsed.timeZone);
-        } catch {
-          throw new WorkspacePreferencesError("VALIDATION", `invalid timeZone: ${parsed.timeZone}`);
-        }
-      }
-      await sql.begin(async tx => {
-        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
-          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
-        if (!owner.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
-        await tx`INSERT INTO workspace_preferences (workspace_id,planning_settings)
-          VALUES (${scope.workspaceId},${parsed === null ? null : tx.json(parsed)})
-          ON CONFLICT(workspace_id) DO UPDATE SET planning_settings=EXCLUDED.planning_settings,updated_at=now()`;
-      });
+      await write(scope, value, false);
+    },
+    /** First-run defaults cannot replace another tab's settings or a nonempty damaged document. */
+    async initialize(scope: Scope, value: OpeningPlanningSettings): Promise<boolean> {
+      return write(scope, value, true);
     },
   };
 }

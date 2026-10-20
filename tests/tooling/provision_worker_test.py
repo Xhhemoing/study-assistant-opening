@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import shutil
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,7 @@ SPEC = importlib.util.spec_from_file_location("provision_worker", ROOT / "infra/
 worker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(worker)
 ensure_identity = worker.ensure_identity
+real_subprocess_run = subprocess.run
 
 
 class WorkerProvisionTests(unittest.TestCase):
@@ -96,7 +98,7 @@ class WorkerProvisionTests(unittest.TestCase):
         unit = self.unit.read_text()
         self.assertIn("User=aistudy-worker\n", unit)
         self.assertIn("ProtectSystem=strict\n", unit)
-        self.assertIn(f'WorkingDirectory="{self.current}"', unit)
+        self.assertIn(f'WorkingDirectory={self.current}', unit)
         self.assertLess(unit.index(str(self.env)), unit.index(str(self.runtime)))
         runtime = self.runtime.read_text()
         self.assertIn(f'PARSER_CWD="{self.current}/services/parser"', runtime)
@@ -114,6 +116,40 @@ class WorkerProvisionTests(unittest.TestCase):
         self.assertIn("-i", check[1][0])
         self.assertFalse(any("DATABASE_URL" in argument for argument in check[1][0]))
         self.assertFalse(any(call[0][0] == "systemctl" and call[0][1] in ("start", "stop", "restart", "enable") for call in self.calls))
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "requires the real systemd unit parser")
+    def test_generated_paths_are_accepted_by_systemd(self):
+        # CI installs Node in its toolcache, while Hermes uses /usr/bin/node.
+        # Verify the path directives with an executable available on this host.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required by the deployment test runner")
+        template = self.base / "worker-template.service"
+        template.write_text(
+            (ROOT / "infra/deploy/aistudy-worker.service").read_text(encoding="utf-8").replace(
+                "ExecStart=/usr/bin/node ", f'ExecStart={worker.quoted(node).replace("%", "%%")} '),
+            encoding="utf-8")
+        def verify_candidate(argv, **kwargs):
+            if argv[:2] == ["systemd-analyze", "verify"]:
+                result = real_subprocess_run(argv, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("EnvironmentFile= path is not absolute", result.stderr)
+                return result
+            return self.record_run(argv, **kwargs)
+        with patch.object(worker, "run", verify_candidate):
+            worker.main(self.args("--unit-file", str(template)))
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "requires the real systemd unit parser")
+    def test_systemd_paths_preserve_spaces_and_literal_specifiers(self):
+        # Each setting has a different parser; exercise the generated unit,
+        # including percent escaping, rather than freezing its source text.
+        self.current = self.base / "current %n space"
+        self.current.symlink_to(self.legacy, target_is_directory=True)
+        self.config = self.base / "config %n space"
+        self.config.mkdir()
+        self.runtime = self.config / "worker-runtime.env"
+        self.runtime.write_text("OLD_RUNTIME=1\n")
+        self.cache = self.base / "cache %n space"
+        self.test_generated_paths_are_accepted_by_systemd()
 
     def test_preserves_legacy_cache_and_internal_links_and_does_not_overwrite_on_rerun(self):
         old = self.legacy / ".local/hf-home"

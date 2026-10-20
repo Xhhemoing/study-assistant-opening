@@ -4,7 +4,10 @@ import type { WorkspaceEntry } from "@aistudy/ui";
 import { BookOpen, Compass, Library, type LucideIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { z } from "zod";
+import { uuidSchema } from "@aistudy/contracts";
 import { ONBOARDING_PATHS, type OnboardingPath } from "../onboarding/onboarding-paths";
+import { FirstLearningForm } from "./first-learning-form";
 
 const PATH_ICONS: Record<OnboardingPath["id"], LucideIcon> = {
   "free-exploration": Compass,
@@ -18,13 +21,15 @@ export function Onboarding() {
   const [ready, setReady] = useState(false);
   const [choicePending, setChoicePending] = useState(false);
   const [error, setError] = useState("");
+  const [draftKey, setDraftKey] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
       .then(async (response) => {
         if (response.status === 401) return router.replace("/login");
         if (!response.ok) throw new Error();
-        await response.json();
+        const { user } = z.object({ user: z.object({ id: uuidSchema, workspaceId: uuidSchema }) }).parse(await response.json());
+        setDraftKey(`aistudy:first-learning:${user.id}:${user.workspaceId}`);
         setReady(true);
       })
       .catch(() => setError("暂时无法准备学习空间，请检查网络后重试。"));
@@ -64,10 +69,13 @@ export function Onboarding() {
     <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <header className="space-y-3">
         <span className="text-sm font-semibold text-emerald-700">AIstudy</span>
-        <h1 className="text-xl font-semibold tracking-[-0.02em] text-zinc-800">你想从哪里开始？</h1>
-        <p className="max-w-prose text-sm leading-6 text-zinc-500">这些只是起点，之后可以随时在 学习、探索和知识库 之间切换，也不需要先创建课程或目标。</p>
+        <h1 className="text-xl font-semibold tracking-[-0.02em] text-zinc-800">从你想学的内容开始</h1>
+        <p className="max-w-prose text-sm leading-6 text-zinc-500">说清想学什么，准备一节具体的学习。也可以跳过设置，直接探索或记笔记。</p>
       </header>
-      <div className="divide-y divide-zinc-200 border-y border-zinc-200">
+      {draftKey ? <FirstLearningForm draftKey={draftKey} onStarted={href => router.replace(href)} /> : null}
+      <details className="border-y border-zinc-200 py-3">
+        <summary className="cursor-pointer text-sm font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700">跳过设置，选择其他入口</summary>
+        <div className="mt-2 divide-y divide-zinc-200">
         {ONBOARDING_PATHS.map((path) => {
           const Icon = PATH_ICONS[path.id];
           return (
@@ -87,13 +95,14 @@ export function Onboarding() {
             </button>
           );
         })}
-      </div>
+        </div>
+      </details>
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 text-sm">
         <span className="text-zinc-500">或者直接进入</span>
         <button
           className="inline-flex min-h-10 items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={choicePending}
-          onClick={() => void chooseEntry("library", "/library")}
+          onClick={() => void chooseEntry("library", "/opening/library")}
           type="button"
         >
           <Library aria-hidden="true" size={16} />笔记知识库

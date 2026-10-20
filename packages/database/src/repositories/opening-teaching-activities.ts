@@ -190,7 +190,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     async create(
       scope: Scope,
       input: TeachingActivityCreateInput,
-      options: { enqueueCompile?: boolean } = {},
+      options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
     ): Promise<TeachingActivity> {
       return sql.begin(async (tx) => {
         await lockLearningOwner(tx, scope);
@@ -254,6 +254,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           clientKey = `${input.clientKey}:next:${previousId}`;
           createIntent = { ...initialCreateIntent, continuesActivityId: previousId };
         }
+        if (options.replayOnly) throw learningError("VALIDATION", "目标日期已过去，且没有可恢复的同一学习意图");
         const id = randomUUID();
         const goalJson = input.goalJson ?? {};
         const generateStatus = options.enqueueCompile ? "queued" : "ready";

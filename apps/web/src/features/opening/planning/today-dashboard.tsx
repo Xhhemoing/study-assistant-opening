@@ -33,6 +33,7 @@ import { TaskLearningActionContext } from "./task-row-actions";
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
 export type TodayPrimaryCtaPlan =
   | { kind: "create" }
+  | { kind: "setup" }
   | {
       kind: "focus-existing";
       activityId: string;
@@ -43,8 +44,9 @@ export type TodayPrimaryCtaPlan =
 export function planTodayPrimaryCta(
   existing: TeachingActivity | null,
   clientInit: ActivitySpecClientInit | null | undefined,
+  hasLearningContext = true,
 ): TodayPrimaryCtaPlan {
-  if (!existing) return { kind: "create" };
+  if (!existing) return { kind: hasLearningContext ? "create" : "setup" };
   const preferWorkspace = Boolean(
     clientInit && isTeachingWorkspaceContentUsable(existing, clientInit),
   );
@@ -255,7 +257,11 @@ export function TodayDashboard({
     if (taskStartInFlight.current) return;
     setCtaError(null);
     const existing = pickCurrentTeachingActivity(activities);
-    const plan = planTodayPrimaryCta(existing, clientInit);
+    const plan = planTodayPrimaryCta(existing, clientInit, Boolean(state.continueItem));
+    if (plan.kind === "setup") {
+      window.location.assign("/onboarding");
+      return;
+    }
     if (plan.kind === "focus-existing") {
       setSelectedActivity(existing);
       setCtaPreferWorkspace(plan.preferWorkspace);

@@ -49,7 +49,7 @@ export function createOpeningTeachingActivityService(
 ) {
   const repo = createOpeningTeachingActivitiesRepository(sql);
   return {
-    async create(scope: Scope, raw: unknown) {
+    async create(scope: Scope, raw: unknown, options: { replayOnly?: boolean } = {}) {
       const input = teachingActivityCreateInputSchema.parse(raw);
       try {
         // Always discard the client-owned derived field, including with the flag off.
@@ -66,6 +66,14 @@ export function createOpeningTeachingActivityService(
           const task = await readOpeningTeachingTaskFocus(sql, scope, taskId);
           if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
           if (task.suggestionKind === "review_cards") throw new ApiError("VALIDATION", "请到卡片复习中开始这项任务", 400);
+          const linkedId = task.clientKey?.match(/^first-learning-activity:([a-f0-9-]{36})$/i)?.[1];
+          if (linkedId) {
+            const original = await repo.get(scope, uuidSchema.parse(linkedId));
+            if (!original || !original.clientKey.startsWith("first-learning:")) {
+              throw new ApiError("NOT_FOUND", "首次学习活动已不可用，请重新读取今日任务。", 404);
+            }
+            return original;
+          }
           input.courseId = task.courseId;
           input.intentSummary = task.title;
           skillLabel = task.skillLabel;
@@ -82,7 +90,8 @@ export function createOpeningTeachingActivityService(
             if (focus) input.goalJson = { ...input.goalJson, learnerFocus: focus };
           }
         }
-        return await repo.create(scope, input, { enqueueCompile: isTeachingCompilerEnabled(env) });
+        return await repo.create(scope, input, { enqueueCompile: isTeachingCompilerEnabled(env),
+          ...(options.replayOnly ? { replayOnly: true } : {}) });
       } catch (error) {
         mapError(error);
       }

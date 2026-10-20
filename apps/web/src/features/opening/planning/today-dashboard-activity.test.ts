@@ -33,6 +33,10 @@ const activity: TeachingActivity = {
 };
 
 describe("Today teaching-activity CTA semantics (CT-03)", () => {
+  it("asks for a learning intent before creating an empty first activity", () => {
+    expect(planTodayPrimaryCta(null, null, false)).toEqual({ kind: "setup" });
+    expect(planTodayPrimaryCta(activity, null, false)).toMatchObject({ kind: "focus-existing" });
+  });
   it("uses 继续学习 when a resumable activity exists, else 开始学习", () => {
     expect(todayActivityCtaLabel(pickCurrentTeachingActivity([activity]))).toBe("继续学习");
     expect(todayActivityCtaLabel(null)).toBe("开始学习");
