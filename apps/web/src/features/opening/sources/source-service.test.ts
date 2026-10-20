@@ -37,7 +37,8 @@ function makeFakeSql() {
   const tag = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     // Nested postgres.js fragments evaluate as standalone tagged calls before the outer query composes.
-    if (query === "FALSE" || query.startsWith("p.privacy_source_ids") || query.startsWith("p.root_observation_id")) return query;
+    if (query === "FALSE" || query.startsWith("p.privacy_source_ids") || query.startsWith("p.root_observation_id")
+      || query.startsWith("baseline.source_ids &&") || query.startsWith("j.payload->'spanDelayedProtocol'->>'baselineRootId'=")) return query;
     if (query.startsWith("INSERT INTO opening_sources")) {
       const [id, workspaceId, name, mime, bytes, sha256] = values as [
         string,

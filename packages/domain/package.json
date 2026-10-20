@@ -21,6 +21,10 @@
     "./measurement-catalog": {
       "types": "./src/opening/measurement/catalog.ts",
       "default": "./src/opening/measurement/catalog.ts"
+    },
+    "./span-heldout-catalog": {
+      "types": "./src/opening/span-heldout-catalog.ts",
+      "default": "./src/opening/span-heldout-catalog.ts"
     }
   },
   "scripts": {

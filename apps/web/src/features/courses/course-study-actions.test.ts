@@ -39,7 +39,7 @@ it("keeps a single primary practice CTA without competing materials CTA (CT-01/0
 
 it("keeps Opening note actions under the Opening library", () => {
   const html = renderToStaticMarkup(createElement(CourseStudyActions, { assetCount: 0, goalCount: 0, opening: true }));
-  expect(html).toContain('href="/opening/library?tab=notes"');
+  expect(html).toContain('href="/opening/library/new"');
   expect(html).not.toContain('href="/library/new"');
 });
 
@@ -54,8 +54,8 @@ it("makes actual study primary and keeps plan seeding inside secondary details",
   );
   expect(html).toContain("设为今日计划");
   expect(html).toContain(`href="/opening/courses/${COURSE_ID}/study"`);
-  expect(html).toContain("开始学习");
-  expect(html.indexOf("开始学习")).toBeLessThan(html.indexOf("设为今日计划"));
+  expect(html).toContain("开始独立练习");
+  expect(html.indexOf("开始独立练习")).toBeLessThan(html.indexOf("设为今日计划"));
   expect(html).toMatch(/<details[\s\S]*学习安排与其他入口[\s\S]*设为今日计划[\s\S]*<\/details>/);
   expect(html).toMatch(/确认草案/);
 });
@@ -153,4 +153,9 @@ describe("Opening seed CTA composition", () => {
     );
     expect(navigate).toHaveBeenCalledWith("/opening/today");
   });
+});
+
+it.each(["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"])("opens a new course-bound note for %s", courseId => {
+  const html = renderToStaticMarkup(createElement(CourseStudyActions, { assetCount: 0, opening: true, courseId, courseTitle: "本课" }));
+  expect(html).toContain(`href="/opening/library/new?courseId=${courseId}"`);
 });

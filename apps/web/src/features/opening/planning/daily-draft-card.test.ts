@@ -263,3 +263,8 @@ describe("DailyDraftCard", () => {
     expect(noSettings).toContain("用默认作息生成本日计划");
   });
 });
+
+it("does not render a zero-count unplanned warning", () => {
+  const html = renderToStaticMarkup(createElement(DailyDraftCard, { api: draftApi(), date: "2026-10-19", onChanged: () => {}, dailyDraftSkippedReason: "accepted", unplannedPendingCount: 0 }));
+  expect(html).toBe("");
+});

@@ -6,13 +6,20 @@ import {
   requirePrincipal,
 } from "../../../features/auth/service";
 import { getAuthRuntime } from "../../../server/runtime";
+import { openingContentDelivery } from "../../../features/opening/server/content-delivery";
+import { contentDeliveryHeaders, contentDeliveryReleaseKey } from "../../../features/opening/content-delivery";
 
 export async function GET(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
+    const key = contentDeliveryReleaseKey(request);
     const documents = await listDocumentsForPrincipal(runtime, principal);
-    return Response.json({ documents });
+    const delivery = openingContentDelivery(runtime.sql);
+    const exposureReceipts = [];
+    // This legacy list includes document blocks, so those bodies are actual delivery too.
+    for (const document of documents) if (document.blocks.length) exposureReceipts.push(...await delivery.note({ workspaceId: principal.workspaceId, ownerUserId: principal.userId }, `${key}:${document.id}`, document));
+    return Response.json({ documents, exposureReceipts }, { headers: contentDeliveryHeaders(exposureReceipts) });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }

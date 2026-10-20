@@ -6,6 +6,8 @@ import {
   type Scope, type SystemQueryRequest, type SystemQueryResult, type SystemQueryAuthorization,
 } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
+import { readSystemStateQuery } from "./opening-system-query-state";
+import { readSystemRecordQuery } from "./opening-system-query-records";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
 import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
 import { systemQueryOwnerGrant } from "./opening-system-query-admission";
@@ -25,7 +27,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
     if (signal.aborted) throw new Error("system query cancelled");
     const result = await sql.begin("isolation level repeatable read read only", async tx => {
       await tx`SET LOCAL statement_timeout='2000ms'`;
-      const [owner] = await tx`SELECT w.privacy_epoch,p.adaptive_planning,p.ai_settings,p.planning_settings,p.updated_at AS preferences_updated_at,
+      const [owner] = await tx`SELECT transaction_timestamp() AS snapshot_as_of,w.privacy_epoch,p.adaptive_planning,p.ai_settings,p.planning_settings,p.updated_at AS preferences_updated_at,
           COALESCE(r.revision,0) AS history_revision
         FROM workspaces w LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
         LEFT JOIN opening_workspace_history_revisions r ON r.workspace_id=w.id AND r.owner_user_id=w.owner_user_id
@@ -35,6 +37,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         version: `query-v1:epoch:${owner?.privacy_epoch ?? "unknown"}:history:${owner?.history_revision ?? "unknown"}`,
         data: [], evidence: [], sourceRefs: [], nextOffset: null };
       if (!owner) return { ...out, status: "unknown" as const, reason: "not_available" as const };
+      if (!options.now && owner.snapshot_as_of) out.asOf = iso(owner.snapshot_as_of);
       const args = request.arguments;
       const limit = "limit" in args ? args.limit : 10, offset = "offset" in args ? args.offset : 0;
       const page = (rows: Row[]) => {
@@ -44,7 +47,11 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       const evidence = (row: Row, kind: string, title: string, href: string, revision: string) => {
         out.evidence.push({ id: `${kind}:${row.id}`, kind, title: title.slice(0, 200), href, recordId: String(row.id), revision });
       };
-      if (request.name === "courses") {
+      if (request.name === "learner_state" || request.name === "explain_decision") {
+        await readSystemStateQuery(tx, scope, request, out);
+      } else if (request.name === "notes" || request.name === "cards" || request.name === "exam_sprint") {
+        await readSystemRecordQuery(tx, scope, request, out);
+      } else if (request.name === "courses") {
         const prefs = openingAdaptivePrefsSchema.safeParse(owner.adaptive_planning);
         const rows = await tx`SELECT id,title,updated_at FROM courses WHERE workspace_id=${scope.workspaceId} AND archived_at IS NULL
           AND ${request.arguments.courseId ? tx`id=${request.arguments.courseId}` : tx`TRUE`}
@@ -63,7 +70,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       } else if (request.name === "learning" || request.name === "recommendation") {
         await readSystemLearningQuery(tx, scope, request, out, limit, offset);
       } else if (request.name === "materials") {
-        if (!request.arguments.sourceId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
+        if (!request.arguments.sourceId && !request.arguments.courseId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
         const a = request.arguments;
         if (a.sourceId) {
           const [source] = await tx`SELECT s.version,s.upload_state FROM opening_sources s WHERE s.workspace_id=${scope.workspaceId} AND s.id=${a.sourceId}
@@ -76,6 +83,8 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
           WHERE s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded' AND s.parse_state='ready' AND length(btrim(c.text))>0
             AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
             AND NOT EXISTS(SELECT 1 FROM opening_source_versions v WHERE v.workspace_id=s.workspace_id AND v.source_id=s.id AND v.version=s.version AND v.availability='unavailable')
+            AND ${a.courseId ? tx`EXISTS(SELECT 1 FROM course_asset_memberships m JOIN courses course ON course.id=m.course_id AND course.workspace_id=m.workspace_id AND course.archived_at IS NULL
+              WHERE m.workspace_id=s.workspace_id AND m.asset_id=s.id AND m.asset_type='source' AND m.course_id=${a.courseId})` : tx`TRUE`}
             AND ${a.sourceId ? tx`s.id=${a.sourceId}` : tx`TRUE`}
             AND ${a.sourceVersion !== undefined ? tx`c.source_version=${a.sourceVersion}` : tx`TRUE`}
             AND ${a.physicalPage ? tx`c.page=${a.physicalPage}` : tx`TRUE`}
@@ -120,12 +129,12 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         out.data = [{ mode: parsed.data.mode, defaultModelId: parsed.data.defaultModelId, manualModelId: parsed.data.manualModelId,
           routes: parsed.data.routes, taskRoutes: parsed.data.taskRoutes ?? {}, savedAt: owner.preferences_updated_at ? iso(owner.preferences_updated_at) : null,
           queryTools: systemQueryRequestSchema.options.map(option => option.shape.name.value), modelConnectivity: "not_checked", deployment: "not_checked",
-          unavailableDomains: ["notes", "review_queue", "cost_summary", "historical_material_versions", "persisted_decisions"],
+          unavailableDomains: ["cost_summary", "historical_material_versions"],
           ...(publicSettings ? { process: publicSettings.process, adaptivePlanning: publicSettings.adaptivePlanning, teachingLoop: publicSettings.teachingLoop } : {}),
           summary: `已保存的模型路由为${parsed.data.mode === "manual" ? "手动" : "自动"}模式${publicSettings ? `；当前 ${publicSettings.process} 进程：自适应规划${publicSettings.adaptivePlanning ? "开启" : "关闭"}，教学循环${publicSettings.teachingLoop ? "开启" : "关闭"}` : "；未核实运行进程的功能开关"}。未检测真实模型连通性或另一进程的配置` }];
         if (!publicSettings) { out.status = "partial"; out.reason = "not_available"; }
       } else if (request.name === "planning") {
-        await readPlanning(tx, scope, request, owner, out, now, page, evidence);
+        await readPlanning(tx, scope, request, owner, out, new Date(out.asOf), page, evidence);
       } else if (request.name === "teaching") {
         const a = request.arguments;
         const rows = await tx`SELECT a.id,a.status,a.generate_status,a.path_version,a.content_version,a.updated_at,a.source_ids,
@@ -173,7 +182,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       return tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     });
     if (signal.aborted) throw new Error("system query cancelled");
-    if (!current || !result.version.includes(`:epoch:${current.privacy_epoch}:`)) throw new Error("system query privacy changed");
+    if (!current || result.authorization.permissionRevision !== systemQueryOwnerGrant(scope, Number(current.privacy_epoch), options.purpose ?? "system_record_lookup").permissionRevision) throw new Error("system query privacy changed");
     return systemQueryResultSchema.parse(result);
   });
 }
@@ -188,10 +197,13 @@ async function readPlanning(tx: TransactionSql, scope: Scope, request: Extract<S
   const parsed = plannedBlockSchema.array().max(200).safeParse(state.accepted_blocks);
   if (!parsed.success) { out.status = "unknown"; out.reason = "unavailable"; return; }
   out.version += `:plan:${state.accepted_version}`;
-  const blocks = parsed.data.slice(a.offset, a.offset + a.limit + 1), ids = blocks.map(block => block.taskId);
+  const ids = parsed.data.map(block => block.taskId);
   const tasks = ids.length ? await tx`SELECT id,title,status,minutes,origin,candidate_id,version FROM opening_tasks
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id=ANY(${ids}::uuid[])` : [];
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id=ANY(${ids}::uuid[])
+      AND ${a.courseId ? tx`course_id=${a.courseId} AND EXISTS(SELECT 1 FROM courses c WHERE c.id=${a.courseId} AND c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL)` : tx`TRUE`}` : [];
   const byId = new Map(tasks.map(row => [String(row.id), row]));
+  const scopedBlocks = a.courseId ? parsed.data.filter(block => byId.has(block.taskId)) : parsed.data;
+  const blocks = scopedBlocks.slice(a.offset, a.offset + a.limit + 1);
   out.data = page(blocks as unknown as Row[]).map(raw => {
     const block = raw as unknown as typeof parsed.data[number], task = byId.get(block.taskId);
     // Derived titles/reasons need ancestry admission. Until that is connected, return only schedule metadata.
@@ -201,5 +213,5 @@ async function readPlanning(tx: TransactionSql, scope: Scope, request: Extract<S
     return { date, timeZone, acceptedVersion: Number(state.accepted_version), taskId: block.taskId, title, start: block.start, end: block.end,
       taskStatus: task?.status ?? "unavailable", summary: `${date} ${title}：${block.start} 至 ${block.end}，任务状态 ${task?.status ?? "不可确认"}；已确认计划版本 ${state.accepted_version}` };
   });
-  if (!parsed.data.length) out.data = [{ date, timeZone, acceptedVersion: Number(state.accepted_version), summary: `${date} 已确认计划为空（版本 ${state.accepted_version}）` }];
+  if (!scopedBlocks.length && !a.courseId) out.data = [{ date, timeZone, acceptedVersion: Number(state.accepted_version), summary: `${date} 已确认计划为空（版本 ${state.accepted_version}）` }];
 }

@@ -10,12 +10,14 @@ export type ProviderModelDraft = {
   inputCentsPerMillion: string; outputCentsPerMillion: string;
   supportsVision: boolean; supportsAudio: boolean;
   billing: "metered" | "free_tier"; dailyRequestCap: string;
+  mediaInputTokenUpperBound?: string; mediaMaxInputBytes?: string; mediaInputCentsPerMillion?: string;
 };
 
 export const emptyProviderDraft: ProviderDraft = { label: "", baseUrl: "", apiKey: "" };
 export const emptyModelDraft: ProviderModelDraft = {
   label: "", modelName: "", inputCentsPerMillion: "", outputCentsPerMillion: "", supportsVision: false,
   supportsAudio: false, billing: "metered", dailyRequestCap: "",
+  mediaInputTokenUpperBound: "", mediaMaxInputBytes: "", mediaInputCentsPerMillion: "",
 };
 
 /** Key fields are write-only: drafts start empty and stay empty after a save. */
@@ -29,6 +31,9 @@ export function modelDraftFromView(view: OpeningProviderModelView): ProviderMode
     outputCentsPerMillion: String(view.outputCentsPerMillion),
     supportsVision: view.supportsVision, supportsAudio: view.supportsAudio,
     billing: view.billing, dailyRequestCap: view.dailyRequestCap === null ? "" : String(view.dailyRequestCap),
+    mediaInputTokenUpperBound: view.mediaInputTokenUpperBound == null ? "" : String(view.mediaInputTokenUpperBound),
+    mediaMaxInputBytes: view.mediaMaxInputBytes == null ? "" : String(view.mediaMaxInputBytes),
+    mediaInputCentsPerMillion: view.mediaInputCentsPerMillion == null ? "" : String(view.mediaInputCentsPerMillion),
   };
 }
 
@@ -68,6 +73,14 @@ export function validateModelDraft(draft: ProviderModelDraft): string | null {
     const cap = Number(draft.dailyRequestCap);
     if (!/^\d+$/.test(draft.dailyRequestCap.trim()) || cap < 1 || cap > 100_000) return "免费额度模型请填写 1–100000 的每日请求上限。";
   }
+  const media = [draft.mediaInputTokenUpperBound ?? "", draft.mediaMaxInputBytes ?? "", draft.mediaInputCentsPerMillion ?? ""];
+  if (media.some(value => !isBlank(value))) {
+    if (media.some(isBlank)) return "媒体 token 上界、总字节上限和价格必须一起填写或全部留空。";
+    const tokens = Number(media[0]), bytes = Number(media[1]);
+    if (!/^\d+$/.test(media[0]!.trim()) || !Number.isSafeInteger(tokens) || tokens <= 0) return "媒体 token 上界必须是供应商可核验的正整数。";
+    if (!/^\d+$/.test(media[1]!.trim()) || !Number.isSafeInteger(bytes) || bytes <= 0 || bytes > 104_857_600) return "媒体总字节上限须为 1–104857600 的整数。";
+    if (price(media[2]!, free) === null) return free ? "媒体输入价格必须为不小于 0 的数字。" : "按量计费的媒体输入价格必须大于 0。";
+  }
   return null;
 }
 
@@ -79,9 +92,10 @@ export function providerRequestBody(draft: ProviderDraft): { label: string; base
   return body;
 }
 
-export function modelRequestBody(draft: ProviderModelDraft): {
+export function modelRequestBody(draft: ProviderModelDraft, options: { clearMedia?: boolean } = {}): {
   label: string; modelName: string; inputCentsPerMillion: number; outputCentsPerMillion: number;
   supportsVision: boolean; supportsAudio: boolean; billing: "metered" | "free_tier"; dailyRequestCap: number | null;
+  mediaInputTokenUpperBound?: number | null; mediaMaxInputBytes?: number | null; mediaInputCentsPerMillion?: number | null;
 } {
   const free = draft.billing === "free_tier";
   return {
@@ -92,6 +106,10 @@ export function modelRequestBody(draft: ProviderModelDraft): {
     supportsAudio: draft.supportsAudio,
     billing: draft.billing,
     dailyRequestCap: free ? Number(draft.dailyRequestCap) : null,
+    ...(draft.mediaInputTokenUpperBound?.trim() ? {
+      mediaInputTokenUpperBound: Number(draft.mediaInputTokenUpperBound), mediaMaxInputBytes: Number(draft.mediaMaxInputBytes),
+      mediaInputCentsPerMillion: Number(draft.mediaInputCentsPerMillion),
+    } : options.clearMedia ? { mediaInputTokenUpperBound: null, mediaMaxInputBytes: null, mediaInputCentsPerMillion: null } : {}),
   };
 }
 

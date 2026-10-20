@@ -59,7 +59,7 @@ export function createOpeningAttemptService(sql: Sql) {
     async get(scope: Scope, id: string) {
       const attempt = await attempts.get(scope, uuidSchema.parse(id));
       if (!attempt) notFound("attempt not found");
-      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId);
+      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId, { attemptId: attempt.id, assessmentDomain: attempt.requirementKey?.startsWith("language:") ? "language" : "math" });
       return {
         attemptId: attempt.id,
         sessionId: attempt.sessionId,
@@ -69,8 +69,10 @@ export function createOpeningAttemptService(sql: Sql) {
     async submit(scope: Scope, id: string, raw: unknown) {
       const input = learningAttemptSubmitInputSchema.parse(raw);
       const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
-      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId);
-      const assistance = resolveAssistance(input.assistance, exposures);
+      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId, { attemptId: attempt.id, assessmentDomain: attempt.requirementKey?.startsWith("language:") ? "language" : "math" });
+      const [reported] = attempt.spanExercise ? await sql`SELECT id FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND attempt_id=${attempt.id} AND payload->'signals' @> '["copied_answer"]'::jsonb LIMIT 1` : [];
+      const assistance = resolveAssistance(reported ? "revealed" : input.assistance, exposures);
       const base = {
         ...input,
         assistance,

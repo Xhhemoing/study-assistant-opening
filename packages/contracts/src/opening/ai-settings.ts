@@ -48,16 +48,24 @@ export const DEFAULT_OPENING_AI_SETTINGS: OpeningAiSettings = {
   routes: { listen: null, hint: null, explain: null, think_together: null },
 };
 
-export const openingModelSnapshotSchema = z.object({
+const openingModelSnapshotBaseSchema = z.object({
   id: modelId,
   providerId: modelId,
   modelName: z.string().min(1).max(200),
   inputCentsPerMillion: z.number().finite().nonnegative(),
   outputCentsPerMillion: z.number().finite().nonnegative(),
+  mediaInputTokenUpperBound: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  mediaMaxInputBytes: z.number().int().positive().max(104_857_600).optional(),
+  mediaInputCentsPerMillion: z.number().finite().nonnegative().optional(),
 }).strict();
+const validMediaPricing = (model: z.infer<typeof openingModelSnapshotBaseSchema>) => {
+  const values = [model.mediaInputTokenUpperBound, model.mediaMaxInputBytes, model.mediaInputCentsPerMillion];
+  return values.every(value => value === undefined) || values.every(value => value !== undefined);
+};
+export const openingModelSnapshotSchema = openingModelSnapshotBaseSchema.refine(validMediaPricing, "Incomplete media pricing");
 export type OpeningModelSnapshot = z.infer<typeof openingModelSnapshotSchema>;
 
-export const openingModelSummarySchema = openingModelSnapshotSchema.extend({
+export const openingModelSummarySchema = openingModelSnapshotBaseSchema.extend({
   label: z.string().min(1).max(120),
   providerLabel: z.string().min(1).max(120),
   availability: z.enum(["available", "missing_key", "budget_disabled", "pricing_missing", "vault_disabled"]),
@@ -67,7 +75,7 @@ export const openingModelSummarySchema = openingModelSnapshotSchema.extend({
   dailyRequestCap: z.number().int().positive().nullable().optional(),
   /** Absent for the server env catalog; "workspace" marks a web-managed custom model. */
   source: z.enum(["server", "workspace"]).optional(),
-});
+}).refine(validMediaPricing, "Incomplete media pricing");
 export type OpeningModelSummary = z.infer<typeof openingModelSummarySchema>;
 export const openingAiSettingsResponseSchema = z.object({
   models: z.array(openingModelSummarySchema).max(32),

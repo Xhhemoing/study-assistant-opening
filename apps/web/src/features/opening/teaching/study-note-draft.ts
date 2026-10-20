@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createBlockId } from "../../editor/local-draft";
 import { EditorApiError, type CreateDocumentInput, type EditorApi } from "../../editor/editor-api";
 import { sourceViewerHref } from "../inbox/source-viewer";
-import { studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
+import { legacyStudyConversationIdentity, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 
 const noteSchema = z.object({
   title: z.string().max(200), text: z.string().max(20_000),
@@ -20,7 +20,23 @@ export function readStudyNote(context: StudyConversationContext): StudyNoteDraft
   const cached = memory.get(key);
   if (cached) return cached;
   try {
-    const raw = sessionStorage.getItem(key);
+    let raw = sessionStorage.getItem(key);
+    if (!raw && context.activityId && context.blockId && (context.attemptId || context.itemVersionId || context.kcMappingVersion !== undefined)) {
+      const legacyKey = `aistudy.study-note.v1:${legacyStudyConversationIdentity(context)}`;
+      const previous = memory.get(legacyKey);
+      if (previous) {
+        const flight = flights.get(legacyKey);
+        const migrated = previous.status === "pending" && !flight ? { ...previous, status: "unknown" as const } : previous;
+        memory.set(key, migrated);
+        if (flight) {
+          flights.set(key, flight);
+          void flight.then(result => { writeStudyNote(context, result); }).finally(() => flights.delete(key));
+        }
+        return migrated;
+      }
+      raw = sessionStorage.getItem(legacyKey);
+      if (raw) sessionStorage.setItem(key, raw);
+    }
     if (raw) {
       let saved: StudyNoteDraft;
       try { saved = noteSchema.parse(JSON.parse(raw)); }
@@ -72,7 +88,7 @@ export function saveStudyNote(context: StudyConversationContext, draft: StudyNot
   const pending = flights.get(key);
   if (pending) return pending;
   const current = readStudyNote(context);
-  if (current.status !== "editing") return Promise.resolve(current);
+  if (current.status !== "editing" || !draft.title.trim() || !draft.text.trim()) return Promise.resolve(current);
   const captured: StudyNoteDraft = { ...draft, status: "pending", storageError: false };
   if (!writeStudyNote(context, captured)) {
     const unsent: StudyNoteDraft = { ...draft, status: "editing", storageError: true };

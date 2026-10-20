@@ -308,3 +308,63 @@ it("runs beforeSend after reserving and releases a rejected pre-send request", a
   expect(repo.unknowns).toEqual([]);
   expect(repo.settled).toEqual([]);
 });
+
+describe("parent interaction budget boundary", () => {
+  it("passes the same durable parent to the real ledger reservation and keeps actual overage", async () => {
+    const { api, repo } = fakeBudget();
+    const parentBudget = { id: "study-turn:1", budgetCents: 1000, maxProviderCalls: 4 };
+    await runBudgetedCall({ ...options, budget: api, provider: { complete: async () => output }, parentBudget, reservedCents: 50, actualCents: () => 80 });
+    expect(repo.reserved[0]).toMatchObject({ parentBudget });
+    expect(repo.settled).toEqual([{ reservationId: "res-1", actualCents: 80 }]);
+    expect(repo.overages[0]).toMatchObject({ actualCents: 80, settledCents: 80 });
+  });
+
+  it("never reserves or sends media without a verifiable model billing bound", async () => {
+    const { api, repo } = fakeBudget();
+    let sent = false;
+    await expect(runBudgetedCall({ ...options, budget: api, parentBudget: { id: "study-turn:1" },
+      provider: { complete: async () => { sent = true; return output; } },
+      input: { ...options.input, imageParts: [{ data: "data:image/png;base64,AAA=", mediaType: "image/png" }] },
+    })).rejects.toMatchObject({ code: "BUDGET_MEDIA_COST_UNBOUNDED" });
+    expect(repo.reserved).toHaveLength(0);
+    expect(sent).toBe(false);
+  });
+
+  it("retains the reservation when a sent request is rejected ambiguously", async () => {
+    const { api, repo } = fakeBudget();
+    await expect(runBudgetedCall({ ...options, budget: api, parentBudget: { id: "study-turn:1" },
+      provider: { complete: async () => { throw new OpeningProviderError("PROVIDER_REQUEST", "ambiguous request", false, true); } },
+    })).rejects.toMatchObject({ code: "PROVIDER_REQUEST" });
+    expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.released).toHaveLength(0);
+  });
+
+  it("does not price invalid provider usage as a free paid-model result", async () => {
+    const { api, repo } = fakeBudget();
+    await expect(runBudgetedCall({ ...options, budget: api, provider: { complete: async () => output }, actualCents: () => Number.NaN,
+      parentBudget: { id: "study-turn:1" },
+    })).rejects.toMatchObject({ code: "BUDGET_INVALID_ACTUAL" });
+    expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.settled).toHaveLength(0);
+  });
+});
+
+it("sends configured media under its byte bound and identifies usage pricing as provisional", async () => {
+  const { api } = fakeBudget();
+  let sent = 0;
+  let settlementMeta: unknown;
+  const snapshot = { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+    mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 10, mediaInputCentsPerMillion: 2 };
+  await runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: snapshot,
+    budget: { ...api, settle: async (_id: string, _cost: number, meta?: unknown) => { settlementMeta = meta; } },
+    provider: { complete: async () => { sent++; return output; } },
+    input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
+  });
+  expect(sent).toBe(1);
+  expect(settlementMeta).toEqual({ costBasis: "media_usage_upper_bound" });
+  await expect(runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: { ...snapshot, mediaMaxInputBytes: 1 },
+    budget: api, provider: { complete: async () => { sent++; return output; } },
+    input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
+  })).rejects.toMatchObject({ code: "BUDGET_MEDIA_INPUT_TOO_LARGE" });
+  expect(sent).toBe(1);
+});

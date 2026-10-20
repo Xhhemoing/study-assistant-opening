@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import type { TransactionSql } from "postgres";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createScopedOpeningSystemQueryReader, createOpeningTeachingContentRepository, readOpeningSystemQueryAuthorization } from "@aistudy/database";
+import { createScopedOpeningSystemQueryReader, createOpeningTeachingContentRepository, readOpeningSystemQueryAuthorization, createLibraryRepository, createCardRepository, createOpeningExamSprintRepository } from "@aistudy/database";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS, DEFAULT_OPENING_AI_SETTINGS, systemQueryRequestSchema, type SystemQueryResult } from "@aistudy/contracts";
 import { runSystemQuery, renderSystemQuery } from "@aistudy/ai";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -78,7 +79,7 @@ describe("owned read-only system query against PostgreSQL", () => {
       ${contextSourceRefsIncluded(fixture.sql, fixture.scope.workspaceId, refs, true)} AS backup`;
     expect(admission).toMatchObject({ ai: false, backup: true });
   });
-  it("executes all eight tools in enforced read-only transactions with zero row writes", async () => {
+  it("executes every registered tool in enforced read-only transactions with zero row writes", async () => {
     const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
     let checked = 0;
     const observedSql = new Proxy(fixture.sql, { get(target, property, receiver) {
@@ -95,10 +96,38 @@ describe("owned read-only system query against PostgreSQL", () => {
     } });
     const reader = createScopedOpeningSystemQueryReader(observedSql, fixture.scope);
     for (const name of systemQueryRequestSchema.options.map(option => option.shape.name.value)) {
-      const args = ["learning", "recommendation", "teaching"].includes(name) ? { courseId: f.courseId } : name === "materials" ? { sourceId: f.sourceId } : {};
+      const args = ["learning", "recommendation", "teaching"].includes(name) ? { courseId: f.courseId } : name === "materials" ? { sourceId: f.sourceId } : name === "explain_decision" ? { decisionId: randomUUID() } : {};
       await reader(systemQueryRequestSchema.parse({ name, arguments: args }), signal());
     }
-    expect(checked).toBe(16);
+    expect(checked).toBe(systemQueryRequestSchema.options.length * 2);
+  });
+  it("reads persisted note/card metadata without releasing their bodies and rechecks source versions", async () => {
+    const f = await learningAttemptFixture(fixture);
+    const note = await createLibraryRepository(fixture.sql).createDocument({ workspaceId: fixture.scope.workspaceId, title: "线性张成笔记",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "PRIVATE_NOTE_SOLUTION" } }] });
+    await fixture.sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${note.id},${fixture.scope.workspaceId},${fixture.sql.json([{ sourceId: f.sourceId, sourceVersion: 1 }])})`;
+    const card = await createCardRepository(fixture.sql).createCard({ ...fixture.scope, front: "PRIVATE_FRONT", back: "PRIVATE_CARD_ANSWER", sourceDocumentId: note.id, courseId: f.courseId });
+    const notes = await read({ name: "notes", arguments: { query: "张成" } });
+    const cards = await read({ name: "cards", arguments: { courseId: f.courseId } });
+    expect(notes.data[0]).toMatchObject({ id: note.id, title: "线性张成笔记", revision: 1, contentWithheld: true });
+    expect(cards.data[0]).toMatchObject({ id: card.id, contentVersion: 1, answerWithheld: true });
+    expect(notes.sourceRefs).toEqual([{ sourceId: f.sourceId, sourceVersion: 1 }]);
+    expect(JSON.stringify([notes, cards])).not.toMatch(/PRIVATE_NOTE_SOLUTION|PRIVATE_CARD_ANSWER|PRIVATE_FRONT/);
+    await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
+    expect(await read({ name: "notes", arguments: {} })).toMatchObject({ status: "unknown", data: [] });
+    expect(await read({ name: "cards", arguments: {} })).toMatchObject({ status: "unknown", data: [] });
+  });
+  it("reads persisted sprint counts and learner-state versions without becoming a repair or grading path", async () => {
+    const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
+    await createOpeningExamSprintRepository(fixture.sql, EXAM_SPRINT_PACK).act(fixture.scope, { action: "configure", examDate: "2026-11-01", dailyMinutes: 30, clientKey: randomUUID() });
+    const sprint = await read({ name: "exam_sprint", arguments: {} });
+    expect(sprint).toMatchObject({ status: "partial", data: [{ examDate: "2026-11-01", attemptCount: 0, completedCount: 0, basis: "stored_snapshot" }] });
+    expect(JSON.stringify(sprint)).not.toContain(EXAM_SPRINT_PACK.questions[0]!.explanation);
+    const state = await read({ name: "learner_state", arguments: { courseId: f.courseId, limit: 1 } });
+    expect(state.data[0]).toMatchObject({ stateVersion: expect.any(String), dataAsOf: expect.any(String) });
+    expect(state.sourceRefs).toEqual([{ sourceId: f.sourceId, sourceVersion: 1 }]);
+    expect(await read({ name: "explain_decision", arguments: { decisionId: randomUUID() } })).toMatchObject({ status: "unknown", reason: "no_data", data: [] });
   });
   it("reads courses and validated goal fields, caps pagination and rejects a forged server scope", async () => {
     const id = randomUUID();

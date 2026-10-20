@@ -51,7 +51,14 @@ function read(courseId: string, query: Record<string, string> = {}, auth = cooki
 async function page(courseId: string, query: Record<string, string> = {}) {
   const response = await read(courseId, query);
   expect(response.status).toBe(200);
-  return courseLearningHistoryPageSchema.parse(await response.json());
+  const history = courseLearningHistoryPageSchema.parse(await response.json());
+  expect(history.exposureReceipts).toHaveLength(history.observations.length);
+  expect(response.headers.get("x-study-exposure-receipts")).toBe(history.exposureReceipts!.map(receipt => receipt.id).join(","));
+  for (const receipt of history.exposureReceipts!) {
+    expect(receipt.origin).toBe("history_solution");
+    expect(receipt.releasedAt).not.toBeNull();
+  }
+  return history;
 }
 
 beforeAll(async () => {
@@ -73,7 +80,7 @@ afterAll(async () => {
 describe("GET /api/opening/courses/[id]/observations/history", () => {
   it("returns an owned empty page, authenticates and conceals foreign courses", async () => {
     const courseId = await createCourse();
-    expect(await page(courseId)).toEqual({ observations: [], snapshotRevision: 0, nextCursor: null, totalCount: 0, visibilityChanged: false });
+    expect(await page(courseId)).toEqual({ observations: [], exposureReceipts: [], snapshotRevision: 0, nextCursor: null, totalCount: 0, visibilityChanged: false });
     expect((await read(courseId, {}, "")).status).toBe(401);
     expect((await read(courseId, {}, foreignCookie)).status).toBe(404);
     expect((await read(randomUUID())).status).toBe(404);

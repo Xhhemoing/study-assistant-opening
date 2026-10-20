@@ -26,6 +26,7 @@ function createService(opts?: {
       updatedAt: "2026-09-20T00:00:00.000Z",
     })),
     loadContinuityTurns: vi.fn(async () => []),
+    releaseReturnedTurnIds: vi.fn(async () => undefined),
     appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
     findTurnByClientKey: vi.fn(async () => null),
   };
@@ -386,4 +387,59 @@ describe("tutor-service Package C thin pick", () => {
       expect.objectContaining({ sourceIds: explicit }),
     );
   });
+});
+
+
+it("releases only resume messages that actually fit in the returned history", async () => {
+  const { service, conversations } = createService();
+  const turns = Array.from({ length: 45 }, (_, index) => ({ id: `turn-${index}`, role: "assistant" as const, text: `message ${index}`, citations: [] }));
+  conversations.loadContinuityTurns.mockResolvedValueOnce(turns);
+  const resumed = await service.resumeConversation(scope, CONVERSATION);
+  expect(resumed.boundedHistory).toHaveLength(40);
+  expect(conversations.releaseReturnedTurnIds).toHaveBeenCalledWith(scope, CONVERSATION, turns.slice(5).map(turn => turn.id));
+});
+
+it("does not release resume help when sticky selection validation refuses the response", async () => {
+  const { service, conversations } = createService();
+  conversations.loadContinuityTurns.mockResolvedValueOnce([{ id: "unreleased-turn", role: "assistant", text: "a hint", citations: [] }]);
+  await expect(service.resumeConversation(scope, CONVERSATION, { sticky: { sourceIds: [S], currentPage: 999, chunkId: null } })).rejects.toMatchObject({ code: "page_not_in_sources" });
+  expect(conversations.releaseReturnedTurnIds).not.toHaveBeenCalled();
+});
+
+describe("explicit source selection intent", () => {
+  it("does not load the course pool or source chunks for no-material discussion", async () => {
+    const listReady = vi.fn(async () => [S]);
+    const f = createService({ courseId: COURSE, listReadySourceIdsForCourse: listReady });
+    await f.service.submitTurn(scope, { conversationId: CONVERSATION, text: "general discussion", sourceIds: [], sourceSelection: "none", mode: "listen", clientKey: "no-material-intent", privacy: "saved" });
+    expect(listReady).not.toHaveBeenCalled();
+    expect(f.sourceChunks.listForSources).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ sourceIds: [] }));
+  });
+  it("keeps an explicit selected set instead of adding other course sources", async () => {
+    const listReady = vi.fn(async () => [S, OTHER_SOURCE]);
+    const f = createService({ courseId: COURSE, listReadySourceIdsForCourse: listReady });
+    await f.service.submitTurn(scope, { conversationId: CONVERSATION, text: "selected", sourceIds: [S], sourceSelection: "selected", mode: "listen", clientKey: "selected-intent-key", privacy: "saved" });
+    expect(listReady).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ sourceIds: [S] }));
+  });
+  it.each([{ sourceSelection: "selected", sourceIds: [] }, { sourceSelection: "none", sourceIds: [S] }, { sourceSelection: "auto", sourceIds: [S] }, { sourceSelection: "none", sourceIds: [], currentPage: 1 }, { sourceSelection: "none", sourceIds: [], contextAnchor: { sourceId: S } }, { sourceSelection: "none", sourceIds: [], contextAnchor: { attemptId: S } }, { sourceSelection: "none", sourceIds: [], contextAnchor: { page: 1 } }])("rejects contradictory material intent before writing: %j", async selection => {
+    const f = createService();
+    await expect(f.service.submitTurn(scope, { conversationId: CONVERSATION, text: "invalid", mode: "listen", clientKey: "invalid-intent-key", privacy: "saved", ...selection })).rejects.toThrow();
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+});
+
+it("queues default-answer status reads without consulting selected PDFs", async () => {
+  const f = createService({ courseId: COURSE });
+  const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
+  await service.submitTurn(scope, { conversationId: CONVERSATION, purpose: "answer", text: "高数进度怎么样", sourceIds: [S], mode: "listen", privacy: "saved", clientKey: "automatic-status" });
+  expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: "query", querySystem: true, sourceIds: [], learningSessionId: null }));
+  expect(f.sourceChunks.listForSources).not.toHaveBeenCalled();
+});
+it("routes a continued saved query from prior user intent rather than assistant prose", async () => {
+  const f = createService({ courseId: COURSE });
+  f.conversations.loadContinuityTurns.mockResolvedValue([{ role: "user", text: "高数进度怎么样", citations: [] }] as never);
+  const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
+  await service.submitTurn(scope, { conversationId: CONVERSATION, text: "那练习情况呢", sourceIds: [], mode: "listen", privacy: "saved", clientKey: "followup-status" });
+  expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
 });

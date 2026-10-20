@@ -20,6 +20,7 @@ interface EvidenceIdentity {
 export interface EvidenceObservation extends EvidenceIdentity {
   observationId?: string | null;
   courseId?: string | null;
+  assessmentDomain?: "language" | "math" | "unknown";
   requirementKey?: string | null;
   /** Server times in epoch milliseconds; missing historical times remain unknown. */
   startedAt?: number | null;
@@ -30,6 +31,9 @@ export interface EvidenceObservation extends EvidenceIdentity {
 }
 
 export interface EvidenceHelpExposure {
+  supportDomain?: "language" | "math" | "unknown";
+  /** Determined from transaction-serialized server revisions, never client clocks. */
+  serverOrder?: "before_answer" | "after_answer";
   attemptId?: string | null;
   problemId?: string | null;
   level: "hinted" | "revealed";
@@ -43,6 +47,8 @@ export interface EvidenceHelpExposure {
 }
 
 export interface EvidenceEligibilityContext {
+  /** Learner reports about the original answer conditions; they never change its mathematical verdict. */
+  selfReportedAnswerConditions?: { copiedAnswer: boolean; reportedGuess: boolean };
   serverEvaluation?: ServerEvaluation | null;
   /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
   examAttempt?: {
@@ -84,6 +90,9 @@ export interface EvidenceEligibilityContext {
     /** Earliest permissible start, supplied by the protocol owner. No wall-clock inference. */
     earliestAt?: number | null;
     priorAnswerPolicy: "require_unseen_problem" | "allow_repeated_problem" | "unknown";
+    /** Tracked in-product support; never proof that no offline revision happened. */
+    baselineEstablished?: boolean;
+    intervalExposure?: { from: number; to: number; recordedCount: number; recordedPracticeCount?: number; complete: boolean };
   } | null;
 }
 
@@ -95,6 +104,8 @@ export type EvidenceEligibilityReasonCode =
   | "help_association_unknown"
   | "help_order_unknown"
   | "help_before_submission"
+  | "self_reported_copied_answer"
+  | "self_reported_guess"
   | "declared_help"
   | "assistance_unknown"
   | "prior_answer_exposure"
@@ -126,6 +137,7 @@ export type EvidenceEligibilityReasonCode =
   | "version_changed_needs_check"
   | "version_unavailable"
   | "version_privacy_excluded"
+  | "delayed_baseline_not_established"
   | "delayed_protocol_incomplete"
   | "delayed_protocol_mismatch"
   | "delayed_check_too_early"

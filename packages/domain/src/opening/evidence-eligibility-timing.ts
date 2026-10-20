@@ -38,6 +38,8 @@ export function evaluateAssistance(
   };
   for (const help of history?.exposures ?? []) {
     if (help.delivered === false) continue;
+    if (help.supportDomain === "language" && observation.assessmentDomain !== "language") continue;
+    if (help.serverOrder === "after_answer") continue;
     // V2-13: concept instruction must not elevate item assistance / prior answer.
     if ((help.kind ?? "hint") === "instruction") continue;
     const sameAttempt = help.attemptId === observation.attemptId;
@@ -45,7 +47,7 @@ export function evaluateAssistance(
     const otherProblem = Boolean(help.problemId && help.problemId !== observation.problemId);
     if (otherProblem && !sameAttempt && !evaluationFeedback) continue;
     // Feedback after this answer was captured never changes its qualification.
-    if (knownTime(help.deliveredAt) && knownTime(answerRecordedAt) && help.deliveredAt > answerRecordedAt) continue;
+    if (!help.serverOrder && knownTime(help.deliveredAt) && knownTime(answerRecordedAt) && help.deliveredAt > answerRecordedAt) continue;
     if (help.delivered == null) {
       markUnknown("help_delivery_unknown");
       continue;
@@ -54,7 +56,7 @@ export function evaluateAssistance(
       markUnknown("help_association_unknown");
       continue;
     }
-    if (!knownTime(help.deliveredAt) || !knownTime(answerRecordedAt) || help.deliveredAt === answerRecordedAt) {
+    if (!help.serverOrder && (!knownTime(help.deliveredAt) || !knownTime(answerRecordedAt) || help.deliveredAt === answerRecordedAt)) {
       markUnknown("help_order_unknown");
       continue;
     }
@@ -65,7 +67,7 @@ export function evaluateAssistance(
       continue;
     }
     if (sameAttempt) {
-      if (knownTime(startedAt) && help.deliveredAt < startedAt) {
+      if (!help.serverOrder && knownTime(startedAt) && knownTime(help.deliveredAt) && help.deliveredAt < startedAt) {
         markUnknown("help_order_unknown");
       } else {
         assisted = true;
@@ -74,7 +76,7 @@ export function evaluateAssistance(
         // association needed to establish a stronger current-attempt exposure.
         if (timingKnown && (help.level === "revealed" || assistance !== "revealed")) assistance = help.level;
       }
-    } else if (knownTime(startedAt) && help.deliveredAt < startedAt) {
+    } else if (knownTime(startedAt) && knownTime(help.deliveredAt) && help.deliveredAt < startedAt) {
       // A new attempt does not erase familiarity; it is distinct from help in this attempt.
       if (help.level === "revealed") {
         priorAnswer = "yes";
@@ -95,6 +97,7 @@ export function evaluateDelayedCheck(
   reasons: Reasons,
 ): EvidenceEligibilityValue {
   const qualifications = [...prerequisites];
+  if (protocol?.baselineEstablished === false) { qualifications.push("unknown"); reasons.add("delayed_baseline_not_established"); }
   if (prerequisites.includes("no")) reasons.add("delayed_prerequisite_not_met");
   else if (prerequisites.includes("unknown")) reasons.add("delayed_prerequisite_unknown");
   if (!protocol?.protocolId || !protocol.attemptId || !knownTime(protocol.earliestAt)) {

@@ -31,6 +31,13 @@ export function createSystemQueryRoute(question: string, clock: SystemQueryClock
           || (request.arguments.courseId !== courseId && !contains(request.arguments.courseId)))) return deny("请先选择一门课程，或明确课程名称；当前不会替你猜选课程。");
       if (request.name === "materials") {
         if ((focus?.sourceIds?.length ?? 0) > 1) return deny("已选择多份材料，请先选择一份材料再定位。");
+        if (focus?.courseId && request.arguments.courseId === focus.courseId && !focus.sourceId
+          && !request.arguments.sourceId && !request.arguments.query && request.arguments.sourceVersion === undefined
+          && request.arguments.physicalPage === undefined) {
+          // A bound-course listing needs no unique source; preserve later ambiguity/truncation refusals.
+          if (intent.kind === "materials" && intent.blocked && !intent.query && clarification === intent.clarification) clarification = undefined;
+          return request;
+        }
         if (focus?.sourceId) {
           if (request.arguments.sourceId !== undefined && request.arguments.sourceId !== focus.sourceId) return deny("材料对象与当前指定材料不一致，请重新选择材料。");
           if (focus.sourceVersion !== undefined && request.arguments.sourceVersion !== undefined && request.arguments.sourceVersion !== focus.sourceVersion) return deny("材料版本与当前指定版本不一致，请重新选择材料版本。");

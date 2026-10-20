@@ -74,7 +74,7 @@ it("shows the latest result and an actionable next step before historical eviden
   const result = html.slice(0, html.indexOf("<details"));
   expect(result).toContain("最近观察到独立完成");
   expect(result).toContain("换一道题独立完成，继续确认");
-  expect(result).toContain('href="#course-practice"');
+  expect(result).toContain('study?mode=practice&amp;skillLabel=fractions&amp;requirementKey=requirement-1');
   expect(result).not.toContain("核验错误");
   expect(html).toContain("更早的记录中有 2 条核验错误");
   expect(html).toContain("1 条记录尚未核验");
@@ -109,7 +109,7 @@ it("distinguishes the full recent count from representative evidence details", (
   expect(html).toContain("近期结果依据最近的 201 条原始作答");
   expect(html).toContain("1 条代表证据");
   expect(html).toContain("最近代表观察 1");
-  expect(html).toContain('href="#course-practice"');
+  expect(html).toContain('study?mode=practice&amp;skillLabel=fractions&amp;requirementKey=requirement-1');
 });
 
 it("uses the original recent ID count for a legacy response", () => {

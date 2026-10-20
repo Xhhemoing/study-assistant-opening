@@ -39,7 +39,9 @@ test.describe("opening upload", () => {
       await expect(sourceRow).toBeVisible();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
       await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
-      const originalLink = page.getByRole("link", { name: "打开原件 v0", exact: true });
+      const reader = page.getByRole("dialog", { name, exact: true });
+      await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
+      const originalLink = reader.getByRole("link", { name: "打开原件 v0", exact: true });
       await expect(originalLink).toBeVisible();
       const download = await context.request.get((await originalLink.getAttribute("href"))!);
       expect(download.status()).toBe(200);
@@ -47,6 +49,7 @@ test.describe("opening upload", () => {
       await page.reload();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
       await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
+      await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
       await expect(originalLink).toBeVisible();
     } finally {
       await context.close();

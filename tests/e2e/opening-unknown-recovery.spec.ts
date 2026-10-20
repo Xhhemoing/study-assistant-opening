@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "./fixtures";
 import type { TurnInput, TurnRecord } from "@aistudy/contracts";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
+import { buildAiReadinessItems } from "../../packages/ai/src/opening/ai-readiness";
 
 const conversationId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -10,6 +11,12 @@ const question = "请给我一个关于导数的提示";
 
 /** Transport fixtures exercise UI recovery without dispatching a model or changing its ledger. */
 async function unknownConversation(page: Page, { newerAnswerDuringPoll = false, changeDuringRecovery = false } = {}) {
+  // Recovery transport assumes a configured text tutor; no real model is dispatched.
+  await page.route("**/api/opening/ai-readiness", route => route.fulfill({ json: {
+    items: buildAiReadinessItems({ keyedModelCount: 1, pricingConfigured: true, effectiveCapCents: 100,
+      usedCents: 0, remainingCents: 100, reconciledUnknownCount: 0, visionAvailable: false,
+      parserOcrReady: false, workerOk: true, workerDetail: "Recovery transport fixture", availableModelCount: 1 }),
+  } }));
   const submitted: TurnInput[] = [];
   let conversationCreates = 0;
   let jobReads = 0;
@@ -96,8 +103,9 @@ test("unknown recovery waits from the server timestamp across refresh, then only
   await retry.click();
   await page.clock.runFor(16);
   await expect(page.getByRole("textbox", { name: "消息输入" })).toHaveValue(question);
-  await expect(page.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
   await expect(page.getByRole("textbox", { name: "消息输入" })).toBeFocused();
+  await page.locator("summary").filter({ hasText: "保存对话 · 设置" }).click();
+  await expect(page.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
   expect(fixture.submitted).toHaveLength(0);
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => fixture.submitted.length).toBe(1);

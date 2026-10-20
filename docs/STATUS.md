@@ -2,7 +2,7 @@
 
 每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
 
-**更新：** 2026-10-17
+**更新：** 2026-10-19
 **目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
 
 ## 主干
@@ -10,15 +10,21 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 发布分支已按顺序合入 #65（`b70ae56`）及 #64（`40a4be7`），两者最新 head 的完整 CI 均通过，迁移末号0072；加固 #66 使用0073，最终整合提交仍须完整 CI。Hermes 当前部署 SHA、迁移与开关状态未现场核实。
+- 当前发布主干为 `c5cb6424`（#75，包含 #74、Study 工作区与自动记录查询）；迁移末号 0081。#75 最终 head 的完整 CI 39359526594 成功；合并后的主干 CI 39361727094 查询时仍运行，发布必须以目标 SHA 的 push CI 成功为准。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| 首次学习与发布保护（2026-10-19） | Codex | [#76](https://github.com/Xhhemoing/study-assistant-opening/pull/76) · `codex/first-learning-20261019` | 首启意图→真实活动/幂等任务/未接受草稿已实现，保留旧设置与隔离草稿；独立审查的任务恢复/跨午夜问题已修。86项单元、7项真实PG、3项新handler通过，Web/Database/Worker及测试类型、lint/边界通过；旧handler因本地缺环境503未执行5项，补环境复查被自动策略拦截。CI39353682711集成1075通过/1失败，已修普通任务空关联键，最新检查见PR。发布保护已启用并回读：PR+strict既有CI、管理员同限、禁止强推/删除。Hermes只读核实服务运行、记录SHA6c4a4ea8/迁移0074，PG16可列备份目录，恢复及真实IP限流待验证；未部署。Graphify AST已扫，缺SQL解析器/重建未完成。浏览器及真实学习待用户，见[首启与试用](plans/2026-10-19-first-learning.md)；Study整合由另一聊天#75负责 |
+| 首次学习与发布保护（2026-10-19） | Codex | [#76](https://github.com/Xhhemoing/study-assistant-opening/pull/76) · `codex/first-learning-20261019` | 已整合发布主干 c5cb6424，仅 STATUS 冲突且两侧记录保留；66项最近单元、Web/Database类型通过，原ea66896e完整CI39355597549成功，整合head须重新通过CI。首启、任务恢复、跨日幂等与旧设置保护保留，无新增migration/开关。Hermes本轮直连核实Web/Worker/Nginx运行，发布记录6c4a4ea8；磁盘约1.27GiB低于既有4GiB发布要求，未部署。备份恢复与真实IP限流待验证，用户浏览器/真实学习待验收；见[首启与试用](plans/2026-10-19-first-learning.md) |
+| 2026-10-19 GitHub Study 链路整合与清理 | Codex | [#74](https://github.com/Xhhemoing/study-assistant-opening/pull/74) 已合；整合 [#75](https://github.com/Xhhemoing/study-assistant-opening/pull/75) | 用户限定本轮优化与Study链路，历史草稿#46/#51/#63保留。#71、内容前置fe24bd8、#73已整合；修复查询兼容、追问来源隔离、检索评估、历史曝光响应契约及旧夹具。1a321316的CI中1151项集成（1既有跳过）和291项handler均通过；浏览器36通过/5跳过/4个旧夹具失配，已维护折叠入口及显式就绪transport，保留恢复安全和原件字节断言，未本地运行浏览器。完整CI和合并结果以PR75最终head检查为准。0075–0081已在隔离PG迁移，回滚见查询架构与升级计划；未部署，待用户浏览器验收。已清理17个远端/2个本地已合分支，独有提交者保留 |
+| UI 审计逐项整改 | Codex | `codex/study-ui-audit-fixes-20261019` | D01–D10、IL01–IL08 的上下文/资料意图/临时分支、阅读适宽与紧凑问答、入口与视觉层级已编码；392 项相关回归分批通过，Web 类型、改动 lint、边界及生产构建通过；未合并/部署，浏览器/窄屏/真实模型待用户复验。基于本地助理升级父提交；不覆盖另会话远端导航/查询成果。见 [逐项记录](operations/ui-audit-remediation-2026-10-19.md) |
+| 有效内容展示面积第二轮 | Codex | `codex/study-content-space-round2` | 基于b131cc9补齐阅读器信息合行、紧凑输入设置、练习开始动作置顶、资料行密度与确认空队列后收起；190项相关回归、最终14项重检、Web类型/lint/边界通过；Web生产构建通过。原31条历史保持，浏览器复验未执行，见同一[整改记录](operations/ui-audit-remediation-2026-10-19.md) |
+| Study 助理升级最终计划 | Codex + GPT-6.1 Sol high 子代理 | `codex/study-upgrade-20261019` · [#71](https://github.com/Xhhemoing/study-assistant-opening/pull/71) | 全部可实现板块已分部分本地提交并独立复核：0075–0081、锚点/交付、父预算、精确span三模式、状态/Decision/影子比较、意图、Composer/13读工具/6提案、39表恢复及检索评测。662文件5059单元/契约、类型、lint、边界及Web/worker构建通过。最新源码推送被自动审批拒绝，待明确授权；#71仍非完整实现，真实PG/handler完整CI未完成。未合并、未部署；浏览器与真实学习效果待验收，见 [计划](plans/2026-10-19-study-assistant-upgrade.md) |
 | 2026-10-19 FACDA 恢复分析与等待体验优化 | Codex | `codex/latest-code-analysis-20261019` | 基于本地6c4a4ea8优化登录成功后的防重复提交/跳转状态与普通链接恢复、Today鉴权后并行读取及加载提示。52项定向回归通过（既有时区测试首次动态导入触及5s，单次15s超时复查3项通过，未改默认配置）；Web/改动测试类型、改动lint通过。附件facda242b仅证实认证与2243.9s冷编译完成，页面/自动查询GUI/ST001–004仍待用户验收，未认定OOM或完成同版本复现。复验步骤见[发布操作](operations/opening-release.md#facda-恢复材料的结论与复验2026-10-19)。Graphify已执行AST更新，但图谱重建未完成已停止，缺SQL解析器；本轮改动随本次本地提交保存；未push/部署 |
 | Study 独立回归修复 ST-001–004 | Codex | [#68](https://github.com/Xhhemoing/study-assistant-opening/pull/68) | c283e78 经完整 CI 39206856601 和主线程独立复核后，已合入 feat/opening-release（b140d548）；四项独立缺陷修复不等于新架构验收。dc792e0/ce4de2a 尚未从合法可见仓库/refs/制品取得，不宣称源码丢失。未部署 |
+| Study 自动受限读取 | Codex | [#73](https://github.com/Xhhemoing/study-assistant-opening/pull/73) · `codex/automatic-records-refinement-20261019`，基于 fe24bd8 | 原补丁及4228253已按完全相同源码树同步为0964837。继续优化每轮工具最小化、历史失效续问澄清、决策ID约束、课程标题与日期分离、完整日期token及跨月/闰年边界，修正集成夹具写死“明天”。246项相关单元通过；本轮AI/Worker/Web类型与改动lint通过。新增真实PG回归交现有CI执行，完整CI以PR当前head为准；本地无数据库服务，真实模型/用户浏览器未验收。未合并/部署，开关默认0不变。[查询架构](architecture/STUDY_SYSTEM_QUERY.md) |
+| Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89修复五项P2及请求/结果工具配对，完整CI39216797557成功。后续接保存/临时聊天与显式开关（默认0），绑定用途/owner grant、核验完整祖先来源；只查元数据，不发起模型请求。含0074与临时24h来源元数据，回滚先停/取消遗留查询再启旧worker并保留DDL。相关222单元及补跑35项、60真实PG（含10聊天/竞态）、4HTTP、七包类型和改动lint通过；#70初轮CI两项旧workspace mock已补，terminal15项回归通过；独立review/新head完整CI待收口；[边界与用户验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。不等于26项新架构或单元三模式完成；原生模型C1/C2、release/ack、M4试验与用户浏览器待完成，无生产操作 |
 | Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89完整CI39216797557成功。#70 d5c4746b完整CI39228165671成功，F1/F2/F3获主侧独审；真实Web+Worker隔离进程三配置28项HTTP断言通过，无真实模型调用。主侧新构建浏览器已验保存恢复/临时消失/临时存笔记制卡禁用、日期与对象消歧和adaptive0/1、query0矩阵，发现证据链接不可点击；本轮修复保留服务端回执证据，仅确切授权的已知应用只读入口可链接，chatProse=0/1均提供入口，100相关单元、Web类型与改动lint通过，增量CI及主侧真实浏览器复验待收口。含0074与临时24h来源元数据，回滚先停/取消查询再启旧worker并保留DDL。[边界与验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。默认有限规则查询，不等于26项新架构完成；真实gateway/C1/C2、release/ack、M4受控试用仍待，MinIO本地镜像拉取unauthorized未绕过，无生产操作 |
 | 专注学习界面改版 P0–P2 | Codex + 独立交叉审查 | [#67](https://github.com/Xhhemoing/study-assistant-opening/pull/67) · `codex/focused-learning-ui` | 编码已补齐：课程断点、固定版本资料阅读、练习草稿保留/另开/切回、完整教学单元与统一工具、关联真实作答的提问/笔记、矩阵平面概念课及真实迁移题。102 文件 847 项整合单元、最终 126 项定向回归、Web/34 份测试/E2E 类型、94 文件 lint、边界检查及 worker/Web 生产构建通过；无新迁移或依赖。已维护旧 E2E；最新 CI 暴露的 Today C5 旧断言已按默认收起工具语义修正，37 项最近回归通过。用户已授权合并，完整 CI 与合并状态见 #67；未部署，用户交互与真实学习效果待验收 |
 | 深度审计按板块复核与修复 | Codex + 独立交叉审查 | [#66](https://github.com/Xhhemoing/study-assistant-opening/pull/66) · `codex/audit-hardening` | 已同步实际合并的#65/#64；0073保留0070–0072，公开原文接入统一配额，迁移前停旧worker并取消待重启；跨协议回退legacy持久暂停worker，返回降级，部署/身份故障注入检查通过。整合真实PG已通过；队列spike监听竞态已修并通过隔离真实Redis。最终提交完整CI须以#66当前检查为准，不能用旧head代替。生产部署、可信代理、分支保护及用户验收未完成，详见[审议与欠项](operations/audit-remediation.md) |
@@ -36,16 +42,10 @@
 
 ## 下一步（按顺序）
 
-1. #56–#60 已合入，最终主干 `cb5a68c`、完整CI 38911719890 成功。恢复 Hermes 部署连接后核实 SHA/迁移、备份；#59 含既有 0065 可空列迁移，运行新代码前先迁移。以 `OPENING_ADAPTIVE_PLANNING=0` 部署，用户决定何时开 1；当前尚未执行线上操作。回滚应用时保留 0065 可空列及已有要求归属。发布/验收见 `docs/operations/adaptive-copilot-release-checklist.md`。
-2. 用户浏览器验收 + 3 天自用：一键配置 → 开始此项 → 主讲内容 → 试一试作答与核对 → 结束与小结 → 复测/卡片；记录编译成功率、「待核对」比例、花费，以及登录后“侧栏卡住”是否复现。
-3. 按用户本轮授权，由Astra研究、Codex编写，执行 `docs/plans/2026-10-16-learning-loop-remaining-plan.md`。S1–S7已实现，完成当前整合提交真实PG/handler和完整CI后合并#62。I2/BKT共享字段由另一会话负责；合并前协调迁移编号，教练自动接受仍不启用。
-4. 大问题方案：
-   - A 规划 Agent（等两周自用数据）：模型看不到任务/计划/课表、没有工具和多步循环、排期纯规则 → 只读工具 + 只出草稿的写工具（复用 PlanDraft 接受/拒绝、`planDay` 排时段、`runBudgetedCall` 计预算）；聊天内显示计划卡；教练模式持久化并接 `canReorderTask`。
-   - B 首次启动：正式版登录后不进 onboarding；onboarding 不收集意图；“开始学习”是固定摘要空记录；无 planning_settings 时没有计划草稿 → 空工作区对话式首启（学什么/何时考/有无材料），写入默认规划设置与场景预设生成首批任务，AI 不可用时降级到笔记/材料路径。
-   - C 安全（小，可与第 3 步并行）：`/api/opening/health` 无鉴权现场探测待有部署连接时核实；发布脚本已移除 root 密码回退与 sshd 自动修改。
-5. S3 内联 `jw:` 块：自用中出现“这里需要图”的实例再做。
-6. 暂缓：E2 AI 判分、BKT 影子运行（先补技能身份与首次作答字段，见 R10）。
-
+1. 完成 #76 与最新发布主干整合，待其完整 CI 成功后合并；发布前再核实合并 SHA 的 push CI。历史实现行保留原时点记录，不能据旧“待合并/保护未启用”重复开发。
+2. Hermes 发布：先解决磁盘空间不足，核对实际制品、隔离备份恢复、可信代理及真实 IP 限流；保留当前应用、可回退版本和备份。按既有受管流程部署 0075–0081，不改变自适应/查询等功能开关，不降低门禁。0081 旧代码不兼容时，先停新 worker 与学习写入，保留 DDL 和学习数据；详见 Study 升级计划。
+3. 用户浏览器与真实学习验收：/onboarding → /opening/today → 同一活动的学习/作答/小结 → 至少72h后独立复测。记录生成成功率、待核对原因、实际费用、等待时间和断点恢复；未验收不标通过。
+4. 按实测等待时间选择性能切片；目标驱动首启已有 #76，不另开重复实现。规划 Agent、多步写工具与扩展自动判分等实际自用反馈后再决定。
 ## 负责人已定（2026-10-13）
 
 - 0060 migration 随 #21 合入：有重复键时迁移报错并列出 job，不删数据；回滚 `DROP INDEX opening_jobs_retest_accept_key_uidx`。

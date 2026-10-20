@@ -56,6 +56,7 @@ export function freeMinutes(blocks: readonly TimeBlock[]): number {
 export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   blocks: PlannedBlock[];
   unscheduledTaskIds: string[];
+  unscheduledReasons: Array<{ taskId: string; reason: string }>;
   adaptive: AdaptiveDraftInput;
 } {
   const { tasks, yesterdayAccepted, date, timeZone, now } = input;
@@ -130,6 +131,7 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
       return reason ? { ...block, reason: reason.label } : block;
     }),
     unscheduledTaskIds: planned.unscheduledTaskIds,
+    unscheduledReasons: planned.unscheduled,
     adaptive: {
       suggestedTasks: suggestions,
       reasons: ranked.reasons,

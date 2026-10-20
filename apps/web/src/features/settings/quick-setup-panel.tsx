@@ -4,6 +4,7 @@ import { openingAiSettingsResponseSchema, type OpeningAiSettingsResponse } from 
 import { Check, LoaderCircle, WandSparkles } from "lucide-react";
 import Link from "next/link";
 import { useRef, useState } from "react";
+import { ProviderMediaBudgetFields } from "./provider-media-budget-fields";
 import { ui } from "../opening/design/ui";
 import { effectiveTaskRoutes } from "./ai-settings-model";
 import { FREE_TIER_NOTICE } from "./provider-settings-model";
@@ -52,6 +53,7 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
         <label className="block space-y-1.5"><span className={ui.label}>输出价格（分 / 百万 token）</span>
           <input className={ui.input} inputMode="decimal" value={draft.outputCentsPerMillion} placeholder={free ? "免费额度可留空，按 0 记账" : "以供应商公布价格为准"} onChange={event => onChange({ ...draft, outputCentsPerMillion: event.target.value })} /></label>
       </div>
+      <ProviderMediaBudgetFields draft={draft} onChange={patch => onChange({ ...draft, ...patch })} />
       {free ? <>
         <label className="block space-y-1.5"><span className={ui.label}>每日请求上限</span>
           <input className={ui.input} inputMode="numeric" value={draft.dailyRequestCap} onChange={event => onChange({ ...draft, dailyRequestCap: event.target.value })} /></label>

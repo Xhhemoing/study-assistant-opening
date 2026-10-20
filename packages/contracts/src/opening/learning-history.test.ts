@@ -28,3 +28,12 @@ it("permits 200 observations and rejects a 201-row response", () => {
   expect(courseLearningHistoryPageSchema.safeParse({ ...page, observations: Array.from({ length: 200 }, () => observation) }).success).toBe(true);
   expect(courseLearningHistoryPageSchema.safeParse({ ...page, observations: Array.from({ length: 201 }, () => observation) }).success).toBe(false);
 });
+it("accepts validated release receipts without loosening the history response", () => {
+  const receipt = { id: courseId, releaseKey: "history-release", contextAnchor: { purpose: "history_solution" }, origin: "history_solution", supportDomain: "unknown",
+    generatedAt: "2026-10-19T00:00:00Z", releasedAt: "2026-10-19T00:00:00Z", acknowledgedAt: null, historyRevision: 1 };
+  const page = { observations: [], snapshotRevision: 0, totalCount: 0, nextCursor: null, visibilityChanged: false, exposureReceipts: [receipt] };
+  expect(courseLearningHistoryPageSchema.parse(page)).toEqual(page);
+  expect(courseLearningHistoryPageSchema.safeParse({ ...page, exposureReceipts: [{ ...receipt, id: "invalid" }] }).success).toBe(false);
+  expect(courseLearningHistoryPageSchema.safeParse({ ...page, exposureReceipts: Array(201).fill(receipt) }).success).toBe(false);
+  expect(courseLearningHistoryPageSchema.safeParse({ ...page, extra: true }).success).toBe(false);
+});

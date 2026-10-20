@@ -34,4 +34,12 @@ describe("loadTutorHistory context selection", () => {
       history: [{ role: "user", text: "recent" }, { role: "assistant", text: "answer" }], sourceRefs: [],
     });
   });
+  it("projects only human questions for record follow-ups, without query snapshot prose", async () => {
+    const sql = fakeSql([{ question: "昨天完成了哪些任务", answer: "snapshot".repeat(2000),
+      user_source_refs: [], assistant_source_refs: [{ sourceId, sourceVersion: 0 }] }]);
+    expect(await loadTutorHistoryContext(sql, scope, "turn-1", "record_referents")).toEqual({
+      history: [{ role: "user", text: "昨天完成了哪些任务" }],
+      sourceRefs: [{ sourceId, sourceVersion: 0 }],
+    });
+  });
 });

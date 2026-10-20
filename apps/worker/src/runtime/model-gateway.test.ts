@@ -114,3 +114,14 @@ describe("shared tutor model selection", () => {
     expect(mocks.provider).not.toHaveBeenCalled();
   });
 });
+
+it("wires stored workspace media bounds into provider options, snapshot and reservation model", async () => {
+  const media = { mediaInputTokenUpperBound: 128000, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 9 };
+  const custom = { ...model, ...media, id: "workspace-media", providerId: "workspace-provider", supportsAudio: true, createdAt: new Date().toISOString(), vaultConfigBroken: false };
+  mocks.catalog.mockReturnValue({ models: [], defaultModelId: null, dailyCapCents: 100 });
+  mocks.models.mockResolvedValue([custom]);
+  const selected = await resolveTutorModel({} as never, scope, "explain");
+  expect(selected).toMatchObject(media);
+  expect(selected.modelSnapshot).toMatchObject(media);
+  expect(mocks.provider).toHaveBeenCalledWith(expect.objectContaining(media));
+});

@@ -38,29 +38,32 @@ export function TodayPlanOverview({ tasks, plan, onArrange }: { tasks: TaskItem[
 
 export function TodayLearningContext({
   item,
+  activity,
   primaryAction,
   secondaryAction,
   onShowActions,
 }: {
   item?: TodayResumeState["continueItem"];
+  activity?: { title: string; courseId: string | null } | null;
   primaryAction?: ReactNode;
   secondaryAction?: ReactNode;
   onShowActions?: () => void;
 }) {
   const sourceCount = Object.keys(item?.sourceVersions ?? {}).length;
-  const courseHref = item?.courseId ? `/opening/courses/${encodeURIComponent(item.courseId)}` : "/opening/courses";
+  const contextCourseId = activity?.courseId ?? item?.courseId;
+  const courseHref = contextCourseId ? `/opening/courses/${encodeURIComponent(contextCourseId)}` : "/opening/courses";
   return <div className="min-w-0 border-b border-zinc-200 px-4 py-2 sm:px-5">
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-xs text-zinc-700">{item ? `上次学习：${item.title}` : "从一个问题、一次练习或一篇笔记开始"}</p>
-        {item ? <p className="mt-1 text-[11px] text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}
-        {item?.manualSourceCount ? <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
+        <p className="truncate text-xs text-zinc-700">{activity ? `继续学习：${activity.title}` : item ? `上次对话：${item.title}` : "从一个问题、一次练习或一篇笔记开始"}</p>
+        {!activity && item ? <p className="mt-1 text-[11px] text-zinc-500">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}
+        {!activity && item?.manualSourceCount ? <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。</p> : null}
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
         {primaryAction}
         {secondaryAction}
         <nav aria-label="其他学习方式" className="flex shrink-0 flex-wrap gap-1">
-          <Link href={courseHref} className={ui.quiet}>{item?.courseId ? "回到关联课程" : "课程与自主练习"}</Link>
+          <Link href={courseHref} className={ui.quiet}>{contextCourseId ? "回到关联课程" : "课程与自主练习"}</Link>
         </nav>
       </div>
     </div>

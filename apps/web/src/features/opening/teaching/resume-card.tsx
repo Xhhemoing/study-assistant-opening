@@ -201,10 +201,10 @@ export function ResumeCardView({
       </header>
 
       <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
-        cv {resume.contentVersion} · pv {resume.pathVersion}
+        学习位置已读取
         {resume.clientInit
-          ? " · clientInit 已就绪"
-          : " · clientInit 暂缺（可先看断点，继续时再拉取）"}
+          ? " · 可继续阅读"
+          : " · 继续时将重新读取内容"}
       </p>
 
       {showJobBanner ? (

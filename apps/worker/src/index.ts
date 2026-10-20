@@ -26,7 +26,7 @@ import { createOpeningReminderRepository } from "@aistudy/database";
 import { runJob } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
-import { createDbSystemQueryService } from "./runtime/system-query";
+import { createDbSystemQueryService, createDbAssistantProposalService } from "./runtime/system-query";
 import { createOpeningEphemeralProvenanceRepository } from "@aistudy/database";
 
 /**
@@ -166,7 +166,12 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
-    systemQuery: createDbSystemQueryService(sql, "worker"),
+    systemQuery: createDbSystemQueryService(sql, "worker", { callModel: (scope, input, options) => models.call(scope, "tutor.listen", {
+      ...options, input, budget: scopeBudget(budget, scope),
+    }) }),
+    proposals: createDbAssistantProposalService(sql, { callModel: (scope, input, options) => models.call(scope, "tutor.listen", {
+      ...options, input, budget: scopeBudget(budget, scope),
+    }) }),
     tutorJobs,
     chunks,
     budget,

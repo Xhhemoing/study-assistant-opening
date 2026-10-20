@@ -1,7 +1,7 @@
 import { format } from "node:util";
 import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderInput, ProviderOutput, SourceChunk } from "@aistudy/contracts";
+import type { ProviderInput, ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { OpeningProviderError } from "@aistudy/ai";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
@@ -40,6 +40,8 @@ function deps(overrides?: {
   provenance?: EphemeralProvenanceRepository;
   resolveModel?: EphemeralTutorDeps["resolveModel"];
   listReadySourceIdsForCourse?: EphemeralTutorDeps["listReadySourceIdsForCourse"];
+  studyContext?: EphemeralTutorDeps["studyContext"];
+  exposures?: EphemeralTutorDeps["exposures"];
 }) {
   const writes: string[] = [];
   const budget = {
@@ -67,6 +69,8 @@ function deps(overrides?: {
     privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
     budget,
     provenance: overrides?.provenance,
+    studyContext: overrides?.studyContext,
+    exposures: overrides?.exposures,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
     listReadySourceIdsForCourse: overrides?.listReadySourceIdsForCourse,
@@ -103,7 +107,7 @@ describe("ephemeral tutor service", () => {
     const service = createEphemeralTutorService({ sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
       privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
       budget: { reserve: async () => ({ id: "r" }), settle: async () => {}, release: async () => {}, claimExecution: async () => true, markUnknown: async () => {} },
-      provider: { complete }, resolveModel: async () => ({ provider: { complete }, supportsVision: true, modelSnapshot: { id: "v", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
+      provider: { complete }, resolveModel: async () => ({ provider: { complete }, supportsVision: true, modelSnapshot: { id: "v", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
       pageImages: async () => images, config: { maxContextCharacters: 12000, maxOutputTokens: 256, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 } });
     await service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId], currentPage: 2, mode: "explain", history: [] });
     expect(complete.mock.calls[0]?.[0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: images });
@@ -396,4 +400,77 @@ describe("ephemeral content-free provenance", () => {
       if (fail) expect(provenance.record).not.toHaveBeenCalled();
     } finally { spies.forEach(spy => spy.mockRestore()); }
   });
+});
+
+
+it("returns scoped deterministic language support and a language receipt without provider spending", async () => {
+  const contextAnchor = { purpose: "language_support" as const, sourceId, sourceVersion: 1 };
+  const receipt = { id: chunkId, releaseKey: "ephemeral:language-key", contextAnchor, origin: "assistant" as const, supportDomain: "language" as const,
+    generatedAt: "2026-10-19T00:00:00.000Z", releasedAt: "2026-10-19T00:00:00.000Z", acknowledgedAt: null, historyRevision: 1 };
+  const deliver = vi.fn(async () => receipt);
+  const f = deps({ studyContext: { resolve: async () => contextAnchor, languageSupport: async () => null }, exposures: { deliver } });
+  const reply = await f.service.replyEphemeral(scope, { text: "Please translate", sourceIds: [sourceId], history: [], mode: "explain", clientKey: "language-key", contextAnchor });
+  expect(reply.text).toContain("不是全文翻译");
+  expect(reply.exposureReceipt?.supportDomain).toBe("language");
+  expect(deliver).toHaveBeenCalledWith(scope, expect.objectContaining({ supportDomain: "language" }));
+  expect(f.complete).not.toHaveBeenCalled();
+  expect(f.budget.reserve).not.toHaveBeenCalled();
+});
+
+it("uses the same operation key for an ephemeral retry and refuses to resend a completed request", async () => {
+  const f = deps();
+  const input = { text: "Explain", sourceIds: [sourceId], history: [], mode: "explain" as const, clientKey: "stable-ephemeral-key" };
+  await f.service.replyEphemeral(scope, input);
+  const completed = { id: "res-1", state: "completed" };
+  f.budget.reserve.mockResolvedValueOnce(completed);
+  await expect(f.service.replyEphemeral(scope, input)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED", status: 409 });
+  expect(f.complete).toHaveBeenCalledTimes(1);
+  expect(f.budget.reserve.mock.calls.map(call => call[0].requestId)).toEqual(["eph:stable-ephemeral-key", "eph:stable-ephemeral-key"]);
+});
+
+
+it("uses only the owned context's latest server intent for ephemeral presentation", async () => {
+  const contextAnchor = { purpose: "learning_help" as const, sourceId, sourceVersion: 1 };
+  const event: StudyIntentEvent = { id: chunkId, sessionId: chunkId, activityId: chunkId, attemptId: null, version: 2,
+    change: { kind: "explicit_request", text: "用英文，慢一点" }, signals: [], action: "continue", createdAt: "2026-10-19T00:00:00.000Z",
+    intent: { purpose: "self_study", timeBudgetMinutes: 10, language: "en", pace: "slow", continuous: false, selfReportedFatigue: "unknown" } };
+  const sessionIntent = vi.fn(async () => event);
+  const f = deps({ studyContext: { resolve: async () => contextAnchor, sessionIntent } });
+  await f.service.replyEphemeral(scope, { text: "Continue", sourceIds: [sourceId], history: [], mode: "hint", contextAnchor });
+  expect(sessionIntent).toHaveBeenCalledWith(scope, contextAnchor);
+  expect(f.complete.mock.calls[0]?.[0].instruction).toContain("Use English");
+  expect(f.complete.mock.calls[0]?.[0].instruction).toContain("放慢节奏");
+});
+
+it.each(["用中文，直接给关键步骤", "串讲还是自学"])("merges the ephemeral current explicit request without persisting its text: %s", async text => {
+  const contextAnchor = { purpose: "learning_help" as const, sourceId, sourceVersion: 1 };
+  const event: StudyIntentEvent = { id: chunkId, sessionId: chunkId, activityId: chunkId, attemptId: null, version: 2,
+    change: { kind: "explicit_request", text: "用英文，慢一点" }, signals: [], action: "continue", createdAt: "2026-10-19T00:00:00.000Z",
+    intent: { purpose: "challenge", timeBudgetMinutes: 10, language: "en", pace: "slow", continuous: false, selfReportedFatigue: "unknown" } };
+  const f = deps({ studyContext: { resolve: async () => contextAnchor, sessionIntent: async () => event } });
+  await f.service.replyEphemeral(scope, { text, clientKey: "stable-intent-key", sourceIds: [sourceId], history: [], mode: "hint", contextAnchor });
+  const instruction = f.complete.mock.calls[0]?.[0].instruction;
+  if (text.startsWith("用中文")) {
+    expect(instruction).toContain("使用中文讲解");
+    expect(instruction).toContain("只给关键步骤");
+    expect(instruction).not.toContain("Use English");
+  } else {
+    expect(instruction).toContain("Use English");
+    expect(instruction).toContain("先澄清，不擅自换教学模式");
+    expect(instruction).toContain("当前目的：提高挑战");
+  }
+});
+
+it("keeps no-material temporary requests out of course retrieval and provider chunks", async () => {
+  const listReady = vi.fn(async () => [sourceId]);
+  const f = deps({ listReadySourceIdsForCourse: listReady, complete: async () => ({ ...output, citedChunkIds: [], candidates: [] }) });
+  await f.service.replyEphemeral(scope, { courseId: workspaceId, text: "general", sourceIds: [], sourceSelection: "none", mode: "listen", history: [] });
+  expect(listReady).not.toHaveBeenCalled();
+  expect(f.complete).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }), undefined);
+});
+
+it("refuses an empty explicit selection before dispatching a temporary model request", async () => {
+  const f = deps();
+  await expect(f.service.replyEphemeral(scope, { text: "selected", sourceIds: [], sourceSelection: "selected", mode: "listen", history: [] })).rejects.toThrow();
+  expect(f.complete).not.toHaveBeenCalled();
 });

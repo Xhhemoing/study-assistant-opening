@@ -1,9 +1,21 @@
-import { integer, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, timestamp, unique, uuid, primaryKey, foreignKey } from "drizzle-orm/pg-core";
 import { workspaces } from "./library";
+
+export const openingParentInteractionBudgets = pgTable("opening_parent_interaction_budgets", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  id: text("id").notNull(),
+  budgetCents: integer("budget_cents").notNull(),
+  maxProviderCalls: integer("max_provider_calls").notNull(),
+  blockedAt: timestamp("blocked_at", { withTimezone: true }),
+  blockedReason: text("blocked_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.workspaceId, t.id] })]);
 
 export const openingBudgetReservations = pgTable("opening_budget_reservations", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  parentInteractionId: text("parent_interaction_id"),
+  settlementCostBasis: text("settlement_cost_basis"),
   purpose: text("purpose").notNull(),
   modelSnapshot: jsonb("model_snapshot"),
   amountCents: integer("amount_cents").notNull(),
@@ -19,7 +31,7 @@ export const openingBudgetReservations = pgTable("opening_budget_reservations", 
   reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
   reservedAmountCents: integer("reserved_amount_cents"),
   pendingReconcileCents: integer("pending_reconcile_cents").notNull().default(0),
-});
+}, (t) => [foreignKey({ columns: [t.workspaceId, t.parentInteractionId], foreignColumns: [openingParentInteractionBudgets.workspaceId, openingParentInteractionBudgets.id] })]);
 
 export const openingBudgetReconcileEvents = pgTable("opening_budget_reconcile_events", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -35,4 +47,4 @@ export const openingBudgetReconcileEvents = pgTable("opening_budget_reconcile_ev
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [unique().on(t.reservationId, t.kind)]);
 
-export const openingBudgetSchema = { openingBudgetReservations, openingBudgetReconcileEvents };
+export const openingBudgetSchema = { openingParentInteractionBudgets, openingBudgetReservations, openingBudgetReconcileEvents };

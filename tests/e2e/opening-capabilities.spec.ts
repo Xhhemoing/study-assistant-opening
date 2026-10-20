@@ -30,8 +30,11 @@ test.describe("opening capabilities (U04)", () => {
     try {
       await page.context().addCookies([f.cookie]);
       await page.goto(`/opening/courses/${f.courseId}`);
-      await expect(page.getByRole("heading", { name: "课程目录", exact: true })).toBeVisible();
-      await expect(page.getByRole("navigation", { name: "课程学习方式", exact: true }).getByRole("link", { name: /学习$/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "本课内容", exact: true })).toBeVisible();
+      const study = page.getByRole("navigation", { name: "课程学习方式", exact: true }).getByRole("link", { name: /^(打开学习|开始学习|继续学习|开始独立练习)$/ });
+      await expect(study).toBeVisible();
+      await expect(study).toHaveAttribute("href", `/opening/courses/${f.courseId}/study`);
+      await page.locator("summary").filter({ hasText: "课程资料与设置" }).click();
       await page.locator("summary").filter({ hasText: "知识关联与完整目录" }).click();
       await expect(page.getByRole("heading", { name: "课程知识", exact: true })).toBeVisible();
       await expect(page.getByText(/掌握\s*%|掌握度/i)).toHaveCount(0);

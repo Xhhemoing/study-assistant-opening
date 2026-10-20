@@ -3,6 +3,15 @@ import { loadOpeningModelCatalog } from "./opening-model-catalog";
 const entry = { id: "fast", label: "Fast", providerId: "p", providerLabel: "Provider", modelName: "opaque-model", baseUrl: "https://provider.example/v1", apiKeyEnv: "PROVIDER_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
 const env = { OPENING_MODEL_CATALOG: JSON.stringify([entry]), OPENING_MODEL_DAILY_CAP_CENTS: "100", PROVIDER_KEY: "private-key" };
 describe("server model catalog", () => {
+  it("requires a complete media cost bound and preserves it without inferring one", () => {
+    const media = { mediaInputTokenUpperBound: 100_000, mediaMaxInputBytes: 5_000_000, mediaInputCentsPerMillion: 30 };
+    const catalog = (extra: Record<string, unknown>) => loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsVision: true, ...extra }]) });
+    expect(catalog(media).models[0]).toMatchObject(media);
+    expect(catalog({}).models[0]).not.toHaveProperty("mediaInputTokenUpperBound");
+    for (const extra of [{ mediaInputTokenUpperBound: 10 }, { ...media, mediaMaxInputBytes: 0 }, { ...media, mediaInputTokenUpperBound: 1.5 }, { ...media, mediaInputCentsPerMillion: 0 }]) {
+      expect(() => catalog(extra)).toThrow(/配置无效/);
+    }
+  });
   it("enables vision only by an explicit server capability", () => {
     expect(loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsVision: true }]) }).models[0]).toMatchObject({ supportsVision: true });
     expect(loadOpeningModelCatalog(env).models[0]?.supportsVision).toBe(false);

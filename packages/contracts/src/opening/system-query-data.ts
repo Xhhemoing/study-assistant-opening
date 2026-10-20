@@ -10,7 +10,7 @@ const model = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).nullable();
 const route = z.object({ primary: model, fallback: model }).strict();
 const taskStatus = z.enum(["pending", "done", "skipped", "unavailable"]);
 const jobStatus = z.enum(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"]);
-const tool = z.enum(["courses", "learning", "recommendation", "materials", "planning", "jobs", "settings", "teaching"]);
+const tool = z.enum(["courses", "learning", "recommendation", "materials", "planning", "jobs", "settings", "teaching", "learner_state", "explain_decision", "notes", "cards", "exam_sprint"]);
 const observation = z.object({
   id: uuidSchema, rootId: uuidSchema, attemptId: uuidSchema.nullable(), itemVersionId: uuidSchema.nullable(),
   skillLabel: z.string().max(200).optional(), requirementKey: z.string().max(200).nullable().optional(),
@@ -31,6 +31,15 @@ const recommendation = z.union([
 ]);
 const plan = { date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), timeZone: z.string().max(100), acceptedVersion: z.number().int().positive(), summary };
 export const systemQueryDataSchemas = {
+  learner_state: z.object({ summary, stateVersion: z.string().max(200), dataAsOf: isoDateTimeSchema,
+    completeness: z.enum(["complete", "partial", "unknown"]), limitations: z.array(z.string().max(300)).max(16) }).strict(),
+  explain_decision: z.object({ id: uuidSchema, current: z.boolean(), basis: z.literal("persisted_decision"),
+    invalidationReasons: z.array(z.string().max(300)).max(16), summary }).strict(),
+  notes: z.object({ id: uuidSchema, title: z.string().max(240), revision: version, updatedAt: isoDateTimeSchema, contentWithheld: z.literal(true), summary }).strict(),
+  cards: z.object({ id: uuidSchema, contentVersion: version, courseId: uuidSchema.nullable(), dueAt: isoDateTimeSchema.nullable(),
+    answerWithheld: z.literal(true), summary }).strict(),
+  exam_sprint: z.object({ id: uuidSchema, updatedAt: isoDateTimeSchema, examDate: z.string().nullable(),
+    attemptCount: version, completedCount: version, basis: z.literal("stored_snapshot"), summary }).strict(),
   courses: z.object({ id: uuidSchema, title: z.string().max(240), updatedAt: isoDateTimeSchema,
     goal: z.object({ targetDate: z.string().nullable(), weeklyMinutes: z.number().int().min(0).max(3000), learningMode: goalLearningModeSchema.nullable(), revision: version.nullable() }).strict().nullable(),
     goalStatus: z.enum(["configured", "not_configured", "invalid"]), summary }).strict(),
@@ -43,7 +52,7 @@ export const systemQueryDataSchemas = {
   settings: z.object({ mode: z.enum(["automatic", "manual"]), defaultModelId: model, manualModelId: model,
     routes: z.object({ listen: model, hint: model, explain: model, think_together: model }).strict(), taskRoutes: z.record(modelTaskKeySchema, route), savedAt: isoDateTimeSchema.nullable(),
     process: z.enum(["web", "worker"]).optional(), adaptivePlanning: z.boolean().optional(), teachingLoop: z.boolean().optional(), summary,
-    queryTools: z.array(tool).max(8).optional(), modelConnectivity: z.literal("not_checked").optional(), deployment: z.literal("not_checked").optional(),
+    queryTools: z.array(tool).max(13).optional(), modelConnectivity: z.literal("not_checked").optional(), deployment: z.literal("not_checked").optional(),
     unavailableDomains: z.array(z.enum(["notes", "review_queue", "cost_summary", "historical_material_versions", "persisted_decisions"])).max(5).optional(),
   }).strict(),
   teaching: z.object({ id: uuidSchema, status: teachingActivityStatusSchema, generateStatus: teachingActivityGenerateStatusSchema,

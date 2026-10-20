@@ -11,6 +11,7 @@ import type { TodayResumeState } from "./today-read";
 import { TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
+import { CourseStudyContextTools } from "../../courses/course-study-context-tools";
 import { TodayLearningContext } from "./today-overview";
 import { focusPriorityActions } from "./today-task-selection";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
@@ -103,10 +104,14 @@ export function TodayDashboard({
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
+  const [queueEmpty, setQueueEmpty] = useState(false);
+  const desktopQueue = !queueEmpty || queueOpen || (state.pendingReviews?.count ?? 0) > 0;
   const [actionsRequested, setActionsRequested] = useState(false);
   const showActions = useCallback(() => { setQueueOpen(true); setActionsRequested(true); }, []);
   const [reloadToken, setReloadToken] = useState(0);
+  const [dueCardsError, setDueCardsError] = useState(false);
   const [dueCardCount, setDueCardCount] = useState(0);
+  const showDesktopQueue = desktopQueue || dueCardCount > 0 || dueCardsError;
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
   const [activityLoad, setActivityLoad] = useState<"loading" | "ready" | "error">("loading");
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
@@ -139,12 +144,13 @@ export function TodayDashboard({
       return;
     }
     const controller = new AbortController();
+    setDueCardsError(false);
     cards.listDue("auto")
       .then((items) => {
         if (!controller.signal.aborted) setDueCardCount(items.length);
       })
       .catch(() => {
-        if (!controller.signal.aborted) setDueCardCount(0);
+        if (!controller.signal.aborted) { setDueCardCount(0); setDueCardsError(true); }
       });
     return () => controller.abort();
   }, [cards, reloadToken, state.kind]);
@@ -324,8 +330,9 @@ export function TodayDashboard({
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex h-full min-h-0 flex-col">
         <h1 className="sr-only">今日学习工作台</h1>
-        <header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 lg:hidden">
-          <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800" title={task?.title}>{task?.title ?? "今日学习 · 可直接开始自由学习"}</span>
+        {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-amber-800">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
+        <header className={`flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 ${showDesktopQueue && !queueEmpty ? "lg:hidden" : ""} group-data-[focus=true]/workspace:hidden`}>
+          <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800" title={task?.title}>{task?.title ?? (queueEmpty ? "今天还未安排任务" : "今日学习 · 可直接开始自由学习")}</span>
           <button
             className={secondaryButtonClass}
             type="button"
@@ -341,8 +348,9 @@ export function TodayDashboard({
         <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
           <TodayLearningContext
             item={state.continueItem}
+            activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId } : null}
             onShowActions={showActions}
-            primaryAction={currentActivity ? (
+            primaryAction={currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
               <button
                 type="button"
                 className={buttonClass}
@@ -368,10 +376,10 @@ export function TodayDashboard({
             </p>
           ) : null}
         </div>
-        <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:grid-rows-1 group-data-[focus=true]/workspace:lg:grid-cols-1">
+        <div className={`flex min-h-0 flex-1 flex-col lg:grid ${showDesktopQueue ? "lg:grid-cols-[260px_minmax(0,1fr)]" : "lg:grid-cols-1"} lg:grid-rows-1 group-data-[focus=true]/workspace:lg:grid-cols-1`}>
           <div
             id="today-queue"
-            className={`${queueOpen ? "flex" : "hidden"} max-h-72 min-h-0 shrink-0 flex-col overflow-y-auto border-b border-zinc-200 bg-zinc-50 lg:flex lg:max-h-none lg:border-b-0 lg:border-r group-data-[focus=true]/workspace:hidden`}
+            className={`${queueOpen ? "flex" : "hidden"} max-h-72 min-h-0 shrink-0 flex-col overflow-y-auto border-b border-zinc-200 bg-zinc-50 ${showDesktopQueue ? "lg:flex" : ""} lg:max-h-none lg:border-b-0 lg:border-r group-data-[focus=true]/workspace:hidden`}
           >
             {(state.pendingReviews?.count ?? 0) > 0 ? (
               <Link
@@ -390,6 +398,7 @@ export function TodayDashboard({
               </Link>
             ) : null}
             <TodayPlanView
+              onEmptyChange={setQueueEmpty}
               api={api}
               focusTaskId={focusTaskId}
               selectedId={task?.id}
@@ -406,10 +415,11 @@ export function TodayDashboard({
             data-today-cta-focus={ctaFocusNonce > 0 ? String(ctaFocusNonce) : undefined}
           >
             {currentActivity ? (
-              teachingLoopTrialEnabled ? (
+              currentActivity.courseId ? <div className="mx-auto max-w-3xl space-y-3 px-5 py-6"><h2 className="text-lg font-semibold">{currentActivity.intentSummary}</h2><p className="text-xs leading-6 text-zinc-500">进入课程工作区，恢复原学习断点、材料、提问与笔记。</p><Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`}>进入学习工作区</Link></div> : teachingLoopTrialEnabled ? (
                 <TeachingContinueEntry
                   key={`${currentActivity.id}:${ctaFocusNonce}`}
                   activity={currentActivity}
+                  contextualTools={context => <CourseStudyContextTools context={context} />}
                   resume={learningResume}
                   assistantHref={assistantHref}
                   timeZone={timeZone}
