@@ -20,6 +20,7 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
   const [errors, setErrors] = useState<FormErrors>({});
   const [serverError, setServerError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [navigationTarget, setNavigationTarget] = useState<string | null>(null);
   const requestPending = useRef(false);
   const closed = mode === "register" && registrationClosed;
 
@@ -51,6 +52,7 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
     setSubmitting(true);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
+    let authenticated = false;
     try {
       const response = await fetch(`/api/auth/${mode}`, {
         method: "POST",
@@ -72,9 +74,15 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         setServerError(typeof body?.error?.message === "string" && body.error.message ? body.error.message : "暂时无法完成请求，请稍后重试");
         return;
       }
-      router.replace(mode === "register" ? "/onboarding" : returnTo ?? "/");
+      authenticated = true;
+      const target = mode === "register" ? "/onboarding" : returnTo ?? "/";
+      setNavigationTarget(target);
+      router.replace(target);
       router.refresh();
     } catch {
+      // Authentication already succeeded. The normal link below recovers a
+      // stalled/failed client transition without submitting credentials again.
+      if (authenticated) return;
       setServerError(controller.signal.aborted
         ? mode === "register"
           ? "请求超时，账户可能已创建，请先尝试登录"
@@ -82,13 +90,15 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         : "无法连接到服务，请检查网络后重试");
     } finally {
       clearTimeout(timeout);
-      requestPending.current = false;
-      setSubmitting(false);
+      if (!authenticated) {
+        requestPending.current = false;
+        setSubmitting(false);
+      }
     }
   }
 
   return (
-    <form onSubmit={handleSubmit} aria-busy={submitting} noValidate>
+    <form onSubmit={handleSubmit} aria-busy={submitting && !navigationTarget} noValidate>
       {closed ? (
         <div id="registration-status" className="mb-6 rounded-md border border-zinc-200 bg-zinc-50 p-4">
           <p className="text-sm font-medium text-zinc-900">注册暂未开放</p>
@@ -121,10 +131,14 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
           disabled={closed || submitting}
         >
           {submitting ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" size={18} /> : null}
-          {closed ? "注册暂未开放" : submitting ? (mode === "register" ? "正在创建账户…" : "正在登录…") : (mode === "register" ? "创建账户" : "登录")}
+          {closed ? "注册暂未开放" : navigationTarget ? "正在进入…" : submitting ? (mode === "register" ? "正在创建账户…" : "正在登录…") : (mode === "register" ? "创建账户" : "登录")}
           {!submitting && !closed ? <ArrowRight aria-hidden="true" size={18} /> : null}
         </button>
       </fieldset>
+      {navigationTarget ? <div className="mt-4 text-sm leading-6 text-zinc-600">
+        <p role="status">{mode === "register" ? "账户已创建，正在进入设置。" : "登录成功，正在进入学习空间。"}</p>
+        <a className="inline-flex min-h-11 items-center text-emerald-800 underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" href={navigationTarget}>若页面未跳转，点此继续</a>
+      </div> : null}
     </form>
   );
 }
