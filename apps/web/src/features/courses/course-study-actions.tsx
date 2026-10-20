@@ -75,10 +75,10 @@ export function CourseStudyActions({
       {study.goal ? <p className="mt-1 text-xs leading-6 text-zinc-500">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && capabilities.adaptivePlanning && !study.taskError ? <p className="mt-1 text-xs text-zinc-500">未设置目标也可以开始。</p> : null}
       <nav aria-label="课程学习方式" className="mt-3 flex flex-wrap items-center gap-2">
         {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : studyHref}>
-          {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : "开始学习"}<ArrowRight size={14} aria-hidden="true" />
+          {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : enabled ? "开始学习" : "开始独立练习"}<ArrowRight size={14} aria-hidden="true" />
         </Link> : <a className={ui.primary} href="#course-practice">开始独立练习<ArrowRight size={14} aria-hidden="true" /></a>}
         <Link className={ui.quiet} href={opening ? `/opening/library?tab=materials${courseId ? `&courseId=${encodeURIComponent(courseId)}` : ""}` : "/library?tab=materials"}>读材料</Link>
-        <Link className={ui.quiet} href={opening ? "/opening/library?tab=notes" : "/library/new"}>写笔记</Link>
+        <Link className={ui.quiet} href={opening ? `/opening/library/new${courseId ? `?courseId=${encodeURIComponent(courseId)}` : ""}` : "/library/new"}>写笔记</Link>
       </nav>
       {study.loading ? <p role="status" className="mt-2 text-xs text-zinc-500">正在确认本课程的学习位置…</p> : null}
       {study.error ? <p role="alert" className="mt-2 text-xs text-amber-800">{study.error} <button type="button" className={ui.quiet} onClick={study.reload}>重新读取</button></p> : null}

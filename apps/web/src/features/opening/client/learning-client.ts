@@ -1,3 +1,4 @@
+import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import {
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
@@ -44,6 +45,7 @@ async function request(
     }
   }
   if (!res.ok) throw requestError(body, res.status);
+  if (body !== null) acknowledgeStudyExposureHeaders(res, fetchImpl);
   return body;
 }
 

@@ -7,6 +7,7 @@ const fieldsSchema = z.object({
   outcome: z.enum(["correct", "incorrect", "unverified"]),
   assistance: z.enum(["unknown", "independent", "hinted", "revealed"]),
   deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
+  spanProblemId: z.string().max(100).default(""), spanVersion: z.number().int().positive().default(1),
   referenceSkipped: z.boolean(), matrixMode: z.boolean(),
   matrixKey: z.enum(["dimensions", "addition", "scalar", "multiplication"]), matrixVariant: z.number().int().min(0).max(8),
 }).strict();
@@ -32,13 +33,13 @@ const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 
-export function practiceScope(courseId: string, mode: "ordinary" | "matrix", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null): string {
+export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
-  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null]);
+  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : [])]);
 }
 
 export function emptyPracticeDraft(scope: string, fields: Partial<PracticeFields> = {}): PracticeDraft {
-  return { version: 1, id: crypto.randomUUID(), scope, fields: { sourceId: "", referenceSourceId: "", skillLabel: "", stem: "", answer: "", outcome: "unverified", assistance: "unknown", deliveredAssistance: "none", referenceSkipped: false, matrixMode: false, matrixKey: "multiplication", matrixVariant: 0, ...fields }, start: null, attemptId: null, observationId: null, submission: null, disputeKey: null };
+  return { version: 1, id: crypto.randomUUID(), scope, fields: { sourceId: "", referenceSourceId: "", skillLabel: "", stem: "", answer: "", outcome: "unverified", assistance: "unknown", deliveredAssistance: "none", spanProblemId: "", spanVersion: 1, referenceSkipped: false, matrixMode: false, matrixKey: "multiplication", matrixVariant: 0, ...fields }, start: null, attemptId: null, observationId: null, submission: null, disputeKey: null };
 }
 
 export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft | null {
@@ -47,9 +48,10 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
   const draft: PracticeDraft = { ...parsed.data, id: parsed.data.id ?? crypto.randomUUID() };
   let context: unknown;
   try { context = JSON.parse(scope); } catch { return null; }
-  if (!Array.isArray(context) || context.length !== 7) return null;
+  if (!Array.isArray(context) || (context.length !== 7 && context.length !== 9)) return null;
   const [courseId, mode, retestId, , requirementKey] = context;
   const start = draft.start;
+  if (context.length === 9 && (draft.fields.skillLabel !== context[7] || start?.sessionInput && (start.sessionInput.requirementKey ?? null) !== context[8])) return null;
   if (start) {
     if (!start.sessionInput && !start.createInput) return null;
     if (start.sessionInput && start.sessionInput.courseId !== courseId) return null;
@@ -58,8 +60,11 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
       if (retestId !== null) return null;
       if (input && (!input.matrixExercise || input.matrixExercise.sourceId !== draft.fields.sourceId || input.matrixExercise.exerciseKey !== draft.fields.matrixKey || input.matrixExercise.variant !== draft.fields.matrixVariant)) return null;
       if (start.sessionInput && JSON.stringify(start.sessionInput.sourceIds) !== JSON.stringify([draft.fields.sourceId])) return null;
+    } else if (mode === "span") {
+      if (input && (!input.spanExercise || input.spanExercise.sourceId !== draft.fields.sourceId || input.spanExercise.problemId !== draft.fields.spanProblemId || input.spanExercise.version !== draft.fields.spanVersion)) return null;
+      if (start.sessionInput && JSON.stringify(start.sessionInput.sourceIds) !== JSON.stringify([draft.fields.sourceId])) return null;
     } else if (mode === "ordinary") {
-      if (input?.matrixExercise || input?.teachingBlock) return null;
+      if (input?.matrixExercise || input?.spanExercise || input?.teachingBlock) return null;
       if (start.sessionInput && start.sessionInput.skillLabel !== draft.fields.skillLabel.trim()) return null;
       if (input?.problem && (input.problem.sourceId !== draft.fields.sourceId || input.problem.stemSnapshot !== draft.fields.stem.trim())) return null;
       if (retestId !== null && ((input && (input.requirementKey ?? null) !== requirementKey) || (start.sessionInput && (start.sessionInput.requirementKey ?? null) !== requirementKey))) return null;

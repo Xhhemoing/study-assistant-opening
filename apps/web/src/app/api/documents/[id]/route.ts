@@ -6,6 +6,8 @@ import {
   updateDocumentForPrincipal,
 } from "../../../../features/auth/service";
 import { getAuthRuntime } from "../../../../server/runtime";
+import { openingContentDelivery } from "../../../../features/opening/server/content-delivery";
+import { contentDeliveryHeaders, contentDeliveryReleaseKey } from "../../../../features/opening/content-delivery";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -17,8 +19,10 @@ export async function GET(
   try {
     const principal = await requirePrincipal(runtime, request);
     const { id } = await context.params;
+    const key = contentDeliveryReleaseKey(request);
     const document = await getDocumentForPrincipal(runtime, principal, id);
-    return Response.json({ document });
+    const exposureReceipts = await openingContentDelivery(runtime.sql).note({ workspaceId: principal.workspaceId, ownerUserId: principal.userId }, key, document);
+    return Response.json({ document, exposureReceipts }, { headers: contentDeliveryHeaders(exposureReceipts) });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }

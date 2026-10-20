@@ -36,9 +36,19 @@ type Props = {
   timeZone?: string;
   onSelect?: (task: StudyTask, source?: SelectionSource) => void;
   onClearSelection?: () => void;
+  onEmptyChange?: (empty: boolean) => void;
 };
 type TaskLoadState = "loading" | "ready" | "error";
 type TodayTasks = Awaited<ReturnType<OpeningApi["listTasks"]>>["tasks"];
+
+/** Only confirmed empty data can release the desktop queue column. */
+export function todayQueueIsEmpty(input: {
+  tasksReady: boolean; planReady: boolean; taskCount: number;
+  hasDraft: boolean; blockCount: number; unplannedCount: number;
+}): boolean {
+  return input.tasksReady && input.planReady && input.taskCount === 0
+    && !input.hasDraft && input.blockCount === 0 && input.unplannedCount === 0;
+}
 
 const QUEUE_GROUP_LABELS = {
   confirmed: "今日已确认",
@@ -91,6 +101,7 @@ export function TodayPlanView({
   selectedId,
   onSelect,
   onClearSelection,
+  onEmptyChange,
   reloadToken = 0,
   timeZone: timeZoneProp,
 }: Props) {
@@ -143,6 +154,12 @@ export function TodayPlanView({
     appliedReloadToken.current = reloadToken;
     void refresh();
   }, [reloadToken, refresh]);
+  const queueEmpty = todayQueueIsEmpty({
+    tasksReady: loadState === "ready", planReady: planState === "ready",
+    taskCount: tasks.length, hasDraft: Boolean(draft || plan?.dailyDraft?.status === "draft"),
+    blockCount: plan?.blocks.length ?? 0, unplannedCount: plan?.unplannedPendingCount ?? 0,
+  });
+  useEffect(() => { onEmptyChange?.(queueEmpty); }, [queueEmpty, onEmptyChange]);
   const draftIsStale = Boolean(draft && (draft.baseVersion !== plan?.acceptedVersion || proposalIntent.current?.date !== date));
   async function propose() {
     if (pending || draft || !plan || planState !== "ready" || loadState !== "ready") return;

@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it, vi } from "vitest";
-import { TodayGroupedQueue, TodayPlanView, TodayTaskList, localDateKey } from "./today-view";
+import { describe, expect, it, vi } from "vitest";
+import { TodayGroupedQueue, TodayPlanView, TodayTaskList, localDateKey, todayQueueIsEmpty } from "./today-view";
 import { shouldCloseTodayQueue, shouldOpenTodayQueue } from "./today-dashboard";
 import { focusTodayTask } from "./today-task-selection";
 import { TaskQueueRefreshContext } from "./task-status-control";
@@ -200,4 +200,17 @@ it("successful updateTaskStatus triggers TaskQueueRefreshContext reread (control
     ),
   );
   expect(html).toContain("标记完成");
+});
+
+describe("desktop queue empty state", () => {
+  const empty = { tasksReady: true, planReady: true, taskCount: 0, hasDraft: false, blockCount: 0, unplannedCount: 0 };
+  it("releases the sidebar only after tasks and plan confirm an empty day", () => {
+    expect(todayQueueIsEmpty(empty)).toBe(true);
+  });
+  it.each([
+    { tasksReady: false }, { planReady: false }, { taskCount: 1 },
+    { hasDraft: true }, { blockCount: 1 }, { unplannedCount: 1 },
+  ])("keeps the queue reachable for loading, failure, tasks or planning work: %j", change => {
+    expect(todayQueueIsEmpty({ ...empty, ...change })).toBe(false);
+  });
 });

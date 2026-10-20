@@ -13,6 +13,7 @@ import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { readOpeningBackupRecords } from "../../../packages/database/src/repositories/opening-backup-records";
 import { executeOpeningRestoreApply } from "../../../packages/database/src/repositories/opening-backup-apply";
 import { backupRows } from "../opening-backup-records-fixture";
+import { studyExposureReceiptSchema } from "@aistudy/contracts";
 let otherCookie: string;
 let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
 beforeAll(async () => {
@@ -48,7 +49,14 @@ it("prefills question, reference, course and skill only for an owned submitted i
   expect((await cardDraft(request(undefined, ""), params(observation.id))).status).toBe(401);
   const response = await cardDraft(request(), params(observation.id));
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ observationId: observation.id, front: "What is a derivative?", back: "A trusted reference answer", courseId, skillLabel: "derivatives" });
+  const { exposureReceipts, ...draft } = await response.json();
+  expect(draft).toEqual({ observationId: observation.id, front: "What is a derivative?", back: "A trusted reference answer", courseId, skillLabel: "derivatives" });
+  const receipts = studyExposureReceiptSchema.array().parse(exposureReceipts);
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]).toMatchObject({ origin: "history_solution", releasedAt: expect.any(String),
+    contextAnchor: { courseId, purpose: "history_solution" } });
+  const [exposure] = await fixture.sql`SELECT delivered,released_at FROM opening_help_exposures WHERE id=${receipts[0]!.id}`;
+  expect(exposure).toMatchObject({ delivered: true, released_at: expect.any(Date) });
   expect((await cardDraft(request(undefined, otherCookie), params(observation.id))).status).toBe(404);
   expect((await cardDraft(request(), params(randomUUID()))).status).toBe(404);
   await backupRows(fixture.sql, fixture.scope).exclude(referenceSourceId);

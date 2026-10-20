@@ -64,9 +64,9 @@ export function SourceRow({
   const canDeleteShortcut = canDeleteSourceShortcut(record);
   const stateTone = failed ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
   return (
-    <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-3">
+    <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-1.5">
       <FileText size={15} aria-hidden="true" className="shrink-0 text-zinc-500" /><div className="min-w-0 flex-1">
-        <h3 title={record.name} className="break-words text-sm font-medium text-zinc-950 [overflow-wrap:anywhere]">
+        <h3 title={record.name} className="line-clamp-2 break-words text-sm font-medium text-zinc-950 [overflow-wrap:anywhere]">
           {onOpen ? (
             <button
               aria-label={`打开资料：${record.name}`}

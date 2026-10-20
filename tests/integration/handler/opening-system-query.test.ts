@@ -48,3 +48,18 @@ it("HTTP rejects forged scope, invalid types and disabled query intent", async (
   const [count] = await sql`SELECT count(*)::int AS n FROM opening_query_ephemeral_provenance`;
   expect(count!.n).toBe(0);
 });
+
+it("HTTP routes default-answer state questions in both modes without manual query selection", async () => {
+  const response = await ephemeralPost(postEphemeral({ text: "今天计划是什么", purpose: "answer", sourceIds: [], mode: "listen", history: [] }));
+  expect(response.status).toBe(200);
+  const body = ephemeralTurnResponseSchema.parse(await response.json());
+  expect(body.systemQuery?.results[0]).toMatchObject({ name: "planning", reason: "no_data" });
+  const workspaceId = await workspaceForCookie(), conversationId = randomUUID();
+  await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+    SELECT ${conversationId},id,owner_user_id,'HTTP automatic' FROM workspaces WHERE id=${workspaceId}`;
+  const queued = await savedPost(postEphemeral({ conversationId, text: "当前任务", purpose: "answer", sourceIds: [], mode: "listen", privacy: "saved", clientKey: randomUUID() }));
+  expect(queued.status).toBe(201);
+  const [turn] = await sql`SELECT query_system,composer_purpose FROM opening_turns WHERE conversation_id=${conversationId} AND role='user'`;
+  expect(turn).toMatchObject({ query_system: true, composer_purpose: "query" });
+  expect(complete).not.toHaveBeenCalled();
+});

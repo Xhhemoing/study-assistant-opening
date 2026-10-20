@@ -58,5 +58,7 @@ function pickAvailableModel<T extends OpeningModelSummary>(models: T[], id: stri
 }
 export function openingModelSnapshot(model: OpeningModelSnapshot): OpeningModelSnapshot {
   return { id: model.id, providerId: model.providerId, modelName: model.modelName,
-    inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
+    inputCentsPerMillion: model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion,
+    ...(model.mediaInputTokenUpperBound === undefined ? {} : { mediaInputTokenUpperBound: model.mediaInputTokenUpperBound,
+      mediaMaxInputBytes: model.mediaMaxInputBytes, mediaInputCentsPerMillion: model.mediaInputCentsPerMillion }) };
 }

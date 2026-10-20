@@ -57,7 +57,7 @@ it("resolves a named course from real candidates, while asking for an ambiguous 
   const ambiguous = await service.reply(fixture.scope, { question: "我现在学到哪里" });
   expect(ambiguous.receipt.clarification).toContain("课程"); expect(ambiguous.receipt.results.map(row => row.name)).toEqual(["courses"]);
   const selected = await service.reply(fixture.scope, { question: "数学甲的学习进度" });
-  expect(selected.receipt.clarification).toBeUndefined(); expect(selected.receipt.results.map(row => row.name)).toEqual(["courses", "learning"]);
+  expect(selected.receipt.clarification).toBeUndefined(); expect(selected.receipt.results.map(row => row.name)).toEqual(["courses", "learner_state"]);
   const material = await service.reply(fixture.scope, { question: "材料在哪页", focus: { sourceIds: [randomUUID(), randomUUID()] } });
   expect(material.receipt.clarification).toContain("多份材料"); expect(material.receipt.results[0]!.data).toEqual([]);
 });

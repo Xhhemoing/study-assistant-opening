@@ -24,6 +24,7 @@ function database(priors: Record<string, unknown>[] = []) {
     const query = strings.join("?");
     if (query.includes("FROM opening_course_knowledge") || query.includes("WITH current_nodes AS")) return {};
     if (query.includes("SELECT * FROM (?) identity") || query.includes("FROM opening_exam_attempt_links")) return Promise.resolve([]);
+    if (query.includes("FROM opening_study_intent_events")) return Promise.resolve([]);
     if (!query.includes("FROM ")) return {};
     if (query.includes("FROM opening_learning_sessions")) return Promise.resolve([{ id: id(4), course_id: id(5) }]);
     if (query.includes("FROM opening_help_exposures") || query.includes("FROM opening_privacy_exclusions")) return Promise.resolve([]);

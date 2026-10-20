@@ -2,14 +2,15 @@ import type { SystemQueryReceipt } from "@aistudy/contracts";
 
 export type QueryEvidenceLink = { href: string; label: string };
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+const NOTE = new RegExp(`^/opening/library/${UUID}$`);
 const COURSE = new RegExp(`^/opening/courses/${UUID}(?:/study|\\?tab=records)?$`);
 const MATERIAL = new RegExp(`^/opening/library\\?tab=materials&source=${UUID}&version=(?:0|[1-9][0-9]*)(?:&page=[1-9][0-9]*)?$`);
 
 /** Only the read routes emitted by the query executor; encoded URL interpretation is unnecessary. */
 export function isQueryEvidenceHref(href: string): boolean {
   if (/[\s%\\]/.test(href)) return false;
-  return ["/opening/today", "/opening/settings", "/opening/library"].includes(href)
-    || COURSE.test(href) || MATERIAL.test(href);
+  return ["/opening/today", "/opening/settings", "/opening/library", "/opening/cards", "/opening/sprint"].includes(href)
+    || COURSE.test(href) || MATERIAL.test(href) || NOTE.test(href);
 }
 
 /** Answer Markdown alone never grants a destination: these come from the server-owned receipt. */

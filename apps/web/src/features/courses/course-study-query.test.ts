@@ -15,3 +15,10 @@ describe("explicit course practice entry", () => {
     expect(parseCourseStudyPracticeEntry(query)).not.toHaveProperty("initialMode");
   });
 });
+
+it("carries the exact skill and requirement into explicit practice, refusing activity resumption", () => {
+  expect(parseCourseStudyPracticeEntry({ mode: "practice", skillLabel: "span", requirementKey: "span:v1" })).toMatchObject({ initialMode: "practice", initialFocus: { skillLabel: "span", requirementKey: "span:v1" } });
+  expect(parseCourseStudyPracticeEntry({ mode: "practice", skillLabel: "span", activity: "other" })).toHaveProperty("practiceEntryError");
+  expect(parseCourseStudyPracticeEntry({ mode: "practice", requirementKey: "missing-skill" })).toHaveProperty("practiceEntryError");
+  expect(parseCourseStudyPracticeEntry({ mode: "matrix", skillLabel: "span" })).toHaveProperty("practiceEntryError");
+});

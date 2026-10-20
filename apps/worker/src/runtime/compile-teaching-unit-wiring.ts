@@ -5,6 +5,7 @@ import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
   readOpeningTeachingCompilerFocus,
+  readOpeningTeachingParentBudget,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
@@ -61,6 +62,7 @@ export function createCompileTeachingUnitWorkerDeps(
     : {};
   return {
     budget,
+    resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
     ...modelPath,
     provider: {
       complete: async () => ({

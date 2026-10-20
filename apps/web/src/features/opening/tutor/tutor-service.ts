@@ -1,5 +1,6 @@
 import {
   conversationCreateInputSchema,
+  isSystemQueryPurpose, isRecordFollowup,
   shouldCreateLearningSession,
   turnInputSchema,
   type ConversationCreateInput,
@@ -7,6 +8,7 @@ import {
   type ConversationSummary,
   type TurnInput,
   type TurnRecord,
+  type StudyContextAnchor,
 } from "@aistudy/contracts";
 import { pickSourceIds, shouldAutoPickSources } from "@aistudy/ai";
 import type {
@@ -72,9 +74,14 @@ export function createTutorService(deps: {
   async function authorizedChunksFor(
     scope: OpeningConversationScope,
     sourceIds: readonly string[],
+    anchor?: StudyContextAnchor,
   ): Promise<AuthorizedChunk[]> {
     if (sourceIds.length === 0) return [];
-    const chunks = await deps.sourceChunks.listForSources(scope, [...sourceIds]);
+    let chunks = await deps.sourceChunks.listForSources(scope, [...sourceIds]);
+    if (anchor?.sourceId && anchor.sourceVersion != null && sourceIds.includes(anchor.sourceId)) {
+      const pinned = await deps.sourceChunks.listChunksAtVersion(scope, anchor.sourceId, anchor.sourceVersion);
+      chunks = [...chunks.filter(chunk => chunk.sourceId !== anchor.sourceId), ...pinned];
+    }
     // Allow image-only chunks (photo sources) for cite/selection; worker enforces VISION_REQUIRED.
     return chunks
       .filter((chunk) => Boolean(chunk.text.trim()) || Boolean(chunk.imageObjectKey?.trim()))
@@ -130,6 +137,9 @@ export function createTutorService(deps: {
       if (!built.ok) {
         throw mapPageSelectionToHttp(built.selection.code);
       }
+      const returnedTurns = built.resume.boundedHistory.length ? turns.slice(-built.resume.boundedHistory.length) : [];
+      const returnedIds = returnedTurns.flatMap(turn => turn.id ? [turn.id] : []);
+      if (deps.conversations.releaseReturnedTurnIds) await deps.conversations.releaseReturnedTurnIds(scope, conversationId, returnedIds);
       return built.resume;
     },
 
@@ -154,10 +164,12 @@ export function createTutorService(deps: {
       }
 
       const owned = await deps.conversations.getOwned(scope, input.conversationId);
-      if (input.querySystem) {
+      const queryHistory = isRecordFollowup(input.text) ? await deps.conversations.loadContinuityTurns(scope, input.conversationId) : [];
+      if (isSystemQueryPurpose({ ...input, history: queryHistory })) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
         const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: input.text, mode: input.mode,
-          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+          contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
           learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
         return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null };
       }
@@ -169,9 +181,10 @@ export function createTutorService(deps: {
 
       // Explicit client sourceIds outrank course pool. Empty + courseId → Data ready membership fill.
       const clientSourceIds = [...input.sourceIds];
-      let effectiveSourceIds = [...clientSourceIds];
+      let effectiveSourceIds = input.sourceSelection === "none" ? [] : clientSourceIds.length === 0 && input.contextAnchor?.sourceId ? [input.contextAnchor.sourceId] : [...clientSourceIds];
       if (
         effectiveSourceIds.length === 0
+        && input.sourceSelection !== "none" && input.sourceSelection !== "selected"
         && owned.courseId
         && deps.listReadySourceIdsForCourse
       ) {
@@ -182,7 +195,7 @@ export function createTutorService(deps: {
       }
 
       if (!existing) {
-        let authorized = await authorizedChunksFor(scope, effectiveSourceIds);
+        let authorized = await authorizedChunksFor(scope, effectiveSourceIds, input.contextAnchor);
         if (clientSourceIds.length === 0) {
           // Auto/course-pool: drop unreadables; then keyword top-K when pool is large.
           effectiveSourceIds = effectiveSourceIds.filter(id =>
@@ -205,8 +218,8 @@ export function createTutorService(deps: {
         const selection = validatePageSelection(
           {
             sourceIds: effectiveSourceIds,
-            currentPage: input.currentPage,
-            chunkId: input.chunkId,
+            currentPage: input.currentPage ?? input.contextAnchor?.page,
+            chunkId: input.chunkId ?? input.contextAnchor?.chunkId,
           },
           authorized,
         );
@@ -215,11 +228,13 @@ export function createTutorService(deps: {
         }
       }
 
-      const attempt = input.attemptId && deps.attempts ? await deps.attempts.assertAccess(scope, input.attemptId) : null;
-      if (input.attemptId && !attempt) throw new TutorServiceError("NOT_FOUND", "attempt not found", 404);
+      const attemptId = input.attemptId ?? input.contextAnchor?.attemptId;
+      if (input.attemptId && input.contextAnchor?.attemptId && input.attemptId !== input.contextAnchor.attemptId) throw new TutorServiceError("VALIDATION", "context attempt mismatch", 400);
+      const attempt = attemptId && deps.attempts ? await deps.attempts.assertAccess(scope, attemptId) : null;
+      if (attemptId && !attempt) throw new TutorServiceError("NOT_FOUND", "attempt not found", 404);
       if (attempt && input.learningSessionId && input.learningSessionId !== attempt.sessionId) throw new TutorServiceError("VALIDATION", "attempt/session mismatch", 400);
       let learningSessionId = attempt?.sessionId ?? existing?.learningSessionId ?? input.learningSessionId ?? null;
-      if (!shouldCreateLearningSession(input.mode)) {
+      if (!attempt && !shouldCreateLearningSession(input.mode)) {
         learningSessionId = null;
       }
 
@@ -232,9 +247,10 @@ export function createTutorService(deps: {
         privacy: input.privacy,
         sourceIds: effectiveSourceIds,
         learningSessionId,
-        attemptId: input.attemptId ?? null,
-        currentPage: input.currentPage ?? null,
-        chunkId: input.chunkId ?? null,
+        contextAnchor: input.contextAnchor, purpose: input.purpose,
+        attemptId: attemptId ?? null,
+        currentPage: input.currentPage ?? input.contextAnchor?.page ?? null,
+        chunkId: input.chunkId ?? input.contextAnchor?.chunkId ?? null,
         strategyTemplateId: input.strategyTemplateId ?? null,
       });
 

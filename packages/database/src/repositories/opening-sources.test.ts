@@ -42,7 +42,8 @@ function transactionalSql(handler: (query: string) => unknown[]) {
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return Promise.resolve([]);
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return Promise.resolve([{ revision }]);
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) return Promise.resolve([{ revision: ++revision }]);
-    if (query.startsWith("DELETE FROM opening_learning_eligibility") || query.startsWith("p.") || query === "FALSE") return Promise.resolve([]);
+    if (query.startsWith("DELETE FROM opening_learning_eligibility") || query.startsWith("p.") || query === "FALSE"
+      || query.startsWith("baseline.source_ids &&") || query.startsWith("j.payload->'spanDelayedProtocol'->>'baselineRootId'=")) return Promise.resolve([]);
     return Promise.resolve(handler(query));
   }) as unknown as Sql;
   sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];

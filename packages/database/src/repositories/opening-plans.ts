@@ -23,6 +23,8 @@ import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } fr
 import { withTaskPlanningFields } from "./opening-task-fields";
 import { recordOpeningPlanFeedback } from "./opening-plan-feedback";
 
+import { recordOpeningPlanDraftDecision } from "./opening-plan-decision";
+
 import { acceptOpeningPlan } from "./opening-plan-accept";
 
 export { OpeningPlanError };
@@ -34,6 +36,7 @@ export type ProposePlanInput = {
   free: TimeBlock[];
   blocks: PlannedBlock[];
   unscheduledTaskIds: string[];
+  unscheduledReasons?: Array<{ taskId: string; reason: string }>;
   clientKey?: string | null;
 };
 
@@ -363,17 +366,22 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         tasks: input.tasks,
         free: input.free,
         proposedAt: new Date().toISOString(),
+        unscheduledReasons: input.unscheduledReasons ?? [],
       };
-      const rows = await sql`
-        INSERT INTO opening_plan_drafts (
-          id, workspace_id, owner_user_id, day, version, base_version, status,
-          blocks, unscheduled_task_ids, input_snapshot, hard_blocks_fingerprint, propose_client_key
-        ) VALUES (
-          ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.date}::date, ${0}, ${baseVersion},
-          ${"draft"}, ${sql.json(input.blocks as never)}, ${sql.json(input.unscheduledTaskIds as never)},
-          ${sql.json(snapshot as never)}, ${fp}, ${input.clientKey ?? null}
-        ) RETURNING *`;
-      return mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
+      return sql.begin(async tx => {
+        const rows = await tx`
+          INSERT INTO opening_plan_drafts (
+            id, workspace_id, owner_user_id, day, version, base_version, status,
+            blocks, unscheduled_task_ids, input_snapshot, hard_blocks_fingerprint, propose_client_key
+          ) VALUES (
+            ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.date}::date, ${0}, ${baseVersion},
+            ${"draft"}, ${tx.json(input.blocks as never)}, ${tx.json(input.unscheduledTaskIds as never)},
+            ${tx.json(snapshot as never)}, ${fp}, ${input.clientKey ?? null}
+          ) RETURNING *`;
+        const draft = mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
+        await recordOpeningPlanDraftDecision(tx, scope, draft, input.unscheduledReasons);
+        return draft;
+      }) as Promise<PlanDraft>;
     },
 
     async rejectPlan(scope: OpeningScope, draftId: string): Promise<PlanDraft> {
@@ -548,6 +556,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           free: input.free,
           proposedAt: new Date().toISOString(),
           autoDraft: true,
+          unscheduledReasons: input.unscheduledReasons ?? [],
           algo: autoDraftAlgo(built),
           ...(adaptive ? {
             plannerInputRevision: adaptive.plannerInputRevision,
@@ -577,8 +586,10 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
             ${adaptive ? "auto_draft" : "user"}, ${tx.json((adaptive?.suggestedTasks ?? []) as never)},
             ${tx.json((adaptive?.reasons ?? {}) as never)}, ${adaptive?.strategyVersion ?? null}
           ) RETURNING *`;
+        const draft = mapOpeningPlanDraft(rows[0] as Record<string, unknown>);
+        await recordOpeningPlanDraftDecision(tx, scope, draft, input.unscheduledReasons);
         return {
-          draft: mapOpeningPlanDraft(rows[0] as Record<string, unknown>),
+          draft,
           skippedBecauseAccepted: false,
           dailyDraftSkippedReason: null,
         };

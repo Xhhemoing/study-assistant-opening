@@ -13,6 +13,7 @@ import { IntegrationPanel } from "./integration-panel";
 import { BktPanel } from "./bkt-panel";
 import { ForecastPanel } from "./forecast-panel";
 import { useExamResources } from "./use-exam-resources";
+import { LearnerStateCard } from "../teaching/learner-state-card";
 import { SourceTracker } from "./source-tracker";
 
 const tabs = [{ id: "practice", label: "当前训练" }, { id: "plan", label: "七天计划" }, { id: "sources", label: "原题登记" }, { id: "lessons", label: "技能与串讲" }, { id: "integration", label: "课程与证据" }, { id: "estimates", label: "表现估计" }, { id: "forecast", label: "考点分析" }] as const;
@@ -55,6 +56,7 @@ export function ExamSprintView() {
       {!overview ? (!error ? <LoadingRows label="正在读取考前冲刺进度" /> : null) : <>
         {overview.activeRun ? <ActiveRun key={overview.activeRun.id} overview={overview} disabled={disabled} send={send} /> : <StartTraining overview={overview} disabled={disabled} send={send} />}
         <SprintSummary overview={overview} />
+        {integration?.binding ? <details className="text-xs text-zinc-600"><summary className="cursor-pointer py-1">查看课程的共同学习证据</summary><LearnerStateCard courseId={integration.binding.courseId} revision={overview.attempts.filter(item => item.answeredAt).length} /></details> : null}
         {integration === null ? <p className="text-xs text-zinc-500">正在确认课程关联，目标设置暂不可编辑。</p> : integration.binding ? <section className={`${ui.panel} p-4 text-xs leading-6 text-zinc-600`}><p>当前使用课程目标：{integration.courseGoal?.targetDate ?? "未设日期"} · 每周 {integration.courseGoal?.weeklyMinutes ?? "未设"} 分钟{integration.courseGoal?.milestoneTitle ? ` · ${integration.courseGoal.milestoneTitle}` : ""}</p><p>冲刺与其他学习任务共用课程规划的时间预算。</p><Link className={`${ui.quiet} mt-2`} href={`/opening/courses/${integration.binding.courseId}`}>查看课程并调整目标</Link></section> : <SprintSettings key={`${overview.state.examDate}-${overview.state.dailyMinutes}`} overview={overview} disabled={disabled} send={send} />}
         <div role="tablist" aria-label="冲刺工具" className={`${ui.segment} overflow-x-auto`}>{tabs.map(item => <button key={item.id} type="button" role="tab" id={`sprint-tab-${item.id}`} aria-selected={tab === item.id} aria-controls={`sprint-panel-${item.id}`} aria-pressed={tab === item.id} disabled={busy} className={`${ui.segmentItem} whitespace-nowrap`} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
         <div role="tabpanel" id={`sprint-panel-${tab}`} aria-labelledby={`sprint-tab-${tab}`} className="space-y-5">

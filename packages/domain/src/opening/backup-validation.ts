@@ -98,7 +98,7 @@ function parseCitations(value: unknown): string[] | null {
 function collectSourceIds(value: unknown, refs: Set<string>): boolean {
   if (Array.isArray(value)) return value.every((item) => collectSourceIds(item, refs));
   if (!isRecord(value)) return true;
-  if ("sourceId" in value && !isUuid(value.sourceId)) return false;
+  if (value.sourceId != null && !isUuid(value.sourceId)) return false;
   if (isUuid(value.sourceId)) refs.add(value.sourceId.toLowerCase());
   if (value.referenceSourceId != null && !isUuid(value.referenceSourceId)) return false;
   if (isUuid(value.referenceSourceId)) refs.add(value.referenceSourceId.toLowerCase());
@@ -107,7 +107,7 @@ function collectSourceIds(value: unknown, refs: Set<string>): boolean {
 
 function opaqueSourceIds(row: Record<string, unknown>): string[] | null {
   const refs = new Set<string>();
-  for (const key of ["payload", "blocks", "accepted_blocks", "input_snapshot", "reference_check", "create_intent", "submitted_intent", "system_query"]) {
+  for (const key of ["payload", "blocks", "accepted_blocks", "input_snapshot", "reference_check", "create_intent", "submitted_intent", "context_anchor", "release_intent", "receipt", "system_query"]) {
     if (row[key] !== undefined && !collectSourceIds(row[key], refs)) return null;
   }
   return [...refs];

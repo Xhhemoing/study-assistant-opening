@@ -134,3 +134,14 @@ describe("authoritative practice restoration", () => {
     await expect(readPracticeRecord(saved, courseId, attempt, original.id)).rejects.toThrow("不一致");
   });
 });
+
+it("isolates focused practice from ordinary drafts and from another skill or requirement", () => {
+  const a = { skillLabel: "span", requirementKey: "v1" };
+  const focused = practiceScope(courseId, "ordinary", null, a);
+  expect(focused).not.toBe(practiceScope(courseId, "ordinary"));
+  expect(focused).not.toBe(practiceScope(courseId, "ordinary", null, { ...a, requirementKey: "v2" }));
+  expect(focused).not.toBe(practiceScope(courseId, "ordinary", null, { ...a, skillLabel: "matrices" }));
+  const draft = emptyPracticeDraft(focused, { skillLabel: "span", answer: "untouched" });
+  expect(parsePracticeDraft(draft, focused)).toMatchObject({ fields: { skillLabel: "span", answer: "untouched" } });
+  expect(parsePracticeDraft({ ...draft, fields: { ...draft.fields, skillLabel: "other" } }, focused)).toBeNull();
+});

@@ -8,6 +8,7 @@ import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import { POST as createAttempt } from "../../../apps/web/src/app/api/opening/attempts/route";
 import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
 import { POST as submitTurn } from "../../../apps/web/src/app/api/opening/turns/route";
+import { GET as listTurns } from "../../../apps/web/src/app/api/opening/conversations/[id]/turns/route";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
@@ -55,6 +56,15 @@ it.each(["hint", "explain"] as const)("records %s delivery through the actual tu
   const handler = tutorHandler(f.chunkId);
   await handler(job.jobId);
   await expect(handler(job.jobId)).resolves.toEqual({ skipped: true });
+  const generated = await fixture.sql`SELECT delivered,delivered_at FROM opening_help_exposures WHERE attempt_id=${attempt.id}`;
+  expect(generated).toEqual([{ delivered: false, delivered_at: null }]);
+  const delivered = await listTurns(new Request(`http://localhost/api/opening/conversations/${conversation.id}/turns`, {
+    headers: { cookie: fixture.cookie },
+  }), params(conversation.id));
+  expect(delivered.status).toBe(200);
+  expect(await delivered.json()).toEqual(expect.arrayContaining([expect.objectContaining({
+    role: "assistant", status: "complete", exposureReceipt: expect.objectContaining({ releasedAt: expect.any(String) }),
+  })]));
   const helpRows = await fixture.sql`SELECT h.*,t.status FROM opening_help_exposures h JOIN opening_turns t ON t.id=h.turn_id WHERE h.attempt_id=${attempt.id}`;
   expect(helpRows).toHaveLength(1);
   expect(helpRows[0]).toMatchObject({ session_id: f.sessionId, attempt_id: attempt.id, problem_id: attempt.problemId,

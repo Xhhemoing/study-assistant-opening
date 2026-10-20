@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { uuidSchema } from "./foundation";
 import { learningObservationSchema } from "./learning";
+import { studyExposureReceiptSchema } from "./tutor";
 
 export const courseLearningHistoryInputSchema = z.object({
   courseId: uuidSchema,
@@ -12,6 +13,8 @@ export const courseLearningHistoryInputSchema = z.object({
 
 export const courseLearningHistoryPageSchema = z.object({
   observations: z.array(learningObservationSchema).max(200),
+  // HTTP delivery adds receipts; repository-only pages have not released content.
+  exposureReceipts: z.array(studyExposureReceiptSchema).max(200).optional(),
   snapshotRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   nextCursor: z.string().min(1).max(2048).nullable(),
   totalCount: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

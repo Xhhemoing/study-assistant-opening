@@ -106,3 +106,11 @@ describe("free-tier models", () => {
     expect(merged.models[0]).toMatchObject({ billing: "free_tier", dailyRequestCap: 200, supportsAudio: true });
   });
 });
+
+it("retains workspace media bounds without applying them to unconfigured text-only models", () => {
+  const media = { mediaInputTokenUpperBound: 128000, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 5 };
+  const configured = { ...custom(), ...media };
+  const merged = mergeOpeningCatalog([], [configured], { defaultModelId: null, dailyCapCents: 100 });
+  expect(merged.models[0]).toMatchObject(media);
+  expect(mergeOpeningCatalog([], [custom()], { defaultModelId: null, dailyCapCents: 100 }).models[0]).not.toHaveProperty("mediaInputTokenUpperBound");
+});

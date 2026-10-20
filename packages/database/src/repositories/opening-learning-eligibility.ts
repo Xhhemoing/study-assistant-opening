@@ -51,10 +51,19 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
     LEFT JOIN LATERAL (SELECT identity_current,requirement_key,observation_id FROM (${openingExamIdentityStateQuery(db, scope)}) identity
       WHERE identity.attempt_id=o.attempt_id OR identity.observation_id=o.current_root_id LIMIT 1) exam_identity ON TRUE
     LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_help_exposures h
-      JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
+      LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
       JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
-      WHERE h.workspace_id=o.workspace_id AND l.owner_user_id=o.owner_user_id AND l.course_id=origin.course_id
-        AND (h.attempt_id=o.attempt_id OR h.problem_id=o.problem_id OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id=o.session_id))) help ON TRUE
+      WHERE h.workspace_id=o.workspace_id AND h.delivered=TRUE AND COALESCE(h.owner_user_id,l.owner_user_id)=o.owner_user_id AND (COALESCE(h.course_id,l.course_id)=origin.course_id OR (h.course_id IS NULL AND h.session_id IS NULL))
+        AND (h.attempt_id=o.attempt_id OR (h.problem_id=o.problem_id AND COALESCE(h.release_intent->'originReference'->>'possibleOpenAttemptOnly','false')<>'true') OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id=o.session_id)
+          OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND EXISTS(SELECT 1 FROM opening_learning_item_versions v
+            WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
+              AND v.source_id::text=h.context_anchor->>'sourceId' AND v.source_version::text=h.context_anchor->>'sourceVersion'
+              AND (h.context_anchor->>'page' IS NULL OR v.physical_page::text=h.context_anchor->>'page')
+              AND (h.context_anchor->>'chunkId' IS NULL OR v.chunk_id::text=h.context_anchor->>'chunkId')))
+          OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.release_intent->'originReference'->>'skillLabel'=o.skill_label
+            AND (h.release_intent->'originReference'->>'requirementKey' IS NULL OR h.release_intent->'originReference'->>'requirementKey'=o.requirement_key)
+            AND EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(h.release_intent->'originReference'->'sourceRefs','[]'::jsonb)) ref
+              WHERE ref->>'sourceId'=ANY(o.source_ids::text[]) AND (ref->>'sourceVersion' IS NULL OR ref->>'sourceVersion'=o.source_versions->>(ref->>'sourceId')))))) help ON TRUE
     LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_exam_help_receipts h
       JOIN opening_exam_attempt_links e ON e.id=h.attempt_link_id
       JOIN opening_exam_sprints s ON s.id=e.sprint_id
@@ -88,7 +97,15 @@ export async function invalidateOpeningLearningEligibility(tx: TransactionSql, s
   if (!input.sourceIds?.length && !input.rootIds?.length) return;
   await tx`DELETE FROM opening_learning_eligibility p WHERE p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId}
     AND (${input.rootIds?.length ? tx`p.root_observation_id=ANY(${[...input.rootIds]}::uuid[])` : tx`FALSE`}
-      OR ${input.sourceIds?.length ? tx`p.privacy_source_ids && ${[...input.sourceIds]}::text[]` : tx`FALSE`})`;
+      OR ${input.sourceIds?.length ? tx`p.privacy_source_ids && ${[...input.sourceIds]}::text[]` : tx`FALSE`}
+      OR EXISTS(SELECT 1 FROM opening_learning_observations o
+        JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
+        JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
+        JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+          AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
+        WHERE COALESCE(o.root_observation_id,o.id)=p.root_observation_id AND o.workspace_id=p.workspace_id AND o.owner_user_id=p.owner_user_id
+          AND (${input.rootIds?.length ? tx`j.payload->'spanDelayedProtocol'->>'baselineRootId'=ANY(${[...input.rootIds]}::text[])` : tx`FALSE`}
+            OR ${input.sourceIds?.length ? tx`baseline.source_ids && ${[...input.sourceIds]}::uuid[]` : tx`FALSE`})))`;
 }
 
 async function writeProjections(tx: TransactionSql, scope: Scope, entries: Array<{ row: Row; evidence: OpeningEvidenceInput }>, revision: number, compare: boolean): Promise<number> {

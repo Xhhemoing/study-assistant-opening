@@ -268,6 +268,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
               free: freeBlocks,
               blocks: built.blocks,
               unscheduledTaskIds: built.unscheduledTaskIds,
+              unscheduledReasons: built.unscheduledReasons,
               clientKey,
             },
             adaptive: built.adaptive,
@@ -311,6 +312,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             free: freeBlocks,
             blocks,
             unscheduledTaskIds: planned.unscheduledTaskIds,
+            unscheduledReasons: planned.unscheduled,
             clientKey,
           },
           ...(adaptive && "fallbackReason" in adaptive ? { fallbackReason: adaptive.fallbackReason } : {}),
@@ -457,9 +459,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           free: freeBlocks,
           blocks: planned.blocks,
           unscheduledTaskIds: planned.unscheduledTaskIds,
+          unscheduledReasons: planned.unscheduled,
           clientKey: body.clientKey ?? null,
         });
-        // PR-B additive: explicit reasons for unscheduled tasks (not persisted).
+        // Return the same explicit exclusion reasons captured with the decision receipt.
         return { ...draft, unscheduled: planned.unscheduled };
       } catch (error) {
         throw mapRepoError(error);
@@ -526,6 +529,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           free: freeBlocks,
           blocks: planned.blocks,
           unscheduledTaskIds: planned.unscheduledTaskIds,
+          unscheduledReasons: planned.unscheduled,
           clientKey: body.clientKey,
         });
       } catch (error) {

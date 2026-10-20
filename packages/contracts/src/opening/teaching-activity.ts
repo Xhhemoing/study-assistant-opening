@@ -34,6 +34,8 @@ export const teachingActivityGenerateStatusSchema = z.enum([
 export const teachingActivityCreateInputSchema = z
   .object({
     clientKey: z.string().min(8).max(200),
+    /** Server validates this user turn before sharing its parent interaction budget. */
+    sourceTurnId: uuidSchema.optional(),
     intentKind: teachingActivityIntentKindSchema,
     intentSummary: z.string().min(1).max(2000),
     sourceIds: z.array(uuidSchema).max(32).optional(),

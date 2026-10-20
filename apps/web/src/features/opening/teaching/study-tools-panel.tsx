@@ -7,8 +7,9 @@ import { ui } from "../design/ui";
 type StudyToolPanel = { id: string; label: string; content: ReactNode };
 
 /** One auxiliary surface. Breakpoint changes and tab switches keep its drafts mounted. */
-export function StudyToolsPanel({ panels, activePanel, onPanelChange, children }: {
+export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, fillHeight = false }: {
   panels: StudyToolPanel[];
+  fillHeight?: boolean;
   activePanel: string | null;
   onPanelChange: (id: string | null) => void;
   children: ReactNode;
@@ -65,22 +66,22 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children }
     return () => document.removeEventListener("keydown", escape);
   }, [selected?.id, wide, onPanelChange]);
 
-  return <div className="min-w-0">
-    <nav aria-label="学习工具" className="mb-4 flex min-w-0 flex-wrap gap-1 border-b border-zinc-200 pb-3">
+  return <div className={fillHeight ? "flex h-full min-h-0 min-w-0 flex-col" : "min-w-0"}>
+    <nav aria-label="学习工具" className="mb-2 flex min-w-0 shrink-0 flex-wrap gap-1 border-b border-zinc-200 pb-1">
       {panels.map(panel => <button key={panel.id} type="button" className={ui.quiet}
         aria-expanded={activePanel === panel.id} aria-controls={`${id}-panel`}
         onClick={() => onPanelChange(activePanel === panel.id ? null : panel.id)}>{panel.label}</button>)}
     </nav>
-    <div className={`grid min-w-0 gap-6 ${selected ? "lg:grid-cols-[minmax(0,1fr)_22rem]" : "grid-cols-1"}`}>
-      <div className="min-w-0">{children}</div>
+    <div className={`grid min-w-0 gap-4 ${fillHeight ? "min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" : ""} ${selected ? "lg:grid-cols-[minmax(0,1fr)_22rem]" : "grid-cols-1"}`}>
+      <div className={fillHeight ? "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain" : "min-w-0"}>{children}</div>
       <dialog ref={dialog} id={`${id}-panel`} aria-labelledby={`${id}-heading`}
         onCancel={event => { event.preventDefault(); onPanelChange(null); }}
-        className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-xl overflow-y-auto overscroll-contain rounded-xl border border-zinc-200 bg-white p-4 text-zinc-800 shadow-xl backdrop:bg-zinc-950/35 lg:static lg:m-0 lg:max-h-none lg:w-full lg:max-w-none lg:self-start lg:rounded-none lg:border-0 lg:border-l lg:pl-5 lg:pr-0 lg:pt-0 lg:shadow-none">
-        <div className="mb-4 flex items-center justify-between gap-3">
+        className={`fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-xl ${fillHeight ? "overflow-hidden" : "overflow-y-auto"} overscroll-contain rounded-xl border border-zinc-200 bg-white p-4 text-zinc-800 shadow-xl backdrop:bg-zinc-950/35 lg:static lg:m-0 lg:max-h-none lg:w-full lg:max-w-none lg:self-start lg:rounded-none lg:border-0 lg:border-l lg:pl-5 lg:pr-0 lg:pt-0 lg:shadow-none ${fillHeight ? "h-[90dvh] min-h-0 open:flex open:flex-col lg:h-full lg:self-stretch" : ""}`}>
+        <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
           <h2 className="text-sm font-semibold" id={`${id}-heading`}>{selected?.label ?? "学习工具"}</h2>
           <button type="button" className={ui.icon} aria-label="关闭学习工具" onClick={() => onPanelChange(null)}><X size={16} aria-hidden /></button>
         </div>
-        {panels.map(panel => visited.current.has(panel.id) ? <div key={panel.id} hidden={activePanel !== panel.id}>{panel.content}</div> : null)}
+        {panels.map(panel => visited.current.has(panel.id) ? <div key={panel.id} hidden={activePanel !== panel.id} className={activePanel !== panel.id ? "hidden" : fillHeight ? "min-h-0 flex-1 overflow-y-auto overscroll-contain" : ""}>{panel.content}</div> : null)}
       </dialog>
     </div>
   </div>;

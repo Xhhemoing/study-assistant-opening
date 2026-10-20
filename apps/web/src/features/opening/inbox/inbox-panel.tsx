@@ -234,7 +234,7 @@ export function InboxPanel({
       <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
         {displayed.map((record) => (
           <li key={record.id}>
-            <div className="flex items-start gap-2 px-2 py-2">
+            <div className="flex items-start gap-2 px-2 py-1">
               {onToggle ? <input aria-label={`选择材料 ${record.name}`} type="checkbox" checked={selectedIds?.has(record.id) ?? false} disabled={selectionDisabled} onChange={() => onToggle(record.id)} className="mt-3 size-4 shrink-0 accent-emerald-700" /> : null}
             <div className="min-w-0 flex-1"><SourceRow
               notice={notice?.sourceId === record.id ? notice.text : undefined}

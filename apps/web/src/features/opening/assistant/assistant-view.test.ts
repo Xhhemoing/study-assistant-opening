@@ -7,14 +7,12 @@ import {
   applyEffectiveSourceIds,
   assistantContextHint,
   autoSelectSourcesNotice,
-  EMPTY_COURSE_SOURCES_CONFIRM,
-  mergeChatMessages,
+  messagesForChatBranch,
   createJobPoller,
   jobStatusHint,
   pendingJobDiscoveryState,
   learningAttemptTurnContext,
   canReuseAssistantConversation,
-  shouldConfirmEmptyCourseSources,
   shouldRefreshCurrentConversation,
   shouldLoadConversationList,
   conversationForAssistant,
@@ -87,10 +85,10 @@ describe("AssistantView ephemeral cancellation", () => {
 });
 
 describe("AssistantView message visibility", () => {
-  it("keeps saved history visible while retaining ephemeral tab history", () => {
+  it("uses only the temporary timeline in the active temporary branch", () => {
     const saved = [{ id: "saved", role: "assistant" as const, text: "已保存", citations: [], citationLabels: [] }];
     const ephemeral = [{ id: "ephemeral", role: "user" as const, text: "本标签页", citations: [], citationLabels: [] }];
-    expect(mergeChatMessages(saved, ephemeral)).toEqual([...saved, ...ephemeral]);
+    expect(messagesForChatBranch(saved, ephemeral, "ephemeral")).toEqual(ephemeral);
   });
 });
 
@@ -316,36 +314,6 @@ it("does not invent citations when the service returns none, but still flags mat
   expect(messages[1]?.hadMaterialContext).toBe(true);
 });
 
-describe("empty course source soft confirm", () => {
-  it("requires confirm when course-bound and no sourceIds", () => {
-    expect(shouldConfirmEmptyCourseSources({
-      sourceIds: [],
-      courseId: "11111111-1111-4111-8111-111111111111",
-    })).toBe(true);
-    expect(EMPTY_COURSE_SOURCES_CONFIRM).toContain("当前课程有材料，尚未选入本轮");
-  });
-
-  it("allows free chat with empty sourceIds", () => {
-    expect(shouldConfirmEmptyCourseSources({ sourceIds: [], courseId: null })).toBe(false);
-    expect(shouldConfirmEmptyCourseSources({ sourceIds: [], courseId: undefined })).toBe(false);
-  });
-
-  it("skips confirm when materials are already selected", () => {
-    expect(shouldConfirmEmptyCourseSources({
-      sourceIds: ["22222222-2222-4222-8222-222222222222"],
-      courseId: "11111111-1111-4111-8111-111111111111",
-    })).toBe(false);
-  });
-
-  it("also warns when ready membership materials exist without courseId on the conversation", () => {
-    expect(shouldConfirmEmptyCourseSources({
-      sourceIds: [],
-      courseId: null,
-      hasReadyCourseMaterials: true,
-    })).toBe(true);
-  });
-});
-
 describe("LAB-U01 chip prefill prompts", () => {
   it("prefills guided with a hint-only prompt and worked_example with a full explanation prompt", () => {
     expect(presetPromptForMode("hint")).toContain("不要直接给完整答案");
@@ -430,4 +398,12 @@ describe("new conversations remain scoped to their entry context", () => {
     expect(assistantSessionIndex(newInMaterialA, "material-a:v2")).toBe(0);
     expect(assistantSessionIndex({ identity: "activity-b", count: 0 }, "activity-b")).toBe(0);
   });
+});
+
+it("keeps saved and ephemeral timelines separate while switching back and forth", () => {
+  const saved = [{ id: "saved", role: "user" as const, text: "saved question", citations: [], citationLabels: [] }];
+  const ephemeral = [{ ...saved[0]!, id: "temporary", text: "temporary question" }];
+  expect(messagesForChatBranch(saved, ephemeral, "ephemeral")).toEqual(ephemeral);
+  expect(messagesForChatBranch(saved, ephemeral, "saved")).toEqual(saved);
+  expect(messagesForChatBranch(saved, [], "ephemeral")).toEqual([]);
 });

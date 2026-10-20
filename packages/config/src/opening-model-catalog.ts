@@ -16,13 +16,25 @@ const modelSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
   inputCentsPerMillion: z.number().finite().nonnegative(),
   outputCentsPerMillion: z.number().finite().nonnegative(),
+  /** Operator-verified bound for this provider/model, never inferred from image bytes. */
+  mediaInputTokenUpperBound: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  mediaMaxInputBytes: z.number().int().positive().max(104_857_600).optional(),
+  mediaInputCentsPerMillion: z.number().finite().nonnegative().optional(),
   supportsVision: z.boolean().default(false),
   supportsAudio: z.boolean().default(false),
   /** free_tier: provider free quota; prices may be 0 and dailyRequestCap bounds use. */
   billing: z.enum(["metered", "free_tier"]).default("metered"),
   dailyRequestCap: z.number().int().min(1).max(100_000).nullable().default(null),
 }).strict().refine(model => model.billing === "metered" || model.dailyRequestCap !== null,
-  "free_tier models need dailyRequestCap");
+  "free_tier models need dailyRequestCap").superRefine((model, ctx) => {
+  const fields = [model.mediaInputTokenUpperBound, model.mediaMaxInputBytes, model.mediaInputCentsPerMillion];
+  if (fields.some(value => value !== undefined) && fields.some(value => value === undefined)) {
+    ctx.addIssue({ code: "custom", message: "media pricing requires token bound, byte limit and rate together" });
+  }
+  if (model.billing === "metered" && model.mediaInputCentsPerMillion !== undefined && model.mediaInputCentsPerMillion <= 0) {
+    ctx.addIssue({ code: "custom", message: "metered media pricing must be positive" });
+  }
+});
 const catalogSchema = z.array(modelSchema).max(32).superRefine((models, ctx) => {
   if (new Set(models.map(model => model.id)).size !== models.length) ctx.addIssue({ code: "custom", message: "model ids must be unique" });
   const labels = new Map<string, string>();

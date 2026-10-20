@@ -23,3 +23,18 @@ it("accepts an explicit user course id and refuses invented material narrowing",
     expect(createSystemQueryRoute("材料“原文”在哪页", clock).admit({ name: "materials", arguments: { ...arguments_, limit: 5, offset: 0 } })).toBeNull();
   }
 });
+
+it("preserves material ambiguity after admitting a bound course listing", () => {
+  const request = { name: "materials" as const, arguments: { courseId: a, limit: 5, offset: 0 } };
+  const route = createSystemQueryRoute("材料记录有哪些", clock, { courseId: a });
+  expect(route.admit(request)).not.toBeNull();
+  expect(route.clarification).toBeUndefined();
+  route.observe(systemQueryResultSchema.parse({ name: "materials", authorization: { purpose: "system_record_lookup", workspaceId: a, principalId: a, role: "workspace_owner", permissionRevision: "owner" },
+    status: "partial", reason: "truncated", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], nextOffset: 5,
+    sourceRefs: [{ sourceId: b, sourceVersion: 1 }], data: [{ id: a, sourceId: b, sourceVersion: 1, physicalPage: 1, truncated: false, exposure: "content_withheld", summary: "candidate" }] }), request);
+  const clarification = route.clarification;
+  expect(clarification).toContain("完整覆盖");
+  route.admit(request);
+  expect(route.clarification).toBe(clarification);
+  expect(createSystemQueryRoute("材料记录有哪些", clock, { courseId: a, sourceIds: [a, b] }).admit(request)).toBeNull();
+});

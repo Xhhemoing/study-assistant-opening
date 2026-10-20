@@ -15,6 +15,8 @@ export const OPENING_RESTORE_NEVER_TABLES = [
   "opening_outbox",
   "opening_tutor_jobs",
   "opening_budget_reservations",
+  "opening_parent_interaction_budgets",
+  "opening_assistant_proposals",
   "opening_connections",
   "opening_connection_credentials",
   "opening_model_provider_credentials",
@@ -112,6 +114,9 @@ export async function readOpeningRestoreNamespaceCounts(
     UNION ALL SELECT 'opening_learning_history_revisions', count(*)::int FROM opening_learning_history_revisions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_activity_history_revisions', count(*)::int FROM opening_learning_activity_history_revisions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_workspace_history_revisions', count(*)::int FROM opening_workspace_history_revisions WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_learning_decisions', count(*)::int FROM opening_learning_decisions WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_learning_shadow_predictions', count(*)::int FROM opening_learning_shadow_predictions WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_study_intent_events', count(*)::int FROM opening_study_intent_events WHERE workspace_id = ${id}
   `;
 
   const counts = Object.fromEntries(

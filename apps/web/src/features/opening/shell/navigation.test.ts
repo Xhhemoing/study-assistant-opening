@@ -27,7 +27,7 @@ describe("workspace navigation", () => {
       "/opening/review",
       "/opening/settings/connections",
     ]);
-    expect(openingNavigation().find(item => item.label === "笔记")?.icon).toBe("library");
+    expect(openingNavigation().find(item => item.label === "资料库")?.icon).toBe("library");
   });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);

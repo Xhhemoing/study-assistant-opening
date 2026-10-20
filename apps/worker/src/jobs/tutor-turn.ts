@@ -1,3 +1,4 @@
+import { previousRecordQuestion } from "@aistudy/contracts";
 export { makeTutorInstruction } from "@aistudy/domain";
 import {
   providerOutputSchema,
@@ -12,6 +13,9 @@ import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveC
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
+  makeStudyLanguageSupport,
+  studyIntentInstruction,
+  studyIntentForMessage,
   instructionWithMemories,
   makeTutorInstruction,
   PageCitationClarifyError,
@@ -36,6 +40,7 @@ import {
   withModelFallback,
   type ReservationTerms,
   type ResolvedTaskModel,
+  type ParentInteractionBudget,
 } from "@aistudy/ai";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -50,6 +55,8 @@ import {
 type Scope = { workspaceId: string; ownerUserId: string };
 
 export type TutorTurnDeps = {
+  proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
+    jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
   tutorJobs: OpeningTutorJobsRepository;
   chunks: {
@@ -125,17 +132,28 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       settle: (...args) => deps.budget.settle(scope, ...args),
       markUnknown: (reservationId) => deps.budget.markUnknown(scope, reservationId),
     };
+    const parentBudget: ParentInteractionBudget = { id: `study-turn:${claimed.userTurnId}` };
     try {
       const turn = await deps.tutorJobs.getUserTurn(claimed.userTurnId, claimed.workspaceId);
       if (!turn) throw new Error("user turn for tutor job is missing");
       const jobEpoch = deps.privacy
         ? await deps.privacy.getWorkspaceEpoch(scope)
         : null;
-      if (turn.querySystem) {
+      if (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
+        if (!deps.proposals) throw new Error("proposal service unavailable");
+        const reply = await deps.proposals.reply(scope, { sourceTurnId: claimed.userTurnId, purpose: turn.purpose, question: turn.text,
+          courseId: turn.courseId, parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}) });
+        if (jobEpoch !== null && reply.privacyEpoch !== jobEpoch) throw new Error("proposal privacy changed");
+        await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId,
+          text: reply.text, citations: [], candidates: [], contextSourceRefs: reply.contextSourceRefs,
+          expectedPrivacyEpoch: reply.privacyEpoch, claimToken: claimed.claimToken });
+        return { skipped: false };
+      }
+      if (turn.querySystem || turn.purpose === "query" || turn.purpose === "explain_state") {
         if (!deps.systemQuery?.enabled()) throw new Error("系统记录查询暂未开启，请保留问题后重试。");
         const sourceId = turn.sourceIds.length === 1 ? turn.sourceIds[0] : undefined;
-        const reply = await deps.systemQuery.reply(scope, { question: turn.text, focus: {
-          courseId: turn.courseId, sourceId, sourceIds: turn.sourceIds, sourceVersion: sourceId ? turn.sourceVersions[sourceId] : undefined, physicalPage: turn.currentPage,
+        const reply = await deps.systemQuery.reply(scope, { question: turn.text, resolvePreviousQuestion: async () => previousRecordQuestion((await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId, "record_referents")).history), parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}), focus: {
+          courseId: turn.courseId ?? turn.contextAnchor?.courseId, sourceId, sourceIds: turn.sourceIds, sourceVersion: sourceId ? turn.sourceVersions[sourceId] : undefined, physicalPage: turn.currentPage,
         } });
         if (jobEpoch !== null && reply.privacyEpoch !== jobEpoch) throw new Error("query privacy changed");
         await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId, text: reply.text,
@@ -143,6 +161,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           expectedPrivacyEpoch: reply.privacyEpoch, claimToken: claimed.claimToken });
         return { skipped: false };
       }
+      if (turn.contextAnchor?.purpose === "language_support") {
+        const text = makeStudyLanguageSupport(turn.languageSupportQuestion ?? null);
+        const generatedExposure = { releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
+          origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "language" as const, kind: "hint" as const, level: "hinted" as const,
+          ...(turn.learningSessionId ? { sessionId: turn.learningSessionId } : {}) };
+        await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId, text,
+          citations: [], candidates: [], contextSourceRefs: [], generatedExposure, expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
+        return { skipped: false };
+      }
+      const currentStudyIntent = deps.tutorJobs.applyUserTurnIntent
+        ? await deps.tutorJobs.applyUserTurnIntent(scope, { userTurnId: claimed.userTurnId, jobId: claimed.id, claimToken: claimed.claimToken })
+        : studyIntentForMessage(turn.studyIntent, turn.text);
       const excluded = new Set(
         deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
       );
@@ -194,7 +224,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           planningInstruction = CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE;
         }
       }
-      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`+planningInstruction;
+      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`+planningInstruction+studyIntentInstruction(currentStudyIntent);
       const tutorOperationId = `tutor:${claimed.id}`;
       // An unusable primary route may hand over to the user's fallback before anything is sent.
       let selected: ResolvedTaskModel | undefined;
@@ -239,6 +269,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           input,
           requestId: operationId,
           operationId,
+          parentBudget,
           // Persisted result reference: the assistant turn this call fills.
           resultRef: `opening_turn:${claimed.assistantTurnId}`,
           reservedCents: terms.reservedCents,
@@ -300,15 +331,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         const currentEpoch = await deps.privacy.getWorkspaceEpoch(scope);
         assertCurrentEpoch(jobEpoch, currentEpoch);
       }
-      // L01: carry delivered help into the same transaction as the assistant turn.
-      const helpExposure = turn.learningSessionId && (mode === "hint" || mode === "explain")
+      // Generate an inert receipt with the answer; only an actual HTTP delivery releases it.
+      const helpExposure = turn.learningSessionId && (turn.contextAnchor || turn.attemptId || mode === "hint" || mode === "explain")
         ? {
             id: randomUUID(),
             sessionId: turn.learningSessionId,
+            contextAnchor: turn.contextAnchor,
+            supportDomain: "unknown" as const,
             problemId: null,
             attemptId: turn.attemptId ?? null,
             turnId: claimed.assistantTurnId,
-            kind: classifyTutorHelpKind({
+            kind: turn.attemptId && mode !== "explain" ? "hint" as const : classifyTutorHelpKind({
               mode,
               attemptId: turn.attemptId ?? null,
               problemId: null,
@@ -317,6 +350,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             delivered: true as const,
           }
         : undefined;
+      const generatedExposure = !turn.learningSessionId && turn.contextAnchor ? {
+        releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
+        origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "unknown" as const,
+        kind: mode === "explain" ? "solution" as const : "hint" as const,
+        level: mode === "explain" ? "revealed" as const : "hinted" as const,
+      } : undefined;
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,
@@ -332,6 +371,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           sourceIds: contextSourceIds,
         })),
         ...(helpExposure ? { helpExposure } : {}),
+        ...(generatedExposure ? { generatedExposure } : {}),
         expectedPrivacyEpoch: jobEpoch ?? undefined,
         claimToken: claimed.claimToken,
       });

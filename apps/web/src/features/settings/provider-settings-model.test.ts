@@ -58,3 +58,16 @@ describe("provider settings presentation", () => {
     expect(keyStatusText({ id: providerId, label: "P", baseUrl: "https://x", hasApiKey: true, apiKeyHint: "ab12", apiKeyUpdatedAt: "2026-02-03T04:05:06.000Z", modelCount: 0, createdAt: "", updatedAt: "" })).toContain("尾号 ab12");
   });
 });
+
+it("validates, serializes and clears user-supplied media upper bounds", () => {
+  const base = { ...emptyModelDraft, label: "Vision", modelName: "v", inputCentsPerMillion: "1", outputCentsPerMillion: "2" };
+  expect(validateModelDraft(base)).toBeNull();
+  expect(validateModelDraft({ ...base, mediaInputTokenUpperBound: "128000" })).toContain("一起填写");
+  const configured = { ...base, mediaInputTokenUpperBound: "128000", mediaMaxInputBytes: "1048576", mediaInputCentsPerMillion: "3" };
+  expect(validateModelDraft(configured)).toBeNull();
+  expect(modelRequestBody(configured)).toMatchObject({ mediaInputTokenUpperBound: 128000, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 3 });
+  expect(validateModelDraft({ ...configured, mediaMaxInputBytes: "104857601" })).toContain("字节");
+  expect(validateModelDraft({ ...configured, mediaInputTokenUpperBound: "1.5" })).toContain("正整数");
+  expect(validateModelDraft({ ...configured, mediaInputCentsPerMillion: "0" })).toContain("大于 0");
+  expect(modelRequestBody(base, { clearMedia: true })).toMatchObject({ mediaInputTokenUpperBound: null, mediaMaxInputBytes: null, mediaInputCentsPerMillion: null });
+});

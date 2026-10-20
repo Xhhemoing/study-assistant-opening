@@ -2,7 +2,8 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw, Sparkles } from "lucide-react";
 import Link from "next/link";
-import { materialAnalysisHref } from "../library/material-analysis-link";
+import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { studyConversationHref } from "../assistant/study-conversation-context";
 import { z } from "zod";
 import { ui } from "../design/ui";
 import { rememberSourceReaderPage, sourceReaderInitialPage } from "./source-reader-position";
@@ -19,12 +20,13 @@ export async function loadSourceContent(sourceId: string, version: number, page?
   if (content.sourceId !== sourceId || content.version !== version || (page !== undefined && content.page !== page)) {
     throw new Error("正文的材料、版本或页码与请求不一致，请重新读取。");
   }
+  acknowledgeStudyExposureHeaders(response, fetcher);
   return content;
 }
 /** Page explanations need current, actually readable physical-page evidence. */
 export function sourceContentExplanation(content: Content): { href: string; label: string } | null {
   if (content.version !== content.currentVersion || content.pageKind !== "physical" || content.page == null || !content.text.trim()) return null;
-  return { href: materialAnalysisHref(content.sourceId, content.page), label: `解释第 ${content.page} 页` };
+  return { href: studyConversationHref({ sourceId: content.sourceId, sourceVersion: content.version, page: content.page, purpose: "material_read", label: `材料第 ${content.page} 页` }), label: `解释第 ${content.page} 页` };
 }
 export function SourceContentBody({ content }: { content: Content }) {
   return <div className="space-y-3">

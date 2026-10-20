@@ -109,7 +109,13 @@ function aggregateNextStep(summary: ReturnType<typeof summarizeLearningAggregate
   return "先查看来源与资格，确认记录后再继续练习。";
 }
 
-function SummaryGroup({ group }: { group: LearningSummaryAggregate }) {
+export function focusedPracticeHref(courseId: string, skillLabel: string, requirementKey?: string | null): string {
+  const params = new URLSearchParams({ mode: "practice", skillLabel });
+  if (requirementKey) params.set("requirementKey", requirementKey);
+  return `/opening/courses/${encodeURIComponent(courseId)}/study?${params}`;
+}
+
+function SummaryGroup({ group, courseId }: { group: LearningSummaryAggregate; courseId: string }) {
   const conclusion = summarizeLearningAggregate(group);
   const sourceLabels = group.evidenceSources.join("、") || "无";
   return <li className="space-y-2 border-b border-zinc-200 py-4 last:border-b-0">
@@ -117,7 +123,7 @@ function SummaryGroup({ group }: { group: LearningSummaryAggregate }) {
       <h3 className="min-w-0 text-sm font-medium text-zinc-800">{group.identity.skillLabel}</h3>
       <span className="text-xs text-zinc-500">{aggregateStatusLabel[conclusion.recentComparableEvidence.status]} · {group.sampleCount} 条观察</span>
     </div>
-    <p className="text-xs leading-6 text-zinc-600">{aggregateNextStep(conclusion)} <a href="#course-practice" className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
+    <p className="text-xs leading-6 text-zinc-600">{aggregateNextStep(conclusion)} <a href={focusedPracticeHref(group.identity.courseId ?? courseId, group.identity.skillLabel, group.identity.requirementKey)} className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
     <details className="text-xs text-zinc-500">
       <summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">查看来源、资格与核验计数</summary>
       <dl className="grid gap-1 py-2 leading-5 sm:grid-cols-2">
@@ -156,7 +162,7 @@ export function CourseSummaryPanel({ courseId }: { courseId: string }) {
     <CourseSummaryNotice state={state} onRefresh={() => void controller.refresh()} />
     {state.status === "error" ? <LoadError message={state.error} onRetry={() => void controller.refresh()} /> : null}
     {state.status === "ready" && state.groups.length === 0 ? <p className="text-sm text-zinc-500">这门课程目前没有生效的学习观察。</p> : null}
-    {state.status === "ready" && state.groups.length > 0 ? <ul className="divide-y divide-zinc-200 border-y border-zinc-200">{state.groups.map(group => <SummaryGroup key={JSON.stringify([group.identity.skillLabel, group.identity.requirementKey])} group={group} />)}</ul> : null}
+    {state.status === "ready" && state.groups.length > 0 ? <ul className="divide-y divide-zinc-200 border-y border-zinc-200">{state.groups.map(group => <SummaryGroup key={JSON.stringify([group.identity.skillLabel, group.identity.requirementKey])} group={group} courseId={courseId} />)}</ul> : null}
     {state.status === "ready" && state.nextCursor ? <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => void controller.loadMore()}>{busy ? "正在读取下一页…" : "继续加载摘要分组"}</button> : null}
     <CourseHistory key={courseId} courseId={courseId} requirements={requirements} onChanged={() => void controller.refresh()} />
   </section>;
@@ -185,7 +191,7 @@ export function CourseLearningRecords({ courseId, state, error, summary, onReloa
             <li key={`${item.courseId ?? courseId}:${item.requirementKey ?? ""}:${item.skillLabel}`} className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-3">
               <span className="min-w-0 text-sm font-medium text-zinc-800">{item.skillLabel}</span>
               <span className="text-xs text-zinc-500">{resultLabel(item)} · {item.sampleCount} 条观察</span>
-              <p className="w-full text-xs leading-6 text-zinc-600">{nextStep(item)} <a href="#course-practice" className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
+              <p className="w-full text-xs leading-6 text-zinc-600">{nextStep(item)} <a href={focusedPracticeHref(item.courseId ?? courseId, item.skillLabel, item.requirementKey)} className="font-medium text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700">继续独立练习</a></p>
               <details className="w-full text-xs text-zinc-500"><summary className="cursor-pointer py-1 focus-visible:ring-2 focus-visible:ring-emerald-700">查看来源与资格</summary>
                 {item.recentPerformance ? <p className="py-2 leading-5">近期结果依据最近的 {item.recentPerformance.evidenceCount ?? item.recentPerformance.evidenceIds.length} 条原始作答；纠正记录不增加练习次数。</p> : null}
                 {item.historicalIncorrectCount !== undefined && item.unverifiedCount !== undefined ? <p className="py-2 leading-5">更早的记录中有 {item.historicalIncorrectCount} 条核验错误；当前共 {item.unverifiedCount} 条记录尚未核验。历史仍可查看。</p> : null}

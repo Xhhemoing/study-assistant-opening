@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
-import { normalizeOpeningProviderBaseUrl } from "@aistudy/contracts";
+import { mediaPricingIssue, normalizeOpeningProviderBaseUrl } from "@aistudy/contracts";
 import {
   CredentialVaultError, decryptWorkspaceSecret, encryptWorkspaceSecret,
 } from "../storage/opening-credential-vault";
@@ -22,13 +22,20 @@ export type OpeningProviderConfigView = {
   modelCount: number; createdAt: string; updatedAt: string;
 };
 export type OpeningModelBilling = "metered" | "free_tier";
-export type OpeningProviderModelView = {
+type MediaModelView = {
+  mediaInputTokenUpperBound?: number | undefined;
+  mediaMaxInputBytes?: number | undefined;
+  mediaInputCentsPerMillion?: number | undefined;
+};
+type MediaModelInput = { [K in keyof MediaModelView]?: number | null | undefined };
+
+export type OpeningProviderModelView = MediaModelView & {
   id: string; providerId: string; label: string; modelName: string;
   inputCentsPerMillion: number; outputCentsPerMillion: number; supportsVision: boolean;
   supportsAudio: boolean; billing: OpeningModelBilling; dailyRequestCap: number | null;
   createdAt: string; updatedAt: string;
 };
-export type OpeningResolvableModel = {
+export type OpeningResolvableModel = MediaModelView & {
   id: string; providerId: string; providerLabel: string; label: string; modelName: string;
   baseUrl: string; apiKey: string; supportsVision: boolean; supportsAudio: boolean;
   billing: OpeningModelBilling; dailyRequestCap: number | null;
@@ -41,13 +48,13 @@ type ProviderInput = { label: string; baseUrl: string; apiKey?: string | undefin
 type ProviderUpdate = {
   label?: string | undefined; baseUrl?: string | undefined; apiKey?: string | undefined;
 };
-type ModelInput = {
+type ModelInput = MediaModelInput & {
   label: string; modelName: string; inputCentsPerMillion: number;
   outputCentsPerMillion: number; supportsVision?: boolean | undefined;
   supportsAudio?: boolean | undefined; billing?: OpeningModelBilling | undefined;
   dailyRequestCap?: number | null | undefined;
 };
-type ModelUpdate = {
+type ModelUpdate = MediaModelInput & {
   label?: string | undefined; modelName?: string | undefined;
   inputCentsPerMillion?: number | undefined; outputCentsPerMillion?: number | undefined;
   supportsVision?: boolean | undefined; supportsAudio?: boolean | undefined;
@@ -55,7 +62,9 @@ type ModelUpdate = {
 };
 
 /** Mirrors the 0062 pricing CHECK so callers get a readable error instead of a constraint violation. */
-function assertPricing(input: { billing: OpeningModelBilling; inputCentsPerMillion: number; outputCentsPerMillion: number; dailyRequestCap: number | null }) {
+function assertPricing(input: { billing: OpeningModelBilling; inputCentsPerMillion: number; outputCentsPerMillion: number; dailyRequestCap: number | null } & MediaModelInput) {
+  const mediaIssue = mediaPricingIssue(input);
+  if (mediaIssue) throw new OpeningModelProviderError("CONFLICT", mediaIssue);
   const ok = input.billing === "metered"
     ? input.inputCentsPerMillion > 0 && input.outputCentsPerMillion > 0
     : input.inputCentsPerMillion >= 0 && input.outputCentsPerMillion >= 0 && input.dailyRequestCap !== null;
@@ -78,10 +87,18 @@ function providerView(row: Row, modelCount: number): OpeningProviderConfigView {
     modelCount, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
   };
 }
+function mediaView(row: Row): MediaModelView {
+  return row.media_input_token_upper_bound == null ? {} : {
+    mediaInputTokenUpperBound: Number(row.media_input_token_upper_bound),
+    mediaMaxInputBytes: Number(row.media_max_input_bytes),
+    mediaInputCentsPerMillion: Number(row.media_input_cents_per_million),
+  };
+}
 function modelView(row: Row): OpeningProviderModelView {
   return {
     id: String(row.id), providerId: String(row.provider_id), label: String(row.label),
     modelName: String(row.model_name),
+    ...mediaView(row),
     inputCentsPerMillion: Number(row.input_cents_per_million),
     outputCentsPerMillion: Number(row.output_cents_per_million),
     supportsVision: Boolean(row.supports_vision), supportsAudio: Boolean(row.supports_audio),
@@ -152,7 +169,7 @@ export async function insertProvider(tx: TransactionSql, scope: Scope, input: Pr
 export async function insertModel(tx: TransactionSql, scope: Scope, providerId: string, input: ModelInput): Promise<OpeningProviderModelView> {
   const billing = input.billing ?? "metered";
   const dailyRequestCap = input.dailyRequestCap ?? null;
-  assertPricing({ billing, inputCentsPerMillion: input.inputCentsPerMillion, outputCentsPerMillion: input.outputCentsPerMillion, dailyRequestCap });
+  assertPricing({ ...input, billing, dailyRequestCap });
   const [clash] = await tx`SELECT id FROM opening_model_provider_models
     WHERE provider_id=${providerId} AND label=${input.label}`;
   if (clash) throw new OpeningModelProviderError("CONFLICT", "model label already exists");
@@ -167,10 +184,12 @@ export async function insertModel(tx: TransactionSql, scope: Scope, providerId: 
   }
   const [row] = await tx`INSERT INTO opening_model_provider_models
     (id,provider_id,workspace_id,owner_user_id,label,model_name,supports_vision,supports_audio,
-     billing,daily_request_cap,input_cents_per_million,output_cents_per_million)
+     billing,daily_request_cap,input_cents_per_million,output_cents_per_million,
+     media_input_token_upper_bound,media_max_input_bytes,media_input_cents_per_million)
     VALUES (${randomUUID()},${providerId},${scope.workspaceId},${scope.ownerUserId},${input.label},
       ${input.modelName},${input.supportsVision ?? false},${input.supportsAudio ?? false},
-      ${billing},${dailyRequestCap},${input.inputCentsPerMillion},${input.outputCentsPerMillion})
+      ${billing},${dailyRequestCap},${input.inputCentsPerMillion},${input.outputCentsPerMillion},
+      ${input.mediaInputTokenUpperBound ?? null},${input.mediaMaxInputBytes ?? null},${input.mediaInputCentsPerMillion ?? null})
     RETURNING *`;
   return modelView(row!);
 }
@@ -265,6 +284,9 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
           inputCentsPerMillion: input.inputCentsPerMillion ?? current.inputCentsPerMillion,
           outputCentsPerMillion: input.outputCentsPerMillion ?? current.outputCentsPerMillion,
           dailyRequestCap: input.dailyRequestCap === undefined ? current.dailyRequestCap : input.dailyRequestCap,
+          mediaInputTokenUpperBound: input.mediaInputTokenUpperBound === undefined ? current.mediaInputTokenUpperBound ?? null : input.mediaInputTokenUpperBound,
+          mediaMaxInputBytes: input.mediaMaxInputBytes === undefined ? current.mediaMaxInputBytes ?? null : input.mediaMaxInputBytes,
+          mediaInputCentsPerMillion: input.mediaInputCentsPerMillion === undefined ? current.mediaInputCentsPerMillion ?? null : input.mediaInputCentsPerMillion,
         };
         assertPricing(next);
         const [row] = await tx`UPDATE opening_model_provider_models SET
@@ -274,6 +296,9 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
             billing=${next.billing},daily_request_cap=${next.dailyRequestCap},
             input_cents_per_million=${next.inputCentsPerMillion},
             output_cents_per_million=${next.outputCentsPerMillion},
+            media_input_token_upper_bound=${next.mediaInputTokenUpperBound},
+            media_max_input_bytes=${next.mediaMaxInputBytes},
+            media_input_cents_per_million=${next.mediaInputCentsPerMillion},
             updated_at=now()
           WHERE id=${id} RETURNING *`;
         return modelView(row!);
@@ -306,6 +331,7 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
       const rows = await sql`SELECT m.id, m.provider_id, m.label, m.model_name, m.supports_vision,
           m.supports_audio, m.billing, m.daily_request_cap,
           m.input_cents_per_million, m.output_cents_per_million, m.created_at,
+          m.media_input_token_upper_bound, m.media_max_input_bytes, m.media_input_cents_per_million,
           p.label AS provider_label, p.base_url, p.owner_user_id,
           c.key_id, c.nonce, c.ciphertext, c.auth_tag
         FROM opening_model_provider_models m
@@ -339,6 +365,7 @@ export function createOpeningModelProvidersRepository(sql: Sql) {
           dailyRequestCap: row.daily_request_cap === null ? null : Number(row.daily_request_cap),
           inputCentsPerMillion: Number(row.input_cents_per_million),
           outputCentsPerMillion: Number(row.output_cents_per_million),
+          ...mediaView(row),
           createdAt: iso(row.created_at), vaultConfigBroken,
         });
       }

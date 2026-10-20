@@ -33,12 +33,12 @@ export function SourceReaderFrame({ title, onClose, returnPoint, children }: {
   }, [returnPoint]);
   return <dialog ref={dialog} aria-labelledby={headingId} data-material-reader="true"
     onCancel={event => { event.preventDefault(); onClose(); }}
-    className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none overflow-y-auto overscroll-contain border-0 bg-white p-0 text-zinc-900 backdrop:bg-zinc-950/40">
-    <header className="sticky top-0 z-10 flex min-w-0 items-center gap-3 border-b border-zinc-200 bg-white px-4 py-3 sm:px-6">
+    className="fixed inset-0 m-0 h-dvh flex-col open:flex max-h-none w-full max-w-none overflow-hidden overscroll-contain border-0 bg-white p-0 text-zinc-900 backdrop:bg-zinc-950/40">
+    <header className="flex shrink-0 min-w-0 items-center gap-3 border-b border-zinc-200 bg-white px-4 py-2 sm:px-6">
       <button type="button" className={`${ui.secondary} shrink-0`} onClick={onClose}><ArrowLeft size={16} aria-hidden="true" />返回</button>
-      <h1 id={headingId} className="min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">{title}</h1>
+      <h1 id={headingId} className="line-clamp-2 min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">{title}</h1>
     </header>
-    <div className="mx-auto w-full max-w-6xl space-y-5 px-4 py-5 sm:px-6">{children}</div>
+    <div className="flex min-h-0 w-full flex-1 flex-col gap-2 px-3 py-2 sm:px-5">{children}</div>
   </dialog>;
 }
 
@@ -94,15 +94,15 @@ export function SourceReader({ record, latestRecord = record, requestedVersion, 
   }
   return <SourceReaderFrame title={latestRecord.name} returnPoint={returnPoint} onClose={onClose}>
     {startMs != null || slideLabel ? <p className="text-sm text-amber-800">引用定位：{slideLabel ? `幻灯片 ${slideLabel}` : ""}{slideLabel && startMs != null ? " · " : ""}{startMs != null ? `${Math.floor(startMs / 60000)}:${String(Math.floor(startMs / 1000) % 60).padStart(2, "0")}` : ""}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
-    <div ref={body}>
-      <StudyToolsPanel activePanel={tool} onPanelChange={setTool} panels={[
+    <div ref={body} className="flex min-h-0 flex-1 flex-col">
+      <StudyToolsPanel fillHeight activePanel={tool} onPanelChange={setTool} panels={[
         { id: "text", label: preferExtractedText ? "原件信息" : "提取文字 / OCR 核对", content: preferExtractedText ? <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion} download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading /> : <div className="space-y-3"><SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /><button type="button" className={ui.quiet} onClick={selectExcerpt}>引用选中文字</button></div> },
         { id: "context", label: "提问与笔记", content: <StudyContextTools key={`${studyConversationIdentity(context)}:${initialQuestion}`} context={context} initialQuestion={initialQuestion} questionBlockedReason={questionProtected ? "这是当前练习的参考资料。请返回原题下保存自己的答案，并从原题的提问入口继续，以保留实际获得的帮助记录。" : undefined} /> },
       ]}>
         {preferExtractedText ? <SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /> : <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion}
-          download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading />}
+          download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading fillHeight toolsOpen={tool !== null} />}
       </StudyToolsPanel>
-      <div className="mt-4 space-y-2"><button type="button" className={ui.quiet} onClick={selectExcerpt}>引用选中文字</button>{selectionNotice ? <p role="status" className="text-xs leading-6 text-zinc-600">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-zinc-500">提问定位：指定物理第 {questionPage} 页。原件阅读器的当前滚动页不会自动同步。</p> : null}</div>
+      <div className="mt-2 shrink-0 space-y-1">{preferExtractedText ? <button type="button" className={ui.quiet} onClick={selectExcerpt}>引用选中文字</button> : null}{selectionNotice ? <p role="status" className="text-xs leading-6 text-zinc-600">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-zinc-500">提问定位：指定物理第 {questionPage} 页。原件阅读器的当前滚动页不会自动同步。</p> : null}</div>
     </div>
     {latest && latestRecord.parseState === "failed" && latestRecord.error?.retryable !== false && onRetry ? <button type="button" className={ui.secondary} disabled={retrying} onClick={() => void retry()}>{retrying ? "正在重新解析…" : "重新解析"}</button> : null}
     {error ? <p role="alert" className="text-sm text-red-700">{error}</p> : null}

@@ -1,3 +1,4 @@
+import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import {
   createCardRequestSchema,
   createCardResponseSchema,
@@ -43,6 +44,7 @@ async function request(path: string, init: RequestInit, fetchImpl: FetchLike): P
     }
   }
   if (!res.ok) throw requestError(body, res.status);
+  if (body !== null) acknowledgeStudyExposureHeaders(res, fetchImpl);
   return body;
 }
 

@@ -12,6 +12,7 @@ export const BACKUP_TABLES = new Set([
   "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
   "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
   "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
+  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/i;
@@ -127,5 +128,5 @@ export function validBackupTableSet(tables: Record<string, unknown[]>): boolean 
   const names = Object.keys(tables);
   return names.every(name => BACKUP_TABLES.has(name))
     && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name)
-      || name === "opening_suggestion_feedback" || name === "opening_plan_feedback" || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events"].includes(name) || name in tables);
+      || name === "opening_study_intent_events" || name === "opening_learning_decisions" || name === "opening_learning_shadow_predictions" || name === "opening_suggestion_feedback" || name === "opening_plan_feedback" || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events"].includes(name) || name in tables);
 }

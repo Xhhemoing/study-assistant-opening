@@ -169,3 +169,30 @@ describe("workspace model provider repository", () => {
       .rejects.toBeInstanceOf(OpeningModelProviderError);
   });
 });
+
+it("persists, updates and clears BYOK media bounds through the real runtime model view", async () => {
+  const repo = createOpeningModelProvidersRepository(fixture.sql);
+  const provider = await repo.createProvider(fixture.scope, providerInput);
+  const media = { mediaInputTokenUpperBound: 128000, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 3 };
+  const model = await repo.createModel(fixture.scope, provider.id, { ...modelInput, ...media });
+  expect(model).toMatchObject(media);
+  expect((await repo.listModels(fixture.scope))[0]).toMatchObject(media);
+  expect((await repo.listResolvableModels(fixture.scope))[0]).toMatchObject(media);
+  vi.stubEnv("OPENING_MODEL_CATALOG", "");
+  vi.stubEnv("OPENING_MODEL_API_KEY", "");
+  vi.stubEnv("OPENING_MODEL_DAILY_CAP_CENTS", "100");
+  const { resolveTutorModel } = await import("../../apps/worker/src/runtime/model-gateway");
+  const selected = await resolveTutorModel(fixture.sql, fixture.scope, "explain");
+  expect(selected.modelSnapshot).toMatchObject(media);
+  expect(selected).toMatchObject(media);
+  const updated = await repo.updateModel(fixture.scope, model.id, { ...media, mediaInputCentsPerMillion: 4 });
+  expect(updated.mediaInputCentsPerMillion).toBe(4);
+  await expect(repo.updateModel(fixture.otherScope, model.id, { ...media })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await expect(repo.updateModel(fixture.scope, model.id, { mediaMaxInputBytes: null })).rejects.toMatchObject({ code: "CONFLICT" });
+  const cleared = await repo.updateModel(fixture.scope, model.id, { mediaInputTokenUpperBound: null, mediaMaxInputBytes: null, mediaInputCentsPerMillion: null });
+  expect(cleared).not.toHaveProperty("mediaInputTokenUpperBound");
+  expect((await repo.listResolvableModels(fixture.scope))[0]).not.toHaveProperty("mediaInputCentsPerMillion");
+  expect(cleared.inputCentsPerMillion).toBe(modelInput.inputCentsPerMillion);
+  await expect(fixture.sql`UPDATE opening_model_provider_models SET media_input_token_upper_bound=1 WHERE id=${model.id}`).rejects.toMatchObject({ code: "23514" });
+  await expect(fixture.sql`UPDATE opening_model_provider_models SET media_input_token_upper_bound=1,media_max_input_bytes=104857601,media_input_cents_per_million=1 WHERE id=${model.id}`).rejects.toMatchObject({ code: "23514" });
+});

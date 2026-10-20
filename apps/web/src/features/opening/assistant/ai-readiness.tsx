@@ -65,30 +65,14 @@ export function AiReadinessChecklistView({
 
   return (
     <section
-      className={`space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 ${className}`}
+      className={`shrink-0 border-l-2 border-amber-300 bg-amber-50/50 px-3 py-1 ${className}`}
       aria-labelledby="ai-readiness-heading"
       data-ai-readiness="hard-blocked"
       data-budget-confirm={showBudgetCta ? "needed" : "not-needed"}
     >
-      {showBudgetCta ? (
-        <div
-          role="status"
-          className="flex flex-wrap items-center justify-between gap-2"
-          data-testid="ai-readiness-budget-banner"
-        >
-          <p className="text-sm font-medium text-amber-950">{BUDGET_CONFIRM_LEAD}</p>
-          <Link
-            href={BUDGET_CONFIRM_HREF}
-            className="inline-flex min-h-9 items-center justify-center rounded-md bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50"
-            data-testid="ai-readiness-budget-cta"
-          >
-            {BUDGET_CONFIRM_CTA}
-          </Link>
-        </div>
-      ) : null}
-      <h3 id="ai-readiness-heading" className={showBudgetCta ? "sr-only" : "text-sm font-medium text-amber-950"}>AI 为何还不可用</h3>
-      <p className="text-xs leading-5 text-amber-900">你仍可写笔记、整理材料和记录自己的练习。</p>
-      <details><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700">查看原因与解决方法</summary>
+      <div className="flex items-start justify-between gap-2" role="status" data-testid={showBudgetCta ? "ai-readiness-budget-banner" : undefined}>
+      <details className="min-w-0 flex-1"><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700"><span id="ai-readiness-heading">{showBudgetCta ? BUDGET_CONFIRM_LEAD : "AI 辅导暂不可用"}</span><span className="ml-2 font-normal">查看原因</span></summary>
+      <div className="max-h-32 overflow-y-auto overscroll-contain pb-2">
       <ul className="space-y-2 text-xs leading-6 text-amber-950">
         {displayItems.map(item => (
           <li key={item.key} className="flex flex-col gap-0.5">
@@ -109,7 +93,9 @@ export function AiReadinessChecklistView({
           {" "}调整密钥、定价与确认状态。
         </p>
       )}
-      </details>
+      </div></details>
+      <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-9 shrink-0 items-center text-xs text-emerald-900 underline underline-offset-2" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
+      </div>
     </section>
   );
 }
@@ -117,7 +103,9 @@ export function AiReadinessChecklistView({
 export function AiReadinessChecklist({
   className = "",
   showVisionHint = false,
+  onBlockedChange,
 }: {
+  onBlockedChange?: (blocked: boolean) => void;
   className?: string;
   /** When true, soft vision tip may render. Default false so assistant readiness stays quiet. */
   showVisionHint?: boolean;
@@ -139,6 +127,8 @@ export function AiReadinessChecklist({
     })();
     return () => controller.abort();
   }, []);
+
+  useEffect(() => { onBlockedChange?.(Boolean(error) || items === null || items.some(isAiReadinessChecklistHardBlocker)); }, [error, items, onBlockedChange]);
 
   if (error) return <p role="alert" className={`text-sm text-amber-800 ${className}`}>{error}</p>;
   if (!items) return <p className={`text-sm text-zinc-500 ${className}`} role="status">正在检查 AI 就绪状态…</p>;

@@ -30,6 +30,8 @@ export const openingTurns = pgTable("opening_turns", {
   contextSourceRefs: jsonb("context_source_refs").$type<Array<{ sourceId: string; sourceVersion: number }> | null>(),
   querySystem: boolean("query_system").notNull().default(false),
   systemQuery: jsonb("system_query"),
+  contextAnchor: jsonb("context_anchor"),
+  composerPurpose: text("composer_purpose"),
   citations: jsonb("citations").$type<unknown[]>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -4,6 +4,8 @@ import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy
 import { Check, CircleHelp, Eye, LoaderCircle, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LearnerStateCard } from "../teaching/learner-state-card";
+import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
 import { EmptyState, LoadError, PageHeader, secondaryButtonClass, ui } from "../design/ui";
 import {
@@ -140,6 +142,7 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
         }
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7">
+        {state.kind === "ready" ? <details className="mx-auto mb-4 max-w-3xl text-xs text-zinc-600"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
         {state.kind === "loading" ? (
           <p role="status" className="text-sm text-zinc-600">
             正在读取到期记忆卡片…
@@ -223,6 +226,7 @@ export function CardReviewView({ client: supplied }: { client?: OpeningCardsClie
                 {state.flipped ? "查看正面" : "显示背面"}
               </span>
             </button>
+            <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo: "/opening/cards" })}>围绕这张卡片提问</Link>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {gradeOptions.map(({ grade, label, icon: Icon }) => (
                 <button

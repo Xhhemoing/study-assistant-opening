@@ -21,6 +21,7 @@ type Reasons = Set<EvidenceEligibilityReasonCode>;
 
 /** Effective current-attempt help; a self-report cannot erase an established delivery. */
 export function resolveEvidenceAssistance(observation: EvidenceObservation, context: EvidenceEligibilityContext) {
+  if (context.selfReportedAnswerConditions?.copiedAnswer) return "revealed" as const;
   return evaluateAssistance(observation, context.helpHistory, new Set()).assistance;
 }
 
@@ -35,8 +36,9 @@ function evaluateCorrectness(
     const supported = automatic && (
       automatic.evaluatorVersion === "matrix-exact-v1" && automatic.specVersion === "matrix-arithmetic-v1"
       || automatic.evaluatorVersion === "exam-choice-exact-v1" && automatic.specVersion === "exam-choice-v1"
+      || automatic.evaluatorVersion === "span-exact-v1" && automatic.specVersion === "span-v1"
     );
-    if (!automatic || !supported) {
+    if (!automatic || !supported || automatic.evaluatorVersion === "span-exact-v1" && automatic.decision === "correct" && automatic.coreEvidenceComplete !== true) {
       reasons.add("server_evaluation_incomplete"); return "unknown";
     }
     if (!observation.observationId || automatic.observationId !== observation.observationId
@@ -144,6 +146,14 @@ export function evaluateEvidenceEligibility(
   const reasons: Reasons = new Set();
   const assistance = evaluateAssistance(observation, context.helpHistory, reasons);
   result.independentAttempt = assistance.independent;
+  if (context.selfReportedAnswerConditions?.copiedAnswer) {
+    result.independentAttempt = "no";
+    reasons.add("self_reported_copied_answer");
+  }
+  if (context.selfReportedAnswerConditions?.reportedGuess) {
+    if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
+    reasons.add("self_reported_guess");
+  }
   if (context.examAttempt?.firstFamilyExposure === false) {
     result.independentAttempt = "no";
     reasons.add("exam_family_already_seen");

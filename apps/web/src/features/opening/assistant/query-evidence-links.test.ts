@@ -62,6 +62,13 @@ describe("server-owned query evidence links", () => {
     expect(anchors(plain)).toEqual([]);
   });
 
+  it.each([`/opening/library/${id}`, "/opening/cards", "/opening/sprint"])("renders newly supported record evidence %s in both modes", href => {
+    for (const proseEnabled of [true, false]) {
+      const html = renderToStaticMarkup(createElement(MessageList, { messages: [{ id, role: "assistant", text: `[记录](${href})`, citations: [], citationLabels: [], queryEvidenceLinks: [{ href, label: "记录" }] }], proseEnabled, artifactsEnabled: false }));
+      expect(anchors(html)).toEqual([href]);
+    }
+    for (const suffix of ["?redirect=https://evil.test", "#x", "/delete"]) expect(isQueryEvidenceHref(`${href}${suffix}`)).toBe(false);
+  });
   it("admits only the executor's known read routes", () => {
     for (const href of [material, settings, "/opening/today", "/opening/library", `/opening/courses/${id}`, `/opening/courses/${id}?tab=records`, `/opening/courses/${id}/study`]) expect(isQueryEvidenceHref(href)).toBe(true);
     expect(isQueryEvidenceHref(`${material}\n`)).toBe(false);

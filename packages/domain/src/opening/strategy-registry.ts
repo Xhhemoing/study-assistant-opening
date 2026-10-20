@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const STRATEGY_SUFFIX = {
-  "default-strict-citation": "所有结论必须锚定所选材料的具体物理页；无法锚定页码时明确拒答，不得编造页码。",
+  "default-strict-citation": "材料内容论断必须锚定所选材料的具体物理页；无法锚定时明确说明材料证据不足，不得编造页码。系统状态事实只依据本轮服务端结构化查询回执及记录链接，不要求 PDF 页码；历史聊天不能证明当前状态。一般数学知识可直接解释，并明确不冒充所选材料原文或个人学习记录。",
 } as const;
 
 export const strategyTemplateSchema = z

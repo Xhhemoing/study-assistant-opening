@@ -80,7 +80,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
   });
 
   it("APPLY_ORDER columns cover every durable table and exclude never-tables", () => {
-    expect(OPENING_RESTORE_APPLY_ORDER).toHaveLength(36);
+    expect(OPENING_RESTORE_APPLY_ORDER).toHaveLength(39);
     for (const table of OPENING_RESTORE_APPLY_ORDER) {
       expect(OPENING_RESTORE_ROW_COLUMNS[table].length).toBeGreaterThan(0);
       expect(["sessions", "opening_jobs", "opening_outbox", "opening_budget_reservations"]).not.toContain(table);
@@ -125,4 +125,16 @@ describe("createOpeningS3RestoreObjectPut / parseOpeningRestoreObjectVersion", (
     expect(() => parseOpeningRestoreObjectVersion("objects/../secret.bin", sourceId)).toThrow(/unsafe|match/);
     expect(() => parseOpeningRestoreObjectVersion(`objects/other/v1.bin`, sourceId)).toThrow(/match/);
   });
+});
+
+
+it("restores Study visibility metadata without admitting paid queues or proposal execution", () => {
+  expect(OPENING_RESTORE_ROW_COLUMNS.opening_turns).toEqual(expect.arrayContaining(["context_anchor", "composer_purpose"]));
+  expect(OPENING_RESTORE_ROW_COLUMNS.opening_learning_attempts).toContain("context_anchor");
+  expect(OPENING_RESTORE_ROW_COLUMNS.opening_help_exposures).toEqual(expect.arrayContaining([
+    "context_anchor", "release_key", "release_intent", "generated_at", "released_at", "acknowledged_at", "support_domain", "workspace_history_revision",
+  ]));
+  expect(OPENING_RESTORE_APPLY_ORDER).toEqual(expect.arrayContaining(["opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events"]));
+  expect(OPENING_RESTORE_APPLY_ORDER).not.toContain("opening_parent_interaction_budgets");
+  expect(OPENING_RESTORE_APPLY_ORDER).not.toContain("opening_assistant_proposals");
 });

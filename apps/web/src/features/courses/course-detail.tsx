@@ -20,6 +20,11 @@ import { sourceViewerHref } from "../opening/inbox/source-viewer";
 import { courseStudyHref } from "./course-study-model";
 import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 
+function revealCourseMaterials() {
+  let node: HTMLElement | null = document.getElementById("course-assets");
+  while (node) { if (node instanceof HTMLDetailsElement) node.open = true; node = node.parentElement; }
+}
+
 export function CourseContents({ courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [error, setError] = useState("");
@@ -33,9 +38,9 @@ export function CourseContents({ courseId, assets }: { courseId: string; assets:
     return () => { active = false; };
   }, [assets, revision]);
   return <section aria-labelledby="course-contents-heading" className="space-y-3">
-    <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-contents-heading">课程目录</h2><a className={ui.quiet} href="#course-assets">管理材料</a></div>
-    {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700" href={sourceViewerHref(asset.source.id, versions[asset.source.id]!)}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-emerald-800 underline underline-offset-4" href={`/opening/library/${encodeURIComponent(asset.document.id)}`}>{asset.document.title}</Link> : <span className="break-words text-zinc-600">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <p className="text-sm leading-6 text-zinc-500">尚无材料；可以直接开始练习，也可以添加已有资料。</p>}
-    {assets.length > 5 ? <a className={ui.quiet} href="#course-assets">查看全部 {assets.length} 份材料</a> : null}
+    <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-contents-heading">本课内容</h2><a className={ui.quiet} href="#course-assets" onClick={revealCourseMaterials}>管理材料</a></div>
+    {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-emerald-800 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-emerald-700" href={sourceViewerHref(asset.source.id, versions[asset.source.id]!)}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-emerald-800 underline underline-offset-4" href={`/opening/library/${encodeURIComponent(asset.document.id)}`}>{asset.document.title}</Link> : <span className="break-words text-zinc-600">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <a className={ui.secondary} href="#course-assets" onClick={revealCourseMaterials}>添加本课材料</a>}
+    {assets.length > 5 ? <a className={ui.quiet} href="#course-assets" onClick={revealCourseMaterials}>查看全部 {assets.length} 份材料</a> : null}
     {error ? <p className="text-xs leading-6 text-amber-800" role="status">{error}<button className={ui.quiet} type="button" onClick={() => setRevision(value => value + 1)}>重试</button></p> : null}
     <Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>打开课程材料库</Link>
   </section>;
@@ -231,8 +236,9 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
       {paths.openingActions ? <><CourseContents courseId={id} assets={assets} /><details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">概念课示例</summary><p className="mt-2 text-xs leading-6 text-zinc-500">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习断点。</p><Link className={`${ui.secondary} mt-3`} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></details></> : null}
       {paths.openingActions && adaptivePlanning ? <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">目标与学习安排</summary><div className="mt-3"><CourseGoalForm courseId={id} /></div></details> : null}
       {paths.openingActions ? <details className="scroll-mt-6 border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">学习进展与记录</summary><div className="mt-3 space-y-5"><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} /></div></details> : <CourseLearningView courseId={id} />}
+      <details className="border-t border-zinc-200 pt-4"><summary className="min-h-10 cursor-pointer text-sm text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700">课程资料与设置</summary><div className="mt-3 space-y-5">
       <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">知识关联与完整目录</summary><div className="mt-3"><CourseKnowledge courseId={id} /></div></details>
-      <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" open={assets.length === 0}>
+      <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" >
         <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
           <h2 className="text-sm font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
           <span className="text-xs text-zinc-500">{assets.length ? "点击展开 / 收起" : "空课 · 默认展开"}</span>
@@ -255,6 +261,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
       </details>
       {paths.openingActions ? <details open={mediaOpen} className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">媒体阅读与片段定位</summary><CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} /></details> : <CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />}
       <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />
+      </div></details>
       <Link className={ui.quiet} href={paths.today}><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>
   </main>;

@@ -57,10 +57,14 @@ export function createOpeningLearningRepository(sql: Sql) {
     async insertHelpExposure(scope: Scope, exposure: Omit<HelpExposure, "createdAt"> & { createdAt?: string }): Promise<HelpExposure> {
       return sql.begin(async (tx) => { await lockWorkspaceLearningHistory(tx, scope); return insertOpeningDeliveredHelp(tx, scope, exposure); });
     },
-    async listDeliveredExposures(scope: Scope, sessionId: string): Promise<Array<"hinted" | "revealed">> {
+    async listDeliveredExposures(scope: Scope, sessionId: string, target: { attemptId?: string; assessmentDomain?: "math" | "language" } = {}): Promise<Array<"hinted" | "revealed">> {
       if (!await getSession(scope, sessionId)) throw learningError("NOT_FOUND", "session not found");
-      // V2-13: instruction kind does not elevate item assistance.
-      const rows = await sql`SELECT level FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND session_id=${sessionId} AND delivered=TRUE AND kind <> 'instruction'`;
+      // Only a known delivery in this attempt can upgrade its declared assistance.
+      // Source-only/legacy associations remain uncertain in the canonical evaluator.
+      const rows = await sql`SELECT level FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}
+        AND (${target.attemptId ? sql`attempt_id=${target.attemptId}` : sql`session_id=${sessionId}`})
+        AND delivered=TRUE AND kind <> 'instruction' AND (${target.assessmentDomain === "language"} OR support_domain<>'language')
+        AND COALESCE(release_intent->'originReference'->>'possibleOpenAttemptOnly','false')<>'true'`;
       return rows.map((r) => r.level as "hinted" | "revealed");
     },
     async listObservationsForCourse(scope: Scope, courseId: string): Promise<LearningObservation[]> {

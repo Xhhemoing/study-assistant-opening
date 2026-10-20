@@ -2,7 +2,7 @@
 
 import { ArrowUp, LoaderCircle, LockKeyhole, Paperclip, Square } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
-import type { TutorMode } from "@aistudy/contracts";
+import { isSystemQueryPurpose, type ComposerPurpose, type TutorMode } from "@aistudy/contracts";
 import { secondaryButtonClass } from "../design/ui";
 
 const MODES: { value: TutorMode; label: string }[] = [
@@ -10,15 +10,15 @@ const MODES: { value: TutorMode; label: string }[] = [
   { value: "listen", label: "听我讲一遍" }, { value: "think_together", label: "一起想一想" },
 ];
 export type ComposerPrivacy = "saved" | "ephemeral";
-export type ComposerSubmit = { text: string; mode: TutorMode; privacy: ComposerPrivacy; clientKey: string; querySystem?: boolean };
+export type ComposerSubmit = { text: string; mode: TutorMode; privacy: ComposerPrivacy; clientKey: string; querySystem?: boolean; purpose?: ComposerPurpose };
 export type ComposerSubmitResult = { accepted: boolean };
 type Props = {
-  practiceMode?: boolean; disabled?: boolean; pending?: boolean; privacy?: ComposerPrivacy;
+  compact?: boolean; practiceMode?: boolean; disabled?: boolean; pending?: boolean; privacy?: ComposerPrivacy;
   queryAvailable?: boolean; contextBlocked?: boolean;
   onPrivacyChange?: (privacy: ComposerPrivacy) => void; onCancel?: () => void;
   onContext?: () => void; contextLabel?: string; draft: string;
   draftId?: string;
-  intent?: { sourceIds: readonly string[]; currentPage?: number | null; chunkId?: string | null };
+  intent?: { sourceSelection?: "auto" | "selected" | "none"; sourceIds: readonly string[]; currentPage?: number | null; chunkId?: string | null };
   /** Chip prefill: switches the selected mode once per nonce change. */
   modePrefill?: { mode: TutorMode; nonce: number } | null;
   onDraftChange: (value: string) => void;
@@ -30,9 +30,9 @@ function newClientKey(): string {
 }
 /** Retries of an unchanged logical send reuse the original client key. */
 export function logicalSendFingerprint(input: {
-  text: string; mode: TutorMode; sourceIds?: readonly string[]; currentPage?: number | null; chunkId?: string | null; querySystem?: boolean;
+  text: string; mode: TutorMode; sourceSelection?: "auto" | "selected" | "none"; sourceIds?: readonly string[]; currentPage?: number | null; chunkId?: string | null; querySystem?: boolean; purpose?: ComposerPurpose;
 }): string {
-  return `${input.querySystem ? "query\u0000" : ""}${input.mode}\u0000${input.text.trim()}\u0000${[...(input.sourceIds ?? [])].sort().join(",")}\u0000${input.currentPage ?? ""}\u0000${input.chunkId ?? ""}`;
+  return `${input.sourceSelection ? `${input.sourceSelection}\u0000` : ""}${input.purpose ? `${input.purpose}\u0000` : ""}${input.querySystem ? "query\u0000" : ""}${input.mode}\u0000${input.text.trim()}\u0000${[...(input.sourceIds ?? [])].sort().join(",")}\u0000${input.currentPage ?? ""}\u0000${input.chunkId ?? ""}`;
 }
 export function nextClientKey(state: {
   clientKey: string | null; fingerprint: string | null; nextFingerprint: string; mint?: () => string;
@@ -43,10 +43,10 @@ export function nextClientKey(state: {
 export function shouldSubmitShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; isComposing: boolean }): boolean {
   return (event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing;
 }
-export function Composer({ practiceMode = false, disabled, pending, privacy = "saved", onPrivacyChange,
+export function Composer({ compact = false, practiceMode = false, disabled, pending, privacy = "saved", onPrivacyChange,
   onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, onDraftChange, onSubmit, queryAvailable = false, contextBlocked = false }: Props) {
-  const [queryRequested, setQueryRequested] = useState(false);
-  const querySystem = queryAvailable && queryRequested;
+  const [purpose, setPurpose] = useState<ComposerPurpose>("answer");
+  const querySystem = queryAvailable && isSystemQueryPurpose({ purpose });
   const [selectedMode, setMode] = useState<TutorMode>("explain");
   const lastPrefill = useRef<number | null>(null);
   if (modePrefill && modePrefill.nonce !== lastPrefill.current) {
@@ -68,36 +68,39 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
     if (!text || blocked || locked.current || composing.current) return;
     locked.current = true; setSending(true);
     const issued = nextClientKey({ clientKey: sendKey.current?.clientKey ?? null, fingerprint: sendKey.current?.fingerprint ?? null,
-      nextFingerprint: logicalSendFingerprint({ text, mode, ...intent, querySystem }) });
+      nextFingerprint: logicalSendFingerprint({ text, mode, ...intent, querySystem, purpose }) });
     sendKey.current = issued;
     try {
-      const result = await onSubmit({ text, mode, privacy: effectivePrivacy, clientKey: issued.clientKey, ...(querySystem ? { querySystem: true } : {}) });
+      const result = await onSubmit({ text, mode, privacy: effectivePrivacy, clientKey: issued.clientKey, purpose, ...(querySystem ? { querySystem: true } : {}) });
       if (result?.accepted !== false) sendKey.current = null;
     } catch {
       // The parent shows the error; retain this intent's idempotency key.
     } finally { locked.current = false; setSending(false); }
   }
-  return <form ref={form} className="shrink-0 border-t border-zinc-200/70 bg-white px-4 pb-3 pt-3 sm:px-5" onSubmit={handleSubmit}>
+  return <form ref={form} className="shrink-0 border-t border-zinc-200/70 bg-white px-3 py-2 sm:px-5" onSubmit={handleSubmit}>
     <div className="overflow-hidden rounded-xl border border-zinc-300 bg-white shadow-sm shadow-zinc-900/5 transition-[border-color,box-shadow] duration-200 focus-within:border-emerald-600 focus-within:shadow-md focus-within:shadow-emerald-600/10 motion-reduce:transition-none">
-      <textarea id={draftId} className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-3.5 text-base leading-7 text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 md:text-sm"
+      <textarea id={draftId} className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-2 text-base leading-7 text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 md:text-sm"
         value={draft} disabled={blocked} onChange={(event) => onDraftChange(event.target.value)}
         onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
         onKeyDown={(event) => { if (shouldSubmitShortcut({ key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, isComposing: event.nativeEvent.isComposing || composing.current })) { event.preventDefault(); form.current?.requestSubmit(); } }}
         placeholder="自由交流，或基于已选材料提问…" aria-label="消息输入" />
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/50 px-3 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/50 px-2 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          {queryAvailable ? <label className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-700 md:min-h-8" title="读取课程、作答和计划记录；材料仅返回定位">
-            <input type="checkbox" className="size-4 accent-emerald-700" checked={querySystem} disabled={Boolean(pending || disabled || sending)} onChange={event => setQueryRequested(event.target.checked)} />查询系统记录
-          </label> : null}
+          <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600"><span className={compact ? "sr-only" : ""}>本轮目的</span><select className="min-h-10 max-w-40 rounded-lg bg-white px-2 text-xs ring-1 ring-zinc-200 md:min-h-8" aria-label="本轮目的" value={purpose} disabled={Boolean(pending || disabled || sending)} onChange={event => setPurpose(event.target.value as ComposerPurpose)}><option value="answer">回答问题</option><option value="teach">带我学习</option><option value="plan">准备计划草稿</option>{queryAvailable ? <><option value="explain_state">解释学习状态</option><option value="query">查询系统记录</option></> : null}</select></label>
           {onContext ? <button type="button" className={secondaryButtonClass} aria-label="选择参考材料" title={contextLabel} onClick={onContext}><Paperclip size={14} aria-hidden /></button> : null}
-          <select className="min-h-10 max-w-40 rounded-lg bg-white px-2.5 text-xs text-zinc-700 shadow-xs ring-1 ring-zinc-900/5 transition-[box-shadow,ring] duration-150 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-50 motion-reduce:transition-none md:min-h-8" value={mode} disabled={blocked} onChange={(event) => setMode(event.target.value as TutorMode)} aria-label="辅导模式">
-            {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
-          <label className="flex items-center gap-1.5 text-zinc-500"><LockKeyhole size={13} aria-hidden />
-            <select className="min-h-10 max-w-28 rounded-lg bg-transparent px-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-60 motion-reduce:transition-none md:min-h-8" value={effectivePrivacy} disabled={practiceMode || blocked || !onPrivacyChange} onChange={(event) => onPrivacyChange?.(event.target.value as ComposerPrivacy)} aria-label="隐私模式">
-              <option value="saved">保存对话</option>{!practiceMode ? <option value="ephemeral">不保存本轮</option> : null}
-            </select>
-          </label>
+          <details className="min-w-0 max-w-full">
+            <summary className="flex min-h-10 cursor-pointer items-center rounded px-2 text-xs text-zinc-700 focus-visible:ring-2 focus-visible:ring-emerald-600 md:min-h-8">{compact ? { hint: "提示", explain: "讲解", listen: "复述", think_together: "一起想" }[mode] : modes.find(item => item.value === mode)?.label} · {effectivePrivacy === "saved" ? (compact ? "保存" : "保存对话") : (compact ? "临时" : "临时对话")} · 设置</summary>
+            <div className="flex flex-wrap items-center gap-2 py-2">
+              <select className="min-h-10 max-w-40 rounded-lg bg-white px-2.5 text-xs text-zinc-700 shadow-xs ring-1 ring-zinc-900/5 transition-[box-shadow,ring] duration-150 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-50 motion-reduce:transition-none md:min-h-8" value={mode} disabled={blocked} onChange={(event) => setMode(event.target.value as TutorMode)} aria-label="辅导模式">
+                {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+              <label className="flex items-center gap-1.5 text-zinc-500"><LockKeyhole size={13} aria-hidden />
+                <select className="min-h-10 max-w-28 rounded-lg bg-transparent px-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 disabled:opacity-60 motion-reduce:transition-none md:min-h-8" value={effectivePrivacy} disabled={practiceMode || blocked || !onPrivacyChange} onChange={(event) => onPrivacyChange?.(event.target.value as ComposerPrivacy)} aria-label="隐私模式">
+                  <option value="saved">保存对话</option>{!practiceMode ? <option value="ephemeral">临时对话</option> : null}
+                </select>
+              </label>
+            </div>
+          </details>
         </div>
         <div className="flex items-center gap-1.5">
           {pending && onCancel ? <button type="button" className={secondaryButtonClass} onClick={onCancel}><Square size={12} aria-hidden />取消</button> : null}
@@ -107,9 +110,8 @@ export function Composer({ practiceMode = false, disabled, pending, privacy = "s
         </div>
       </div>
     </div>
-    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs leading-5 text-zinc-500">
-      <span>{practiceMode ? "练习辅导会保存对话并记录帮助。" : effectivePrivacy === "ephemeral" ? "本轮仅保留在当前标签页；刷新后不会恢复。" : contextLabel ?? "AI 可能出错，请核对原始材料。"}</span>
-      <span className="hidden tabular-nums sm:inline">⌘ + Enter 发送</span>
-    </div>
+    {querySystem || practiceMode || effectivePrivacy === "ephemeral" ? <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs leading-5 text-zinc-500">
+      <span>{querySystem ? "查学习记录：使用固定规则，无需 AI 辅导额度。" : practiceMode ? "练习辅导会保存对话并记录帮助。" : "本轮仅保留在当前标签页；刷新后不会恢复。"}</span>
+    </div> : null}
   </form>;
 }

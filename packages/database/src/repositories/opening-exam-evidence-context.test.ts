@@ -50,6 +50,7 @@ function fixture(options: { links?: Record<string, unknown>[]; record?: Learning
     }]);
     if (!query.includes(" FROM ") && !query.includes("\n    FROM ")) return {};
     if (query.includes("FROM opening_exam_attempt_links")) return Promise.resolve(options.links ?? [link]);
+    if (query.includes("FROM opening_study_intent_events")) return Promise.resolve([]);
     if (query.includes("FROM opening_help_exposures")) return Promise.resolve([]);
     if (query.includes("FROM opening_learning_sessions")) return Promise.resolve([{ id: id(14), course_id: id(15) }]);
     if (query.includes("FROM opening_privacy_exclusions")) return Promise.resolve([]);

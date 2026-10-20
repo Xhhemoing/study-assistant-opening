@@ -146,7 +146,7 @@ describe("G18 AiReadinessChecklistView budget banner", () => {
     expect(html).toContain('data-testid="ai-readiness-budget-banner"');
     expect(html).toContain('data-testid="ai-readiness-budget-cta"');
     expect(html).toContain('data-budget-confirm="needed"');
-    expect(html).toContain("AI 为何还不可用");
+    expect(html).toContain(BUDGET_CONFIRM_LEAD);
     // Soft OCR must not appear in the hard checklist list (filtered out).
     expect(html).not.toContain("扫描件 OCR 未配置");
   });
@@ -163,7 +163,7 @@ describe("G18 AiReadinessChecklistView budget banner", () => {
     const html = renderToStaticMarkup(createElement(AiReadinessChecklistView, {
       items: [hardProviderFail],
     }));
-    expect(html).toContain("AI 为何还不可用");
+    expect(html).toContain("AI 辅导暂不可用");
     expect(html).toContain('data-budget-confirm="not-needed"');
     expect(html).not.toContain('data-testid="ai-readiness-budget-banner"');
     expect(html).not.toContain(BUDGET_CONFIRM_LEAD);

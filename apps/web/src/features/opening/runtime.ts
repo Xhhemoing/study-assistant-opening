@@ -1,3 +1,4 @@
+import { isSystemQueryPurpose } from "@aistudy/contracts";
 import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
@@ -6,6 +7,7 @@ import { createOpeningTeachingCommandService } from "./teaching/command-service"
 import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
   createOpeningConversationRepository, readOpeningConversationSelection,
+  createOpeningStudyContextRepository, createOpeningStudyExposureRepository,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
   createOpeningCourseReadySourcesRepository,
@@ -112,7 +114,7 @@ export function setEphemeralTutorDepsForTests(
 
 export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
   return { replyEphemeral(scope, input, signal) {
-    if (input?.querySystem) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
+    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
       provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
     return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
   } };
@@ -156,6 +158,8 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
           },
         },
         chunks,
+        studyContext: createOpeningStudyContextRepository(sql),
+        exposures: createOpeningStudyExposureRepository(sql),
         pageImages: createSourcePageImages(sql, openingPageStorage()),
         provenance: createOpeningEphemeralProvenanceRepository(sql),
         privacy: {
