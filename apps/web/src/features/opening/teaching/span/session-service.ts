@@ -26,11 +26,12 @@ export function createSpanSessionService(sql: Sql) {
           AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!session) throw Object.assign(new Error("学习会话不存在"), { code: "NOT_FOUND" });
         if (input.retestId) {
-          const [retest] = await tx`SELECT not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
-            WHERE (id=${input.retestId} OR candidate_id=${input.retestId}) AND workspace_id=${scope.workspaceId}
+          const retests = await tx`SELECT not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
+            WHERE (id=${input.retestId} OR candidate_id=${input.retestId} OR candidate_reference_id=${input.retestId}) AND workspace_id=${scope.workspaceId}
               AND owner_user_id=${scope.ownerUserId} AND course_id=${String(session.course_id)} AND requirement_key=${SPAN_REQUIREMENT_KEY}
               AND status IN ('accepted','in_progress') FOR SHARE`;
-          if (!retest) throw Object.assign(new Error("延迟复测不属于本课程或尚未接受"), { code: "VALIDATION" });
+          if (retests.length !== 1) throw Object.assign(new Error("延迟复测不属于本课程、尚未接受或身份不唯一"), { code: "VALIDATION" });
+          const retest = retests[0]!;
           const iso = (value: unknown) => value == null ? null : new Date(value as Date).toISOString();
           assertRetestSubmitEarliestAllowed({ notBeforeAt: iso(retest.not_before_at), recommendedAt: iso(retest.recommended_at), scheduledStartAt: iso(retest.scheduled_start_at) }, new Date());
         }

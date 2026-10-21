@@ -1,6 +1,7 @@
 import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
 import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads } from "@aistudy/database";
 import type { Sql } from "postgres";
+import { SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 
 export function createSpanLessonSessionService(sql: Sql) {
   const sessions = createOpeningSpanSessionRepository(sql);
@@ -11,7 +12,8 @@ export function createSpanLessonSessionService(sql: Sql) {
       const courseId = uuidSchema.parse(courseIdRaw);
       const session = activityIdRaw ? await sessions.get(scope, uuidSchema.parse(activityIdRaw))
         : await sessions.latest(scope, courseId, retestIdRaw ? uuidSchema.parse(retestIdRaw) : null);
-      if (activityIdRaw && (!session || session.courseId !== courseId || session.retestId !== (retestIdRaw ?? null))) {
+      if (activityIdRaw && (!session || session.courseId !== courseId || (session.retestId !== (retestIdRaw ?? null)
+        && !await sessions.matchesRetestReference(scope, courseId, session.retestId, retestIdRaw ?? null)))) {
         throw Object.assign(new Error("本次学习不属于当前课程或复测任务。"), { code: "NOT_FOUND" });
       }
       if (!session) return { session: null, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null };
@@ -21,7 +23,7 @@ export function createSpanLessonSessionService(sql: Sql) {
         sessions.deliveredHintLevels(scope, session.activityId),
         createOpeningStudyIntentRepository(sql).latest(scope, session.sessionId),
       ]);
-      const attempts = rows.filter(row => row.sessionId === session.sessionId && row.spanExercise).map(({ outcome: _outcome, assistance: _assistance, ...attempt }) => attempt);
+      const attempts = rows.filter(row => row.sessionId === session.sessionId && (row.spanExercise || row.requirementKey === SPAN_REQUIREMENT_KEY)).map(({ outcome: _outcome, assistance: _assistance, ...attempt }) => attempt);
       const learning = createOpeningLearningRepository(sql);
       const assistance = Object.fromEntries(await Promise.all(attempts.map(async attempt => {
         const levels = await learning.listDeliveredExposures(scope, session.sessionId, { attemptId: attempt.id, assessmentDomain: "math" });

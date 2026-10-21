@@ -162,9 +162,12 @@ it("enforces persisted retest timing on direct and reserved issuance while prese
 it("binds new submissions to the persisted retest while omitted IDs, replacement tasks and rescheduling cannot bypass it", async () => {
   const f = await seed(), retestId = randomUUID(), otherRetestId = randomUUID();
   for (const id of [retestId, otherRetestId]) {
+    // A different historical task is valid data; two active cycles for this
+    // owner/course/requirement are forbidden by the database unique index.
+    const status = id === retestId ? "accepted" : "completed";
     await fixture.sql`INSERT INTO opening_retest_activities
       (id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,not_before_at)
-      VALUES (${id},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2,clock_timestamp()-interval '1 day')`;
+      VALUES (${id},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},${status},2,clock_timestamp()-interval '1 day')`;
   }
   const lesson = await f.repo.create(fixture.scope, { ...f.input, retestId });
   const attempts = createOpeningLearningAttemptRepository(fixture.sql), learning = createOpeningLearningRepository(fixture.sql);

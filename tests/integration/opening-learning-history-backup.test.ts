@@ -22,7 +22,12 @@ const storage=createOpeningTestStorage(), reader=createOpeningBackupReader(stora
 const objectKeys=new Set<string>();
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
-beforeEach(async () => { await fixture.reset(); await fixture.sql`TRUNCATE opening_learning_sessions, opening_learning_item_versions, opening_learning_history_revisions, opening_workspace_history_revisions, opening_source_versions, opening_conversations CASCADE`; });
+beforeEach(async () => {
+  await fixture.reset();
+  // Exam bindings reference courses outside this backup inventory. Clear their
+  // fixture-owned parent before the restore tests replace the course rows.
+  await fixture.sql`TRUNCATE opening_exam_sprints, opening_learning_sessions, opening_learning_item_versions, opening_learning_history_revisions, opening_workspace_history_revisions, opening_source_versions, opening_conversations CASCADE`;
+});
 afterAll(async () => {
   try { for(const key of objectKeys) await storage.deleteObject(key); }
   finally { if(storage.client instanceof S3Client) storage.client.destroy(); await fixture?.close(); }

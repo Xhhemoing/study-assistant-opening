@@ -7,6 +7,10 @@ import { createOpeningRetestService } from "../../learning/retest-service";
 const inputSchema = z.object({ observationId: z.string().uuid(), clientKey: z.string().min(8).max(160) }).strict();
 const delayedPrompt = "线性组合与 span 延迟复测：离开示范，独立完成服务器发放的新题，建立等式并检查全部坐标。";
 const conflict = (message: string) => Object.assign(new Error(message), { code: "CONFLICT" });
+const protocolSchema = z.object({ protocolId: z.literal("span-delayed-3d-v1"), baselineObservationId: z.string().uuid(),
+  baselineRootId: z.string().uuid(), priorAnswerPolicy: z.literal("require_unseen_problem") }).strict();
+const iso = (value: unknown) => new Date(value as string | Date).toISOString();
+const at = (value: unknown) => value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : NaN;
 
 /** Keep the repositories' admission, receipts and task writes in the scheduling transaction. */
 function transactionClient(tx: TransactionSql): Sql {
@@ -27,6 +31,34 @@ export function createSpanDelayedRetestService(sql: Sql) {
       // The scanner takes this same lock before checking the one-active-cycle constraint.
       // Keep it until acceptance commits so a proposed conversion is never half visible.
       await lockWorkspaceLearningHistory(tx, scope);
+      // Restore does not trust imported scoring authority. An existing acceptance
+      // is still replayable from its immutable intent, task and baseline identity.
+      const receipts = await tx`SELECT r.id AS replay_activity_id,r.candidate_reference_id,r.learning_protocol,
+          r.task_id,r.accepted_at,r.not_before_at,r.course_id,t.id AS replay_task_id,
+          b.id AS baseline_id,COALESCE(b.root_observation_id,b.id) AS baseline_root_id,b.submitted_at,b.recorded_at
+        FROM opening_retest_activities r
+        LEFT JOIN opening_tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.owner_user_id=r.owner_user_id
+          AND t.course_id=r.course_id AND t.skill_label=r.skill_label AND t.requirement_key IS NOT DISTINCT FROM r.requirement_key
+        LEFT JOIN opening_learning_observations b ON b.id::text=r.learning_protocol->>'baselineObservationId'
+          AND b.workspace_id=r.workspace_id AND b.owner_user_id=r.owner_user_id AND b.course_id=r.course_id
+          AND b.skill_label=r.skill_label AND b.requirement_key IS NOT DISTINCT FROM r.requirement_key
+        WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.accept_client_key=${input.clientKey}
+          AND r.purpose='retest' AND r.skill_label=${SPAN_SKILL_LABEL} AND r.requirement_key=${SPAN_REQUIREMENT_KEY}
+        FOR UPDATE OF r`;
+      if (receipts.length) {
+        const receipt = receipts[0]!, protocol = protocolSchema.safeParse(receipt.learning_protocol);
+        const baselineAt = Math.max(at(receipt.submitted_at), at(receipt.recorded_at));
+        const earliestAt = at(receipt.not_before_at);
+        if (receipts.length !== 1 || !protocol.success || protocol.data.baselineObservationId !== input.observationId
+          || receipt.baseline_id !== input.observationId || protocol.data.baselineRootId !== receipt.baseline_root_id
+          || !receipt.replay_task_id || !receipt.accepted_at || !z.string().uuid().safeParse(receipt.candidate_reference_id).success
+          || !Number.isFinite(baselineAt) || !Number.isFinite(earliestAt) || earliestAt < baselineAt + 72 * 60 * 60 * 1000) {
+          throw conflict("原复测回执与这次请求不一致或基线已不可用，请重新核对原任务。");
+        }
+        return { candidateId: String(receipt.candidate_reference_id), taskId: String(receipt.task_id), activityId: String(receipt.replay_activity_id),
+          courseId: String(receipt.course_id), notBeforeAt: iso(receipt.not_before_at),
+          href: `/opening/courses/${receipt.course_id}/study/span?retest=${receipt.replay_activity_id}` };
+      }
       const db = transactionClient(tx);
       const history = await createOpeningLearningRepository(db).observationHistory(scope, input.observationId);
       const head = history.revisions.find(row => row.id === history.headObservationId);
@@ -60,6 +92,9 @@ export function createSpanDelayedRetestService(sql: Sql) {
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${head.courseId}
           AND skill_label=${SPAN_SKILL_LABEL} AND requirement_key=${SPAN_REQUIREMENT_KEY} AND purpose='retest'
           AND status IN ('proposed','accepted','in_progress') ORDER BY created_at LIMIT 1`;
+      if (existing.length && !existing[0]!.candidate_id) {
+        throw conflict("已有恢复的复测任务。请从原任务继续；旧备份缺少正式协议时不能把它改成新的保持检查。");
+      }
       const candidateId = receipt ? String(receipt.replay_candidate_id)
         : existing[0]?.candidate_id ? String(existing[0].candidate_id) : head.id;
       const canonicalCandidate = { id: candidateId, courseId: head.courseId, skillLabel: SPAN_SKILL_LABEL,
@@ -104,11 +139,16 @@ export function createSpanDelayedRetestService(sql: Sql) {
         throw conflict("原复测任务的时间约束与这次记录不一致，请重新核对后再安排。");
       }
       const accepted = await createOpeningRetestService(db).accept(scope, candidateId, input.clientKey);
-      const [scheduled] = await tx`SELECT id,not_before_at FROM opening_retest_activities WHERE candidate_id=${candidateId}
-        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      const [scheduled] = await tx`UPDATE opening_retest_activities SET learning_protocol=${tx.json(protocol)},
+          candidate_reference_id=${candidateId},accept_client_key=${input.clientKey},version=version+1,updated_at=now()
+        WHERE candidate_id=${candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND task_id=${accepted.taskId} AND accepted_at IS NOT NULL AND (accept_client_key IS NULL OR accept_client_key=${input.clientKey})
+        RETURNING id,not_before_at`;
+      if (!scheduled) throw conflict("复测接受回执未完整保存，原请求尚未确认。");
+      await nextWorkspaceLearningHistoryRevision(tx, scope);
       return { candidateId, taskId: accepted.taskId, activityId: String(scheduled!.id), courseId: head.courseId,
         notBeforeAt: new Date(scheduled!.not_before_at as Date).toISOString(),
-        href: `/opening/courses/${head.courseId}/study/span?retest=${candidateId}` };
+        href: `/opening/courses/${head.courseId}/study/span?retest=${scheduled.id}` };
     });
   } };
 }

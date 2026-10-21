@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { Sql, TransactionSql } from "postgres";
 import { retestCandidateSchema, type RetestCandidate } from "@aistudy/contracts";
-import type { RetestEvidenceIdentity } from "@aistudy/domain";
+import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, type RetestEvidenceIdentity } from "@aistudy/domain";
 import type { OpeningScope } from "./opening-sources";
 import { lockLearningHistory, lockLearningOwner, lockWorkspaceLearningHistory, mapLearningObservation, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
 import { lockLearningPreferences, readLearningAutomationState } from "./opening-learning-preferences";
+
+const spanProtocolSchema = z.object({ protocolId: z.literal("span-delayed-3d-v1"),
+  baselineObservationId: z.string().uuid(), baselineRootId: z.string().uuid(),
+  priorAnswerPolicy: z.literal("require_unseen_problem") }).strict();
 
 /**
  * L02 retest proposals as opening_jobs (kind=retest). No new migration.
@@ -89,23 +94,31 @@ export function createOpeningRetestRepository(sql: Sql) {
           // upgrades and worker retries must not regenerate a declined or
           // finished proposal for unchanged evidence. Only genuinely new
           // evidence roots (or no recorded evidence at all) may start one.
-          const prior = await tx`SELECT id, status, reason FROM opening_retest_activities
+          const prior = await tx`SELECT id, status, reason, learning_protocol FROM opening_retest_activities
             WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
               AND course_id=${candidate.courseId} AND skill_label=${candidate.skillLabel}
               AND requirement_key IS NOT DISTINCT FROM ${candidate.requirementKey ?? null}
               AND purpose='retest' AND status IN ('completed','declined','cancelled','invalidated','superseded')
             ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`;
-          const priorRow = prior[0] as { id: string; status: string; reason: string | null } | undefined;
+          const priorRow = prior[0] as { id: string; status: string; reason: string | null; learning_protocol?: unknown } | undefined;
           const candidateRoots = [...new Set(candidate.evidenceRootIds ?? [])].sort();
           if (priorRow && priorRow.reason === "evidence_changed") {
             // Evidence already changed under this identity: the reconciler
             // recorded the change, so a new cycle with the fresh roots is legitimate.
           } else if (priorRow) {
-            const seen = await tx`SELECT payload FROM opening_jobs
-              WHERE id=(SELECT candidate_id FROM opening_retest_activities WHERE id=${priorRow.id})
-                AND workspace_id=${scope.workspaceId}`;
-            const priorPayload = (seen[0] as { payload?: { evidenceRootIds?: string[] } } | undefined)?.payload;
-            const priorRoots = [...new Set((Array.isArray(priorPayload?.evidenceRootIds) ? priorPayload.evidenceRootIds : []) as string[])].sort();
+            const protocol = spanProtocolSchema.safeParse(priorRow.learning_protocol);
+            let priorRoots: string[];
+            if (candidate.skillLabel === SPAN_SKILL_LABEL && candidate.requirementKey === SPAN_REQUIREMENT_KEY && protocol.success) {
+              // A restored terminal cycle must still suppress the same evidence;
+              // its durable baseline is negative history, not grading authority.
+              priorRoots = [protocol.data.baselineRootId];
+            } else {
+              const seen = await tx`SELECT payload FROM opening_jobs
+                WHERE id=(SELECT candidate_id FROM opening_retest_activities WHERE id=${priorRow.id})
+                  AND workspace_id=${scope.workspaceId}`;
+              const priorPayload = (seen[0] as { payload?: { evidenceRootIds?: string[] } } | undefined)?.payload;
+              priorRoots = [...new Set((Array.isArray(priorPayload?.evidenceRootIds) ? priorPayload.evidenceRootIds : []) as string[])].sort();
+            }
             const sameEvidence = priorRoots.length > 0 && priorRoots.length === candidateRoots.length
               && priorRoots.every((root, index) => root === candidateRoots[index]);
             if (sameEvidence) continue;

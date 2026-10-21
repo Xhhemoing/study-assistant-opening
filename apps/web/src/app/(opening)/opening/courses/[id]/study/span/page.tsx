@@ -25,5 +25,5 @@ export default async function SpanLessonPage({ params, searchParams }: { params:
     if (event.signals.some(signal => signal === "guessed" || signal === "copied_answer")) initialNewEvidenceEventId = event.id;
     if (event.id !== intentEvent || !createSpanTeachingSequence(spanModeForIntent(event.intent)).some(candidate => candidate.id === move)) move = undefined;
   }
-  return <SpanLessonSession initialActivityId={lesson} courseId={id} sourceIds={context.sourceIds} sourceLoadError={context.sourceLoadError} delayedRetestId={retest} initialIntent={initialIntent} initialMoveId={move} initialNewEvidenceEventId={initialNewEvidenceEventId} />;
+  return <SpanLessonSession key={`${id}:${retest ?? "study"}`} initialActivityId={lesson} courseId={id} sourceIds={context.sourceIds} sourceLoadError={context.sourceLoadError} delayedRetestId={retest} initialIntent={initialIntent} initialMoveId={move} initialNewEvidenceEventId={initialNewEvidenceEventId} />;
 }
