@@ -252,13 +252,14 @@ describe("opening tutor polling handlers", () => {
       method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
     }));
     expect(first.status).toBe(201);
-    const created = await first.json() as { jobId: string; turnId: string };
+    const created = await first.json() as { jobId: string; turnId: string; replayed: boolean };
+    expect(created.replayed).toBe(false);
 
     const replay = await submitTurn(new Request("http://localhost/api/opening/turns", {
       method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
     }));
     expect(replay.status).toBe(201);
-    await expect(replay.json()).resolves.toEqual(created);
+    await expect(replay.json()).resolves.toEqual({ ...created, replayed: true });
 
     const pageConflict = await submitTurn(new Request("http://localhost/api/opening/turns", {
       method: "POST",

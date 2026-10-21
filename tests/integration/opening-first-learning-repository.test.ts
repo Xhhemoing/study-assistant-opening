@@ -6,6 +6,7 @@ import { createOpeningAdaptivePrefsRepository, createOpeningFirstLearningReposit
   listReadySourceIdsForCourse, readOpeningTeachingCompilerFocus, type FirstLearningInitializationInput } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { createOpeningTeachingActivityService } from "../../apps/web/src/features/opening/teaching/activity-service";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
@@ -66,6 +67,19 @@ it("concurrent same-key requests return the one saved initialization", async () 
   const [first, second] = await Promise.all([repository().initialize(fixture.scope, request), repository().initialize(fixture.scope, request)]);
   expect(first.activity.id).toBe(second.activity.id); expect(first.firstTaskId).toBe(second.firstTaskId);
   expect([first.replayed, second.replayed].sort()).toEqual([false, true]);
+  expect(await counts()).toEqual({ courses: 1, activities: 1, tasks: 10, jobs: 1, outbox: 1 });
+});
+
+it("resumes the original lesson from the first course-seed task without creating another lesson or compile job", async () => {
+  const first = await repository().initialize(fixture.scope, input());
+  const activities = createOpeningTeachingActivityService(fixture.sql, {});
+  const intent = { clientKey: `task:${first.firstTaskId}`, intentKind: "goal", intentSummary: "client title ignored",
+    createIntent: { source: "task", taskId: first.firstTaskId } };
+  const resumed = await activities.create(fixture.scope, intent);
+  expect(resumed.id).toBe(first.activity.id);
+  expect(resumed.intentSummary).toBe(first.activity.intentSummary);
+  expect((await activities.create(fixture.scope, intent)).id).toBe(first.activity.id);
+  await expect(activities.create(fixture.otherScope, intent)).rejects.toMatchObject({ code: "NOT_FOUND" });
   expect(await counts()).toEqual({ courses: 1, activities: 1, tasks: 10, jobs: 1, outbox: 1 });
 });
 

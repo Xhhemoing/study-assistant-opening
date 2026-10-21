@@ -29,9 +29,12 @@ it("HTTP saved query binds persisted intent and a new intent cannot reuse its cl
     SELECT ${conversationId},id,owner_user_id,'HTTP query' FROM workspaces WHERE id=${workspaceId}`;
   const input = { conversationId, querySystem: true, text: "模型设置", sourceIds: [], mode: "explain", privacy: "saved", clientKey: randomUUID() };
   const response = await savedPost(postEphemeral(input)); expect(response.status).toBe(201);
-  const created = await response.json();
-  const replay = await savedPost(postEphemeral(input)); expect(await replay.json()).toEqual(created);
-  const conflict = await savedPost(postEphemeral({ ...input, querySystem: false })); expect(conflict.status).toBe(409);
+  const created = await response.json(); expect(created.replayed).toBe(false);
+  const replay = await savedPost(postEphemeral(input)); expect(replay.status).toBe(201);
+  expect(await replay.json()).toEqual({ ...created, replayed: true });
+  const automaticReplay = await savedPost(postEphemeral({ ...input, querySystem: false }));
+  expect(automaticReplay.status).toBe(201); expect(await automaticReplay.json()).toEqual({ ...created, replayed: true });
+  const conflict = await savedPost(postEphemeral({ ...input, querySystem: false, text: "解释积分中值定理" })); expect(conflict.status).toBe(409);
   const turns = await sql`SELECT query_system,learning_session_id,attempt_id FROM opening_turns WHERE conversation_id=${conversationId}`;
   expect(turns).toHaveLength(2); expect(turns.every(turn => turn.query_system && turn.learning_session_id === null && turn.attempt_id === null)).toBe(true);
   expect(complete).not.toHaveBeenCalled();
