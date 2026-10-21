@@ -37,7 +37,7 @@ export function LearnerStateCard({ courseId, revision = 0, proactive = false }: 
   const selected = relevant.find(row => row.status === "needs_review") ?? relevant.find(row => row.status === "needs_check") ?? relevant[0];
   return <section className="space-y-3 rounded-xl border border-line bg-surface p-4" aria-label={proactive ? "开始前的学习建议" : "共同学习证据"}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold">{proactive ? "从已有记录开始" : "当前学习证据"}</h2><span className="text-xs text-text-2">{selected ? labels[selected.status] : "未测"}</span></div>
-    <div className="space-y-2" aria-label="已记录学习要求的状态">
+    <div role="group" className="space-y-2" aria-label="已记录学习要求的状态">
       <p className="text-sm font-medium">已记录的学习要求 · {state.display.total} 项</p>
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(Object.keys(learnerEvidenceDisplayLabels) as Array<keyof typeof learnerEvidenceDisplayLabels>).map(key => <div className="rounded-lg bg-surface-2 p-3" key={key}><dt className="text-xs text-text-2">{learnerEvidenceDisplayLabels[key]}</dt><dd className="mt-1 font-serif text-2xl tabular-nums text-text">{state.display.counts[key]}</dd></div>)}</dl>
       <p className="text-xs leading-6 text-text-2">每项按最近作答的有效证据归入一类；数学提示 1–3 级均按使用提示记录。已查看本题解法、核验有误或真实复测到期时显示待复测，不表示已自动新增任务。这不是全课程单元覆盖率或掌握率。</p>

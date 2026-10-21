@@ -136,7 +136,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
         : null;
 
   return (
-    <div className="space-y-3" aria-labelledby="timetable-import-heading">
+    <section className="space-y-3" aria-labelledby="timetable-import-heading">
       <div>
         <h3 className="text-sm font-medium text-text" id="timetable-import-heading">导入课表</h3>
         <p className="mt-1 text-xs leading-6 text-text-3">
@@ -219,6 +219,6 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
           </div>
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }
