@@ -229,7 +229,7 @@ test.describe("Opening span durable teaching flow", () => {
       await makeTeachingRetestDue(course, scheduled.candidateId);
       testInfo.annotations.push({ type: "controlled-time", description: "Only the isolated retest time gate is advanced. No real 3-day retention or learning benefit is asserted." });
       const reservedResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/teaching/span/reserved") && response.request().method() === "POST");
-      await page.getByRole("button", { name: "恢复原题与保存回执", exact: true }).click();
+      await page.getByRole("button", { name: "恢复原题和保存结果", exact: true }).click();
       const reserved = await reservedResponse;
       expect(reserved.ok()).toBe(true);
       const retestAttempt = learningAttemptSchema.parse(await reserved.json());

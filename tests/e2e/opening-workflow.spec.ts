@@ -38,7 +38,8 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await expect(choice).toBeChecked();
     await expect(assistant.getByLabel("当前物理页码")).toHaveValue("1");
     await assistant.getByRole("button", { name: "关闭上下文", exact: true }).click();
-    const citation = assistant.getByRole("log").getByRole("link", { name: /v0/ }).first();
+    const citation = assistant.getByRole("log").locator('a[href^="/opening/library?tab=materials&source="][href$="&version=0&page=1"]').first();
+    await expect(citation).toContainText("parser-two-page.pdf");
     await expect(citation).toHaveAttribute("href", /\/opening\/library\?tab=materials&source=[0-9a-f-]+&version=0&page=1$/);
     await citation.click();
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });

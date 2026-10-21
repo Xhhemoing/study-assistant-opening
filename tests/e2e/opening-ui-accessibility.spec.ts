@@ -66,7 +66,10 @@ async function openView(page: Page, view: View) {
       await expect(page.getByRole("navigation", { name: "课程分区" }).getByRole("link", { name: label, exact: true })).toHaveAttribute("aria-current", "page");
       if (view === "overview") await expect(page.getByRole("heading", { name: "本课内容", exact: true })).toBeVisible();
       if (view === "units") await expect(page.getByRole("heading", { name: "课程单元", exact: true })).toBeVisible();
-      if (view === "progress") await expect(page.getByRole("region", { name: "共同学习证据", exact: true })).toBeVisible();
+      if (view === "progress") {
+        await expect(page.getByRole("heading", { name: "学习进展与记录", exact: true })).toBeVisible();
+        await expect(page.getByRole("region", { name: "学习进展", exact: true })).toHaveCount(0);
+      }
       break;
     }
     case "review":
