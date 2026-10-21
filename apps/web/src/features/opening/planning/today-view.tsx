@@ -221,7 +221,7 @@ export function TodayPlanView({
       {plan?.blocks.length ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">已确认安排 · {plan.blocks.length} 个时间块</summary><ul className="space-y-2 text-xs leading-5 text-text-2">{plan.blocks.map((block) => <li key={`${block.taskId}-${block.start}`}><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p>{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul></details> : null}
       {draft ? <div className="space-y-3 border-t border-line pt-3"><p className="text-xs font-semibold text-text">计划变更预览</p><p className="text-xs leading-5 text-text-2">当前 {plan?.blocks.length ?? 0} 个时间块 → 草案 {draft.blocks.length} 个时间块；未安排 {draft.unscheduledTaskIds.length} 项。</p>
         <ul className="space-y-2 text-xs leading-5 text-text-2">{draft.blocks.map((block) => <li key={`${block.taskId}-${block.start}`}><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p>{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul>
-        {draftIsStale ? <p className="text-xs leading-5 text-warn">计划版本或日期已变化。请取消旧草案，重新生成后确认。</p> : null}
+        {draftIsStale ? <p className="text-xs leading-5 text-warn">计划或日期已变化。请取消当前建议，重新生成后确认。</p> : null}
         <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void accept()} disabled={loadState !== "ready" || planState !== "ready" || !canAcceptPlan({ pending, stale: draftIsStale })} className={buttonClass}>确认变更</button><button type="button" onClick={() => void reject()} disabled={pending} className={secondaryButtonClass}>取消草案</button></div>
       </div> : null}
     </div> : null}

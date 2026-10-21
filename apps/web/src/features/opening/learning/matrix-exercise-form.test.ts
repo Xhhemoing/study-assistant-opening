@@ -8,9 +8,9 @@ it("offers real start controls, labels the built-in source honestly and blocks a
     courseId: "course", sources: [], onRecorded() {}, onBack() {},
   }));
   expect(html).toContain("内置矩阵练习");
-  expect(html).toContain("正在读取矩阵练习草稿");
+  expect(html).toContain("正在恢复矩阵练习");
   expect(html).toContain('<fieldset disabled=""');
-  expect(html).toContain("题目并非从材料中抽取");
+  expect(html).toContain("这是内置矩阵练习");
   expect(html).toContain("选择可用课程材料");
   expect(html).toContain("请先添加并完成解析一份材料");
   expect(html).toMatch(/<button disabled=""[^>]*>开始矩阵练习<\/button>/);

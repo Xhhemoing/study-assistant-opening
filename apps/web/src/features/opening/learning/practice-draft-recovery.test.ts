@@ -22,9 +22,9 @@ it("shows archived raw answers and a restore action alongside a nondestructive n
     patch() { return active; }, requireSaved() {}, reload() {}, restore() { return true; }, startAnother() { return true; },
   };
   const html = renderToStaticMarkup(createElement(PracticeDraftShelf, { continuity }));
-  expect(html).toContain("保留此草稿，开始其他练习");
-  expect(html).toContain("保留的练习草稿（1）");
+  expect(html).toContain("保留答案，开始其他练习");
+  expect(html).toContain("未完成的练习（1）");
   expect(html).toContain("original &lt;answer&gt;");
-  expect(html).toContain("切换到此草稿");
+  expect(html).toContain("继续这次练习");
   expect(html).toMatch(/readonly=""/i);
 });

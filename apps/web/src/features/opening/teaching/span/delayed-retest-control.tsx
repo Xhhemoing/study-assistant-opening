@@ -21,7 +21,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
     finally { setPending(false); }
   }
   return <div className="space-y-2 border-t border-line pt-3">
-    {receipt ? <div role="status" className="space-y-2"><p className="text-sm leading-7">延迟复测已存入今日任务，最早 {new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 开始。提前打开不会发放新题，提前提交会被服务器拒绝。</p><Link className={ui.secondary} href={receipt.href}>打开这项延迟复测</Link><Link className={ui.quiet} href="/opening/today">查看正式任务</Link></div> : <><button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule()}>{pending ? "正在保存复测任务…" : "安排 3 天后的正式延迟复测"}</button><p className="text-xs leading-6 text-text-3">使用既有复测任务与时间门槛，3 天是可解释的初始排程规则。期间的材料、提示或解析交付继续影响证据资格；不会提前宣称保持。</p></>}
+    {receipt ? <div role="status" className="space-y-2"><p className="text-sm leading-7">复习已加入今日任务，可在 {new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 之后开始。</p><Link className={ui.secondary} href={receipt.href}>打开这项复习</Link><Link className={ui.quiet} href="/opening/today">查看今日任务</Link></div> : <><button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule()}>{pending ? "正在保存复测任务…" : "安排 3 天后再练习"}</button><p className="text-xs leading-6 text-text-3">隔 3 天再做一道新题，看看哪些内容还记得。</p></>}
     {error ? <p role="alert" className="text-xs leading-6 text-danger">{error}</p> : null}
   </div>;
 }

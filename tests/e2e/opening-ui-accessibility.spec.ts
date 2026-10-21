@@ -50,7 +50,7 @@ async function openView(page: Page, view: View) {
   switch (view) {
     case "today":
       await page.goto("/opening/today");
-      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeAttached();
+      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeAttached();
       await expect(page.getByRole("heading", { name: "从课程继续学习", exact: true })).toBeVisible();
       break;
     case "courses":

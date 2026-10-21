@@ -42,7 +42,7 @@ describe("command labels / conflict policy", () => {
     expect(conflictRequiresReread("stale_content_version")).toBe(true);
     expect(conflictRequiresReread("generate_in_flight")).toBe(true);
     expect(conflictRequiresReread("branch_stack_empty")).toBe(false);
-    expect(teachingCommandConflictLabel("stale_content_version")).toMatch(/重新拉取/);
+    expect(teachingCommandConflictLabel("stale_content_version")).toMatch(/重新读取/);
     expect(SKIP_HONESTY_COPY).toMatch(/不会记为答错/);
   });
 
@@ -95,8 +95,8 @@ describe("BlockCommandsBarView", () => {
     expect(html.indexOf('data-command-assist="why"')).toBeGreaterThan(helpEnd);
     expect(html.indexOf('data-command-conflict="stale_path_version"')).toBeGreaterThan(helpEnd);
     expect(html.indexOf('data-command-reread="true"')).toBeGreaterThan(helpEnd);
-    expect(html).toContain("学习路径已更新。");
-    expect(html).toMatch(/<details[^>]*><summary[^>]*>技术信息<\/summary>[\s\S]*?path=3[\s\S]*?<\/details>/);
+    expect(html).toContain("学习路径已更新");
+    expect(html).not.toContain("path=3");
   });
 
   it.each([
@@ -165,8 +165,7 @@ describe("BlockCommandsBarView", () => {
     expect(html).not.toContain('data-command-assist="why"');
     expect(html).toContain('data-command-conflict="stale_content_version"');
     expect(html).toContain("data-command-reread");
-    expect(html).toContain("重新拉取教学内容");
-    expect(html).toContain("不会提供「强制覆盖」");
+    expect(html).toContain("重新读取教学内容");
     expect(html).not.toContain("data-force-overwrite");
     expect(html).not.toContain("force overwrite");
     expect(html).not.toContain("LWW");

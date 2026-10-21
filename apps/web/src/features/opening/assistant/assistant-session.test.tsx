@@ -63,7 +63,7 @@ describe("assistant canonical attempt restoration", () => {
     const result = render(selected);
     expect(result.type).not.toBe(AssistantView);
     expect(result.props.children.type).toBe(LoadError);
-    expect(result.props.children.props.message).toContain("身份或版本不一致");
+    expect(result.props.children.props.message).toContain("与原题的作答记录不一致");
   });
 
   it("keeps the explicit support purpose while restoring the same canonical question", async () => {
@@ -113,7 +113,7 @@ describe("assistant canonical attempt restoration", () => {
     hooks.read.mockResolvedValueOnce(response({ ...attempt, id: other }));
     render().props.children.props.onRetry?.();
     render(); runEffects(); await flush();
-    expect(render().props.children.props.message).toContain("身份或版本不一致");
+    expect(render().props.children.props.message).toContain("与原题的作答记录不一致");
   });
 
   it("passes a supplied canonical attempt directly and still validates its selected pins", () => {

@@ -666,7 +666,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         if (sequence === sourceRequestSequence.current) setSources(latestSources);
         const problem = pinnedStudySourceProblem(studyContext, latestSources);
         if (problem) { setError(problem); return { accepted: false }; }
-      } catch { setError("无法核对指定材料版本，本次未发送；问题草稿已保留。"); return { accepted: false }; }
+      } catch { setError("指定资料暂时无法读取，问题已保留，请重试。"); return { accepted: false }; }
     }
     const submittedText = querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
     if (submittedText.length > 20000) { setError("问题和携入背景合计超过 20000 字，请缩短问题或选中片段后再发送。"); return { accepted: false }; }
@@ -848,7 +848,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
 
   const setPrompt = useCallback((value: string) => {
     if (pending || loading || recoveryRequired) return;
-    setDraft(replacePromptDraft(draftRef.current, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
+    setDraft(replacePromptDraft(draftRef.current, value, () => window.confirm("将内容带入输入？已有未发送的内容将被替换。")));
   }, [pending, loading, recoveryRequired, setDraft]);
   function prepareStarter(starter: AssistantStarter) {
     if (pending || loading || recoveryRequired) return;
@@ -867,7 +867,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }
   function prepareUnknownQuestion() {
     if (!retryQuestion || pending || loading || recoveryRequired || unknownTurnRecovery(unknownJob, Date.now())?.canRetry !== true) return;
-    const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的草稿将被替换。"));
+    const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的内容将被替换。"));
     if (next !== retryQuestion.text) return;
     setDraft(next);
     changePrivacy("saved");
@@ -931,9 +931,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       ) : null}
 
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
-      {privacy === "saved" && !loading && !embedded ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">准备或查看行动草稿</summary><ProposalPanel api={api} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
+      {privacy === "saved" && !loading && !embedded ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel api={api} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
-      {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
+      {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题会保留在当前页面；浏览器暂时无法保存，刷新或关闭前请先复制。</p> : null}
       <Composer defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}

@@ -9,7 +9,7 @@ import type { ReviewAction, ReviewItem, ReviewOutcome } from "./review-types";
 import { ConversationPlanAction } from "./conversation-plan-action";
 import type { ConversationPlanApi } from "./conversation-plan-controller";
 
-export function ReviewCard({ item, actions, conversationApi }: { item: ReviewItem; actions: ReturnType<typeof createReviewActions>; conversationApi?: ConversationPlanApi }) {
+export function ReviewCard({ item, actions, conversationApi, onDecision }: { item: ReviewItem; actions: ReturnType<typeof createReviewActions>; conversationApi?: ConversationPlanApi; onDecision?: (outcome: ReviewOutcome) => void }) {
   const [draft, setDraft] = useState(() => initialReviewDraft(item));
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [outcome, setOutcome] = useState<ReviewOutcome | null>(null);
@@ -19,7 +19,7 @@ export function ReviewCard({ item, actions, conversationApi }: { item: ReviewIte
   async function decide(action: ReviewAction) {
     if (busy) return;
     setBusy(true); setError("");
-    try { setOutcome(await actions.submit(item, draft, action)); }
+    try { const result = await actions.submit(item, draft, action); setOutcome(result); onDecision?.(result); }
     catch (reason) { setError(reason instanceof Error && reason.name !== "ZodError" ? reason.message : "请检查任务名称、分钟数及日期后重试。"); }
     finally { setBusy(false); }
   }
@@ -42,7 +42,7 @@ export function ReviewCard({ item, actions, conversationApi }: { item: ReviewIte
       </div> : null}
       {conversationApi && item.ref.origin === "assistant" && item.proposal.kind === "task" ? <ConversationPlanAction
         candidateId={item.ref.id} expectedVersion={item.version} api={conversationApi} disabled={busy || Boolean(pending)}
-        onModeChange={setPlanning} onAccepted={task => setOutcome({ kind: "task", task, label: "对话任务已创建并加入今日计划" })} /> : null}
+        onModeChange={setPlanning} onAccepted={task => { const result: ReviewOutcome = { kind: "task", task, label: "对话任务已创建并加入今日计划" }; setOutcome(result); onDecision?.(result); }} /> : null}
     </>}
   </li>;
 }

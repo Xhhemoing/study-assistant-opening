@@ -98,7 +98,7 @@ export function InboxPanel({
     if (openedInitialKey === key) return;
     const record = sources.find((item) => item.id === initialOpen.sourceId);
     if (!record || record.uploadState !== "uploaded" || initialOpen.version > record.version) {
-      setNotice({ sourceId: initialOpen.sourceId, text: !record ? "引用材料已移除或暂时无法访问，请核对资料库。" : record.uploadState !== "uploaded" ? "引用材料尚未上传完成，请重新选择文件。" : "请求的材料版本尚不可用，请刷新后核对；不会改用其他版本。" });
+      setNotice({ sourceId: initialOpen.sourceId, text: !record ? "引用材料已移除或暂时无法访问，请核对资料库。" : record.uploadState !== "uploaded" ? "引用材料尚未上传完成，请重新选择文件。" : "引用时的材料内容暂时无法读取，请刷新后重试。" });
       setOpenedInitialKey(key);
       return;
     }

@@ -22,7 +22,6 @@ test("creates a knowledge-only course with no plan (Path D)", async ({ browser, 
     await expect(page).toHaveURL(/\/opening\/courses\/new/);
 
     await page.locator("#course-title").fill("Knowledge Only");
-    await page.locator("#course-slug").fill(`knowledge-only-${Date.now()}`);
     await page.getByRole("button", { name: "创建课程" }).click();
     await expect(page).toHaveURL(/\/opening\/courses\//);
 

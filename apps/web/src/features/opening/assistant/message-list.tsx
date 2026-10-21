@@ -20,6 +20,7 @@ import { LearningProse, type CitationLink } from "./learning-prose";
 import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
 import { assistantStarters, type AssistantStarter } from "./assistant-starters";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -54,6 +55,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
 
 export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
+  const diagnostics = useDiagnosticsEnabled();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
   const messageElements = useRef<Record<string, HTMLElement | null>>({});
@@ -125,14 +127,16 @@ export const MessageList = memo(function MessageList({ messages, compact = false
       {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-text-2">出处：</span>{message.citations.map((citation) => {
         const { href: viewerHref, label: chipLabel } = citationLink(citation, sourceNames);
         const downloadHref = sourceDownloadHref(citation.sourceId, citation.sourceVersion, citation.page);
+        const currentVersion = currentVersions[citation.sourceId] ?? citation.sourceVersion;
+        const versionMismatch = currentVersion !== citation.sourceVersion;
         const title = sourceViewerCopy({
           requestedVersion: citation.sourceVersion,
-          currentVersion: currentVersions[citation.sourceId] ?? citation.sourceVersion,
-          versionMismatch: (currentVersions[citation.sourceId] ?? citation.sourceVersion) !== citation.sourceVersion,
+          currentVersion,
+          versionMismatch,
           page: citation.page,
         });
         return <span key={`${citation.sourceId}-${citation.chunkId}-${citation.sourceVersion}`} className="inline-flex max-w-full items-center gap-1">
-          <a className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-text shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-line-strong hover:text-text hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent motion-reduce:transition-none" href={viewerHref} title={title}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{chipLabel}</span><span className="shrink-0 text-text-3">{`v${citation.sourceVersion}`}</span></a>
+          <a className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-text shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-line-strong hover:text-text hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent motion-reduce:transition-none" href={viewerHref} title={title}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{chipLabel}</span>{versionMismatch ? <span className="shrink-0 text-warn">当前材料已更新</span> : null}{diagnostics ? <span className="shrink-0 text-text-3">{`v${citation.sourceVersion}`}</span> : null}</a>
           <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-text-2 transition-colors hover:border-line hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
         </span>;
       })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-text-2">一般说明（未引用材料）</p> : null}

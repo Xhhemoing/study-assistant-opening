@@ -376,7 +376,7 @@ export function DailyDraftCard({
         </p>
       ) : null}
       {stale ? (
-        <p className="text-xs leading-5 text-warn">计划版本已变化。请拒绝旧草案或调整后重新确认。</p>
+        <p className="text-xs leading-5 text-warn">学习安排已变化。请取消当前建议，或调整后重新确认。</p>
       ) : null}
       {model.error ? <div className="space-y-2"><p className="text-xs leading-5 text-danger" role="alert">{model.error}</p>{onChanged || onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>{adaptivePlanning && onRefreshSuggestions ? "刷新草案" : "重新读取"}</button> : null}</div> : null}
       <div className="flex flex-wrap gap-2">

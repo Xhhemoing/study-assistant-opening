@@ -1,7 +1,7 @@
 "use client";
 
 import { AppShell, getWorkspaceEntry, SIDEBAR_COLLAPSED_STORAGE_KEY } from "@aistudy/ui";
-import { Layers2, Library, Notebook, Sparkles, Sun } from "lucide-react";
+import { Library, Notebook, Sparkles, Sun } from "lucide-react";
 import { ShellNavLink } from "./shell-nav-link";
 import { usePathname, useRouter } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
@@ -16,7 +16,7 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 
-const icons = { today: Sun, library: Library, courses: Notebook, review: Layers2 };
+const icons = { today: Sun, library: Library, courses: Notebook, assistant: Sparkles };
 
 function readSidebarCollapsed(): boolean {
   if (typeof window === "undefined") return false;
@@ -87,16 +87,21 @@ export function OpeningShell({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
   useEffect(() => {
-    const controller = new AbortController();
-    // The shell survives soft navigation. Refresh the badge after reviewing
-    // suggestions rather than relying on a full page load to update it.
-    fetch("/api/opening/reviews?limit=1", { cache: "no-store", signal: controller.signal })
-      .then(async response => {
-        if (!response.ok) { if (!controller.signal.aborted) setPendingCount(null); return; }
-        const body = await response.json() as { total?: number };
-        if (!controller.signal.aborted) setPendingCount(typeof body.total === "number" ? body.total : null);
-      }).catch(() => { if (!controller.signal.aborted) setPendingCount(null); });
-    return () => controller.abort();
+    let controller: AbortController | undefined;
+    const refresh = () => {
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      fetch("/api/opening/reviews?limit=1", { cache: "no-store", signal: current.signal })
+        .then(async response => {
+          if (!response.ok) { if (!current.signal.aborted) setPendingCount(null); return; }
+          const body = await response.json() as { total?: number };
+          if (!current.signal.aborted) setPendingCount(typeof body.total === "number" ? body.total : null);
+        }).catch(() => { if (!current.signal.aborted) setPendingCount(null); });
+    };
+    refresh();
+    if (typeof window !== "undefined") window.addEventListener("opening:reviews-changed", refresh);
+    return () => { controller?.abort(); if (typeof window !== "undefined") window.removeEventListener("opening:reviews-changed", refresh); };
   }, [pathname]);
   async function logout() {
     if (logoutPending) return;

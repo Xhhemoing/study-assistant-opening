@@ -37,7 +37,7 @@ export function CourseContents({ courseId, assets }: { courseId: string; assets:
     setVersions({}); setError("");
     if (assets.some(asset => asset.source)) void createOpeningApi().listSources().then(rows => {
       if (active) setVersions(Object.fromEntries(rows.map(source => [source.id, source.version])));
-    }).catch(() => { if (active) setError("材料版本暂时无法读取，请重试或从材料库打开。"); });
+    }).catch(() => { if (active) setError("材料暂时无法读取，请重试或从材料库打开。"); });
     return () => { active = false; };
   }, [assets, revision]);
   return <section aria-labelledby="course-contents-heading" className="space-y-3">
@@ -237,7 +237,7 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
   </section>;
 
   return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
-    <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
+    <PageHeading title={course.title} description={course.description || "课程资料、学习安排与进度。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
       {paths.openingActions ? <CourseStudyProvider key={id} courseId={id}><CourseTabs courseId={id}>
         <CoursePanel name="overview">
@@ -247,11 +247,11 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
         <CoursePanel name="units">
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
           <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
-          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习断点。</p><Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></section>
+          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习进度。</p><Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></section>
         </CoursePanel>
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
-          <p className="text-sm leading-6 text-text-2">查看当前有效的学习证据与历史记录。自报、提示后的作答和独立完成会分别标明。</p>
+          <p className="text-sm leading-6 text-text-2">回顾练习结果、用过的提示和独立完成情况。</p>
           <section aria-labelledby="course-goal-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>
           <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
         </CoursePanel>

@@ -1,10 +1,10 @@
 "use client";
 
-import { Layers2, Library, Notebook, Sun } from "lucide-react";
+import { Library, Notebook, Sparkles, Sun } from "lucide-react";
 import { ShellNavLink } from "./shell-nav-link";
 import { navigationIsActive, openingNavigation } from "./navigation";
 
-const icons = { today: Sun, library: Library, courses: Notebook, review: Layers2 };
+const icons = { today: Sun, library: Library, courses: Notebook, assistant: Sparkles };
 
 export function OpeningMobileNavigation({ pathname }: { pathname: string; pendingCount?: number | null }) {
   return <nav aria-label="学习工作台导航（移动端）" className="grid grid-cols-4 gap-1 px-2">

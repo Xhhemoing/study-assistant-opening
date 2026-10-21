@@ -52,6 +52,6 @@ function ReminderStatus({ api }: { api: Pick<OpeningApi, "listReminders"> }) {
   return <details className="px-4 py-3 text-xs text-zinc-500">
     <summary className="min-h-10 cursor-pointer py-2 focus-visible:ring-2 focus-visible:ring-emerald-600/50">提醒状态 · {reminders.reminders.length} 项</summary>
     <p className="py-1 leading-5">外部渠道：{reminders.externalDelivery === "configured" ? "已配置" : "未配置"}；应用内列表不代表已送达。</p>
-    <ul className="space-y-1">{reminders.reminders.map(reminder => <li key={reminder.id}>{reminder.status === "sent" && reminder.receiptId ? "已收到提供方回执" : reminder.outcome === "unknown" ? "发送结果未知，请勿自动重试" : reminder.outcome === "quiet" ? "静默时段，暂不发送" : reminder.outcome === "rate_limited" ? "提供方限流" : reminder.channel === "in_app" ? "应用内提醒" : "外部提醒未送达"}</li>)}</ul>
+    <ul className="space-y-1">{reminders.reminders.map(reminder => <li key={reminder.id}>{reminder.status === "sent" && reminder.receiptId ? "提醒已送达" : reminder.outcome === "unknown" ? "暂时无法确认是否送达" : reminder.outcome === "quiet" ? "静默时段，暂不发送" : reminder.outcome === "rate_limited" ? "提供方限流" : reminder.channel === "in_app" ? "应用内提醒" : "外部提醒未送达"}</li>)}</ul>
   </details>;
 }

@@ -170,7 +170,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       requireSaved();
       const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, async () => {
         if (!request.sessionId) {
-          if (!request.sessionInput) throw new Error("练习会话不可用，原草稿已保留。");
+          if (!request.sessionInput) throw new Error("练习暂时无法读取，原答案已保留。");
           request.sessionId = (await client.createSession(request.sessionInput)).id;
           patch({ start: request });
           requireSaved();
@@ -209,7 +209,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       patch({ observationId: result.id });
       const current = await readPracticeRecord(client, courseId, { ...attempt, observationId: result.id });
       if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
-      if (!current.observation) throw new Error("已收到保存回执，尚未读取最新记录，请保留原答案后重试。");
+      if (!current.observation) throw new Error("答案已保存，暂时无法读取结果，请保留原答案后重试。");
       setRecorded(current.observation);
       setAutoGrade(true);
       setAssistance(current.observation.assistance);
@@ -234,7 +234,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, () => client.createAttempt(request.createInput!));
       patch({ attemptId: next.id });
       await acceptAttempt(next, request.clientKey);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法重新开始本题，草稿已保留"); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法重新开始本题，原答案已保留"); }
     finally { pendingRef.current = false; setPending(false); }
   }
 
@@ -250,10 +250,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
   return (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
-      {!ready ? <p className="text-sm text-text-3" role="status">正在读取练习草稿…</p> : null}
+      {!ready ? <p className="text-sm text-text-3" role="status">正在恢复练习…</p> : null}
       {attempt || recorded ? <h3 className="text-sm font-semibold text-text">{recorded ? "已保存的作答" : "完成自己的尝试"}</h3> : null}
-      {ready && initialMode === "matrix" && !matrixMode && draft.start ? <p className="text-xs text-text-2" role="status">已恢复原普通练习草稿，新的入口选择不会覆盖它。可保留此草稿后开始其他练习。</p> : null}
-      {storageWarning ? <p className="text-xs text-warn" role="status">草稿暂时只在当前页面内保留，刷新前请复制答案。</p> : null}
+      {ready && initialMode === "matrix" && !matrixMode && draft.start ? <p className="text-xs text-text-2" role="status">已恢复未完成的练习。也可以保留答案，开始其他练习。</p> : null}
+      {storageWarning ? <p className="text-xs text-warn" role="status">答案暂时只在当前页面保留，刷新前请先复制。</p> : null}
       {!attempt && !draft.start && !retest && !initialFocus ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-line px-3 py-2 text-sm text-text">练习内置矩阵题（自动核算）</button> : null}
       {restored ? (
         <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} />
@@ -327,7 +327,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                   onChange={(event) => setSourceId(event.target.value)}
                   className="mt-1 w-full rounded border border-line bg-surface px-3 py-2"
                 >
-                  <option value="">不关联题目材料，保留为待核验记录</option>
+                  <option value="">不关联资料，先记录作答</option>
                   {readySources.map((source) => (
                     <option key={source.id} value={source.id}>{source.name}</option>
                   ))}
@@ -359,11 +359,11 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
               </label>
               {!stem.trim() ? (
                 <p className="rounded border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-6 text-warn" role="status">
-                  题干为空时不会生成补测提议；隔天重做需要可复用的题干快照。
+                  填入完整题干后，之后可以安排重做这道题。
                 </p>
               ) : null}
               {sourceId && !stem.trim() ? (
-                <p className="text-xs text-text-3">已选题干来源但未填写题干时，不会创建可核验题目身份。</p>
+                <p className="text-xs text-text-3">请补充题干，让系统知道你在回答哪道题。</p>
               ) : null}
             </div>
           </details>
@@ -422,10 +422,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
         <div className="space-y-3">
           <p className="text-xs text-text-3">
             本次练习已开始：{attempt.skillLabel}。
-            {attempt.problemId ? "题目与版本已由服务器记录。" : "未关联可核验题目，资格保持待核验。"}
-            {deliveredAssistance !== "none" ? ` 会话内已送达帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}，只能上调不能下调。` : null}
+            {attempt.problemId ? "题目已记录。" : "本次先保存答案；需要评分时，可开始新练习并填写完整题干。"}
+            {deliveredAssistance !== "none" ? ` 本次已使用的帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}。` : null}
           </p>
-          {draft.submission ? <p className="text-xs text-warn" role="status">上次保存结果待核对，原答案已锁定；重试会沿用同一次请求。</p> : null}
+          {draft.submission ? <p className="text-xs text-warn" role="status">正在确认上次保存结果，请先保留原答案。</p> : null}
           <form onSubmit={submit} className="space-y-3">
             <p className="text-xs leading-6 text-text-3">2. 作答 · 3. 保存</p>
             <label className="block text-sm text-text">

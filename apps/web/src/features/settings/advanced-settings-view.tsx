@@ -71,7 +71,7 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
         action={<Link className={ui.quiet} href={basePath}><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
       />
       <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
-        <QuickSetupPanel basePath={basePath} onConfigured={() => setModelRevision(current => current + 1)} />
+        <QuickSetupPanel basePath={basePath} advanced onConfigured={() => setModelRevision(current => current + 1)} />
         <AiSettingsPanel key={`ai-${modelRevision}`} />
         <ProviderSettingsPanel key={`providers-${modelRevision}`} />
         {basePath === "/opening/settings" ? <><PlanFeedbackPanel /><LoopMetricsPanel api={createOpeningApi()} /></> : null}

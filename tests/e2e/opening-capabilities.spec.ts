@@ -18,7 +18,7 @@ test.describe("opening capabilities (U04)", () => {
     try {
       await page.context().addCookies([f.cookie]);
       await page.goto("/opening/today");
-      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
       await expect(page.getByText(/掌握\s*%|掌握度|mastery/i)).toHaveCount(0);
     } finally {
       await f.dispose();

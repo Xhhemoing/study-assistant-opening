@@ -88,6 +88,21 @@ async function runCapturedEffects() {
 }
 
 describe("OpeningShell review badge", () => {
+  it("refreshes the badge after a decision on the current Today page", async () => {
+    const target = new EventTarget();
+    vi.stubGlobal("window", Object.assign(target, { localStorage: { getItem: () => null } }));
+    let count = 2;
+    vi.mocked(fetch).mockImplementation(async input => String(input).startsWith("/api/opening/reviews")
+      ? Response.json({ total: count }) : Response.json({ user: { displayName: "学习者" } }));
+    renderShell();
+    await runCapturedEffects();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBe(2);
+    count = 1;
+    target.dispatchEvent(new Event("opening:reviews-changed"));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBe(1);
+  });
+
   it("does not show the review badge when the reviews request fails", async () => {
     vi.mocked(fetch).mockImplementation(async input => {
       const url = String(input);

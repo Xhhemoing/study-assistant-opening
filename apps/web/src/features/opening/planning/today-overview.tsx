@@ -59,8 +59,6 @@ export function TodayLearningContext({
 }) {
   return <div className="min-w-0 px-4 py-5 sm:px-5">
     <ContinueCard item={item} activity={activity} courseTitle={courseTitle} course={course} timeZone={timeZone} resume={resume} primaryAction={primaryAction} secondaryAction={secondaryAction} />
-    <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">
-      {onShowActions ? <button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button> : <a href="#action-digest" className={ui.quiet}>优先行动</a>}
-    </nav>
+    {onShowActions ? <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true"><button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button></nav> : null}
   </div>;
 }

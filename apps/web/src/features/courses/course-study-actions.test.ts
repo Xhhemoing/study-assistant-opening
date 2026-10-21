@@ -57,7 +57,7 @@ it("makes actual study primary and keeps plan seeding as a visible secondary act
   expect(html).toContain("开始独立练习");
   expect(html.indexOf("开始独立练习")).toBeLessThan(html.indexOf("设为今日计划"));
   expect(html).not.toContain("<details");
-  expect(html).toMatch(/确认草案/);
+  expect(html).toMatch(/确认今日安排/);
 });
 
 it("links practice and record actions to existing sections while records are still loading", () => {

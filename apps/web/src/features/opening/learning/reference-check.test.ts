@@ -166,7 +166,7 @@ describe("ReferenceCheckStep", () => {
       onChecked: () => undefined,
       onSkip: () => undefined,
     }));
-    expect(html).toContain("这条记录未保留参考版本");
+    expect(html).toContain("暂时无法找到这次作答使用的参考资料");
     expect(html).not.toContain("/opening/library?");
   });
 });

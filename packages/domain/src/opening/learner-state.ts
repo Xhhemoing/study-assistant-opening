@@ -70,6 +70,15 @@ function projectLearnerDisplay(evidence: CourseEvidence, features: LearnerStateF
 }
 
 export type LearnerEvidenceView = "independent" | "retention" | "transfer" | "help";
+/** Count current graded answers once, using the full effective-head sequence. */
+export function countValidLearnerObservations(observations: readonly {
+  observationId: string;
+  eligibility: Pick<EvidenceEligibility, "verifiedCorrect" | "usableForCurrentVersion">;
+}[]): number {
+  return new Set(observations.filter(row => row.eligibility.verifiedCorrect !== "unknown"
+    && row.eligibility.usableForCurrentVersion === "yes").map(row => row.observationId)).size;
+}
+
 export type LearnerStateEvidence = {
   observationId: string; attemptId: string | null; courseId: string; requirementKey: string | null;
   itemVersionId: string | null; skillLabel: string; attemptedAt: string; recordedAt: string | null;

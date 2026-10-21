@@ -24,6 +24,7 @@ import { LoaderCircle, Pause, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass, ui, tone } from "../design/ui";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import {
   teachingActivityGenerateStatusLabel,
   teachingActivityStatusLabel,
@@ -61,14 +62,14 @@ const ACTION_LABEL: Record<TeachingContinuableAction, string> = {
 
 const JOB_GATE_COPY: Record<TeachingResumeJobGate, string> = {
   ready: "生成任务可用或已明确失败/取消。",
-  in_flight: "生成仍在进行中；结构化断点与草稿仍可读，请等待。",
-  unknown: "生成状态未知；不会假装已就绪，草稿与思路仍保留。",
+  in_flight: "正在准备学习内容，请稍候。已保存的内容仍可查看。",
+  unknown: "暂时无法确认内容是否生成完成，请重新读取。你写的内容仍保留。",
   stale: "生成结果可能已过期；请核对材料后再继续。",
 };
 
 const MATERIALS_GATE_COPY: Record<TeachingResumeMaterialsGate, string> = {
   available: "学习材料可用。",
-  partial: "部分材料不可用；不会伪造缺失来源内容。",
+  partial: "部分材料暂时无法读取，请检查材料后继续。",
   unavailable: "材料不可用或已撤回；请先处理材料后再继续主讲。",
 };
 
@@ -150,6 +151,7 @@ export function ResumeCardView({
   onReread?: () => void;
   onSyncUnsent?: () => void;
 }) {
+  const diagnostics = useDiagnosticsEnabled();
   const thought = summarizeThoughtTrain(resume);
   const materialsGate = resume.gates.materials;
   const jobGate = resume.gates.job;
@@ -178,7 +180,7 @@ export function ResumeCardView({
             id="teaching-resume-heading"
             className="text-sm font-semibold text-text"
           >
-            学习断点 · 继续
+            学习位置
           </h2>
           <p className="mt-1 break-words text-sm leading-6 text-text-2">
             {activityTitle}
@@ -246,73 +248,15 @@ export function ResumeCardView({
         </div>
       ) : null}
 
-      <dl className="mt-4 grid gap-2 text-xs leading-5 text-text-2 sm:grid-cols-2">
-        <div data-resume-thought-train="true">
-          <dt className="text-text-3">思路深度</dt>
-          <dd className="mt-1 text-text">
-            分支 {thought.branchDepth} · 命令日志 {thought.commandLogCount} · 跳过{" "}
-            {thought.skippedCount}
-            {thought.currentBlockId ? (
-              <span className="mt-0.5 block tabular-nums text-xs text-text-3">
-                当前块 {thought.currentBlockId.slice(0, 8)}…
-              </span>
-            ) : (
-              <span className="mt-0.5 block text-xs text-text-3">尚无当前块</span>
-            )}
-          </dd>
-        </div>
-        <div data-resume-open-problems="true">
-          <dt className="text-text-3">未解决问题</dt>
-          <dd className="mt-1 text-text">
-            {resume.openProblems.length
-              ? `${resume.openProblems.length} 项`
-              : "无"}
-            {resume.openProblems.length ? (
-              <ul className="mt-1 space-y-0.5 text-xs text-text-3">
-                {resume.openProblems.slice(0, 5).map((p) => (
-                  <li key={`${p.problemId}-${p.reason}`} className="tabular-nums">
-                    {p.problemId.slice(0, 8)}… · {p.reason}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </dd>
-        </div>
-      </dl>
-
-      <div className="mt-4" data-resume-drafts="true">
-        <p className="text-xs font-medium text-text-2">草稿</p>
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {serverDrafts.length === 0 && localUnsent.length === 0 ? (
-            <span className="text-xs text-text-3">暂无服务端草稿</span>
-          ) : null}
-          {serverDrafts.map((d) => (
-            <span
-              key={`server-${d.blockId}`}
-              className={`${ui.badge} ${tone.success}`}
-              data-draft-chip="server"
-              data-draft-block-id={d.blockId}
-              title={d.draftText?.slice(0, 80) ?? ""}
-            >
-              服务端 · {d.blockId.slice(0, 8)}…
-            </span>
-          ))}
-          {localUnsent.map((d) => (
-            <span
-              key={`unsent-${d.blockId}`}
-              className={`${ui.badge} ${tone.warning}`}
-              data-draft-chip="unsent"
-              data-draft-block-id={d.blockId}
-              title={d.draftText.slice(0, 80)}
-            >
-              未发送 · {d.blockId.slice(0, 8)}…
-            </span>
-          ))}
-        </div>
-        <p className="mt-1.5 text-xs leading-5 text-text-3">
-          服务端草稿为权威；本地未发送草稿仅缓冲至同步成功，冲突时并排展示，禁止静默覆盖。
-        </p>
-      </div>
+      {serverDrafts.length || localUnsent.length ? <div className="mt-4 text-xs leading-5 text-text-2" data-resume-drafts="true">
+        {serverDrafts.length ? <p>{serverDrafts.length} 段内容已保存</p> : null}
+        {localUnsent.length ? <p className="text-warn" role="status">{localUnsent.length} 段内容尚未保存</p> : null}
+        {localUnsent.length && !hasJuxtaposition ? <details className="mt-2">
+          <summary className="cursor-pointer">查看未保存内容</summary>
+          <ul className="mt-2 space-y-2">{localUnsent.map(d => <li key={d.blockId} className="whitespace-pre-wrap break-words">{d.draftText}</li>)}</ul>
+        </details> : null}
+      </div> : null}
+      {resume.openProblems.length ? <p className="mt-2 text-xs leading-5 text-text-2">还有 {resume.openProblems.length} 道题可以继续。</p> : null}
 
       {hasJuxtaposition || conflict ? (
         <div
@@ -321,26 +265,17 @@ export function ResumeCardView({
           data-resume-draft-conflict={conflict?.kind ?? "juxtapose"}
           data-forbid-lww="true"
         >
-          <p className="font-medium">草稿冲突 · 并排对照（禁止强制覆盖 / 禁止后写优先）</p>
-          {conflict?.message ? <p className="mt-1">{conflict.message}</p> : null}
-          {conflict?.lostBlockIds?.length ? (
-            <p className="mt-1 tabular-nums text-xs">
-              失效块：{conflict.lostBlockIds.map((id) => id.slice(0, 8)).join(", ")}…
-            </p>
-          ) : null}
+          <p className="font-medium">{conflict ? "保存未完成，请对照内容" : "有内容尚未保存"}</p>
+          <p className="mt-1">{conflict?.kind === "draft_anchor_lost" ? "部分内容的位置已变化，你写的内容仍保留在下面。" : "已保存的内容和本次输入都保留在下面，可先对照再继续。"}</p>
           <div className="mt-2 grid gap-2 sm:grid-cols-2" data-resume-draft-juxtapose="true">
             <div className="rounded-md bg-surface px-2 py-1.5 ring-1 ring-line">
-              <p className="text-xs font-medium text-text-2">服务端</p>
+              <p className="text-xs font-medium text-text-2">已保存内容</p>
               {serverDrafts.length ? (
                 <ul className="mt-1 space-y-1 text-xs text-text-2">
                   {serverDrafts.map((d) => (
                     <li key={`jx-s-${d.blockId}`}>
-                      <span className="tabular-nums">{d.blockId.slice(0, 8)}…</span>
                       {d.draftText ? (
-                        <span className="mt-0.5 block break-words text-text-3">
-                          {d.draftText.slice(0, 120)}
-                          {d.draftText.length > 120 ? "…" : ""}
-                        </span>
+                        <span className="block whitespace-pre-wrap break-words text-text-3">{d.draftText}</span>
                       ) : null}
                     </li>
                   ))}
@@ -350,16 +285,12 @@ export function ResumeCardView({
               )}
             </div>
             <div className="rounded-md bg-surface px-2 py-1.5 ring-1 ring-line">
-              <p className="text-xs font-medium text-warn">本地未发送</p>
+              <p className="text-xs font-medium text-warn">本次未保存内容</p>
               {localUnsent.length ? (
                 <ul className="mt-1 space-y-1 text-xs text-text-2">
                   {localUnsent.map((d) => (
                     <li key={`jx-l-${d.blockId}`}>
-                      <span className="tabular-nums">{d.blockId.slice(0, 8)}…</span>
-                      <span className="mt-0.5 block break-words text-text-3">
-                        {d.draftText.slice(0, 120)}
-                        {d.draftText.length > 120 ? "…" : ""}
-                      </span>
+                      <span className="block whitespace-pre-wrap break-words text-text-3">{d.draftText}</span>
                     </li>
                   ))}
                 </ul>
@@ -369,7 +300,7 @@ export function ResumeCardView({
             </div>
           </div>
           <p className="mt-2 text-xs text-text-2">
-            请重新拉取断点后手动决定保留哪一侧；本页不提供「强制覆盖」。
+            请重新读取后，在学习内容中整理需要保留的文字。两侧内容不会自动覆盖。
           </p>
           {onReread ? (
             <button
@@ -379,36 +310,28 @@ export function ResumeCardView({
               onClick={onReread}
             >
               <RefreshCw size={12} aria-hidden />
-              重新拉取断点
+              重新读取已保存内容
             </button>
           ) : null}
         </div>
       ) : null}
 
-      {resume.continuableActions.length ? (
-        <div className="mt-4" data-resume-continuable="true">
-          <p className="text-xs font-medium text-text-2">可立即继续</p>
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {resume.continuableActions.map((action) => (
-              <span
-                key={action}
-                className={`${ui.badge} ${tone.neutral}`}
-                data-continuable-action={action}
-              >
-                {continuableActionLabel(action)}
-              </span>
-            ))}
+      {diagnostics ? <details className="mt-4 rounded-lg border border-line px-3 py-2 text-xs leading-5 text-text-3" data-resume-diagnostics="true">
+        <summary className="cursor-pointer font-medium">诊断信息</summary>
+        <div className="mt-3 space-y-3">
+          <p data-resume-thought-train="true">分支 {thought.branchDepth} · 命令日志 {thought.commandLogCount} · 跳过 {thought.skippedCount}<span className="block break-all">当前块：{thought.currentBlockId ?? "无"}</span></p>
+          <div data-resume-open-problems="true">未解决问题：{resume.openProblems.length}<ul>{resume.openProblems.map(p => <li key={`${p.problemId}-${p.reason}`} className="break-all">{p.problemId} · {p.reason}</li>)}</ul></div>
+          <div className="flex flex-wrap gap-1.5">
+            {serverDrafts.map(d => <span key={`server-${d.blockId}`} className={`${ui.badge} ${tone.success}`} data-draft-chip="server" data-draft-block-id={d.blockId}>服务端 · {d.blockId}</span>)}
+            {localUnsent.map(d => <span key={`unsent-${d.blockId}`} className={`${ui.badge} ${tone.warning}`} data-draft-chip="unsent" data-draft-block-id={d.blockId}>未发送 · {d.blockId}</span>)}
           </div>
+          <p>服务端草稿为权威；本地未发送草稿仅缓冲至同步成功，冲突时并排展示，禁止静默覆盖。</p>
+          {conflict?.message ? <p>{conflict.message}</p> : null}
+          {conflict?.lostBlockIds?.length ? <p className="break-all">失效块：{conflict.lostBlockIds.join(", ")}</p> : null}
+          {resume.continuableActions.length ? <div className="flex flex-wrap gap-1.5" data-resume-continuable="true">{resume.continuableActions.map(action => <span key={action} className={`${ui.badge} ${tone.neutral}`} data-continuable-action={action}>{continuableActionLabel(action)}</span>)}</div> : null}
+          <p data-resume-summary-independence="true">断点恢复不依赖 AI 摘要（摘要状态：{resume.summary?.status ?? "未附带"}）；摘要失败不影响继续。</p>
         </div>
-      ) : null}
-
-      <p className="mt-3 text-xs leading-5 text-text-3" data-resume-summary-independence="true">
-        断点恢复不依赖 AI 摘要
-        {resume.summary
-          ? `（摘要状态：${resume.summary.status}）`
-          : "（未附带摘要）"}
-        ；摘要失败不影响继续。
-      </p>
+      </details> : null}
 
       {statusError ? (
         <p className={`mt-2 text-xs ${tone.danger}`} role="alert">
@@ -475,10 +398,10 @@ export function ResumeCardView({
             {syncBusy ? (
               <LoaderCircle size={12} className="animate-spin" aria-hidden />
             ) : null}
-            同步未发送草稿
+            保存未保存内容
           </button>
         ) : null}
-        {onReread && !conflict ? (
+        {onReread && !hasJuxtaposition ? (
           <button
             type="button"
             className={ui.quiet}
@@ -486,7 +409,7 @@ export function ResumeCardView({
             onClick={onReread}
           >
             <RefreshCw size={12} aria-hidden />
-            刷新断点
+            刷新学习位置
           </button>
         ) : null}
       </div>
@@ -570,7 +493,7 @@ export function ResumeCard({
     } catch (err) {
       if (!requestScope.active) return null;
       setLoadState("error");
-      setLoadError(err instanceof Error ? err.message : "读取学习断点失败");
+      setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
       return null;
     }
   }, [activity.id, api, applyResume, requestScope]);
@@ -608,7 +531,7 @@ export function ResumeCard({
       .catch((err) => {
         if (cancelled) return;
         setLoadState("error");
-        setLoadError(err instanceof Error ? err.message : "读取学习断点失败");
+        setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
       });
     return () => {
       cancelled = true;
@@ -725,7 +648,7 @@ export function ResumeCard({
         data-teaching-resume-card="loading"
       >
         <LoaderCircle size={18} className="animate-spin text-text-3" aria-hidden />
-        <p className="mt-3 text-xs text-text-3">正在读取学习断点…</p>
+        <p className="mt-3 text-xs text-text-3">正在读取学习位置…</p>
       </section>
     );
   }
@@ -737,12 +660,12 @@ export function ResumeCard({
         data-teaching-resume-card="error"
         role="alert"
       >
-        <h2 className="text-sm font-semibold text-text">学习断点暂时无法读取</h2>
+        <h2 className="text-sm font-semibold text-text">学习位置暂时无法读取</h2>
         <p className={`mt-2 text-xs leading-5 ${tone.danger}`}>
           {loadError ?? "未知错误"}
         </p>
         <p className="mt-2 text-xs text-text-3">
-          不会伪造讲义或聊天恢复；可稍后重试。
+          请稍后重新读取，已保存的学习内容会保留。
         </p>
         <button
           type="button"

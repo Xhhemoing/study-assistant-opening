@@ -156,9 +156,9 @@ function CatalogBody({
           className="rounded-lg border border-line bg-surface px-3 py-2 text-sm leading-6 text-text-2"
           data-catalog="draft"
         >
-          <p className="mb-1 text-xs font-medium text-text-2">个人草稿</p>
+          <p className="mb-1 text-xs font-medium text-text-2">我的思考</p>
           <p className="whitespace-pre-wrap text-text-2">
-            {text || "草稿锚点已预留；保存需服务端 draft-anchors 接口。"}
+            {text || "可以用「记笔记」写下你的思考。"}
           </p>
         </div>
       );

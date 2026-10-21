@@ -24,7 +24,7 @@ describe("in-place citation reading", () => {
     const target = { sourceId, version: 0, page: 3 };
     expect(await loadCitationReaderRecord(api, target)).toBe(record);
     await expect(loadCitationReaderRecord(api, { ...target, sourceId: "missing" })).rejects.toThrow("已移除");
-    await expect(loadCitationReaderRecord(api, { ...target, version: 2 })).rejects.toThrow("不会改用其他版本");
+    await expect(loadCitationReaderRecord(api, { ...target, version: 2 })).rejects.toThrow("引用时的材料内容暂时无法读取");
     api.listSources.mockResolvedValueOnce([{ ...record, uploadState: "pending" }]);
     await expect(loadCitationReaderRecord(api, target)).rejects.toThrow("尚未上传完成");
     api.listSources.mockRejectedValueOnce(new Error("network failed"));

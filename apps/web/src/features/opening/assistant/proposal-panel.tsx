@@ -24,7 +24,7 @@ function proposalText(row: AssistantProposalRecord): string {
 }
 export function PlanProposalPreview({ row }: { row: AssistantProposalRecord }) {
   const preview = row.prepared?.preview;
-  if (!preview) return <p className="text-sm text-warn">计划预览不可用，请重新准备草稿后再确认。</p>;
+  if (!preview) return <p className="text-sm text-warn">计划预览不可用，请重新准备建议后再确认。</p>;
   const titles = new Map(preview.tasks.map(task => [task.id, task.title]));
   const taskIds = [...new Set([...preview.previousBlocks.map(block => block.taskId), ...preview.proposedBlocks.map(block => block.taskId)])];
   const time = (value: string) => new Date(value).toLocaleString("zh-CN", { timeZone: preview.timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -35,8 +35,8 @@ export function PlanProposalPreview({ row }: { row: AssistantProposalRecord }) {
       const before = spans(preview.previousBlocks, id), after = spans(preview.proposedBlocks, id);
       const label = before === after ? "保留" : before && after ? "调整" : after ? "新增" : "移出安排";
       return <li key={id} className="text-sm leading-6"><p className="font-medium">{titles.get(id) ?? "已不可用的学习任务"} · {label}</p>
-        <p className="text-text-2">原安排：{before || "未安排"}</p><p>草稿：{after || "未安排"}</p></li>;
-    })}</ul> : <p className="text-sm">本次草稿没有安排学习时段。</p>}
+        <p className="text-text-2">原安排：{before || "未安排"}</p><p>建议安排：{after || "未安排"}</p></li>;
+    })}</ul> : <p className="text-sm">本次建议没有安排学习时段。</p>}
     <p className="text-xs font-medium">尚未排入：{preview.unscheduledTaskIds.length ? preview.unscheduledTaskIds.map(id => titles.get(id) ?? "已不可用的学习任务").join("、") : "无"}</p>
   </section>;
 }
@@ -92,9 +92,9 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
       if (pending.current?.fingerprint !== fingerprint) pending.current = { fingerprint, input: { sourceTurnId, tool, clientKey: `assistant-proposal:${crypto.randomUUID()}` } };
       await api.proposeAssistantAction(pending.current.input);
       pending.current = null;
-      setMessage("草稿已准备好，请检查内容后接受。");
+      setMessage("建议已准备好，请检查内容后接受。");
       await refresh();
-    } catch (error) { setMessage(error instanceof Error ? error.message : "未确认草稿是否已保存；重新读取后可重试同一内容。"); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : "暂时无法确认建议是否已保存；重新读取后可重试同一内容。"); }
     finally { setBusy(false); }
   }
   async function decide(row: AssistantProposalRecord, action: "accept" | "reject") {
@@ -107,8 +107,8 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
   }
   const field = "w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm focus-visible:outline-accent";
   const needsObservation = kind === "propose_card" || kind === "flag_dispute";
-  return <section aria-label="学习建议草稿" className="space-y-3 pt-3">
-    <p className="text-xs leading-5 text-text-2">先准备可修改的草稿，接受后才更新学习安排、笔记或偏好。</p>
+  return <section aria-label="学习建议" className="space-y-3 pt-3">
+    <p className="text-xs leading-5 text-text-2">先检查并修改建议，接受后才更新学习安排、笔记或偏好。</p>
     {message ? <p role="status" className="text-sm text-warn">{message}</p> : null}
     <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => { void refresh().catch(error => setMessage(String(error))); }}>重新读取建议</button>
     {sourceTurnId ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void propose(); }}>
@@ -117,7 +117,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
       {kind === "propose_note" ? <label className="block text-sm">笔记标题<input required maxLength={240} value={title} onChange={event => setTitle(event.target.value)} className={field} disabled={busy} /></label> : null}
       {kind === "propose_plan_change" ? <label className="block text-sm">安排日期<input required type="date" value={date} onChange={event => setDate(event.target.value)} className={field} disabled={busy} /></label> : <label className="block text-sm">{kind === "flag_dispute" ? "需要复核的原因" : kind === "propose_card" ? "卡片问题" : "具体内容"}<textarea required rows={3} maxLength={kind === "propose_note" ? 20000 : 2000} value={text} onChange={event => setText(event.target.value)} className={field} disabled={busy} /></label>}
       {kind === "propose_card" ? <label className="block text-sm">卡片答案<textarea required rows={3} maxLength={4000} value={back} onChange={event => setBack(event.target.value)} className={field} disabled={busy} /></label> : null}
-      <button className={buttonClass} disabled={busy || (needsObservation && !observations.length) || (kind === "propose_teaching_move" && !courseId)} type="submit">准备草稿</button>
+      <button className={buttonClass} disabled={busy || (needsObservation && !observations.length) || (kind === "propose_teaching_move" && !courseId)} type="submit">准备建议</button>
     </form> : <p className="text-xs text-text-3">先完成一轮保存对话，即可准备关联这次问题的建议。</p>}
     <ul className="space-y-3">{rows.map(row => <li key={row.id} className="border-t border-line pt-3">
       <h3 className="text-sm font-semibold">{labels[row.tool.name]}</h3><p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>

@@ -220,9 +220,10 @@ describe("MessageList", () => {
     const viewerHref = sourceViewerHref(sourceId, 3).replaceAll("&", "&amp;");
     expect(html).toContain(`href="${viewerHref}"`);
     expect(html).toContain(`href="${sourceDownloadHref(sourceId, 3)}"`);
-    expect(html).toContain("v3");
+    expect(html).not.toContain(">v3<");
+    expect(html).toContain("当前材料已更新");
     expect(html).toContain("p.2");
-    expect(html).toContain("不是当前版本");
+    expect(html).toContain("这份材料之后已有更新");
   });
 
   it("points inline [k] at the same place as the k-th 出处 chip", () => {

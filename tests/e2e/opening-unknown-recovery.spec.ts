@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "./fixtures";
 import type { TurnInput, TurnRecord } from "@aistudy/contracts";
+import { inferComposerIntent } from "../../packages/domain/src/opening/composer-intent";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 import { buildAiReadinessItems } from "../../packages/ai/src/opening/ai-readiness";
 
@@ -65,7 +66,7 @@ async function unknownConversation(page: Page, { newerAnswerDuringPoll = false, 
     const input = route.request().postDataJSON() as TurnInput;
     submitted.push(input);
     turns.push(
-      { ...turns[0]!, id: "66666666-6666-4666-8666-666666666666", text: input.text, mode: input.mode },
+      { ...turns[0]!, id: "66666666-6666-4666-8666-666666666666", text: input.text, mode: inferComposerIntent(input).mode },
       { ...turns[1]!, id: "77777777-7777-4777-8777-777777777777", status: "pending", text: "" },
     );
     await route.fulfill({ status: 201, json: { jobId: newJobId, turnId: turns.at(-1)!.id } });

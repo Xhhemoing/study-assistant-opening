@@ -21,7 +21,7 @@ describe("explicit one-task in-app reminder", () => {
   });
 
   it.each([
-    [{ ...task, version: undefined }, "版本"],
+    [{ ...task, version: undefined }, "任务信息还没读完整"],
     [{ ...task, status: "done" as const }, "待办"],
     [{ ...task, status: "skipped" as const }, "待办"],
   ])("disables unavailable task intent %j without guessing a version", (value, reason) => {

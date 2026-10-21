@@ -10,7 +10,7 @@ import type { AssistantEntry } from "./assistant-entry";
 import type { StudyConversationContext } from "./study-conversation-context";
 
 const contextFields = ["courseId", "activityId", "blockId", "contentVersion", "attemptId", "itemVersionId", "kcMappingVersion", "sourceId", "sourceVersion", "page", "chunkId"] as const;
-const mismatchMessage = "本次作答的身份或版本不一致，请返回原题重新打开。";
+const mismatchMessage = "本次提问与原题的作答记录不一致，请返回原题重新打开。";
 
 function boundAttemptContext(selected: StudyConversationContext | undefined, attempt: LearningAttempt): StudyConversationContext {
   const canonical = { ...attempt.contextAnchor, courseId: attempt.courseId, attemptId: attempt.id, itemVersionId: attempt.itemVersionId };
