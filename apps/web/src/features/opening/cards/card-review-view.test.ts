@@ -91,6 +91,7 @@ it("embeds the existing grading flow with a section heading and a return to the 
   expect(html).toMatch(/<h2[^>]*>记忆卡片<\/h2>/);
   expect(html).not.toContain("<h1");
   expect(html).toContain("显示卡片正面");
+  expect(html).toMatch(/<progress[^>]*value="0"[^>]*max="1"[^>]*aria-label="本组卡片已完成"/);
   expect(html).toContain("%2Fopening%2Freview%3Ftab%3Dcards");
 });
 

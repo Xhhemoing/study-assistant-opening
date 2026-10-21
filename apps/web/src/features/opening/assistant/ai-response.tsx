@@ -9,7 +9,7 @@ export function AiSpark({ size = 20 }: { size?: number }) {
 }
 
 export function ThinkingText({ children = "正在思考…" }: { children?: ReactNode }) {
-  return <p role="status" className="flex items-center gap-2 text-sm leading-6 text-text-2"><span className="motion-safe:animate-breathe"><AiSpark size={16} /></span>{children}</p>;
+  return <p role="status" className="flex items-center gap-2 text-sm leading-6 text-text-2"><AiSpark size={16} /><span className="relative overflow-hidden">{children}<span aria-hidden="true" className="pointer-events-none absolute inset-0 -translate-x-full bg-linear-to-r from-transparent via-ai-2/15 to-transparent motion-safe:animate-shimmer motion-reduce:hidden" /></span></p>;
 }
 
 /** Reveal complete semantic blocks so math, citations and selection offsets stay intact. */

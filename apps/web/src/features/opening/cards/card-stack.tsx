@@ -32,6 +32,6 @@ export function CardStack({ front, back, flipped, disabled, remaining, exiting =
         <span className="inline-flex items-center gap-2 text-xs text-text-2">{flipped ? <RotateCcw size={15} aria-hidden /> : <Eye size={15} aria-hidden />}{flipped ? "查看正面" : "显示背面"}</span>
       </button>
     </div>
-    <p id={helpId} className="text-xs leading-6 text-text-3">聚焦卡片后：空格翻面；揭示后按 1 忘记、2 困难、3 良好、4 简单。</p>
+    <p id={helpId} className="text-xs leading-6 text-text-3">聚焦卡片后：空格翻面；揭示后按 1 重来、2 困难、3 记得、4 轻松。</p>
   </div>;
 }

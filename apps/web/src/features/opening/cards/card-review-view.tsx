@@ -1,13 +1,13 @@
 "use client";
 
 import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
-import { Check, CircleHelp, LoaderCircle, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
+import { Check, CircleHelp, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
-import { EmptyState, LoadError, PageHeader, secondaryButtonClass, ui } from "../design/ui";
+import { EmptyState, LoadError, LoadingRows, PageHeader, secondaryButtonClass, ui } from "../design/ui";
 import { interactionMotionReduced, successfulInteractionHaptic } from "../design/haptics";
 import { CardStack } from "./card-stack";
 import {
@@ -18,10 +18,10 @@ import {
 } from "./cards-client";
 
 const gradeOptions: Array<{ grade: ReviewGrade; label: string; icon: typeof Check }> = [
-  { grade: "again", label: "忘记", icon: RotateCcw },
+  { grade: "again", label: "重来", icon: RotateCcw },
   { grade: "hard", label: "困难", icon: CircleHelp },
-  { grade: "good", label: "良好", icon: Check },
-  { grade: "easy", label: "简单", icon: Sparkles },
+  { grade: "good", label: "记得", icon: Check },
+  { grade: "easy", label: "轻松", icon: Sparkles },
 ];
 
 function createIdempotencyKey(): string {
@@ -146,12 +146,8 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
-        {state.kind === "ready" ? <details className="mx-auto mb-4 max-w-3xl text-xs text-zinc-600"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
-        {state.kind === "loading" ? (
-          <p role="status" className="text-sm text-zinc-600">
-            正在读取到期记忆卡片…
-          </p>
-        ) : null}
+        {state.kind === "ready" ? <details className="mx-auto mb-4 max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
+        {state.kind === "loading" ? <LoadingRows label="正在读取到期记忆卡片…" /> : null}
         {state.kind === "loggedOut" ? (
           <>
             <EmptyState title="尚未登录" description="登录后查看属于你的记忆卡片。" />
@@ -190,19 +186,21 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
         ) : null}
         {state.kind === "ready" && current ? (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            <progress value={state.index} max={state.items.length} aria-label="本组卡片已完成" className="h-[3px] w-full overflow-hidden rounded-full border-0 bg-surface-2 text-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" />
             <div className="flex items-end justify-between gap-3">
-              <p className="text-xs text-zinc-500">正面 → 揭示 → 四档评分</p>
-              <span className="text-sm tabular-nums text-zinc-500">
+              <p className="text-xs text-text-3">正面 → 揭示 → 四档评分</p>
+              <span className="text-sm tabular-nums text-text-3">
                 第 {Math.min(state.index + 1, state.items.length)}/{state.items.length} 张
               </span>
             </div>
+            {grading ? <p role="status" className="text-xs text-text-2">正在保存评分…</p> : null}
             {gradeError ? (
-              <p className="text-sm text-red-700" role="alert">
+              <p className="text-sm text-danger" role="alert">
                 {gradeError}
               </p>
             ) : null}
             {evidenceNotice ? (
-              <p className="text-xs leading-6 text-amber-800" role="status">
+              <p className="text-xs leading-6 text-warn" role="status">
                 {evidenceNotice}
               </p>
             ) : null}
@@ -219,15 +217,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
                   disabled={!state.flipped || grading}
                   onClick={() => void gradeCard(grade)}
                 >
-                  {grading && state.flipped ? (
-                    <LoaderCircle
-                      size={16}
-                      className="animate-spin motion-reduce:animate-none"
-                      aria-hidden
-                    />
-                  ) : (
-                    <Icon size={16} aria-hidden />
-                  )}
+                  <Icon size={16} aria-hidden />
                   {label}
                 </button>
               ))}

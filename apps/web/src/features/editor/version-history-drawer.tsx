@@ -90,39 +90,39 @@ export function VersionHistoryDrawer({
   return (
     <Inspector open={open} onClose={onClose} title="版本历史" id="document-version-history">
       <div className="grid gap-5">
-        {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
-        {revisions === null && !error ? <p className="text-sm text-zinc-500" role="status">正在读取版本...</p> : null}
-        {revisions?.length === 0 ? <p className="text-sm text-zinc-500">还没有可用版本。</p> : null}
+        {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+        {revisions === null && !error ? <p className="text-sm text-text-3" role="status">正在读取版本...</p> : null}
+        {revisions?.length === 0 ? <p className="text-sm text-text-3">还没有可用版本。</p> : null}
         {orderedRevisions.length > 0 ? (
           <div className="grid gap-2" aria-label="版本列表">
             {orderedRevisions.map((revision) => (
               <button
                 key={revision.revisionNumber}
-                className={`grid gap-1 rounded-md border px-3 py-2 text-left ${selected?.revisionNumber === revision.revisionNumber ? "border-emerald-700 bg-emerald-50" : "border-zinc-200 hover:bg-zinc-50"}`}
+                className={`grid gap-1 rounded-md border px-3 py-2 text-left ${selected?.revisionNumber === revision.revisionNumber ? "border-accent bg-accent-soft" : "border-line hover:bg-bg"}`}
                 type="button"
                 aria-pressed={selected?.revisionNumber === revision.revisionNumber}
                 onClick={() => setSelected(revision)}
               >
-                <span className="flex items-center justify-between text-sm font-semibold text-zinc-800"><span>v{revision.revisionNumber}</span><span className="text-xs font-normal text-zinc-500">{revision.reason ?? "编辑"}</span></span>
-                <span className="truncate text-xs text-zinc-500">{revision.title}</span>
+                <span className="flex items-center justify-between text-sm font-semibold text-text"><span>v{revision.revisionNumber}</span><span className="text-xs font-normal text-text-3">{revision.reason ?? "编辑"}</span></span>
+                <span className="truncate text-xs text-text-3">{revision.title}</span>
               </button>
             ))}
           </div>
         ) : null}
         {selected ? (
-          <section className="grid gap-3 border-t border-zinc-200 pt-4" aria-label="版本预览">
+          <section className="grid gap-3 border-t border-line pt-4" aria-label="版本预览">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">预览 v{selected.revisionNumber}</p>
-              <h3 className="mt-1 text-lg font-semibold text-zinc-800">{selected.title}</h3>
-              <p className="mt-1 text-xs text-zinc-500">{selected.blocks.length} 个内容块</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-accent">预览 v{selected.revisionNumber}</p>
+              <h3 className="mt-1 text-lg font-semibold text-text">{selected.title}</h3>
+              <p className="mt-1 text-xs text-text-3">{selected.blocks.length} 个内容块</p>
             </div>
             <div className="grid gap-2">
-              {selected.blocks.slice(0, 4).map((block, index) => <p className="truncate rounded-md bg-white px-3 py-2 text-sm text-zinc-500" key={isRecord(block) && typeof block.id === "string" ? block.id : index}>{blockPreview(block)}</p>)}
+              {selected.blocks.slice(0, 4).map((block, index) => <p className="truncate rounded-md bg-surface px-3 py-2 text-sm text-text-3" key={isRecord(block) && typeof block.id === "string" ? block.id : index}>{blockPreview(block)}</p>)}
             </div>
-            <button className="inline-flex items-center justify-center gap-2 rounded-md bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={restoreSelected} disabled={restoring}><RotateCcw aria-hidden="true" size={16} />{restoring ? "正在恢复..." : `恢复此版本`}</button>
+            <button className="inline-flex items-center justify-center gap-2 rounded-md bg-ink px-3 py-2 text-sm font-semibold text-on-ink hover:bg-ink disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={restoreSelected} disabled={restoring}><RotateCcw aria-hidden="true" size={16} />{restoring ? "正在恢复..." : `恢复此版本`}</button>
           </section>
         ) : null}
-        <p className="flex items-center gap-2 text-xs text-zinc-500"><History aria-hidden="true" size={14} />恢复会创建新的版本，历史记录不会被覆盖。</p>
+        <p className="flex items-center gap-2 text-xs text-text-3"><History aria-hidden="true" size={14} />恢复会创建新的版本，历史记录不会被覆盖。</p>
       </div>
     </Inspector>
   );

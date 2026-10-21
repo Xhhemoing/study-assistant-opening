@@ -24,18 +24,18 @@ function proposalText(row: AssistantProposalRecord): string {
 }
 export function PlanProposalPreview({ row }: { row: AssistantProposalRecord }) {
   const preview = row.prepared?.preview;
-  if (!preview) return <p className="text-sm text-amber-800">计划预览不可用，请重新准备草稿后再确认。</p>;
+  if (!preview) return <p className="text-sm text-warn">计划预览不可用，请重新准备草稿后再确认。</p>;
   const titles = new Map(preview.tasks.map(task => [task.id, task.title]));
   const taskIds = [...new Set([...preview.previousBlocks.map(block => block.taskId), ...preview.proposedBlocks.map(block => block.taskId)])];
   const time = (value: string) => new Date(value).toLocaleString("zh-CN", { timeZone: preview.timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   const spans = (blocks: typeof preview.previousBlocks, id: string) => blocks.filter(block => block.taskId === id).map(block => `${time(block.start)} 至 ${time(block.end)}`).join("；");
-  return <section aria-label="计划变更预览" className="mt-2 space-y-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
-    <p className="text-xs text-zinc-600">具体调整 · {preview.timeZone}</p>
+  return <section aria-label="计划变更预览" className="mt-2 space-y-2 rounded-lg border border-line bg-surface-2 p-3">
+    <p className="text-xs text-text-2">具体调整 · {preview.timeZone}</p>
     {taskIds.length ? <ul className="space-y-2">{taskIds.map(id => {
       const before = spans(preview.previousBlocks, id), after = spans(preview.proposedBlocks, id);
       const label = before === after ? "保留" : before && after ? "调整" : after ? "新增" : "移出安排";
       return <li key={id} className="text-sm leading-6"><p className="font-medium">{titles.get(id) ?? "已不可用的学习任务"} · {label}</p>
-        <p className="text-zinc-600">原安排：{before || "未安排"}</p><p>草稿：{after || "未安排"}</p></li>;
+        <p className="text-text-2">原安排：{before || "未安排"}</p><p>草稿：{after || "未安排"}</p></li>;
     })}</ul> : <p className="text-sm">本次草稿没有安排学习时段。</p>}
     <p className="text-xs font-medium">尚未排入：{preview.unscheduledTaskIds.length ? preview.unscheduledTaskIds.map(id => titles.get(id) ?? "已不可用的学习任务").join("、") : "无"}</p>
   </section>;
@@ -105,11 +105,11 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
     } catch (error) { setMessage(error instanceof Error ? error.message : "结果未确认，请重新读取后再操作。"); }
     finally { setBusy(false); }
   }
-  const field = "w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm focus-visible:outline-emerald-700";
+  const field = "w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm focus-visible:outline-accent";
   const needsObservation = kind === "propose_card" || kind === "flag_dispute";
   return <section aria-label="学习建议草稿" className="space-y-3 pt-3">
-    <p className="text-xs leading-5 text-zinc-600">先准备可修改的草稿，接受后才更新学习安排、笔记或偏好。</p>
-    {message ? <p role="status" className="text-sm text-amber-800">{message}</p> : null}
+    <p className="text-xs leading-5 text-text-2">先准备可修改的草稿，接受后才更新学习安排、笔记或偏好。</p>
+    {message ? <p role="status" className="text-sm text-warn">{message}</p> : null}
     <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => { void refresh().catch(error => setMessage(String(error))); }}>重新读取建议</button>
     {sourceTurnId ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void propose(); }}>
       <label className="block text-sm">下一步想做什么<select className={field} value={kind} disabled={busy} onChange={event => setKind(event.target.value as typeof kind)}>{Object.entries(labels).map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select></label>
@@ -118,11 +118,11 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
       {kind === "propose_plan_change" ? <label className="block text-sm">安排日期<input required type="date" value={date} onChange={event => setDate(event.target.value)} className={field} disabled={busy} /></label> : <label className="block text-sm">{kind === "flag_dispute" ? "需要复核的原因" : kind === "propose_card" ? "卡片问题" : "具体内容"}<textarea required rows={3} maxLength={kind === "propose_note" ? 20000 : 2000} value={text} onChange={event => setText(event.target.value)} className={field} disabled={busy} /></label>}
       {kind === "propose_card" ? <label className="block text-sm">卡片答案<textarea required rows={3} maxLength={4000} value={back} onChange={event => setBack(event.target.value)} className={field} disabled={busy} /></label> : null}
       <button className={buttonClass} disabled={busy || (needsObservation && !observations.length) || (kind === "propose_teaching_move" && !courseId)} type="submit">准备草稿</button>
-    </form> : <p className="text-xs text-zinc-500">先完成一轮保存对话，即可准备关联这次问题的建议。</p>}
-    <ul className="space-y-3">{rows.map(row => <li key={row.id} className="border-t border-zinc-200 pt-3">
+    </form> : <p className="text-xs text-text-3">先完成一轮保存对话，即可准备关联这次问题的建议。</p>}
+    <ul className="space-y-3">{rows.map(row => <li key={row.id} className="border-t border-line pt-3">
       <h3 className="text-sm font-semibold">{labels[row.tool.name]}</h3><p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>
       {row.tool.name === "propose_plan_change" ? <PlanProposalPreview row={row} /> : null}
-      {row.status === "draft" ? <div className="mt-2 flex gap-2"><button className={buttonClass} disabled={busy || (row.tool.name === "propose_plan_change" && !row.prepared?.preview)} onClick={() => void decide(row, "accept")}>接受</button><button className={secondaryButtonClass} disabled={busy} onClick={() => void decide(row, "reject")}>不采用</button></div> : <p className="mt-2 text-xs text-zinc-500">{row.status === "accepted" ? "已接受" : "未采用"}</p>}
+      {row.status === "draft" ? <div className="mt-2 flex gap-2"><button className={buttonClass} disabled={busy || (row.tool.name === "propose_plan_change" && !row.prepared?.preview)} onClick={() => void decide(row, "accept")}>接受</button><button className={secondaryButtonClass} disabled={busy} onClick={() => void decide(row, "reject")}>不采用</button></div> : <p className="mt-2 text-xs text-text-3">{row.status === "accepted" ? "已接受" : "未采用"}</p>}
       {row.result?.href.startsWith("/") && !row.result.href.startsWith("//") ? <Link href={row.result.href} className={`${secondaryButtonClass} mt-2`}>查看结果</Link> : null}
     </li>)}</ul>
   </section>;

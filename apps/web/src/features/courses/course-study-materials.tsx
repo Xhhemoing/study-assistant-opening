@@ -13,7 +13,7 @@ export function CourseStudyMaterials({ gate, materialsHref, onRetry, children }:
 }) {
   if (gate === "available") return <>{children}</>;
   return <>
-    <div className="mx-5 mt-4 space-y-2 border-y border-amber-200 py-3 text-xs leading-6 text-amber-900" role="status">
+    <div className="mx-5 mt-4 space-y-2 border-y border-warn/40 py-3 text-xs leading-6 text-warn" role="status">
       <p>{materialsGateBannerCopy(gate)}</p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={ui.secondary} onClick={onRetry}>重新核查材料</button>

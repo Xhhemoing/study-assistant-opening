@@ -14,12 +14,17 @@ export function AssistantDrawer() {
   const pathname = usePathname();
   const query = useSearchParams();
   const [open, setOpen] = useState(false);
+  const [openContextKey, setOpenContextKey] = useState("");
   const binding = useCurrentStudyContext();
   const [entries, setEntries] = useState<(AssistantEntry & { learningAttempt?: LearningAttempt })[]>([]);
   const [active, setActive] = useState("");
   const bound = binding?.pathname === pathname ? binding : null;
   const studySurface = Boolean(bound) || isStudySurface(pathname);
+  const boundKey = bound ? `${studyConversationIdentity(bound.context)}:${bound.isQuestion}:${bound.blockedReason ?? ""}:${bound.learningAttempt?.id ?? ""}` : null;
+  const contextKey = JSON.stringify([pathname, boundKey]);
+  const visible = open && openContextKey === contextKey;
   const launch = useCallback((href?: string) => {
+    setOpenContextKey(contextKey);
     // A toolbar reopen returns to the active question; navigation never silently rebinds it.
     if (!href && active && !studySurface) { setOpen(true); return; }
     const next: AssistantEntry & { learningAttempt?: LearningAttempt } = assistantEntry(href ?? (bound ? studyConversationHref(bound.context) : "/opening/assistant"), pathname);
@@ -31,8 +36,7 @@ export function AssistantDrawer() {
     setEntries(current => current.some(entry => entry.key === next.key) ? current : [...current, next]);
     setActive(next.key);
     setOpen(true);
-  }, [active, pathname, bound, studySurface]);
-  const boundKey = bound ? `${studyConversationIdentity(bound.context)}:${bound.isQuestion}:${bound.blockedReason ?? ""}:${bound.learningAttempt?.id ?? ""}` : null;
+  }, [active, pathname, bound, studySurface, contextKey]);
   // Changing the current item can happen on Today without a route change.
   // Close the previous session while keeping its draft and pending request intact.
   useEffect(() => { setOpen(false); }, [pathname, boundKey]);
@@ -45,9 +49,9 @@ export function AssistantDrawer() {
       const target = event.target;
       const editing = target instanceof Element && Boolean(target.closest("input,textarea,select,[contenteditable=true]"));
       if (!isAssistantShortcut(event, editing)) return;
-      if (document.querySelector('dialog[open],[role="dialog"][data-state="open"]') && !open) return;
+      if (document.querySelector('dialog[open],[role="dialog"][data-state="open"]') && !visible) return;
       event.preventDefault();
-      if (open) setOpen(false); else launch();
+      if (visible) setOpen(false); else launch();
     };
     const openLink = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -66,14 +70,14 @@ export function AssistantDrawer() {
       document.removeEventListener("keydown", keyDown);
       document.removeEventListener("click", openLink, true);
     };
-  }, [launch, open]);
+  }, [launch, visible]);
   const redirectQuery = query.get("ai") === "1" ? query.toString() : null;
   useEffect(() => {
     if (redirectQuery) launch(`/opening/assistant?${redirectQuery}`);
     // Consume an entry URL only when it changes; closing must not immediately reopen it.
   }, [redirectQuery]);
-  return <Drawer open={open} onClose={() => setOpen(false)} title="学习助手" description="提示、讲解与学习提问。关闭后保留本次页面中的对话和草稿。" keepMounted contentClassName="flex min-h-0 flex-1 flex-col p-0">
-    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2 text-xs text-text-2"><span>提问背景：{entries.find(entry => entry.key === active)?.label ?? "当前内容"}</span>{!studySurface ? <button type="button" className="min-h-8 rounded px-2 text-accent underline" onClick={() => launch(`/opening/assistant${/^\/opening\/courses\/([0-9a-f-]{36})/.exec(pathname)?.[1] ? `?courseId=${pathname.split("/")[3]}` : ""}`)}>围绕当前页面提问</button> : null}</div>
+  return <Drawer open={visible} onClose={() => setOpen(false)} title="学习助手" description="提示、讲解与学习提问。关闭后保留本次页面中的对话和草稿。" keepMounted contentClassName="flex min-h-0 flex-1 flex-col p-0">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2 text-xs text-text-2"><span>提问背景：{entries.find(entry => entry.key === active)?.label ?? "当前内容"}</span>{!studySurface ? <div className="flex flex-wrap gap-1">{entries.find(entry => entry.key === active)?.context ? <button type="button" className="min-h-8 rounded px-2 underline" aria-label="移除提问背景" onClick={() => launch("/opening/assistant?context=none")}>自由提问</button> : null}<button type="button" className="min-h-8 rounded px-2 text-accent underline" onClick={() => launch(`/opening/assistant${/^\/opening\/courses\/([0-9a-f-]{36})/.exec(pathname)?.[1] ? `?courseId=${pathname.split("/")[3]}` : ""}`)}>围绕当前页面提问</button></div> : null}</div>
     {entries.length > 1 && !studySurface ? <label className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2 text-xs text-text-2">本次提问<select aria-label="切换本次提问" className="min-h-10 min-w-0 flex-1 rounded-lg border border-line bg-surface px-2 text-text" value={active} onChange={event => setActive(event.target.value)}>{entries.map((entry, index) => <option key={entry.key} value={entry.key}>{index + 1}. {entry.label}</option>)}</select></label> : null}
     {entries.map(entry => <div key={entry.key} hidden={entry.key !== active} inert={entry.key !== active} className={entry.key === active ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       <AssistantSession entry={entry} />

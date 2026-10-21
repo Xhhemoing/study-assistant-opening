@@ -39,7 +39,7 @@ afterEach(async () => {
 });
 async function render(next = client) { await act(async () => root.render(createElement(CardReviewView, { client: next }))); }
 function card() { return container.querySelector<HTMLButtonElement>('button[aria-pressed]')!; }
-function gradeButton() { return Array.from(container.querySelectorAll("button")).find(button => button.textContent === "良好")!; }
+function gradeButton() { return Array.from(container.querySelectorAll("button")).find(button => button.textContent === "记得")!; }
 async function reveal() { await act(async () => card().click()); }
 async function tick(ms = 200) { await act(async () => vi.advanceTimersByTimeAsync(ms)); }
 

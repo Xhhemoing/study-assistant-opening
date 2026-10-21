@@ -21,27 +21,27 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
         return (
           <section key={group.type} aria-labelledby={headingId}>
             <div className="mb-3 flex items-baseline justify-between gap-4">
-              <h2 id={headingId} className="text-sm font-semibold text-zinc-900">
+              <h2 id={headingId} className="text-sm font-semibold text-text">
                 {group.label}
               </h2>
-              <span className="text-xs text-zinc-500">{group.hits.length} 条</span>
+              <span className="text-xs text-text-3">{group.hits.length} 条</span>
             </div>
-            <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
+            <ul className="divide-y divide-line border-y border-line">
               {group.hits.map((hit) => (
                 <li key={`${hit.type}-${hit.id}`}>
                   <Link
-                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-zinc-50 focus-visible:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600"
+                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-bg focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600"
                     href={searchHitHref(hit)}
                   >
                     <span className="min-w-0 space-y-1">
-                      <span className="block truncate text-sm font-medium text-zinc-900 group-hover:text-emerald-700">
+                      <span className="block truncate text-sm font-medium text-text group-hover:text-accent">
                         {hit.title}
                       </span>
-                      <span className="block line-clamp-2 text-sm leading-7 text-zinc-500">
+                      <span className="block line-clamp-2 text-sm leading-7 text-text-3">
                         {hit.snippet || "暂无摘要"}
                       </span>
                       {hit.lifecycle || hit.courseMemberships?.length ? (
-                        <span className="block text-xs text-zinc-500">
+                        <span className="block text-xs text-text-3">
                           {[
                             hit.lifecycle,
                             hit.courseMemberships?.map((course) => course.title).join("、"),
@@ -49,7 +49,7 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
                         </span>
                       ) : null}
                     </span>
-                    <ArrowUpRight aria-hidden="true" className="mt-0.5 shrink-0 text-zinc-500 group-hover:text-emerald-700" size={16} />
+                    <ArrowUpRight aria-hidden="true" className="mt-0.5 shrink-0 text-text-3 group-hover:text-accent" size={16} />
                   </Link>
                 </li>
               ))}

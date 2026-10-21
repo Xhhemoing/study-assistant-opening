@@ -22,7 +22,10 @@ export type DrawerProps = {
 
 export function Drawer({ open, onClose, title = "详情", description, children, keepMounted = false, className = "", contentClassName = "min-h-0 flex-1 overflow-y-auto p-5" }: DrawerProps) {
   const previousFocus = useRef<HTMLElement | null>(null);
+  const drag = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [retainedHost, setRetainedHost] = useState<HTMLDivElement | null>(null);
+
+  useEffect(() => { if (!open) drag.current = null; }, [open]);
 
   useEffect(() => {
     if (!keepMounted || !open || retainedHost) return;
@@ -61,7 +64,23 @@ export function Drawer({ open, onClose, title = "详情", description, children,
               if (previousFocus.current?.isConnected) previousFocus.current.focus();
             }}
           >
-            <div aria-hidden="true" className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-text-3/50 sm:hidden" />
+            <div aria-hidden="true" data-drawer-handle="true" className="flex h-7 shrink-0 touch-none select-none items-center justify-center sm:hidden"
+              onPointerDown={event => {
+                if (!event.isPrimary || event.button !== 0 || !["touch", "pen"].includes(event.pointerType) || !window.matchMedia?.("(max-width: 639px)").matches) return;
+                event.preventDefault();
+                drag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+                event.currentTarget.setPointerCapture?.(event.pointerId);
+              }}
+              onPointerUp={event => {
+                const start = drag.current;
+                if (!start || start.pointerId !== event.pointerId) return;
+                drag.current = null; event.preventDefault();
+                const down = event.clientY - start.y, across = Math.abs(event.clientX - start.x);
+                if (down >= 64 && down > across * 1.5 && window.matchMedia?.("(max-width: 639px)").matches) onClose();
+              }}
+              onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
+              <span className="h-1 w-10 rounded-full bg-text-3/50" />
+            </div>
             <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
               <div className="min-w-0">
                 <Dialog.Title className="font-serif text-xl font-medium leading-7">{title}</Dialog.Title>
