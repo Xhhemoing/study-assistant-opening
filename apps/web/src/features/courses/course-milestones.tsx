@@ -5,6 +5,7 @@ import { courseMilestoneUpdateSchema, type CourseGoal, type CourseMilestone, typ
 import { createCourseHistoryClient } from "../opening/client/history-client";
 import { OpeningApiError, type OpeningApi } from "../opening/client/api";
 import { ui } from "../opening/design/ui";
+import { Drawer } from "@aistudy/ui";
 
 type EvidenceOption = { ref: CourseMilestoneEvidenceRef; label: string };
 type MilestoneApi = Pick<OpeningApi, "patchAdaptivePrefs" | "getAdaptivePrefs" | "listTeachingActivities">;
@@ -12,6 +13,10 @@ type MilestoneApi = Pick<OpeningApi, "patchAdaptivePrefs" | "getAdaptivePrefs" |
 export function milestoneUpdate(item: CourseMilestone, confirm?: boolean): CourseMilestoneUpdate {
   return { id: item.id, title: item.title, successCriteria: item.successCriteria, targetDate: item.targetDate,
     evidenceRefs: item.evidenceRefs, ...(confirm === undefined ? {} : { confirm }) };
+}
+
+export function CourseMilestoneHistory({ item }: { item: CourseMilestone }) {
+  return <ol className="space-y-4">{item.history.map(version => <li key={version.revision} className="space-y-2 border-b border-line pb-4 text-sm text-text-2"><h4 className="font-medium text-text">{version.title}</h4><p className="whitespace-pre-wrap leading-6">{version.successCriteria}</p><p className="text-xs">关联 {version.evidenceRefs.length} 条记录 · {version.status === "confirmed_by_learner" ? "曾由你确认" : "待核对"}</p></li>)}</ol>;
 }
 
 export function CourseMilestones({ courseId, goal, api, onSaved, disabled = false }: {
@@ -25,11 +30,13 @@ export function CourseMilestones({ courseId, goal, api, onSaved, disabled = fals
   const [loadingEvidence, setLoadingEvidence] = useState(false);
   const [evidenceNotice, setEvidenceNotice] = useState("");
   const [selected, setSelected] = useState("");
+  const [historyId, setHistoryId] = useState<string | null>(null);
   const active = useRef(true);
   const busy = useRef(false);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const locked = disabled || pending || mustReload;
   const milestones = goal.milestones ?? [];
+  const historyItem = milestones.find(item => item.id === historyId);
 
   async function save(change: CourseMilestoneUpdate) {
     if (busy.current || locked) return;
@@ -88,22 +95,20 @@ export function CourseMilestones({ courseId, goal, api, onSaved, disabled = fals
     setLoadingEvidence(false);
   }
 
-  return <section className="space-y-3 border-t border-zinc-200 pt-4" aria-labelledby="course-milestones-heading">
-    <h3 id="course-milestones-heading" className="text-sm font-semibold text-zinc-800">阶段成果</h3>
-    <p className="text-xs leading-6 text-zinc-500">写清能独立完成什么，可关联学习记录，再由你确认。投入分钟、任务完成和自评确认均不自动代表掌握。</p>
-    {milestones.map(item => <article key={item.id} className="space-y-2 rounded-lg border border-zinc-200 p-3">
-      <div className="flex flex-wrap justify-between gap-2"><h4 className="text-sm font-medium text-zinc-800">{item.title}</h4>
-        <span className="text-xs text-zinc-500">{item.status === "confirmed_by_learner" ? "已由你确认" : "待核对"}</span></div>
-      <p className="whitespace-pre-wrap text-xs leading-6 text-zinc-600">{item.successCriteria}</p>
-      <p className="text-xs text-zinc-500">{item.targetDate ? `目标 ${item.targetDate} · ` : ""}关联 {item.evidenceRefs.length} 条记录</p>
+  return <section className="space-y-3 border-t border-line pt-4" aria-labelledby="course-milestones-heading">
+    <h3 id="course-milestones-heading" className="text-sm font-semibold text-text">阶段成果</h3>
+    <p className="text-xs leading-6 text-text-3">写清能独立完成什么，可关联学习记录，再由你确认。投入分钟、任务完成和自评确认均不自动代表掌握。</p>
+    {milestones.map(item => <article key={item.id} className="space-y-2 rounded-lg border border-line p-3">
+      <div className="flex flex-wrap justify-between gap-2"><h4 className="text-sm font-medium text-text">{item.title}</h4>
+        <span className="text-xs text-text-3">{item.status === "confirmed_by_learner" ? "已由你确认" : "待核对"}</span></div>
+      <p className="whitespace-pre-wrap text-xs leading-6 text-text-2">{item.successCriteria}</p>
+      <p className="text-xs text-text-3">{item.targetDate ? `目标 ${item.targetDate} · ` : ""}关联 {item.evidenceRefs.length} 条记录</p>
       <div className="flex flex-wrap gap-2"><button type="button" className={ui.quiet} disabled={locked} onClick={() => { setEditing(milestoneUpdate(item)); setError(""); }}>编辑成果</button>
         <button type="button" className={ui.secondary} disabled={locked || editing !== null} onClick={() => void save(milestoneUpdate(item, item.status !== "confirmed_by_learner"))}>{item.status === "confirmed_by_learner" ? "重新待核对" : "由我确认达成"}</button></div>
-      {item.history.length ? <details className="text-xs text-zinc-500"><summary>查看此前标准与记录（{item.history.length}次）</summary>
-        {item.history.map(version => <p key={version.revision} className="mt-2 whitespace-pre-wrap leading-6">{version.title}：{version.successCriteria}（关联{version.evidenceRefs.length}条，{version.status === "confirmed_by_learner" ? "曾由你确认" : "待核对"}）</p>)}
-      </details> : null}
+      {item.history.length ? <button type="button" className={ui.quiet} onClick={() => setHistoryId(item.id)}>查看此前标准与记录（{item.history.length}次）</button> : null}
     </article>)}
     {!editing && milestones.length < 8 ? <button type="button" className={ui.secondary} disabled={locked} onClick={() => { setEditing({ id: crypto.randomUUID(), title: "", successCriteria: "", targetDate: null, evidenceRefs: [] }); setError(""); }}>添加阶段成果</button> : null}
-    {editing ? <div className="space-y-3 rounded-lg border border-sky-200 bg-sky-50/30 p-3">
+    {editing ? <div className="space-y-3 rounded-lg border border-accent bg-accent-soft p-3">
       <label className="block space-y-1"><span className={ui.label}>成果名称</span><input className={ui.input} maxLength={120} value={editing.title} disabled={locked} onChange={event => setEditing({ ...editing, title: event.target.value })} /></label>
       <label className="block space-y-1"><span className={ui.label}>成功标准</span><textarea className={ui.input} rows={3} maxLength={500} placeholder="例如：隔天无提示完成两道矩阵乘法变式，并解释维数要求。" value={editing.successCriteria} disabled={locked} onChange={event => setEditing({ ...editing, successCriteria: event.target.value })} /></label>
       <label className="block space-y-1"><span className={ui.label}>目标日期（可选）</span><input type="date" className={ui.input} value={editing.targetDate ?? ""} disabled={locked} onChange={event => setEditing({ ...editing, targetDate: event.target.value || null })} /></label>
@@ -112,12 +117,15 @@ export function CourseMilestones({ courseId, goal, api, onSaved, disabled = fals
         setSelected(""); const option = options.find(item => `${item.ref.kind}:${item.ref.id}` === event.target.value);
         if (option && !editing.evidenceRefs.some(ref => ref.kind === option.ref.kind && ref.id === option.ref.id)) setEditing({ ...editing, evidenceRefs: [...editing.evidenceRefs, option.ref] });
       }}><option value="">选择一条记录</option>{options.map(option => <option key={`${option.ref.kind}:${option.ref.id}`} value={`${option.ref.kind}:${option.ref.id}`}>{option.label}</option>)}</select></label> : null}
-      {evidenceNotice ? <p role="status" className="text-xs text-zinc-500">{evidenceNotice}</p> : null}
-      {editing.evidenceRefs.map((ref, index) => <div key={`${ref.kind}:${ref.id}`} className="flex items-center justify-between gap-2 text-xs text-zinc-600"><span>{options.find(item => item.ref.kind === ref.kind && item.ref.id === ref.id)?.label ?? `已关联学习记录 ${index + 1}`}</span><button type="button" className={ui.quiet} disabled={locked} onClick={() => setEditing({ ...editing, evidenceRefs: editing.evidenceRefs.filter(item => item !== ref) })}>取消关联</button></div>)}
-      <p className="text-xs leading-6 text-zinc-500">修改成功标准后回到待核对，旧标准和记录保留。保存后可另行确认达成。</p>
+      {evidenceNotice ? <p role="status" className="text-xs text-text-3">{evidenceNotice}</p> : null}
+      {editing.evidenceRefs.map((ref, index) => <div key={`${ref.kind}:${ref.id}`} className="flex items-center justify-between gap-2 text-xs text-text-2"><span>{options.find(item => item.ref.kind === ref.kind && item.ref.id === ref.id)?.label ?? `已关联学习记录 ${index + 1}`}</span><button type="button" className={ui.quiet} disabled={locked} onClick={() => setEditing({ ...editing, evidenceRefs: editing.evidenceRefs.filter(item => item !== ref) })}>取消关联</button></div>)}
+      <p className="text-xs leading-6 text-text-3">修改成功标准后回到待核对，旧标准和记录保留。保存后可另行确认达成。</p>
       <div className="flex gap-2"><button type="button" className={ui.secondary} disabled={locked} onClick={() => void save(editing)}>{pending ? "保存中…" : "保存成果"}</button><button type="button" className={ui.quiet} disabled={locked} onClick={() => setEditing(null)}>取消编辑</button></div>
     </div> : null}
-    {error ? <p className="text-xs text-red-700" role="alert">{error}</p> : null}
+    {error ? <p className="text-xs text-danger" role="alert">{error}</p> : null}
     {mustReload ? <button type="button" className={ui.secondary} disabled={pending || disabled} onClick={() => void reload()}>重新读取课程目标</button> : null}
+    <Drawer open={Boolean(historyItem)} onClose={() => setHistoryId(null)} title="此前标准与记录" description={historyItem?.title}>
+      {historyItem ? <CourseMilestoneHistory item={historyItem} /> : null}
+    </Drawer>
   </section>;
 }

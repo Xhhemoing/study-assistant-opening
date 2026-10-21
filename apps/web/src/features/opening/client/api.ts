@@ -1,3 +1,4 @@
+import { parseOpeningResponse } from "./parse-response";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { createSessionFetch } from "../../auth/session-expiry";
 import { createAssistantProposalClient } from "./assistant-proposal-client";
@@ -234,7 +235,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
     ...createAssistantProposalClient(fetchImpl),
     async listConversations(): Promise<ConversationSummary[]> {
       const body = await request("/api/opening/conversations", { method: "GET" }, fetchImpl);
-      return summaryListSchema.parse(body);
+      return parseOpeningResponse(summaryListSchema, body);
     },
 
     async createConversation(
@@ -246,13 +247,12 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return z
+      return parseOpeningResponse(z
         .object({
           id: z.string().uuid(),
           title: z.string().min(1),
           courseId: z.string().uuid().nullable(),
-        })
-        .parse(body);
+        }), body);
     },
 
     async resumeConversation(id: string, signal?: AbortSignal): Promise<ConversationResume> {
@@ -261,7 +261,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET", signal },
         fetchImpl,
       );
-      return conversationResumeSchema.parse(body);
+      return parseOpeningResponse(conversationResumeSchema, body);
     },
 
     async listTurns(conversationId: string, signal?: AbortSignal): Promise<TurnRecord[]> {
@@ -270,7 +270,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET", signal },
         fetchImpl,
       );
-      return turnListSchema.parse(body);
+      return parseOpeningResponse(turnListSchema, body);
     },
 
     async getJob(jobId: string, signal?: AbortSignal): Promise<JobStatusResponse> {
@@ -279,12 +279,12 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET", signal },
         fetchImpl,
       );
-      return jobStatusResponseSchema.parse(body);
+      return parseOpeningResponse(jobStatusResponseSchema, body);
     },
 
     async cancelJob(jobId: string): Promise<JobStatusResponse> {
       const body = await request(`/api/opening/jobs/${jobId}`, { method: "DELETE" }, fetchImpl);
-      return jobStatusResponseSchema.parse(body);
+      return parseOpeningResponse(jobStatusResponseSchema, body);
     },
 
     async getPendingJob(conversationId: string, signal?: AbortSignal): Promise<JobStatusResponse | null> {
@@ -293,7 +293,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET", signal },
         fetchImpl,
       );
-      return jobStatusResponseSchema.nullable().parse(body);
+      return parseOpeningResponse(jobStatusResponseSchema.nullable(), body);
     },
 
     async replyEphemeral(
@@ -305,7 +305,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(input), signal },
         fetchImpl,
       );
-      return ephemeralTurnResponseSchema.parse(body);
+      return parseOpeningResponse(ephemeralTurnResponseSchema, body);
     },
 
     async createSnippet(input: SnippetCreateInput): Promise<SnippetCreateResponse> {
@@ -315,7 +315,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return snippetCreateResponseSchema.parse(body);
+      return parseOpeningResponse(snippetCreateResponseSchema, body);
     },
 
     async submitTurn(
@@ -330,14 +330,13 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return z
-        .object({ jobId: z.string().uuid(), turnId: z.string().uuid() })
-        .parse(body);
+      return parseOpeningResponse(z
+        .object({ jobId: z.string().uuid(), turnId: z.string().uuid() }), body);
     },
 
     async listSources(): Promise<SourceRecord[]> {
       const body = await request("/api/opening/sources", { method: "GET" }, fetchImpl);
-      return sourceListSchema.parse(body);
+      return parseOpeningResponse(sourceListSchema, body);
     },
 
     async beginUpload(input: UploadInput): Promise<UploadTicket> {
@@ -347,7 +346,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return uploadTicketSchema.parse(body);
+      return parseOpeningResponse(uploadTicketSchema, body);
     },
 
     async completeUpload(sourceId: string): Promise<SourceRecord> {
@@ -356,7 +355,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify({}) },
         fetchImpl,
       );
-      return sourceRecordSchema.parse(body);
+      return parseOpeningResponse(sourceRecordSchema, body);
     },
 
     async retryParse(sourceId: string): Promise<SourceRecord> {
@@ -365,7 +364,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify({}) },
         fetchImpl,
       );
-      return sourceRecordSchema.parse(body);
+      return parseOpeningResponse(sourceRecordSchema, body);
     },
 
     async refreshUploadTicket(sourceId: string): Promise<UploadTicket> {
@@ -374,44 +373,44 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify({}) },
         fetchImpl,
       );
-      return uploadTicketSchema.parse(body);
+      return parseOpeningResponse(uploadTicketSchema, body);
     },
 
     async listMemory(courseId: string | null = null): Promise<{ items: MemoryItem[]; context: MemoryItem[]; review: MemoryItem[] }> {
       const query = courseId ? `?courseId=${encodeURIComponent(courseId)}` : "";
       const body = await request(`/api/opening/memory${query}`, { method: "GET" }, fetchImpl);
-      return z.object({ items: z.array(memoryCardSchema), context: z.array(memoryCardSchema), review: z.array(memoryCardSchema) }).parse(body);
+      return parseOpeningResponse(z.object({ items: z.array(memoryCardSchema), context: z.array(memoryCardSchema), review: z.array(memoryCardSchema) }), body);
     },
 
     async decideMemory(input: MemoryDecision): Promise<MemoryItem> {
       const body = await request(`/api/opening/memory/${input.id}/decision`, {
         method: "POST", body: JSON.stringify(input),
       }, fetchImpl);
-      return memoryCardSchema.parse(body);
+      return parseOpeningResponse(memoryCardSchema, body);
     },
 
     async decideMemoryCandidate(input: MemoryCandidateDecision): Promise<MemoryItem> {
       const body = await request(`/api/opening/candidates/${input.id}/memory-decision`, {
         method: "POST", body: JSON.stringify(input),
       }, fetchImpl);
-      return memoryCardSchema.parse(body);
+      return parseOpeningResponse(memoryCardSchema, body);
     },
 
     async listCandidates(): Promise<AssistantCandidateRecord[]> {
       const body = await request("/api/opening/candidates", { method: "GET" }, fetchImpl);
-      return z.array(assistantCandidateRecordSchema).parse(body);
+      return parseOpeningResponse(z.array(assistantCandidateRecordSchema), body);
     },
 
     async createTask(input: TaskCreateInput) {
       const body = await request("/api/opening/tasks", { method: "POST", body: JSON.stringify(taskCreateInputSchema.parse(input)) }, fetchImpl);
-      return taskCreateResultSchema.parse(body);
+      return parseOpeningResponse(taskCreateResultSchema, body);
     },
 
     async updateTaskStatus(taskId: string, input: TaskStatusUpdateInput) {
       const body = await request(`/api/opening/tasks/${taskId}`, {
         method: "PATCH", body: JSON.stringify(taskStatusUpdateInputSchema.parse(input)),
       }, fetchImpl);
-      return taskListSchema.shape.tasks.element.parse(body);
+      return parseOpeningResponse(taskListSchema.shape.tasks.element, body);
     },
 
     /** Defer a pending task until notBefore (null clears it). */
@@ -419,24 +418,24 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       const body = await request(`/api/opening/tasks/${taskId}`, {
         method: "PATCH", body: JSON.stringify(taskDeferInputSchema.parse(input)),
       }, fetchImpl);
-      return taskListSchema.shape.tasks.element.parse(body);
+      return parseOpeningResponse(taskListSchema.shape.tasks.element, body);
     },
 
     async listRetestCandidates() {
       const body = await request("/api/opening/retests", { method: "GET" }, fetchImpl);
-      return z.array(retestReviewSchema).parse(body);
+      return parseOpeningResponse(z.array(retestReviewSchema), body);
     },
 
     async acceptRetest(id: string, clientKey: string) {
       const body = await request(`/api/opening/retests/${id}/accept`, { method: "POST", body: JSON.stringify({ clientKey }) }, fetchImpl);
-      return z.object({ taskId: z.string().uuid(), accepted: z.literal(true), scheduled: z.literal(false) }).parse(body);
+      return parseOpeningResponse(z.object({ taskId: z.string().uuid(), accepted: z.literal(true), scheduled: z.literal(false) }), body);
     },
 
     async discardCandidate(ref: CandidateRef, clientKey: string) {
       if (ref.kind === "memory") throw new Error("记忆建议请使用记忆决定接口。");
       const path = ref.origin === "assistant" ? `/api/opening/candidates/${ref.id}/discard` : `/api/opening/retests/${ref.id}/discard`;
       const body = await request(path, { method: "POST", body: JSON.stringify({ candidateRef: ref, clientKey }) }, fetchImpl);
-      return z.object({ id: z.string().uuid(), status: z.literal("discarded") }).parse(body);
+      return parseOpeningResponse(z.object({ id: z.string().uuid(), status: z.literal("discarded") }), body);
     },
     async listTutorActions(input: {
       courseId: string;
@@ -456,7 +455,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return z.object({ actions: z.array(thinTutorActionSchema) }).parse(body).actions;
+      return parseOpeningResponse(z.object({ actions: z.array(thinTutorActionSchema) }), body).actions;
     },
 
     async getCourseKnowledge(courseId: string): Promise<{
@@ -469,36 +468,35 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return z
+      return parseOpeningResponse(z
         .object({
           version: z.number().int().nonnegative(),
           snapshot: knowledgeSnapshotSchema,
           sourceVersions: z.record(z.string(), z.number().int().nonnegative()),
-        })
-        .parse(body);
+        }), body);
     },
 
     async getLearning(courseId: string) {
       const body = await request(`/api/opening/courses/${courseId}/learning`, { method: "GET" }, fetchImpl);
-      return z.array(learningSummarySchema).parse(body);
+      return parseOpeningResponse(z.array(learningSummarySchema), body);
     },
 
     async requestTaskReminder(input: { clientKey: string; channel?: "in_app" | "feishu"; taskId: string; expectedVersion: number }) {
       const payload = reminderEnqueueInputSchema.parse(input);
       const body = await request("/api/opening/reminders", { method: "POST", body: JSON.stringify(payload) }, fetchImpl);
-      return z.object({ reminders: z.array(reminderSchema).length(1) }).strict().refine(result => {
+      return parseOpeningResponse(z.object({ reminders: z.array(reminderSchema).length(1) }).strict().refine(result => {
         const reminder = result.reminders[0];
         return Boolean(reminder && reminder.taskId === input.taskId && reminder.taskVersion === input.expectedVersion && reminder.channel === payload.channel);
-      }, "reminder response does not match the requested task and version").parse(body);
+      }, "reminder response does not match the requested task and version"), body);
     },
     async listReminders(): Promise<ReminderList> {
       const body = await request("/api/opening/reminders", { method: "GET" }, fetchImpl);
-      return reminderListSchema.parse(body);
+      return parseOpeningResponse(reminderListSchema, body);
     },
 
     async getPlanningSettings(): Promise<OpeningPlanningSettingsResponse> {
       const body = await request("/api/opening/planning-settings", { method: "GET" }, fetchImpl);
-      return openingPlanningSettingsResponseSchema.parse(body);
+      return parseOpeningResponse(openingPlanningSettingsResponseSchema, body);
     },
 
     async putPlanningSettings(
@@ -510,80 +508,80 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "PUT", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return openingPlanningSettingsResponseSchema.parse(body);
+      return parseOpeningResponse(openingPlanningSettingsResponseSchema, body);
     },
 
     async getAdaptivePrefs(): Promise<OpeningAdaptivePrefsResponse> {
       const body = await request("/api/opening/adaptive-planning", { method: "GET" }, fetchImpl);
-      return openingAdaptivePrefsResponseSchema.parse(body);
+      return parseOpeningResponse(openingAdaptivePrefsResponseSchema, body);
     },
 
     async patchAdaptivePrefs(patch: OpeningAdaptivePrefsPatch): Promise<OpeningAdaptivePrefsResponse> {
       const body = await request("/api/opening/adaptive-planning", {
         method: "PATCH", body: JSON.stringify(openingAdaptivePrefsPatchSchema.parse(patch)),
       }, fetchImpl);
-      return openingAdaptivePrefsResponseSchema.parse(body);
+      return parseOpeningResponse(openingAdaptivePrefsResponseSchema, body);
     },
 
     /** `refreshSuggestions` replaces an open draft whose suggestions are out of date (hasNewerSuggestion). */
     async getToday(date: string, options: { refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
       const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
       const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
-      return todayPlanSchema.parse(body);
+      return parseOpeningResponse(todayPlanSchema, body);
     },
 
     async getPlanFeedbackSummary(days = 7) {
       const body = await request(`/api/opening/plans/feedback?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
-      return planFeedbackSummarySchema.parse(body);
+      return parseOpeningResponse(planFeedbackSummarySchema, body);
     },
 
     async inspectConversationPlan(candidateId: string) {
       const body = await request(`/api/opening/plans/from-candidate?candidateId=${encodeURIComponent(candidateId)}`, { method: "GET" }, fetchImpl);
-      return conversationPlanInspectionSchema.parse(body);
+      return parseOpeningResponse(conversationPlanInspectionSchema, body);
     },
     async proposeConversationPlan(input: ConversationPlanInput) {
       const body = await request("/api/opening/plans/from-candidate", { method: "POST", body: JSON.stringify(conversationPlanInputSchema.parse(input)) }, fetchImpl);
-      return conversationPlanResultSchema.parse(body);
+      return parseOpeningResponse(conversationPlanResultSchema, body);
     },
 
     async submitSuggestionFeedback(input: SuggestionFeedbackInput) {
       const body = await request("/api/opening/plans/suggestions/feedback", { method: "POST", body: JSON.stringify(suggestionFeedbackInputSchema.parse(input)) }, fetchImpl);
-      return suggestionFeedbackResultSchema.parse(body);
+      return parseOpeningResponse(suggestionFeedbackResultSchema, body);
     },
 
     async getLoopMetrics(days = 14) {
       const body = await request(`/api/opening/plans/metrics?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
-      return loopMetricsReportSchema.parse(body);
+      return parseOpeningResponse(loopMetricsReportSchema, body);
     },
 
     async proposeLocalReplan(input: LocalReplanInput) {
       const body = await request("/api/opening/plans/replan", { method: "POST", body: JSON.stringify(localReplanInputSchema.parse(input)) }, fetchImpl);
-      return localReplanResultSchema.parse(body);
+      return parseOpeningResponse(localReplanResultSchema, body);
     },
 
     async listTasks(): Promise<{ tasks: TaskItem[] }> {
       const body = await request("/api/opening/tasks", { method: "GET" }, fetchImpl);
-      return taskListSchema.parse(body);
+      return parseOpeningResponse(taskListSchema, body);
     },
 
     async proposePlan(input: unknown): Promise<PlanDraft> {
       const body = await request("/api/opening/plans", { method: "POST", body: JSON.stringify(input) }, fetchImpl);
-      return planDraftSchema.parse(body);
+      return parseOpeningResponse(planDraftSchema, body);
     },
 
     async acceptPlan(input: AcceptPlanInput): Promise<PlanDraft> {
       const body = await request(`/api/opening/plans/${input.draftId}/accept`, { method: "POST", body: JSON.stringify(input) }, fetchImpl);
-      return planDraftSchema.parse(body);
+      return parseOpeningResponse(planDraftSchema, body);
     },
 
     async rejectPlan(draftId: string): Promise<PlanDraft> {
       const body = await request(`/api/opening/plans/${draftId}/reject`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
-      return planDraftSchema.parse(body);
+      return parseOpeningResponse(planDraftSchema, body);
     },
 
     async getActionDigest(): Promise<ActionDigest> {
       const body = await request("/api/opening/action-digest", { method: "GET" }, fetchImpl);
-      return actionDigestSchema.parse(body);
+      return parseOpeningResponse(actionDigestSchema, body);
     },
 
     async decideActionDigest(input: {
@@ -596,13 +594,12 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(input) },
         fetchImpl,
       );
-      return z
+      return parseOpeningResponse(z
         .object({
           candidate: actionCandidateSchema,
           digest: actionDigestSchema,
         })
-        .strict()
-        .parse(body);
+        .strict(), body);
     },
 
     async listConnections(): Promise<ConnectionView[]> {
@@ -612,7 +609,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         : Array.isArray((body as { connections?: unknown } | null)?.connections)
           ? (body as { connections: unknown[] }).connections
           : [];
-      return z.array(connectionViewSchema).parse(rows);
+      return parseOpeningResponse(z.array(connectionViewSchema), rows);
     },
 
     async createImapConnection(input: ImapSetupInput): Promise<ConnectionView> {
@@ -622,7 +619,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return connectionViewSchema.parse(body);
+      return parseOpeningResponse(connectionViewSchema, body);
     },
 
     async putConnectionCredential(
@@ -656,7 +653,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(input) },
         fetchImpl,
       );
-      return connectionViewSchema.parse(body);
+      return parseOpeningResponse(connectionViewSchema, body);
     },
 
     async importEmailManual(file: File): Promise<unknown> {
@@ -677,7 +674,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
 
     async listTeachingActivities(): Promise<TeachingActivity[]> {
       const body = await request("/api/opening/teaching-activities", { method: "GET" }, fetchImpl);
-      return teachingActivityListSchema.parse(body);
+      return parseOpeningResponse(teachingActivityListSchema, body);
     },
 
     async createTeachingActivity(input: TeachingActivityCreateInput): Promise<TeachingActivity> {
@@ -687,7 +684,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return teachingActivitySchema.parse(body);
+      return parseOpeningResponse(teachingActivitySchema, body);
     },
 
     async getTeachingActivity(id: string): Promise<TeachingActivity> {
@@ -696,7 +693,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return teachingActivitySchema.parse(body);
+      return parseOpeningResponse(teachingActivitySchema, body);
     },
 
     /** Queue AI 主讲 generation; returns the activity now `queued`. */
@@ -706,7 +703,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify({ clientKey }) },
         fetchImpl,
       );
-      return z.object({ activity: teachingActivitySchema }).parse(body).activity;
+      return parseOpeningResponse(z.object({ activity: teachingActivitySchema }), body).activity;
     },
 
     async associateTeachingActivityCourse(
@@ -719,7 +716,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "POST", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return teachingActivitySchema.parse(body);
+      return parseOpeningResponse(teachingActivitySchema, body);
     },
 
 
@@ -729,7 +726,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return activitySpecClientInitSchema.parse(body);
+      return parseOpeningResponse(activitySpecClientInitSchema, body);
     },
 
     async getSourceSegments(sourceId: string): Promise<MediaSegmentsResponse> {
@@ -738,7 +735,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return mediaSegmentsResponseSchema.parse(body);
+      return parseOpeningResponse(mediaSegmentsResponseSchema, body);
     },
 
     /**
@@ -757,7 +754,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         ? `/api/opening/intervention-settings?${qs}`
         : "/api/opening/intervention-settings";
       const body = await request(path, { method: "GET" }, fetchImpl);
-      return interventionSettingsResponseSchema.parse(body);
+      return parseOpeningResponse(interventionSettingsResponseSchema, body);
     },
 
     /**
@@ -781,7 +778,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return learningResumeSchema.parse(body);
+      return parseOpeningResponse(learningResumeSchema, body);
     },
 
     /**
@@ -803,7 +800,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       );
       const body = await parseJson(res);
       if (res.ok || res.status === 409) {
-        return teachingCheckpointSaveResultSchema.parse(body);
+        return parseOpeningResponse(teachingCheckpointSaveResultSchema, body);
       }
       const { message, code } = readError(body);
       throw new OpeningApiError(
@@ -827,7 +824,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "PATCH", body: JSON.stringify(payload) },
         fetchImpl,
       );
-      return teachingActivitySchema.parse(body);
+      return parseOpeningResponse(teachingActivitySchema, body);
     },
 
     async postTeachingCommand(
@@ -845,7 +842,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       );
       const body = await parseJson(res);
       if (res.ok || res.status === 409) {
-        return teachingCommandResponseSchema.parse(body);
+        return parseOpeningResponse(teachingCommandResponseSchema, body);
       }
       const { message, code } = readError(body);
       throw new OpeningApiError(
@@ -885,7 +882,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         { method: "PUT", body: JSON.stringify(value) },
         fetchImpl,
       );
-      return interventionSettingsResponseSchema.parse(body);
+      return parseOpeningResponse(interventionSettingsResponseSchema, body);
     },
   };
 }

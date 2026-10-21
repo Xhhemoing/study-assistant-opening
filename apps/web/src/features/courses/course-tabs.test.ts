@@ -11,6 +11,7 @@ describe("course section routes", () => {
     expect(readCourseTab("?mediaSource=source&seekMs=4000")).toBe("materials");
     expect(readCourseTab("", "#course-media")).toBe("materials");
     expect(readCourseTab("", "#course-knowledge")).toBe("units");
+    expect(readCourseTab("?tab=overview", "#course-units")).toBe("units");
     expect(readCourseTab("?tab=units&mediaSource=source")).toBe("units");
     expect(readCourseTab("?tab=unknown")).toBe("overview");
   });

@@ -33,7 +33,8 @@ describe("course-knowledge helpers", () => {
     expect(video && "canSeek" in video ? video.canSeek : true).toBe(false);
     const evidence = targets.find((t) => t.kind === "evidence");
     expect(evidence?.href).toBeNull();
-    expect(evidence?.label).toMatch(/无片段锚点/);
+    expect(evidence?.label).toMatch(/当前页无法定位到片段/);
+    expect(evidence?.label).not.toContain(id(4));
   });
 
   it("seeks course media when source + startMs are known (CT-04)", () => {
@@ -56,6 +57,13 @@ describe("course-knowledge helpers", () => {
     expect(video?.href).toContain("mediaSource=");
     expect(video?.href).toContain("seekMs=12500");
     expect(video?.href).toContain("#course-media");
+  });
+
+  it("retains complete evidence identities only for diagnostics without creating a false locator", () => {
+    const targets = evidenceTargetsForNode({ id: id(1), courseId: id(9), label: "概念", kind: "concept", evidenceChunkIds: [id(4)] }, { diagnostics: true });
+    const evidence = targets.find(target => target.kind === "evidence");
+    expect(evidence?.label).toContain(id(4));
+    expect(evidence?.href).toBeNull();
   });
 
   it("opens course media without fake seek when media panel exists but no segment (CT-04)", () => {
