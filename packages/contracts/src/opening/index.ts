@@ -260,6 +260,7 @@ export * from "./conversation-planning-context";
 export * from "./measurement";
 
 export * from "./span-learning";
+export * from "./span-hints";
 
 export * from "./composer-purpose";
 export * from "./study-session-intent";

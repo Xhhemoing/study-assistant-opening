@@ -1,77 +1,69 @@
 "use client";
 
+import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import { useEffect, useId, useRef, type ReactNode } from "react";
-import { getFocusTrapTarget } from "./focus-trap-model";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { ui } from "./styles";
 
-function focusableElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]")).filter(
-    (element) => !element.hasAttribute("disabled") && element.tabIndex >= 0,
-  );
-}
-
-export function Drawer({
-  open,
-  onClose,
-  title = "详情",
-  children,
-}: {
+export type DrawerProps = {
   open: boolean;
   onClose: () => void;
   title?: string;
+  description?: string;
   children: ReactNode;
-}) {
-  const titleId = useId();
-  const onCloseRef = useRef(onClose);
-  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
+  /** Keep the child React tree after first opening, including unsent input. */
+  keepMounted?: boolean;
+  /** Additional panel classes; responsive default is 400px / 85dvh. */
+  className?: string;
+  /** Replaces default body classes when a full-height workspace needs its own scrolling. */
+  contentClassName?: string;
+};
+
+export function Drawer({ open, onClose, title = "详情", description, children, keepMounted = false, className = "", contentClassName = "min-h-0 flex-1 overflow-y-auto p-5" }: DrawerProps) {
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const [retainedHost, setRetainedHost] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!open) return;
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); onCloseRef.current(); }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const elements = focusableElements(dialogRef.current);
-      if (elements.length === 0) return;
-      const activeIndex = elements.indexOf(document.activeElement as HTMLElement);
-      const targetIndex = getFocusTrapTarget(activeIndex, event.shiftKey ? "backward" : "forward", elements.length);
-      if (targetIndex !== null) {
-        event.preventDefault();
-        elements[targetIndex]?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    closeRef.current?.focus();
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      if (previousFocusRef.current && document.contains(previousFocusRef.current)) previousFocusRef.current.focus();
-      previousFocusRef.current = null;
-    };
-  }, [open]);
+    if (!keepMounted || !open || retainedHost) return;
+    const host = document.createElement("div");
+    host.className = "flex min-h-0 flex-1 flex-col";
+    setRetainedHost(host);
+  }, [keepMounted, open, retainedHost]);
 
-  if (!open) return null;
-  return (
-    <div ref={dialogRef} className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-      <button
-        type="button"
-        aria-label="关闭抽屉"
-        data-drawer-backdrop="true"
-        tabIndex={-1}
-        className="absolute inset-0 bg-zinc-950/30"
-        onClick={onClose}
-      />
-      <aside className="relative flex h-full w-full max-w-80 flex-col border-l border-zinc-200 bg-white shadow-xl">
-        <header className="flex min-h-12 items-center justify-between border-b border-zinc-200 px-5">
-          <h2 id={titleId} className="text-sm font-semibold text-zinc-800">{title}</h2>
-          <button ref={closeRef} type="button" aria-label="关闭抽屉" className="inline-grid size-10 place-items-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 md:size-8" onClick={onClose}>
-            <X aria-hidden="true" size={18} />
-          </button>
+  useEffect(() => {
+    if (!retainedHost) return;
+    retainedHost.hidden = !open;
+    retainedHost.inert = !open;
+    if (!open) retainedHost.remove();
+  }, [open, retainedHost]);
+
+  const retainedContent = keepMounted && retainedHost ? createPortal(children, retainedHost) : null;
+  return <Dialog.Root open={open} onOpenChange={next => { if (!next) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay data-drawer-backdrop="true" className="fixed inset-0 z-50 bg-black/30" />
+      <Dialog.Content
+        aria-modal="true"
+        className={`fixed inset-x-0 bottom-0 z-50 flex h-[85dvh] flex-col rounded-t-card border border-line bg-surface text-text shadow-overlay sm:inset-y-0 sm:left-auto sm:right-0 sm:h-dvh sm:w-[400px] sm:rounded-none ${className}`}
+        onOpenAutoFocus={() => { previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }}
+        onCloseAutoFocus={event => {
+          event.preventDefault();
+          if (previousFocus.current?.isConnected) previousFocus.current.focus();
+        }}
+      >
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
+          <div className="min-w-0">
+            <Dialog.Title className="font-serif text-xl font-medium leading-7">{title}</Dialog.Title>
+            {description ? <Dialog.Description className="mt-1 text-sm leading-6 text-text-2">{description}</Dialog.Description> : null}
+          </div>
+          <Dialog.Close asChild><button type="button" aria-label="关闭抽屉" className={ui.icon}><X aria-hidden="true" size={20} /></button></Dialog.Close>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
-      </aside>
-    </div>
-  );
+        {keepMounted
+          ? <div className={contentClassName} ref={node => { if (node && retainedHost) { retainedHost.hidden = false; retainedHost.inert = false; node.appendChild(retainedHost); } }} />
+          : <div className={contentClassName}>{children}</div>}
+      </Dialog.Content>
+    </Dialog.Portal>
+    {/* Never forceMount a modal: closed Radix content would keep hideOthers active. */}
+    {retainedContent}
+  </Dialog.Root>;
 }
