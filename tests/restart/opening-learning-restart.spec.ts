@@ -3,11 +3,13 @@ import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } fro
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
 import postgres from "postgres";
+import { z } from "zod";
 import { loginOpeningOwner, seedOpeningOwner } from "../e2e/opening-auth";
 import { createTeachingCourse, readTeachingEvidence, readTeachingRetest, type TeachingCourse } from "../e2e/opening-teaching-fixture";
 import { createOpeningRestartServices } from "./opening-restart-fixture";
 
 const lessonEndpoint = "/api/opening/teaching/span/lesson";
+const submittedObservationSchema = learningObservationSchema.extend({ allowsIndependent: z.boolean() });
 const intent = { purpose: "self_study", timeBudgetMinutes: 12, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" };
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 async function readLesson(request: APIRequestContext, course: TeachingCourse, activityId: string) {
@@ -70,8 +72,8 @@ test("same-version graceful Web and worker restart restores the persisted learni
         representations: { system: "none", geometry: "plane" }, explanation: "第一与第三坐标强制两个系数均为2，但第二坐标产生4而非3。" }) };
     const submitted = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: submission });
     expect(submitted.status()).toBe(201);
-    const observation = learningObservationSchema.parse(await submitted.json());
-    expect(observation).toMatchObject({ outcome: "correct", assistance: "hinted" });
+    const observation = submittedObservationSchema.parse(await submitted.json());
+    expect(observation).toMatchObject({ outcome: "correct", assistance: "hinted", allowsIndependent: false });
     const solution = await context.request.post("/api/opening/teaching/span/hint", { headers: { origin }, data: { attemptId: attempt.id, level: 4 } });
     expect(solution.status()).toBe(200); const fullHint = spanHintResponseSchema.parse(await solution.json());
     // This succeeds only if the actual worker handles the durable outbox job.
@@ -126,7 +128,7 @@ test("same-version graceful Web and worker restart restores the persisted learni
     expect(await readTeachingEvidence(course, attempt.id)).toEqual(before);
     const replay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: submission });
     expect(replay.status()).toBe(201);
-    expect(learningObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer, assistance: "hinted" });
+    expect(submittedObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer, assistance: "hinted", allowsIndependent: false });
     expect(await readTeachingEvidence(course, attempt.id)).toEqual(before);
 
     // A new ordinary session produces a new durable job after restart. This
@@ -147,7 +149,7 @@ test("same-version graceful Web and worker restart restores the persisted learni
       ...submission, clientKey: `restart-next-answer:${randomUUID()}`, assistance: "independent",
     } });
     expect(secondSubmitResponse.status()).toBe(201);
-    const secondObservation = learningObservationSchema.parse(await secondSubmitResponse.json());
+    const secondObservation = submittedObservationSchema.parse(await secondSubmitResponse.json());
     await expect.poll(async () => (await readScanJob(course, secondObservation.id)).state, { timeout: 45_000 }).toBe("succeeded");
     const postRestartScan = await readScanJob(course, secondObservation.id);
     expect(postRestartScan.id).not.toBe(scan.id);

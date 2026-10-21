@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { APIRequestContext, Locator } from "@playwright/test";
 import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
+import { z } from "zod";
 import { expect, test } from "./fixtures";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 import { createTeachingCourse, makeTeachingRetestDue, readTeachingEvidence, readTeachingRetest } from "./opening-teaching-fixture";
@@ -9,6 +10,7 @@ import { createTeachingCourse, makeTeachingRetestDue, readTeachingEvidence, read
 // fixture does not certify parsing; the controlled due date does not certify retention.
 const lessonEndpoint = "/api/opening/teaching/span/lesson";
 const hintEndpoint = "/api/opening/teaching/span/hint";
+const submittedObservationSchema = learningObservationSchema.extend({ allowsIndependent: z.boolean() });
 
 async function readLesson(request: APIRequestContext, courseId: string, activityId: string, retestId?: string) {
   const query = new URLSearchParams({ courseId, activityId, ...(retestId ? { retestId } : {}) });
@@ -112,8 +114,8 @@ test.describe("Opening span durable teaching flow", () => {
       const submitted = await submittedResponse;
       expect(submitted.status()).toBe(201);
       const submission = submitted.request().postDataJSON() as LearningAttemptSubmitInput;
-      const observation = learningObservationSchema.parse(await submitted.json());
-      expect(observation).toMatchObject({ attemptId: attempt.id, assistance: "hinted", outcome: "correct", serverEvaluation: { decision: "correct" } });
+      const observation = submittedObservationSchema.parse(await submitted.json());
+      expect(observation).toMatchObject({ attemptId: attempt.id, assistance: "hinted", outcome: "correct", allowsIndependent: false, serverEvaluation: { decision: "correct" } });
       await expect(practice.getByRole("heading", { name: "本题精确核对通过", exact: true })).toBeVisible();
       const solutionResponse = page.waitForResponse(response => response.url().endsWith(hintEndpoint) && response.request().method() === "POST");
       await practice.getByRole("button", { name: "查看完整示范", exact: true }).click();
@@ -180,7 +182,7 @@ test.describe("Opening span durable teaching flow", () => {
       await expect(summary.locator("dl > div").filter({ hasText: "使用帮助作答" }).locator("dd")).toHaveText("1");
       const replay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: submission });
       expect(replay.status()).toBe(201);
-      expect(learningObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer });
+      expect(submittedObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer, allowsIndependent: false });
       const changedReplay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: { ...submission, answer: '{"membership":"in_span"}' } });
       expect(changedReplay.status()).toBe(409);
       const lateInput: LearningAttemptSubmitInput = { clientKey: `late:${randomUUID()}`, answer: '{"membership":"in_span"}', outcome: "unverified", assistance: "independent", verdictSource: "self_report" };
@@ -249,8 +251,8 @@ test.describe("Opening span durable teaching flow", () => {
       await practice.getByRole("button", { name: "封存首答并精确核对", exact: true }).click();
       const retested = await retestedResponse;
       expect(retested.status()).toBe(201);
-      const retestObservation = learningObservationSchema.parse(await retested.json());
-      expect(retestObservation).toMatchObject({ attemptId: retestAttempt.id, outcome: "incorrect", serverEvaluation: { decision: "incorrect" } });
+      const retestObservation = submittedObservationSchema.parse(await retested.json());
+      expect(retestObservation).toMatchObject({ attemptId: retestAttempt.id, outcome: "incorrect", allowsIndependent: false, serverEvaluation: { decision: "incorrect" } });
       await expect(practice.getByRole("heading", { name: "本题有需要修正的数学步骤", exact: true })).toBeVisible();
       expect(await readTeachingRetest(course, scheduled.candidateId)).toMatchObject({ status: "completed", task_status: "done" });
       expect((await readTeachingEvidence(course, attempt.id)).observations).toHaveLength(1);
