@@ -37,22 +37,22 @@ function SourceCheckboxList({
   onToggle: (id: string) => void;
 }) {
   if (items.length === 0) {
-    return <p className="mt-2 text-sm text-zinc-500">暂无可指定材料。</p>;
+    return <p className="mt-2 text-sm text-text-3">暂无可指定材料。</p>;
   }
   return (
-    <ul className="mt-3 divide-y divide-zinc-200 border-y border-zinc-200">
+    <ul className="mt-3 divide-y divide-line border-y border-line">
       {items.map((source) => (
         <li key={source.id}>
-          <label className="flex min-h-10 items-center gap-2 py-2 text-xs text-zinc-700">
+          <label className="flex min-h-11 items-center gap-2 py-2 text-xs text-text-2">
             <input
               type="checkbox"
-              className="size-4 shrink-0 accent-emerald-700 focus-visible:ring-2 focus-visible:ring-emerald-700"
+              className="size-4 shrink-0 accent-accent focus-visible:ring-2 focus-visible:ring-accent"
               checked={selectedSourceIds.includes(source.id)}
               disabled={disabled || (!selectedSourceIds.includes(source.id) && selectedSourceIds.length >= MAX_ASSISTANT_SOURCE_IDS)}
               onChange={() => onToggle(source.id)}
             />
             <span className="min-w-0 flex-1 break-words">{source.name}</span>
-            <span className="shrink-0 text-[11px] text-emerald-700">就绪</span>
+            <span className="shrink-0 text-xs text-accent">就绪</span>
           </label>
         </li>
       ))}
@@ -87,12 +87,12 @@ export function SourcePageControls({
   return (
     <section className="space-y-4" aria-label="材料与页码">
       <div>
-        <h2 className="text-xs font-semibold text-zinc-800">指定材料</h2>
-        <p className="mt-1 text-xs leading-5 text-zinc-500">
+        <h2 className="text-xs font-semibold text-text">指定材料</h2>
+        <p className="mt-1 text-xs leading-5 text-text-3">
           {courseScoped ? "本课就绪材料，最多 32 份。" : "仅解析就绪的材料可选。"}
         </p>
         {selectedSourceIds.length >= MAX_ASSISTANT_SOURCE_IDS ? (
-          <p className="mt-2 text-xs text-amber-800" role="status">已选满 {MAX_ASSISTANT_SOURCE_IDS} 份材料。</p>
+          <p className="mt-2 text-xs text-warn" role="status">已选满 {MAX_ASSISTANT_SOURCE_IDS} 份材料。</p>
         ) : null}
         <SourceCheckboxList
           items={membershipReady}
@@ -104,7 +104,7 @@ export function SourcePageControls({
           <div className="mt-3">
             <button
               type="button"
-              className="text-xs font-medium text-emerald-800 underline decoration-emerald-300 underline-offset-2 focus-visible:ring-2 focus-visible:ring-emerald-700"
+              className="inline-flex min-h-11 items-center text-xs font-medium text-accent underline decoration-accent underline-offset-2 focus-visible:ring-2 focus-visible:ring-accent"
               aria-expanded={showWorkspaceOthers}
               onClick={() => setShowWorkspaceOthers((value) => !value)}
             >
@@ -121,7 +121,7 @@ export function SourcePageControls({
           </div>
         ) : null}
       </div>
-      <label className="flex min-h-10 items-center gap-2 py-2 text-xs text-zinc-700">
+      <label className="flex min-h-11 items-center gap-2 py-2 text-xs text-text-2">
         <span className="shrink-0">当前页（可选）</span>
         <input
           type="number"

@@ -5,11 +5,12 @@ import {
   explainOpeningLearningDecision, createOpeningPlansRepository, captureOpeningLearnerShadowPredictions,
   createOpeningLearnerShadowPredictionsRepository, createOpeningLearningAttemptRepository,
   createOpeningStudyIntentRepository,
+  createOpeningRetestActivityRepository,
 } from "@aistudy/database";
 import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { SPAN_SKILL_LABEL, getSpanProblem, type LearningDecisionInput } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
-import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
+import { matrixAttemptFixture, matrixRequirement, matrixSkill } from "./opening-matrix-attempt-fixture";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 
@@ -50,6 +51,8 @@ describe("LearnerState actual PostgreSQL boundary", () => {
     });
     expect(result.features[0]).toMatchObject({ observationId: observation.id, eligibility: { verifiedCorrect: "yes", independentAttempt: "yes" } });
     expect(result.projection).toMatchObject({ mode: "live_read", persistedRows: 0, repairTriggered: false });
+    expect(result.display).toMatchObject({ scope: "recorded_requirements", total: 1,
+      counts: { independent: 1, hinted: 0, retest: 0, insufficient: 0 } });
     expect(await counts()).toEqual(before);
   });
 
@@ -61,6 +64,7 @@ describe("LearnerState actual PostgreSQL boundary", () => {
     expect(state.features).toHaveLength(3);
     expect(state.features.map(row => row.attemptedAt)).toEqual(state.features.map(row => row.attemptedAt).sort());
     expect(state.completeness).toMatchObject({ status: "truncated", total: 3, returned: 1 });
+    expect(state.display).toMatchObject({ total: 1, counts: { independent: 0, hinted: 0, retest: 0, insufficient: 1 } });
   });
 
   it("rejects cross-owner and foreign-course scopes", async () => {
@@ -75,6 +79,60 @@ describe("LearnerState actual PostgreSQL boundary", () => {
     const state = await createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
     expect(state.summary).toEqual([]);
     expect(state.completeness.gaps).toContain("no_observation_evidence");
+    expect(state.display.total).toBe(0);
+  });
+
+  it("uses canonical help and delivered solutions without rewriting original independent qualification", async () => {
+    const f = await matrixAttemptFixture(fixture), service = createOpeningLearnerStateService(fixture.sql);
+    const first = await f.start();
+    await f.help(first, "hinted");
+    await f.submit(first);
+    expect((await service.read(fixture.scope, { courseId: f.courseId })).display.counts.hinted).toBe(1);
+    const next = await f.start(), independent = await f.submit(next);
+    const before = await service.read(fixture.scope, { courseId: f.courseId });
+    expect(before.display.counts.independent).toBe(1);
+    await f.help(next, "revealed");
+    const after = await service.read(fixture.scope, { courseId: f.courseId });
+    expect(after.display).toMatchObject({ total: 1, counts: { independent: 0, hinted: 0, retest: 1, insufficient: 0 } });
+    expect(after.features.find(row => row.observationId === independent.id)?.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(after.stateVersion).not.toBe(before.stateVersion);
+  });
+
+  it("overlays only accepted due tasks for the exact requirement, respecting all queue time floors", async () => {
+    const f = await matrixAttemptFixture(fixture), service = createOpeningLearnerStateService(fixture.sql);
+    await f.submit(await f.start());
+    const activities = createOpeningRetestActivityRepository(fixture.sql), taskId = randomUUID();
+    const past = "2000-01-01T00:00:00.000Z", future = "2100-01-01T00:00:00.000Z";
+    await fixture.sql`INSERT INTO opening_tasks(id,workspace_id,owner_user_id,title,minutes,due_at,priority,status,version)
+      VALUES(${taskId},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},'Retest',15,NULL,1,'pending',1)`;
+    const proposed = await activities.createProposed(fixture.scope, { cycleId: randomUUID(), courseId: f.courseId,
+      skillLabel: matrixSkill, requirementKey: matrixRequirement, recommendedAt: past });
+    const read = () => service.read(fixture.scope, { courseId: f.courseId });
+    expect((await read()).display.counts.independent).toBe(1);
+    await activities.accept(fixture.scope, proposed.activityId, taskId, past);
+    await fixture.sql`UPDATE opening_retest_activities SET requirement_key='other-requirement' WHERE id=${proposed.activityId}`;
+    expect((await read()).display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_retest_activities SET requirement_key=${matrixRequirement},recommended_at=${future} WHERE id=${proposed.activityId}`;
+    expect((await read()).display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_retest_activities SET recommended_at=${past},scheduled_start_at=${future} WHERE id=${proposed.activityId}`;
+    expect((await read()).display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_retest_activities SET scheduled_start_at=NULL,not_before_at=${future} WHERE id=${proposed.activityId}`;
+    expect((await read()).display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_retest_activities SET not_before_at=NULL,snoozed_until=${future} WHERE id=${proposed.activityId}`;
+    expect((await read()).display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_retest_activities SET snoozed_until=NULL WHERE id=${proposed.activityId}`;
+    await fixture.sql`UPDATE opening_tasks SET not_before=${future} WHERE id=${taskId}`;
+    const notDue = await read();
+    expect(notDue.display.counts.independent).toBe(1);
+    await fixture.sql`UPDATE opening_tasks SET not_before=NULL WHERE id=${taskId}`;
+    const beforeCounts = await counts(), due = await read();
+    expect(due.display).toMatchObject({ total: 1, counts: { independent: 0, hinted: 0, retest: 1, insufficient: 0 } });
+    expect(due.display.requirements[0]).toMatchObject({ requirementKey: matrixRequirement, dueRetest: true });
+    expect(due.features[0]?.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(due.stateVersion).not.toBe(notDue.stateVersion);
+    expect(await counts()).toEqual(beforeCounts);
+    await fixture.sql`UPDATE opening_tasks SET status='done' WHERE id=${taskId}`;
+    expect((await read()).display.counts.independent).toBe(1);
   });
 });
 
@@ -117,6 +175,7 @@ describe("immutable decision provenance", () => {
     const state = await createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
     expect(state.features[0]).toMatchObject({ availability: "stale", eligibility: { verifiedCorrect: "yes" } });
     expect(state.completeness.stale).toBe(true);
+    expect(state.display.counts.insufficient).toBe(1);
     expect((await repo.explain(fixture.scope, saved.id))?.invalidationReasons).toContain("state_changed");
   });
 

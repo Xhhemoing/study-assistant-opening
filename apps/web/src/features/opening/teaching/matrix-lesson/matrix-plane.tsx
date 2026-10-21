@@ -30,8 +30,8 @@ export function MatrixPlaneDiagram({ matrix, vector, phase = 3, originalOnly = f
       {gridLines.map(([from, to], index) => <line key={`grid-${index}`} x1={x(from[0])} y1={y(from[1])} x2={x(to[0])} y2={y(to[1])} stroke="currentColor" className="text-zinc-200" />)}
       {!originalOnly && phase > 0 ? transformed.map(([from, to], index) => <line key={`transformed-${index}`} x1={x(from[0])} y1={y(from[1])} x2={x(to[0])} y2={y(to[1])} stroke="currentColor" className="text-emerald-200" />) : null}
       <path d="M 20 180 H 340 M 180 20 V 340" fill="none" stroke="currentColor" className="text-zinc-400" />
-      <text x="342" y="175" className="fill-zinc-500 text-[11px]">x</text><text x="188" y="20" className="fill-zinc-500 text-[11px]">y</text><text x="186" y="194" className="fill-zinc-500 text-[11px]">0</text>
-      {grid.filter(value => value !== 0).map(value => <g key={value}><text x={x(value)} y="194" textAnchor="middle" className="fill-zinc-400 text-[9px]">{value}</text><text x="170" y={y(value) + 3} textAnchor="end" className="fill-zinc-400 text-[9px]">{value}</text></g>)}
+      <text x="342" y="175" className="fill-zinc-500 text-xs">x</text><text x="188" y="20" className="fill-zinc-500 text-xs">y</text><text x="186" y="194" className="fill-zinc-500 text-xs">0</text>
+      {grid.filter(value => value !== 0).map(value => <g key={value}><text x={x(value)} y="194" textAnchor="middle" className="fill-zinc-400 text-xs">{value}</text><text x="170" y={y(value) + 3} textAnchor="end" className="fill-zinc-400 text-xs">{value}</text></g>)}
       {arrow([0, 0], vector, "v", "text-blue-600", !originalOnly && phase > 0)}
       {!originalOnly && phase >= 1 ? arrow([0, 0], first, "x·第1列", "text-emerald-700") : null}
       {!originalOnly && phase >= 2 ? arrow(first, result, "y·第2列", "text-amber-700") : null}

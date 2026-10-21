@@ -97,17 +97,17 @@ function PrefsFields({
   return (
     <fieldset disabled={busy} className="space-y-3">
       <legend className="sr-only">介入偏好字段</legend>
-      <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 text-sm text-zinc-700">
+      <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 text-sm text-text-2">
         <span>安静模式（抑制主动提议；仍回答你的求助）</span>
         <input
           type="checkbox"
-          className="size-4 accent-emerald-700"
+          className="size-4 accent-accent"
           checked={draft.quietMode}
           onChange={(e) => onChange({ ...draft, quietMode: e.target.checked })}
           aria-describedby={`${idPrefix}-quiet-help`}
         />
       </label>
-      <p id={`${idPrefix}-quiet-help`} className="text-[11px] leading-5 text-zinc-500">
+      <p id={`${idPrefix}-quiet-help`} className="text-xs leading-5 text-text-3">
         安静 / 关闭主动介入不会把「你主动求助」当成打断；系统仍应回答。不按停留时间推断卡住，也不会在提示后自动展开完整解答，也没有「每 N 分钟必问」控件。
       </p>
       <label className="block space-y-1.5">
@@ -147,11 +147,11 @@ function PrefsFields({
       </label>
       <div className="space-y-1.5">
         <span className={ui.label}>允许主动介入的节点</span>
-        <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-zinc-700">
+        <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-text-2">
           <span>讲解段</span>
           <input
             type="checkbox"
-            className="size-4 accent-emerald-700"
+            className="size-4 accent-accent"
             checked={draft.nodes.allowOnTeach}
             onChange={(e) =>
               onChange({
@@ -161,11 +161,11 @@ function PrefsFields({
             }
           />
         </label>
-        <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-zinc-700">
+        <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-text-2">
           <span>练习 / 提问段</span>
           <input
             type="checkbox"
-            className="size-4 accent-emerald-700"
+            className="size-4 accent-accent"
             checked={draft.nodes.allowOnPrompt}
             onChange={(e) =>
               onChange({
@@ -175,11 +175,11 @@ function PrefsFields({
             }
           />
         </label>
-        <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-zinc-700">
+        <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-1 text-sm text-text-2">
           <span>证据不足时仍可主动（默认关）</span>
           <input
             type="checkbox"
-            className="size-4 accent-emerald-700"
+            className="size-4 accent-accent"
             checked={draft.nodes.allowOnLowEvidence}
             onChange={(e) =>
               onChange({
@@ -199,32 +199,32 @@ function EffectiveSummary({ data }: { data: InterventionSettingsResponse }) {
   const e = data.effective;
   return (
     <div
-      className="space-y-1.5 rounded-lg border border-zinc-200 bg-zinc-50/90 p-3"
+      className="space-y-1.5 rounded-lg border border-line bg-surface-2 p-3"
       data-intervention-effective="true"
       data-winning-layer={layer}
     >
-      <h3 className="text-xs font-medium text-zinc-800">当前生效（已合并）</h3>
-      <p className="text-[11px] leading-5 text-zinc-600">
+      <h3 className="text-xs font-medium text-text">当前生效（已合并）</h3>
+      <p className="text-xs leading-5 text-text-2">
         优先层：<strong>{winningLayerLabel(layer)}</strong>
         {" · "}顺序：本课临时 &gt; 课程 &gt; 全局
       </p>
-      <dl className="space-y-1 text-xs leading-6 text-zinc-700">
+      <dl className="space-y-1 text-xs leading-6 text-text-2">
         <div className="flex flex-wrap justify-between gap-x-4">
-          <dt className="text-zinc-500">安静模式</dt>
+          <dt className="text-text-3">安静模式</dt>
           <dd>{e.quietMode ? "开" : "关"}</dd>
         </div>
         <div className="flex flex-wrap justify-between gap-x-4">
-          <dt className="text-zinc-500">主动程度</dt>
+          <dt className="text-text-3">主动程度</dt>
           <dd>{PROACTIVITY_OPTIONS.find((o) => o.value === e.proactivity)?.label ?? e.proactivity}</dd>
         </div>
         <div className="flex flex-wrap justify-between gap-x-4">
-          <dt className="text-zinc-500">深度</dt>
+          <dt className="text-text-3">深度</dt>
           <dd>{DEPTH_OPTIONS.find((o) => o.value === e.depth)?.label ?? e.depth}</dd>
         </div>
       </dl>
       {data.sessionOverride ? (
         <p
-          className="text-[11px] leading-5 text-amber-900"
+          className="text-xs leading-5 text-warn"
           role="status"
           data-session-temp-banner="true"
         >
@@ -232,7 +232,7 @@ function EffectiveSummary({ data }: { data: InterventionSettingsResponse }) {
         </p>
       ) : null}
       {data.invalidStoredSettings ? (
-        <p className="text-xs text-amber-800" role="alert">
+        <p className="text-xs text-warn" role="alert">
           已保存的偏好无效，已回退默认值。请重新选择后保存，或重置。
         </p>
       ) : null}
@@ -284,17 +284,17 @@ export function PreferenceControlsView({
     >
       {!compact ? (
         <div>
-          <h3 className="text-sm font-medium text-zinc-900" id={`${idPrefix}-heading`}>
+          <h3 className="text-sm font-medium text-text" id={`${idPrefix}-heading`}>
             {heading}
           </h3>
-          <p className="mt-1 text-xs leading-6 text-zinc-500">{description}</p>
+          <p className="mt-1 text-xs leading-6 text-text-3">{description}</p>
         </div>
       ) : (
-        <p className="text-[11px] leading-5 text-zinc-500">{description}</p>
+        <p className="text-xs leading-5 text-text-3">{description}</p>
       )}
 
       {error ? (
-        <p role="alert" className="text-sm leading-6 text-red-700">
+        <p role="alert" className="text-sm leading-6 text-danger">
           {error}
         </p>
       ) : null}
@@ -329,7 +329,7 @@ export function PreferenceControlsView({
       </div>
 
       {notice ? (
-        <p role="status" className="text-sm leading-6 text-emerald-700">
+        <p role="status" className="text-sm leading-6 text-accent">
           {notice}
         </p>
       ) : null}
@@ -435,7 +435,7 @@ export function PreferenceControls({
 
   if (scope === "session" && !activityId) {
     return (
-      <p className="text-xs text-zinc-500" role="status" data-intervention-session-missing="true">
+      <p className="text-xs text-text-3" role="status" data-intervention-session-missing="true">
         无教学活动时无法设置本课临时偏好。
       </p>
     );
@@ -449,11 +449,11 @@ export function PreferenceControls({
         data-intervention-scope={scope}
       >
         {error ? (
-          <p role="alert" className="text-sm leading-6 text-red-700">
+          <p role="alert" className="text-sm leading-6 text-danger">
             {error}
           </p>
         ) : null}
-        <p className="text-sm text-zinc-500" role="status">
+        <p className="text-sm text-text-3" role="status">
           正在读取介入偏好…
         </p>
         <span className="sr-only" data-no-nag-interval="true" data-no-dwell-stuck="true">
@@ -470,7 +470,7 @@ export function PreferenceControls({
         data-intervention-scope={scope}
       >
         {error ? (
-          <p role="alert" className="text-sm leading-6 text-red-700">
+          <p role="alert" className="text-sm leading-6 text-danger">
             {error}
           </p>
         ) : null}

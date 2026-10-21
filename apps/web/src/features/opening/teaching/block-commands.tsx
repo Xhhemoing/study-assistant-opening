@@ -174,7 +174,7 @@ export function BlockCommandsBarView({
             aria-hidden
           />
         </summary>
-        <div className="mt-2 space-y-2 rounded-lg border border-zinc-200 p-3">
+        <div className="mt-2 space-y-2 rounded-lg border border-line p-3">
           <div
             className="flex flex-wrap gap-1"
             role="group"
@@ -212,7 +212,7 @@ export function BlockCommandsBarView({
               );
             })}
           </div>
-          <p className="text-[11px] leading-5 text-zinc-500" data-skip-honesty="true">
+          <p className="text-xs leading-5 text-text-3" data-skip-honesty="true">
             {SKIP_HONESTY_COPY}
           </p>
         </div>
@@ -238,11 +238,11 @@ export function BlockCommandsBarView({
           <p className="font-medium">
             命令冲突：{teachingCommandConflictLabel(conflict.conflict)}
           </p>
-          <p className="mt-1 text-zinc-700">{conflict.message}</p>
+          <p className="mt-1 text-text-2">{conflict.message}</p>
           {conflict.currentContentVersion != null ||
           conflict.currentPathVersion != null ? (
-            <details className="mt-1 text-zinc-600">
-              <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">
+            <details className="mt-1 text-text-2">
+              <summary className="min-h-11 cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent py-2">
                 技术信息
               </summary>
               <p className="mt-1 tabular-nums">
@@ -256,7 +256,7 @@ export function BlockCommandsBarView({
               </p>
             </details>
           ) : null}
-          <p className="mt-1 text-zinc-600">
+          <p className="mt-1 text-text-2">
             请重新拉取教学内容并合并本地草稿后再试；不会提供「强制覆盖」。
           </p>
           {onReread && conflictRequiresReread(conflict.conflict) ? (
