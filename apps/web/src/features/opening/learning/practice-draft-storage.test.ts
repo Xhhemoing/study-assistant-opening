@@ -127,3 +127,23 @@ it("loads a legacy draft once with a stable local identity while preserving froz
   expect(first.submission).toEqual(saved.submission);
   expect(disk.setItem).not.toHaveBeenCalled();
 });
+
+it("restores the exact selected photo alongside the original text after switching practice drafts", () => {
+  const { scope, saved, disk } = setup();
+  const photo = { workSourceId: "99999999-9999-4999-8999-999999999999", workSourceVersion: 3, workPhysicalPage: 2 };
+  patchPracticeDraft(scope, {}, { fields: photo }, disk, saved.id);
+  const another = emptyPracticeDraft(scope);
+  switchPracticeDraft(scope, saved.id, another, disk);
+  switchPracticeDraft(scope, another.id, saved.id, disk);
+  expect(readPracticeDraft(scope, null)?.fields).toMatchObject({ ...photo, answer: saved.fields.answer });
+  const persisted = JSON.parse(disk.data.get(`opening-practice:v2:${scope}`)!);
+  expect(parsePracticeDraftCollection(persisted, scope)?.drafts.find(item => item.id === saved.id)?.fields).toMatchObject(photo);
+});
+
+it("reads older drafts without photo fields without losing the frozen answer", () => {
+  const { scope, saved } = setup();
+  const { workSourceId: _id, workSourceVersion: _version, workPhysicalPage: _page, ...fields } = saved.fields;
+  const restored = parsePracticeDraftCollection({ version: 2, scope, activeId: saved.id, drafts: [{ ...saved, fields }] }, scope);
+  expect(restored?.drafts[0]?.fields).toMatchObject({ answer: saved.fields.answer, workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 });
+  expect(restored?.drafts[0]?.submission).toEqual(saved.submission);
+});

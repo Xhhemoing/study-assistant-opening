@@ -35,6 +35,10 @@ describe("complete group aggregates with bounded representatives", () => {
   it("keeps full counts independently of the representative count", () => {
     expect(learningSummaryAggregateSchema.parse(aggregate)).toEqual(aggregate);
   });
+  it("reads a mixed historical summary after server AI grading is added", () => {
+    const evidenceSources = ["self_report", "reference_checked", "model_suggestion", "unknown", "deterministic", "ai_graded"];
+    expect(learningSummaryAggregateSchema.parse({ ...aggregate, evidenceSources }).evidenceSources).toEqual(evidenceSources);
+  });
   it("preserves null and empty requirement identities as distinct groups", () => {
     const nullGroup = learningSummaryAggregateSchema.parse({ ...aggregate, identity: { ...aggregate.identity, requirementKey: null } });
     const emptyGroup = learningSummaryAggregateSchema.parse({ ...aggregate, identity: { ...aggregate.identity, requirementKey: "" } });

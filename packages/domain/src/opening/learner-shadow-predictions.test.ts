@@ -26,3 +26,14 @@ it("reports held-out failure denominators at a predeclared threshold and null wi
 it("fails visibly on corrupt stored probabilities rather than producing a misleading score", () => {
   expect(() => compareLearnerShadow([{ predictions: [{ modelId: "pfa", modelVersion: "1", calibrated: false, probability: Number.NaN, parameters: {} }], correct: true, familyKey: "family", predictedAt: "2026-10-19T00:00:00Z" }])).toThrow(/persisted/);
 });
+
+it("does not train BKT or PFA on an AI grader's uncalibrated judgments", () => {
+  const [feature] = assembleLearnerState({ evidence: courseEvidence(), stateVersion: "v1", dataAsOf: "2026-10-19T00:00:00Z" }).features;
+  const input = { features: [feature!], courseId: feature!.courseId, requirementKey: feature!.requirementKey!,
+    cutoff: "2026-10-21T08:00:00Z", excludedProblemIds: [] };
+  const aiFeature = { ...feature!, observationId: "ai-result", eligibility: { ...feature!.eligibility,
+    reasonCodes: [...feature!.eligibility.reasonCodes, "ai_graded_correct" as const] } };
+  const result = predictLearnerShadow({ ...input, features: [feature!, aiFeature] });
+  expect(result).toEqual(predictLearnerShadow(input));
+  expect(result.evidenceObservationIds).not.toContain("ai-result");
+});

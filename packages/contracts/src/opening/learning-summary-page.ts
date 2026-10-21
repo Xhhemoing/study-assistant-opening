@@ -37,7 +37,7 @@ export const learningSummaryAggregateSchema = z.object({
     version_unknown: countSchema, unavailable: countSchema,
   }).strict(),
   unverifiedCount: countSchema,
-  evidenceSources: z.array(verdictSourceSchema).max(5),
+  evidenceSources: z.array(verdictSourceSchema).max(verdictSourceSchema.options.length),
   representatives: z.array(z.object({
     observationId: uuidSchema,
     rootId: uuidSchema,

@@ -41,5 +41,12 @@ export function nextLearningStep(input: NextLearningStepInput): NextLearningStep
     return { activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" };
   }
 
+  // A readable photo can establish correctness without proving when it was
+  // written. Ask for a fresh independent exercise instead of repeating diagnosis.
+  if (latest.verifiedCorrect === "yes" && latest.independentAttempt === "unknown"
+    && latest.assistance !== "hinted" && latest.assistance !== "revealed") {
+    return { activityKind: "transfer_check", focusObservationId: null, reasonCode: "correct_needs_independent_check" };
+  }
+
   return { activityKind: "diagnose", focusObservationId: null, reasonCode: "needs_check" };
 }

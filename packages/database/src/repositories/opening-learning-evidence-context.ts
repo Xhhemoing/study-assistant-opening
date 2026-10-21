@@ -1,5 +1,5 @@
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
-import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
+import { aiEvaluationSchema, serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
 import { mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
@@ -263,11 +263,12 @@ export async function readOpeningLearningEvidenceContexts(
   // Reference comparisons expose answers even when low-trust or subsequently revised.
   // Read immutable events, not only current heads: corrections cannot erase exposure.
   const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id, o.verdict_source,
-      o.submitted_at, o.recorded_at
+      o.submitted_at, o.recorded_at, o.workspace_history_revision,
+      (o.verdict_source='ai_graded' OR o.submitted_intent ? 'aiGrading') AS ai_feedback
     FROM opening_learning_observations o
     WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
       AND o.problem_id =ANY(${problemIds}::uuid[])
-      AND (o.verdict_source='reference_checked' OR o.reference_check IS NOT NULL)
+      AND (o.verdict_source IN ('reference_checked','ai_graded') OR o.reference_check IS NOT NULL OR o.submitted_intent ? 'aiGrading')
       AND o.attempt_id IS NOT NULL
       AND (o.revision_kind IS DISTINCT FROM 'retract')` : [];
   const priorsByProblem = new Map<string, Row[]>();
@@ -309,7 +310,8 @@ export async function readOpeningLearningEvidenceContexts(
     if (record.problemId) {
       for (const prior of priorsByProblem.get(record.problemId) ?? []) {
         if (String(prior.id) === record.id) continue;
-        if (record.attemptId && prior.attempt_id === record.attemptId) continue;
+        const aiFeedback = prior.ai_feedback === true || prior.verdict_source === "ai_graded";
+        if (record.attemptId && prior.attempt_id === record.attemptId && !aiFeedback) continue;
         if (record.itemVersionId && prior.item_version_id && String(prior.item_version_id) !== record.itemVersionId) continue;
         // A check revision retains the original submission time. Its exposure
         // happened when the check was recorded, not at that earlier submission.
@@ -321,7 +323,9 @@ export async function readOpeningLearningEvidenceContexts(
           id: `prior-reference:${prior.id}`,
           attempt_id: prior.attempt_id,
           problem_id: prior.problem_id,
-          level: "revealed", kind: "solution",
+          level: aiFeedback ? "hinted" : "revealed",
+          kind: aiFeedback ? "evaluation_feedback" : "solution",
+          ...(aiFeedback ? { same_question: true, workspace_history_revision: prior.workspace_history_revision } : {}),
           delivered: true,
           delivered_at: Number.isFinite(checkedMs) ? checkedAt : null,
           history_revision: 0,
@@ -346,6 +350,7 @@ export async function readOpeningLearningEvidenceContexts(
     const context: EvidenceEligibilityContext = {
       selfReportedAnswerConditions: { copiedAnswer: declaredConditions?.copied_answer === true, reportedGuess: declaredConditions?.reported_guess === true },
       serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
+      aiEvaluation: aiEvaluationSchema.safeParse(record.aiEvaluation).data ?? null,
       // Every existing manual-check write is learner-owned. Persisted JSON and
       // historical checker ids cannot grant independent-review authority.
       referenceCheckAuthority: "learner",

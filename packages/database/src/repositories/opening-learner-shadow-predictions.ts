@@ -1,5 +1,5 @@
 import type { Scope } from "@aistudy/contracts";
-import { compareLearnerShadow, predictLearnerShadow, type LearnerShadowPrediction } from "@aistudy/domain";
+import { isAiGradedEvidence, compareLearnerShadow, predictLearnerShadow, type LearnerShadowPrediction } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { learningError } from "./opening-learning-facts";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
@@ -57,11 +57,12 @@ export function createOpeningLearnerShadowPredictionsRepository(sql: Sql) {
       const outcome = state.features.find(feature => feature.observationId === row.observation_id || feature.attemptId === row.attempt_id);
       const cutoff = new Date(row.input_cutoff as Date).getTime();
       let reason: string | null = !receipt.predictions ? "missing_family_or_target" : receipt.familySeenBefore ? "family_previously_seen" : !outcome ? "pending_or_retracted" : null;
+      if (!reason && outcome && isAiGradedEvidence(outcome.eligibility)) reason = "ai_grade_not_calibrated";
       if (!reason && outcome && (outcome.eligibility.independentAttempt !== "yes" || outcome.eligibility.verifiedCorrect === "unknown"
         || outcome.eligibility.usableForCurrentVersion !== "yes")) reason = "outcome_ineligible";
       if (!reason && (!row.submitted_at || cutoff >= new Date(row.submitted_at as Date).getTime())) reason = "prediction_not_before_answer";
       if (!reason && receipt.evidenceObservationIds?.some(id => { const feature = state.features.find(row => row.observationId === id);
-        return !feature || feature.eligibility.independentAttempt !== "yes" || feature.eligibility.usableForCurrentVersion !== "yes"
+        return !feature || isAiGradedEvidence(feature.eligibility) || feature.eligibility.independentAttempt !== "yes" || feature.eligibility.usableForCurrentVersion !== "yes"
           || feature.eligibility.verifiedCorrect === "unknown" || Date.parse(feature.attemptedAt) >= cutoff; })) reason = "invalidated_history";
       if (reason) excluded[reason] = (excluded[reason] ?? 0) + 1;
       else scored.push({ predictions: receipt.predictions!, correct: outcome!.eligibility.verifiedCorrect === "yes", familyKey: String(row.family_key), predictedAt: new Date(cutoff).toISOString() });

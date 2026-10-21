@@ -1,4 +1,5 @@
 import { evaluateAssistance, evaluateDelayedCheck } from "./evidence-eligibility-timing";
+import { evaluateAiCorrectness } from "./ai-evaluation";
 import type {
   EvidenceEligibility,
   EvidenceEligibilityContext,
@@ -192,7 +193,9 @@ export function evaluateEvidenceEligibility(
       reasons.add("exam_answer_history_unknown");
     }
   }
-  result.verifiedCorrect = evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
+  result.verifiedCorrect = observation.verdictSource === "ai_graded"
+    ? evaluateAiCorrectness(observation, context.aiEvaluation, reasons)
+    : evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
   result.usableForDelayedCheck = evaluateDelayedCheck(
     observation,

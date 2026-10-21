@@ -2,16 +2,22 @@ import { refreshOpeningLearningEligibility } from "./opening-learning-eligibilit
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
-import { observationRevisionInputSchema, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
+import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, observationRevisionInputSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
 import { admitLearningSources, learnerVerdictSource, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
+import { acceptedAiGradingOutcome } from "@aistudy/domain";
+import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
-export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, raw: ObservationRevisionInput): Promise<ObservationRevisionResult> {
+export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, raw: ObservationRevisionInput,
+  options: { aiGrading?: { input: AiGradingInput; proposal: AiGradingProposal; modelLabel: string | null } } = {},
+): Promise<ObservationRevisionResult> {
   const input = observationRevisionInputSchema.parse(raw);
-  const intent = JSON.parse(JSON.stringify(input)) as ObservationRevisionInput;
+  const grading = options.aiGrading ? { input: aiGradingInputSchema.parse(options.aiGrading.input),
+    proposal: aiGradingProposalSchema.parse(options.aiGrading.proposal), modelLabel: options.aiGrading.modelLabel } : null;
+  const intent = JSON.parse(JSON.stringify({ ...input, ...(grading ? { aiGrading: grading } : {}) }));
   return sql.begin(async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
     await lockLearningOwner(tx, scope);
@@ -47,6 +53,12 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND COALESCE(root_observation_id,id)=${root.id}`;
     if (!head || !courseIds.includes(String(head.course_id))) throw learningError("CONFLICT", "observation attribution changed");
     const previous = await qualifyObservationRevision(tx, scope, head);
+    const gradingContext = grading ? await readOpeningAiGradingContext(tx, scope, grading.input) : null;
+    if (grading && (input.revisionKind !== "replace" || grading.input.observationId !== headId
+      || replacement?.answer !== previous.answer || replacement.assistance !== previous.assistance
+      || replacement.courseId !== undefined || replacement.skillLabel !== undefined || replacement.requirementKey !== undefined)) {
+      throw learningError("VALIDATION", "AI 批改只能评价已保存的同一答案");
+    }
     const session = await lockLearningSession(tx, scope, String(root.session_id));
     const courseId = replacement?.courseId ?? previous.courseId;
     const ownedCourses = await tx`SELECT id FROM courses WHERE workspace_id=${scope.workspaceId} AND id IN ${tx(courseIds)} AND archived_at IS NULL ORDER BY id FOR SHARE`;
@@ -64,8 +76,8 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       && (replacement?.verdictSource === undefined || replacement.verdictSource === previous.verdictSource)
       && (replacement?.referenceSourceId === undefined || replacement.referenceSourceId === previous.referenceSourceId);
     // Ordinary learner corrections never carry a server evaluator's authority to a new head.
-    const verdictSource = learnerVerdictSource(replacement?.verdictSource ?? (replacement?.referenceCheck ? "self_report" : keepCheck && previous.verdictSource !== "deterministic" ? previous.verdictSource : "self_report"));
-    const referenceSourceId = replacement?.referenceSourceId !== undefined ? replacement.referenceSourceId
+    const verdictSource = grading ? "ai_graded" : learnerVerdictSource(replacement?.verdictSource ?? (replacement?.referenceCheck ? "self_report" : keepCheck && previous.verdictSource !== "deterministic" ? previous.verdictSource : "self_report"));
+    const referenceSourceId = grading ? previous.referenceSourceId : replacement?.referenceSourceId !== undefined ? replacement.referenceSourceId
       : replacement?.referenceCheck?.referenceSourceId ?? (keepCheck ? previous.referenceSourceId : null);
     if (replacement?.referenceCheck && (verdictSource !== "self_report" || referenceSourceId !== replacement.referenceCheck.referenceSourceId)) throw learningError("VALIDATION", "reference check source or verdict mismatch");
     if ((replacement?.referenceCheck || replacement?.verdictSource === "reference_checked" || keepCheck && previous.referenceCheck) && (!referenceSourceId || !(session.source_ids as string[]).includes(referenceSourceId))) throw learningError("VALIDATION", "reference source is outside original session");
@@ -79,17 +91,27 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     for (const id of courseIds) revisions.set(id, await nextLearningHistoryRevision(tx, scope, id));
     const revision = revisions.get(courseId)!, id = randomUUID();
     const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
+    const [clock] = grading ? await tx`SELECT clock_timestamp() AS at` : [];
+    const aiEvaluation = grading ? aiEvaluationSchema.parse({ ...grading.proposal,
+      outcome: acceptedAiGradingOutcome(grading.proposal), observationId: id, attemptId: previous.attemptId,
+      problemId: previous.problemId, itemVersionId: previous.itemVersionId, requirementKey: previous.requirementKey ?? null,
+      evaluatorVersion: "ai-rubric-v1", modelLabel: grading.modelLabel, evaluatedAt: new Date(clock!.at as Date).toISOString(),
+      ...(gradingContext?.workSource ? { workSource: gradingContext.workSource } : {}) }) : null;
+    const sourceIds = gradingContext?.sourceIds ?? head.source_ids;
+    const sourceVersions = gradingContext?.sourceVersions ?? head.source_versions;
+    // A photo attached after submission can be graded, but was not sealed as an independent answer at that time.
+    const assistance = gradingContext?.workSource && previous.assistance === "independent" ? "unknown" : replacement?.assistance ?? previous.assistance;
     const skillLabel = replacement?.skillLabel ?? previous.skillLabel;
     const requirementKey = replacement?.requirementKey !== undefined ? replacement.requirementKey : previous.requirementKey ?? null;
     const [record] = await tx`INSERT INTO opening_learning_observations
       (id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,problem_id,retest_id,answer,outcome,assistance,client_key,occurred_at,
        source_turn_ids,verdict_source,reference_source_id,evidence_verdict,attempt_id,item_version_id,requirement_key,started_at,submitted_at,recorded_at,source_versions,reference_check,submitted_intent,history_revision,workspace_history_revision,
-       root_observation_id,revises_observation_id,revision_kind,revision_reason,actor_id)
-      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${head.session_id},${courseId},${head.activity_id},${skillLabel},${head.source_ids},${head.problem_id},${head.retest_id},
-       ${replacement?.answer ?? previous.answer},${replacement?.outcome ?? previous.outcome},${replacement?.assistance ?? previous.assistance},${input.clientKey},${head.occurred_at},
+       root_observation_id,revises_observation_id,revision_kind,revision_reason,actor_id,ai_evaluation)
+      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${head.session_id},${courseId},${head.activity_id},${skillLabel},${sourceIds},${head.problem_id},${head.retest_id},
+       ${replacement?.answer ?? previous.answer},${aiEvaluation?.outcome ?? replacement?.outcome ?? previous.outcome},${assistance},${input.clientKey},${head.occurred_at},
        ${head.source_turn_ids},${verdictSource},${referenceSourceId},'MASTERY_NOT_ESTABLISHED',${head.attempt_id},${head.item_version_id},${requirementKey},${head.started_at},${head.submitted_at},clock_timestamp(),
-       ${head.source_versions ? tx.json(head.source_versions) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},
-       ${root.id},${headId},${input.revisionKind},${input.reason},${scope.ownerUserId})
+       ${sourceVersions ? tx.json(sourceVersions) : null},${referenceCheck ? tx.json(referenceCheck) : null},${tx.json(intent)},${revision},${workspaceRevision},
+       ${root.id},${headId},${input.revisionKind},${input.reason},${scope.ownerUserId},${aiEvaluation ? tx.json(aiEvaluation) : null})
       ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
     if (!record) throw learningError("CONFLICT", "revision clientKey already used");
     await tx`UPDATE opening_learning_observations SET effective_head_id=${id} WHERE id=${root.id}`;
@@ -97,6 +119,17 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     await reconcileOpeningRetestEvidence(tx, scope, { rootObservationId: String(root.id), previousHeadObservationId: headId, headObservationId: id,
       previousIdentity: identity(previous), currentIdentity: input.revisionKind === "retract" ? null : identity({ courseId, requirementKey, skillLabel }), historyRevision: revision });
     await refreshOpeningLearningEligibility(tx, scope, [String(root.id)]);
+    if (aiEvaluation && aiEvaluation.outcome !== "unverified" && !head.retest_id) {
+      // The original ungraded scan may already have finished; evaluate the new effective result.
+      const jobId = randomUUID();
+      const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`;
+      const payload = { courseId, observationId: id };
+      await tx`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,privacy_epoch)
+        VALUES(${jobId},${scope.workspaceId},${scope.ownerUserId},${`retest-scan:${courseId}:${id}`},'retest',
+          ${tx.json(payload)},${Number(workspace?.privacy_epoch ?? 0)})`;
+      await tx`INSERT INTO opening_outbox(workspace_id,job_id,topic,payload)
+        VALUES(${scope.workspaceId},${jobId},'opening.job.enqueue',${tx.json({ jobId, kind: "retest", ...payload })})`;
+    }
     return result(record, "applied");
   }) as Promise<ObservationRevisionResult>;
 }

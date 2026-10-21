@@ -26,6 +26,7 @@ const SOURCE_LABEL: Record<string, string> = {
   self_report: "自报",
   reference_checked: "参考核对记录",
   deterministic: "内置题精确核算",
+  ai_graded: "AI 批改",
   model_suggestion: "模型建议",
   unknown: "未知",
 };
@@ -88,7 +89,7 @@ export function CourseLearningView({ courseId, retest: retestProp = null }: { co
   return (
     <div className="space-y-6">
       <section id="course-practice" className="scroll-mt-6 space-y-3" aria-labelledby="course-practice-heading">
-        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-text">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-text-3">{retest ? "按补测提示完成作答；提交后由服务器关闭补测活动并标记任务完成，前端只重新读取。" : "默认三步：选主题 → 作答 → 保存。辅导默认收起在底部；先保留自己的尝试，再对照参考。"}</p></div>
+        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-text">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-text-3">{retest ? "按补测提示完成作答，保存后查看反馈。" : "选择题目材料，写下答案或附上照片；保存后自动批改，判错了可以直接更正。"}</p></div>
         {retestNotice ? <p className="text-xs leading-6 text-warn" role="status">{retestNotice}</p> : null}
         <LearningAttemptForm key={`${courseId}:${retest?.retestId ?? "practice"}`} courseId={courseId} retest={retest} skillLabels={skillLabels} onRecorded={() => setRevision((value) => value + 1)} />
       </section>

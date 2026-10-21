@@ -90,6 +90,7 @@ export type NextStepReasonCode =
   | "verified_incorrect"
   | "assistance_dependent"
   | "independent"
+  | "correct_needs_independent_check"
   | "needs_check";
 
 export type NextLearningStepInput = {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { serverEvaluationSchema } from "./matrix-evaluation";
+import { aiEvaluationSchema } from "./ai-evaluation";
 
 export const sourceVersionsSchema = z.record(uuidSchema, z.number().int().nonnegative());
 export const evidenceEligibilitySchema = z.object({
@@ -29,6 +30,7 @@ export const learningObservationFactsShape = {
   historyRevision: z.number().int().nonnegative().optional(),
   referenceCheck: referenceCheckFactSchema.nullable().optional(), eligibility: evidenceEligibilitySchema.optional(),
   serverEvaluation: serverEvaluationSchema.nullable().optional(),
+  aiEvaluation: aiEvaluationSchema.nullable().optional(),
 };
 export type LearningEvidenceEligibility = z.infer<typeof evidenceEligibilitySchema>;
 export type LearningReferenceCheck = z.infer<typeof referenceCheckFactSchema>;

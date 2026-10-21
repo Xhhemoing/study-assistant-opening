@@ -6,6 +6,9 @@ import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
+import { AiGradingPhotoFields } from "./ai-grading-photo";
+import { ObservationRevisionCard } from "./observation-revision-card";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
 import { formatRetestSubmitError, withRetestSubmit, type RetestAttemptPrefill } from "./retest-attempt";
 import { ReferenceCheckStep } from "./reference-check-step";
@@ -60,6 +63,7 @@ function PracticeController(props: Props) {
 
 function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, continuity }: Props & { continuity: PracticeContinuity }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
+  const diagnostics = useDiagnosticsEnabled();
   const scope = practiceScope(courseId, "ordinary", retest, initialFocus);
   const { draft, patch, ready, storageWarning, requireSaved } = continuity;
   const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
@@ -83,6 +87,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   const [skillOptions, setSkillOptions] = useState<string[]>(skillLabelsProp ?? []);
   const [attempt, setAttempt] = useState<LearningAttempt | null>(null);
   const [recorded, setRecorded] = useState<LearningObservation | null>(null);
+  const [autoGrade, setAutoGrade] = useState(false);
   const [referenceChecked, setReferenceChecked] = useState(false);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
@@ -97,7 +102,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   useEffect(() => {
     let active = true;
     void createOpeningApi().listSources().then((rows) => {
-      if (active) setSources(rows.filter((source) => source.uploadState === "uploaded" && source.parseState === "ready"));
+      if (active) setSources(rows.filter((source) => source.uploadState === "uploaded"));
     }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "无法读取练习材料"); });
     return () => { active = false; };
   }, []);
@@ -113,8 +118,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
 
   const skillReuseHint = findSkillLabelReuseHint(skillLabel, skillOptions);
   const skillListId = `opening-skill-labels-${courseId}`;
+  const readySources = sources.filter(source => source.parseState === "ready");
+  const gradingPhoto = { workSourceId: draft.fields.workSourceId, workSourceVersion: draft.fields.workSourceVersion, physicalPage: draft.fields.workPhysicalPage };
   const referenceSource = sources.find((source) => source.id === referenceSourceId) ?? null;
-  const canReferenceCheck = Boolean(recorded && referenceSourceId && !referenceChecked && !referenceSkipped);
+  const canReferenceCheck = Boolean(recorded && !recorded.aiEvaluation && referenceSourceId && !referenceChecked && !referenceSkipped);
 
   async function refreshDeliveredAssistance(attemptId: string) {
     try {
@@ -142,6 +149,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     if (readPracticeDraft(scope, null, draft.id)?.attemptId !== next.id || readPracticeDraft(scope, null, draft.id)?.start?.clientKey !== expectedRequestKey) return;
     setAttempt(next);
     setRecorded(state.observation);
+    setAutoGrade(false);
     setReferenceChecked(Boolean(state.observation?.referenceCheck));
     patch(current => ({ observationId: state.observation?.id ?? null, fields: {
       ...restoredPracticeAssistance(current.fields, state.deliveredAssistance),
@@ -189,7 +197,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     if (!attempt || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true); setError("");
-    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report" }, retest?.retestId) } })).submission!;
+    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report", ...(referenceSourceId ? { referenceSourceId } : {}) }, retest?.retestId) } })).submission!;
     try {
       if (draft.submission) {
         const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);
@@ -203,6 +211,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
       if (!current.observation) throw new Error("已收到保存回执，尚未读取最新记录，请保留原答案后重试。");
       setRecorded(current.observation);
+      setAutoGrade(true);
       setAssistance(current.observation.assistance);
       setHelpOpen(false); setHelpOpenedOnce(false);
       onRecorded();
@@ -215,8 +224,9 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     pendingRef.current = true;
     const request: PracticeStart = { sessionId: attempt.sessionId, sessionInput: null, clientKey: `attempt-${crypto.randomUUID()}`, createInput: null };
     request.createInput = { sessionId: attempt.sessionId, problemId: attempt.problemId, requirementKey: attempt.requirementKey, clientKey: request.clientKey };
-    patch({ start: request, attemptId: null, observationId: null, submission: null, fields: { answer: "", outcome: "unverified", assistance: "unknown", referenceSkipped: false } });
+    patch({ start: request, attemptId: null, observationId: null, submission: null, fields: { answer: "", outcome: "unverified", assistance: "unknown", referenceSkipped: false, workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
     setAttempt(null); setRecorded(null); setReferenceChecked(false); setRestored(true);
+    setAutoGrade(false);
     // A repeated attempt retains the same session and its delivered assistance floor.
     setPending(true); setError("");
     try {
@@ -232,7 +242,12 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     continuity.startAnother({ skillLabel, stem: retest?.prompt ?? "", sourceId, referenceSourceId });
   }
 
-  if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={sources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
+  async function refreshSources() {
+    try { setSources((await createOpeningApi().listSources()).filter(source => source.uploadState === "uploaded")); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "文件暂时无法读取，请重试。"); }
+  }
+
+  if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
   return (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
       {!ready ? <p className="text-sm text-text-3" role="status">正在读取练习草稿…</p> : null}
@@ -301,9 +316,9 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             {sourceId && !stem.trim() ? <p role="status" className="mt-1 text-xs text-warn">已选题目来源，请填写下方的本次题干后开始。</p> : null}
           </div>
           <details className="rounded border border-line bg-bg/50 px-3 py-2">
-            <summary className="cursor-pointer text-xs font-medium text-text-2">更多选项（材料 / 题干）</summary>
+            <summary className="cursor-pointer text-xs font-medium text-text-2">题目材料与题干（用于 AI 批改）</summary>
             <div className="mt-3 space-y-3">
-              <p className="text-xs text-text-3">开始时由服务器记录题目、材料版本和时间；没有题目或版本的记录仍可保存，资格为待核验。</p>
+              <p className="text-xs text-text-3">选好题目材料并填写题干，保存作答后即可自动批改。</p>
               <label className="block text-sm text-text">
                 题目来源（可选）
                 <select
@@ -313,7 +328,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                   className="mt-1 w-full rounded border border-line bg-surface px-3 py-2"
                 >
                   <option value="">不关联题目材料，保留为待核验记录</option>
-                  {sources.map((source) => (
+                  {readySources.map((source) => (
                     <option key={source.id} value={source.id}>{source.name}</option>
                   ))}
                 </select>
@@ -327,7 +342,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                   className="mt-1 w-full rounded border border-line bg-surface px-3 py-2"
                 >
                   <option value="">暂不绑定参考；提交后无自对照步骤</option>
-                  {sources.map((source) => (
+                  {readySources.map((source) => (
                     <option key={source.id} value={source.id}>{source.name}</option>
                   ))}
                 </select>
@@ -354,13 +369,14 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
           </details>
         </form>
       ) : recorded ? (
-        <div className="space-y-3" role="status">
-          <p className="text-sm text-text">
-            已保存原答案。自报结果：{OUTCOME_LABEL[recorded.outcome]}
-            {recorded.referenceCheck ? " · 自对照参考（尚未经独立评分）" : "（尚未完成参考核对）"}。
-          </p>
-          <p className="text-xs text-text-3">自报正确不等于已核验正确；原始答案与资格分开保留。不显示掌握或稳固。</p>
-          {recorded.eligibility ? <LearningEvidenceEligibilityDetails eligibility={recorded.eligibility} /> : <p className="text-xs text-text-3">资格待核验。</p>}
+        <div className="space-y-3">
+          <p className="text-sm text-text" role="status">原答案已保存。</p>
+          <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={gradingPhoto.workSourceId ? gradingPhoto : undefined} onChanged={onRecorded} onUpdated={next => {
+            const current = readPracticeDraft(scope, null, draft.id);
+            if (!current || current.attemptId !== next.attemptId || current.start?.sessionId !== next.sessionId) return;
+            setAutoGrade(false); setRecorded(next); patch({ observationId: next.id });
+          }} />
+          {diagnostics && recorded.eligibility ? <LearningEvidenceEligibilityDetails eligibility={recorded.eligibility} /> : null}
           {canReferenceCheck ? (
             <ReferenceCheckStep
               observation={recorded}
@@ -422,6 +438,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                 className="mt-1 min-h-24 w-full rounded border border-line bg-surface px-3 py-2"
               />
             </label>
+            {attempt.problemId ? <AiGradingPhotoFields sources={sources} value={gradingPhoto} onChange={next => patch({ fields: { workSourceId: next.workSourceId, workSourceVersion: next.workSourceVersion, workPhysicalPage: next.physicalPage } })} disabled={pending || Boolean(draft.submission)} onRefresh={() => void refreshSources()} /> : null}
             <label className="block text-sm text-text">
               自报结果
               <select
@@ -461,7 +478,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
               </label>
             </details>
             <button disabled={pending} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">
-              {pending ? "正在保存…" : draft.submission ? "重试保存同一答案" : "保存当前答案"}
+              {pending ? "正在保存…" : draft.submission ? "重试保存同一答案" : attempt.problemId ? "保存并批改" : "保存当前答案"}
             </button>
           </form>
           <div className="border-t border-line pt-3">

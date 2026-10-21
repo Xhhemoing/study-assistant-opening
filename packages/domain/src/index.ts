@@ -324,6 +324,7 @@ export {
 } from "./opening/backup-learning-state";
 
 export * from "./opening/evidence-eligibility";
+export { AI_GRADING_MIN_CONFIDENCE, acceptedAiGradingOutcome, isAiGradedEvidence } from "./opening/ai-evaluation";
 export { resolveLearningPreferences } from "./opening/learning-preferences";
 export { summarizeLearningAggregate, type AggregateLearningSummary } from "./opening/learning-summary-aggregate";
 export {

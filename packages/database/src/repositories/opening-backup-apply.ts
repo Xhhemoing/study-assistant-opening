@@ -213,7 +213,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "attempt_id", "item_version_id", "requirement_key", "started_at", "submitted_at", "recorded_at",
     "source_versions", "reference_check", "submitted_intent", "history_revision", "workspace_history_revision",
     "root_observation_id", "revises_observation_id", "revision_kind", "revision_reason", "actor_id",
-    "effective_head_id", "server_evaluation",
+    "effective_head_id", "server_evaluation", "ai_evaluation",
   ],
   opening_skill_evidence: [
     "id", "workspace_id", "owner_user_id", "course_id", "node_id", "observation_id", "dimension", "created_at",
@@ -293,6 +293,7 @@ const JSONB_COLUMNS = new Set([
   "opening_learning_observations.source_versions",
   "opening_learning_observations.reference_check",
   "opening_learning_observations.server_evaluation",
+  "opening_learning_observations.ai_evaluation",
   "opening_learning_item_versions.evaluation_spec",
   "opening_suggestion_feedback.intent",
   "opening_plan_acceptances.before_blocks",

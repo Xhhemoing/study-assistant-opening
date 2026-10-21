@@ -90,6 +90,7 @@ export const openingLearningObservations = pgTable(
     sourceVersions: jsonb("source_versions"),
     referenceCheck: jsonb("reference_check"),
     serverEvaluation: jsonb("server_evaluation"),
+    aiEvaluation: jsonb("ai_evaluation"),
     submittedIntent: jsonb("submitted_intent"),
     historyRevision: bigint("history_revision", { mode: "number" }).notNull().default(0),
     rootObservationId: uuid("root_observation_id"),

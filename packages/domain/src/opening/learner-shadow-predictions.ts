@@ -1,5 +1,6 @@
 import type { LearnerStateFeature } from "./learner-state";
 import { predictClassicalBkt, predictSmoothedFrequency, CLASSICAL_BKT_PARAMETERS } from "./measurement/models";
+import { isAiGradedEvidence } from "./ai-evaluation";
 
 /** Predeclared experiment threshold, not fitted or calibrated for a learner. */
 export const LEARNER_SHADOW_ADVANCE_THRESHOLD = 0.8;
@@ -15,6 +16,8 @@ export function predictLearnerShadow(input: { features: readonly LearnerStateFea
   const eligible = input.features.filter(row => row.courseId === input.courseId && row.requirementKey === input.requirementKey
     && row.eligibility.independentAttempt === "yes" && row.eligibility.usableForCurrentVersion === "yes"
     && row.eligibility.verifiedCorrect !== "unknown" && Date.parse(row.attemptedAt) < cutoff
+    // AI feedback guides practice, but is not calibration truth for another model.
+    && !isAiGradedEvidence(row.eligibility)
     && (row.recordedAt == null || Date.parse(row.recordedAt) < cutoff)
     && !input.excludedProblemIds.includes(row.observationId));
   const ordered = [...eligible].sort((a, b) => Date.parse(a.attemptedAt) - Date.parse(b.attemptedAt) || a.observationId.localeCompare(b.observationId));

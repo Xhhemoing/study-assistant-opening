@@ -246,6 +246,7 @@ export * from "./teaching-resume";
 export * from "./teaching-math-model";
 
 export * from "./matrix-evaluation";
+export * from "./ai-evaluation";
 export * from "./loop-metrics";
 
 export * from "./local-replan";

@@ -20,7 +20,8 @@ export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
         JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
         WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-        AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=${version} AND c.page=${input.physicalPage})`;
+        AND ((s.mime IN ('image/jpeg','image/png','image/webp') AND s.version=${version} AND ${input.physicalPage}=1)
+          OR EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=${version} AND c.page=${input.physicalPage}))`;
       // A page selection is valid when any selected source contains it. Other
       // selected sources can still contribute text, but do not have to share
       // the same physical page or file format.
