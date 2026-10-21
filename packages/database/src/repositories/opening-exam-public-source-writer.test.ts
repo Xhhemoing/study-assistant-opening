@@ -58,6 +58,14 @@ describe("public source original writer", () => {
     const binding = await ensureExamCourseBinding(tx, scope, pack, input, now, undefined, write);
     expect(write).toHaveBeenCalledTimes(1);
     const original = write.mock.calls[0]![0];
+    const text = Buffer.from(original.body).toString("utf8");
+    expect(text).toContain(`题包：${pack.id}\n版本：${pack.version}`);
+    expect(text).toContain(`串讲：${pack.lessons[0]!.id}\n主题：${pack.lessons[0]!.topicId}`);
+    expect(text).toContain(pack.lessons[0]!.title);
+    expect(text).toContain(pack.lessons[0]!.summary);
+    for (const body of [...pack.lessons[0]!.steps, pack.lessons[0]!.workedExample, ...pack.lessons[0]!.pitfalls]) {
+      expect(text).not.toContain(body);
+    }
     expect(original.body.byteLength).toBeGreaterThan(Buffer.from(original.body).toString("utf8").length);
     expect(original.sourceId).toBe(binding.packSourceId);
     const metadata = queries.find(item => item.query.startsWith("INSERT INTO opening_sources"))!;

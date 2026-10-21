@@ -14,6 +14,8 @@ const attemptSchema = z.object({
     difficulty: z.enum(["foundation", "transfer"]), prompt: z.string(), options: z.array(z.object({ id: z.string(), label: z.string() })), estimatedMinutes: z.number(),
   }),
   prediction: z.object({ predictedAt: z.string(), skillId: z.string(), historyAttemptIds: z.array(z.string()), modelVersion: z.string().min(1).max(100), calibrated: z.literal(false), bktCorrect: z.number(), baselineCorrect: z.number() }).optional(),
+  lessonExposureIds: z.array(z.string()).optional(), seenExampleExposureIds: z.array(z.string()).optional(), partialExampleExposureIds: z.array(z.string()).optional(), firstFamilyExposure: z.boolean().nullable().optional(),
+  exposureCoverage: z.object({ kind: z.enum(["legacy_untracked_source", "unverifiable_source"]), packSourceId: z.string().uuid(), sourceVersion: z.number().int().nonnegative() }).optional(),
   feedback: z.object({ answer: z.string(), explanation: z.string() }).nullable(), hint: z.string().nullable(), independent: z.boolean(),
 });
 // A malformed 2xx response cannot acknowledge a write: validate the HTTP boundary
@@ -22,17 +24,19 @@ export const overviewSchema: z.ZodType<ExamSprintOverview> = z.object({
   pack: z.object({
     id: z.string(), version: z.string(), title: z.string(), description: z.string(),
     topics: z.array(z.object({ id: z.string(), title: z.string() })),
-    lessons: z.array(z.object({ id: z.string(), topicId: z.string(), title: z.string(), summary: z.string(), steps: z.array(z.string()), workedExample: z.string(), pitfalls: z.array(z.string()) })),
+    lessons: z.array(z.object({ id: z.string(), topicId: z.string(), title: z.string(), summary: z.string(), exposureIdentity: z.object({ packVersion: z.string(), contentFingerprint: z.string(), mappingVersion: z.string() }).nullable() })),
     sourceItems: z.array(z.object({ id: z.string(), topicId: z.string(), label: z.string(), sourceTitle: z.string(), sourcePage: z.number().nullable(), kind: z.enum(["choice", "problem", "exercise"]), suggestedDay: z.number(), skills: z.array(z.string()) })),
     weekPlan: z.array(z.object({ day: z.number(), minutes: z.number(), title: z.string(), tasks: z.array(z.string()) })), limitations: z.array(z.string()),
   }),
   state: z.object({
     version: z.literal(1), startedAt: z.string(), examDate: z.string().nullable(), dailyMinutes: z.number(), runs: z.array(runSchema),
+    lessonExposures: z.array(z.object({ id: z.string(), clientKey: z.string(), openedAt: z.string(), runId: z.string().nullable(), lessonId: z.string(), packId: z.string(), packVersion: z.string(), contentFingerprint: z.string(), mappingVersion: z.string(), displayedFamilyIds: z.array(z.string()), partialFamilyIds: z.array(z.string()).optional() })).optional(),
     sourceRecords: z.array(z.object({
       id: z.string(), sourceId: z.string(), phase: z.enum(["first", "blind", "delayed", "variant"]), outcome: z.enum(["correct", "partial", "incorrect", "read"]),
       assistance: z.enum(["none", "hint", "solution"]), durationMinutes: z.number(), errorCause: examErrorCauseSchema.nullable(), note: z.string(), recordedAt: z.string(), answerText: z.string().optional(), workSourceId: z.string().optional(), workSourceVersion: z.number().optional(), reviewId: z.string().optional(), referenceChecked: z.boolean().optional(),
     })),
   }),
+  lessonContents: z.array(z.object({ exposureId: z.string(), lesson: z.object({ id: z.string(), topicId: z.string(), title: z.string(), summary: z.string(), steps: z.array(z.string()), workedExample: z.string(), pitfalls: z.array(z.string()) }) })),
   attempts: z.array(attemptSchema), activeRun: runSchema.nullable(), currentAttempt: attemptSchema.nullable(),
   skills: z.array(z.object({ skillId: z.string(), topicId: z.string(), title: z.string(), status: z.enum(["untested", "weak", "usable", "secure"]), independentCorrect: z.number(), attempted: z.number(), dueAt: z.string().nullable(), reason: z.string(), lessonId: z.string() })),
   summary: z.object({ sourceTotal: z.number(), sourceCovered: z.number(), sourceIndependent: z.number(), sourceDelayed: z.number(), onlineAnswered: z.number(), onlineIndependentCorrect: z.number() }),

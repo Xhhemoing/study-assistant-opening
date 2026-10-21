@@ -10,6 +10,7 @@ import { z } from "zod";
 import { learningError } from "./opening-learning-facts";
 import { readCurrentExamNodeIds } from "./opening-exam-skill-identity";
 import { reserveOpeningSourceQuota, type OpeningSourceQuota } from "./opening-source-quota";
+import { examPackDirectorySections } from "./opening-exam-source-format";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -65,17 +66,13 @@ async function mapMaterials(tx: TransactionSql, scope: Scope, pack: ExamPack, in
   return input.materials.map(material => ({ ...material }));
 }
 
-/** Whitelist public lesson fields. The question pool is never serialized into the course material. */
+/** Public syllabus metadata preserves source/skill identity; lesson bodies require Sprint authorization. */
 async function createPublicPackSource(
   tx: TransactionSql, scope: Scope, pack: ExamPack, courseId: string, now: string, writePublicSource?: ExamPublicSourceWriter,
   quota?: OpeningSourceQuota,
 ) {
   const sourceId = randomUUID();
-  const sections = [
-    { lessonId: null, title: pack.title, text: `${pack.title}\n\n${pack.description}\n\n${pack.limitations.join("\n")}` },
-    ...pack.lessons.map(lesson => ({ lessonId: lesson.id, title: lesson.title,
-      text: `${lesson.title}\n\n${lesson.summary}\n\n${lesson.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n例题讲解\n${lesson.workedExample}\n\n易错点\n${lesson.pitfalls.join("\n")}` })),
-  ];
+  const sections = examPackDirectorySections(pack);
   const body = Buffer.from(sections.map(section => section.text).join("\n\n"), "utf8");
   const bytes = body.byteLength, digest = createHash("sha256").update(body).digest("hex");
   // The caller already holds the workspace lock before material/source locks.
@@ -86,7 +83,7 @@ async function createPublicPackSource(
   // uploaded/ready so ordinary downloads, backups and re-parsing share the same original.
   await writePublicSource?.({ sourceId, version: 0, mime: "text/plain", body });
   await tx`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state,created_at,updated_at)
-    VALUES(${sourceId},${scope.workspaceId},${`${pack.title} · 公开串讲`.slice(0, 180)},'text/plain',${bytes},${digest},0,'uploaded','ready',${now},${now})`;
+    VALUES(${sourceId},${scope.workspaceId},${`${pack.title} · 串讲目录`.slice(0, 180)},'text/plain',${bytes},${digest},0,'uploaded','ready',${now},${now})`;
   await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
     VALUES(${sourceId},0,${scope.workspaceId},${bytes},${digest},'available')`;
   const lessonChunks = new Map<string, string>();

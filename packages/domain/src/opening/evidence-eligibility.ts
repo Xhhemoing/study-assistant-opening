@@ -22,7 +22,14 @@ type Reasons = Set<EvidenceEligibilityReasonCode>;
 /** Effective current-attempt help; a self-report cannot erase an established delivery. */
 export function resolveEvidenceAssistance(observation: EvidenceObservation, context: EvidenceEligibilityContext) {
   if (context.selfReportedAnswerConditions?.copiedAnswer) return "revealed" as const;
-  return evaluateAssistance(observation, context.helpHistory, new Set()).assistance;
+  const assistance = evaluateAssistance(observation, context.helpHistory, new Set()).assistance;
+  if (assistance === "revealed") return assistance;
+  if (context.examAttempt?.lessonAssistance === true || context.examAttempt?.partialExample === true) return "hinted" as const;
+  if (assistance === "hinted") return assistance;
+  if (context.examAttempt && (context.examAttempt.lessonAssistance === null
+    || context.examAttempt.partialExample === null
+    || context.examAttempt.firstFamilyExposure === null || context.examAttempt.exposureCoverage !== undefined)) return "unknown" as const;
+  return assistance;
 }
 
 function evaluateCorrectness(
@@ -153,6 +160,24 @@ export function evaluateEvidenceEligibility(
   if (context.selfReportedAnswerConditions?.reportedGuess) {
     if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
     reasons.add("self_reported_guess");
+  }
+  if (context.examAttempt?.lessonAssistance === true) {
+    result.independentAttempt = "no";
+    reasons.add("exam_lesson_assistance");
+  }
+  if (context.examAttempt && (context.examAttempt.lessonAssistance === null
+    || context.examAttempt.firstFamilyExposure === null || context.examAttempt.partialExample === null)) {
+    if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
+    reasons.add("exam_exposure_history_unknown");
+  }
+  if (context.examAttempt?.exposureCoverage !== undefined) {
+    if (result.independentAttempt !== "no") result.independentAttempt = "unknown";
+    reasons.add(context.examAttempt.exposureCoverage === "legacy_untracked_source"
+      ? "exam_legacy_untracked_source" : "exam_exposure_history_unknown");
+  }
+  if (context.examAttempt?.partialExample === true) {
+    result.independentAttempt = "no";
+    reasons.add("exam_partial_example_exposure");
   }
   if (context.examAttempt?.firstFamilyExposure === false) {
     result.independentAttempt = "no";

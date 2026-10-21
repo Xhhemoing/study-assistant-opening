@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import type { ExamAttempt, ExamCourseBinding, ExamPack, ExamSprintCommand, ExamSprintState, Scope } from "@aistudy/contracts";
-import { examSprintOverview } from "@aistudy/domain";
+import { examAttemptExposureQualification, examSprintOverview } from "@aistudy/domain";
 import { admitLearningSources, learningError, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { createExamSession } from "./opening-exam-integration-session";
 import { insertOpeningLearningObservationInTx } from "./opening-learning-observations";
@@ -40,8 +40,7 @@ async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack:
     VALUES(${learningAttemptId},${scope.workspaceId},${scope.ownerUserId},${sessionId},${binding.courseId},${activityId},${skillLabel},${skill.requirementKey},
       ${problemId},${itemVersionId},${sourceIds},${tx.json(sourceVersions)},${`exam-attempt:${linkId}`},
       ${tx.json({ examSprint: { sprintId, examAttemptId: attempt.id, spec }, nodeId: skill.nodeId })},${revision},${attempt.presentedAt})`;
-  const index = state.attempts.findIndex(item => item.id === attempt.id);
-  const firstFamily = !state.attempts.slice(0, index).some(item => pack.questions.find(q => q.id === item.questionId)?.familyId === question.familyId);
+  const firstFamily = examAttemptExposureQualification(attempt, state, pack).firstFamilyExposure === true;
   const run = state.runs.find(item => item.id === attempt.runId)!;
   const delayedEarliest = run.mode === "retest" ? examSprintOverview(before, pack, now,
     await readExamEvidenceState(tx, scope, sprintId, before)).skills.find(item => item.skillId === question.skillId)?.dueAt ?? null : null;
@@ -83,7 +82,7 @@ async function mockSourcesAvailable(tx: TransactionSql, scope: Scope, attempt: R
     && source.availability === "available" && source.excluded === false && Number(source.version) === versions![String(source.id)]);
 }
 
-async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state: ExamSprintState, attempt: ExamAttempt,
+async function publish(tx: TransactionSql, scope: Scope, sprintId: string, pack: ExamPack, state: ExamSprintState, attempt: ExamAttempt,
   binding: ExamCourseBinding, nodeIds: ReadonlySet<string>) {
   const [row] = await tx`SELECT l.id AS link_id,l.publication,l.node_id,l.first_family_exposure,a.*
     FROM opening_exam_attempt_links l JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
@@ -103,8 +102,11 @@ async function publish(tx: TransactionSql, scope: Scope, sprintId: string, state
       WHERE id=${String(row.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     return;
   }
+  const qualification = examAttemptExposureQualification(attempt, state, pack);
   const assistance = attempt.help.some(item => item.kind === "solution") ? "revealed"
-    : attempt.help.length ? "hinted" : row.first_family_exposure === true ? "independent" : "unknown";
+    : attempt.help.length || qualification.lessonAssistance === true || qualification.partialExample === true ? "hinted"
+      : qualification.lessonAssistance === false && qualification.firstFamilyExposure === true
+        && row.first_family_exposure === true ? "independent" : "unknown";
   const observation = await insertOpeningLearningObservationInTx(tx, scope, {
     sessionId: String(row.session_id), courseId: String(row.course_id), skillLabel: String(row.skill_label), sourceIds: row.source_ids as string[],
     attemptId: String(row.id), problemId: String(row.problem_id), answer: attempt.answer,
@@ -130,6 +132,14 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
   for (const attempt of state.attempts.filter(item => !previousAttemptIds.has(item.id))) {
     await present(tx, scope, sprintId, pack, binding, before, state, attempt, now);
   }
+  // A lesson opened while an attempt is pending changes its captured qualification.
+  // Answered captures retain their original references and published evidence.
+  if (command.action === "open_lesson" || command.action === "answer") {
+    for (const attempt of state.attempts.filter(item => before.attempts.some(previous => previous.id === item.id && previous.answeredAt === null))) {
+      await tx`UPDATE opening_exam_attempt_links SET first_family_exposure=${examAttemptExposureQualification(attempt, state, pack).firstFamilyExposure === true}
+        WHERE sprint_id=${sprintId} AND exam_attempt_id=${attempt.id} AND publication<>'published'`;
+    }
+  }
   if (command.action === "help") await help(tx, scope, sprintId, pack, binding, state.attempts.find(item => item.id === command.attemptId)!);
   const previouslyAnswered = new Set(before.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => attempt.id));
   const previouslyOpenRuns = new Set(before.runs.filter(run => run.completedAt === null).map(run => run.id));
@@ -141,6 +151,6 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
     WHERE sprint_id=${sprintId} AND publication<>'published'`;
   const pendingIds = new Set(pending.map(link => String(link.exam_attempt_id)));
   for (const attempt of candidates.filter(item => pendingIds.has(item.id))) {
-    await publish(tx, scope, sprintId, state, attempt, binding, nodeIds);
+    await publish(tx, scope, sprintId, pack, state, attempt, binding, nodeIds);
   }
 }

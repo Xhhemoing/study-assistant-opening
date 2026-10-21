@@ -1,11 +1,17 @@
 import type {
-  ExamAttempt, ExamAttemptView, ExamMode, ExamPack, ExamQuestion, ExamRun,
+  ExamAttempt, ExamAttemptView, ExamExposureCoverage, ExamMode, ExamPack, ExamQuestion, ExamRun,
   ExamSkillSummary, ExamSourceRecord, ExamSprintCommand, ExamSprintOverview, ExamSprintState,
 } from "@aistudy/contracts";
+import { validExamLessonExposure } from "./lesson-exposure-mapping";
 import { snapshotExamPrediction } from "./analytics";
+import { captureExamAttemptExposures, examAttemptExposureQualification } from "./exposure-qualification";
+export { examAttemptExposureQualification } from "./exposure-qualification";
+export { validExamLessonExposure } from "./lesson-exposure-mapping";
 
 export type ExamRuleEvidence = { usable: boolean; correct: boolean | null; independent: boolean; assisted: boolean };
 export type ExamSelectionContext = {
+  /** Server-classified real source provenance; never inferred from an empty ledger. */
+  exposureCoverage?: ExamExposureCoverage;
   bktEligibleAttemptIds?: readonly string[];
   /** Live canonical qualification for linked records; absent keys retain isolated sprint history. */
   ruleEvidence?: Readonly<Record<string, ExamRuleEvidence>>;
@@ -36,21 +42,21 @@ function currentAttempt(state: ExamSprintState, run: ExamRun): ExamAttempt | nul
 }
 
 function independent(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): boolean {
-  if (attempt.answeredAt === null || attempt.help.length > 0) return false;
+  const exposure = examAttemptExposureQualification(attempt, state, pack);
+  if (attempt.answeredAt === null || attempt.help.length > 0 || exposure.exposureHistoryUncertain || exposure.lessonAssistance !== false || exposure.firstFamilyExposure !== true) return false;
   const current = context?.ruleEvidence?.[attempt.id];
   if (current && (!current.usable || !current.independent || current.assisted)) return false;
-  const family = questionFor(pack, attempt.questionId).familyId;
-  const index = state.attempts.findIndex(item => item.id === attempt.id);
-  return !state.attempts.slice(0, index).some(item => questionFor(pack, item.questionId).familyId === family);
+  return true;
 }
 
-function assisted(attempt: ExamAttempt, context?: ExamSelectionContext): boolean {
-  return attempt.help.length > 0 || context?.ruleEvidence?.[attempt.id]?.assisted === true;
+function assisted(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): boolean {
+  return Boolean(attempt.lessonExposureIds?.length) || examAttemptExposureQualification(attempt, state, pack).partialExample === true
+    || attempt.help.length > 0 || context?.ruleEvidence?.[attempt.id]?.assisted === true;
 }
 
 function visibleEvidence(state: ExamSprintState, context?: ExamSelectionContext): ExamAttempt[] {
   const sealedRuns = new Set(state.runs.filter(run => isMock(run.mode) && !run.completedAt).map(run => run.id));
-  return state.attempts.filter(attempt => !sealedRuns.has(attempt.runId) && context?.ruleEvidence?.[attempt.id]?.usable !== false)
+  return state.attempts.filter(attempt => attempt.answeredAt !== null && !sealedRuns.has(attempt.runId) && context?.ruleEvidence?.[attempt.id]?.usable !== false)
     .map(attempt => {
       const current = context?.ruleEvidence?.[attempt.id];
       if (!current) return attempt;
@@ -66,7 +72,7 @@ function recheckSkills(state: ExamSprintState, pack: ExamPack, context?: ExamSel
   const sealedRuns = new Set(state.runs.filter(run => isMock(run.mode) && !run.completedAt).map(run => run.id));
   return new Set(state.attempts.filter(attempt => {
     const current = context?.ruleEvidence?.[attempt.id];
-    return current && !sealedRuns.has(attempt.runId) && (!current.usable
+    return attempt.answeredAt !== null && current && !sealedRuns.has(attempt.runId) && (!current.usable
       || attempt.correct === true && (!current.independent || current.correct !== true));
   }).map(attempt => questionFor(pack, attempt.questionId).skillId));
 }
@@ -78,15 +84,15 @@ function skillSummaries(state: ExamSprintState, pack: ExamPack, context?: ExamSe
   return skills.map(question => {
     const attempts = evidence.filter(attempt => questionFor(pack, attempt.questionId).skillId === question.skillId);
     const wins = attempts.filter(attempt => attempt.correct === true && independent(attempt, state, pack, context));
-    const effective = attempts.filter(attempt => attempt.correct === false || assisted(attempt, context) || independent(attempt, state, pack, context));
+    const effective = attempts.filter(attempt => attempt.correct === false || assisted(attempt, state, pack, context) || independent(attempt, state, pack, context));
     const last = effective.at(-1);
-    const failureIndex = effective.reduce((latest, attempt, index) => attempt.correct === false || assisted(attempt, context) ? index : latest, -1);
+    const failureIndex = effective.reduce((latest, attempt, index) => attempt.correct === false || assisted(attempt, state, pack, context) ? index : latest, -1);
     const recoveredWins = effective.slice(failureIndex + 1).filter(attempt => attempt.correct === true && independent(attempt, state, pack, context));
     const firstWin = recoveredWins[0];
     const lastWin = recoveredWins.at(-1);
     const secure = firstWin?.answeredAt && lastWin?.answeredAt && recoveredWins.length >= 2
       && at(lastWin.answeredAt) - at(firstWin.answeredAt) >= DAY;
-    const weak = last && (last.correct === false || assisted(last, context));
+    const weak = last && (last.correct === false || assisted(last, state, pack, context));
     const status = weak ? "weak" : secure ? "secure" : wins.length > 0 ? "usable" : "untested";
     const latestTime = last?.answeredAt ?? last?.help.at(-1)?.at;
     return {
@@ -186,16 +192,18 @@ function selectQuestions(state: ExamSprintState, pack: ExamPack, mode: ExamMode,
 }
 
 function newAttempt(run: ExamRun, questionId: string, state: ExamSprintState, pack: ExamPack, clientKey: string, now: string, context?: ExamSelectionContext): ExamAttempt {
-  return {
+  const attempt: ExamAttempt = {
     id: `attempt-${state.attempts.length + 1}-${clientKey.slice(0, 65)}`, questionId, runId: run.id,
     presentedAt: now, answeredAt: null, answer: null, correct: null, confidence: null, durationSeconds: null,
     help: [], errorCause: null,
     prediction: snapshotExamPrediction(state, pack, questionId, now, context?.bktEligibleAttemptIds),
   };
+  captureExamAttemptExposures(attempt, state, pack, context?.exposureCoverage);
+  return attempt;
 }
 
 export function createExamSprintState(now: string): ExamSprintState {
-  return { version: 1, startedAt: now, examDate: null, dailyMinutes: 360, runs: [], attempts: [], sourceRecords: [] };
+  return { version: 1, startedAt: now, examDate: null, dailyMinutes: 360, runs: [], attempts: [], sourceRecords: [], lessonExposures: [] };
 }
 
 function recordSource(state: ExamSprintState, command: Extract<ExamSprintCommand, { action: "source" }>, pack: ExamPack, now: string): void {
@@ -232,8 +240,38 @@ function recordSource(state: ExamSprintState, command: Extract<ExamSprintCommand
   state.sourceRecords.push(record);
 }
 
+function openLesson(state: ExamSprintState, command: Extract<ExamSprintCommand, { action: "open_lesson" }>, pack: ExamPack, now: string, context?: ExamSelectionContext): void {
+  const active = activeRun(state);
+  const current = active ? currentAttempt(state, active) : null;
+  if (active && isMock(active.mode)) fail("CONFLICT", "模拟交卷前不能打开串讲，请先完成交卷。");
+  if ((active?.id ?? null) !== command.expectedRunId || (current?.id ?? null) !== command.expectedAttemptId) {
+    fail("CONFLICT", "练习上下文已改变，请重新载入后再打开串讲。");
+  }
+  const lesson = pack.lessons.find(item => item.id === command.lessonId) ?? fail("NOT_FOUND", "串讲不存在。");
+  const mapping = validExamLessonExposure(lesson);
+  if (!mapping) fail("CONFLICT", "此题包版本没有已审核的串讲曝光映射，暂不可打开；请保留原题包记录。");
+  if (command.packVersion !== pack.version || command.contentFingerprint !== mapping.contentFingerprint || command.mappingVersion !== mapping.mappingVersion) {
+    fail("CONFLICT", "串讲内容版本已改变，请重新载入后再打开。");
+  }
+  const exposures = state.lessonExposures ??= [];
+  const existing = exposures.find(exposure => exposure.packId === pack.id && exposure.packVersion === pack.version
+    && exposure.runId === (active?.id ?? null) && exposure.lessonId === lesson.id
+    && exposure.contentFingerprint === mapping.contentFingerprint && exposure.mappingVersion === mapping.mappingVersion);
+  if (!existing) exposures.push({
+    id: `lesson-exposure-${exposures.length + 1}-${command.clientKey.slice(0, 60)}`,
+    clientKey: command.clientKey, openedAt: now, runId: active?.id ?? null,
+    lessonId: lesson.id, packId: pack.id, packVersion: pack.version,
+    ...structuredClone(mapping),
+  });
+  if (current) captureExamAttemptExposures(current, state, pack, context?.exposureCoverage);
+}
+
 export function applyExamSprintCommand(state: ExamSprintState, command: ExamSprintCommand, pack: ExamPack, now: string, context?: ExamSelectionContext): ExamSprintState {
   const result = structuredClone(state);
+  if (command.action === "open_lesson") {
+    openLesson(result, command, pack, now, context);
+    return result;
+  }
   if (command.action === "configure") {
     result.examDate = command.examDate;
     result.dailyMinutes = command.dailyMinutes;
@@ -289,6 +327,7 @@ export function applyExamSprintCommand(state: ExamSprintState, command: ExamSpri
   if (attempt.id !== command.attemptId) fail("CONFLICT", "只能操作当前题目。");
   if (attempt.answeredAt) fail("CONFLICT", "本题已经提交，首次作答不能覆盖。");
   if (command.action === "help") {
+    captureExamAttemptExposures(attempt, result, pack, context?.exposureCoverage);
     if (isMock(active.mode) && command.kind !== "external") fail("CONFLICT", "限时模拟不提供帮助，请交卷后查看解析。");
     if (!attempt.help.some(help => help.kind === command.kind)) attempt.help.push({ kind: command.kind, at: now });
     return result;
@@ -297,6 +336,7 @@ export function applyExamSprintCommand(state: ExamSprintState, command: ExamSpri
   const question = questionFor(pack, attempt.questionId);
   if (!question.options.some(option => option.id === command.answer)) fail("VALIDATION", "请选择本题提供的有效选项。");
   if (at(now) < at(attempt.presentedAt)) fail("VALIDATION", "作答时间不能早于题目展示时间。");
+  captureExamAttemptExposures(attempt, result, pack, context?.exposureCoverage);
   attempt.answer = command.answer;
   attempt.correct = command.answer === question.answer;
   attempt.answeredAt = now;
@@ -348,7 +388,23 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   const active = activeRun(state);
   const current = active ? currentAttempt(state, active) : null;
   const evidence = visibleEvidence(state, context);
-  const { questions: _questions, ...publicPack } = pack;
+  const { questions: _questions, lessons, ...packMetadata } = pack;
+  const publicPack: ExamSprintOverview["pack"] = {
+    ...packMetadata,
+    lessons: lessons.map(lesson => {
+      const mapping = validExamLessonExposure(lesson);
+      return { id: lesson.id, topicId: lesson.topicId, title: lesson.title, summary: lesson.summary,
+        exposureIdentity: mapping ? { packVersion: pack.version, contentFingerprint: mapping.contentFingerprint, mappingVersion: mapping.mappingVersion } : null };
+    }),
+  };
+  const lessonContents: ExamSprintOverview["lessonContents"] = active && isMock(active.mode) ? [] : lessons.flatMap(lesson => {
+    const mapping = validExamLessonExposure(lesson);
+    if (!mapping) return [];
+    const exposure = (state.lessonExposures ?? []).find(item => item.packId === pack.id && item.packVersion === pack.version
+      && (!active || item.runId === active.id)
+      && item.lessonId === lesson.id && item.contentFingerprint === mapping.contentFingerprint && item.mappingVersion === mapping.mappingVersion);
+    return exposure ? [{ exposureId: exposure.id, lesson: structuredClone(lesson) }] : [];
+  });
   const { attempts: _attempts, ...publicState } = state;
   const distinctSources = (predicate: (record: ExamSourceRecord) => boolean) => new Set(currentSourceRecords(state, context).filter(predicate).map(record => record.sourceId)).size;
   const selectionState = active ? { ...state, attempts: state.attempts.filter(attempt => attempt.runId !== active.id) } : state;
@@ -363,7 +419,7 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   }
   recommendations.push({ title: active ? "本轮题目安排" : "下一轮练习安排", reason: selection.note, lessonId: null, mode: "practice" });
   return {
-    pack: structuredClone(publicPack), state: structuredClone(publicState), attempts,
+    pack: structuredClone(publicPack), state: { ...structuredClone(publicState), lessonExposures: structuredClone(state.lessonExposures ?? []) }, attempts, lessonContents,
     activeRun: active ? structuredClone(active) : null,
     currentAttempt: current ? attempts.find(attempt => attempt.id === current.id) ?? null : null,
     skills, recommendations, workload: workload(state, pack, now, context),

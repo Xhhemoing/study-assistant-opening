@@ -1,4 +1,5 @@
 import type { ExamAttempt, ExamBktReport, ExamPack, ExamPredictionSnapshot, ExamSprintState } from "@aistudy/contracts";
+import { examAttemptExposureQualification } from "./exposure-qualification";
 import { predictClassicalBkt, predictSmoothedFrequency } from "../measurement/models";
 
 const timestamp = (value: string) => Date.parse(value);
@@ -9,15 +10,15 @@ function independentAnswered(state: ExamSprintState, pack: ExamPack, index: numb
   const attempt = state.attempts[index]!;
   const question = pack.questions.find(item => item.id === attempt.questionId);
   const run = state.runs.find(item => item.id === attempt.runId);
-  if (!question || !run || attempt.help.length > 0 || attempt.answeredAt === null
+  const exposure = examAttemptExposureQualification(attempt, state, pack);
+  if (!question || !run || attempt.help.length > 0 || exposure.exposureHistoryUncertain || exposure.lessonAssistance !== false || exposure.firstFamilyExposure !== true || attempt.answeredAt === null
     || typeof attempt.correct !== "boolean" || !question.options.some(option => option.id === attempt.answer)
     || attempt.correct !== (attempt.answer === question.answer)) return false;
   const presented = timestamp(attempt.presentedAt);
   const answered = timestamp(attempt.answeredAt);
   if (!Number.isFinite(presented) || !Number.isFinite(answered) || answered < presented || answered > cutoff) return false;
   if (isMock(run.mode) && (run.completedAt === null || timestamp(run.completedAt) > cutoff)) return false;
-  return !state.attempts.slice(0, index).some(previous =>
-    pack.questions.find(item => item.id === previous.questionId)?.familyId === question.familyId);
+  return true;
 }
 
 function historyFor(

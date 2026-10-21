@@ -1,8 +1,10 @@
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
-import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
+import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
 import { mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
+import { OpeningExamSprintRepositoryError, parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
+import { readExamSourceExposure } from "./opening-exam-source-exposure";
 
 type Row = Record<string, unknown>;
 export type OpeningEvidenceDependencies = {
@@ -155,9 +157,10 @@ export async function readOpeningLearningEvidenceContexts(
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
   // Keep the immutable exposure/protocol link even if the observation is revised.
   const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
-      e.learning_attempt_id AS attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
+      e.learning_attempt_id AS attempt_id,e.exam_attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
       a.session_id,a.course_id,a.problem_id,a.item_version_id,
       s.pack_snapshot->>'id' AS exam_pack_id,s.pack_snapshot->>'version' AS exam_pack_version,
+      s.id AS exam_sprint_id,s.pack_snapshot AS exam_pack_snapshot,s.state AS exam_sprint_state,
       h.id AS receipt_id,h.kind,h.delivered_at,h.history_revision
     FROM opening_exam_attempt_links e
     JOIN opening_exam_sprints s ON s.id=e.sprint_id
@@ -172,6 +175,18 @@ export async function readOpeningLearningEvidenceContexts(
         OR ${problemIds.length ? db`a.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`})
     ORDER BY e.id,h.delivered_at,h.id` : [];
   const examLinks = new Map(examRows.map(row => [String(row.attempt_id), row]));
+  const examSnapshots = new Map<string, ReturnType<typeof parseExamSprintSnapshot> | null>();
+  for (const row of examRows) {
+    if (row.exam_sprint_state !== undefined && !examSnapshots.has(String(row.exam_sprint_id))) {
+      try {
+        examSnapshots.set(String(row.exam_sprint_id), parseExamSprintSnapshot(row.exam_pack_snapshot, row.exam_sprint_state));
+      } catch (error) {
+        if (!(error instanceof OpeningExamSprintRepositoryError)) throw error;
+        // An unprovable Sprint reference is unknown evidence, never proof of no help.
+        examSnapshots.set(String(row.exam_sprint_id), null);
+      }
+    }
+  }
   const examIdentities = await db`SELECT * FROM (${openingExamIdentityStateQuery(db, scope)}) identity
     WHERE identity.attempt_id=ANY(${attemptIds}::uuid[]) OR identity.observation_id=ANY(${rootIds}::uuid[])`;
   const identitiesByAttempt = new Map(examIdentities.filter(row => row.attempt_id != null).map(row => [String(row.attempt_id), row]));
@@ -374,6 +389,10 @@ export async function readOpeningLearningEvidenceContexts(
     }
     const examSpec = record.itemVersionId ? examItems.get(record.itemVersionId) : undefined;
     const examLink = record.attemptId ? examLinks.get(record.attemptId) : undefined;
+    const examSnapshot = examLink ? examSnapshots.get(String(examLink.exam_sprint_id)) : undefined;
+    const examCapture = examSnapshot?.state.attempts.find(attempt => attempt.id === examLink?.exam_attempt_id);
+    const examQualification = examSnapshot && examCapture
+      ? examAttemptExposureQualification(examCapture, examSnapshot.state, examSnapshot.pack) : undefined;
     const examIdentity = (record.attemptId ? identitiesByAttempt.get(record.attemptId) : undefined)
       ?? identitiesByRoot.get(record.rootObservationId ?? record.id);
     const identityCurrent = examIdentity ? examIdentity.identity_current === true && examIdentity.requirement_key === record.requirementKey
@@ -382,10 +401,25 @@ export async function readOpeningLearningEvidenceContexts(
     const linkedExam = examSpec && examLink && examLink.session_id === record.sessionId
       && examLink.problem_id === record.problemId && examLink.item_version_id === record.itemVersionId
       && examLink.exam_pack_id === examSpec.packId && examLink.exam_pack_version === examSpec.packVersion
+      && (!examSnapshot || examCapture?.questionId === examSpec.questionId)
       && typeof examLink.first_family_exposure === "boolean";
     if (linkedExam) {
+      let exposureCoverage: "legacy_untracked_source" | "unverifiable" | undefined = examSnapshot === null ? "unverifiable" : undefined;
+      if (examCapture?.exposureCoverage && examSnapshot) {
+        const coverage = examCapture.exposureCoverage;
+        const classification = await readExamSourceExposure(db, scope, String(examLink.exam_sprint_id), examSnapshot.pack, examCapture.id);
+        exposureCoverage = coverage.kind === "legacy_untracked_source" && classification?.kind === "legacy_untracked_source"
+          && coverage.packSourceId === classification.packSourceId && coverage.sourceVersion === classification.sourceVersion
+          ? "legacy_untracked_source" : "unverifiable";
+      }
       context.examAttempt = {
-        firstFamilyExposure: examLink.first_family_exposure as boolean,
+        firstFamilyExposure: examQualification ? examQualification.firstFamilyExposure : examSnapshot === null
+          ? null : examLink.first_family_exposure as boolean,
+        ...(examSnapshot !== undefined ? {
+          lessonAssistance: examQualification?.lessonAssistance ?? null,
+          partialExample: examQualification?.partialExample ?? null,
+        } : {}),
+        ...(exposureCoverage ? { exposureCoverage } : {}),
         answerUnchanged: examAnswerUnchanged(record, chains.get(record.rootObservationId ?? record.id) ?? [], examLink.submitted_answer),
       };
       const earliestAt = examLink.delayed_earliest_at == null ? Number.NaN : new Date(examLink.delayed_earliest_at as string | Date).getTime();
