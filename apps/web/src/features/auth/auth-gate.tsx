@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loginHrefForReturn } from "./auth-form-model";
 import { clearSessionExpiry, installSessionFetch, subscribeToSessionExpiry } from "./session-expiry";
 
-type SessionIdentity = { id: string; workspaceId: string };
+import { publishVerifiedSessionIdentity, type SessionIdentity } from "./session-identity";
 
 async function readSessionIdentity(response: Response): Promise<SessionIdentity | null> {
   const body: unknown = await response.json().catch(() => null);
@@ -49,6 +49,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
+    let releaseIdentity: (() => void) | undefined;
     fetch("/api/auth/me", { cache: "no-store" })
       .then(async (response) => {
         if (!active) return;
@@ -57,6 +58,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
           if (!active) return;
           if (!identity) { setError("暂时无法验证登录账户，请稍后重试。"); return; }
           initialIdentity.current = identity;
+          releaseIdentity = publishVerifiedSessionIdentity(identity);
           clearSessionExpiry();
           setReady(true);
         }
@@ -66,7 +68,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       .catch(() => {
         if (active) setError("暂时无法验证登录状态，请检查网络后重试。");
       });
-    return () => { active = false; };
+    return () => { active = false; releaseIdentity?.(); };
   }, [router]);
 
   if (error) {

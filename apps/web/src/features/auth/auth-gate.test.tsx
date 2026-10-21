@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthGate } from "./auth-gate";
 import { clearSessionExpiry, createSessionFetch } from "./session-expiry";
+import { getVerifiedSessionNamespace, publishVerifiedSessionIdentity } from "./session-identity";
 
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], cursor: 0, effects: [] as Array<() => unknown>, replace: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: hooks.replace }) }));
@@ -65,21 +66,36 @@ describe("AuthGate session recovery", () => {
     let authenticate!: (response: Response) => void;
     transport.mockImplementationOnce(() => new Promise(resolve => { authenticate = resolve; }));
     expect(renderToStaticMarkup(render())).not.toContain("尚未保存的答案");
+    expect(getVerifiedSessionNamespace()).toBeNull();
     cleanups = hooks.effects.map(effect => effect()).filter((value): value is () => void => typeof value === "function");
     expect(fetch).not.toBe(transport);
     authenticate(Response.json({ user: { id: "u1", workspaceId: "w1" } }));
     await flush();
     expect(content().props.children).toBe(child);
+    expect(getVerifiedSessionNamespace()).not.toBeNull();
     transport.mockResolvedValueOnce(Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 }));
     await fetch("/api/opening/conversations", { method: "POST" });
     expect(content().props.inert).toBe(true);
     cleanups.forEach(cleanup => cleanup());
     expect(fetch).toBe(transport);
+    expect(getVerifiedSessionNamespace()).toBeNull();
   });
 
   it("retains the existing initial unauthenticated redirect with the exact return destination", async () => {
     await mount(new Response(null, { status: 401 }));
     expect(hooks.replace).toHaveBeenCalledWith("/login?returnTo=%2Fopening%2Fcourses%2Fc1%3Ftab%3Dunits%23q2");
+  });
+
+  it("does not clear a newer gate's verified identity when an earlier gate unmounts", async () => {
+    await mount();
+    const previousNamespace = getVerifiedSessionNamespace();
+    const releaseNewGate = publishVerifiedSessionIdentity({ id: "u2", workspaceId: "w2" });
+    const nextNamespace = getVerifiedSessionNamespace();
+    expect(nextNamespace).not.toBe(previousNamespace);
+    cleanups.forEach(cleanup => cleanup());
+    expect(getVerifiedSessionNamespace()).toBe(nextNamespace);
+    releaseNewGate();
+    expect(getVerifiedSessionNamespace()).toBeNull();
   });
 
   it("keeps the same child in the same tree position when session expiry opens a login notice", async () => {
@@ -156,10 +172,12 @@ describe("AuthGate session recovery", () => {
   ])("does not unlock another account, workspace or missing identity: %j", async identity => {
     await mount();
     await expire();
+    const originalNamespace = getVerifiedSessionNamespace();
     transport.mockResolvedValueOnce(Response.json(identity));
     recheckButton().props.onClick();
     await flush();
     expect(renderToStaticMarkup(render())).toContain("请切回原账户和学习空间");
+    expect(getVerifiedSessionNamespace()).toBe(originalNamespace);
     expect(content().props.children).toBe(child);
     expect(content().props.inert).toBe(true);
     const callsBeforeWrite = transport.mock.calls.length;
@@ -174,5 +192,6 @@ describe("AuthGate session recovery", () => {
     const html = renderToStaticMarkup(render());
     expect(html).toContain("暂时无法验证登录账户");
     expect(html).not.toContain("尚未保存的答案");
+    expect(getVerifiedSessionNamespace()).toBeNull();
   });
 });

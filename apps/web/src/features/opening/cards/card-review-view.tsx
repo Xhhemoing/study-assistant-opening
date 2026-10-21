@@ -1,13 +1,14 @@
 "use client";
 
 import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
-import { Check, CircleHelp, Eye, LoaderCircle, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
+import { Check, CircleHelp, LoaderCircle, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
 import { EmptyState, LoadError, PageHeader, secondaryButtonClass, ui } from "../design/ui";
+import { CardStack } from "./card-stack";
 import {
   createOpeningCardsClient,
   resolveCardGradeIdentity,
@@ -52,6 +53,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
   const [evidenceNotice, setEvidenceNotice] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const gradeIdentity = useRef<CardGradeIdentity | null>(null);
+  const gradeInFlight = useRef(false);
   // Guards against a late response from a superseded load overwriting newer state.
   const requestId = useRef(0);
 
@@ -88,7 +90,8 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
   }, [onRemainingChange, state]);
 
   const gradeCard = useCallback(async (grade: ReviewGrade) => {
-    if (state.kind !== "ready" || !current || !state.flipped || grading) return;
+    if (state.kind !== "ready" || !current || !state.flipped || grading || gradeInFlight.current) return;
+    gradeInFlight.current = true;
     const queueRequest = requestId.current;
     setGrading(true);
     setGradeError("");
@@ -116,6 +119,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
         error instanceof Error ? error.message : "评分保存失败，请保持当前卡片并重试。",
       );
     } finally {
+      gradeInFlight.current = false;
       setGrading(false);
     }
   }, [client, current, grading, state]);
@@ -193,30 +197,9 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
                 {evidenceNotice}
               </p>
             ) : null}
-            <button
-              type="button"
-              aria-label={state.flipped ? "显示卡片正面" : "显示卡片背面"}
-              aria-pressed={state.flipped}
-              className="grid min-h-[18rem] gap-4 rounded-xl border border-zinc-200 bg-white p-6 text-left shadow-xs transition-colors hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
-              onClick={() =>
-                setState((currentState) =>
-                  currentState.kind === "ready"
-                    ? { ...currentState, flipped: !currentState.flipped }
-                    : currentState,
-                )
-              }
-            >
-              <span className="text-xs font-semibold text-emerald-700">
-                {state.flipped ? "背面" : "正面"}
-              </span>
-              <span className="self-center whitespace-pre-wrap text-sm font-medium leading-7 text-zinc-900">
-                {state.flipped ? current.card.back : current.card.front}
-              </span>
-              <span className="inline-flex items-center gap-2 text-xs text-zinc-500">
-                {state.flipped ? <RotateCcw size={15} aria-hidden /> : <Eye size={15} aria-hidden />}
-                {state.flipped ? "查看正面" : "显示背面"}
-              </span>
-            </button>
+            <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index}
+              onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
+              onGrade={gradeCard} />
             <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo: "/opening/review?tab=cards" })}>围绕这张卡片提问</Link>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {gradeOptions.map(({ grade, label, icon: Icon }) => (
