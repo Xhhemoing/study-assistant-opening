@@ -31,7 +31,10 @@ test("finds a note through the global command palette and navigates to it", asyn
 
     const page = await context.newPage();
     await page.goto("/library");
-    // The shortcut listener attaches on hydration; the list finishing its client fetch proves it.
+    await expect(page).toHaveURL(/\/opening\/library$/);
+    // The notes tab interaction proves client hydration before exercising the shortcut.
+    await page.getByRole("tab", { name: "笔记", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "笔记", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 
@@ -47,7 +50,7 @@ test("finds a note through the global command palette and navigates to it", asyn
     await expect(page.getByRole("option", { name: /检索目标笔记/ })).toBeVisible();
     await page.getByRole("option", { name: /检索目标笔记/ }).click();
 
-    await expect(page).toHaveURL(new RegExp(`/library/${documentId}`));
+    await expect(page).toHaveURL(new RegExp(`/opening/library/${documentId}$`));
   } finally {
     await context.close();
   }
@@ -61,6 +64,9 @@ test("shows the no-match state for an unknown query", async ({ browser, baseURL 
 
     const page = await context.newPage();
     await page.goto("/library");
+    await expect(page).toHaveURL(/\/opening\/library$/);
+    await page.getByRole("tab", { name: "笔记", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "笔记", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByText("正在读取笔记...")).toHaveCount(0);
     await page.keyboard.press("Control+K");
 

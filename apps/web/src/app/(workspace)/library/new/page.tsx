@@ -1,5 +1,6 @@
-import { NewDocument } from "../../../../features/editor/new-document";
+import { redirect } from "next/navigation";
+import { openingAliasHref, type LegacySearchParams } from "@/features/opening/shell/legacy-routes";
 
-export default function NewLibraryNotePage() {
-  return <NewDocument />;
+export default async function LegacyPage({ searchParams }: { searchParams: Promise<LegacySearchParams> }) {
+  redirect(openingAliasHref("/opening/library/new", await searchParams));
 }

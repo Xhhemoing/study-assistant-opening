@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * No DOM library is installed. Capture effects during SSR and replay them with a
+ * Capture shell effects during SSR and replay them with a
  * persistent useState slot store so a second render reflects fetch outcomes.
  */
 const effects: Array<() => unknown> = [];
@@ -43,6 +43,8 @@ vi.mock("next/link", () => ({
 vi.mock("../../search/command-palette", () => ({
   CommandPalette: () => null,
 }));
+
+vi.mock("./connection-notice", () => ({ ConnectionNotice: () => null }));
 
 vi.mock("./focus-timer", () => ({
   FocusTimer: () => null,

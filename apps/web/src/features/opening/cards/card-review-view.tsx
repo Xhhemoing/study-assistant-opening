@@ -8,6 +8,7 @@ import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
 import { EmptyState, LoadError, PageHeader, secondaryButtonClass, ui } from "../design/ui";
+import { interactionMotionReduced, successfulInteractionHaptic } from "../design/haptics";
 import { CardStack } from "./card-stack";
 import {
   createOpeningCardsClient,
@@ -49,6 +50,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
   const client = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
   const [state, setState] = useState<ReadState>({ kind: "loading" });
   const [grading, setGrading] = useState(false);
+  const [exiting, setExiting] = useState(false);
   const [gradeError, setGradeError] = useState("");
   const [evidenceNotice, setEvidenceNotice] = useState("");
   const [retryToken, setRetryToken] = useState(0);
@@ -110,8 +112,14 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
         idempotencyKey: identity.key,
       });
       if (queueRequest !== requestId.current) return;
+      successfulInteractionHaptic();
       setEvidenceNotice(cardEvidenceNotice(result.evidence));
       gradeIdentity.current = null;
+      if (!interactionMotionReduced()) {
+        setExiting(true);
+        await new Promise<void>(resolve => window.setTimeout(resolve, 200));
+        if (queueRequest !== requestId.current) return;
+      }
       setState((currentState) => advanceGradedCard(currentState, current.card.id, queueRequest, requestId.current));
     } catch (error) {
       if (queueRequest !== requestId.current) return;
@@ -120,6 +128,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
       );
     } finally {
       gradeInFlight.current = false;
+      setExiting(false);
       setGrading(false);
     }
   }, [client, current, grading, state]);
@@ -197,7 +206,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
                 {evidenceNotice}
               </p>
             ) : null}
-            <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index}
+            <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index} exiting={exiting} entering={state.index > 0}
               onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
               onGrade={gradeCard} />
             <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo: "/opening/review?tab=cards" })}>围绕这张卡片提问</Link>

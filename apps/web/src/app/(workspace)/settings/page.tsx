@@ -1,5 +1,6 @@
-import { SettingsView } from "../../../features/settings/settings-view";
+import { redirect } from "next/navigation";
+import { openingAliasHref, type LegacySearchParams } from "@/features/opening/shell/legacy-routes";
 
-export default function SettingsPage() {
-  return <SettingsView />;
+export default async function LegacyPage({ searchParams }: { searchParams: Promise<LegacySearchParams> }) {
+  redirect(openingAliasHref("/opening/settings", await searchParams));
 }
