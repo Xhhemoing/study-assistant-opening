@@ -19,7 +19,9 @@ import { createOpeningApi } from "../opening/client/api";
 import { sourceViewerHref } from "../opening/inbox/source-viewer";
 import { CoursePanel, CourseTabs } from "./course-tabs";
 import { legacyCourseStudyHref } from "./course-tabs-route";
+import { CourseSprintMode } from "./course-sprint-mode";
 import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
+import { LearnerStateCard } from "../opening/teaching/learner-state-card";
 
 function revealCourseMaterials() {
   let node: HTMLElement | null = document.getElementById("course-assets");
@@ -204,13 +206,13 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 };
 
 /** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
-export function CourseDetail({ id, surface = "opening" }: { id: string; surface?: CourseDetailSurface }) {
+export function CourseDetail({ id, surface = "opening", mode }: { id: string; surface?: CourseDetailSurface; mode?: "sprint" }) {
   const router = useRouter();
   const { adaptivePlanning } = useOpeningCapabilities();
   const paths = COURSE_DETAIL_PATHS[surface];
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   useEffect(() => {
-    if (!paths.openingActions) return;
+    if (!paths.openingActions || mode === "sprint") return;
     function followLegacyStudyLink() {
       const href = legacyCourseStudyHref(id, window.location.search, window.location.hash);
       if (href) router.replace(href);
@@ -218,9 +220,10 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
     followLegacyStudyLink();
     window.addEventListener("hashchange", followLegacyStudyLink);
     return () => window.removeEventListener("hashchange", followLegacyStudyLink);
-  }, [id, paths.openingActions, router]);
+  }, [id, mode, paths.openingActions, router]);
   if (loading) return <LoadingRows label="正在读取课程…" />;
   if (error || !course) return <section className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></section>;
+  if (paths.openingActions && mode === "sprint") return course.id === id ? <CourseSprintMode key={id} course={course} /> : <LoadingRows label="正在核对冲刺课程…" />;
 
   const studyActions = <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />;
   const settings = <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
@@ -249,7 +252,7 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
           <p className="text-sm leading-6 text-text-2">查看当前有效的学习证据与历史记录。自报、提示后的作答和独立完成会分别标明。</p>
-          <CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
+          <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
         </CoursePanel>
         <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} /></CoursePanel>
       </CourseTabs> : <>

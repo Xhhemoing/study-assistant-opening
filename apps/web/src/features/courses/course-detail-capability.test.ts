@@ -14,6 +14,7 @@ vi.mock("react", async importOriginal => ({
 
 import { CourseDetail, type CourseDetailSurface } from "./course-detail";
 import { CourseGoalForm } from "./course-goal-form";
+import { CourseSprintMode } from "./course-sprint-mode";
 
 function contains(node: ReactNode, match: (type: unknown, children: ReactNode) => boolean): boolean {
   if (Array.isArray(node)) return node.some(child => contains(child, match));
@@ -21,9 +22,9 @@ function contains(node: ReactNode, match: (type: unknown, children: ReactNode) =
   return match(node.type, node.props.children) || contains(node.props.children, match);
 }
 
-function render(surface: CourseDetailSurface = "opening") {
+function render(surface: CourseDetailSurface = "opening", mode?: "sprint") {
   index = 0;
-  return CourseDetail({ id: "course", surface });
+  return CourseDetail({ id: "course", surface, mode });
 }
 
 beforeEach(() => {
@@ -32,6 +33,13 @@ beforeEach(() => {
 });
 
 describe("course detail planning capability", () => {
+  it("opens sprint only after this exact course has been read successfully", () => {
+    expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(true);
+    states[0] = { id: "other", title: "另一课程" };
+    expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(false);
+    states[0] = null; states[3] = "课程读取失败";
+    expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(false);
+  });
   it("hides the entire goal section while capabilities are closed", () => {
     const tree = render();
     expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);

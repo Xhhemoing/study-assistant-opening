@@ -1,9 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReviewQueueItem } from "@aistudy/contracts";
+import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
 
-const scenario = vi.hoisted(() => ({ items: [] as ReviewQueueItem[], grading: false }));
+const scenario = vi.hoisted(() => ({ items: [] as ReviewQueueItem[], grading: false, onGrade: undefined as ((grade: ReviewGrade) => void) | undefined }));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -20,8 +20,16 @@ vi.mock("react", async (importOriginal) => {
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: { children: unknown; href: string }) => createElement("a", { ...props, href }, children),
 }));
+vi.mock("./card-stack", async importOriginal => {
+  const actual = await importOriginal<typeof import("./card-stack")>();
+  return { CardStack: (props: Parameters<typeof actual.CardStack>[0]) => {
+    scenario.onGrade = props.onGrade;
+    return createElement(actual.CardStack, props);
+  } };
+});
 
 import { advanceGradedCard, CardReviewView, cardEvidenceNotice } from "./card-review-view";
+import { createOpeningCardsClient } from "./cards-client";
 
 function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
@@ -33,7 +41,7 @@ function item(id: string): ReviewQueueItem {
   };
 }
 
-beforeEach(() => { scenario.items = []; scenario.grading = false; });
+beforeEach(() => { scenario.items = []; scenario.grading = false; scenario.onGrade = undefined; });
 
 it("advances only the graded card in the queue that submitted it", () => {
   const ready = { kind: "ready" as const, items: [item("a"), item("b")], index: 0, flipped: true };
@@ -56,6 +64,20 @@ it("disables queue reload while a grade is being saved", () => {
   scenario.grading = true;
   const html = renderToStaticMarkup(createElement(CardReviewView));
   expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[\s\S]*?重新读取<\/button>/);
+});
+
+it("does not submit a second grade when shortcuts fire before React updates the saving state", async () => {
+  scenario.items = [item("a")];
+  let reject!: (reason: Error) => void;
+  const pending = new Promise<GradeReviewResponse>((_resolve, rejectPromise) => { reject = rejectPromise; });
+  const client = createOpeningCardsClient();
+  client.grade = vi.fn(() => pending);
+  renderToStaticMarkup(createElement(CardReviewView, { client }));
+  const first = scenario.onGrade!("again"), second = scenario.onGrade!("good");
+  expect(client.grade).toHaveBeenCalledTimes(1);
+  expect(client.grade).toHaveBeenCalledWith(expect.objectContaining({ cardId: "a", grade: "again" }));
+  reject(new Error("offline"));
+  await Promise.all([first, second]);
 });
 
 it("offers a direct assistant entry when no cards are due", () => {

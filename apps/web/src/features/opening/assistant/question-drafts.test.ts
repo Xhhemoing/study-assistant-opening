@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createQuestionDraftStore } from "./question-drafts";
-function memory() {
-  const values = new Map<string, string>();
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
+const cleanups: Array<() => void> = [];
+function identify(id: string, workspaceId = "workspace-1") {
+  cleanups.push(publishVerifiedSessionIdentity({ id, workspaceId }));
+}
+beforeEach(() => {
+  vi.stubGlobal("window", new EventTarget());
+  identify("account-A");
+});
+afterEach(() => { cleanups.splice(0).forEach(cleanup => cleanup()); vi.unstubAllGlobals(); });
+function memory(values = new Map<string, string>()) {
   return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
 }
 describe("unsent question drafts", () => {
@@ -69,4 +78,77 @@ describe("unsent question drafts", () => {
     expect(createQuestionDraftStore(storage).read("unit")).toBeNull();
   });
 
+});
+
+
+describe("question draft ownership", () => {
+  it("isolates accounts and workspaces in both memory and persisted drafts, including late A callbacks", () => {
+    const disk = new Map<string, string>();
+    const storage = memory(disk);
+    const accountA = createQuestionDraftStore(storage);
+    accountA.write("free-question", "A 私密草稿");
+    identify("account-B");
+    const accountB = createQuestionDraftStore(storage);
+    expect(accountB.read("free-question")).toBeNull();
+    accountB.write("free-question", "B 自己的草稿");
+    accountA.write("free-question", "A 的迟到保存");
+    expect(accountB.read("free-question")).toBe("B 自己的草稿");
+    // A new storage facade simulates a refreshed document without the old memory cache.
+    expect(createQuestionDraftStore(memory(disk)).read("free-question")).toBe("B 自己的草稿");
+    identify("account-A", "workspace-2");
+    expect(createQuestionDraftStore(storage).read("free-question")).toBeNull();
+    identify("account-A");
+    expect(createQuestionDraftStore(storage).read("free-question")).toBe("A 的迟到保存");
+    expect(createQuestionDraftStore(memory(disk)).read("free-question")).toBe("A 的迟到保存");
+    accountA.remove("free-question");
+    identify("account-B");
+    expect(createQuestionDraftStore(memory(disk)).read("free-question")).toBe("B 自己的草稿");
+  });
+
+  it("does not claim or delete legacy drafts whose account was never recorded", () => {
+    const legacyKey = "opening:question-draft:free-question";
+    const legacyText = JSON.stringify({ version: 1, text: "来源账户未知的私密草稿" });
+    const disk = new Map([[legacyKey, legacyText]]);
+    identify("account-B");
+    const store = createQuestionDraftStore(memory(disk));
+    expect(store.read("free-question")).toBeNull();
+    store.write("free-question", "B 草稿");
+    store.remove("free-question");
+    expect(disk.get(legacyKey)).toBe(legacyText);
+  });
+
+  it("partitions storage-unavailable memory by the captured verified identity", () => {
+    const accountA = createQuestionDraftStore();
+    accountA.write("free-question", "A 页面内草稿");
+    identify("account-B");
+    const accountB = createQuestionDraftStore();
+    expect(accountB.read("free-question")).toBeNull();
+    accountB.write("free-question", "B 页面内草稿");
+    accountA.write("free-question", "A 迟到草稿");
+    expect(accountB.read("free-question")).toBe("B 页面内草稿");
+    identify("account-A");
+    expect(createQuestionDraftStore().read("free-question")).toBe("A 迟到草稿");
+  });
+
+  it("keeps drafts created without verified identity local to that store and never persists or adopts them", () => {
+    cleanups.splice(0).forEach(cleanup => cleanup());
+    const disk = new Map<string, string>();
+    const storage = memory(disk);
+    const anonymous = createQuestionDraftStore(storage);
+    anonymous.write("free-question", "未验证身份草稿");
+    expect(anonymous.read("free-question")).toBe("未验证身份草稿");
+    expect(createQuestionDraftStore(storage).read("free-question")).toBeNull();
+    identify("account-B");
+    expect(createQuestionDraftStore(storage).read("free-question")).toBeNull();
+    anonymous.write("free-question", "未验证身份迟到保存");
+    expect(disk.size).toBe(0);
+    expect(anonymous.unavailable).toBe(true);
+  });
+
+  it("does not share server-side drafts between requests", () => {
+    vi.stubGlobal("window", undefined);
+    const first = createQuestionDraftStore();
+    first.write("free-question", "另一请求的草稿");
+    expect(createQuestionDraftStore().read("free-question")).toBeNull();
+  });
 });

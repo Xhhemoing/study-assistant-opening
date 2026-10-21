@@ -4,7 +4,7 @@ import type { ExamMode, ExamSprintOverview } from "@aistudy/contracts";
 import Link from "next/link";
 import { Download, RefreshCw } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { LoadingRows, LoadError, PageHeading, ui } from "../design/ui";
+import { EmptyState, LoadingRows, LoadError, PageHeading, ui } from "../design/ui";
 import { ActiveRun, CompletedRun } from "./active-run";
 import { createExamSprintClient, type ExamSprintIntent } from "./client";
 import { SkillsAndLessons, SprintSettings, WeekPlan } from "./learning-plan";
@@ -15,6 +15,7 @@ import { ForecastPanel } from "./forecast-panel";
 import { useExamResources } from "./use-exam-resources";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { SourceTracker } from "./source-tracker";
+import { sprintCourseScope } from "./sprint-course-route";
 
 const tabs = [{ id: "practice", label: "当前训练" }, { id: "plan", label: "七天计划" }, { id: "sources", label: "原题登记" }, { id: "lessons", label: "技能与串讲" }, { id: "integration", label: "课程与证据" }, { id: "estimates", label: "表现估计" }, { id: "forecast", label: "考点分析" }] as const;
 type Tab = typeof tabs[number]["id"];
@@ -30,15 +31,15 @@ function StartTraining({ overview, disabled, send }: { overview: ExamSprintOverv
   return <section className={`${ui.panel} space-y-4 p-5`} aria-labelledby="sprint-start-title"><div><h2 id="sprint-start-title" className="font-semibold">{hasDiagnostic ? "继续补薄弱点，再做独立复测" : "先做一轮摸底，找到这周的起点"}</h2><p className="mt-2 max-w-2xl text-sm leading-7 text-text-2">{hasDiagnostic ? "根据真实作答安排下一组训练。不会的地方先看串讲，用新的题目验证是否能独立完成。" : "无需等待 AI 出题。预置中文串讲与客观题可直接练，原资料中的题目可逐项登记和复测。"}</p></div><button type="button" className={ui.primary} disabled={disabled} onClick={() => send({ action: "start", mode: primaryMode })}>开始{modeLabels[primaryMode]}</button><details className="border-t border-line pt-3"><summary className="min-h-11 cursor-pointer text-xs font-medium text-text-2 py-2">选择其他训练</summary><div className="mt-3 flex flex-wrap gap-2">{(["diagnostic", "practice", "retest", "mock-a", "mock-b"] as const).filter(mode => mode !== primaryMode).map(mode => <button key={mode} type="button" className={ui.secondary} disabled={disabled || (mode.startsWith("mock") && overview.state.runs.some(run => run.mode === mode))} onClick={() => send({ action: "start", mode })}>{modeLabels[mode]}{mode.startsWith("mock") && overview.state.runs.some(run => run.mode === mode) ? " · 已使用" : ""}</button>)}</div><p className="mt-3 text-xs leading-6 text-text-3">模拟 A/B 各可开启一次，为约 20–30 分钟短模拟，交卷后显示解析。完整 120 分钟训练卷仍需扩充题包；这里不提供正式考试预测。</p></details></section>;
 }
 
-export function ExamSprintView() {
+export function ExamSprintView({ courseId }: { courseId?: string }) {
   const [client] = useState(() => createExamSprintClient());
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
-  const [tab, setTab] = useState<Tab>("practice");
-  const [initialCourseId, setInitialCourseId] = useState("");
+  const [tab, setTab] = useState<Tab>(courseId ? "integration" : "practice");
   const [resourcesEnabled, setResourcesEnabled] = useState(false);
   const resourceState = useExamResources(resourcesEnabled);
-  useEffect(() => { const courseId = new URLSearchParams(window.location.search).get("courseId"); if (courseId) { setInitialCourseId(courseId); setTab("integration"); } void client.load(); return () => client.dispose(); }, [client]);
+  useEffect(() => { void client.load(); return () => client.dispose(); }, [client]);
   const { overview, integration, forecast, review, busy, uncertain, error } = snapshot;
+  const scope = sprintCourseScope(courseId, integration === null ? undefined : integration.binding);
   const overviewReady = overview !== null;
   useEffect(() => {
     if (!overviewReady) return;
@@ -48,12 +49,20 @@ export function ExamSprintView() {
   }, [client, tab, overviewReady]);
   const reloadCurrent = () => { if (!overview) { void client.load(); return; } if (!integration && tab !== "forecast") { void client.loadIntegration(); return; } if (["integration", "sources", "estimates"].includes(tab)) void client.loadIntegration(); else if (tab === "forecast") void client.loadForecast(forecast?.teacher ?? ""); else void client.load(); };
   const disabled = busy || uncertain;
-  const send = (command: ExamSprintIntent) => { if (command.action === "start") setTab("practice"); void client.send(command); };
+  const send = (command: ExamSprintIntent) => { if (courseId && scope !== "match") return; if (command.action === "start") setTab("practice"); void client.send(command); };
   return <><PageHeading title="考前冲刺" description={overview?.pack.title ?? "预置学习材料，记录真实尝试，补足薄弱点。"} actions={<div className="flex gap-2"><button type="button" className={ui.quiet} disabled={busy} onClick={reloadCurrent}><RefreshCw size={14} aria-hidden="true" />刷新进度</button>{overview ? <a href="/api/opening/exam-sprint/export" className={ui.secondary} download><Download size={14} aria-hidden="true" />导出学习记录</a> : null}</div>} />
     <div className="mx-auto max-w-5xl space-y-5 px-5 py-5 sm:px-7">
       {error ? <div role="alert" className="space-y-3 rounded-xl border border-warn/30 bg-warn-soft p-4"><p className="text-sm leading-6 text-warn">{error}</p><button type="button" className={ui.secondary} disabled={busy} onClick={() => { if (uncertain) void client.recover(); else reloadCurrent(); }}>{uncertain ? "核对进度并恢复上一操作" : "重新读取进度"}</button>{uncertain ? <p className="text-xs leading-6 text-warn">其他写入暂时暂停。恢复时先核对服务器，再用同一操作标识确认；不要刷新整个页面或重复登记。</p> : null}</div> : null}
       {busy ? <p role="status" className="text-xs text-text-3">正在同步学习记录…</p> : null}
-      {!overview ? (!error ? <LoadingRows label="正在读取考前冲刺进度" /> : null) : <>
+      {!overview ? (!error ? <LoadingRows label="正在读取考前冲刺进度" /> : null) : courseId && scope !== "match" ? <>
+        {scope === "loading" && !error ? <LoadingRows label="正在核对冲刺题包的实际课程关联…" /> : null}
+        {scope === "other" ? <EmptyState title="冲刺题包已关联另一门课程" description="这个题包共用一份训练记录。当前课程不会接收另一门课程的冲刺进展，请进入已关联课程继续。" action={<Link className={ui.primary} href={`/opening/courses/${encodeURIComponent(integration!.binding!.courseId)}?mode=sprint`}>进入已关联课程</Link>} /> : null}
+        {scope === "unbound" ? <>
+          <p className="rounded-xl bg-surface-2 p-4 text-sm leading-6 text-text-2">此题包尚未关联课程。先确认课程与资料关联，再开始训练；原有题包记录会继续保留。</p>
+          {resourceState.error ? <LoadError message={resourceState.error} onRetry={resourceState.reload} /> : null}
+          {resourceState.resources && integration ? <IntegrationPanel key="unbound" overview={overview} integration={integration} resources={resourceState.resources} initialCourseId={courseId} disabled={disabled} send={intent => { void client.sendIntegration(intent); }} /> : !resourceState.error ? <LoadingRows label="正在读取课程与资料…" /> : null}
+        </> : null}
+      </> : <>
         {overview.activeRun ? <ActiveRun key={overview.activeRun.id} overview={overview} disabled={disabled} send={send} /> : <StartTraining overview={overview} disabled={disabled} send={send} />}
         <SprintSummary overview={overview} />
         {integration?.binding ? <details className="text-xs text-text-2"><summary className="min-h-11 cursor-pointer py-1">查看课程的共同学习证据</summary><LearnerStateCard courseId={integration.binding.courseId} revision={overview.attempts.filter(item => item.answeredAt).length} /></details> : null}
@@ -66,7 +75,7 @@ export function ExamSprintView() {
           {tab === "lessons" ? <SkillsAndLessons overview={overview} disabled={disabled} send={send} /> : null}
           {["sources", "integration", "forecast"].includes(tab) && resourceState.error ? <LoadError message={resourceState.error} onRetry={resourceState.reload} /> : null}
           {["sources", "integration", "forecast"].includes(tab) && resourceState.loading ? <p role="status" className="text-xs text-text-3">正在读取已有课程与资料…</p> : null}
-          {tab === "integration" ? integration && resourceState.resources ? <IntegrationPanel key={integration.binding?.boundAt ?? "unbound"} overview={overview} integration={integration} resources={resourceState.resources} initialCourseId={initialCourseId} disabled={disabled} send={intent => { void client.sendIntegration(intent); }} /> : !error && !resourceState.error ? <LoadingRows label="正在读取课程关联" /> : null : null}
+          {tab === "integration" ? integration && resourceState.resources ? <IntegrationPanel key={integration.binding?.boundAt ?? "unbound"} overview={overview} integration={integration} resources={resourceState.resources} initialCourseId={courseId ?? ""} disabled={disabled} send={intent => { void client.sendIntegration(intent); }} /> : !error && !resourceState.error ? <LoadingRows label="正在读取课程关联" /> : null : null}
           {tab === "estimates" ? integration ? <BktPanel overview={overview} integration={integration} /> : !error ? <LoadingRows label="正在读取表现估计" /> : null : null}
           {tab === "forecast" ? forecast && resourceState.resources ? <ForecastPanel forecast={forecast} overview={overview} resources={resourceState.resources} disabled={disabled} send={intent => { void client.sendIntegration(intent); }} onFilter={teacher => { void client.loadForecast(teacher); }} /> : !error && !resourceState.error ? <LoadingRows label="正在读取考点依据" /> : null : null}
         </div>
