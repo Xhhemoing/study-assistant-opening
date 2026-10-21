@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { inlineAttemptSubmissionCheckpointSchema } from "./inline-attempt-submission";
+import { inlineAttemptPreparationCheckpointSchema } from "./inline-attempt-prepare";
 
 const draftSchema = z.object({
   answer: z.string().max(20_000), skillLabel: z.string().max(200), prompt: z.string().max(100_000),
   submission: inlineAttemptSubmissionCheckpointSchema.optional(),
+  preparation: inlineAttemptPreparationCheckpointSchema.optional(),
 }).strict();
 export type InlineAttemptDraft = z.infer<typeof draftSchema>;
 export type InlineAttemptDraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
@@ -19,7 +21,8 @@ export function inlineAttemptIdentityKey(activityId: string, blockId: string, ve
 /** A restored request must never silently move to another course or question. */
 export function inlineAttemptDraftConflict(draft: InlineAttemptDraft | undefined, current: { courseId: string | null; prompt: string }): "prompt_changed" | "course_changed" | null {
   if (draft && draft.prompt !== current.prompt) return "prompt_changed";
-  if (draft?.submission && draft.submission.input.courseId !== current.courseId) return "course_changed";
+  const request = draft?.submission ?? draft?.preparation;
+  if (request && request.input.courseId !== current.courseId) return "course_changed";
   return null;
 }
 
@@ -30,6 +33,9 @@ function readDraft(key: string, raw: string): InlineAttemptDraft | undefined {
     if (!result.success) return;
     const draft = result.data;
     const submitted = draft.submission?.input;
+    const prepared = draft.preparation?.input;
+    if (prepared && (inlineAttemptIdentityKey(prepared.activityId, prepared.blockId, prepared.contentVersion) !== key
+      || prepared.skillLabel !== draft.skillLabel || prepared.prompt !== draft.prompt || draft.submission)) return;
     if (submitted && (inlineAttemptIdentityKey(submitted.activityId, submitted.blockId, submitted.contentVersion) !== key
       || submitted.answer !== draft.answer || submitted.skillLabel !== draft.skillLabel || submitted.prompt !== draft.prompt)) return;
     return draft;

@@ -14,9 +14,13 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
   useEffect: (effect: () => unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { deps: unknown[]; cleanup?: () => void } | undefined;
     if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.effects.push(() => { previous?.cleanup?.(); hooks.values[i] = { deps, cleanup: effect() }; }); },
 }));
-const mocks = vi.hoisted(() => ({ draft: null as PracticeDraft | null, readRecord: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), requireSaved: vi.fn(), ack: vi.fn() }));
+const mocks = vi.hoisted(() => ({ draft: null as PracticeDraft | null, readRecord: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), requireSaved: vi.fn(), ack: vi.fn(), haptic: vi.fn() }));
 const studyBinding = vi.hoisted(() => ({ set: vi.fn() }));
+const shortcuts = vi.hoisted(() => ({ set: vi.fn() }));
+vi.mock("../../design/haptics", () => ({ successfulInteractionHaptic: mocks.haptic }));
 vi.mock("../../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
+vi.mock("../lesson-shortcuts", () => ({ useLessonArrowKeys: shortcuts.set }));
+vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("../../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
 vi.mock("../../learning/practice-draft", async original => ({ ...await original<typeof import("../../learning/practice-draft")>(),
@@ -70,7 +74,7 @@ it("retains the answer and current level on failed delivery, then records only t
   vi.mocked(fetch).mockResolvedValueOnce(response(1));
   const next = ladder().next!; next.request(); next.request(); await settle();
   expect(ladder().delivered.map(value => value.text)).toEqual(["server hint 1"]); expect(ladder().next!.label).toBe("定义提醒");
-  expect(mocks.draft!.fields.assistance).toBe("hinted"); expect(mocks.draft!.fields.answer).toBe(original); expect(mocks.ack).toHaveBeenCalledOnce();
+  expect(mocks.draft!.fields.assistance).toBe("hinted"); expect(mocks.draft!.fields.answer).toBe(original); expect(mocks.ack).toHaveBeenCalledOnce(); expect(mocks.haptic).not.toHaveBeenCalled();
   expect(fetch).toHaveBeenCalledTimes(3);
 });
 it("keeps full demonstration disabled until the durable original is read and preserves that original", async () => {
@@ -83,7 +87,7 @@ it("keeps full demonstration disabled until the durable original is read and pre
   expect(ladder().next!.disabled).toBe(false); expect(props.onRecorded).toHaveBeenCalledWith(record);
   vi.mocked(fetch).mockResolvedValueOnce(response(4)); ladder().next!.request(); await settle();
   expect(ladder().next).toBeUndefined(); expect(mocks.draft!.fields.deliveredAssistance).toBe("revealed");
-  expect(record.assistance).toBe("hinted"); expect(mocks.submitAttempt).toHaveBeenCalledOnce(); expect(props.onRecorded).toHaveBeenCalledOnce();
+  expect(record.assistance).toBe("hinted"); expect(mocks.submitAttempt).toHaveBeenCalledOnce(); expect(props.onRecorded).toHaveBeenCalledOnce(); expect(mocks.haptic).toHaveBeenCalledOnce();
 });
 it("clears the registered attempt when its draft unmounts and ignores a delayed recovery callback", async () => {
   let resolve!: (value: { observation: null; deliveredAssistance: "none" }) => void;
@@ -107,6 +111,10 @@ it("registers the sole active span entry and never carries a previous step's att
   steps[1]!.props.onClick(); lesson();
   expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: true, learningAttempt: null }));
   expect(studyBinding.set.mock.lastCall![0].context).not.toHaveProperty("attemptId");
+  expect(shortcuts.set.mock.lastCall![1]).toMatchObject({ previous: expect.any(Function), next: undefined });
   (initial.props.onAttempt as (value: LearningAttempt | null) => void)(attempt); lesson();
   expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: null }));
+  const current = find(lesson(), node => node.type === SpanPractice)!;
+  (current.props.onRecorded as (record: LearningObservation) => void)({ ...record, serverEvaluation: { decision: "correct" } } as LearningObservation); lesson();
+  expect(shortcuts.set.mock.lastCall![1].next).toBeTypeOf("function");
 });

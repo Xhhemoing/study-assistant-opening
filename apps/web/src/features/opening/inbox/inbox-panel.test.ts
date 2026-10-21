@@ -26,10 +26,11 @@ describe("inbox material collection rendering", () => {
     expect(html).not.toContain("拖入文件到这里，或点击选择");
     expect(html).toContain("可以用于提问");
   });
-  it("keeps the large upload dropzone for an empty library", () => {
+  it("keeps a single working upload dropzone inside the empty library action", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [], onChanged }));
     expect(html).toContain("拖入文件到这里，或点击选择");
     expect(html).toContain("还没有材料");
+    expect(html.match(/type="file"/g)).toHaveLength(1);
   });
   it("renders accessible stable checkboxes for the selected page and accepts course metadata", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources, onChanged,

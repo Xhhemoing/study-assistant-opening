@@ -6,6 +6,8 @@ import { CHALLENGE_MATRIX, CHALLENGE_VECTOR, MATRIX_LESSON_REQUIREMENT, PLANE_PR
 import { initialMatrixLessonProgress, readMatrixLessonProgress, recordMatrixLessonOriginal, revealMatrixLessonHint, saveMatrixLessonProgress, visitMatrixLessonSection } from "./lesson-progress";
 import { MatrixPlaneDiagram, MatrixPlaneExplorer } from "./matrix-plane";
 import { MatrixConceptLesson } from "./matrix-concept-lesson";
+const appearance = vi.hoisted(() => ({ motion: "system" as "system" | "reduce" }));
+vi.mock("../../settings/appearance-preferences", () => ({ useAppearancePreferences: () => ({ preferences: appearance }) }));
 
 const id = "11111111-1111-4111-8111-111111111111";
 const otherId = "22222222-2222-4222-8222-222222222222";
@@ -15,6 +17,13 @@ function createStorage() {
 }
 
 describe("matrix concept lesson mathematics", () => {
+  it("disables automatic play for the explicit reduce-motion preference", () => {
+    appearance.motion = "reduce";
+    const html = renderToStaticMarkup(createElement(MatrixPlaneExplorer, { interactiveEnabled: true }));
+    expect(html).toContain("已按减少动态偏好关闭播放");
+    expect(html).toMatch(/disabled="" aria-pressed="false"/);
+    appearance.motion = "system";
+  });
   it("uses the domain transform for each preset and adds column contributions to the same result", () => {
     for (const { matrix } of PLANE_PRESETS) {
       for (const vector of [[2, -1], [-1, 2], [0, 0]] as const) {

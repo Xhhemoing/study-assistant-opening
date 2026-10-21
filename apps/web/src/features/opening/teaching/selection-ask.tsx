@@ -36,7 +36,7 @@ export function SelectionAsk({ binding, children }: { binding: CurrentStudyConte
     {children}
     {binding && excerpt ? <div className="fixed bottom-20 right-5 z-30 max-w-xs space-y-2 rounded-card border border-line bg-surface p-3 text-text shadow-lg" data-selection-ask-controls="true">
       {blocked || tooLong ? <><button type="button" disabled className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm text-text-3"><Sparkles size={16} aria-hidden="true" />问 AI</button><p role="status" className="text-xs leading-5 text-text-2">{blocked || "选中的内容较长，请缩小到 4000 字以内再提问。"}</p></>
-        : <a className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm font-medium text-ai focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" href={studyConversationHref({ ...binding.context, fragment: excerpt })} onPointerDown={event => event.preventDefault()}><Sparkles size={16} aria-hidden="true" />问 AI</a>}
+        : <a className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm font-medium text-ai-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" href={studyConversationHref({ ...binding.context, fragment: excerpt })} onPointerDown={event => event.preventDefault()}><Sparkles size={16} aria-hidden="true" />问 AI</a>}
     </div> : null}
   </div>;
 }
