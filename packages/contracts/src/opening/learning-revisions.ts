@@ -2,6 +2,7 @@ import { z } from "zod";
 import { uuidSchema } from "./foundation";
 import { assistanceLevelSchema, learningObservationSchema, observationOutcomeSchema, publicVerdictSourceSchema } from "./learning";
 import { referenceCheckInputSchema } from "./learning-evidence";
+import { studyExposureReceiptSchema } from "./tutor";
 
 export const observationReplacementSchema = z.object({
   answer: z.string().max(20_000), outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,
@@ -24,6 +25,8 @@ export const observationRevisionResultSchema = z.object({
 }).strict();
 export const observationHistorySchema = z.object({
   rootObservationId: uuidSchema, headObservationId: uuidSchema, revisions: z.array(learningObservationSchema),
+  // HTTP history delivery adds receipts; repository reads have not released content.
+  exposureReceipts: z.array(studyExposureReceiptSchema).optional(),
 }).strict();
 export type ObservationRevisionInput = z.infer<typeof observationRevisionInputSchema>;
 export type ObservationRevisionResult = z.infer<typeof observationRevisionResultSchema>;
