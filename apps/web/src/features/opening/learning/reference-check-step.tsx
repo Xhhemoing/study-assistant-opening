@@ -95,19 +95,19 @@ export function ReferenceCheckStep({
 
   if (done) {
     return (
-      <div className="space-y-2 rounded border border-emerald-200 bg-emerald-50/40 px-3 py-3" role="status">
-        <p className="text-sm text-zinc-800">已完成自对照参考核对。</p>
-        <p className="text-xs text-zinc-500">答案未改动；已保存为自对照记录，尚未经独立评分，不计作已核验正确。</p>
+      <div className="space-y-2 rounded border border-accent/30 bg-accent-soft px-3 py-3">
+        <p className="text-sm text-text" role="status">已完成自对照参考核对。</p>
+        <p className="text-xs text-text-2">答案未改动；已保存为自对照记录，尚未经独立评分，不计作已核验正确。</p>
         {done.eligibility ? <LearningEvidenceEligibilityDetails eligibility={done.eligibility} /> : null}
       </div>
     );
   }
 
   return (
-    <form onSubmit={(event) => void submit(event)} className="space-y-3 rounded border border-zinc-200 bg-zinc-50/60 px-3 py-3">
+    <form onSubmit={(event) => void submit(event)} className="space-y-3 rounded border border-line bg-bg/60 px-3 py-3">
       <div>
-        <h4 className="text-sm font-semibold text-zinc-800">自对照参考</h4>
-        <p className="mt-1 text-xs leading-6 text-zinc-500">
+        <h4 className="text-sm font-semibold text-text">自对照参考</h4>
+        <p className="mt-1 text-xs leading-6 text-text-2">
           先打开会话绑定的参考来源整体对照；答案已锁定，不能在核对时改写。自对照结果作为自报记录保留，仍需独立核验。
           {referenceSourceName ? ` 参考材料：${referenceSourceName}。` : null}
         </p>
@@ -121,21 +121,21 @@ export function ReferenceCheckStep({
             打开参考材料（新窗口）
           </a>
         ) : (
-          <p className="mt-1 text-xs leading-6 text-amber-800" role="status">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
+          <p className="mt-1 text-xs leading-6 text-warn">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
         )}
       </div>
-      <label className="block text-sm text-zinc-800">
+      <label className="block text-sm text-text">
         我的答案（已锁定）
         <textarea
           readOnly
           value={observation.answer}
-          className="mt-1 min-h-20 w-full cursor-not-allowed rounded border border-zinc-200 bg-zinc-100 px-3 py-2 text-sm text-zinc-700"
+          className="mt-1 min-h-20 w-full cursor-not-allowed rounded border border-text-3 bg-surface-2 px-3 py-2 text-sm text-text-2"
         />
       </label>
       <fieldset className="space-y-2" disabled={pending}>
-        <legend className="text-sm text-zinc-800">对照结果</legend>
+        <legend className="text-sm text-text">对照结果</legend>
         {(Object.keys(CHOICE_LABEL) as Array<keyof typeof CHOICE_LABEL>).map((value) => (
-          <label key={value} className="flex items-center gap-2 text-sm text-zinc-800">
+          <label key={value} className="flex items-center gap-2 text-sm text-text">
             <input
               type="radio"
               name="self-compare-choice"
@@ -147,7 +147,7 @@ export function ReferenceCheckStep({
           </label>
         ))}
       </fieldset>
-      <label className="block text-sm text-zinc-800">
+      <label className="block text-sm text-text">
         参考页码（可选）
         <input
           type="number"
@@ -156,7 +156,7 @@ export function ReferenceCheckStep({
           value={page}
           disabled={pending}
           onChange={(event) => setPage(event.target.value)}
-          className="mt-1 w-28 rounded border border-zinc-200 bg-white px-3 py-2 text-sm"
+          className="mt-1 w-28 rounded border border-line bg-surface px-3 py-2 text-sm"
           placeholder="如 3"
         />
       </label>
@@ -164,7 +164,7 @@ export function ReferenceCheckStep({
         <button
           type="submit"
           disabled={pending || !choice || choice === "unclear"}
-          className="rounded bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+          className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50"
         >
           {pending ? "正在保存核对…" : "提交对照结果"}
         </button>
@@ -172,17 +172,17 @@ export function ReferenceCheckStep({
           type="button"
           disabled={pending}
           onClick={skipUnclear}
-          className="rounded border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 disabled:opacity-50"
+          className="rounded border border-line bg-surface px-3 py-2 text-sm text-text disabled:opacity-50"
         >
           看不懂参考
         </button>
       </div>
       {conflict ? (
-        <p className="text-xs leading-6 text-amber-800" role="status">
+        <p className="text-xs leading-6 text-warn" role="status">
           {message} 请刷新课程记录后重试；本次输入的对照选项仍可重新提交。
         </p>
       ) : message ? (
-        <p className="text-sm text-red-700" role="alert">
+        <p className="text-sm text-danger" role="alert">
           {message}
         </p>
       ) : null}

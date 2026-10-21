@@ -1,25 +1,34 @@
 import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
-import { parseOpeningSpanExercise } from "./opening-span-attempt";
+import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
 import { captureOpeningLearnerShadowPredictions } from "./opening-learner-shadow-predictions";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningAttempt, LearningAttemptCreateInput, Scope, StudyContextAnchor } from "@aistudy/contracts";
-import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, getSpanProblem, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
+import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, assertRetestSubmitEarliestAllowed, getSpanProblem, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockWorkspaceLearningHistory, lockLearningOwner, lockLearningSession, nextLearningHistoryRevision } from "./opening-learning-facts";
+
+export { readOpeningSpanExposureHistory } from "./opening-span-attempt";
 
 export function mapLearningAttempt(row: Record<string, unknown>): LearningAttempt {
   const matrixExercise = parseCanonicalMatrixExercise(row.evaluation_spec);
-  const spanExercise = parseOpeningSpanExercise(row.evaluation_spec);
+  const canonicalSpan = parseOpeningSpanExercise(row.evaluation_spec);
+  const restored = canonicalSpan ? null : parseOpeningSpanIntent(row.create_intent);
+  const spanExercise = canonicalSpan ?? (restored && row.item_stem_snapshot === spanProblemStem(restored.problem)
+    && row.item_source_id === restored.sourceId && (row.source_ids as string[]).includes(restored.sourceId) ? restored.problem : null);
+  const spanValidation = !canonicalSpan && (restored || row.requirement_key === SPAN_REQUIREMENT_KEY)
+    ? { eligible: false, firstFamilyExposure: false, reasonCode: spanExercise ? "restored_identity_unverified" : "restored_identity_unavailable" }
+    : (row.create_intent as { spanValidation?: LearningAttempt["spanValidation"] } | undefined)?.spanValidation;
   return { id: String(row.id), workspaceId: String(row.workspace_id), sessionId: String(row.session_id), courseId: String(row.course_id),
     skillLabel: String(row.skill_label), requirementKey: row.requirement_key as string | null, problemId: row.problem_id as string | null,
     itemVersionId: row.item_version_id as string | null, sourceIds: row.source_ids as string[], sourceVersions: row.source_versions as Record<string, number>,
     startedAt: learningIso(row.started_at)!, submittedAt: learningIso(row.submitted_at), observationId: row.observation_id as string | null,
     historyRevision: Number(row.history_revision), ...(matrixExercise ? { matrixExercise } : {}), ...(spanExercise ? { spanExercise } : {}),
     ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),
-    ...((row.create_intent as { spanValidation?: LearningAttempt["spanValidation"] } | undefined)?.spanValidation ? { spanValidation: (row.create_intent as { spanValidation: LearningAttempt["spanValidation"] }).spanValidation } : {}) };
+    ...(spanValidation ? { spanValidation } : {}) };
 }
+
 /** Canonical attempt creation, also used by the atomic held-out issuer. Caller owns the transaction. */
 export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope: Scope, input: LearningAttemptCreateInput): Promise<LearningAttempt> {
   await lockWorkspaceLearningHistory(tx, scope);
@@ -66,7 +75,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
     ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}) };
-  const replay = await tx`SELECT a.*,v.evaluation_spec FROM opening_learning_attempts a
+  const replay = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a
     LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.client_key=${input.clientKey}`;
   if (replay[0]) {
@@ -75,13 +84,33 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
   }
+  // An acknowledged attempt remains replayable after pause/completion, but a
+  // dedicated span lesson must be resumed before it can issue another question.
+  const spanActivities = await tx`SELECT status,checkpoint_json FROM opening_teaching_activities
+    WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND create_intent->>'protocol'='span-lesson-v1' FOR SHARE`;
+  if (spanActivities[0] && spanActivities[0].status !== "active") {
+    throw learningError("CONFLICT", "paused or completed span lesson cannot accept new attempts");
+  }
+  const spanRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
+  if (spanRetestId) {
+    // Binding and timing come from the persisted lesson, so callers cannot skip
+    // preparation or omit a retestId to issue the reserved question early.
+    const retests = await tx`SELECT not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
+      WHERE (id=${spanRetestId} OR candidate_id=${spanRetestId} OR candidate_reference_id=${spanRetestId}) AND workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND requirement_key=${SPAN_REQUIREMENT_KEY}
+        AND skill_label=${SPAN_SKILL_LABEL} AND status IN ('accepted','in_progress') FOR SHARE`;
+    if (retests.length !== 1) throw learningError("VALIDATION", "延迟复测不属于本课程、尚未接受或已结束。");
+    const retest = retests[0]!, [clock] = await tx`SELECT clock_timestamp() AS at`;
+    assertRetestSubmitEarliestAllowed({ notBeforeAt: learningIso(retest.not_before_at), recommendedAt: learningIso(retest.recommended_at),
+      scheduledStartAt: learningIso(retest.scheduled_start_at) }, learningIso(clock!.at)!);
+  }
   let spanValidation: LearningAttempt["spanValidation"];
   if (spanExercise) {
-    const [previous] = await tx`SELECT a.id FROM opening_learning_attempts a JOIN opening_learning_item_versions v
-      ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
-      WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
-        AND v.evaluation_spec->>'familyId'=${spanExercise.familyId} LIMIT 1`;
-    spanValidation = { eligible: !previous, firstFamilyExposure: !previous, reasonCode: previous ? "family_previously_issued" : null };
+    const history = await readOpeningSpanExposureHistory(tx, scope);
+    const previous = history.familyIds.has(spanExercise.familyId) || history.unknownHistory;
+    spanValidation = { eligible: !previous, firstFamilyExposure: !previous,
+      reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : previous ? "family_previously_issued" : null };
   }
   const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
   let problemId = input.problemId ?? null, itemVersionId: string | null = null;
@@ -160,7 +189,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
 export function createOpeningLearningAttemptRepository(sql: Sql) {
   return {
     async get(scope: Scope, id: string): Promise<LearningAttempt | null> {
-      const rows = await sql`SELECT a.*,v.evaluation_spec FROM opening_learning_attempts a JOIN workspaces w ON w.id=a.workspace_id
+      const rows = await sql`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a JOIN workspaces w ON w.id=a.workspace_id
         LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
         WHERE a.id=${id} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND w.owner_user_id=${scope.ownerUserId}`;
       return rows[0] ? mapLearningAttempt(rows[0]) : null;
@@ -184,7 +213,7 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
     > {
       const capped = Math.min(Math.max(1, limit), 100);
       const rows = await sql`
-        SELECT a.*, v.evaluation_spec,
+        SELECT a.*, v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id,
           o.outcome AS obs_outcome,
           o.assistance AS obs_assistance
         FROM opening_learning_attempts a
@@ -212,7 +241,7 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
     async assertAccess(scope: Scope, id: string) {
       return sql.begin(async (tx) => {
         await lockLearningOwner(tx, scope);
-        const rows = await tx`SELECT a.*,v.evaluation_spec FROM opening_learning_attempts a
+        const rows = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a
           LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
           WHERE a.id=${id} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
         if (!rows[0]) throw learningError("NOT_FOUND", "attempt not found");

@@ -47,7 +47,7 @@ test("persists a wiki link and shows the backlink on the target note", async ({ 
     await expect(page.getByRole("heading", { name: "反向链接" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Knowledge link source" })).toHaveAttribute(
       "href",
-      `/library/${encodeURIComponent(source.id)}`,
+      `/opening/library/${encodeURIComponent(source.id)}`,
     );
   } finally {
     await context.close();

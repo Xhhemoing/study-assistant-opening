@@ -105,7 +105,7 @@ export async function readOpeningBackupTableRows(
       FROM opening_retest_activities a
       WHERE a.workspace_id = ${id} AND a.owner_user_id = ${userId}
         AND a.course_id = o.course_id AND a.skill_label = o.skill_label
-        AND (a.id = o.retest_id OR a.candidate_id = o.retest_id)
+        AND (a.id = o.retest_id OR a.candidate_id = o.retest_id OR a.candidate_reference_id = o.retest_id)
       ORDER BY (a.id = o.retest_id) DESC, a.id
       LIMIT 1
     ) a ON true
@@ -172,10 +172,11 @@ export async function readOpeningBackupTableRows(
     WHERE f.workspace_id=${id} AND f.owner_user_id=${userId} ORDER BY f.id`);
   tables.opening_retest_activities = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose, evidence_cycle_id,
-      NULL::uuid AS candidate_id, task_id, status, result, version, snoozed_until, proposed_at, accepted_at, started_at,
+      NULL::uuid AS candidate_id, COALESCE(candidate_reference_id,candidate_id) AS candidate_reference_id,
+      learning_protocol,accept_client_key,task_id, status, result, version, snoozed_until, proposed_at, accepted_at, started_at,
       completed_at, declined_at, cancelled_at, invalidated_at, superseded_at, not_before_at, recommended_at,
       scheduled_start_at, deadline_at,
-      CASE WHEN candidate_id IS NULL THEN reason
+      CASE WHEN candidate_id IS NULL OR learning_protocol IS NOT NULL THEN reason
         ELSE left(concat_ws(';', reason, 'candidate_reference_unresolved'), 200)
       END AS reason,
       reopened_from_activity_id, created_at, updated_at
@@ -284,6 +285,14 @@ export async function readOpeningBackupTableRows(
   tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
     && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
+  // Privacy/source filtering may omit a protocol's baseline. Keep the task and
+  // stable identity, but never export a dangling baseline or replay receipt.
+  tables.opening_retest_activities = tables.opening_retest_activities.map(row => {
+    const protocol = row.learning_protocol as { baselineObservationId?: unknown; baselineRootId?: unknown } | null;
+    if (!protocol || completeObservationIds.has(protocol.baselineObservationId) && completeObservationIds.has(protocol.baselineRootId)) return row;
+    return { ...row, learning_protocol: null, accept_client_key: null,
+      reason: [row.reason, "learning_protocol_baseline_unavailable"].filter(Boolean).join(";").slice(0, 200) };
+  });
   const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
   const associatedUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
   tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => activityIds.has(row.activity_id));

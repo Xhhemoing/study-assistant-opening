@@ -51,7 +51,7 @@ function renderTimer() {
   stateIndex = 0;
   refIndex = 0;
   const tree = FocusTimer();
-  refs[0].current = { contains: (target: unknown) => target === inside };
+  refs[0].current = { isConnected: true, contains: (target: unknown) => target === inside };
   refs[1].current = { focus: focusTrigger };
   for (const effect of effects) {
     const cleanup = effect();
@@ -100,6 +100,13 @@ describe("focus timer panel dismissal", () => {
     expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(false);
     expect(focusTrigger).toHaveBeenCalledOnce();
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("leaves Escape untouched when its retained panel is detached", () => {
+    openTimer();
+    (refs[0].current as { isConnected: boolean }).isConnected = false;
+    expect(keydown().defaultPrevented).toBe(false);
+    expect(focusTrigger).not.toHaveBeenCalled();
   });
 
   it("keeps the panel open for internal pointer events and closes for an outside pointer", () => {

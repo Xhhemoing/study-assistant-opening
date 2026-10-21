@@ -9,6 +9,7 @@ describe("exam sprint HTTP commands", () => {
       { action: "configure", clientKey, examDate: "2028-02-29", dailyMinutes: 90 },
       { action: "configure", clientKey, examDate: null, dailyMinutes: 15 },
       { action: "start", clientKey, mode: "mock-a" },
+      { action: "open_lesson", clientKey, lessonId: "lesson", expectedRunId: null, expectedAttemptId: null, packVersion: "v1", contentFingerprint: "fingerprint", mappingVersion: "review-v1" },
       { action: "answer", clientKey, attemptId: "attempt-1", answer: "A", confidence: 5 },
       { action: "help", clientKey, attemptId: "attempt-1", kind: "external" },
       { action: "next", clientKey, runId: "run-1" },
@@ -32,6 +33,17 @@ describe("exam sprint HTTP commands", () => {
       { ...valid, answer: "" }, { ...valid, answer: "x".repeat(21) }, { ...valid, action: "reset" },
       { action: "help", clientKey, attemptId: "a", kind: "magic" },
     ]) expect(examSprintCommandSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it("requires exact lesson identity and explicit nullable run and attempt expectations", () => {
+    const command = { action: "open_lesson", clientKey, lessonId: "lesson", expectedRunId: "run", expectedAttemptId: "attempt", packVersion: "v1", contentFingerprint: "fingerprint", mappingVersion: "review-v1" };
+    expect(examSprintCommandSchema.safeParse(command).success).toBe(true);
+    for (const field of ["expectedRunId", "expectedAttemptId", "packVersion", "contentFingerprint", "mappingVersion"] as const) {
+      const { [field]: _missing, ...invalid } = command;
+      expect(examSprintCommandSchema.safeParse(invalid).success).toBe(false);
+    }
+    expect(examSprintCommandSchema.safeParse({ ...command, displayedFamilyIds: [] }).success).toBe(false);
+    expect(examSprintCommandSchema.safeParse({ ...command, contentFingerprint: "" }).success).toBe(false);
   });
 
   it("rejects invalid time budgets and source inputs", () => {

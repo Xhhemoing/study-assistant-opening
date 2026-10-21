@@ -139,8 +139,17 @@ describe("openingApi (RU-07 client)", () => {
       );
       const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
 
-      await expect(api.getJob(U)).rejects.toThrow();
+      await expect(api.getJob(U)).rejects.toMatchObject({
+        name: "OpeningResponseError",
+        message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+        cause: { name: "ZodError", issues: [{ code: "unrecognized_keys", keys: ["extra"] }] },
+      });
     });
+
+  it("reports malformed success JSON as unverified rather than exposing parser output or returning an empty list", async () => {
+    const api = createOpeningApi(async () => new Response("<html>internal upstream error</html>", { status: 200 }));
+    await expect(api.listConversations()).rejects.toMatchObject({ name: "OpeningResponseError", cause: { name: "ZodError" } });
+  });
 
   it("posts ephemeral turns with the caller AbortSignal", async () => {
     const controller = new AbortController();
@@ -412,7 +421,7 @@ describe("single task reminders", () => {
   });
   it.each([{ reminders: [] }, { reminders: [{ ...reminder, taskId: S }] }, { reminders: [{ ...reminder, taskVersion: 4 }] }])("does not report another or missing task reminder as this request's success", async ({ reminders }) => {
     const fetchImpl = vi.fn(async () => jsonResponse({ reminders }));
-    await expect(createOpeningApi(fetchImpl as unknown as typeof fetch).requestTaskReminder(input)).rejects.toMatchObject({ name: "ZodError" });
+    await expect(createOpeningApi(fetchImpl as unknown as typeof fetch).requestTaskReminder(input)).rejects.toMatchObject({ name: "OpeningResponseError", cause: { name: "ZodError" } });
   });
 });
 

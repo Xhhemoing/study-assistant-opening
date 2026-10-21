@@ -136,15 +136,15 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
         : null;
 
   return (
-    <div className="space-y-3" aria-labelledby="timetable-import-heading">
+    <section className="space-y-3" aria-labelledby="timetable-import-heading">
       <div>
-        <h3 className="text-sm font-medium text-zinc-900" id="timetable-import-heading">导入课表</h3>
-        <p className="mt-1 text-xs leading-6 text-zinc-500">
+        <h3 className="text-sm font-medium text-text" id="timetable-import-heading">导入课表</h3>
+        <p className="mt-1 text-xs leading-6 text-text-3">
           在本地读取 xlsx 并预览。确认后才写入课表；原始文件不会上传到对象存储。
         </p>
       </div>
       <label className="block space-y-1.5">
-        <span className="text-xs font-medium text-zinc-600">选择 xlsx 文件</span>
+        <span className="text-xs font-medium text-text-2">选择 xlsx 文件</span>
         <input
           aria-label="选择课表 xlsx 文件"
           accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -155,22 +155,22 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
         />
       </label>
       {state.phase === "error" ? (
-        <p className="text-xs leading-5 text-red-700" role="alert">{state.message}</p>
+        <p className="text-xs leading-5 text-danger" role="alert">{state.message}</p>
       ) : null}
       {state.phase === "saved" ? (
-        <p className="text-xs leading-5 text-emerald-700" role="status">已保存 {state.count} 条课表会话。</p>
+        <p className="text-xs leading-5 text-accent" role="status">已保存 {state.count} 条课表会话。</p>
       ) : null}
       {preview ? (
-        <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/80 p-3">
-          <p className="text-xs text-zinc-600">
+        <div className="space-y-3 rounded-lg border border-line bg-bg/80 p-3">
+          <p className="text-xs text-text-2">
             预览：{preview.fileName} · {preview.parsed.sessions.length} 条课程
             {preview.parsed.warnings.length ? ` · ${preview.parsed.warnings.length} 条需核对` : ""}
           </p>
           {preview.parsed.sessions.length ? (
             <div className="max-h-48 overflow-y-auto">
-              <table className="w-full text-left text-xs text-zinc-700">
+              <table className="w-full text-left text-xs text-text-2">
                 <thead>
-                  <tr className="border-b border-zinc-200 text-zinc-500">
+                  <tr className="border-b border-line text-text-3">
                     <th className="py-1 pr-2 font-medium">课程</th>
                     <th className="py-1 pr-2 font-medium">星期</th>
                     <th className="py-1 pr-2 font-medium">周次</th>
@@ -179,7 +179,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
                 </thead>
                 <tbody>
                   {previewSessionRows(preview.parsed.sessions).map((row, index) => (
-                    <tr key={`${row.courseName}-${row.weekdayLabel}-${index}`} className="border-b border-zinc-100">
+                    <tr key={`${row.courseName}-${row.weekdayLabel}-${index}`} className="border-b border-line">
                       <td className="py-1.5 pr-2">{row.courseName}</td>
                       <td className="py-1.5 pr-2">{row.weekdayLabel}</td>
                       <td className="py-1.5 pr-2">{row.weeksLabel}</td>
@@ -190,10 +190,10 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
               </table>
             </div>
           ) : (
-            <p className="text-xs text-amber-800">未能解析出有效课程行，请检查表格列（课程/星期/周次/节次）。</p>
+            <p className="text-xs text-warn">未能解析出有效课程行，请检查表格列（课程/星期/周次/节次）。</p>
           )}
           {preview.parsed.warnings.length ? (
-            <details className="text-xs text-amber-900">
+            <details className="text-xs text-warn">
               <summary className="cursor-pointer py-1">解析警告 · {preview.parsed.warnings.length}</summary>
               <ul className="mt-1 max-h-24 space-y-1 overflow-y-auto">
                 {preview.parsed.warnings.slice(0, 20).map((warning) => (
@@ -219,6 +219,6 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
           </div>
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }

@@ -9,7 +9,7 @@ export default function UIPreviewPage() {
       {/* Sidebar */}
       <aside className="hidden w-52 shrink-0 flex-col items-stretch bg-white px-3 py-3 md:flex">
         <a className="group/logo mb-5 inline-flex h-10 items-center justify-start gap-2.5 rounded-lg px-1.5 text-sm font-semibold tracking-tight text-zinc-900" href="#">
-          <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-zinc-800 to-zinc-950 text-[11px] font-bold text-white shadow-md shadow-zinc-900/20 ring-1 ring-white/10 transition-transform duration-300 ease-out-expo group-hover/logo:-rotate-6 group-hover/logo:scale-105">AI</span>
+          <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-zinc-800 to-zinc-950 text-xs font-bold text-white shadow-md shadow-zinc-900/20 ring-1 ring-white/10 transition-transform duration-300 ease-out-expo group-hover/logo:-rotate-6 group-hover/logo:scale-105">AI</span>
           <span>AIstudy</span>
         </a>
         <nav className="flex flex-col gap-1">
@@ -25,7 +25,7 @@ export default function UIPreviewPage() {
         </nav>
         <div className="mt-auto space-y-1 border-t border-zinc-200/70 pt-3">
           <button type="button" className="flex h-10 w-full items-center justify-start gap-2.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900">
-            <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[11px] font-semibold text-emerald-800">我</span>
+            <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-800">我</span>
             <span>我的账户</span>
           </button>
         </div>
@@ -41,7 +41,7 @@ export default function UIPreviewPage() {
               <div className="rounded-lg border border-zinc-200/80 bg-white p-5">
                 <h3 className="mb-3 text-sm font-semibold text-zinc-900">Typography Scale</h3>
                 <div className="space-y-2">
-                  <p className="text-[10px] text-zinc-500">10px · Labels</p>
+                  <p className="text-xs text-zinc-500">12px · Labels</p>
                   <p className="text-xs text-zinc-600">12px · Secondary</p>
                   <p className="text-[13px] text-zinc-700">13px · Nav/Tabs</p>
                   <p className="text-sm text-zinc-800">14px · Body</p>

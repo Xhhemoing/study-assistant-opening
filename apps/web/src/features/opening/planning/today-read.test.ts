@@ -18,13 +18,13 @@ describe("independent Today resume and review state", () => {
     const state = resolveTodayResume({ hasSession: true, loadFailed: false, lastConversation: conversation, pendingConfirmations: 3 });
     expect(state.kind).toBe("ready");
     expect(state.continueItem).toMatchObject({ conversationId: conversation.id, currentPage: 7 });
-    expect(state.pendingReviews).toEqual({ count: 3, href: "/opening/review" });
+    expect(state.pendingReviews).toEqual({ count: 3, href: "/opening/suggestions" });
     const html = renderToStaticMarkup(createElement(TodayResumeBody, { state }));
     expect(html).toContain('data-today-primary-cta="true"');
     expect(html).toContain("开始学习");  // no activity yet → create; conversation is secondary
     expect(html).toContain(`/opening/assistant?conversation=${conversation.id}`);
     expect(html).toContain("打开自由对话（次要）");
-    expect(html).toContain('href="/opening/review"');
+    expect(html).toContain('href="/opening/suggestions"');
     expect(html).not.toContain("/api/");
     expect(html).not.toContain("请先处理");
   });
@@ -37,7 +37,7 @@ describe("independent Today resume and review state", () => {
     expect(resolveTodayResume({ hasSession: true, loadFailed: false, lastConversation: conversation }).continueItem?.conversationId).toBe(conversation.id);
   });
   it.each(["memory", "task", "retest"])("uses the review page for %s, never a mutation API", (kind) => {
-    expect(todayConfirmHref([{ id: "candidate", payload: { kind } }])).toBe("/opening/review");
+    expect(todayConfirmHref([{ id: "candidate", payload: { kind } }])).toBe("/opening/suggestions");
   });
   it("renders a read failure without pretending the list is empty", () => {
     const html = renderToStaticMarkup(createElement(TodayResumeBody, { state: { kind: "error" } }));

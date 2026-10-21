@@ -27,6 +27,7 @@ const ACTIVITY = "00000000-0000-4000-8000-0000000000a1";
 const UNIT = "00000000-0000-4000-8000-0000000000u1";
 const SRC_A = "00000000-0000-4000-8000-0000000000aa";
 const SRC_B = "00000000-0000-4000-8000-0000000000bb";
+const hints = { direction: "从未知量和约束入手。", concept: "解空间由满足所有齐次约束的向量组成。", firstStep: "先写出对应的齐次方程组。" };
 const SRC_HELD = "00000000-0000-4000-8000-0000000000dd";
 
 describe("goal-driven teaching provider context", () => {
@@ -65,10 +66,10 @@ describe("goal-driven teaching provider context", () => {
     const writeLibraryBlocks = vi.fn();
     const publish = createCompilerBuildPublishInput({ learnerFocus: focus, writeLibraryBlocks, requireModelOutput: true });
     const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 };
-    const target = [{ type: "prompt", text: "完成分部积分" }, { type: "answer_key", text: "完整积分步骤" }];
+    const target = [{ type: "prompt", text: "完成分部积分" }, { type: "answer_key", hints, text: "完整积分步骤" }];
     await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
       { type: "text", text: "先提醒必要的求导规则，再回到分部积分。" },
-      { type: "prompt", text: "先完成求导小题" }, { type: "answer_key", text: "导数" }, ...target,
+      { type: "prompt", text: "先完成求导小题" }, { type: "answer_key", hints, text: "导数" }, ...target,
     ] }) })).rejects.toThrow("one original-target prompt");
     expect(writeLibraryBlocks).not.toHaveBeenCalled();
     await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
@@ -381,13 +382,13 @@ describe("teaching-compiler", () => {
       blocks: [
         { type: "text", text: "rank", citedChunkIds: ["c1", "invented"] },
         { type: "html", text: "<script>" },
-        { type: "answer_key", text: "3" },
+        { type: "answer_key", hints, text: "3" },
       ],
     }), new Set(["c1"]));
     expect(parsed.itemTitles).toEqual(["秩", "零空间"]);
     expect(parsed.blocks).toEqual([
       { type: "text", text: "rank", citedChunkIds: ["c1"] },
-      { type: "answer_key", text: "3", citedChunkIds: [] },
+      { type: "answer_key", hints, text: "3", citedChunkIds: [] },
     ]);
     expect(() => parseCompileModelOutput("not json", new Set())).toThrow(TeachingCompileOutputError);
     expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "prompt", text: "q?" }] }), new Set())).toThrow(/no teaching block/);
@@ -410,16 +411,26 @@ describe("teaching-compiler", () => {
         { type: "text", text: "零空间是 $Ax=0$ 的解集。", citedChunkIds: ["c1"] },
         { type: "steps", text: "1. 写出方程\n2. 化简" },
         { type: "prompt", text: "求零空间维数？" },
-        { type: "answer_key", text: "n − rank", citedChunkIds: ["c1"] },
+        { type: "answer_key", hints, text: "n − rank", citedChunkIds: ["c1"] },
       ] }),
     });
     expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key"]);
     expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
-    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hidden: true, citedChunkIds: ["c1"] } });
+    expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hints, hidden: true, citedChunkIds: ["c1"] } });
+    expect(JSON.stringify(projectClientSafeLibraryBlocks(written as Parameters<typeof projectClientSafeLibraryBlocks>[0]))).not.toContain(hints.firstStep);
     expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
     expect(publishInput.goals?.map((g) => g.statement).join(" ")).not.toContain("Hook:");
     await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, { text: "{}" }))
       .rejects.toBeInstanceOf(TeachingCompileOutputError);
+  });
+
+  it("refuses a generated answer without all three question-specific hints instead of inventing them", () => {
+    for (const invalid of [undefined, { direction: "方向", concept: "概念" }, { ...hints, firstStep: " " }]) {
+      expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [
+        { type: "text", text: "教学" }, { type: "prompt", text: "问题" },
+        { type: "answer_key", text: "答案", hints: invalid },
+      ] }), new Set())).toThrow(/question-specific/);
+    }
   });
 
   it("mixed mathematical teaching keeps provenance and cannot become a formal scoring source automatically", async () => {
@@ -441,13 +452,13 @@ describe("teaching-compiler", () => {
         { type: "text", text: "The nullspace is the solution set of A x = 0.", citedChunkIds: ["c1"] },
         { type: "formula", text: "A x = 0", citedChunkIds: ["c1"] },
         { type: "example", text: "For the identity matrix, x = 0.", citedChunkIds: ["c1"] },
-        { type: "answer_key", text: "A x = 0", citedChunkIds: ["c1"] },
+        { type: "answer_key", hints, text: "A x = 0", citedChunkIds: ["c1"] },
       ] }), new Set(["c1"])),
     });
     expect(compiled.libraryBlocks.find((block) => block.type === "formula")?.content)
       .toEqual({ latex: "A x = 0", citedChunkIds: ["c1"] });
     expect(compiled.libraryBlocks.find((block) => block.type === "answer_key")?.content)
-      .toEqual({ answer: "A x = 0", hidden: true, citedChunkIds: ["c1"] });
+      .toEqual({ answer: "A x = 0", hints, hidden: true, citedChunkIds: ["c1"] });
 
     const input = {
       activityId: ACTIVITY,

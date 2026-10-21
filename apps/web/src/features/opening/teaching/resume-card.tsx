@@ -21,7 +21,7 @@ import type {
   TeachingResumeMaterialsGate,
 } from "@aistudy/contracts";
 import { LoaderCircle, Pause, Play, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass, ui, tone } from "../design/ui";
 import {
@@ -36,6 +36,8 @@ export type LocalUnsentDraft = {
   /** Optional local contentVersion hint when last edited. */
   contentVersion?: number;
 };
+
+const EMPTY_LOCAL_DRAFTS: LocalUnsentDraft[] = [];
 
 export type ResumeDraftConflict = {
   kind: "draft_anchor_lost" | "version_conflict" | "juxtapose";
@@ -118,7 +120,7 @@ export function ResumeCardView({
   activityStatus,
   generateStatusLabel,
   resume,
-  localUnsent = [],
+  localUnsent = EMPTY_LOCAL_DRAFTS,
   conflict = null,
   continueDisabled = false,
   continueBusy = false,
@@ -174,11 +176,11 @@ export function ResumeCardView({
         <div className="min-w-0">
           <h2
             id="teaching-resume-heading"
-            className="text-sm font-semibold text-zinc-900"
+            className="text-sm font-semibold text-text"
           >
             学习断点 · 继续
           </h2>
-          <p className="mt-1 break-words text-sm leading-6 text-zinc-700">
+          <p className="mt-1 break-words text-sm leading-6 text-text-2">
             {activityTitle}
           </p>
         </div>
@@ -200,7 +202,7 @@ export function ResumeCardView({
         </div>
       </header>
 
-      <p className="mt-2 text-[11px] tabular-nums text-zinc-500">
+      <p className="mt-2 text-xs tabular-nums text-text-3">
         学习位置已读取
         {resume.clientInit
           ? " · 可继续阅读"
@@ -237,36 +239,36 @@ export function ResumeCardView({
         >
           {materialsGateBannerCopy(materialsGate)}
           {resume.gates.unavailableSourceIds.length ? (
-            <span className="mt-1 block tabular-nums text-[11px] opacity-80">
+            <span className="mt-1 block tabular-nums text-xs">
               不可用来源 {resume.gates.unavailableSourceIds.length} 个
             </span>
           ) : null}
         </div>
       ) : null}
 
-      <dl className="mt-4 grid gap-2 text-xs leading-5 text-zinc-600 sm:grid-cols-2">
+      <dl className="mt-4 grid gap-2 text-xs leading-5 text-text-2 sm:grid-cols-2">
         <div data-resume-thought-train="true">
-          <dt className="text-zinc-400">思路深度</dt>
-          <dd className="mt-1 text-zinc-800">
+          <dt className="text-text-3">思路深度</dt>
+          <dd className="mt-1 text-text">
             分支 {thought.branchDepth} · 命令日志 {thought.commandLogCount} · 跳过{" "}
             {thought.skippedCount}
             {thought.currentBlockId ? (
-              <span className="mt-0.5 block tabular-nums text-[11px] text-zinc-500">
+              <span className="mt-0.5 block tabular-nums text-xs text-text-3">
                 当前块 {thought.currentBlockId.slice(0, 8)}…
               </span>
             ) : (
-              <span className="mt-0.5 block text-[11px] text-zinc-500">尚无当前块</span>
+              <span className="mt-0.5 block text-xs text-text-3">尚无当前块</span>
             )}
           </dd>
         </div>
         <div data-resume-open-problems="true">
-          <dt className="text-zinc-400">未解决问题</dt>
-          <dd className="mt-1 text-zinc-800">
+          <dt className="text-text-3">未解决问题</dt>
+          <dd className="mt-1 text-text">
             {resume.openProblems.length
               ? `${resume.openProblems.length} 项`
               : "无"}
             {resume.openProblems.length ? (
-              <ul className="mt-1 space-y-0.5 text-[11px] text-zinc-500">
+              <ul className="mt-1 space-y-0.5 text-xs text-text-3">
                 {resume.openProblems.slice(0, 5).map((p) => (
                   <li key={`${p.problemId}-${p.reason}`} className="tabular-nums">
                     {p.problemId.slice(0, 8)}… · {p.reason}
@@ -279,10 +281,10 @@ export function ResumeCardView({
       </dl>
 
       <div className="mt-4" data-resume-drafts="true">
-        <p className="text-xs font-medium text-zinc-600">草稿</p>
+        <p className="text-xs font-medium text-text-2">草稿</p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {serverDrafts.length === 0 && localUnsent.length === 0 ? (
-            <span className="text-[11px] text-zinc-500">暂无服务端草稿</span>
+            <span className="text-xs text-text-3">暂无服务端草稿</span>
           ) : null}
           {serverDrafts.map((d) => (
             <span
@@ -307,7 +309,7 @@ export function ResumeCardView({
             </span>
           ))}
         </div>
-        <p className="mt-1.5 text-[11px] leading-5 text-zinc-500">
+        <p className="mt-1.5 text-xs leading-5 text-text-3">
           服务端草稿为权威；本地未发送草稿仅缓冲至同步成功，冲突时并排展示，禁止静默覆盖。
         </p>
       </div>
@@ -322,20 +324,20 @@ export function ResumeCardView({
           <p className="font-medium">草稿冲突 · 并排对照（禁止强制覆盖 / 禁止后写优先）</p>
           {conflict?.message ? <p className="mt-1">{conflict.message}</p> : null}
           {conflict?.lostBlockIds?.length ? (
-            <p className="mt-1 tabular-nums text-[11px]">
+            <p className="mt-1 tabular-nums text-xs">
               失效块：{conflict.lostBlockIds.map((id) => id.slice(0, 8)).join(", ")}…
             </p>
           ) : null}
           <div className="mt-2 grid gap-2 sm:grid-cols-2" data-resume-draft-juxtapose="true">
-            <div className="rounded-md bg-white/70 px-2 py-1.5 ring-1 ring-zinc-900/5">
-              <p className="text-[11px] font-medium text-zinc-700">服务端</p>
+            <div className="rounded-md bg-surface px-2 py-1.5 ring-1 ring-line">
+              <p className="text-xs font-medium text-text-2">服务端</p>
               {serverDrafts.length ? (
-                <ul className="mt-1 space-y-1 text-[11px] text-zinc-600">
+                <ul className="mt-1 space-y-1 text-xs text-text-2">
                   {serverDrafts.map((d) => (
                     <li key={`jx-s-${d.blockId}`}>
                       <span className="tabular-nums">{d.blockId.slice(0, 8)}…</span>
                       {d.draftText ? (
-                        <span className="mt-0.5 block break-words text-zinc-500">
+                        <span className="mt-0.5 block break-words text-text-3">
                           {d.draftText.slice(0, 120)}
                           {d.draftText.length > 120 ? "…" : ""}
                         </span>
@@ -344,17 +346,17 @@ export function ResumeCardView({
                   ))}
                 </ul>
               ) : (
-                <p className="mt-1 text-[11px] text-zinc-500">无</p>
+                <p className="mt-1 text-xs text-text-3">无</p>
               )}
             </div>
-            <div className="rounded-md bg-white/70 px-2 py-1.5 ring-1 ring-zinc-900/5">
-              <p className="text-[11px] font-medium text-amber-900">本地未发送</p>
+            <div className="rounded-md bg-surface px-2 py-1.5 ring-1 ring-line">
+              <p className="text-xs font-medium text-warn">本地未发送</p>
               {localUnsent.length ? (
-                <ul className="mt-1 space-y-1 text-[11px] text-zinc-600">
+                <ul className="mt-1 space-y-1 text-xs text-text-2">
                   {localUnsent.map((d) => (
                     <li key={`jx-l-${d.blockId}`}>
                       <span className="tabular-nums">{d.blockId.slice(0, 8)}…</span>
-                      <span className="mt-0.5 block break-words text-zinc-500">
+                      <span className="mt-0.5 block break-words text-text-3">
                         {d.draftText.slice(0, 120)}
                         {d.draftText.length > 120 ? "…" : ""}
                       </span>
@@ -362,11 +364,11 @@ export function ResumeCardView({
                   ))}
                 </ul>
               ) : (
-                <p className="mt-1 text-[11px] text-zinc-500">无</p>
+                <p className="mt-1 text-xs text-text-3">无</p>
               )}
             </div>
           </div>
-          <p className="mt-2 text-[11px] text-zinc-600">
+          <p className="mt-2 text-xs text-text-2">
             请重新拉取断点后手动决定保留哪一侧；本页不提供「强制覆盖」。
           </p>
           {onReread ? (
@@ -385,7 +387,7 @@ export function ResumeCardView({
 
       {resume.continuableActions.length ? (
         <div className="mt-4" data-resume-continuable="true">
-          <p className="text-xs font-medium text-zinc-600">可立即继续</p>
+          <p className="text-xs font-medium text-text-2">可立即继续</p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {resume.continuableActions.map((action) => (
               <span
@@ -400,7 +402,7 @@ export function ResumeCardView({
         </div>
       ) : null}
 
-      <p className="mt-3 text-[11px] leading-5 text-zinc-500" data-resume-summary-independence="true">
+      <p className="mt-3 text-xs leading-5 text-text-3" data-resume-summary-independence="true">
         断点恢复不依赖 AI 摘要
         {resume.summary
           ? `（摘要状态：${resume.summary.status}）`
@@ -509,15 +511,34 @@ export type ResumeCardProps = {
 export function ResumeCard({
   activity,
   resume: resumeProp = null,
-  localUnsent: localUnsentProp = [],
+  localUnsent: localUnsentProp = EMPTY_LOCAL_DRAFTS,
   api: apiProp,
   onContinue,
   onActivityUpdated,
   onResumeUpdated,
 }: ResumeCardProps) {
-  const api = apiProp ?? createOpeningApi();
+  const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
+  const requestScope = useMemo(() => ({ active: true }), [activity.id, api]);
+  useEffect(() => {
+    requestScope.active = true;
+    return () => { requestScope.active = false; };
+  }, [requestScope]);
   const [liveResume, setLiveResume] = useState<LearningResume | null>(resumeProp);
-  const [localUnsent, setLocalUnsent] = useState<LocalUnsentDraft[]>(localUnsentProp);
+  // Props remain the source of local drafts. Only the exact acknowledged
+  // snapshots disappear; a new edit during an in-flight save stays unsent.
+  const [acknowledged, setAcknowledged] = useState<{
+    activityId: string;
+    drafts: Array<LocalUnsentDraft & { contentVersion: number }>;
+  } | null>(null);
+  const localUnsent = useMemo(() => localUnsentProp.filter(draft => {
+    const version = draft.contentVersion ?? liveResume?.contentVersion;
+    const matchesDraft = (saved: TeachingDraftAnchor) => saved.blockId === draft.blockId
+      && saved.draftText === draft.draftText && saved.contentVersion === version;
+    const wasAcknowledged = acknowledged?.activityId === activity.id && acknowledged.drafts.some(matchesDraft);
+    // A previous save cannot suppress a new draft after the server content changes.
+    const matchesServer = liveResume?.activityId === activity.id && liveResume.drafts.some(matchesDraft);
+    return !wasAcknowledged || !matchesServer;
+  }), [activity.id, acknowledged, liveResume, localUnsentProp]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">(
     resumeProp ? "ready" : "idle",
   );
@@ -541,25 +562,29 @@ export function ResumeCard({
   const fetchResume = useCallback(async () => {
     setLoadState("loading");
     setLoadError(null);
-    setConflict(null);
     try {
       const next = await api.getTeachingResume(activity.id);
+      if (!requestScope.active) return null;
       applyResume(next);
       return next;
     } catch (err) {
+      if (!requestScope.active) return null;
       setLoadState("error");
       setLoadError(err instanceof Error ? err.message : "读取学习断点失败");
       return null;
     }
-  }, [activity.id, api, applyResume]);
+  }, [activity.id, api, applyResume, requestScope]);
 
   useEffect(() => {
     setLiveActivity(activity);
-  }, [activity.id, activity.updatedAt, activity.status, activity.generateStatus, activity]);
+  }, [activity]);
 
   useEffect(() => {
-    setLocalUnsent(localUnsentProp);
-  }, [localUnsentProp]);
+    setConflict(null);
+    setStatusError(null);
+    setPauseBusy(false);
+    setSyncBusy(false);
+  }, [activity.id]);
 
   useEffect(() => {
     if (resumeProp) {
@@ -611,15 +636,16 @@ export function ResumeCard({
         status: "paused",
         expectedUpdatedAt: liveActivity.updatedAt,
       });
+      if (!requestScope.active) return;
       setLiveActivity(updated);
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      setStatusError(err instanceof Error ? err.message : "暂停失败");
+      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "暂停失败");
     } finally {
-      setPauseBusy(false);
+      if (requestScope.active) setPauseBusy(false);
     }
-  }, [activity.id, api, fetchResume, liveActivity.updatedAt, onActivityUpdated]);
+  }, [activity.id, api, fetchResume, liveActivity.updatedAt, onActivityUpdated, requestScope]);
 
   const handleUnpause = useCallback(async () => {
     setPauseBusy(true);
@@ -629,15 +655,16 @@ export function ResumeCard({
         status: "active",
         expectedUpdatedAt: liveActivity.updatedAt,
       });
+      if (!requestScope.active) return;
       setLiveActivity(updated);
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      setStatusError(err instanceof Error ? err.message : "恢复失败");
+      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "恢复失败");
     } finally {
-      setPauseBusy(false);
+      if (requestScope.active) setPauseBusy(false);
     }
-  }, [activity.id, api, fetchResume, liveActivity.updatedAt, onActivityUpdated]);
+  }, [activity.id, api, fetchResume, liveActivity.updatedAt, onActivityUpdated, requestScope]);
 
   const handleSyncUnsent = useCallback(async () => {
     if (!liveResume || localUnsent.length === 0) return;
@@ -645,15 +672,16 @@ export function ResumeCard({
     setStatusError(null);
     setConflict(null);
     try {
-      const drafts: TeachingDraftAnchor[] = localUnsent.map((d) => ({
+      const drafts = localUnsent.map((d) => ({
         blockId: d.blockId,
         contentVersion: d.contentVersion ?? liveResume.contentVersion,
         draftText: d.draftText,
-      }));
+      })) satisfies TeachingDraftAnchor[];
       const result = await api.postTeachingCheckpoint(activity.id, {
         expectedVersion: liveResume.contentVersion,
         drafts,
       });
+      if (!requestScope.active) return;
       if (checkpointConflictRequiresJuxtapose(result)) {
         const lost = result.ok === false ? result.lostBlockIds : [];
         setConflict({
@@ -666,10 +694,17 @@ export function ResumeCard({
         return;
       }
       if (result.ok) {
-        setLocalUnsent([]);
+        setAcknowledged(previous => ({
+          activityId: activity.id,
+          drafts: [
+            ...(previous?.activityId === activity.id ? previous.drafts.filter(saved => !localUnsent.some(draft => draft.blockId === saved.blockId)) : []),
+            ...drafts,
+          ],
+        }));
         await fetchResume();
       }
     } catch (err) {
+      if (!requestScope.active) return;
       setConflict({
         kind: "version_conflict",
         message:
@@ -679,9 +714,9 @@ export function ResumeCard({
       });
       await fetchResume();
     } finally {
-      setSyncBusy(false);
+      if (requestScope.active) setSyncBusy(false);
     }
-  }, [activity.id, api, fetchResume, liveResume, localUnsent]);
+  }, [activity.id, api, fetchResume, liveResume, localUnsent, requestScope]);
 
   if (loadState === "loading" || loadState === "idle") {
     return (
@@ -689,8 +724,8 @@ export function ResumeCard({
         className="flex h-full min-h-0 flex-col items-center justify-center px-5 py-10"
         data-teaching-resume-card="loading"
       >
-        <LoaderCircle size={18} className="animate-spin text-zinc-400" aria-hidden />
-        <p className="mt-3 text-xs text-zinc-500">正在读取学习断点…</p>
+        <LoaderCircle size={18} className="animate-spin text-text-3" aria-hidden />
+        <p className="mt-3 text-xs text-text-3">正在读取学习断点…</p>
       </section>
     );
   }
@@ -702,11 +737,11 @@ export function ResumeCard({
         data-teaching-resume-card="error"
         role="alert"
       >
-        <h2 className="text-sm font-semibold text-zinc-900">学习断点暂时无法读取</h2>
+        <h2 className="text-sm font-semibold text-text">学习断点暂时无法读取</h2>
         <p className={`mt-2 text-xs leading-5 ${tone.danger}`}>
           {loadError ?? "未知错误"}
         </p>
-        <p className="mt-2 text-[11px] text-zinc-500">
+        <p className="mt-2 text-xs text-text-3">
           不会伪造讲义或聊天恢复；可稍后重试。
         </p>
         <button

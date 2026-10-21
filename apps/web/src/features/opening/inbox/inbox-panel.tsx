@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { resolveUploadPutUrl } from "../client/api";
@@ -11,13 +11,15 @@ import { type SourceViewerTarget } from "./source-viewer";
 import { SourceReader } from "./source-reader";
 import { captureReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { createUploadClient } from "./upload-client";
-import { sourceStatusLabel } from "./upload-state";
+import { canDeleteSourceShortcut, sourceStatusLabel } from "./upload-state";
 import { createUploadQueue, type UploadQueueItem } from "./upload-queue";
 import { shouldRefreshSources, startSourceRefresh } from "./source-refresh";
 import { EmptyState, ui } from "../design/ui";
 import { SourceActionsPanel, sourceActionNotice } from "./source-actions-panel";
 import { SourceCleanupPanel } from "./source-cleanup-panel";
 import { createMaterialOrganizationClient } from "../library/material-organization-client";
+import { LiveTaskCard } from "../library/live-task-card";
+import type { LibraryFileBatch } from "../library/library-view";
 
 type Notice = { sourceId?: string; text: string };
 type CourseRole = "core" | "optional" | "reference";
@@ -34,11 +36,26 @@ export function InboxPanel({
   renderMetadata,
   onAssign,
   renderBelow,
+  expandedSourceId = null,
   courseId = null,
   courseRole = "reference",
   initialOpen = null,
+  incomingFiles,
+  onIncomingFilesAccepted,
+  onUploadBusyChange,
+  onUploadRequested,
+  hideUploadPicker = false,
+  showEmptyState = true,
+  liveSources,
 }: {
   api: OpeningApi;
+  incomingFiles?: LibraryFileBatch | null;
+  onIncomingFilesAccepted?: () => void;
+  onUploadBusyChange?: (busy: boolean) => void;
+  onUploadRequested?: () => void;
+  hideUploadPicker?: boolean;
+  showEmptyState?: boolean;
+  liveSources?: SourceRecord[];
   sources: SourceRecord[];
   onChanged: () => Promise<void>;
   filter?: string;
@@ -49,12 +66,15 @@ export function InboxPanel({
   renderMetadata?: (record: SourceRecord) => ReactNode;
   onAssign?: (id: string) => void;
   renderBelow?: (record: SourceRecord) => ReactNode;
+  /** Preserve an externally controlled editor across automatic filtering and pagination. */
+  expandedSourceId?: string | null;
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
   courseRole?: CourseRole;
   /** Deep-link from citation chips: open in-app viewer at version/page. */
   initialOpen?: SourceViewerTarget | null;
 }) {
+  const consumedFileBatch = useRef<LibraryFileBatch | null>(null);
   const [managedId, setManagedId] = useState<string | null>(null);
   const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -64,6 +84,13 @@ export function InboxPanel({
   const [openedInitialKey, setOpenedInitialKey] = useState<string | null>(null);
   const processing = shouldRefreshSources(sources);
   const displayed = visibleSources ?? sources.filter(record => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
+  const processingSources = (liveSources ?? displayed).filter(isProcessingSource);
+  const processingIds = new Set(processingSources.map(record => record.id));
+  const listedSources = [...processingSources, ...displayed.filter(record => !processingIds.has(record.id))];
+  const listedIds = new Set(listedSources.map(record => record.id));
+  const retainedSources = sources.filter(record => !listedIds.has(record.id) && (record.id === managedId || record.id === expandedSourceId));
+  const retainedIds = new Set(retainedSources.map(record => record.id));
+  const renderedSources = [...listedSources, ...retainedSources];
   const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
   useEffect(() => {
     if (!initialOpen) return;
@@ -107,42 +134,57 @@ export function InboxPanel({
   })), [client]);
   const uploading = queueItems.some((item) => item.state === "idle" || item.state === "uploading");
 
-  async function attachSavedToCourse(items: UploadQueueItem[]) {
+  const attachSavedToCourse = useCallback(async (items: UploadQueueItem[]) => {
     if (!courseId) return;
     const ids = items
       .filter((item) => item.state === "saved" && item.source)
       .map((item) => item.source!.id);
     if (!ids.length) return;
     await createMaterialOrganizationClient().addToCourse(courseId, ids, courseRole);
-  }
+  }, [courseId, courseRole]);
 
-  async function uploadFiles(files: File[]) {
-    const localFiles = await Promise.all(files.map(async (file) => ({
-      name: file.name,
-      type: file.type,
-      bytes: new Uint8Array(await file.arrayBuffer()),
-    })));
-    const added = uploadQueue.add(localFiles);
-    const addedIds = new Set(added.map((item) => item.id));
-    setQueueItems(uploadQueue.snapshot());
-    await uploadQueue.start(setQueueItems);
-    const snapshot = uploadQueue.snapshot();
-    const newlySaved = snapshot.filter((item) => addedIds.has(item.id) && item.state === "saved");
-    if (newlySaved.length) {
-      await onChanged();
-      await attachSavedToCourse(newlySaved);
-      if (courseId) await onChanged();
-    }
-  }
+  const uploadFiles = useCallback(async (files: File[]) => {
+    onUploadBusyChange?.(true);
+    try {
+      const localFiles = await Promise.all(files.map(async (file) => ({
+        name: file.name,
+        type: file.type,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+      })));
+      const added = uploadQueue.add(localFiles);
+      const addedIds = new Set(added.map((item) => item.id));
+      setQueueItems(uploadQueue.snapshot());
+      await uploadQueue.start(setQueueItems);
+      const snapshot = uploadQueue.snapshot();
+      const newlySaved = snapshot.filter((item) => addedIds.has(item.id) && item.state === "saved");
+      if (newlySaved.length) {
+        await onChanged();
+        await attachSavedToCourse(newlySaved);
+        if (courseId) await onChanged();
+      }
+    } finally { onUploadBusyChange?.(false); }
+  }, [attachSavedToCourse, courseId, onChanged, onUploadBusyChange, uploadQueue]);
+
+  useEffect(() => {
+    if (!incomingFiles || consumedFileBatch.current === incomingFiles) return;
+    consumedFileBatch.current = incomingFiles;
+    onIncomingFilesAccepted?.();
+    void uploadFiles(incomingFiles.files).catch(reason => {
+      setNotice({ text: reason instanceof Error ? reason.message : "文件添加未完成，请重新选择文件。" });
+    });
+  }, [incomingFiles, onIncomingFilesAccepted, uploadFiles]);
 
   async function retryQueuedUpload(id: string) {
-    await uploadQueue.retry(id, setQueueItems);
-    const item = uploadQueue.snapshot().find((row) => row.id === id);
-    if (item?.state === "saved") {
-      await onChanged();
-      await attachSavedToCourse([item]);
-      if (courseId) await onChanged();
-    }
+    onUploadBusyChange?.(true);
+    try {
+      await uploadQueue.retry(id, setQueueItems);
+      const item = uploadQueue.snapshot().find((row) => row.id === id);
+      if (item?.state === "saved") {
+        await onChanged();
+        await attachSavedToCourse([item]);
+        if (courseId) await onChanged();
+      }
+    } finally { onUploadBusyChange?.(false); }
   }
 
   function showOperationFailure(reason: unknown) {
@@ -200,28 +242,29 @@ export function InboxPanel({
     setNotice({ sourceId: record.id, text: "请重新选择文件" });
   }
 
+  function sourceTools(record: SourceRecord) {
+    return <>
+      {managedId === record.id ? <SourceActionsPanel record={record} initialAction={manageInitialAction} onClose={closeManage} onChanged={onChanged} onResult={result => {
+        setNotice({ text: sourceActionNotice(result) });
+        if (result.deleted) setView(value => value?.record.id === record.id ? null : value);
+      }} /> : null}
+      {renderBelow?.(record)}
+    </>;
+  }
+
   return (
     <section className="space-y-3">
-      <CaptureDialog compact={sources.length > 0} disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />
-      {refreshError ? <p className="text-sm text-amber-800" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
-      {notice ? <p className="text-sm text-amber-800" role="status">{notice.text}</p> : null}
+      {!hideUploadPicker && (sources.length > 0 || !showEmptyState) ? <CaptureDialog compact disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} /> : null}
+      {refreshError ? <p className="text-sm text-warn" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
+      {notice ? <p className="text-sm text-warn" role="status">{notice.text}</p> : null}
       {queueItems.some(item => item.state !== "saved") ? (
-        <ul className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3" aria-label="上传队列">
-          {queueItems.filter(item => item.state !== "saved").map((item) => (
-            <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="min-w-0 flex-1 break-words text-zinc-800">{item.file.name}</span>
-              <span className="text-zinc-500" role="status">
-                {item.state === "idle" ? "等待上传" : item.state === "uploading" ? `上传中 ${item.progress}%` : item.message ?? "上传失败"}
-              </span>
-              {item.state === "failed" ? <>
-                <button className={ui.secondary} onClick={() => void retryQueuedUpload(item.id).catch(showOperationFailure)} type="button">重试</button>
-                <button className={ui.quiet} onClick={() => dismissQueuedUpload(item.id)} type="button">清除</button>
-              </> : <button className={ui.quiet} onClick={() => dismissQueuedUpload(item.id)} type="button">取消</button>}
-            </li>
-          ))}
+        <ul className="space-y-3" aria-label="上传队列">
+          {queueItems.filter(item => item.state !== "saved").map(item => <li key={item.id}><LiveTaskCard title={item.file.name} failed={item.state === "failed"} phase={item.state === "idle" ? "等待上传" : item.state === "uploading" ? item.progress === 100 ? "文件已传输，正在确认" : "正在上传文件" : item.message ?? "上传失败"} byteProgress={item.state === "uploading" ? item.progress : undefined}>
+            {item.state === "failed" ? <><button className={ui.secondary} onClick={() => void retryQueuedUpload(item.id).catch(showOperationFailure)} type="button">重试</button><button className={ui.quiet} onClick={() => dismissQueuedUpload(item.id)} type="button">清除</button></> : <button className={ui.quiet} onClick={() => dismissQueuedUpload(item.id)} type="button">取消</button>}
+          </LiveTaskCard></li>)}
         </ul>
       ) : null}
-      {queueItems.some(item => item.state === "saved") ? <details className="rounded-lg border border-zinc-200 p-3 text-xs text-zinc-600">
+      {queueItems.some(item => item.state === "saved") ? <details className="rounded-lg border border-line p-3 text-xs text-text-2">
         <summary className="cursor-pointer">已上传 {queueItems.filter(item => item.state === "saved").length} 份材料</summary>
         <ul aria-label="已上传任务" className="mt-3 space-y-2">{queueItems.filter(item => item.state === "saved").map(item => {
           const current = sources.find(source => source.id === item.source?.id) ?? item.source;
@@ -231,12 +274,18 @@ export function InboxPanel({
         })}</ul>
       </details> : null}
       <SourceCleanupPanel revision={sources} />
-      <ul className="divide-y divide-zinc-200 border-y border-zinc-200">
-        {displayed.map((record) => (
+      <ul className="divide-y divide-line border-y border-line">
+        {renderedSources.map((record) => (
           <li key={record.id}>
             <div className="flex items-start gap-2 px-2 py-1">
-              {onToggle ? <input aria-label={`选择材料 ${record.name}`} type="checkbox" checked={selectedIds?.has(record.id) ?? false} disabled={selectionDisabled} onChange={() => onToggle(record.id)} className="mt-3 size-4 shrink-0 accent-emerald-700" /> : null}
-            <div className="min-w-0 flex-1"><SourceRow
+              {onToggle ? <input aria-label={`选择材料 ${record.name}`} type="checkbox" checked={selectedIds?.has(record.id) ?? false} disabled={selectionDisabled} onChange={() => onToggle(record.id)} className="mt-3 size-6 shrink-0 accent-accent" /> : null}
+            <div className="min-w-0 flex-1">{processingIds.has(record.id) ? <div role="group" aria-label="材料处理任务"><LiveTaskCard title={record.name} phase={sourceStatusLabel(record)}>
+              <button type="button" className={ui.quiet} data-source-open={record.id} onClick={() => openOriginal(record)}>阅读已保存原件</button>
+              <button type="button" className={ui.quiet} onClick={() => managedId === record.id ? closeManage() : openManage(record.id)}>管理材料</button>
+              {onAssign ? <button type="button" className={ui.quiet} onClick={() => onAssign(record.id)}>归入课程</button> : null}
+              {canDeleteSourceShortcut(record) ? <button type="button" className={`${ui.quiet} text-danger`} onClick={() => openManage(record.id, "delete")}>删除</button> : null}
+              {notice?.sourceId === record.id ? <p className="w-full text-xs text-warn">{notice.text}</p> : null}
+            </LiveTaskCard></div> : <SourceRow
               notice={notice?.sourceId === record.id ? notice.text : undefined}
               onOpen={record.uploadState === "uploaded" ? () => openOriginal(record) : undefined}
               onRetry={record.uploadState === "pending" || (record.uploadState === "uploaded" && record.parseState === "failed" && record.error?.retryable !== false) ? () => void retrySource(record) : undefined}
@@ -247,20 +296,21 @@ export function InboxPanel({
               }}
               onDelete={() => openManage(record.id, "delete")}
               onAssign={onAssign}
-            />{renderMetadata?.(record)}</div></div>
-            {managedId === record.id ? <SourceActionsPanel record={record} initialAction={manageInitialAction} onClose={closeManage} onChanged={onChanged} onResult={result => {
-              setNotice({ text: sourceActionNotice(result) });
-              if (result.deleted) setView(value => value?.record.id === record.id ? null : value);
-            }} /> : null}
-            {renderBelow?.(record)}
+            />}{renderMetadata?.(record)}</div></div>
+            {retainedIds.has(record.id) ? <p role="status" className="px-4 py-2 text-xs text-text-2">正在编辑的材料暂时保留在此处；关闭表单后将按当前筛选显示。</p> : null}
+            {sourceTools(record)}
             <p className="sr-only">{sourceStatusLabel(record)}</p>
           </li>
         ))}
       </ul>
-      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !displayed.length ? <p className="py-4 text-sm text-zinc-500">没有匹配的材料。</p> : null}
+      {!sources.length && showEmptyState ? <EmptyState title="还没有材料" description="添加第一份材料，上传后的处理状态会显示在这里。" action={hideUploadPicker ? onUploadRequested ? <button type="button" className={ui.primary} disabled={uploading} onClick={onUploadRequested}>上传材料</button> : undefined : <CaptureDialog disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />} /> : sources.length > 0 && !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
         record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}
     </section>
   );
+}
+
+function isProcessingSource(record: SourceRecord): boolean {
+  return record.uploadState === "uploaded" && record.error?.code !== "PRIVACY_EXCLUDED" && ["queued", "running", "not_started"].includes(record.parseState);
 }

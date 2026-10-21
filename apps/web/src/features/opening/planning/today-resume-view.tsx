@@ -1,10 +1,14 @@
 import Link from "next/link";
 import { buttonClass, EmptyState, secondaryButtonClass, ui } from "../design/ui";
-import type { TodayResumeState } from "./today-read";
+import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import type { TeachingActivity } from "@aistudy/contracts";
 import { todayActivityCtaLabel } from "../teaching/today-activity";
 
 const primary = `${buttonClass} mt-4`;
+
+export function TodayNoCourses() {
+  return <EmptyState title="从第一门课程开始" description="添加你想学习的课程，再把资料、练习和学习记录放在一起。" action={<Link className={buttonClass} href="/opening/courses/new" data-today-primary-cta="true">添加第一门课</Link>} />;
+}
 
 export function TodayResumeBody({
   state,
@@ -20,20 +24,15 @@ export function TodayResumeBody({
 }) {
   if (state.kind === "loggedOut") {
     return (
-      <>
-        <EmptyState title="尚未登录" description="登录后即可查看今天的学习记录。" />
-        <Link className={primary} href="/login">登录</Link>
-      </>
+      <EmptyState title="尚未登录" description="登录后即可查看今天的学习记录。" action={<Link className={buttonClass} href="/login">登录</Link>} />
     );
   }
   if (state.kind === "error") {
     return (
-      <>
-        <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" />
-        <Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>
-      </>
+      <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" action={<Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>} />
     );
   }
+  if (hasNoTodayCourses(state)) return <TodayNoCourses />;
   const item = state.continueItem;
   const ctaLabel = todayActivityCtaLabel(activity ?? null);
   // Without an interactive handler, land on Today dashboard (activity wiring lives there).
@@ -45,19 +44,19 @@ export function TodayResumeBody({
   return (
     <>
       {item ? (
-        <article className="border-b border-zinc-200 bg-white px-5 py-5">
-          <h2 className="text-sm font-semibold text-zinc-900">继续：{item.title}</h2>
+        <article className="border-b border-line bg-surface px-5 py-5">
+          <h2 className="text-sm font-semibold text-text">继续：{item.title}</h2>
           {item.lastUserText ? (
-            <p className="mt-2 break-words text-sm leading-6 text-zinc-600">{item.lastUserText}</p>
+            <p className="mt-2 break-words text-sm leading-6 text-text-2">{item.lastUserText}</p>
           ) : null}
-          <p className="mt-3 text-sm text-zinc-500">
+          <p className="mt-3 text-sm text-text-3">
             {item.currentPage ? `上次读到第 ${item.currentPage} 页` : "从上次对话继续"}
             {Object.keys(item.sourceVersions ?? {}).length
               ? ` · 可恢复 ${Object.keys(item.sourceVersions ?? {}).length} 份材料`
               : ""}
           </p>
           {(item.manualSourceCount ?? 0) > 0 ? (
-            <p className="mt-2 text-sm text-zinc-500">
+            <p className="mt-2 text-sm text-text-3">
               {item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。
             </p>
           ) : null}
@@ -97,14 +96,14 @@ export function TodayResumeBody({
         </>
       )}
       {(state.pendingReviews?.count ?? 0) > 0 ? (
-        <article className="border-b border-zinc-200 bg-white px-5 py-5">
-          <h2 className="text-base font-semibold text-zinc-900">
+        <article className="border-b border-line bg-surface px-5 py-5">
+          <h2 className="text-base font-semibold text-text">
             {state.pendingReviews!.count} 项建议待审核
           </h2>
-          <p className="mt-2 text-sm leading-6 text-zinc-600">
+          <p className="mt-2 text-sm leading-6 text-text-2">
             任务、记忆与补测都由你决定；可以稍后处理，不影响继续学习。
           </p>
-          <Link href="/opening/review" className={`${secondaryButtonClass} mt-4`}>
+          <Link href="/opening/suggestions" className={`${secondaryButtonClass} mt-4`}>
             查看待审核建议
           </Link>
         </article>

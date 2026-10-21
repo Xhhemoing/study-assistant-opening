@@ -28,7 +28,6 @@ describe("adaptive draft details", () => {
     expect(html).not.toContain("旧原因");
     expect(html).toContain("原有原因");
     expect(html).toContain("不会创建");
-    expect(html).toContain("text-zinc-400");
     expect(html).toContain("今天放不下");
     expect(html).toContain("没有足够长的连续空档");
     expect(html).toMatch(/aria-checked="false" disabled=""/);

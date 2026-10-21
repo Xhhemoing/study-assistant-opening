@@ -1,25 +1,22 @@
 export type OpeningNavigationItem = {
   href: string;
   label: string;
-  icon: "today" | "assistant" | "library" | "courses" | "cards" | "sprint" | "review" | "connections";
-  group: "core" | "more";
+  icon: "today" | "courses" | "review" | "library";
+  group: "core";
 };
 
-/** Opening shell: core learning loop first, then secondary loop surfaces. */
+/** The same four destinations on desktop and mobile. Tools live in the account menu. */
 export function openingNavigation(): OpeningNavigationItem[] {
   return [
     { href: "/opening/today", label: "今日", icon: "today", group: "core" },
-    { href: "/opening/assistant", label: "助理", icon: "assistant", group: "core" },
-    { href: "/opening/library", label: "资料库", icon: "library", group: "core" },
     { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
-    { href: "/opening/cards", label: "卡片", icon: "cards", group: "more" },
-    { href: "/opening/sprint", label: "考前冲刺", icon: "sprint", group: "more" },
-    { href: "/opening/review", label: "待确认", icon: "review", group: "more" },
-    { href: "/opening/settings/connections", label: "连接", icon: "connections", group: "more" },
+    { href: "/opening/review", label: "复习", icon: "review", group: "core" },
+    { href: "/opening/library", label: "资料", icon: "library", group: "core" },
   ];
 }
 
 export function navigationIsActive(href: string, pathname: string): boolean {
   const hrefPath = href.split("?")[0] ?? href;
+  if (hrefPath === "/opening/review" && (pathname === "/opening/cards" || pathname.startsWith("/opening/cards/"))) return true;
   return pathname === hrefPath || pathname.startsWith(`${hrefPath}/`);
 }

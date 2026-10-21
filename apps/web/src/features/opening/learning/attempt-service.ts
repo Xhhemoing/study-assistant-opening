@@ -1,8 +1,10 @@
-import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
+import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema, uuidSchema, type Scope } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
+  createOpeningStudyContextRepository,
+  createOpeningSpanSessionRepository,
 } from "@aistudy/database";
 import { assertRetestSubmitEarliestAllowed, prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -35,7 +37,7 @@ async function loadRetestSubmitEarliestTimes(sql: Sql, scope: Scope, retestId: s
     SELECT not_before_at, recommended_at, scheduled_start_at
     FROM opening_retest_activities
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND (candidate_id=${retestId} OR id=${retestId})
+      AND (candidate_id=${retestId} OR id=${retestId} OR candidate_reference_id=${retestId})
   `;
   if (rows.length !== 1) validation("retest activity is missing or ambiguous");
   const row = rows[0] as {
@@ -66,6 +68,19 @@ export function createOpeningAttemptService(sql: Sql) {
         deliveredAssistance: highestDeliveredAssistance(exposures),
       };
     },
+    async getContext(scope: Scope, id: string) {
+      const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
+      const contextAnchor = await createOpeningStudyContextRepository(sql).resolve(scope,
+        attempt.contextAnchor ?? { purpose: "learning_help" },
+        { attemptId: attempt.id, sessionId: attempt.sessionId, courseId: attempt.courseId, sourceIds: attempt.sourceIds });
+      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId, {
+        attemptId: attempt.id, assessmentDomain: attempt.requirementKey?.startsWith("language:") ? "language" : "math",
+      });
+      const result = learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, contextAnchor },
+        deliveredAssistance: highestDeliveredAssistance(exposures) });
+      if (!result.success) validation("本次作答缺少可验证的题目或材料版本，请返回原题重新打开。");
+      return result.data;
+    },
     async submit(scope: Scope, id: string, raw: unknown) {
       const input = learningAttemptSubmitInputSchema.parse(raw);
       const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
@@ -83,6 +98,12 @@ export function createOpeningAttemptService(sql: Sql) {
         sourceIds: attempt.sourceIds,
         problemId: attempt.problemId,
       };
+      // Span's canonical evaluation and retest binding are checked together in
+      // the observation transaction. Keep the learner's original request level
+      // separate from help delivered later so an exact retry remains a replay.
+      const spanLesson = attempt.spanExercise && attempt.contextAnchor?.activityId
+        ? await createOpeningSpanSessionRepository(sql).get(scope, attempt.contextAnchor.activityId) : null;
+      if (spanLesson?.sessionId === attempt.sessionId) return learning.insertObservation(scope, base, { submittedAssistance: input.assistance });
       // K02 L02 close: resolve nodeId for independent retest so Data links SkillEvidence in the same tx.
       if (!input.retestId) {
         return learning.insertObservation(scope, base);

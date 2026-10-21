@@ -18,7 +18,8 @@ describe("connection-status", () => {
     expect(formatLastSyncAt(null)).toBe("尚未成功同步");
     expect(formatLastSyncAt("2026-10-09T10:00:00.000Z")).toMatch(/2026/);
     expect(connectionErrorCopy({ state: "ready", errorCode: "X" })).toBeNull();
-    expect(connectionErrorCopy({ state: "error", errorCode: "TLS" })).toContain("TLS");
+    expect(connectionErrorCopy({ state: "error", errorCode: "TLS" })).toBe("同步出错，请检查授权后重试。");
+    expect(connectionErrorCopy({ state: "error", errorCode: "TLS" }, true)).toContain("错误代码：TLS");
   });
 
   it("treats revoked and disabled as unavailable for sync controls", () => {

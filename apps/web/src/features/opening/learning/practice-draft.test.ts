@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+import { getSpanProblem } from "@aistudy/domain";
 import { assertPracticeAttempt, emptyPracticeDraft, parsePracticeDraft, patchPracticeDraft, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, writePracticeDraft } from "./practice-draft";
 
 const courseId = "33333333-3333-4333-8333-333333333333";
@@ -114,6 +115,8 @@ describe("authoritative practice restoration", () => {
   it("reads current effective history rather than replaying a stale original observation", async () => {
     const result = await readPracticeRecord(client(), courseId, attempt);
     expect(result.observation).toEqual(revised);
+    expect(result.originalObservation).toEqual(original);
+    expect(result.originalObservation?.answer).not.toBe(result.observation?.answer);
     expect(result.deliveredAssistance).toBe("revealed");
     expect(result.observation?.assistance).toBe("independent"); // Preserve evidence at original submit; later exposure does not rewrite it.
   });
@@ -144,4 +147,20 @@ it("isolates focused practice from ordinary drafts and from another skill or req
   const draft = emptyPracticeDraft(focused, { skillLabel: "span", answer: "untouched" });
   expect(parsePracticeDraft(draft, focused)).toMatchObject({ fields: { skillLabel: "span", answer: "untouched" } });
   expect(parsePracticeDraft({ ...draft, fields: { ...draft.fields, skillLabel: "other" } }, focused)).toBeNull();
+});
+
+it("restores the exact eight-part span evidence scope without treating its event UUID as a skill", () => {
+  const eventId = "88888888-8888-4888-8888-888888888888";
+  const activityId = "99999999-9999-4999-8999-999999999999";
+  const scope = JSON.stringify([courseId, "span", null, activityId, null, null, "span-independent-3d", eventId]);
+  const draft = { ...emptyPracticeDraft(scope, { sourceId, spanProblemId: "span-independent-3d", answer: "original" }),
+    start: { clientKey: "span-event-request", sessionId, sessionInput: { courseId, activityId, skillLabel: "span", sourceIds: [sourceId] },
+      createInput: { sessionId, clientKey: "span-event-request", spanExercise: { sourceId, problemId: "span-independent-3d", version: 1 } } } };
+  expect(parsePracticeDraft(JSON.parse(JSON.stringify(draft)), scope)).toEqual(draft);
+  expect(() => assertPracticeAttempt(draft, { ...attempt, sourceIds: [sourceId], spanExercise: getSpanProblem("span-independent-3d")! })).not.toThrow();
+  for (const context of [[courseId, "ordinary", null, activityId, null, null, null, eventId], [courseId, "span", null, activityId, null, null, null, "not-a-uuid"]]) {
+    const invalid = JSON.stringify(context);
+    expect(parsePracticeDraft({ ...draft, scope: invalid }, invalid)).toBeNull();
+  }
+  expect(parsePracticeDraft({ ...draft, start: { ...draft.start, sessionInput: { ...draft.start.sessionInput, activityId: eventId } } }, scope)).toBeNull();
 });

@@ -1,12 +1,13 @@
 import { examSprintCommandSchema, examBindInputSchema, examSourceMappingInputSchema, examPaperInputSchema, examWorkReviewInputSchema, type ExamSprintCommand, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamBindInput, type ExamSourceMappingInput, type ExamPaperInput, type ExamWorkReview, type ExamWorkReviewInput } from "@aistudy/contracts";
 import { overviewSchema, integrationSchema, forecastSchema, reviewSchema } from "./client-schemas";
+import { isCurrentSprintLessonRequest } from "./lesson-navigation";
 
 type WithoutKey<T> = T extends unknown ? Omit<T, "clientKey"> : never;
 export type ExamSprintIntent = WithoutKey<ExamSprintCommand>;
 export type ExamIntegrationIntent = { action: "bind"; input: WithoutKey<ExamBindInput> } | { action: "map"; input: WithoutKey<ExamSourceMappingInput> } | { action: "paper"; input: WithoutKey<ExamPaperInput> } | { action: "review"; input: WithoutKey<ExamWorkReviewInput> };
 export type ExamSprintSnapshot = { overview: ExamSprintOverview | null; integration: ExamIntegrationOverview | null; forecast: ExamForecastOverview | null; review: ExamWorkReview | null; busy: boolean; error: string | null; uncertain: boolean };
 type Target = "overview" | "integration" | "forecast" | "review";
-type Pending = { target: Target; path: string; method: "POST" | "PATCH"; body: unknown; readTarget?: Target; readPath?: string };
+type Pending = { target: Target; path: string; method: "POST" | "PATCH"; body: unknown; readTarget?: Target; readPath?: string; lessonRequest?: Extract<ExamSprintCommand, { action: "open_lesson" }> };
 const BASE = "/api/opening/exam-sprint";
 
 class HttpError extends Error {
@@ -71,10 +72,16 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         const result = await request(operation.controller.signal, command.readTarget ?? command.target, command.readPath ?? command.path);
         if (!isCurrent(operation)) return;
         publish(result);
+        if (command.lessonRequest && result.overview && !isCurrentSprintLessonRequest(result.overview, command.lessonRequest)) {
+          pending = null;
+          publish({ uncertain: false, error: "已读取最新进度，原串讲请求的训练或内容版本已变更，请重新选择串讲。" });
+          return result;
+        }
       }
       const result = await request(operation.controller.signal, command.target, command.path, command);
       if (!isCurrent(operation)) return;
       pending = null; publish({ ...result, error: null, uncertain: false });
+      return result;
     } catch (error) {
       if (!isCurrent(operation)) return;
       const rejected = !recovering && error instanceof HttpError && error.status >= 400 && error.status < 500;
@@ -83,9 +90,9 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
     } finally { finish(operation); }
   }
   async function enqueue(build: (key: string) => Pending) {
-    if (active || pending) return;
+    if (active || pending) return null;
     try { pending = build(keyFactory()); } catch { publish({ error: "请检查输入内容，暂未提交。" }); return; }
-    await write(pending, false);
+    return await write(pending, false);
   }
   return {
     getSnapshot: () => snapshot,
@@ -94,14 +101,20 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
     loadIntegration: () => loadTarget("integration", `${BASE}/integration`),
     loadForecast: (teacher = "") => loadTarget("forecast", `${BASE}/forecast${teacher.trim() ? `?teacher=${encodeURIComponent(teacher.trim())}` : ""}`),
     loadReview: (id: string) => loadTarget("review", `${BASE}/reviews?id=${encodeURIComponent(id)}`),
-    send: (intent: ExamSprintIntent) => enqueue(clientKey => ({ target: "overview", path: BASE, method: "POST", body: examSprintCommandSchema.parse({ ...intent, clientKey }) })),
+    async send(intent: ExamSprintIntent) {
+      const result = await enqueue(clientKey => {
+        const body = examSprintCommandSchema.parse({ ...intent, clientKey });
+        return { target: "overview", path: BASE, method: "POST", body, ...(body.action === "open_lesson" ? { lessonRequest: body } : {}) };
+      });
+      return result?.overview ?? null;
+    },
     sendIntegration: (intent: ExamIntegrationIntent) => enqueue(clientKey => {
       if (intent.action === "bind") return { target: "integration", path: `${BASE}/integration`, method: "POST", body: examBindInputSchema.parse({ ...intent.input, clientKey }) };
       if (intent.action === "map") return { target: "integration", path: `${BASE}/integration`, method: "PATCH", body: examSourceMappingInputSchema.parse({ ...intent.input, clientKey }) };
       if (intent.action === "review") return { target: "review", path: `${BASE}/reviews`, method: "POST", body: examWorkReviewInputSchema.parse({ ...intent.input, clientKey }), readTarget: "overview", readPath: BASE };
       return { target: "forecast", path: `${BASE}/forecast`, method: "POST", body: examPaperInputSchema.parse({ ...intent.input, clientKey }) };
     }),
-    async recover() { if (!active && pending) await write(pending, true); },
+    async recover() { if (!active && pending) return (await write(pending, true))?.overview ?? null; return null; },
     dispose() {
       const interruptedWrite = active?.writing && pending !== null;
       active?.controller.abort(); active = null; generation++;

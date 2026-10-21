@@ -1,4 +1,5 @@
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { createSessionFetch } from "../../auth/session-expiry";
 import {
   createCardRequestSchema,
   createCardResponseSchema,
@@ -57,7 +58,8 @@ export type OpeningGradeCardInput = {
 };
 
 /** HTTP cards/reviews client. Failures throw; they never become sample cards. */
-export function createOpeningCardsClient(fetchImpl: FetchLike = fetch) {
+export function createOpeningCardsClient(transport: FetchLike = fetch) {
+  const fetchImpl = createSessionFetch(transport);
   return {
     async observationDraft(observationId: string) {
       return observationCardDraftSchema.parse(await request(

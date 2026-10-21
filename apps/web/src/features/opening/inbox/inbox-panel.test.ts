@@ -26,10 +26,11 @@ describe("inbox material collection rendering", () => {
     expect(html).not.toContain("拖入文件到这里，或点击选择");
     expect(html).toContain("可以用于提问");
   });
-  it("keeps the large upload dropzone for an empty library", () => {
+  it("keeps a single working upload dropzone inside the empty library action", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [], onChanged }));
     expect(html).toContain("拖入文件到这里，或点击选择");
     expect(html).toContain("还没有材料");
+    expect(html.match(/type="file"/g)).toHaveLength(1);
   });
   it("renders accessible stable checkboxes for the selected page and accepts course metadata", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources, onChanged,
@@ -94,4 +95,20 @@ describe("inbox upload course association helpers", () => {
     expect(html).toContain("Visible.pdf");
     expect(html).not.toContain("127.0.0.1:9000");
   });
+});
+
+it("pins a processing material once and retains selection, management and aged-queue deletion", () => {
+  const queued = { ...source("queued", "Processing.pdf"), parseState: "queued" as const };
+  const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [queued], onChanged, selectedIds: new Set([queued.id]), onToggle: () => {}, onAssign: () => {}, renderMetadata: () => createElement("span", null, "关联课程") }));
+  expect(html).toContain('aria-label="材料处理任务"');
+  expect(html).toContain("原件已保存，解析排队中");
+  expect(html).toContain("阅读已保存原件");
+  expect(html).toContain("管理材料");
+  expect(html).toContain("归入课程");
+  expect(html).toContain("删除");
+  expect(html).toContain("关联课程");
+  expect(html).toContain('aria-label="选择材料 Processing.pdf"');
+  expect(html).toContain('checked=""');
+  expect(html.match(/<h3/g)).toHaveLength(1);
+  expect(html).not.toContain("<progress");
 });

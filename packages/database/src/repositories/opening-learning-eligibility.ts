@@ -100,11 +100,10 @@ export async function invalidateOpeningLearningEligibility(tx: TransactionSql, s
       OR ${input.sourceIds?.length ? tx`p.privacy_source_ids && ${[...input.sourceIds]}::text[]` : tx`FALSE`}
       OR EXISTS(SELECT 1 FROM opening_learning_observations o
         JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
-        JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-        JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+        JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
           AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
         WHERE COALESCE(o.root_observation_id,o.id)=p.root_observation_id AND o.workspace_id=p.workspace_id AND o.owner_user_id=p.owner_user_id
-          AND (${input.rootIds?.length ? tx`j.payload->'spanDelayedProtocol'->>'baselineRootId'=ANY(${[...input.rootIds]}::text[])` : tx`FALSE`}
+          AND (${input.rootIds?.length ? tx`r.learning_protocol->>'baselineRootId'=ANY(${[...input.rootIds]}::text[])` : tx`FALSE`}
             OR ${input.sourceIds?.length ? tx`baseline.source_ids && ${[...input.sourceIds]}::uuid[]` : tx`FALSE`})))`;
 }
 

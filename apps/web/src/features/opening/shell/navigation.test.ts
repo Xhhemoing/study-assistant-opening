@@ -3,31 +3,11 @@ import { legacyOpeningRedirectPath } from "../../../middleware";
 import { navigationIsActive, openingNavigation } from "./navigation";
 
 describe("workspace navigation", () => {
-  it("exposes notes in the Opening core loop plus cards, review, and connections", () => {
-    const links = openingNavigation().map(item => item.href);
-    expect(links).toEqual([
-      "/opening/today",
-      "/opening/assistant",
-      "/opening/library",
-      "/opening/courses",
-      "/opening/cards",
-      "/opening/sprint",
-      "/opening/review",
-      "/opening/settings/connections",
+  it("uses four shared destinations and keeps secondary tools out of primary navigation", () => {
+    expect(openingNavigation().map(item => [item.href, item.label])).toEqual([
+      ["/opening/today", "今日"], ["/opening/courses", "课程"],
+      ["/opening/review", "复习"], ["/opening/library", "资料"],
     ]);
-    expect(openingNavigation().filter(item => item.group === "core").map(item => item.href)).toEqual([
-      "/opening/today",
-      "/opening/assistant",
-      "/opening/library",
-      "/opening/courses",
-    ]);
-    expect(openingNavigation().filter(item => item.group === "more").map(item => item.href)).toEqual([
-      "/opening/cards",
-      "/opening/sprint",
-      "/opening/review",
-      "/opening/settings/connections",
-    ]);
-    expect(openingNavigation().find(item => item.label === "资料库")?.icon).toBe("library");
   });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);

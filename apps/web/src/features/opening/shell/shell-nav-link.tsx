@@ -1,15 +1,14 @@
 "use client";
 
 import type { ComponentProps } from "react";
+import Link from "next/link";
 
-type ShellNavLinkProps = ComponentProps<"a">;
+type ShellNavLinkProps = ComponentProps<typeof Link>;
 
-/** Primary shell navigation deliberately uses native navigation.
- * App Router transitions can stall behind concurrent teaching updates. A native
- * anchor avoids that interception entirely, as well as stale fallback timers
- * racing subsequent clicks. Browser modifier keys and cancelled clicks retain
- * their normal semantics. Page-level learning routes may still use soft nav.
+/** Keep the shared shell mounted when changing learning surfaces.
+ * Next Link preserves modified-click and caller cancellation semantics without
+ * a fallback timer that could redirect after a later navigation has completed.
  */
 export function ShellNavLink(props: ShellNavLinkProps) {
-  return <a {...props} />;
+  return <Link {...props} />;
 }

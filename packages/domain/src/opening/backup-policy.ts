@@ -1,4 +1,5 @@
 import { validateBackupStudy } from "./backup-study";
+import { validateBackupRetestProtocols } from "./backup-retest-protocol";
 import { validateOpeningBackupCards } from "./backup-cards";
 import { validateBackupCourseMilestones } from "./backup-course-milestones";
 import { validateBackupPlanControl } from "./backup-plan-control";
@@ -372,6 +373,7 @@ export function validateOpeningRestore(
   }
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);
+  validateBackupRetestProtocols(tables, errors);
   validateBackupPlanFeedback(tables, errors);
   validateBackupPlanControl(tables, errors);
   validateBackupCourseMilestones(tables, errors);

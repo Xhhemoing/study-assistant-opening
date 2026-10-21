@@ -93,6 +93,20 @@ describe("readOpeningBackupRecords", () => {
     expect(snapshot).not.toHaveProperty("workspace");
   });
 
+  it("keeps a retest identity but removes a protocol whose baseline was excluded from the backup", async () => {
+    const sql = fakeSql(call => {
+      if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (call.query.includes("FROM opening_retest_activities WHERE")) return [{ id: "retest-1", candidate_id: null,
+        candidate_reference_id: candidateId, task_id: "task-1", accept_client_key: "accepted-request",
+        learning_protocol: { baselineObservationId: "private-observation", baselineRootId: "private-root" }, reason: null }];
+      return [];
+    });
+    const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+    expect(snapshot.tables.opening_retest_activities).toEqual([{ id: "retest-1", candidate_id: null,
+      candidate_reference_id: candidateId, task_id: "task-1", accept_client_key: null, learning_protocol: null,
+      reason: "learning_protocol_baseline_unavailable" }]);
+  });
+
   it("retains an accepted task candidate only when its assistant candidate and source turn are included", async () => {
     const sql = fakeSql((call) => {
       if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 4 }];

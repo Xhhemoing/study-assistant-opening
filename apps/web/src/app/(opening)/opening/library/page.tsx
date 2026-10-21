@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { LibraryView } from "../../../../features/opening/library/library-view";
 import { parseSourceViewerSearchParams } from "../../../../features/opening/inbox/source-viewer";
 
@@ -8,6 +9,12 @@ export default async function OpeningLibraryPage({
 }) {
   const params = await searchParams;
   const { tab, courseId } = params;
+  if (tab === "review") {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined) query.set(key, value);
+    query.set("tab", "memory");
+    redirect(`/opening/suggestions?${query}`);
+  }
   const initialOpen = parseSourceViewerSearchParams(params);
-  return <LibraryView key={courseId ?? "global"} tab={tab} courseId={courseId} initialOpen={initialOpen} />;
+  return <LibraryView tab={tab} courseId={courseId} initialOpen={initialOpen} />;
 }

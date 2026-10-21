@@ -38,10 +38,10 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
         <input className={ui.input} maxLength={2048} type="url" value={draft.baseUrl} onChange={event => onChange({ ...draft, baseUrl: event.target.value })} /></label>
       <label className="block space-y-1.5"><span className={ui.label}>API 密钥</span>
         <input autoComplete="new-password" className={ui.input} maxLength={4096} type="password" value={draft.apiKey} onChange={event => onChange({ ...draft, apiKey: event.target.value })} />
-        <span className="block text-xs leading-6 text-zinc-500">只写入并加密保存；成功后清空此输入，不保存到浏览器存储。</span></label>
+        <span className="block text-xs leading-6 text-text-3">只写入并加密保存；成功后清空此输入，不保存到浏览器存储。</span></label>
       <div className="flex flex-wrap gap-x-5 gap-y-1">
-        <label className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-700"><input className="size-4 accent-emerald-700" type="checkbox" checked={draft.supportsVision} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} />支持视觉</label>
-        <label className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-700"><input className="size-4 accent-emerald-700" type="checkbox" checked={draft.supportsAudio} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} />支持音频输入</label>
+        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="checkbox" checked={draft.supportsVision} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} />支持视觉</label>
+        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="checkbox" checked={draft.supportsAudio} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} />支持音频输入</label>
       </div>
       <label className="block space-y-1.5"><span className={ui.label}>计费方式</span>
         <select className={ui.input} value={draft.billing} onChange={event => onChange({ ...draft, billing: event.target.value as QuickSetupDraft["billing"], confirmBudget: false })}>
@@ -57,18 +57,18 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
       {free ? <>
         <label className="block space-y-1.5"><span className={ui.label}>每日请求上限</span>
           <input className={ui.input} inputMode="numeric" value={draft.dailyRequestCap} onChange={event => onChange({ ...draft, dailyRequestCap: event.target.value })} /></label>
-        <p className="text-xs leading-6 text-amber-800" role="note">{FREE_TIER_NOTICE}</p>
-        <p className="text-xs leading-6 text-zinc-500">200 次为初始限制，请按供应商当前免费额度调整；请求成功与可用额度以供应商为准。</p>
+        <p className="text-xs leading-6 text-warn" role="note">{FREE_TIER_NOTICE}</p>
+        <p className="text-xs leading-6 text-text-3">200 次为初始限制，请按供应商当前免费额度调整；请求成功与可用额度以供应商为准。</p>
       </> : <>
         <label className="block space-y-1.5"><span className={ui.label}>每日额度（分）</span>
           <input className={ui.input} inputMode="numeric" value={draft.dailyCapCents} onChange={event => onChange({ ...draft, dailyCapCents: event.target.value, confirmBudget: false })} /></label>
-        <label className="flex min-h-10 cursor-pointer items-start gap-2 text-sm leading-6 text-zinc-700">
-          <input className="mt-1 size-4 shrink-0 accent-emerald-700" type="checkbox" checked={draft.confirmBudget} onChange={event => onChange({ ...draft, confirmBudget: event.target.checked })} />
+        <label className="flex min-h-11 cursor-pointer items-start gap-2 text-sm leading-6 text-text-2">
+          <input className="mt-1 size-4 shrink-0 accent-accent" type="checkbox" checked={draft.confirmBudget} onChange={event => onChange({ ...draft, confirmBudget: event.target.checked })} />
           我确认开启每日额度{Number.isSafeInteger(Number(draft.dailyCapCents)) && Number(draft.dailyCapCents) > 0 ? `，每天最多约 ¥${(Number(draft.dailyCapCents) / 100).toFixed(2)}` : ""}。</label>
       </>}
     </fieldset>
-    <p className="text-xs leading-6 text-zinc-500">保存会将此模型设为默认，并清空已有的辅导模式及用途专属路由。价格请使用统一记账币种；不自动换汇。</p>
-    {locked ? <p className="text-xs leading-6 text-amber-800" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p className="text-xs leading-6 text-amber-800" role="status">{problem}</p> : null}
+    <p className="text-xs leading-6 text-text-3">保存会将此模型设为默认，并清空已有的辅导模式及用途专属路由。价格请使用统一记账币种；不自动换汇。</p>
+    {locked ? <p className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p className="text-xs leading-6 text-warn" role="status">{problem}</p> : null}
     <button className={ui.primary} disabled={busy || (!locked && problem !== null)} type="submit">
       {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <WandSparkles aria-hidden="true" size={14} />}{locked ? "确认上次配置结果" : "一键配置模型"}
     </button>
@@ -77,11 +77,11 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
 
 export function QuickSetupResult({ data, basePath = "/settings" }: { data: OpeningAiSettingsResponse; basePath?: string }) {
   const routes = effectiveTaskRoutes(data, data.settings);
-  return <div className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
-    <p className="flex items-center gap-2 text-sm text-emerald-800" role="status"><Check aria-hidden="true" size={15} />配置已保存，密钥输入已清空。</p>
-    <p className="text-xs leading-6 text-zinc-600">下方显示配置是否满足各用途要求；实际连通性请在高级设置的模型列表中测试。</p>
+  return <div className="space-y-2 rounded-lg border border-accent/30 bg-accent-soft p-3">
+    <p className="flex items-center gap-2 text-sm text-accent" role="status"><Check aria-hidden="true" size={15} />配置已保存，密钥输入已清空。</p>
+    <p className="text-xs leading-6 text-text-2">下方显示配置是否满足各用途要求；实际连通性请在高级设置的模型列表中测试。</p>
     <dl className="space-y-1 text-xs leading-6">{routes.map(route => <div className="flex flex-wrap justify-between gap-x-4" key={route.task.key}>
-      <dt className="text-zinc-600">{route.task.label}</dt><dd className={route.problem ? "text-amber-800" : "text-emerald-800"}>{route.problem ?? "配置可用"}</dd>
+      <dt className="text-text-2">{route.task.label}</dt><dd className={route.problem ? "text-warn" : "text-accent"}>{route.problem ?? "配置可用"}</dd>
     </div>)}</dl>
     <Link className={ui.quiet} href={`${basePath}/advanced`}>查看模型路由与连通性测试</Link>
   </div>;
@@ -124,11 +124,11 @@ export function QuickSetupPanel({ onConfigured, basePath = "/settings" }: { onCo
     finally { submitting.current = false; setBusy(false); }
     if (configured) onConfigured?.(configured);
   }
-  return <section id="quick-model-setup" className="scroll-mt-6 grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="quick-model-setup-heading">
-    <div><h2 id="quick-model-setup-heading" className="text-sm font-medium text-zinc-900">一键配置 AI 模型</h2><p className="mt-1 text-xs leading-6 text-zinc-500">填写一次，将一个模型用于辅导、主讲及材料处理。各用途的输入能力要求会在保存后列出。</p></div>
+  return <section id="quick-model-setup" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="quick-model-setup-heading">
+    <div><h2 id="quick-model-setup-heading" className="text-sm font-medium text-text">一键配置 AI 模型</h2><p className="mt-1 text-xs leading-6 text-text-3">填写一次，将一个模型用于辅导、主讲及材料处理。各用途的输入能力要求会在保存后列出。</p></div>
     <div className="min-w-0 space-y-3">
       <QuickSetupForm draft={draft} preset={preset} busy={busy} locked={submission.uncertain} onChange={value => { setDraft(value); setError(""); }} onPreset={value => { setPreset(value); setDraft(current => applyQuickSetupPreset(current, value)); setError(""); }} onSubmit={() => void submit()} />
-      {error ? <p className="text-sm leading-6 text-red-700" role="alert">{error}</p> : null}
+      {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}
       {result ? <QuickSetupResult data={result} basePath={basePath} /> : null}
     </div>
   </section>;

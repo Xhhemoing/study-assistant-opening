@@ -34,26 +34,26 @@ export function TeachingLoopTrialEmpty({
     >
       <h2
         id="teaching-loop-trial-empty-heading"
-        className="text-[15px] font-semibold text-zinc-900"
+        className="text-[15px] font-semibold text-text"
       >
         AI 主讲试运行未开启
       </h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-zinc-500">
+      <p className="mt-2 max-w-md text-sm leading-6 text-text-3">
         进入主讲工作台（TeachingWorkspace）需要同时开启{" "}
-        <span className="font-medium text-zinc-700">OPENING_TEACHING_LOOP</span>{" "}
+        <span className="font-medium text-text-2">OPENING_TEACHING_LOOP</span>{" "}
         与{" "}
-        <span className="font-medium text-zinc-700">OPENING_TEACHING_WORKSPACE</span>
+        <span className="font-medium text-text-2">OPENING_TEACHING_WORKSPACE</span>
         。当前未同时开启
         {missing.length > 0 ? (
           <>
             （缺少：
-            <span className="font-medium text-zinc-700">{missing.join("、")}</span>
+            <span className="font-medium text-text-2">{missing.join("、")}</span>
             ）
           </>
         ) : null}
         ，因此不会进入主讲工作台，也不会把自由对话当成主讲试运行。
       </p>
-      <p className="mt-4 rounded-lg bg-zinc-50 px-3 py-2 text-[11px] leading-5 text-zinc-600 ring-1 ring-zinc-900/5">
+      <p className="mt-4 rounded-lg bg-surface-2 px-3 py-2 text-xs leading-5 text-text-2 ring-1 ring-line">
         试运行关闭时保留既有活动与断点内容；不会伪造讲义或假装主讲已可用。
       </p>
       <p className="mt-4">

@@ -9,6 +9,8 @@ import { SEARCH_DEBOUNCE_MS, filterPaletteCommands, getNextPaletteIndex, getPale
 import { openingSearchHitHref, searchHitTypeLabel } from "./search-results-model";
 import { createSearchApi } from "./search-api";
 
+import { openAssistantDrawer } from "../opening/assistant/assistant-entry";
+
 interface PaletteOption { id: string; label: string; description: string; href: string; kind: "page" | "command" | "result" }
 function buildOptions(query: string, hits: SearchHit[]): PaletteOption[] {
   return [
@@ -38,7 +40,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
 
   useEffect(() => {
     function handleGlobalKeyDown(event: globalThis.KeyboardEvent) {
-      if (!event.isComposing && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); onOpen(); }
+      if (!event.defaultPrevented && !event.isComposing && !document.querySelector('[role="dialog"][data-state="open"]') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); onOpen(); }
     }
     document.addEventListener("keydown", handleGlobalKeyDown);
     return () => document.removeEventListener("keydown", handleGlobalKeyDown);
@@ -76,7 +78,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
     const option = options[activeIndex];
     if (open && option) document.getElementById(`command-option-${option.id}`)?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, open, options]);
-  function selectOption(index: number) { const option = options[index]; if (!option) return; onClose(); router.push(option.href); }
+  function selectOption(index: number) { const option = options[index]; if (!option) return; onClose(); if (option.href.startsWith("/opening/assistant")) openAssistantDrawer(option.href); else router.push(option.href); }
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
     const action = getPaletteKeyAction(event.key, event.nativeEvent.isComposing);
     if (action === "none") return;
@@ -86,23 +88,23 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
     setActiveIndex((current) => getNextPaletteIndex(current, action, options.length));
   }
   if (!open) return null;
-  return <dialog ref={dialogRef} aria-labelledby="command-palette-title" aria-modal="true" role="dialog" className="fixed inset-x-4 bottom-auto top-[10dvh] m-0 mx-auto max-h-[80dvh] w-[calc(100%_-_2rem)] max-w-2xl overflow-hidden rounded-lg border border-zinc-200 bg-white p-0 text-zinc-800 shadow-xl shadow-zinc-950/15 outline-none backdrop:bg-zinc-950/30" onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => {
+  return <dialog ref={dialogRef} aria-labelledby="command-palette-title" aria-modal="true" role="dialog" className="fixed inset-x-4 bottom-auto top-[10dvh] m-0 mx-auto max-h-[80dvh] w-[calc(100%_-_2rem)] max-w-2xl overflow-hidden rounded-lg border border-line bg-surface p-0 text-text shadow-xl shadow-zinc-950/15 outline-none backdrop:bg-zinc-950/30" onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => {
     if (event.target !== event.currentTarget) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onClose();
   }}>
-    <div className="flex min-h-12 items-center gap-3 border-b border-zinc-200 px-4">
-      <Search aria-hidden="true" className="shrink-0 text-zinc-500" size={17} /><h2 id="command-palette-title" className="sr-only">快捷导航与内容搜索</h2>
-      <input aria-activedescendant={options[activeIndex] ? `command-option-${options[activeIndex].id}` : undefined} ref={inputRef} aria-controls="command-palette-options" aria-expanded="true" aria-label="搜索页面、笔记和课程" autoComplete="off" className="min-h-12 min-w-0 flex-1 bg-transparent text-sm text-zinc-800 outline-none placeholder:text-zinc-500" onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} onCompositionStart={() => setComposing(true)} onCompositionEnd={event => { setComposing(false); setQuery(event.currentTarget.value); }} onKeyDown={handleKeyDown} placeholder="搜索页面、笔记和课程" role="combobox" value={query} />
-      <span className="hidden items-center gap-1 text-xs text-zinc-400 sm:flex"><Command aria-hidden="true" size={12} />K</span><button aria-label="关闭搜索" className={ui.icon} onClick={onClose} type="button"><X aria-hidden="true" size={16} /></button>
+    <div className="flex min-h-12 items-center gap-3 border-b border-line px-4">
+      <Search aria-hidden="true" className="shrink-0 text-text-3" size={17} /><h2 id="command-palette-title" className="sr-only">快捷导航与内容搜索</h2>
+      <input aria-activedescendant={options[activeIndex] ? `command-option-${options[activeIndex].id}` : undefined} ref={inputRef} aria-controls="command-palette-options" aria-expanded="true" aria-label="搜索页面、笔记和课程" autoComplete="off" className="min-h-12 min-w-0 flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-3" onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} onCompositionStart={() => setComposing(true)} onCompositionEnd={event => { setComposing(false); setQuery(event.currentTarget.value); }} onKeyDown={handleKeyDown} placeholder="搜索页面、笔记和课程" role="combobox" value={query} />
+      <span className="hidden items-center gap-1 text-xs text-text-3 sm:flex"><Command aria-hidden="true" size={12} />K</span><button aria-label="关闭搜索" className={ui.icon} onClick={onClose} type="button"><X aria-hidden="true" size={16} /></button>
     </div>
     <div className="max-h-[60dvh] overflow-y-auto p-2">
-      <p className="px-3 py-2 text-xs text-zinc-500">{query.trim() ? "页面、操作与内容结果" : "页面与快捷操作"}</p>
-      <div id="command-palette-options" role="listbox" aria-label="搜索选项">{options.map((option, index) => <button aria-selected={activeIndex === index} className={`flex min-h-12 w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-700 motion-reduce:transition-none ${activeIndex === index ? "bg-emerald-50" : "hover:bg-zinc-50"}`} id={`command-option-${option.id}`} key={option.id} onClick={() => selectOption(index)} onMouseEnter={() => setActiveIndex(index)} role="option" tabIndex={-1} type="button"><span className="min-w-0"><span className="block truncate text-sm font-medium text-zinc-800">{option.label}</span><span className="mt-0.5 block truncate text-xs text-zinc-500">{option.description}</span></span><span className="shrink-0 text-[10px] text-zinc-500">{option.kind === "page" ? "页面" : option.kind === "command" ? "操作" : "内容"}</span></button>)}</div>
-      {loading ? <p className="px-3 py-3 text-xs text-zinc-500" role="status">正在搜索内容…</p> : null}
-      {error ? <div className="flex items-center justify-between gap-3 px-3 py-3" role="alert"><p className="text-xs leading-6 text-red-700">{error}</p><button aria-label="重试搜索" className={ui.icon} onClick={() => setRetryToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={15} /></button></div> : null}
-      {query.trim() && !loading && !error && options.length === 0 ? <p className="px-3 py-6 text-center text-sm text-zinc-500" role="status">没有匹配的页面或内容</p> : null}
+      <p className="px-3 py-2 text-xs text-text-3">{query.trim() ? "页面、操作与内容结果" : "页面与快捷操作"}</p>
+      <div id="command-palette-options" role="listbox" aria-label="搜索选项">{options.map((option, index) => <button aria-selected={activeIndex === index} className={`flex min-h-12 w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none ${activeIndex === index ? "bg-accent-soft" : "hover:bg-surface-2"}`} id={`command-option-${option.id}`} key={option.id} onClick={() => selectOption(index)} onMouseEnter={() => setActiveIndex(index)} role="option" tabIndex={-1} type="button"><span className="min-w-0"><span className="block truncate text-sm font-medium text-text">{option.label}</span><span className="mt-0.5 block truncate text-xs text-text-3">{option.description}</span></span><span className="shrink-0 text-xs text-text-3">{option.kind === "page" ? "页面" : option.kind === "command" ? "操作" : "内容"}</span></button>)}</div>
+      {loading ? <p className="px-3 py-3 text-xs text-text-3" role="status">正在搜索内容…</p> : null}
+      {error ? <div className="flex items-center justify-between gap-3 px-3 py-3" role="alert"><p className="text-xs leading-6 text-danger">{error}</p><button aria-label="重试搜索" className={ui.icon} onClick={() => setRetryToken((value) => value + 1)} type="button"><RefreshCw aria-hidden="true" size={15} /></button></div> : null}
+      {query.trim() && !loading && !error && options.length === 0 ? <p className="px-3 py-6 text-center text-sm text-text-3" role="status">没有匹配的页面或内容</p> : null}
     </div>
-    <p className="border-t border-zinc-100 px-4 py-2 text-[10px] text-zinc-500">上下键选择 · Enter 打开 · Esc 关闭</p>
+    <p className="border-t border-line px-4 py-2 text-xs text-text-3">上下键选择 · Enter 打开 · Esc 关闭</p>
   </dialog>;
 }

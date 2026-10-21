@@ -95,9 +95,9 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
       if (current === sequence.current) setRecord(value);
     }} />
     : <SourceReaderFrame title="查看引用材料" onClose={close} returnPoint={request.returnPoint}>
-      {error ? <div className="space-y-3"><p role="alert" className="text-sm text-red-700">{error}</p>
+      {error ? <div className="space-y-3"><p role="alert" className="text-sm text-danger">{error}</p>
         <button type="button" className={ui.secondary} onClick={() => setRevision(value => value + 1)}>重新读取</button>
         <a href={request.href} className={ui.quiet}>在资料库中打开</a></div>
-        : <p role="status" className="text-sm text-zinc-600">正在读取引用材料…</p>}
+        : <p role="status" className="text-sm text-text-2">正在读取引用材料…</p>}
     </SourceReaderFrame>;
 }

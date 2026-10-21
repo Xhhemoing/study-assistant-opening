@@ -11,6 +11,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { lockBoundExamCourse, packWithExamSourceMappings, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { syncExamIntegration } from "./opening-exam-integration-attempts";
 import { readExamIntegrationInTx } from "./opening-exam-integration";
+import { examSourceExposureCoverage, readExamSourceExposure } from "./opening-exam-source-exposure";
 export { OpeningExamSprintRepositoryError } from "./opening-exam-sprint-snapshot";
 
 
@@ -77,13 +78,25 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
           if (!isDeepStrictEqual(parsed.data, command)) {
             throw new OpeningExamSprintRepositoryError("CONFLICT", "同一请求标识不能提交不同操作");
           }
+          // A durable receipt does not authorize delivery in a different run or a sealed mock.
+          // Revalidate against the captured pack/context without writing another exposure.
+          if (command.action === "open_lesson") applyExamSprintCommand(snapshot.state, command, snapshot.pack, now);
           return examSprintOverview(snapshot.state, snapshot.pack, now, await readExamEvidenceState(tx, scope, sprintId, snapshot.state));
         }
         if (command.action === "configure") {
           const [bound] = await tx`SELECT sprint_id FROM opening_exam_bindings WHERE sprint_id=${sprintId}`;
           if (bound) throw new OpeningExamSprintRepositoryError("CONFLICT", "请到课程目标调整考试日期和时间预算");
         }
-        const context = row ? await readExamEvidenceState(tx, scope, sprintId, snapshot.state) : { bktEligibleAttemptIds: [], ruleEvidence: {} };
+        const evidence = row ? await readExamEvidenceState(tx, scope, sprintId, snapshot.state) : { bktEligibleAttemptIds: [], ruleEvidence: {} };
+        const capturesAttempt = ["start", "next", "open_lesson", "help", "answer"].includes(command.action);
+        const captureId = command.action === "answer" || command.action === "help" ? command.attemptId
+          : command.action === "open_lesson" ? snapshot.state.attempts.at(-1)?.id : undefined;
+        const sourceExposure = row && capturesAttempt
+          ? await readExamSourceExposure(tx, scope, sprintId, snapshot.pack, captureId) : null;
+        if (sourceExposure?.sourceVersion === null) {
+          throw new OpeningExamSprintRepositoryError("CONFLICT", "冲刺材料版本无法校验，请保留记录并联系维护者");
+        }
+        const context = { ...evidence, exposureCoverage: examSourceExposureCoverage(sourceExposure) };
         const state = applyExamSprintCommand(snapshot.state, command, snapshot.pack, now, context);
         if (row) {
           await tx`UPDATE opening_exam_sprints SET state=${tx.json(state as never)},updated_at=${now}

@@ -1,3 +1,4 @@
+import { createSessionFetch } from "../../auth/session-expiry";
 import { sourceActionResultSchema, sourceDeletionListSchema, sourceImpactSchema, type SourceActionInput } from "@aistudy/contracts";
 import { notifyOpeningPrivacyChange } from "../client/privacy-change";
 
@@ -5,7 +6,8 @@ export class SourceActionsError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-export function createSourceActionsClient(fetcher: typeof fetch = fetch) {
+export function createSourceActionsClient(transport: typeof fetch = (input, init) => fetch(input, init)) {
+  const fetcher = createSessionFetch(transport);
   async function request(path: string, input?: SourceActionInput): Promise<unknown> {
     const response = await fetcher(`/api/opening/sources/${path}`, input ? {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),

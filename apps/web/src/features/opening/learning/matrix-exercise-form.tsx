@@ -136,39 +136,39 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
   function nextQuestion() {
     continuity.startAnother({ sourceId, matrixKey: key, matrixVariant: (variant + 1) % 9 });
   }
-  return <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-zinc-200 pt-4">
-    {!ready ? <p className="text-sm text-zinc-500" role="status">正在读取矩阵练习草稿…</p> : null}
-    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-zinc-800">内置矩阵练习</h3>
-      <button type="button" disabled={pending} onClick={onBack} className="rounded border border-zinc-200 px-3 py-2 text-sm">返回普通练习</button></div>
-    {ready && ((initialKey && key !== initialKey) || (initialVariant !== undefined && variant !== initialVariant)) ? <p className="text-xs text-zinc-600" role="status">已恢复此前的{matrixExerciseSkillLabel(key)}第 {variant + 1} 组草稿，新入口的选择不会覆盖原题。</p> : null}
-    <p className="text-xs text-zinc-500">本次题组：{variant + 1}</p>
-    <p className="text-xs leading-6 text-zinc-500">题目由内置规则生成，使用精确计算核对。材料仅用于课程与版本关联，题目并非从材料中抽取。</p>
-    {storageWarning ? <p className="text-xs text-amber-800" role="status">草稿暂时只在当前页面内保留，刷新前请复制答案。</p> : null}
+  return <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
+    {!ready ? <p className="text-sm text-text-3" role="status">正在读取矩阵练习草稿…</p> : null}
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-text">内置矩阵练习</h3>
+      <button type="button" disabled={pending} onClick={onBack} className="rounded border border-line px-3 py-2 text-sm">返回普通练习</button></div>
+    {ready && ((initialKey && key !== initialKey) || (initialVariant !== undefined && variant !== initialVariant)) ? <p className="text-xs text-text-2" role="status">已恢复此前的{matrixExerciseSkillLabel(key)}第 {variant + 1} 组草稿，新入口的选择不会覆盖原题。</p> : null}
+    <p className="text-xs text-text-3">本次题组：{variant + 1}</p>
+    <p className="text-xs leading-6 text-text-3">题目由内置规则生成，使用精确计算核对。材料仅用于课程与版本关联，题目并非从材料中抽取。</p>
+    {storageWarning ? <p className="text-xs text-warn" role="status">草稿暂时只在当前页面内保留，刷新前请复制答案。</p> : null}
     {restored ? <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} /> : !attempt ? <form onSubmit={start} className="space-y-3">
-      <label className="block text-sm">题型<select value={key} disabled={pending} onChange={event => setKey(event.target.value as Key)} className="ml-2 rounded border border-zinc-200 bg-white px-3 py-2">
+      <label className="block text-sm">题型<select value={key} disabled={pending} onChange={event => setKey(event.target.value as Key)} className="ml-2 rounded border border-line bg-surface px-3 py-2">
         {KEYS.map(value => <option key={value} value={value}>{matrixExerciseSkillLabel(value)}</option>)}</select></label>
-      <label className="block text-sm">关联材料<select required value={sourceId} disabled={pending} onChange={event => setSourceId(event.target.value)} className="ml-2 max-w-full rounded border border-zinc-200 bg-white px-3 py-2">
+      <label className="block text-sm">关联材料<select required value={sourceId} disabled={pending} onChange={event => setSourceId(event.target.value)} className="ml-2 max-w-full rounded border border-line bg-surface px-3 py-2">
         <option value="">选择可用课程材料</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
-      {sources.length === 0 ? <p className="text-xs text-amber-800">请先添加并完成解析一份材料，再开始内置练习。</p> : null}
-      <button disabled={pending || !sourceId} className="rounded bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50">{pending ? "正在开始…" : "开始矩阵练习"}</button>
+      {sources.length === 0 ? <p className="text-xs text-warn">请先添加并完成解析一份材料，再开始内置练习。</p> : null}
+      <button disabled={pending || !sourceId} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在开始…" : "开始矩阵练习"}</button>
     </form> : record ? <div className="space-y-3" role="status">
       <p className="text-sm font-medium">{record.serverEvaluation
         ? record.serverEvaluation.decision === "correct" ? "精确核算：本次答案正确" : record.serverEvaluation.decision === "incorrect" ? "精确核算：本次答案有误" : "本次未能自动判定"
         : "本次记录待核验"}</p>
-      {record.serverEvaluation?.decision === "abstain" ? <p className="text-xs text-amber-800">{reasonText[record.serverEvaluation.reasonCodes[0] ?? ""] ?? "请保留答案并到课程历史中手动核对。"}</p> : null}
-      <p className="whitespace-pre-wrap break-words text-sm text-zinc-700">原答案：{record.answer}</p>
-      <p className="text-xs text-zinc-500">本次结果只覆盖这道题；重复同题的已知反馈也会计入帮助，不代表掌握或延迟学习效果。</p>
+      {record.serverEvaluation?.decision === "abstain" ? <p className="text-xs text-warn">{reasonText[record.serverEvaluation.reasonCodes[0] ?? ""] ?? "请保留答案并到课程历史中手动核对。"}</p> : null}
+      <p className="whitespace-pre-wrap break-words text-sm text-text-2">原答案：{record.answer}</p>
+      <p className="text-xs text-text-3">本次结果只覆盖这道题；重复同题的已知反馈也会计入帮助，不代表掌握或延迟学习效果。</p>
       {record.eligibility ? <LearningEvidenceEligibilityDetails eligibility={record.eligibility} /> : null}
-      {message ? <p className="text-xs text-zinc-700">{message}</p> : null}
-      <div className="flex flex-wrap gap-2">{record.serverEvaluation ? <button type="button" disabled={pending} onClick={() => void dispute()} className="rounded border border-zinc-200 px-3 py-2 text-sm">评价有异议，标为待核验</button> : null}
-        <button type="button" disabled={pending} onClick={nextQuestion} className="rounded bg-zinc-900 px-3 py-2 text-sm text-white">换一道题</button></div>
+      {message ? <p className="text-xs text-text-2">{message}</p> : null}
+      <div className="flex flex-wrap gap-2">{record.serverEvaluation ? <button type="button" disabled={pending} onClick={() => void dispute()} className="rounded border border-line px-3 py-2 text-sm">评价有异议，标为待核验</button> : null}
+        <button type="button" disabled={pending} onClick={nextQuestion} className="rounded bg-ink px-3 py-2 text-sm text-on-ink">换一道题</button></div>
     </div> : <form onSubmit={submit} className="space-y-3">
-      <p className="whitespace-pre-wrap break-words rounded border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm leading-7">{matrixExerciseStem(attempt.matrixExercise!)}</p>
-      <label className="block text-sm">我的答案<textarea required maxLength={2000} rows={3} value={answer} disabled={pending || Boolean(draft.submission)} onChange={event => setAnswer(event.target.value)} className="mt-1 w-full rounded border border-zinc-200 bg-white px-3 py-2" /></label>
-      <label className="block text-sm">本次帮助<select required value={assistance} disabled={pending || Boolean(draft.submission)} onChange={event => setAssistance(event.target.value as LearningObservation["assistance"])} className="ml-2 rounded border border-zinc-200 bg-white px-3 py-2">
+      <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg px-3 py-3 text-sm leading-7">{matrixExerciseStem(attempt.matrixExercise!)}</p>
+      <label className="block text-sm">我的答案<textarea required maxLength={2000} rows={3} value={answer} disabled={pending || Boolean(draft.submission)} onChange={event => setAnswer(event.target.value)} className="mt-1 w-full rounded border border-line bg-surface px-3 py-2" /></label>
+      <label className="block text-sm">本次帮助<select required value={assistance} disabled={pending || Boolean(draft.submission)} onChange={event => setAssistance(event.target.value as LearningObservation["assistance"])} className="ml-2 rounded border border-line bg-surface px-3 py-2">
         <option value="unknown" disabled={!isAssistanceAllowed("unknown", deliveredAssistance)}>尚未确认</option><option value="independent" disabled={!isAssistanceAllowed("independent", deliveredAssistance)}>独立作答</option><option value="hinted" disabled={!isAssistanceAllowed("hinted", deliveredAssistance)}>使用了提示</option><option value="revealed">看过答案或解析</option></select></label>
-      <button disabled={pending || !answer.trim()} className="rounded bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50">{pending ? "正在保存…" : draft.submission ? "重试保存同一答案" : "保存并核算"}</button>
+      <button disabled={pending || !answer.trim()} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在保存…" : draft.submission ? "重试保存同一答案" : "保存并核算"}</button>
     </form>}
-    {error ? <p role="alert" className="text-sm text-red-700">{error}</p> : null}
+    {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
   </fieldset>;
 }

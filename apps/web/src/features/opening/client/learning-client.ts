@@ -1,8 +1,10 @@
+import { parseOpeningResponse } from "./parse-response";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { createSessionFetch } from "../../auth/session-expiry";
 import {
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
-  learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningObservationSchema,
+  learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningAttemptContextReadSchema, learningObservationSchema,
   type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
   observationHistorySchema, observationRevisionInputSchema, observationRevisionResultSchema,
@@ -50,7 +52,8 @@ async function request(
 }
 
 /** HTTP learning client. Failures throw; they never become demo summaries. */
-export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
+export function createOpeningLearningClient(transport: FetchLike = fetch) {
+  const fetchImpl = createSessionFetch(transport);
   return {
     async getSummary(courseId: string): Promise<LearningSummary[]> {
       const body = await request(
@@ -58,7 +61,7 @@ export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
         { method: "GET" },
         fetchImpl,
       );
-      return z.array(learningSummarySchema).parse(body);
+      return parseOpeningResponse(z.array(learningSummarySchema), body);
     },
 
     /** Fixed-snapshot, complete group summary. Legacy getSummary remains available. */
@@ -67,50 +70,54 @@ export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
       const query = new URLSearchParams({ limit: String(target.limit) });
       if (target.groupCursor !== undefined) query.set("groupCursor", target.groupCursor);
       const body = await request(`/api/opening/courses/${target.courseId}/learning/summary?${query}`, { method: "GET", signal }, fetchImpl);
-      return courseLearningSummaryPageSchema.parse(body);
+      return parseOpeningResponse(courseLearningSummaryPageSchema, body);
     },
 
     async listObservations(courseId: string) {
-      return z.array(learningObservationSchema).parse(await request(`/api/opening/courses/${courseId}/observations`, { method: "GET" }, fetchImpl));
+      return parseOpeningResponse(z.array(learningObservationSchema), await request(`/api/opening/courses/${courseId}/observations`, { method: "GET" }, fetchImpl));
     },
 
     async getObservationHistory(id: string) {
-      return observationHistorySchema.parse(await request(`/api/opening/observations/${id}/history`, { method: "GET" }, fetchImpl));
+      return parseOpeningResponse(observationHistorySchema, await request(`/api/opening/observations/${id}/history`, { method: "GET" }, fetchImpl));
     },
 
     async reviseObservation(input: ObservationRevisionInput) {
       const payload = observationRevisionInputSchema.parse(input);
-      return observationRevisionResultSchema.parse(await request("/api/opening/observations/revisions", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+      return parseOpeningResponse(observationRevisionResultSchema, await request("/api/opening/observations/revisions", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
     async listRevisionCourses() {
       const result = await request("/api/courses", { method: "GET" }, fetchImpl);
-      return z.object({ courses: z.array(z.object({ id: z.string().uuid(), title: z.string() })) }).parse(result).courses;
+      return parseOpeningResponse(z.object({ courses: z.array(z.object({ id: z.string().uuid(), title: z.string() })) }), result).courses;
     },
 
     async createSession(input: LearningSessionCreateInput): Promise<{ id: string }> {
       const payload = learningSessionCreateInputSchema.parse(input);
       const body = await request("/api/opening/learning-sessions", { method: "POST", body: JSON.stringify(payload) }, fetchImpl);
-      return z.object({ id: z.string().uuid() }).parse(body);
+      return parseOpeningResponse(z.object({ id: z.string().uuid() }), body);
     },
 
     async createAttempt(input: LearningAttemptCreateInput) {
       const payload = learningAttemptCreateInputSchema.parse(input);
-      return learningAttemptSchema.parse(await request("/api/opening/attempts", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+      return parseOpeningResponse(learningAttemptSchema, await request("/api/opening/attempts", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
     async getAttempt(attemptId: string) {
       const body = await request(`/api/opening/attempts/${attemptId}`, { method: "GET" }, fetchImpl);
-      return z.object({
+      return parseOpeningResponse(z.object({
         attemptId: z.string().uuid(),
         sessionId: z.string().uuid(),
         deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
-      }).strict().parse(body);
+      }).strict(), body);
+    },
+
+    async getAttemptContext(attemptId: string) {
+      return parseOpeningResponse(learningAttemptContextReadSchema, await request(`/api/opening/attempts/${encodeURIComponent(attemptId)}/context`, { method: "GET", cache: "no-store" }, fetchImpl));
     },
 
     async submitAttempt(attemptId: string, input: LearningAttemptSubmitInput) {
       const payload = learningAttemptSubmitInputSchema.parse(input);
-      return learningObservationSchema.extend({ allowsIndependent: z.boolean() }).parse(await request(`/api/opening/attempts/${attemptId}/submit`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+      return parseOpeningResponse(learningObservationSchema.extend({ allowsIndependent: z.boolean() }), await request(`/api/opening/attempts/${attemptId}/submit`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
     async submitObservation(input: ObservationInput) {

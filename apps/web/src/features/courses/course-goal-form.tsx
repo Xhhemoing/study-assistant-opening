@@ -204,27 +204,27 @@ export function CourseGoalForm({
 
   return (
     <section
-      className="border-t border-zinc-200 pt-5"
+      className="border-t border-line pt-5"
       aria-labelledby="course-goal-heading"
       data-testid="course-goal-form"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="course-goal-heading" className="text-sm font-semibold text-zinc-800">
+        <h2 id="course-goal-heading" className="text-sm font-semibold text-text">
           课程目标
         </h2>
-        <p className="text-xs text-zinc-500">{hasGoal ? "已设置" : "未设置"}</p>
+        <p className="text-xs text-text-3">{hasGoal ? "已设置" : "未设置"}</p>
       </div>
-      <p className="mt-1 text-xs leading-6 text-zinc-500">
+      <p className="mt-1 text-xs leading-6 text-text-3">
         先选择目标日期与讲练方式；日期留空支持长期学习。未设置目标也可以直接开始。
       </p>
       {loading ? (
-        <p className="mt-3 text-xs text-zinc-500" role="status">
+        <p className="mt-3 text-xs text-text-3" role="status">
           正在读取课程目标…
         </p>
       ) : loadFailed ? (
         <div className="mt-3 space-y-2">
           {error ? (
-            <p className="text-xs leading-5 text-red-700" role="alert">
+            <p className="text-xs leading-5 text-danger" role="alert">
               {error}
             </p>
           ) : null}
@@ -278,13 +278,13 @@ export function CourseGoalForm({
               </select>
             </label>
           </div>
-          <p className="text-xs leading-6 text-zinc-500">
+          <p className="text-xs leading-6 text-text-3">
             {learningMode === "auto" ? "目标或未完成阶段成果进入最后7天时，优先短讲解和练习；其他时间侧重理解与迁移。"
               : learningMode === "exam" ? "优先练习与必要补课，减少无关扩展；仍保留独立作答与复测记录。"
                 : "侧重理解、方法解释与迁移；遇到阻塞时先补必要前置，再回到原任务。"}
           </p>
           {datePast ? (
-            <p className="text-xs leading-6 text-amber-800" role="status">
+            <p className="text-xs leading-6 text-warn" role="status">
               目标日期早于今天；仍可保存，但草案可能不再按该截止日期推进。
             </p>
           ) : null}
@@ -307,18 +307,18 @@ export function CourseGoalForm({
             </button>
           </div>
           {error ? (
-            <p className="text-xs leading-5 text-red-700" role="alert">
+            <p className="text-xs leading-5 text-danger" role="alert">
               {error}
             </p>
           ) : null}
           {message ? (
-            <p className="text-xs leading-6 text-zinc-600" role="status">
+            <p className="text-xs leading-6 text-text-2" role="status">
               {message}
             </p>
           ) : null}
           {mustReload ? <button type="button" className={ui.secondary} disabled={busy} onClick={() => setReloadToken(value => value + 1)}>重新读取课程目标</button> : null}
-          <details className="border-t border-zinc-200 pt-3">
-            <summary className="cursor-pointer py-1 text-xs font-medium text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700">投入时间、优先级与阶段成果</summary>
+          <fieldset className="border-t border-line pt-3">
+            <legend className="py-1 pr-3 text-sm font-medium text-text">投入时间、优先级与阶段成果</legend>
             <div className="mt-3 space-y-4">
               <div className="flex flex-wrap items-end gap-3">
                 <label className="block min-w-0 flex-1 basis-40 space-y-1">
@@ -336,11 +336,11 @@ export function CourseGoalForm({
                   </select>
                 </label>
               </div>
-              <p className="text-xs leading-6 text-zinc-500">时间与优先级调整后，使用上方“保存”确认。{priority > 0 ? "本课程可排在其他课程的普通积压任务之前，当天截止事项仍优先。" : ""}</p>
+              <p className="text-xs leading-6 text-text-3">时间与优先级调整后，使用上方“保存”确认。{priority > 0 ? "本课程可排在其他课程的普通积压任务之前，当天截止事项仍优先。" : ""}</p>
               {storedGoal ? <CourseMilestones key={courseId} courseId={courseId} goal={storedGoal} api={api}
-                onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-zinc-500">保存课程目标后，可添加阶段成果与成功标准。</p>}
+                onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-text-3">保存课程目标后，可添加阶段成果与成功标准。</p>}
             </div>
-          </details>
+          </fieldset>
         </div>
       )}
     </section>

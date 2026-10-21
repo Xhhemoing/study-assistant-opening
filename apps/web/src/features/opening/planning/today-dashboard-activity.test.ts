@@ -33,6 +33,16 @@ const activity: TeachingActivity = {
 };
 
 describe("Today teaching-activity CTA semantics (CT-03)", () => {
+  it("shows one first-course action only after a successful empty course read", () => {
+    const empty = renderToStaticMarkup(createElement(TodayResumeBody, { state: { kind: "empty", courses: { status: "ready", items: [] } } }));
+    expect(empty).toContain("添加第一门课");
+    expect(empty.match(/<a\b/g)).toHaveLength(1);
+    expect(empty).toContain('href="/opening/courses/new"');
+    for (const state of [{ kind: "empty" as const }, { kind: "empty" as const, courses: { status: "error" as const } },
+      { kind: "empty" as const, courses: { status: "ready" as const, items: [{ id: "course", title: "归档课程", archivedAt: "2026-10-01T00:00:00Z" }] } }]) {
+      expect(renderToStaticMarkup(createElement(TodayResumeBody, { state }))).not.toContain("添加第一门课");
+    }
+  });
   it("asks for a learning intent before creating an empty first activity", () => {
     expect(planTodayPrimaryCta(null, null, false)).toEqual({ kind: "setup" });
     expect(planTodayPrimaryCta(activity, null, false)).toMatchObject({ kind: "focus-existing" });

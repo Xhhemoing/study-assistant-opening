@@ -5,31 +5,63 @@
 @source "../../../../packages/jingwei/src/react";
 @source "../";
 
-@theme {
+/* Emit the complete token set, including values consumed through CSS variables. */
+@theme static {
   --font-sans: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Iowan Old Style", "Charter", "Georgia", "Songti SC", "STSong", "Noto Serif SC", "Source Han Serif SC", serif;
+  --font-reading: var(--font-serif);
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
 
-  --color-ink: #fafafa;
+  --color-bg: #faf9f5;
   --color-surface: #ffffff;
-  --color-surface-2: #f4f4f5;
-  --color-line: #e4e4e7;
-  --color-text: #27272a;
-  --color-text-dim: #71717a;
-  --color-primary: #18181b;
-  --color-success: #047857;
-  --color-warning: #a16207;
-  --color-danger: #b91c1c;
+  --color-surface-2: #f2f0e9;
+  /* Separators are decorative; controls also need a visible focus/interaction state. */
+  --color-line: #e8e5dc;
+  --color-line-strong: #dcd8cc;
+  --color-text: #1f1e1b;
+  --color-text-2: #5e5d59;
+  /* Keep secondary text above 4.5:1 on surface-2 as well as the canvas. */
+  --color-text-3: #6e6c65;
+  --color-ink: #1f1e1b;
+  --color-on-ink: #faf9f5;
+  --color-accent: #047857;
+  --color-accent-soft: #e6f2eb;
+  --color-warn: #a4501f;
+  --color-warn-soft: #f6ece2;
+  --color-danger: #b42318;
+  --color-ai-1: #4f86f7;
+  --color-ai-2: #9a7bd8;
+  --color-ai-3: #e0798f;
+  --color-obj-1: #2b6cb0;
+  --color-obj-2: #c2571a;
+  --color-obj-3: #047857;
 
-  /* Motion tokens: quick, decelerating, and never animating layout properties. */
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --animate-enter: enter 280ms var(--ease-out-expo) both;
-  --animate-pop: pop 320ms var(--ease-spring) both;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-card: 14px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 2px rgb(31 30 27 / .04), 0 2px 8px rgb(31 30 27 / .03);
+  --shadow-float: 0 6px 20px rgb(31 30 27 / .07);
+  --shadow-overlay: 0 16px 48px rgb(31 30 27 / .14);
+
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --ease-out-expo: cubic-bezier(.16, 1, .3, 1);
+  --ease-in: cubic-bezier(.3, 0, 1, 1);
+  --ease-spring: linear(0, .06 2%, .24 5%, .53 10%, .79 16%, .94 23%, 1.012 31%, 1.018 38%, 1.004 50%, 1);
+  --duration-micro: 120ms;
+  --duration-state: 220ms;
+  --duration-panel: 320ms;
+  --duration-scene: 600ms;
+
+  /* Preserve existing animation names; animate only transform and opacity. */
+  --animate-enter: enter var(--duration-state) var(--ease-out-expo) both;
+  --animate-pop: pop var(--duration-panel) var(--ease-spring) both;
   --animate-shimmer: shimmer 1.6s linear infinite;
   --animate-breathe: breathe 2s ease-in-out infinite;
 
   @keyframes enter {
-    from { opacity: 0; transform: translateY(6px); filter: blur(2px); }
-    to { opacity: 1; transform: none; filter: none; }
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
   }
   @keyframes pop {
     from { opacity: 0; transform: scale(0.96); }
@@ -45,7 +77,72 @@
   }
 }
 
+/* Existing components keep working while they migrate to the canonical names. */
+@theme inline {
+  --color-text-dim: var(--color-text-3);
+  --color-primary: var(--color-ink);
+  --color-success: var(--color-accent);
+  --color-warning: var(--color-warn);
+}
+
+/* Token support only: the settings toggle and page-by-page dark migration follow in UX5. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #1f1e1c;
+  --color-surface: #262624;
+  --color-surface-2: #30302d;
+  --color-line: rgb(236 234 227 / .10);
+  --color-line-strong: rgb(236 234 227 / .16);
+  --color-text: #eceae3;
+  --color-text-2: #b6b3aa;
+  --color-text-3: #9b988f;
+  --color-ink: #eceae3;
+  --color-on-ink: #1f1e1c;
+  --color-accent: #5fcb9c;
+  --color-accent-soft: rgb(95 203 156 / .13);
+  --color-warn: #eba06a;
+  --color-warn-soft: rgb(235 160 106 / .13);
+  --color-danger: #ff9b91;
+  --color-ai-1: #7ba4ff;
+  --color-ai-2: #b49cf0;
+  --color-ai-3: #f29aae;
+  /* Objects must remain distinguishable on the dark canvas. */
+  --color-obj-1: #7ba4ff;
+  --color-obj-2: #f0aa78;
+  --color-obj-3: #5fcb9c;
+}
+
 @layer base {
   html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-  ::selection { background-color: var(--color-emerald-100); color: var(--color-emerald-950); }
+  ::selection { background-color: var(--color-ink); color: var(--color-on-ink); }
+  :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+}
+
+/* Also cover existing animate-spin/pulse users without per-component motion classes. */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation: none !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  ::view-transition-old(root), ::view-transition-new(root) {
+    animation-duration: 1ms !important;
+  }
+}
+
+/* Reading preference changes lesson prose without changing interface typography. */
+[data-reading-font="sans"] { --font-reading: var(--font-sans); }
+
+/* Explicit user preference also applies when the OS allows motion. */
+[data-motion="reduce"],
+[data-motion="reduce"] *,
+[data-motion="reduce"] *::before,
+[data-motion="reduce"] *::after {
+  animation: none !important;
+  transition-duration: 1ms !important;
+  scroll-behavior: auto !important;
+}
+[data-motion="reduce"]::view-transition-old(root),
+[data-motion="reduce"]::view-transition-new(root) {
+  animation-duration: 1ms !important;
 }

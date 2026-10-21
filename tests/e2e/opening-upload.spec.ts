@@ -26,19 +26,20 @@ test.describe("opening upload", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/library?tab=materials");
+      await expect(page.getByRole("tab", { name: "材料", exact: true })).toHaveAttribute("aria-selected", "true");
       const name = `notes-${Date.now()}.pdf`;
       const original = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF");
-      await page.locator('#upload input[type="file"]').setInputFiles({
+      await page.getByLabel("上传材料", { exact: true }).setInputFiles({
         name,
         mimeType: "application/pdf",
         buffer: original,
       }, { timeout: 30_000 });
       await page.locator("summary").filter({ hasText: "已上传 1 份材料" }).click({ timeout: 30_000 });
       await expect(page.getByRole("list", { name: "已上传任务", exact: true }).getByText(/^原件已保存，/)).toBeVisible();
-      const sourceRow = page.getByRole("article").filter({ has: page.getByRole("button", { name: `打开资料：${name}`, exact: true }) });
+      const sourceRow = page.getByRole("article", { name: `处理材料：${name}`, exact: true });
       await expect(sourceRow).toBeVisible();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
+      await sourceRow.getByRole("button", { name: "阅读已保存原件", exact: true }).click({ timeout: 15_000 });
       const reader = page.getByRole("dialog", { name, exact: true });
       await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
       const originalLink = reader.getByRole("link", { name: "打开原件 v0", exact: true });
@@ -48,7 +49,7 @@ test.describe("opening upload", () => {
       expect(await download.body()).toEqual(original);
       await page.reload();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: `打开资料：${name}`, exact: true }).click({ timeout: 15_000 });
+      await sourceRow.getByRole("button", { name: "阅读已保存原件", exact: true }).click({ timeout: 15_000 });
       await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
       await expect(originalLink).toBeVisible();
     } finally {

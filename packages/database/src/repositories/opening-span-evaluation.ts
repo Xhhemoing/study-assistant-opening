@@ -2,6 +2,7 @@ import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import type { Scope } from "@aistudy/contracts";
 import { getSpanProblem, spanProblemStem, verifySpanAnswer, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
+import { readOpeningSpanExposureHistory } from "./opening-span-attempt";
 
 export type OpeningSpanEvaluation = {
   evaluatorVersion: "span-exact-v1"; specVersion: "span-v1";
@@ -41,6 +42,9 @@ export async function evaluateOpeningSpanAttempt(tx: TransactionSql, scope: Scop
       AND v.evaluation_spec=${tx.json(spec)} AND o.attempt_id<>${String(attempt.id)}
       AND o.server_evaluation->>'evaluatorVersion'='span-exact-v1'
       AND o.server_evaluation->>'decision' IN ('correct','incorrect') LIMIT 1`;
+  // Imported records cannot authorize a score, but their old exposure cannot be
+  // forgotten when a new canonical item version is issued after restoration.
+  const history = await readOpeningSpanExposureHistory(tx, scope);
   const verified = result.outcome === "correct" && result.coreEvidenceComplete;
   return { evaluatorVersion: "span-exact-v1", specVersion: "span-v1",
     decision: result.outcome === "incorrect" ? "incorrect" : verified ? "correct" : "abstain",
@@ -48,5 +52,5 @@ export async function evaluateOpeningSpanAttempt(tx: TransactionSql, scope: Scop
     reasonCodes: [result.outcome === "correct" && !result.coreEvidenceComplete ? "core_steps_unobserved" : result.reason],
     skills: result.skills, coreEvidenceComplete: result.coreEvidenceComplete,
     membershipOutcome: result.membershipOutcome,
-    priorFeedback: prior.length > 0 || problem.id === "span-faded-3d" };
+    priorFeedback: prior.length > 0 || problem.id === "span-faded-3d" || history.uncertainProblemIds.has(problem.id) || history.unknownHistory };
 }

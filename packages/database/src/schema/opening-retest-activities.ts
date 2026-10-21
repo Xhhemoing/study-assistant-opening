@@ -1,4 +1,4 @@
-import { foreignKey, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { courses } from "./courses";
 import { openingJobs } from "./opening-jobs";
@@ -16,6 +16,9 @@ export const openingRetestActivities = pgTable("opening_retest_activities", {
   purpose: text("purpose").notNull().default("retest"),
   evidenceCycleId: uuid("evidence_cycle_id").notNull(),
   candidateId: uuid("candidate_id").references(() => openingJobs.id, { onDelete: "set null" }),
+  candidateReferenceId: uuid("candidate_reference_id"),
+  learningProtocol: jsonb("learning_protocol"),
+  acceptClientKey: text("accept_client_key"),
   taskId: uuid("task_id").references(() => openingTasks.id, { onDelete: "set null" }),
   status: text("status").notNull(),
   result: text("result"),
@@ -58,6 +61,12 @@ export const openingRetestActivities = pgTable("opening_retest_activities", {
   uniqueIndex("opening_retest_activity_task_key")
     .on(table.workspaceId, table.taskId)
     .where(sql`${table.taskId} IS NOT NULL`),
+  uniqueIndex("opening_retest_candidate_reference_uidx")
+    .on(table.workspaceId, table.ownerUserId, table.candidateReferenceId)
+    .where(sql`${table.candidateReferenceId} IS NOT NULL`),
+  uniqueIndex("opening_retest_accept_client_key_uidx")
+    .on(table.workspaceId, table.ownerUserId, table.acceptClientKey)
+    .where(sql`${table.acceptClientKey} IS NOT NULL`),
   uniqueIndex("opening_retest_activity_active_business_key")
     .on(table.workspaceId, table.ownerUserId, table.courseId, table.skillLabel, sql`COALESCE(${table.requirementKey}, '')`, table.purpose)
     .where(sql`${table.status} IN ('proposed', 'accepted', 'in_progress')`),

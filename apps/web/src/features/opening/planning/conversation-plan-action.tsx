@@ -69,24 +69,24 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
     finally { setBusy(false); }
   }
   if (!open) return <button type="button" className={secondaryButtonClass} disabled={disabled || busy} onClick={() => void load()}>安排到今日计划</button>;
-  return <div className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4" aria-label="对话计划草案">
-    <p className="text-sm font-medium text-zinc-900">安排已保存的对话建议</p>
-    {busy ? <p className="text-xs text-zinc-600" role="status">正在处理…</p> : null}
+  return <div className="mt-4 space-y-3 rounded-xl border border-line bg-surface-2 p-4" aria-label="对话计划草案">
+    <p className="text-sm font-medium text-text">安排已保存的对话建议</p>
+    {busy ? <p className="text-xs text-text-2" role="status">正在处理…</p> : null}
     {inspection ? <>
-      <p className="break-words text-sm text-zinc-800">{inspection.candidate.title}</p>
-      <p className="text-xs text-zinc-600">{inspection.date} · {inspection.timeZone}。已确认的安排将保留。</p>
-      {inspection.candidate.dueText ? <p className="text-xs text-zinc-600">时间备注：{inspection.candidate.dueText}（仅作备注）</p> : null}
-      {!inspection.planningReady ? <p className="text-sm text-zinc-700">请先<Link href="/opening/today" className="underline underline-offset-2">设置学期和可用时间</Link>，再预览安排。</p> : null}
+      <p className="break-words text-sm text-text">{inspection.candidate.title}</p>
+      <p className="text-xs text-text-2">{inspection.date} · {inspection.timeZone}。已确认的安排将保留。</p>
+      {inspection.candidate.dueText ? <p className="text-xs text-text-2">时间备注：{inspection.candidate.dueText}（仅作备注）</p> : null}
+      {!inspection.planningReady ? <p className="text-sm text-text-2">请先<Link href="/opening/today" className="underline underline-offset-2">设置学期和可用时间</Link>，再预览安排。</p> : null}
       {!draft ? <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-zinc-600">关联课程<select className={`${inputClass} mt-1`} disabled={busy || unknownProposal} value={course} onChange={event => setCourse(event.target.value)}><option value="">请选择</option><option value="none">不关联课程</option>{inspection.courses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label className="text-xs text-zinc-600">预计分钟数<input type="number" className={`${inputClass} mt-1`} min={1} max={240} required readOnly={inspection.candidate.minutes !== null} disabled={busy || unknownProposal} value={minutes} onChange={event => setMinutes(event.target.value)} /></label>
-      </div> : <div className="space-y-2 text-xs text-zinc-700">
+        <label className="text-xs text-text-2">关联课程<select className={`${inputClass} mt-1`} disabled={busy || unknownProposal} value={course} onChange={event => setCourse(event.target.value)}><option value="">请选择</option><option value="none">不关联课程</option>{inspection.courses.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label className="text-xs text-text-2">预计分钟数<input type="number" className={`${inputClass} mt-1`} min={1} max={240} required readOnly={inspection.candidate.minutes !== null} disabled={busy || unknownProposal} value={minutes} onChange={event => setMinutes(event.target.value)} /></label>
+      </div> : <div className="space-y-2 text-xs text-text-2">
         <p>新增1项任务，保留{draft.blocks.filter(block => block.taskId !== draft.suggestedTasks?.[0]?.id).length}个已确认时间块。确认后创建任务并安排到日历。</p>
         <ul className="space-y-1" aria-label="新增安排">{draft.blocks.filter(block => block.taskId === draft.suggestedTasks?.[0]?.id).map(block => <li key={block.start}>{time(block.start, inspection.timeZone)}–{time(block.end, inspection.timeZone)} · {inspection.candidate.title}</li>)}</ul>
       </div>}
     </> : null}
-    {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
-    {unknownProposal || unknownAcceptance ? <p className="text-xs text-zinc-600">上次请求结果尚未确认。输入已保留，重试会发送相同请求。</p> : null}
+    {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
+    {unknownProposal || unknownAcceptance ? <p className="text-xs text-text-2">上次请求结果尚未确认。输入已保留，重试会发送相同请求。</p> : null}
     <div className="flex flex-wrap gap-2">
       {draft ? <><button type="button" disabled={busy} className={buttonClass} onClick={() => void accept()}>{unknownAcceptance ? "重试确认" : "确认安排"}</button><button type="button" disabled={busy || unknownAcceptance} className={secondaryButtonClass} onClick={() => void reject()}>暂不安排</button></>
         : <><button type="button" disabled={busy || !inspection?.planningReady || (inspection.candidate.minutes ?? 0) > 240} className={buttonClass} onClick={() => void preview()}>{unknownProposal ? "重试预览" : "预览安排"}</button><button type="button" disabled={busy || unknownProposal} className={secondaryButtonClass} onClick={() => void load()}>重新读取</button><button type="button" disabled={busy || unknownProposal} className={secondaryButtonClass} onClick={close}>返回建议</button></>}

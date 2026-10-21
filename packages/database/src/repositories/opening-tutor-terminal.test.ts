@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
+import { TUTOR_UNKNOWN_MESSAGE } from "@aistudy/domain";
 import { createOpeningConversationRepository, type StoredTurn } from "./opening-conversations";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 
@@ -152,12 +153,14 @@ describe("opening tutor jobs repository", () => {
       : []);
     const repository = createOpeningTutorJobsRepository(sql);
 
-    await expect(repository.findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+    const recovered = await repository.findPendingForConversation(scope, "conversation-1");
+    expect(recovered).toEqual({
       id: "job-unknown",
       status: "outcome_unknown",
-      error: { message: "provider timeout" },
+      error: { message: TUTOR_UNKNOWN_MESSAGE },
       updatedAt: "2026-09-13T12:00:00.000Z",
     });
+    expect(JSON.stringify(recovered)).not.toContain("provider timeout");
   });
 
   it("returns no pending job when the owner-scoped conversation is empty", async () => {

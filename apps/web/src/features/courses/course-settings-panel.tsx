@@ -53,24 +53,24 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
   }
   const savedDraft = courseRestrictionDraft(course.learningPreferenceOverrides);
   const changed = fields.some(({ key }) => draft[key] !== savedDraft[key]);
-  return <details className="group border-t border-zinc-200 pt-4" aria-labelledby="course-settings-heading">
-    <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 py-1 [&::-webkit-details-marker]:hidden">
+  return <section className="border-t border-line pt-4" aria-labelledby="course-settings-heading">
+    <div className="flex flex-wrap items-center justify-between gap-2 py-1">
       <h2 className="text-sm font-semibold" id="course-settings-heading">课程设置</h2>
-      <span className="text-xs text-zinc-500">{course.archivedAt ? "已归档" : "进行中"} · 默认折叠</span>
-    </summary>
+      <span className="text-xs text-text-3">{course.archivedAt ? "已归档" : "进行中"}</span>
+    </div>
     <div className="mt-3 space-y-3">
-    <p className="text-xs leading-6 text-zinc-500">课程设置只能进一步关闭自动行为。“跟随账号”不会开启账号中已关闭的项目。关闭自动行为不会删除历史记录；归档后需先恢复课程才能记录新作答。</p>
-    {course.archivedAt ? <p className="text-xs leading-6 text-zinc-600">归档期间停止此课程的自动评价、补测建议和学习提醒。恢复后沿用保存的限制，不补发历史积压。</p> : account && !account.assessmentEnabled ? <p className="text-xs leading-6 text-zinc-600">账号已关闭自动评价，此课程的三项自动行为当前均关闭。</p> : null}
-    {loading ? <p className="text-xs text-zinc-500" role="status">正在读取课程设置…</p> : <div className="space-y-3">{fields.map(({ key, label }) => <div className="flex flex-wrap items-center gap-3" key={key}>
+    <p className="text-xs leading-6 text-text-3">课程设置只能进一步关闭自动行为。“跟随账号”不会开启账号中已关闭的项目。关闭自动行为不会删除历史记录；归档后需先恢复课程才能记录新作答。</p>
+    {course.archivedAt ? <p className="text-xs leading-6 text-text-2">归档期间停止此课程的自动评价、补测建议和学习提醒。恢复后沿用保存的限制，不补发历史积压。</p> : account && !account.assessmentEnabled ? <p className="text-xs leading-6 text-text-2">账号已关闭自动评价，此课程的三项自动行为当前均关闭。</p> : null}
+    {loading ? <p className="text-xs text-text-3" role="status">正在读取课程设置…</p> : <div className="space-y-3">{fields.map(({ key, label }) => <div className="flex flex-wrap items-center gap-3" key={key}>
       <label className="w-28 text-xs font-medium" htmlFor={`course-setting-${key}`}>{label}</label>
       <select className={`${ui.input} max-w-40`} id={`course-setting-${key}`} disabled={busy || !effective} value={draft[key] ? "inherit" : "off"} onChange={(event) => { setDraft((current) => ({ ...current, [key]: event.target.value === "inherit" })); setMessage(""); }}><option value="inherit">跟随账号</option><option value="off">此课程关闭</option></select>
-      {effective ? <span className="text-xs text-zinc-500">当前生效：{effective[key] ? "开启" : "关闭"}</span> : null}
+      {effective ? <span className="text-xs text-text-3">当前生效：{effective[key] ? "开启" : "关闭"}</span> : null}
     </div>)}<button className={ui.secondary} disabled={busy || !effective || !changed} onClick={() => void save()} type="button"><Save aria-hidden="true" size={14} />{busy ? "保存中…" : "保存课程设置"}</button></div>}
     {error ? <LoadError message={error} onRetry={() => setRetry((value) => value + 1)} /> : null}
-    {message ? <p className="text-xs leading-6 text-zinc-600" role="status">{message}</p> : null}
-    <div className="space-y-2 border-t border-zinc-100 pt-3">
-      {confirmArchive && !course.archivedAt ? <div className="space-y-2"><p className="text-xs leading-6 text-zinc-600">归档会暂停自动学习行为。原件、其他课程引用、笔记、证据和已接受任务都会保留。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void changeArchive()} type="button">确认归档</button><button className={ui.quiet} disabled={busy} onClick={() => setConfirmArchive(false)} type="button">取消</button></div></div> : <button className={ui.secondary} disabled={busy || loading} onClick={() => course.archivedAt ? void changeArchive() : setConfirmArchive(true)} type="button">{course.archivedAt ? <ArchiveRestore aria-hidden="true" size={14} /> : <Archive aria-hidden="true" size={14} />}{course.archivedAt ? "恢复课程" : "归档课程"}</button>}
+    {message ? <p className="text-xs leading-6 text-text-2" role="status">{message}</p> : null}
+    <div className="space-y-2 border-t border-line pt-3">
+      {confirmArchive && !course.archivedAt ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">归档会暂停自动学习行为。原件、其他课程引用、笔记、证据和已接受任务都会保留。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void changeArchive()} type="button">确认归档</button><button className={ui.quiet} disabled={busy} onClick={() => setConfirmArchive(false)} type="button">取消</button></div></div> : <button className={ui.secondary} disabled={busy || loading} onClick={() => course.archivedAt ? void changeArchive() : setConfirmArchive(true)} type="button">{course.archivedAt ? <ArchiveRestore aria-hidden="true" size={14} /> : <Archive aria-hidden="true" size={14} />}{course.archivedAt ? "恢复课程" : "归档课程"}</button>}
     </div>
     </div>
-  </details>;
+  </section>;
 }

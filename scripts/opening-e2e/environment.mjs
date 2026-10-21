@@ -16,7 +16,8 @@ export function buildOpeningE2eEnvironment(inherited = process.env, platform = p
   const database = "postgres://opening:opening-local-test@127.0.0.1:15432/aistudy_opening_e2e";
   return {
     ...inherited,
-    OPENING_E2E: "1", OPENING_RELEASE: "1", NODE_ENV: "production",
+    OPENING_E2E: "1", OPENING_RELEASE: "1", NODE_ENV: "production", OPENING_PROVIDER_ALLOW_LOCAL: "0",
+    OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1",
     DATABASE_URL: database, E2E_DATABASE_URL: database,
     REDIS_URL: "redis://127.0.0.1:16379/0",
     S3_ENDPOINT: "http://127.0.0.1:19000", S3_REGION: "us-east-1", S3_BUCKET: "opening-e2e",
@@ -35,4 +36,9 @@ export function buildOpeningE2eEnvironment(inherited = process.env, platform = p
     HF_HOME: path.join(projectRoot, ".local/hf-home"), HF_HUB_OFFLINE: "1",
     NEXT_TELEMETRY_DISABLED: "1",
   };
+}
+
+/** Only the isolated test worker may contact the loopback provider fixture. */
+export function buildOpeningE2eWorkerEnvironment(inherited = process.env, platform = process.platform) {
+  return { ...buildOpeningE2eEnvironment(inherited, platform), NODE_ENV: "test", OPENING_PROVIDER_ALLOW_LOCAL: "1" };
 }

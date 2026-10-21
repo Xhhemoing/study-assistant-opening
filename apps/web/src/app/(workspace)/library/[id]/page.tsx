@@ -1,8 +1,6 @@
-import { DocumentEditor } from "../../../../features/editor/document-editor";
+import { redirect } from "next/navigation";
+import { openingAliasHref, type LegacySearchParams } from "@/features/opening/shell/legacy-routes";
 
-type Props = { params: Promise<{ id: string }> };
-
-export default async function LibraryDocumentPage({ params }: Props) {
-  const { id } = await params;
-  return <DocumentEditor documentId={id} />;
+export default async function LegacyDocumentPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<LegacySearchParams> }) {
+  redirect(openingAliasHref(`/opening/library/${encodeURIComponent((await params).id)}`, await searchParams));
 }

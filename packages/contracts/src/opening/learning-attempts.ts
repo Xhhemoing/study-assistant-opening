@@ -42,6 +42,19 @@ export const learningAttemptSchema = z.object({
   spanValidation: z.object({ eligible: z.boolean(), firstFamilyExposure: z.boolean(), reasonCode: z.string().nullable() }).strict().optional(),
   matrixExercise: matrixExerciseSpecSchema.optional(),
 }).strict();
+/** A resumable assistant context must bind the canonical question and captured material version. */
+export const learningAttemptContextReadSchema = z.object({
+  attempt: learningAttemptSchema,
+  deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
+}).strict().refine(({ attempt }) => {
+  const anchor = attempt.contextAnchor;
+  return Boolean(attempt.problemId && attempt.itemVersionId && anchor?.activityId
+    && anchor.attemptId === attempt.id && anchor.courseId === attempt.courseId
+    && anchor.itemVersionId === attempt.itemVersionId && anchor.sourceId
+    && attempt.sourceIds.includes(anchor.sourceId) && anchor.sourceVersion != null
+    && attempt.sourceVersions[anchor.sourceId] === anchor.sourceVersion);
+}, "assistant context requires a canonical attempt and captured material version");
+export type LearningAttemptContextRead = z.infer<typeof learningAttemptContextReadSchema>;
 export type LearningAttempt = z.infer<typeof learningAttemptSchema>;
 export type LearningAttemptCreateInput = z.infer<typeof learningAttemptCreateInputSchema>;
 export type LearningAttemptSubmitInput = z.infer<typeof learningAttemptSubmitInputSchema>;

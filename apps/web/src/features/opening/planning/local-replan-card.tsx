@@ -85,14 +85,14 @@ export function LocalReplanCard({ api, date, acceptedVersion, blocks, tasks, rea
   if (!reason || hidden) return null;
   const diff = draft ? replanDiff(blocks, draft.blocks) : null;
   const time = (value: string) => new Intl.DateTimeFormat("zh-CN", { timeZone, hour: "2-digit", minute: "2-digit" }).format(new Date(value));
-  return <section className="mx-4 my-3 space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/40 p-3" aria-label="局部重排">
-    <h3 className="text-sm font-medium text-zinc-900">{reason === "missed_block" ? "有任务错过了原定时间" : "今天腾出了一些时间"}</h3>
-    <p className="text-xs leading-5 text-zinc-600">可以预览剩余空档的安排，确认后才生效。</p>
-    {diff ? <><p className="text-xs text-zinc-700">保留 {diff.preserved} 段 · 释放 {diff.removed.length} 段 · 新增 {diff.added.length} 段</p>
-      <ul className="space-y-2 text-xs text-zinc-700">{diff.removed.map(block => <li key={`remove-${block.taskId}-${block.start}`}>释放：{tasks.find(task => task.id === block.taskId)?.title ?? "学习任务"} · {time(block.start)}–{time(block.end)}</li>)}{diff.added.map(block => <li key={`add-${block.taskId}-${block.start}`}>新增：{tasks.find(task => task.id === block.taskId)?.title ?? "学习任务"} · {time(block.start)}–{time(block.end)}</li>)}</ul>
-      {draft!.unscheduledTaskIds.length ? <p className="text-xs text-zinc-600">另有 {draft!.unscheduledTaskIds.length} 项仍未排入。</p> : null}</> : null}
-    {notice ? <p role="status" className="text-xs text-zinc-600">{notice}</p> : null}
-    {error ? <div><p role="alert" className="text-xs text-red-700">{error} 请先重新读取，核对当前安排后再继续。</p><button type="button" disabled={pending} className={`${secondaryButtonClass} mt-2`} onClick={() => void reread()}>重新读取当前安排</button></div> : null}
+  return <section className="mx-4 my-3 space-y-3 rounded-xl border border-accent/30 bg-accent-soft p-3" aria-label="局部重排">
+    <h3 className="text-sm font-medium text-text">{reason === "missed_block" ? "有任务错过了原定时间" : "今天腾出了一些时间"}</h3>
+    <p className="text-xs leading-5 text-text-2">可以预览剩余空档的安排，确认后才生效。</p>
+    {diff ? <><p className="text-xs text-text-2">保留 {diff.preserved} 段 · 释放 {diff.removed.length} 段 · 新增 {diff.added.length} 段</p>
+      <ul className="space-y-2 text-xs text-text-2">{diff.removed.map(block => <li key={`remove-${block.taskId}-${block.start}`}>释放：{tasks.find(task => task.id === block.taskId)?.title ?? "学习任务"} · {time(block.start)}–{time(block.end)}</li>)}{diff.added.map(block => <li key={`add-${block.taskId}-${block.start}`}>新增：{tasks.find(task => task.id === block.taskId)?.title ?? "学习任务"} · {time(block.start)}–{time(block.end)}</li>)}</ul>
+      {draft!.unscheduledTaskIds.length ? <p className="text-xs text-text-2">另有 {draft!.unscheduledTaskIds.length} 项仍未排入。</p> : null}</> : null}
+    {notice ? <p role="status" className="text-xs text-text-2">{notice}</p> : null}
+    {error ? <div><p role="alert" className="text-xs text-danger">{error} 请先重新读取，核对当前安排后再继续。</p><button type="button" disabled={pending} className={`${secondaryButtonClass} mt-2`} onClick={() => void reread()}>重新读取当前安排</button></div> : null}
     <div className="flex flex-wrap gap-2"><button type="button" disabled={pending || Boolean(notice) || Boolean(error)} className={buttonClass} onClick={() => void (draft ? confirm() : preview())}>{pending ? "正在处理…" : draft ? "确认局部重排" : "预览局部重排"}</button><button type="button" disabled={pending || Boolean(error)} className={secondaryButtonClass} onClick={() => void dismiss()}>{draft ? "取消草案" : "暂不调整"}</button></div>
   </section>;
 }

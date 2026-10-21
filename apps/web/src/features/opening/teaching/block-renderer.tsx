@@ -14,6 +14,7 @@ import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { LearningProse } from "../assistant/learning-prose";
 import { InlineAttempt, type InlineAttemptContext } from "./inline-attempt";
+import { ProblemCard } from "./problem-card";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
   teachingArtifactBlock,
@@ -71,7 +72,7 @@ function asSteps(params: Record<string, unknown>): string[] {
 function FailSoftCard({ reason, blockId }: { reason: FailSoftReason; blockId: string }) {
   return (
     <div
-      className="rounded-lg bg-zinc-50 px-3 py-2 text-[11px] leading-5 text-zinc-600 ring-1 ring-zinc-900/5"
+      className="rounded-lg bg-surface-2 px-3 py-2 text-xs leading-5 text-text-2 ring-1 ring-line"
       role="status"
       data-block-fail-soft={reason}
       data-block-id={blockId}
@@ -96,7 +97,7 @@ function CatalogBody({
   switch (catalogId) {
     case "text":
       return (
-        <div className="text-sm leading-6 text-zinc-800" data-catalog="text">
+        <div className="text-sm leading-6 text-text" data-catalog="text">
           {text ? <LearningProse text={text} /> : "（空文本块）"}
         </div>
       );
@@ -105,7 +106,7 @@ function CatalogBody({
         asText(params.latex) || asText(params.formula) || asText(params.text) || text;
       return (
         <div
-          className="rounded-lg bg-zinc-50 px-3 py-2 font-mono text-sm leading-6 text-zinc-900 ring-1 ring-zinc-900/5"
+          className="rounded-lg bg-surface-2 px-3 py-2 font-mono text-sm leading-6 text-text ring-1 ring-line"
           data-catalog="math"
         >
           <span className="sr-only">公式：</span>
@@ -117,14 +118,14 @@ function CatalogBody({
       const steps = asSteps(params);
       if (!steps.length) {
         return (
-          <p className="text-sm text-zinc-600" data-catalog="step">
+          <p className="text-sm text-text-2" data-catalog="step">
             （暂无步骤）
           </p>
         );
       }
       return (
         <ol
-          className="list-decimal space-y-1.5 pl-5 text-sm leading-6 text-zinc-800"
+          className="list-decimal space-y-1.5 pl-5 text-sm leading-6 text-text"
           data-catalog="step"
         >
           {steps.map((step, i) => (
@@ -136,32 +137,27 @@ function CatalogBody({
     case "example":
       return (
         <aside
-          className="rounded-lg border border-emerald-200/80 bg-emerald-50/40 px-3 py-2 text-sm leading-6 text-zinc-800"
+          className="rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-sm leading-6 text-text"
           data-catalog="example"
         >
-          <p className="mb-1 text-[11px] font-medium text-emerald-800">例题 / 示例</p>
+          <p className="mb-1 text-xs font-medium text-accent">例题 / 示例</p>
           {text ? <LearningProse text={text} /> : <p>（空示例）</p>}
         </aside>
       );
     case "question":
       return (
-        <div
-          className="rounded-lg border border-amber-200/80 bg-amber-50/30 px-3 py-2 text-sm leading-6 text-zinc-800"
-          data-catalog="question"
-        >
-          <p className="mb-1 text-[11px] font-medium text-amber-900">试一试</p>
-          {text ? <LearningProse text={text} /> : <p>（空提问）</p>}
-          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="mt-2 text-[11px] text-zinc-500">请从教学工作区打开本题以保存作答。</p>}
-        </div>
+        <ProblemCard prompt={text || "（空提问）"}>
+          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
+        </ProblemCard>
       );
     case "draft":
       return (
         <div
-          className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm leading-6 text-zinc-700"
+          className="rounded-lg border border-line bg-surface px-3 py-2 text-sm leading-6 text-text-2"
           data-catalog="draft"
         >
-          <p className="mb-1 text-[11px] font-medium text-zinc-600">个人草稿</p>
-          <p className="whitespace-pre-wrap text-zinc-600">
+          <p className="mb-1 text-xs font-medium text-text-2">个人草稿</p>
+          <p className="whitespace-pre-wrap text-text-2">
             {text || "草稿锚点已预留；保存需服务端 draft-anchors 接口。"}
           </p>
         </div>
@@ -170,26 +166,26 @@ function CatalogBody({
       const refs = sourceRefs ?? [];
       if (!refs.length && !text) {
         return (
-          <p className="text-[11px] text-zinc-500" data-catalog="evidence">
+          <p className="text-xs text-text-3" data-catalog="evidence">
             暂无引用材料
           </p>
         );
       }
       return (
-        <ul className="space-y-1.5 text-xs leading-5 text-zinc-700" data-catalog="evidence">
+        <ul className="space-y-1.5 text-xs leading-5 text-text-2" data-catalog="evidence">
           {text ? <li className="whitespace-pre-wrap">{text}</li> : null}
           {refs.map((ref, i) => (
             <li
               key={`${ref.sourceId}-${i}`}
-              className="rounded-md bg-zinc-50 px-2 py-1.5 ring-1 ring-zinc-900/5"
+              className="rounded-md bg-surface-2 px-2 py-1.5 ring-1 ring-line"
             >
-              <span className="font-medium text-zinc-800">来源 </span>
-              <span className="tabular-nums text-zinc-600">{ref.sourceId.slice(0, 8)}…</span>
+              <span className="font-medium text-text">来源 </span>
+              <span className="tabular-nums text-text-2">{ref.sourceId.slice(0, 8)}…</span>
               {ref.page != null ? (
-                <span className="ml-2 text-zinc-500">p.{ref.page}</span>
+                <span className="ml-2 text-text-3">p.{ref.page}</span>
               ) : null}
               {ref.chunkId ? (
-                <span className="ml-2 text-zinc-500">
+                <span className="ml-2 text-text-3">
                   chunk {String(ref.chunkId).slice(0, 8)}…
                 </span>
               ) : null}

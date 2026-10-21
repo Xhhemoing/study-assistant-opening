@@ -11,24 +11,36 @@ test("compact mobile navigation and settings retain every destination and predic
   await page.goto("/opening/today");
   const navigation = page.getByRole("navigation", { name: "学习工作台导航（移动端）", exact: true });
   await expect(navigation.getByRole("link")).toHaveCount(4);
+  for (const [label, href] of [["今日", "/opening/today"], ["课程", "/opening/courses"], ["复习", "/opening/review"], ["资料", "/opening/library"]] as const) {
+    await expect(navigation.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
+  }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
-  await navigation.getByRole("button", { name: "更多", exact: true }).click();
-  const more = page.getByRole("dialog", { name: "更多学习工具", exact: true });
+  const account = page.getByRole("button", { name: "账户与学习工具", exact: true });
+  await account.click();
+  const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "账户与学习工具", exact: true }) });
   await expect(more).toBeVisible();
-  for (const label of ["卡片", "待确认", "连接"]) await expect(more.getByRole("link", { name: label, exact: true })).toBeVisible();
+  for (const [label, href] of [[/^AI 建议/, "/opening/suggestions"], [/^考前冲刺$/, "/opening/sprint"], [/^连接$/, "/opening/settings/connections"]] as const) {
+    await expect(more.getByRole("link", { name: label })).toHaveAttribute("href", href);
+  }
   await page.keyboard.press("Escape");
   await expect(more).not.toBeVisible();
-  await page.getByRole("button", { name: "进入专注模式", exact: true }).click();
+  await expect(account).toBeFocused();
+  await account.click();
+  await more.getByRole("button", { name: "进入专注模式", exact: true }).click();
   await expect(navigation).not.toBeVisible();
-  const timer = page.getByRole("button", { name: "25:00", exact: true });
+  await account.click();
+  const timer = more.getByRole("button", { name: "25:00", exact: true });
   await timer.click();
+  await expect(more.getByRole("combobox", { name: "专注时长" })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("combobox", { name: "专注时长" })).toHaveCount(0);
-  await expect(timer).toBeFocused();
-  await expect(page.getByRole("button", { name: "退出专注模式" })).toBeVisible();
+  await expect(more).not.toBeVisible();
+  await expect(account).toBeFocused();
+  await expect(navigation).not.toBeVisible();
+  await expect(page.locator("[data-app-shell]")).toHaveAttribute("data-focus", "true");
   await page.keyboard.press("Escape");
   await expect(navigation).toBeVisible();
-  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await account.click();
+  await more.getByRole("link", { name: "设置", exact: true }).click();
   await expect(page).toHaveURL(/\/opening\/settings$/);
   await expect(page.getByRole("link", { name: /高级设置/ }).first()).toHaveAttribute("href", "/opening/settings/advanced");
   await expect(navigation).toBeVisible();
@@ -52,6 +64,8 @@ test("a real note can be saved once with Ctrl S, restored, and found after clear
   await page.reload();
   await expect(title).toHaveValue("体验回归：我的学习笔记");
   await page.getByRole("link", { name: "返回知识库" }).click();
+  await expect(page.getByRole("tab", { name: "材料", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: "笔记", exact: true }).click();
   await page.getByRole("textbox", { name: "搜索笔记标题" }).fill("不存在的匹配词");
   await expect(page.getByRole("heading", { name: "没有找到匹配的笔记" })).toBeVisible();
   await page.getByRole("button", { name: "清除筛选", exact: true }).click();

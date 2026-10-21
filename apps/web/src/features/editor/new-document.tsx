@@ -48,12 +48,12 @@ export function NewDocument({ basePath = DEFAULT_LIBRARY_BASE_PATH }: { basePath
   }, [attempt, basePath, router]);
 
   return (
-    <main className="flex min-h-[60vh] items-center justify-center px-6 py-12">
+    <div className="flex min-h-[60vh] items-center justify-center px-6 py-12">
       <div className="grid max-w-sm justify-items-center gap-4 text-center">
-        {error ? <><FilePlus2 aria-hidden="true" className="text-red-700" size={24} /><p className="text-sm text-red-700" role="alert">{error}</p>{!unknown ? <button className="inline-flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button> : null}</> : <><FilePlus2 aria-hidden="true" className="text-emerald-700" size={24} /><p className="text-sm text-zinc-500" role="status">正在创建笔记...</p></>}
-        {slow && !error ? <p role="status" className="text-xs leading-6 text-zinc-600">请求耗时较长，可以先到知识库查看；不会自动再创建一篇。</p> : null}
-        <Link className="inline-flex min-h-10 items-center rounded-lg px-3 text-sm text-zinc-700 underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" href={basePath}>{unknown || slow ? "检查知识库" : "返回知识库"}</Link>
+        {error ? <><FilePlus2 aria-hidden="true" className="text-danger" size={24} /><p className="text-sm text-danger" role="alert">{error}</p>{!unknown ? <button className="inline-flex items-center gap-2 rounded-md border border-text-3 px-3 py-2 text-sm font-semibold text-text hover:bg-surface-2" type="button" onClick={() => { setError(""); setAttempt((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重试</button> : null}</> : <><FilePlus2 aria-hidden="true" className="text-accent" size={24} /><p className="text-sm text-text-3" role="status">正在创建笔记...</p></>}
+        {slow && !error ? <p role="status" className="text-xs leading-6 text-text-2">请求耗时较长，可以先到知识库查看；不会自动再创建一篇。</p> : null}
+        <Link className="inline-flex min-h-10 items-center rounded-lg px-3 text-sm text-text-2 underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={basePath}>{unknown || slow ? "检查知识库" : "返回知识库"}</Link>
       </div>
-    </main>
+    </div>
   );
 }

@@ -89,25 +89,25 @@ export function DingTalkConnectionsPanel() {
     }
   }
 
-  return <section aria-labelledby="dingtalk-connections-heading" className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
+  return <section aria-labelledby="dingtalk-connections-heading" className="grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
     <div>
-      <h2 className="text-sm font-medium text-zinc-900" id="dingtalk-connections-heading">钉钉连接</h2>
-      <p className="mt-1 text-xs leading-6 text-zinc-500">只处理组织授权的回调事件；不推断历史群聊读取权限。</p>
+      <h2 className="text-sm font-medium text-text" id="dingtalk-connections-heading">钉钉连接</h2>
+      <p className="mt-1 text-xs leading-6 text-text-3">只处理组织授权的回调事件；不推断历史群聊读取权限。</p>
     </div>
     <div className="space-y-3">
-      {error ? <p className="text-sm leading-6 text-red-700" role="alert">{error}</p> : null}
-      {loading ? <p className="text-sm text-zinc-500" role="status">正在读取连接…</p> : null}
+      {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}
+      {loading ? <p className="text-sm text-text-3" role="status">正在读取连接…</p> : null}
       {!loading && connections.length === 0 ? (
-        <div className="rounded-md border border-zinc-200 p-3 text-sm leading-6 text-zinc-600">
+        <div className="rounded-md border border-line p-3 text-sm leading-6 text-text-2">
           还没有钉钉连接。组织管理员需要先创建企业内部应用并配置回调映射。
         </div>
       ) : null}
       {connections.map(view => (
-        <div className="rounded-md border border-zinc-200 p-3" key={view.id}>
+        <div className="rounded-md border border-line p-3" key={view.id}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-zinc-900">{view.label}</p>
-              <p className="mt-1 text-xs leading-6 text-zinc-500">
+              <p className="truncate text-sm font-medium text-text">{view.label}</p>
+              <p className="mt-1 text-xs leading-6 text-text-3">
                 {stateText[view.state]}
                 {view.allowedScopes.length ? ` · ${view.allowedScopes.join("、")}` : " · 无已授权能力"}
               </p>
@@ -130,7 +130,7 @@ export function DingTalkConnectionsPanel() {
       <button className={ui.quiet} disabled={loading} onClick={() => void load()} type="button">
         <RefreshCw aria-hidden="true" size={14} />重新读取
       </button>
-      {notice ? <p className="text-sm leading-6 text-emerald-700" role="status">{notice}</p> : null}
+      {notice ? <p className="text-sm leading-6 text-accent" role="status">{notice}</p> : null}
     </div>
   </section>;
 }

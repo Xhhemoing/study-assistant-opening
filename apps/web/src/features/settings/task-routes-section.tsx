@@ -17,7 +17,7 @@ function TaskModelSelect({ label, task, models, value, empty, onChange }: {
   onChange: (id: string | null) => void;
 }) {
   const missing = value !== null && !models.some(model => model.id === value);
-  return <label className="block min-w-0 space-y-1"><span className="text-[11px] font-medium text-zinc-600">{label}</span>
+  return <label className="block min-w-0 space-y-1"><span className="text-xs font-medium text-text-2">{label}</span>
     <select className={ui.input} value={value ?? ""} onChange={event => onChange(event.target.value || null)}>
       <option value="">{empty}</option>
       {missing ? <option value={value!}>已移除的模型（{value}）</option> : null}
@@ -40,10 +40,10 @@ export function TaskRoutesSection({ data, draft, onChange }: {
   const routes = effectiveTaskRoutes(data, draft);
   if (!routes.length) return null;
   const groups = [...new Set(routes.map(route => route.task.group))];
-  return <section className="space-y-3 rounded-lg border border-zinc-200 p-3" aria-labelledby="task-routes-heading">
+  return <section className="space-y-3 rounded-lg border border-line p-3" aria-labelledby="task-routes-heading">
     <div>
-      <h3 id="task-routes-heading" className="text-sm font-medium text-zinc-900">按用途指定模型与备用模型</h3>
-      <p className="text-xs leading-6 text-zinc-500">
+      <h3 id="task-routes-heading" className="text-sm font-medium text-text">按用途指定模型与备用模型</h3>
+      <p className="text-xs leading-6 text-text-3">
         {draft.mode === "manual"
           ? "手动选择已锁定所有用途的主模型；这里仍可为每个用途指定备用模型。"
           : "未指定时按上方规则选择。"}
@@ -51,12 +51,12 @@ export function TaskRoutesSection({ data, draft, onChange }: {
       </p>
     </div>
     {groups.map(group => <div key={group} className="space-y-2">
-      <h4 className="text-xs font-medium text-zinc-700">{taskGroupLabels[group] ?? group}</h4>
+      <h4 className="text-xs font-medium text-text-2">{taskGroupLabels[group] ?? group}</h4>
       {routes.filter(route => route.task.group === group).map(route => {
         const stored = draft.taskRoutes?.[route.task.key];
-        return <div key={route.task.key} className="space-y-1.5 rounded-md bg-zinc-50 p-2" data-task={route.task.key}>
-          <p className="text-xs text-zinc-800">{route.task.label}
-            <span className={route.problem ? "ml-2 text-amber-800" : "ml-2 text-zinc-500"}>
+        return <div key={route.task.key} className="space-y-1.5 rounded-md bg-surface-2 p-2" data-task={route.task.key}>
+          <p className="text-xs text-text">{route.task.label}
+            <span className={route.problem ? "ml-2 text-warn" : "ml-2 text-text-3"}>
               {route.model ? `当前：${route.model.providerLabel} · ${route.model.label}` : "当前：未配置"}{route.problem ? ` · ${route.problem}` : ""}
             </span>
           </p>
@@ -68,11 +68,11 @@ export function TaskRoutesSection({ data, draft, onChange }: {
               value={stored?.fallback ?? null} empty="不使用备用模型"
               onChange={id => onChange(setTaskRoute(draft, route.task.key, { fallback: id }))} />
           </div>
-          {route.fallbackProblem ? <p className="text-[11px] text-amber-800" role="status">备用模型：{route.fallbackProblem}</p> : null}
+          {route.fallbackProblem ? <p className="text-xs text-warn" role="status">备用模型：{route.fallbackProblem}</p> : null}
         </div>;
       })}
     </div>)}
-    {data.models.some(model => model.billing === "free_tier") ? <p className="text-[11px] leading-5 text-amber-800">
+    {data.models.some(model => model.billing === "free_tier") ? <p className="text-xs leading-5 text-warn">
       免费额度模型（如 Google Gemini 免费额度）的输入和输出可能被供应商用于改进其产品，并可能经人工审阅；不要用于隐私材料。被标记为隐私排除的材料不会发送。
     </p> : null}
   </section>;

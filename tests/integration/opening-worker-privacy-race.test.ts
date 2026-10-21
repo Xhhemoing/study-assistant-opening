@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningProvider } from "@aistudy/ai";
+import { TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import {
   createOpeningBudgetRepository,
   createOpeningMemoryRepository,
@@ -110,9 +111,9 @@ describe("opening worker privacy race (handler/repository)", () => {
       const budget = await fixture.sql<{ state: string; amount_cents: number }[]>`
         SELECT state, amount_cents FROM opening_budget_reservations WHERE request_id = ${`tutor:${seeded.jobId}`}`;
       expect(job?.status).toBe("failed");
-      expect(job?.error?.message).toBe("privacy epoch mismatch: job=0 current=1");
+      expect(job?.error?.message).toBe(TUTOR_FAILURE_MESSAGE);
       expect(turn[0]?.status).toBe("failed");
-      expect(turn[0]?.text).toBe("privacy epoch mismatch: job=0 current=1");
+      expect(turn[0]?.text).toBe(TUTOR_FAILURE_MESSAGE);
       expect(turn[0]?.text).not.toContain(SECRET_ANSWER);
       expect(turn[0]?.citations).toEqual([]);
       expect(candidates).toHaveLength(0);

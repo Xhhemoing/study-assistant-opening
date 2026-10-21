@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { createOpeningLearningClient } from "./learning-client";
 import { createOpeningLearningReadService } from "../learning/read-service";
+import { readPracticeRecord } from "../learning/practice-draft";
 import { learningObservation, qualifiedInput } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 
 const COURSE = "11111111-1111-4111-8111-111111111111";
@@ -32,6 +33,15 @@ it("parses a genuine empty summary without inventing skills", async () => {
   });
   const client = createOpeningLearningClient(fetchImpl as unknown as typeof fetch);
   await expect(client.getSummary(COURSE)).resolves.toEqual([]);
+});
+
+it.each(["<html>upstream failure</html>", JSON.stringify([{ internalRequirementId: "private-server-diagnostic" }])])("keeps invalid learning responses as failures without displaying schema details", async body => {
+  const client = createOpeningLearningClient(async () => new Response(body, { status: 200 }));
+  await expect(client.getSummary(COURSE)).rejects.toMatchObject({
+    name: "OpeningResponseError",
+    message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+    cause: { name: "ZodError" },
+  });
 });
 
 it("reads the paginated summary through its opaque cursor without using legacy response parsing", async () => {
@@ -99,6 +109,36 @@ it("reads real empty current-head records and courses through their server route
   expect(await client.listObservations(COURSE)).toEqual([]);
   expect(fetchImpl).toHaveBeenCalledWith(`/api/opening/courses/${COURSE}/observations`, expect.objectContaining({ method: "GET" }));
   expect(await client.listRevisionCourses()).toEqual([{ id: COURSE, title: "Fractions" }]);
+});
+
+it("restores sealed answers through the HTTP history response with delivery receipts", async () => {
+  const original = { ...learningObservation, courseId: COURSE, sessionId: SESSION, attemptId: ATTEMPT,
+    rootObservationId: OBSERVATION, effectiveHeadId: OBSERVATION, revisesObservationId: null, revisionKind: "original" as const,
+    assistance: "hinted" as const, answer: '{"membership":"not_in_span","coefficients":["2","2"]}' };
+  const receipt = { id: SOURCE, releaseKey: "history-delivery:history_solution:0",
+    contextAnchor: { purpose: "history_solution", courseId: COURSE, itemVersionId: SOURCE, attemptId: null },
+    origin: "history_solution", supportDomain: "unknown", generatedAt: ISO, releasedAt: ISO, acknowledgedAt: null, historyRevision: 6 };
+  const history = { rootObservationId: OBSERVATION, headObservationId: OBSERVATION, revisions: [original], exposureReceipts: [receipt] };
+  const fetchImpl = vi.fn(async (url: string) => {
+    if (url === `/api/opening/attempts/${ATTEMPT}`) return Response.json({ attemptId: ATTEMPT, sessionId: SESSION, deliveredAssistance: "revealed" });
+    if (url === `/api/opening/courses/${COURSE}/observations`) return Response.json([original]);
+    if (url === `/api/opening/observations/${OBSERVATION}/history`) return Response.json(history);
+    throw new Error(`Unexpected recovery request: ${url}`);
+  });
+  const client = createOpeningLearningClient(fetchImpl as unknown as typeof fetch);
+  expect(await client.getObservationHistory(OBSERVATION)).toEqual(history);
+  const restored = await readPracticeRecord(client, COURSE, { ...attempt, observationId: OBSERVATION, submittedAt: ISO });
+  expect(restored).toEqual({ originalObservation: original, observation: original, deliveredAssistance: "revealed" });
+  expect(restored.originalObservation?.answer).toBe(original.answer);
+  expect(restored.observation?.assistance).toBe("hinted");
+});
+
+it.each([
+  { exposureReceipts: [{ id: "invalid" }] },
+  { exposureReceipts: [], unrecognizedServerField: true },
+])("keeps malformed history delivery responses observable %o", async extra => {
+  const client = createOpeningLearningClient(async () => Response.json({ rootObservationId: OBSERVATION, headObservationId: OBSERVATION, revisions: [], ...extra }));
+  await expect(client.getObservationHistory(OBSERVATION)).rejects.toMatchObject({ name: "OpeningResponseError", cause: { name: "ZodError" } });
 });
 
 it("reads a 201-observation service response through the strict HTTP client", async () => {

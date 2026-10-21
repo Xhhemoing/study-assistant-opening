@@ -9,6 +9,14 @@ const newJobId = "33333333-3333-4333-8333-333333333333";
 const updatedAt = "2026-10-15T00:00:00.000Z";
 const question = "请给我一个关于导数的提示";
 
+async function openAssistant(page: Page, conversation?: string) {
+  await page.goto(`/opening/assistant${conversation ? `?conversation=${conversation}` : ""}`);
+  await expect(page).toHaveURL(url => url.pathname === "/opening/today" && url.searchParams.get("ai") === "1" && url.searchParams.get("conversation") === (conversation ?? null));
+  const assistant = page.getByRole("dialog", { name: "学习助手", exact: true });
+  await expect(assistant).toBeVisible();
+  return assistant;
+}
+
 /** Transport fixtures exercise UI recovery without dispatching a model or changing its ledger. */
 async function unknownConversation(page: Page, { newerAnswerDuringPoll = false, changeDuringRecovery = false } = {}) {
   // Recovery transport assumes a configured text tutor; no real model is dispatched.
@@ -87,27 +95,27 @@ test("unknown recovery waits from the server timestamp across refresh, then only
   await page.clock.install({ time: new Date(Date.parse(updatedAt) - 1_000) });
   await page.clock.pauseAt(new Date(updatedAt));
   const fixture = await unknownConversation(page);
-  await page.goto("/opening/assistant");
-  await expect(page.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
+  const assistant = await openAssistant(page);
+  await expect(assistant.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
+  await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
   await page.clock.fastForward(20_000);
   await page.reload();
-  await expect(page.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
+  await expect(assistant.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
   await page.clock.fastForward(39_999);
-  await expect(page.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
+  await expect(assistant.getByRole("button", { name: "稍后重新提问", exact: true })).toBeDisabled();
   expect(fixture.submitted).toHaveLength(0);
   await page.clock.fastForward(1);
-  const retry = page.getByRole("button", { name: "重新提问", exact: true });
+  const retry = assistant.getByRole("button", { name: "重新提问", exact: true });
   await expect(retry).toBeEnabled();
   expect(fixture.counts()).toEqual({ conversationCreates: 0, jobReads: 0 });
   await retry.click();
   await page.clock.runFor(16);
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toHaveValue(question);
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeFocused();
-  await page.locator("summary").filter({ hasText: "保存对话 · 设置" }).click();
-  await expect(page.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
+  await expect(assistant.getByRole("textbox", { name: "消息输入" })).toHaveValue(question);
+  await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeFocused();
+  await assistant.locator("summary").filter({ hasText: "保存 · 设置" }).click();
+  await expect(assistant.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
   expect(fixture.submitted).toHaveLength(0);
-  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await assistant.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => fixture.submitted.length).toBe(1);
   expect(fixture.submitted[0]).toMatchObject({ conversationId, text: question, mode: "hint", privacy: "saved" });
   expect(fixture.submitted[0]!.clientKey).toMatch(/^ck-/);
@@ -119,38 +127,38 @@ test("manual retry protects an unsent draft and does not restore an old unknown 
   await page.clock.install({ time: new Date(Date.parse(updatedAt) + 59_000) });
   await page.clock.pauseAt(new Date(Date.parse(updatedAt) + 60_000));
   const fixture = await unknownConversation(page);
-  await page.goto("/opening/assistant");
-  const draft = page.getByRole("textbox", { name: "消息输入" });
+  const assistant = await openAssistant(page);
+  const draft = assistant.getByRole("textbox", { name: "消息输入" });
   await expect(draft).toBeEnabled();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await draft.fill("保留我的新草稿");
   page.once("dialog", dialog => dialog.dismiss());
-  await page.getByRole("button", { name: "重新提问", exact: true }).click();
+  await assistant.getByRole("button", { name: "重新提问", exact: true }).click();
   await expect(draft).toHaveValue("保留我的新草稿");
   expect(fixture.submitted).toHaveLength(0);
   fixture.finishNewTurn();
   await page.reload();
-  await expect(page.getByRole("log").getByText("新回答", { exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
+  await expect(assistant.getByRole("log").getByText("新回答", { exact: true })).toBeVisible();
+  await expect(assistant.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
   await expect(draft).toBeEnabled();
   expect(fixture.submitted).toHaveLength(0);
 });
 
 test("a late unknown poll cannot replace the latest completed conversation state", async ({ page }) => {
   const fixture = await unknownConversation(page, { newerAnswerDuringPoll: true });
-  await page.goto("/opening/assistant");
-  await expect(page.getByRole("log").getByText("新回答", { exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
+  const assistant = await openAssistant(page);
+  await expect(assistant.getByRole("log").getByText("新回答", { exact: true })).toBeVisible();
+  await expect(assistant.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
+  await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
   expect(fixture.counts().jobReads).toBe(1);
   expect(fixture.submitted).toHaveLength(0);
 });
 
 test("a different latest job during recovery requires a fresh read instead of offering an unrelated question", async ({ page }) => {
   const fixture = await unknownConversation(page, { changeDuringRecovery: true });
-  await page.goto(`/opening/assistant?conversation=${conversationId}`);
-  await expect(page.getByText("对话刚刚发生变化，请重新读取后再恢复提问。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
+  const assistant = await openAssistant(page, conversationId);
+  await expect(assistant.getByText("对话刚刚发生变化，请重新读取后再恢复提问。", { exact: true })).toBeVisible();
+  await expect(assistant.getByRole("region", { name: "回答恢复" })).toHaveCount(0);
+  await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
   expect(fixture.submitted).toHaveLength(0);
 });

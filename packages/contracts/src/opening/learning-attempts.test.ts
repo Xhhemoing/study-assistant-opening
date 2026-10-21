@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema } from "./learning-attempts";
+import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema } from "./learning-attempts";
 import { evidenceEligibilitySchema } from "./learning-evidence";
 const sessionId = "11111111-1111-4111-8111-111111111111";
 it("allows an unlinked server-issued attempt without inventing a problem", () => {
@@ -41,4 +41,25 @@ it("accepts only a catalogue selector, never client operands, answers, or gradin
   const submit = { clientKey: "matrix-answer", answer: "[[1]]", outcome: "correct", assistance: "independent" };
   expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, verdictSource: "deterministic" }).success).toBe(false);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, serverEvaluation: {} }).success).toBe(false);
+});
+
+const contextAttempt = {
+  id: sessionId, workspaceId: sessionId, sessionId, courseId: sessionId, skillLabel: "span", requirementKey: "span:v1",
+  problemId: sessionId, itemVersionId: sessionId, sourceIds: [sessionId], sourceVersions: { [sessionId]: 2 },
+  startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, historyRevision: 1,
+  contextAnchor: { attemptId: sessionId, activityId: sessionId, itemVersionId: sessionId, courseId: sessionId,
+    sourceId: sessionId, sourceVersion: 2, purpose: "learning_help" },
+};
+it("reads only a complete canonical assistant context without an answer or grading payload", () => {
+  const result = { attempt: contextAttempt, deliveredAssistance: "hinted" };
+  expect(learningAttemptContextReadSchema.parse(result)).toEqual(result);
+  expect(learningAttemptContextReadSchema.safeParse({ ...result, answer: "sealed answer" }).success).toBe(false);
+  expect(learningAttemptContextReadSchema.safeParse({ ...result, attempt: { ...contextAttempt, answer: "sealed answer" } }).success).toBe(false);
+});
+it.each([
+  { contextAnchor: undefined }, { sourceIds: [] }, { sourceVersions: {} }, { itemVersionId: null }, { problemId: null },
+  { contextAnchor: { ...contextAttempt.contextAnchor, attemptId: "22222222-2222-4222-8222-222222222222" } },
+  { contextAnchor: { ...contextAttempt.contextAnchor, sourceVersion: 3 } },
+])("rejects incomplete or inconsistent assistant restore identities: %j", change => {
+  expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...contextAttempt, ...change }, deliveredAssistance: "none" }).success).toBe(false);
 });

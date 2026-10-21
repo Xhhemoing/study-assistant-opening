@@ -1,8 +1,10 @@
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
-import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
+import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
 import { mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
+import { OpeningExamSprintRepositoryError, parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
+import { readExamSourceExposure } from "./opening-exam-source-exposure";
 
 type Row = Record<string, unknown>;
 export type OpeningEvidenceDependencies = {
@@ -121,17 +123,17 @@ export async function readOpeningLearningEvidenceContexts(
               WHERE ref->>'sourceId'=ANY(${recordSourceIds}::text[])))))
     ORDER BY h.created_at,h.id` : [];
   const retestIds = [...new Set(records.flatMap(record => record.retestId ? [record.retestId] : []))];
-  const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,
-      j.payload->'spanDelayedProtocol' AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,
+  const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.candidate_reference_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,r.accepted_at,
+      r.learning_protocol AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,baseline.submitted_at AS baseline_submitted_at,
       baseline.course_id AS baseline_course_id,baseline.requirement_key AS baseline_requirement_key,
       root.id AS baseline_root_id,COALESCE(root.effective_head_id,root.id)=baseline.id AND COALESCE(baseline.revision_kind,'original')<>'retract' AS baseline_current
-    FROM opening_retest_activities r JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+    FROM opening_retest_activities r
+    JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
       AND baseline.workspace_id=r.workspace_id AND baseline.owner_user_id=r.owner_user_id
     JOIN opening_learning_observations root ON root.id=COALESCE(baseline.root_observation_id,baseline.id)
       AND root.workspace_id=baseline.workspace_id AND root.owner_user_id=baseline.owner_user_id
     WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.purpose='retest'
-      AND (r.id=ANY(${retestIds}::uuid[]) OR r.candidate_id=ANY(${retestIds}::uuid[]))` : [];
+      AND (r.id=ANY(${retestIds}::uuid[]) OR r.candidate_id=ANY(${retestIds}::uuid[]) OR r.candidate_reference_id=ANY(${retestIds}::uuid[]))` : [];
   const baselineRecords = [...new Map(retestProtocols.map(row => [String(row.baseline_id), mapLearningObservation(row.baseline_record as Row)])).values()];
   const baselineEvidence = baselineRecords.length ? await readOpeningLearningEvidenceContexts(db, scope, baselineRecords, false) : {};
   const baselineEligibility = new Map(Object.entries(baselineEvidence).map(([id, evidence]) => [id, evaluateEvidenceEligibility(evidence.observation, evidence.context)]));
@@ -140,8 +142,7 @@ export async function readOpeningLearningEvidenceContexts(
         AND practice.course_id=o.course_id AND practice.requirement_key IS NOT DISTINCT FROM o.requirement_key AND practice.id<>o.attempt_id
         AND practice.started_at>baseline.recorded_at AND practice.started_at<=o.started_at) AS recorded_practice_count
     FROM opening_learning_observations o JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
-    JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+    JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
       AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
     LEFT JOIN opening_help_exposures h ON h.workspace_id=o.workspace_id AND COALESCE(h.owner_user_id,
         (SELECT l.owner_user_id FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id))=o.owner_user_id
@@ -155,9 +156,10 @@ export async function readOpeningLearningEvidenceContexts(
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
   // Keep the immutable exposure/protocol link even if the observation is revised.
   const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
-      e.learning_attempt_id AS attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
+      e.learning_attempt_id AS attempt_id,e.exam_attempt_id,e.first_family_exposure,e.delayed_earliest_at,e.submitted_answer,
       a.session_id,a.course_id,a.problem_id,a.item_version_id,
       s.pack_snapshot->>'id' AS exam_pack_id,s.pack_snapshot->>'version' AS exam_pack_version,
+      s.id AS exam_sprint_id,s.pack_snapshot AS exam_pack_snapshot,s.state AS exam_sprint_state,
       h.id AS receipt_id,h.kind,h.delivered_at,h.history_revision
     FROM opening_exam_attempt_links e
     JOIN opening_exam_sprints s ON s.id=e.sprint_id
@@ -172,6 +174,18 @@ export async function readOpeningLearningEvidenceContexts(
         OR ${problemIds.length ? db`a.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`})
     ORDER BY e.id,h.delivered_at,h.id` : [];
   const examLinks = new Map(examRows.map(row => [String(row.attempt_id), row]));
+  const examSnapshots = new Map<string, ReturnType<typeof parseExamSprintSnapshot> | null>();
+  for (const row of examRows) {
+    if (row.exam_sprint_state !== undefined && !examSnapshots.has(String(row.exam_sprint_id))) {
+      try {
+        examSnapshots.set(String(row.exam_sprint_id), parseExamSprintSnapshot(row.exam_pack_snapshot, row.exam_sprint_state));
+      } catch (error) {
+        if (!(error instanceof OpeningExamSprintRepositoryError)) throw error;
+        // An unprovable Sprint reference is unknown evidence, never proof of no help.
+        examSnapshots.set(String(row.exam_sprint_id), null);
+      }
+    }
+  }
   const examIdentities = await db`SELECT * FROM (${openingExamIdentityStateQuery(db, scope)}) identity
     WHERE identity.attempt_id=ANY(${attemptIds}::uuid[]) OR identity.observation_id=ANY(${rootIds}::uuid[])`;
   const identitiesByAttempt = new Map(examIdentities.filter(row => row.attempt_id != null).map(row => [String(row.attempt_id), row]));
@@ -348,11 +362,13 @@ export async function readOpeningLearningEvidenceContexts(
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,
     };
     if (record.retestId && record.requirementKey === SPAN_REQUIREMENT_KEY && record.attemptId) {
-      const retest = retestProtocols.find(row => row.id === record.retestId || row.candidate_id === record.retestId);
+      const matchingRetests = retestProtocols.filter(row => row.id === record.retestId || row.candidate_id === record.retestId || row.candidate_reference_id === record.retestId);
+      const retest = matchingRetests.length === 1 ? matchingRetests[0] : undefined;
       const protocol = retest?.protocol as { protocolId?: string; baselineObservationId?: string; baselineRootId?: string; priorAnswerPolicy?: string } | undefined;
       const earliestAt = retest?.not_before_at == null ? NaN : new Date(retest.not_before_at as Date).getTime();
-      const baselineAt = retest?.baseline_recorded_at == null ? NaN : new Date(retest.baseline_recorded_at as Date).getTime();
-      if (retest && protocol?.protocolId === "span-delayed-3d-v1" && protocol.priorAnswerPolicy === "require_unseen_problem"
+      const baselineAt = retest?.baseline_recorded_at == null || retest.baseline_submitted_at == null ? NaN
+        : Math.max(new Date(retest.baseline_recorded_at as Date).getTime(), new Date(retest.baseline_submitted_at as Date).getTime());
+      if (retest?.accepted_at && protocol?.protocolId === "span-delayed-3d-v1" && protocol.priorAnswerPolicy === "require_unseen_problem"
         && protocol.baselineObservationId === retest.baseline_id && protocol.baselineRootId === retest.baseline_root_id && retest.baseline_current === true
         && retest.course_id === record.courseId && retest.baseline_course_id === record.courseId && retest.skill_label === record.skillLabel
         && retest.requirement_key === record.requirementKey && retest.baseline_requirement_key === record.requirementKey
@@ -374,6 +390,10 @@ export async function readOpeningLearningEvidenceContexts(
     }
     const examSpec = record.itemVersionId ? examItems.get(record.itemVersionId) : undefined;
     const examLink = record.attemptId ? examLinks.get(record.attemptId) : undefined;
+    const examSnapshot = examLink ? examSnapshots.get(String(examLink.exam_sprint_id)) : undefined;
+    const examCapture = examSnapshot?.state.attempts.find(attempt => attempt.id === examLink?.exam_attempt_id);
+    const examQualification = examSnapshot && examCapture
+      ? examAttemptExposureQualification(examCapture, examSnapshot.state, examSnapshot.pack) : undefined;
     const examIdentity = (record.attemptId ? identitiesByAttempt.get(record.attemptId) : undefined)
       ?? identitiesByRoot.get(record.rootObservationId ?? record.id);
     const identityCurrent = examIdentity ? examIdentity.identity_current === true && examIdentity.requirement_key === record.requirementKey
@@ -382,10 +402,25 @@ export async function readOpeningLearningEvidenceContexts(
     const linkedExam = examSpec && examLink && examLink.session_id === record.sessionId
       && examLink.problem_id === record.problemId && examLink.item_version_id === record.itemVersionId
       && examLink.exam_pack_id === examSpec.packId && examLink.exam_pack_version === examSpec.packVersion
+      && (!examSnapshot || examCapture?.questionId === examSpec.questionId)
       && typeof examLink.first_family_exposure === "boolean";
     if (linkedExam) {
+      let exposureCoverage: "legacy_untracked_source" | "unverifiable" | undefined = examSnapshot === null ? "unverifiable" : undefined;
+      if (examCapture?.exposureCoverage && examSnapshot) {
+        const coverage = examCapture.exposureCoverage;
+        const classification = await readExamSourceExposure(db, scope, String(examLink.exam_sprint_id), examSnapshot.pack, examCapture.id);
+        exposureCoverage = coverage.kind === "legacy_untracked_source" && classification?.kind === "legacy_untracked_source"
+          && coverage.packSourceId === classification.packSourceId && coverage.sourceVersion === classification.sourceVersion
+          ? "legacy_untracked_source" : "unverifiable";
+      }
       context.examAttempt = {
-        firstFamilyExposure: examLink.first_family_exposure as boolean,
+        firstFamilyExposure: examQualification ? examQualification.firstFamilyExposure : examSnapshot === null
+          ? null : examLink.first_family_exposure as boolean,
+        ...(examSnapshot !== undefined ? {
+          lessonAssistance: examQualification?.lessonAssistance ?? null,
+          partialExample: examQualification?.partialExample ?? null,
+        } : {}),
+        ...(exposureCoverage ? { exposureCoverage } : {}),
         answerUnchanged: examAnswerUnchanged(record, chains.get(record.rootObservationId ?? record.id) ?? [], examLink.submitted_answer),
       };
       const earliestAt = examLink.delayed_earliest_at == null ? Number.NaN : new Date(examLink.delayed_earliest_at as string | Date).getTime();

@@ -43,7 +43,7 @@ it("keeps Opening note actions under the Opening library", () => {
   expect(html).not.toContain('href="/library/new"');
 });
 
-it("makes actual study primary and keeps plan seeding inside secondary details", () => {
+it("makes actual study primary and keeps plan seeding as a visible secondary action", () => {
   const html = renderToStaticMarkup(
     createElement(CourseStudyActions, {
       assetCount: 1,
@@ -56,7 +56,7 @@ it("makes actual study primary and keeps plan seeding inside secondary details",
   expect(html).toContain(`href="/opening/courses/${COURSE_ID}/study"`);
   expect(html).toContain("开始独立练习");
   expect(html.indexOf("开始独立练习")).toBeLessThan(html.indexOf("设为今日计划"));
-  expect(html).toMatch(/<details[\s\S]*学习安排与其他入口[\s\S]*设为今日计划[\s\S]*<\/details>/);
+  expect(html).not.toContain("<details");
   expect(html).toMatch(/确认草案/);
 });
 

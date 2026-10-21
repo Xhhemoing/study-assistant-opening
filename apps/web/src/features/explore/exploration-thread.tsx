@@ -39,7 +39,7 @@ function ThreadTurn({ turn }: { turn: ChatTurn }) {
           <p className={`whitespace-pre-wrap break-words rounded-md px-3 py-2 text-sm leading-7 ${user ? "bg-zinc-100 text-zinc-800" : "bg-white text-zinc-800"}`}>
             {turn.content}
           </p>
-          {turn.simulated ? <span className="text-[11px] text-zinc-500">模拟回复</span> : null}
+          {turn.simulated ? <span className="text-xs text-zinc-500">模拟回复</span> : null}
         </div>
       </div>
     </article>

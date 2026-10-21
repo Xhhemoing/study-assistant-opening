@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * No DOM library is installed. Capture effects during SSR and replay them with a
+ * Capture shell effects during SSR and replay them with a
  * persistent useState slot store so a second render reflects fetch outcomes.
  */
 const effects: Array<() => unknown> = [];
@@ -44,12 +44,16 @@ vi.mock("../../search/command-palette", () => ({
   CommandPalette: () => null,
 }));
 
+vi.mock("./connection-notice", () => ({ ConnectionNotice: () => null }));
+
 vi.mock("./focus-timer", () => ({
   FocusTimer: () => null,
 }));
 vi.mock("./mobile-navigation", () => ({
   OpeningMobileNavigation: () => null,
 }));
+vi.mock("../assistant/assistant-drawer", () => ({ AssistantDrawer: () => null }));
+vi.mock("./account-menu", () => ({ OpeningAccountMenu: ({ pendingCount, focusMode }: { pendingCount: number | null; focusMode: boolean }) => createElement("button", { "aria-label": focusMode ? "退出专注模式" : "账户与学习工具" }, pendingCount ? createElement("span", { "aria-label": `${pendingCount} 项待审核` }, pendingCount) : null) }));
 vi.mock("../inbox/citation-reader-host", () => ({ CitationReaderHost: () => null }));
 
 import { OpeningShell } from "./opening-shell";
@@ -103,7 +107,7 @@ describe("OpeningShell review badge", () => {
     const html = renderShell();
     expect(html).not.toContain("项待审核");
     expect(html).not.toContain("bg-amber-500");
-    expect(html).toContain('aria-label="待确认建议"');
+    expect(html).toContain('aria-label="账户与学习工具"');
   });
 
   it("shows the review count badge only after a successful reviews response", async () => {
@@ -120,7 +124,22 @@ describe("OpeningShell review badge", () => {
 
     const html = renderShell();
     expect(html).toContain('aria-label="3 项待审核"');
-    expect(html).toContain("bg-amber-500");
+
+  });
+
+  it("clears a previous count when the next route cannot refresh suggestions", async () => {
+    vi.mocked(fetch).mockImplementation(async input => String(input).startsWith("/api/opening/reviews")
+      ? Response.json({ total: 3 })
+      : Response.json({ user: { displayName: "学习者" } }));
+    renderShell();
+    await runCapturedEffects();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBe(3);
+    pathname = "/opening/courses";
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 503 }));
+    renderShell();
+    await runCapturedEffects();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBeNull();
+    expect(renderShell()).not.toContain('aria-label="3 项待审核"');
   });
 });
 

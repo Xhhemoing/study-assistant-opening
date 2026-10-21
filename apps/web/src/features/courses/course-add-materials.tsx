@@ -100,26 +100,26 @@ export function CourseAddMaterials({
         </Link>
       </div>
       {open ? (
-        <section aria-label="添加材料到课程" className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+        <section aria-label="添加材料到课程" className="space-y-3 rounded-xl border border-line bg-surface-2 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-zinc-600">从知识库选择尚未挂入本课的材料。</p>
+            <p className="text-xs text-text-2">从知识库选择尚未挂入本课的材料。</p>
             <button type="button" className={ui.icon} aria-label="关闭添加材料" title="关闭" onClick={() => setOpen(false)}>
               <X size={14} aria-hidden="true" />
             </button>
           </div>
-          {loading ? <p className="text-xs text-zinc-500" role="status">正在读取知识库…</p> : null}
+          {loading ? <p className="text-xs text-text-3" role="status">正在读取知识库…</p> : null}
           {loadError ? <LoadError message={loadError} onRetry={() => void load()} /> : null}
           {!loading && !loadError && !available.length ? (
-            <p className="text-xs text-zinc-500">知识库里没有可挂入的新材料。可先去材料库上传，或确认材料尚未挂入本课。</p>
+            <p className="text-xs text-text-3">知识库里没有可挂入的新材料。可先去材料库上传，或确认材料尚未挂入本课。</p>
           ) : null}
           {!loading && uploaded.length ? (
-            <ul className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-2">
+            <ul className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-line bg-surface p-2">
               {uploaded.map((source) => (
                 <li key={source.id}>
-                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-zinc-800 hover:bg-zinc-50">
+                  <label className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-xs text-text hover:bg-surface-2">
                     <input
                       type="checkbox"
-                      className="size-4 accent-emerald-700"
+                      className="size-4 accent-accent"
                       checked={selected.includes(source.id)}
                       disabled={busy}
                       onChange={() => toggle(source.id)}
@@ -133,8 +133,8 @@ export function CourseAddMaterials({
           ) : null}
           {!loading && pending.length ? (
             <div className="space-y-1">
-              <p className="text-[11px] text-zinc-500">以下材料尚未完成上传，暂不可选：</p>
-              <ul className="space-y-1 text-xs text-zinc-400">
+              <p className="text-xs text-text-3">以下材料尚未完成上传，暂不可选：</p>
+              <ul className="space-y-1 text-xs text-text-3">
                 {pending.map((source) => (
                   <li key={source.id} className="truncate px-2 py-1">{source.name}</li>
                 ))}
@@ -162,13 +162,13 @@ export function CourseAddMaterials({
             </button>
           </div>
           {result ? (
-            <div role="status" className="space-y-1 text-xs text-zinc-700">
+            <div role="status" className="space-y-1 text-xs text-text-2">
               <p>
                 {result.succeeded.length} 份挂接成功
                 {result.failed.length ? `，${result.failed.length} 份未完成` : ""}。
               </p>
               {result.failed.map((item) => (
-                <p key={item.id} className="break-words text-red-700">
+                <p key={item.id} className="break-words text-danger">
                   {sources.find((source) => source.id === item.id)?.name ?? item.id}：{item.message}
                 </p>
               ))}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SpanProblem } from "@aistudy/contracts";
-import { solveSpanProblem, verifySpanAnswer } from "./span-verifier";
-import { parseSpanRational, formatSpanRational } from "./span-rational";
+import { solveSpanProblem, solveSpanProblemWithSteps, verifySpanAnswer } from "./span-verifier";
+import { parseSpanRational, formatSpanRational, multiplyRational, subtractRational } from "./span-rational";
 const problem = (vectors: [string[], string[]], target: string[]): SpanProblem => ({ id: "test", version: "1", familyId: "fixture", vectors, target, knowledgeComponents: ["span:solve-coefficients"] });
 const p = problem([["1", "0", "1"], ["0", "1", "1"]], ["1/2", "-2/3", "-1/6"]);
 describe("exact span verification", () => {
@@ -63,5 +63,45 @@ describe("exact span verification", () => {
     expect(formatSpanRational(parseSpanRational("-0.125")!)).toBe("-1/8");
     expect(parseSpanRational("1".repeat(161))).toBeNull();
     expect(parseSpanRational("1e1000000000")).toBeNull();
+  });
+  it.each([
+    p,
+    problem([["0", "2", "4"], ["3", "1", "8"]], ["3/2", "5/2", "8"]),
+    problem([["1", "0", "1"], ["0", "1", "1"]], ["1", "2", "4"]),
+    problem([["1", "2"], ["2", "4"]], ["3", "6"]),
+    problem([["0", "0"], ["0", "0"]], ["0", "0"]),
+  ])("replays every exact row operation to obtain the reported reduced equations: %j", input => {
+    const working = solveSpanProblemWithSteps(input);
+    const rows = working.initialMatrix.map(row => row.map(value => parseSpanRational(value)!));
+    for (const { operation, matrix } of working.steps) {
+      if (operation.kind === "swap") {
+        const [a, b] = operation.rows;
+        [rows[a], rows[b]] = [rows[b]!, rows[a]!];
+      } else if (operation.kind === "scale") {
+        const factor = parseSpanRational(operation.factor)!;
+        expect(factor.n).not.toBe(0n);
+        rows[operation.row] = rows[operation.row]!.map(cell => multiplyRational(cell, factor));
+      } else {
+        expect(operation.row).not.toBe(operation.sourceRow);
+        const factor = parseSpanRational(operation.factor)!;
+        rows[operation.row] = rows[operation.row]!.map((cell, column) => subtractRational(cell, multiplyRational(factor, rows[operation.sourceRow]![column]!)));
+      }
+      expect(rows.map(row => row.map(formatSpanRational))).toEqual(matrix);
+    }
+    expect(rows.map(row => row.map(formatSpanRational))).toEqual(working.reducedMatrix);
+    expect(working.solution).toEqual(solveSpanProblem(input));
+  });
+  it("shows a row swap and an exact contradiction instead of rounding them away", () => {
+    const swapped = solveSpanProblemWithSteps(problem([["0", "2"], ["3", "1"]], ["3/2", "5/2"]));
+    expect(swapped.steps[0]!.operation).toEqual({ kind: "swap", rows: [0, 1] });
+    expect(swapped.reducedMatrix).toEqual([["1", "0", "1"], ["0", "1", "1/2"]]);
+    const inconsistent = solveSpanProblemWithSteps(problem([["1", "0", "1"], ["0", "1", "1"]], ["1/2", "1/3", "1"]));
+    expect(inconsistent.solution).toEqual({ kind: "none" });
+    expect(inconsistent.reducedMatrix).toContainEqual(["0", "0", "1/6"]);
+  });
+  it("returns no invented working for invalid operands", () => {
+    expect(solveSpanProblemWithSteps({ ...p, target: ["invalid"] })).toEqual({
+      solution: { kind: "unknown", reason: "invalid_problem" }, initialMatrix: [], steps: [], reducedMatrix: [],
+    });
   });
 });

@@ -9,9 +9,9 @@ export function SuggestionRejectionControl({ disabled, onConfirm }: {
 }) {
   const [armed, setArmed] = useState(false);
   const [reason, setReason] = useState<TaskFeedbackInput["reason"] | "">("");
-  if (!armed) return <button type="button" className="min-h-9 text-xs text-zinc-600 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+  if (!armed) return <button type="button" className="min-h-11 text-xs text-text-2 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     disabled={disabled} onClick={() => setArmed(true)}>不适合我</button>;
-  return <div className="mt-2 space-y-2 rounded border border-zinc-200 bg-white px-3 py-2">
+  return <div className="mt-2 space-y-2 rounded border border-line bg-surface px-3 py-2">
     <p>确认后今天不再推荐同一项；不会据此判断你的能力。</p>
     <label>原因（可不选）<select className={`${inputClass} ml-2 max-w-full`} value={reason} disabled={disabled}
       onChange={event => setReason(event.target.value as TaskFeedbackInput["reason"] | "")}>

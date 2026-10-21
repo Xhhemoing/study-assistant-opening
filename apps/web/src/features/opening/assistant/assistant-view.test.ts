@@ -407,3 +407,13 @@ it("keeps saved and ephemeral timelines separate while switching back and forth"
   expect(messagesForChatBranch(saved, ephemeral, "saved")).toEqual(saved);
   expect(messagesForChatBranch(saved, [], "ephemeral")).toEqual([]);
 });
+
+
+describe("purpose-specific question scope", () => {
+  it("isolates translation drafts from mathematical-help drafts", async () => {
+    const { assistantContextScope } = await import("./assistant-view");
+    const attemptId = "11111111-1111-4111-8111-111111111111";
+    expect(assistantContextScope({ attemptId, purpose: "language_support" })).not.toBe(assistantContextScope({ attemptId, purpose: "learning_help" }));
+    expect(assistantContextScope({ attemptId })).toBe(assistantContextScope({ attemptId, purpose: "learning_help" }));
+  });
+});

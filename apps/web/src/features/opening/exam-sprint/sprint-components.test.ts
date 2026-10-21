@@ -1,10 +1,12 @@
 import type { ExamAttemptView, ExamSprintOverview } from "@aistudy/contracts";
-import { createElement } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ActiveRun, AttemptFeedback, CompletedRun } from "./active-run";
 import { filterSources, SourceTracker } from "./source-tracker";
-import { practiceModeForDueAt } from "./labels";
+import { hasSprintAttemptHelp, practiceModeForDueAt } from "./labels";
+import { LessonButton } from "./lesson-button";
+import { SkillsAndLessons } from "./learning-plan";
 
 const attempt: ExamAttemptView = {
   id: "attempt-1", runId: "run-1", questionId: "q-1", presentedAt: "2026-10-17T10:00:00Z", answeredAt: "2026-10-17T10:01:00Z",
@@ -20,12 +22,130 @@ function fixture(): ExamSprintOverview {
       { id: "source-2", topicId: "topic-2", label: "Problem 9", sourceTitle: "Topic 4 积分参考题", sourcePage: 12, kind: "problem", suggestedDay: 4, skills: ["分部积分"] },
     ], weekPlan: [], limitations: [] },
     state: { version: 1, startedAt: run.startedAt, examDate: null, dailyMinutes: 360, runs: [run], sourceRecords: [] },
-    attempts: [attempt], activeRun: run, currentAttempt: attempt, skills: [], summary: { sourceTotal: 2, sourceCovered: 0, sourceIndependent: 0, sourceDelayed: 0, onlineAnswered: 0, onlineIndependentCorrect: 0 }, recommendations: [],
+    lessonContents: [], attempts: [attempt], activeRun: run, currentAttempt: attempt, skills: [], summary: { sourceTotal: 2, sourceCovered: 0, sourceIndependent: 0, sourceDelayed: 0, onlineAnswered: 0, onlineIndependentCorrect: 0 }, recommendations: [],
     workload: { remainingItems: 2, estimatedMinutes: null, availableMinutes: null, overloaded: false, message: "未设置考试日期" },
   };
 }
 
+function clickTarget(node: ReactNode, id: string): { onClick?: (event: { preventDefault: () => void }) => void } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) { const found = clickTarget(child, id); if (found) return found; }
+    return null;
+  }
+  if (!isValidElement<{ id?: string; children?: ReactNode; onClick?: (event: { preventDefault: () => void }) => void }>(node)) return null;
+  return node.props.id === id ? node.props : clickTarget(node.props.children, id);
+}
+
 describe("exam sprint UI boundaries", () => {
+  const lesson = { id: "lesson-1", topicId: "topic-1", title: "极限串讲", summary: "方法摘要", steps: ["先化简"], workedExample: "完整例题正文不能预先显示", pitfalls: [] };
+  const metadata = { id: lesson.id, topicId: lesson.topicId, title: lesson.title, summary: lesson.summary, exposureIdentity: { packVersion: "1", contentFingerprint: "reviewed-content", mappingVersion: "reviewed-map" } };
+
+  it.each(["legacy_untracked_source", "unverifiable_source"] as const)("explains %s as unknown evidence without calling it help", kind => {
+    const covered = { ...attempt, independent: false, exposureCoverage: { kind, packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 2 } };
+    const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: covered, disabled: false, send: () => undefined }));
+    expect(html).toContain("早期资料曝光无法核验，当前不计独立证据");
+    expect(html).not.toContain("含帮助");
+    expect(html).not.toContain("未见题族独立作答");
+    expect(hasSprintAttemptHelp(covered)).toBe(false);
+  });
+
+  it("prevents a manual summary from opening its native details before the asynchronous request is confirmed", () => {
+    const overview = fixture();
+    overview.activeRun = null;
+    overview.pack.lessons = [metadata];
+    overview.lessonContents = [{ exposureId: "already-seen", lesson }];
+    const onOpenLesson = vi.fn(async () => undefined);
+    const send = vi.fn();
+    const props = { overview, disabled: false, send, onOpenLesson };
+    const summary = clickTarget(SkillsAndLessons(props), "sprint-manual-lesson-1");
+    const preventDefault = vi.fn();
+    expect(summary?.onClick).toBeDefined();
+    summary!.onClick!({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(onOpenLesson).toHaveBeenCalledExactlyOnceWith(lesson.id, { id: "sprint-manual-lesson-1", label: "返回串讲目录" });
+    expect(send).not.toHaveBeenCalled();
+    expect(renderToStaticMarkup(createElement(SkillsAndLessons, props))).not.toContain(lesson.workedExample);
+  });
+
+  it("labels same-run lesson assistance while keeping previously seen examples separate", () => {
+    const assisted = { ...attempt, independent: false, lessonExposureIds: ["lesson-exposure-1"] };
+    const seenEarlier = { ...attempt, independent: false, seenExampleExposureIds: ["older-example"] };
+    expect(hasSprintAttemptHelp(assisted)).toBe(true);
+    expect(hasSprintAttemptHelp(seenEarlier)).toBe(false);
+    const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: assisted, disabled: false, send: () => undefined }));
+    expect(html).toContain("含帮助，不计独立正确");
+    const previous = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: seenEarlier, disabled: false, send: () => undefined }));
+    expect(previous).not.toContain("含帮助");
+  });
+
+  it("shows confirmed partial answers as help even when unrelated source coverage is unknown", () => {
+    const partial = { ...attempt, independent: false, partialExampleExposureIds: ["partial-answer"],
+      exposureCoverage: { kind: "unverifiable_source" as const, packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 1 } };
+    expect(hasSprintAttemptHelp(partial)).toBe(true);
+    const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: partial, disabled: false, send: () => undefined }));
+    expect(html).toContain("含帮助，不计独立正确");
+    expect(html).not.toContain("未见题族独立作答");
+    expect(html).not.toContain("早期资料曝光无法核验");
+  });
+
+  it("offers an exact lesson button and stable original-question target after a mock is submitted", () => {
+    const overview = fixture();
+    overview.activeRun = null;
+    overview.currentAttempt = null;
+    overview.state.runs[0]!.completedAt = "2026-10-17T10:10:00Z";
+    overview.pack.lessons = [metadata];
+    const html = renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send: () => undefined, onOpenLesson: async () => undefined }));
+    expect(html).toContain('id="sprint-attempt-attempt-1"');
+    expect(html).toContain("查看对应串讲");
+    expect(html).toContain("你的答案：A");
+    expect(html).toContain(attempt.feedback!.explanation);
+    overview.activeRun = fixture().activeRun;
+    const activeHtml = renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send: () => undefined, onOpenLesson: () => undefined }));
+    expect(activeHtml).toContain("短模拟交卷后才能阅读串讲");
+    expect(activeHtml.match(/<button[^>]*>查看对应串讲<\/button>/)?.[0]).toMatch(/\sdisabled(?:=|[ >])/);
+  });
+
+  it("keeps lesson actions keyboard-operable and disables missing or ambiguous mappings", () => {
+    const overview = fixture();
+    overview.activeRun = null;
+    overview.pack.lessons = [metadata];
+    const props = { overview, lessonId: lesson.id, onOpenLesson: async () => undefined, returnTarget: { id: "original", label: "返回原题" } };
+    const html = renderToStaticMarkup(createElement(LessonButton, props));
+    expect(html).toContain('type="button"');
+    expect(html).not.toMatch(/\sdisabled(?:=|[ >])/);
+    for (const lessonId of [null, "gone"]) {
+      const missing = renderToStaticMarkup(createElement(LessonButton, { ...props, lessonId }));
+      expect(missing).toMatch(/\sdisabled(?:=|[ >])/);
+      expect(missing).toContain("暂无对应串讲");
+    }
+    overview.pack.lessons = [metadata, { ...metadata }];
+    expect(renderToStaticMarkup(createElement(LessonButton, props))).toContain("暂无对应串讲");
+  });
+
+  it("requires confirmation for skill and manual entries and seals cached content during an active mock", () => {
+    const overview = fixture();
+    overview.activeRun = null;
+    overview.pack.lessons = [metadata];
+    overview.skills = [{ skillId: "skill-1", topicId: "topic-1", title: "极限", status: "weak", independentCorrect: 0, attempted: 1, dueAt: null, reason: "需要再练", lessonId: lesson.id }];
+    const props = { overview, disabled: false, send: () => undefined, onOpenLesson: () => undefined };
+    const html = renderToStaticMarkup(createElement(SkillsAndLessons, props));
+    expect(html).toContain('id="sprint-skill-skill-1"');
+    expect(html).toContain('id="sprint-lessons-title" tabindex="-1"');
+    expect(html).toContain('id="lesson-lesson-1"');
+    expect(html).not.toContain('href="#lesson-lesson-1"');
+    expect(html).not.toContain(lesson.workedExample);
+    overview.lessonContents = [{ exposureId: "exposure-1", lesson }];
+    expect(renderToStaticMarkup(createElement(SkillsAndLessons, props))).not.toContain(lesson.workedExample);
+    const confirmed = renderToStaticMarkup(createElement(SkillsAndLessons, { ...props, lessonContent: overview.lessonContents[0] }));
+    expect(confirmed).toContain(lesson.workedExample);
+    expect(confirmed).toContain(' open=""');
+    overview.activeRun = fixture().activeRun;
+    const sealed = renderToStaticMarkup(createElement(SkillsAndLessons, { ...props, lessonContent: overview.lessonContents[0] }));
+    expect(sealed).not.toContain('href="#lesson-lesson-1"');
+    expect(sealed).not.toContain(lesson.workedExample);
+    expect(sealed).toContain("短模拟交卷后才能阅读串讲");
+  });
+
   it("keeps newly scheduled skills in practice until the retest actually becomes due", () => {
     const now = Date.parse("2026-10-17T12:00:00Z");
     expect(practiceModeForDueAt("2026-10-18T12:00:00Z", now)).toBe("practice");
@@ -63,7 +183,7 @@ describe("exam sprint UI boundaries", () => {
     overview.activeRun = null;
     overview.currentAttempt = null;
     overview.attempts = [{ ...attempt, correct: true, independent: false }];
-    overview.state.runs[0].completedAt = "2026-10-17T10:10:00Z";
+    overview.state.runs[0]!.completedAt = "2026-10-17T10:10:00Z";
     const html = renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send: () => undefined }));
     expect(html).toContain("已答 1/2");
     expect(html).toContain("A. 0");

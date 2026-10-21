@@ -24,6 +24,13 @@ describe("parsed source content", () => {
     expect(value.text).toBe(content.text);
     await expect(loadSourceContent(content.sourceId, 0, undefined, async () => new Response(null, { status: 409 }))).rejects.toThrow();
   });
+  it.each(["<html>upstream failure</html>", JSON.stringify({ ...content, page: "internal-field-error" })])("does not show response parser or schema details in the source reader", async body => {
+    await expect(loadSourceContent(content.sourceId, 0, 2, async () => new Response(body, { status: 200 }))).rejects.toMatchObject({
+      name: "OpeningResponseError",
+      message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+      cause: { name: "ZodError" },
+    });
+  });
   it.each([
     { sourceId: "22222222-2222-4222-8222-222222222222" },
     { version: 1 }, { page: 1 },

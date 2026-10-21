@@ -18,9 +18,11 @@ test("opens the server-backed note editor from Library", async ({ browser, baseU
 
     const page = await context.newPage();
     await page.goto("/library");
-    // The Library header now has an icon link and a primary button, both "新建笔记" -> /library/new.
+    await expect(page).toHaveURL(/\/opening\/library$/);
+    await expect(page.getByRole("tab", { name: "材料", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "笔记", exact: true }).click();
     await page.getByRole("link", { name: "新建笔记" }).first().click();
-    await expect(page).toHaveURL(/\/library\/[0-9a-f-]{36}$/);
+    await expect(page).toHaveURL(/\/opening\/library\/[0-9a-f-]{36}$/);
     await expect(page.getByRole("heading", { name: "编辑笔记" })).toBeVisible();
     await expect(page.locator(".bn-editor")).toBeVisible();
   } finally {
@@ -48,6 +50,8 @@ test("edits, undoes, and reloads a note saved to the server", async ({ browser, 
 
     await page.goto("/library/new");
     await expect(page.getByRole("status").filter({ hasText: /^已保存$/ })).toBeVisible();
+    await expect(page).toHaveURL(/\/opening\/library\/[0-9a-f-]{36}$/);
+    const documentId = new URL(page.url()).pathname.split("/").at(-1)!;
     const title = page.getByRole("textbox", { name: "笔记标题" });
     await title.fill("终身学习笔记");
 
@@ -66,7 +70,7 @@ test("edits, undoes, and reloads a note saved to the server", async ({ browser, 
 
     await expect(page.getByRole("status").filter({ hasText: "有未同步修改" })).toBeVisible();
     const saving = page.waitForResponse((response) =>
-      response.request().method() === "PATCH" && new URL(response.url()).pathname === new URL(page.url()).pathname.replace("/library/", "/api/documents/"),
+      response.request().method() === "PATCH" && new URL(response.url()).pathname === `/api/documents/${documentId}`,
     );
     await page.getByRole("button", { name: "保存", exact: true }).click();
     expect((await saving).status()).toBe(200);
