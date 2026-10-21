@@ -73,7 +73,7 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
           {unavailable.length ? <section className="space-y-3"><h3 className="text-sm font-semibold">暂不可开始</h3><ReviewTaskList items={unavailable} /><Link className={ui.quiet} href="/opening/today">到今天查看任务</Link></section> : null}
         </>}
       </section> : null}
-      <p className="border-t border-line pt-3 text-xs text-text-2"><Link className="font-medium text-accent underline underline-offset-4" href="/opening/today#suggestions">到今日查看学习建议</Link></p>
+      <p className="border-t border-line pt-3 text-xs text-text-2"><Link className="font-medium text-accent underline underline-offset-4" href="/opening/settings/planning#suggestions">查看学习建议</Link></p>
     </div></div>
   </section>;
 }

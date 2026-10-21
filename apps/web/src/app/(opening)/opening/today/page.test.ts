@@ -6,9 +6,10 @@ import OpeningTodayPage from "./page";
 import TodayLoading from "./loading";
 
 const mocks = vi.hoisted(() => ({
-  authenticate: vi.fn(), resume: vi.fn(), preference: vi.fn(), reader: vi.fn(),
+  redirect: vi.fn(), authenticate: vi.fn(), resume: vi.fn(), preference: vi.fn(), reader: vi.fn(),
   scope: { workspaceId: "workspace", ownerUserId: "owner" }, sql: {},
 }));
+vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 vi.mock("@aistudy/ai", () => ({ isTeachingCompilerEnabled: () => false }));
 vi.mock("../../../../features/opening/planning/today-dashboard", () => ({ TodayDashboard: () => null }));
@@ -20,7 +21,7 @@ vi.mock("../../../../features/opening/server/data-services", () => ({
   getPlanningSettingsService: () => ({ get: mocks.preference }),
 }));
 
-const page = () => OpeningTodayPage({ searchParams: Promise.resolve({ task: "task-1" }) });
+const page = () => OpeningTodayPage({ searchParams: Promise.resolve({}) });
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.authenticate.mockResolvedValue({ scope: mocks.scope, sql: mocks.sql });
@@ -29,6 +30,12 @@ beforeEach(() => {
 });
 
 describe("Today server reads", () => {
+  it("keeps old task links pointed at the scheduling page", async () => {
+    mocks.redirect.mockImplementation(() => { throw new Error("redirect"); });
+    await expect(OpeningTodayPage({ searchParams: Promise.resolve({ task: "task-1" }) })).rejects.toThrow("redirect");
+    expect(mocks.redirect).toHaveBeenCalledWith("/opening/settings/planning?task=task-1");
+    expect(mocks.authenticate).not.toHaveBeenCalled();
+  });
   it("starts both scoped reads without waiting for the resume query", async () => {
     let finishResume!: (value: { kind: "empty" }) => void;
     let markStarted!: () => void;
@@ -46,7 +53,7 @@ describe("Today server reads", () => {
     expect(mocks.preference).toHaveBeenCalledWith(mocks.scope);
     expect(mocks.reader).toHaveBeenCalledWith(mocks.sql);
     expect(mocks.resume).toHaveBeenCalledWith(expect.objectContaining({ scope: mocks.scope }));
-    expect(result.props).toMatchObject({ state: { kind: "empty" }, timeZone: "America/New_York", focusTaskId: "task-1" });
+    expect(result.props).toMatchObject({ state: { kind: "empty" }, timeZone: "America/New_York" });
   });
 
   it("does not start either read before authentication completes", async () => {

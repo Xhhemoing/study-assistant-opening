@@ -108,9 +108,10 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
         <section id="planning" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-planning-heading">
           <div>
             <h2 className="text-sm font-medium text-text" id="opening-planning-heading">开学排程</h2>
-            <p className="mt-1 text-xs leading-6 text-text-3">导入课表并确认学期设置后，今天页可用「按建议安排」一键生成草案。</p>
+            <p className="mt-1 text-xs leading-6 text-text-3">导入课表并确认学期设置后，可在学习安排里调整可用时间和任务。</p>
           </div>
           <div className="space-y-8">
+            <Link className={ui.secondary} href="/opening/settings/planning">打开学习安排</Link>
             <SemesterSettingsForm />
             <TimetableImport />
           </div>

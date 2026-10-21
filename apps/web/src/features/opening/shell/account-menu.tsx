@@ -19,7 +19,7 @@ export function OpeningAccountMenu({ userLabel, pendingCount, focusMode, onToggl
     </button>
     <Drawer open={open} onClose={() => setOpen(false)} title={userLabel || "学习工具"} keepMounted description="AI 建议、专注计时与账户设置">
       <nav aria-label="账户与学习工具" className="space-y-2">
-        <ShellNavLink className={`${ui.secondary} w-full justify-start`} href="/opening/today#suggestions" onClick={() => { window.dispatchEvent(new Event("opening:show-suggestions")); setOpen(false); }}><ClipboardCheck size={16} aria-hidden="true" />待确认建议{pendingCount ? ` · ${pendingCount}` : ""}</ShellNavLink>
+        <ShellNavLink className={`${ui.secondary} w-full justify-start`} href="/opening/settings/planning#suggestions" onClick={() => { window.dispatchEvent(new Event("opening:show-suggestions")); setOpen(false); }}><ClipboardCheck size={16} aria-hidden="true" />待确认建议{pendingCount ? ` · ${pendingCount}` : ""}</ShellNavLink>
         <button className={`${ui.secondary} w-full justify-start`} type="button" aria-pressed={focusMode} onClick={() => { onToggleFocus(); setOpen(false); }}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}{focusMode ? "退出专注模式" : "进入专注模式"}</button>
         <div className="rounded-xl border border-line p-3"><p className="mb-2 text-xs text-text-2">专注计时 · 仅当前页面有效</p><FocusTimer /></div>
         <ShellNavLink className={`${ui.secondary} w-full justify-start`} href="/opening/settings" onClick={() => setOpen(false)}><Settings size={16} aria-hidden="true" />设置</ShellNavLink>

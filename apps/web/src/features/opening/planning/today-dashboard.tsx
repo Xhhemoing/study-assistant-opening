@@ -5,7 +5,7 @@ import { TaskQueueRefreshContext } from "./task-status-control";
 import { buttonClass, EmptyState, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
-import { createOpeningCardsClient } from "../cards/cards-client";
+import { TodayProgress } from "./today-progress";
 import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
@@ -60,6 +60,7 @@ export function TodayDashboard({
   state,
   api: apiProp,
   focusTaskId,
+  planning = false,
   teachingWorkspaceEnabled: teachingWorkspaceEnabledProp,
   teachingLoopEnabled: teachingLoopEnabledProp,
   teachingLoopTrialEnabled: teachingLoopTrialEnabledProp,
@@ -71,6 +72,8 @@ export function TodayDashboard({
   timeZone?: string;
   api?: OpeningApi;
   focusTaskId?: string;
+  /** Scheduling lives in Settings; Today mounts only learning and progress. */
+  planning?: boolean;
   /** Override for tests; default = server capabilities teachingLoop.ui. */
   teachingWorkspaceEnabled?: boolean;
   /** Override for tests; default = server capabilities teachingLoop.api. */
@@ -98,12 +101,10 @@ export function TodayDashboard({
       ? teachingLoopEnabled && teachingWorkspaceEnabled
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
-  const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
+  const [queueOpen, setQueueOpen] = useState(() => planning || shouldOpenTodayQueue(focusTaskId));
   const [reviewsOpen, setReviewsOpen] = useState(false);
   const [pendingReviewCount, setPendingReviewCount] = useState(state.pendingReviews?.count ?? 0);
   const [reloadToken, setReloadToken] = useState(0);
-  const [dueCardsError, setDueCardsError] = useState(false);
-  const [dueCardCount, setDueCardCount] = useState(0);
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
   const [activityLoad, setActivityLoad] = useState<"loading" | "ready" | "error">("loading");
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
@@ -118,7 +119,6 @@ export function TodayDashboard({
   const [learningResume, setLearningResume] = useState<LearningResume | null>(null);
   const [resumeLoad, setResumeLoad] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const timeZone = useMemo(() => resolveTodayTimeZone(workspaceTimeZone), [workspaceTimeZone]);
-  const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
   const noCourses = hasNoTodayCourses(state);
@@ -136,29 +136,17 @@ export function TodayDashboard({
     if (focusTaskId) setQueueOpen(true);
   }, [focusTaskId]);
   useEffect(() => {
+    if (!planning) {
+      if (window.location.hash === "#suggestions") window.location.replace("/opening/settings/planning#suggestions");
+      return;
+    }
     const openSuggestions = () => { if (window.location.hash === "#suggestions") setReviewsOpen(true); };
     const showSuggestions = () => setReviewsOpen(true);
     openSuggestions(); window.addEventListener("hashchange", openSuggestions);
     window.addEventListener("opening:show-suggestions", showSuggestions);
     return () => { window.removeEventListener("hashchange", openSuggestions); window.removeEventListener("opening:show-suggestions", showSuggestions); };
-  }, []);
+  }, [planning]);
 
-  useEffect(() => {
-    if (noCourses || state.kind !== "ready" && state.kind !== "empty") {
-      setDueCardCount(0);
-      return;
-    }
-    const controller = new AbortController();
-    setDueCardsError(false);
-    cards.listDue("auto")
-      .then((items) => {
-        if (!controller.signal.aborted) setDueCardCount(items.length);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) { setDueCardCount(0); setDueCardsError(true); }
-      });
-    return () => controller.abort();
-  }, [cards, reloadToken, state.kind, noCourses]);
   useEffect(() => {
     if (noCourses || state.kind !== "ready" && state.kind !== "empty") return;
     const controller = new AbortController();
@@ -310,9 +298,10 @@ export function TodayDashboard({
       setActivities((rows) => [created, ...rows.filter((row) => row.id !== created.id)]);
       setSelectedActivity(created); setActivityLoad("ready");
       setCtaPreferWorkspace(true); setCtaFocusNonce((n) => n + 1); setQueueOpen(false);
+      if (planning && created.courseId) window.location.assign(`/opening/courses/${encodeURIComponent(created.courseId)}/study?activity=${encodeURIComponent(created.id)}`);
     } catch (reason) { setCtaError(reason instanceof Error ? reason.message : "任务主讲创建未确认，请用同一任务重新读取。"); }
     finally { taskStartInFlight.current = false; setCtaBusy(false); }
-  }, [api, teachingLoopTrialEnabled, timeZone]);
+  }, [api, planning, teachingLoopTrialEnabled, timeZone]);
 
 
   useEffect(() => {
@@ -324,12 +313,12 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
-  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">今日学习</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time></p></header>;
+  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">{planning ? "学习安排" : "今日学习"}</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time></p></header>;
   const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
     <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
     <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />
   </details>;
-  if (noCourses) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav>{suggestions}</div>;
+  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
@@ -337,8 +326,7 @@ export function TodayDashboard({
       <div className="flex min-h-full flex-col bg-bg text-text">
         {heading}
         {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
-        {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
-        <div ref={nextStepMetrics.ref} onClickCapture={event => {
+        {!planning ? <div ref={nextStepMetrics.ref} onClickCapture={event => {
           if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
         }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
           {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
@@ -373,13 +361,14 @@ export function TodayDashboard({
               学习记录暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button>
             </p>
           ) : null}
-        </div>
+        </div> : ctaError ? <p role="alert" className="px-5 pt-3 text-sm text-danger">{ctaError}</p> : null}
+        {!planning ? <TodayProgress api={api} timeZone={timeZone} reloadToken={reloadToken} /> : null}
         <div className="flex min-h-0 flex-1 flex-col">
           <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
-            <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起今日安排" : "查看今日安排"}</button>
-            <Link href="/opening/review" className={ui.quiet}>复习{dueCardCount > 0 ? ` · ${dueCardCount} 张到期` : ""}</Link>
+            {planning ? <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起任务列表" : "查看任务列表"}</button> : <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>}
+            {planning ? <><Link href="/opening/today" className={ui.quiet}>返回今天</Link><Link href="/opening/review" className={ui.quiet}>复习</Link></> : null}
           </nav>
-          <div
+          {planning ? <div
             id="today-queue"
             hidden={!queueOpen}
             className={`${queueOpen ? "flex" : "hidden"} min-h-0 shrink-0 flex-col border-b border-line bg-surface`}
@@ -393,7 +382,7 @@ export function TodayDashboard({
               reloadToken={reloadToken}
               timeZone={timeZone}
             />
-          </div>
+          </div> : null}
           <div
             ref={teachingPaneRef}
             className="min-h-0 min-w-0 flex-1 bg-surface"
@@ -438,7 +427,7 @@ export function TodayDashboard({
             ) : null}
           </div>
         </div>
-        {suggestions}
+        {planning ? suggestions : null}
       </div>
       </TaskLearningActionContext.Provider>
     </TaskQueueRefreshContext.Provider>

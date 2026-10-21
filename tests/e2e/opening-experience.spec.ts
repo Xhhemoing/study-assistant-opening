@@ -19,7 +19,7 @@ test("compact mobile navigation and settings retain every destination and predic
   await account.click();
   const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "账户与学习工具", exact: true }) });
   await expect(more).toBeVisible();
-  for (const [label, href] of [[/^待确认建议/, "/opening/today#suggestions"], [/^设置$/, "/opening/settings"]] as const) {
+  for (const [label, href] of [[/^待确认建议/, "/opening/settings/planning#suggestions"], [/^设置$/, "/opening/settings"]] as const) {
     await expect(more.getByRole("link", { name: label })).toHaveAttribute("href", href);
   }
   await expect(more.getByRole("link", { name: "连接", exact: true })).toHaveCount(0);
