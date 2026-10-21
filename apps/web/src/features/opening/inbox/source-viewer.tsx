@@ -159,7 +159,7 @@ function SourcePreviewPane({
       <img
         src={previewHref}
         alt={`${name} 预览`}
-        className="max-h-[calc(100dvh-15rem)] w-full rounded-md border border-zinc-200 object-contain bg-zinc-50"
+        className="max-h-[calc(100dvh-15rem)] w-full rounded-md border border-line object-contain bg-white"
       />
     );
   }
@@ -205,17 +205,17 @@ export function SourceViewer({
   const previewable = sourcePreviewKind(mime) != null;
   const previewHref = sourcePreviewHref(record.id, download.version, page);
   return (
-    <section className={fillHeight ? "flex min-h-0 flex-1 flex-col gap-2 bg-white" : "space-y-3 bg-white"} aria-label="材料原件">
-      {!hideHeading ? <h2 className="text-base font-semibold text-zinc-950">{latestRecord.name}</h2> : null}
-      <div className="shrink-0 text-xs text-zinc-600">
+    <section className={fillHeight ? "flex min-h-0 flex-1 flex-col gap-2 bg-surface" : "space-y-3 bg-surface"} aria-label="材料原件">
+      {!hideHeading ? <h2 className="text-base font-semibold text-text">{latestRecord.name}</h2> : null}
+      <div className="shrink-0 text-xs text-text-2">
         <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-          <p className={versionMismatch ? "text-amber-800" : ""}>{copy}</p>
+          <p className={versionMismatch ? "text-warn" : ""}>{copy}</p>
           {!versionMismatch && latestRecord.parseState !== "ready" ? <span role="status">{sourceStatusLabel(latestRecord)}</span> : null}
           <details open={!previewable} className="min-w-0 max-w-full">
-            <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-emerald-800 focus-visible:ring-2 focus-visible:ring-emerald-700">原件与处理信息</summary>
+            <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-accent focus-visible:ring-2 focus-visible:ring-emerald-700">原件与处理信息</summary>
             <div className="max-h-36 space-y-2 overflow-y-auto overscroll-contain py-2">
               <p>{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
-              {sourcePreviewKind(mime) === "pdf" ? <p className="text-amber-800">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
+              {sourcePreviewKind(mime) === "pdf" ? <p className="text-warn">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
               <div className="flex flex-wrap gap-2">
                 {previewable ? (
                   <a className={ui.secondary} href={previewHref} target="_blank" rel="noreferrer">

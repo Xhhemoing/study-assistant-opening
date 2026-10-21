@@ -92,14 +92,14 @@ export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId 
   }
 
   return (
-    <div className="space-y-2 border-b border-zinc-200 px-3 py-3">
+    <div className="space-y-2 border-b border-line px-3 py-3">
       <UploadDropzone disabled={busy} onFiles={(files) => void uploadFiles(files)} />
       {items.length ? (
         <ul className="space-y-1.5" aria-label="助手上传队列">
           {items.map((item) => (
             <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="min-w-0 flex-1 break-words text-zinc-700">{item.file.name}</span>
-              <span className="text-zinc-500" role="status">
+              <span className="min-w-0 flex-1 break-words text-text-2">{item.file.name}</span>
+              <span className="text-text-3" role="status">
                 {uploadStripItemStatus(item, sources)}
               </span>
               {item.state === "failed" ? <>

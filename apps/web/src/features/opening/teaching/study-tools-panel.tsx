@@ -67,7 +67,7 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
   }, [selected?.id, wide, onPanelChange]);
 
   return <div className={fillHeight ? "flex h-full min-h-0 min-w-0 flex-col" : "min-w-0"}>
-    <nav aria-label="学习工具" className="mb-2 flex min-w-0 shrink-0 flex-wrap gap-1 border-b border-zinc-200 pb-1">
+    <nav aria-label="学习工具" className="mb-2 flex min-w-0 shrink-0 flex-wrap gap-1 border-b border-line pb-1">
       {panels.map(panel => <button key={panel.id} type="button" className={ui.quiet}
         aria-expanded={activePanel === panel.id} aria-controls={`${id}-panel`}
         onClick={() => onPanelChange(activePanel === panel.id ? null : panel.id)}>{panel.label}</button>)}
@@ -76,7 +76,7 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
       <div className={fillHeight ? "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain" : "min-w-0"}>{children}</div>
       <dialog ref={dialog} id={`${id}-panel`} aria-labelledby={`${id}-heading`}
         onCancel={event => { event.preventDefault(); onPanelChange(null); }}
-        className={`fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-xl ${fillHeight ? "overflow-hidden" : "overflow-y-auto"} overscroll-contain rounded-xl border border-zinc-200 bg-white p-4 text-zinc-800 shadow-xl backdrop:bg-zinc-950/35 lg:static lg:m-0 lg:max-h-none lg:w-full lg:max-w-none lg:self-start lg:rounded-none lg:border-0 lg:border-l lg:pl-5 lg:pr-0 lg:pt-0 lg:shadow-none ${fillHeight ? "h-[90dvh] min-h-0 open:flex open:flex-col lg:h-full lg:self-stretch" : ""}`}>
+        className={`fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-xl ${fillHeight ? "overflow-hidden" : "overflow-y-auto"} overscroll-contain rounded-xl border border-line bg-surface p-4 text-text shadow-xl backdrop:bg-ink/35 lg:static lg:m-0 lg:max-h-none lg:w-full lg:max-w-none lg:self-start lg:rounded-none lg:border-0 lg:border-l lg:pl-5 lg:pr-0 lg:pt-0 lg:shadow-none ${fillHeight ? "h-[90dvh] min-h-0 open:flex open:flex-col lg:h-full lg:self-stretch" : ""}`}>
         <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
           <h2 className="text-sm font-semibold" id={`${id}-heading`}>{selected?.label ?? "学习工具"}</h2>
           <button type="button" className={ui.icon} aria-label="关闭学习工具" onClick={() => onPanelChange(null)}><X size={16} aria-hidden /></button>

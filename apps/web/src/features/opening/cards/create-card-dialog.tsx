@@ -112,7 +112,7 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
         event.preventDefault();
         if (!busy) onClose();
       }}
-      className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-xl overflow-y-auto rounded-xl border border-zinc-200 bg-white p-0 text-zinc-800 shadow-xl backdrop:bg-zinc-950/30"
+      className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-xl overflow-y-auto rounded-xl border border-line bg-surface p-0 text-text shadow-xl backdrop:bg-ink/30"
     >
       <form
         onSubmit={(event) => {
@@ -120,7 +120,7 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
           void submit();
         }}
       >
-        <header className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3">
+        <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
           <h2 id={headingId} className="text-sm font-semibold">
             制成记忆卡片
           </h2>
@@ -135,14 +135,14 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
           </button>
         </header>
         <div className="space-y-4 px-5 py-4">
-          <div id={descriptionId} className="space-y-1 text-xs leading-6 text-zinc-600">
+          <div id={descriptionId} className="space-y-1 text-xs leading-6 text-text-2">
             <p>{draft ? "先把当前回答存为关联笔记，再编辑正反面制成记忆卡片。" : "题干与参考内容已预填，请核对并编辑后再创建；背面为空时请补充参考答案。"}</p>
             <p>关联课程的复习会记入学习记录，结果按自报保存，不作为独立正确的证明；未关联课程只安排复习。</p>
           </div>
           {saved ? (
             <div
               role="status"
-              className="space-y-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"
+              className="space-y-2 rounded-md border border-accent/30 bg-accent-soft p-3 text-sm text-accent"
             >
               <p className="flex items-center gap-2">
                 <Check size={16} aria-hidden />
@@ -195,17 +195,17 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
                 </div>
               </div>
               {!valid ? (
-                <p className="text-xs leading-5 text-amber-800">正反面都不能为空。</p>
+                <p className="text-xs leading-5 text-warn">正反面都不能为空。</p>
               ) : null}
             </>
           )}
           {error ? (
-            <p role="alert" className="text-xs leading-6 text-red-700">
+            <p role="alert" className="text-xs leading-6 text-danger">
               制成卡片未完成：{error}
             </p>
           ) : null}
         </div>
-        <footer className="flex flex-wrap justify-end gap-2 border-t border-zinc-200 px-5 py-3">
+        <footer className="flex flex-wrap justify-end gap-2 border-t border-line px-5 py-3">
           <button type="button" className={secondaryButtonClass} disabled={busy} onClick={onClose}>
             {saved ? "关闭" : "取消"}
           </button>

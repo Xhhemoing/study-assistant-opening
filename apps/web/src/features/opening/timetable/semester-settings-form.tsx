@@ -117,7 +117,7 @@ function RangeFields({
   return (
     <fieldset className="grid gap-2 sm:grid-cols-[6rem_1fr_1fr]" disabled={disabled}>
       <legend className="sr-only">{label}</legend>
-      <span className="flex items-center text-xs text-zinc-600">{label}</span>
+      <span className="flex items-center text-xs text-text-2">{label}</span>
       <label className="block space-y-1">
         <span className={ui.label}>开始</span>
         <input
@@ -217,17 +217,17 @@ export function SemesterSettingsForm() {
   return (
     <div className="space-y-4" aria-labelledby="semester-settings-heading">
       <div>
-        <h3 className="text-sm font-medium text-zinc-900" id="semester-settings-heading">学期与可用时间</h3>
-        <p className="mt-1 text-xs leading-6 text-zinc-500">
+        <h3 className="text-sm font-medium text-text" id="semester-settings-heading">学期与可用时间</h3>
+        <p className="mt-1 text-xs leading-6 text-text-3">
           第一周周一、节次时间与每日窗口保存在服务端，供按建议排程推导空闲时间。默认每日 07:30–22:30，午餐 12:00–13:00，晚餐 17:30–18:30，睡眠 23:00–07:00。
         </p>
       </div>
       {data?.invalidStoredSettings ? (
-        <p className="text-sm text-amber-800" role="alert">已保存的学期设置无效，请重新填写后保存。</p>
+        <p className="text-sm text-warn" role="alert">已保存的学期设置无效，请重新填写后保存。</p>
       ) : null}
       {error ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-3" role="alert">
-          <p className="text-sm text-red-700">{error}</p>
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger/10 p-3" role="alert">
+          <p className="text-sm text-danger">{error}</p>
           <button className={secondaryButtonClass} onClick={() => void load()} type="button" disabled={busy}>
             <RefreshCw aria-hidden size={14} />重新读取
           </button>
@@ -255,7 +255,7 @@ export function SemesterSettingsForm() {
         </label>
         <div className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-xs font-medium text-zinc-800">节次时间（45 分钟模板可编辑）</h4>
+            <h4 className="text-xs font-medium text-text">节次时间（45 分钟模板可编辑）</h4>
             <button
               type="button"
               className={secondaryButtonClass}
@@ -264,10 +264,10 @@ export function SemesterSettingsForm() {
               套用 45 分钟模板
             </button>
           </div>
-          <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-zinc-200 p-2">
+          <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-line p-2">
             {entries.map(({ period, start, end }) => (
               <div key={period} className="grid grid-cols-[3rem_1fr_1fr_auto] items-end gap-2">
-                <span className="pb-2 text-xs text-zinc-500">第{period}节</span>
+                <span className="pb-2 text-xs text-text-3">第{period}节</span>
                 <label className="block space-y-1">
                   <span className="sr-only">第{period}节开始</span>
                   <input
@@ -372,7 +372,7 @@ export function SemesterSettingsForm() {
           清除设置
         </button>
       </div>
-      {notice ? <p className="text-sm text-emerald-700" role="status">{notice}</p> : null}
+      {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
     </div>
   );
 }

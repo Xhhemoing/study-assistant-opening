@@ -124,10 +124,10 @@ export function UploadDropzone({ compact = false, disabled = false, multiple = t
         title={compact ? `可拖入文件，或点击添加。支持类型：${supportedUploadTypesLabel(accept)}` : undefined}
         className={`group ${compact ? "inline-flex min-h-10 items-center rounded-lg border px-3 py-2" : "rounded-xl border-2 border-dashed px-4 py-5 text-center"} transition-[border-color,background-color,box-shadow] duration-150 motion-reduce:transition-none ${
           disabled
-            ? "cursor-not-allowed border-zinc-200 bg-zinc-50 opacity-60"
+            ? "cursor-not-allowed border-line bg-bg opacity-60"
             : dragging
-              ? "cursor-copy border-emerald-600 bg-emerald-50 shadow-sm shadow-emerald-900/10"
-              : "cursor-pointer border-zinc-300 bg-white hover:border-zinc-400 hover:bg-zinc-50"
+              ? "cursor-copy border-accent bg-accent-soft shadow-sm shadow-emerald-900/10"
+              : "cursor-pointer border-line-strong bg-surface hover:border-line-strong hover:bg-bg"
         }`}
         onClick={openPicker}
         onDragEnter={onDragEnter}
@@ -138,12 +138,12 @@ export function UploadDropzone({ compact = false, disabled = false, multiple = t
         role="button"
         tabIndex={disabled ? -1 : 0}
       >
-        <div className="mx-auto flex max-w-lg items-center justify-center gap-2 text-sm font-medium text-zinc-900">
-          {disabled ? <LoaderCircle className="size-4 animate-spin text-zinc-500 motion-reduce:animate-none" aria-hidden /> : dragging ? <Files className="size-4 text-emerald-700" aria-hidden /> : <Upload className="size-4 text-zinc-600" aria-hidden />}
+        <div className="mx-auto flex max-w-lg items-center justify-center gap-2 text-sm font-medium text-text">
+          {disabled ? <LoaderCircle className="size-4 animate-spin text-text-2 motion-reduce:animate-none" aria-hidden /> : dragging ? <Files className="size-4 text-accent" aria-hidden /> : <Upload className="size-4 text-text-2" aria-hidden />}
           {disabled ? "当前正在上传" : dragging ? "松开鼠标即可添加材料" : compact ? "添加资料" : "拖入文件到这里，或点击选择"}
         </div>
         {!compact ? <>
-          <p className="mt-1 text-xs leading-5 text-zinc-500">支持类型：{supportedUploadTypesLabel(accept)}，{multiple ? "可一次添加多个文件" : "每次添加一个文件"}。</p>
+          <p className="mt-1 text-xs leading-5 text-text-2">支持类型：{supportedUploadTypesLabel(accept)}，{multiple ? "可一次添加多个文件" : "每次添加一个文件"}。</p>
           <span className={`${ui.secondary} pointer-events-none mt-3 inline-flex`}>选择文件</span>
         </> : null}
       </div>
