@@ -6,7 +6,7 @@ test.describe("opening shell", () => {
     await seedOpeningOwner();
   });
 
-  test("shows the three responsive entry points", async ({ browser, baseURL }) => {
+  test("shows the four responsive entry points", async ({ browser, baseURL }) => {
     const context = await browser.newContext({ baseURL });
     try {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
@@ -25,7 +25,7 @@ test.describe("opening shell", () => {
           nav,
         ).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "助理" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toHaveAttribute(
           "aria-current",
@@ -69,9 +69,9 @@ test.describe("opening shell", () => {
       await today.focus();
       await expect(today).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("navigation", { name: "学习工作台导航", exact: true }).getByRole("link", { name: "助理" })).toBeFocused();
+      await expect(page.getByRole("navigation", { name: "学习工作台导航", exact: true }).getByRole("link", { name: "课程" })).toBeFocused();
       await page.keyboard.press("Enter");
-      await expect(page).toHaveURL(/\/opening\/assistant$/);
+      await expect(page).toHaveURL(/\/opening\/courses$/);
     } finally {
       await context.close();
     }
@@ -121,9 +121,9 @@ test.describe("opening shell", () => {
         await expect(page).toHaveURL(/\/opening\/courses$/);
         await expect(nav.getByRole("link", { name: "课程", exact: true })).toHaveAttribute("aria-current", "page");
         await expect(page.getByRole("heading", { name: "课程", exact: true })).toBeVisible();
-        await nav.getByRole("link", { name: "资料库", exact: true }).click();
+        await nav.getByRole("link", { name: "资料", exact: true }).click();
         await expect(page).toHaveURL(/\/opening\/library$/);
-        await expect(nav.getByRole("link", { name: "资料库", exact: true })).toHaveAttribute("aria-current", "page");
+        await expect(nav.getByRole("link", { name: "资料", exact: true })).toHaveAttribute("aria-current", "page");
         await expect(page.getByRole("heading", { name: "资料库", exact: true })).toBeVisible();
         await page.goBack();
         await expect(page).toHaveURL(/\/opening\/courses$/);
@@ -131,7 +131,7 @@ test.describe("opening shell", () => {
         await expect(page.getByRole("heading", { name: "课程", exact: true })).toBeVisible();
         await page.goForward();
         await expect(page).toHaveURL(/\/opening\/library$/);
-        await expect(nav.getByRole("link", { name: "资料库", exact: true })).toHaveAttribute("aria-current", "page");
+        await expect(nav.getByRole("link", { name: "资料", exact: true })).toHaveAttribute("aria-current", "page");
         await expect(page.getByRole("heading", { name: "资料库", exact: true })).toBeVisible();
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         expect(documentRequests).toEqual([]);

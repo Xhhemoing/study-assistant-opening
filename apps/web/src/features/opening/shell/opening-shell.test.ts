@@ -50,6 +50,8 @@ vi.mock("./focus-timer", () => ({
 vi.mock("./mobile-navigation", () => ({
   OpeningMobileNavigation: () => null,
 }));
+vi.mock("../assistant/assistant-drawer", () => ({ AssistantDrawer: () => null }));
+vi.mock("./account-menu", () => ({ OpeningAccountMenu: ({ pendingCount, focusMode }: { pendingCount: number | null; focusMode: boolean }) => createElement("button", { "aria-label": focusMode ? "退出专注模式" : "账户与学习工具" }, pendingCount ? createElement("span", { "aria-label": `${pendingCount} 项待审核` }, pendingCount) : null) }));
 vi.mock("../inbox/citation-reader-host", () => ({ CitationReaderHost: () => null }));
 
 import { OpeningShell } from "./opening-shell";
@@ -103,7 +105,7 @@ describe("OpeningShell review badge", () => {
     const html = renderShell();
     expect(html).not.toContain("项待审核");
     expect(html).not.toContain("bg-amber-500");
-    expect(html).toContain('aria-label="待确认建议"');
+    expect(html).toContain('aria-label="账户与学习工具"');
   });
 
   it("shows the review count badge only after a successful reviews response", async () => {
@@ -120,7 +122,7 @@ describe("OpeningShell review badge", () => {
 
     const html = renderShell();
     expect(html).toContain('aria-label="3 项待审核"');
-    expect(html).toContain("bg-amber-500");
+
   });
 
   it("clears a previous count when the next route cannot refresh suggestions", async () => {

@@ -30,7 +30,7 @@ describe("search result model", () => {
   it("keeps Opening palette hits inside the Opening shell and drops hits without a surface", () => {
     expect(openingSearchHitHref(hit("document", "d/1"))).toBe("/opening/library/d%2F1");
     expect(openingSearchHitHref(hit("course", "course 1"))).toBe("/opening/courses/course%201");
-    expect(openingSearchHitHref(hit("card", "c1"))).toBe("/opening/cards");
+    expect(openingSearchHitHref(hit("card", "c1"))).toBe("/opening/review?tab=cards");
     expect(openingSearchHitHref(hit("exploration", "e1"))).toBeNull();
     expect(openingSearchHitHref(hit("practice", "p1"))).toBeNull();
   });

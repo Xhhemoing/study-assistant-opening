@@ -1,0 +1,35 @@
+import { describe, expect, it } from "vitest";
+import { assistantEntry, assistantRedirect, isAssistantShortcut } from "./assistant-entry";
+const id = "11111111-1111-4111-8111-111111111111";
+
+describe("global assistant entry", () => {
+  it("preserves material version, selection and return address through the old route", () => {
+    const query = { source: id, version: "0", page: "3", fragment: "α + β", returnTo: `/opening/library?source=${id}&version=0&page=3` };
+    const redirect = assistantRedirect(query);
+    expect(redirect).toMatch(/^\/opening\/today\?source=/);
+    expect(new URL(redirect, "https://study.invalid").searchParams.get("ai")).toBe("1");
+    const entry = assistantEntry(redirect);
+    expect(entry.context).toMatchObject({ sourceId: id, sourceVersion: 0, page: 3, fragment: "α + β", returnTo: query.returnTo });
+    expect(entry.fresh).toBe(true);
+  });
+  it("keeps invalid pinned identity blocked, never opens an unscoped fallback", () => {
+    expect(assistantEntry(`/opening/assistant?version=2`).error).toContain("停止发送");
+    expect(assistantEntry(`/opening/assistant?attemptId=bad`).error).toContain("停止发送");
+  });
+  it("restores conversation identity and binds an unscoped open to the current course", () => {
+    expect(assistantEntry("/opening/assistant?conversation=conversation-a").conversation).toBe("conversation-a");
+    expect(assistantEntry("/opening/assistant", `/opening/courses/${id}/study`).context).toEqual({ courseId: id });
+    expect(assistantEntry(`/opening/assistant?courseId=${id}&activityId=${id}`).key).not.toBe(assistantEntry(`/opening/assistant?courseId=${id}`).key);
+  });
+  it("blocks a course-only study entry and isolates language support from mathematical help", () => {
+    expect(assistantEntry("/opening/assistant", `/opening/courses/${id}/study/span`).error).toContain("本次作答");
+    expect(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=language_support`).key).not.toBe(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=learning_help`).key);
+  });
+  it("keeps Cmd/Ctrl J out of text entry, composition and already handled events", () => {
+    const event = { key: "j", metaKey: true, ctrlKey: false, altKey: false, isComposing: false, defaultPrevented: false };
+    expect(isAssistantShortcut(event, false)).toBe(true);
+    expect(isAssistantShortcut(event, true)).toBe(false);
+    expect(isAssistantShortcut({ ...event, isComposing: true }, false)).toBe(false);
+    expect(isAssistantShortcut({ ...event, defaultPrevented: true }, false)).toBe(false);
+  });
+});

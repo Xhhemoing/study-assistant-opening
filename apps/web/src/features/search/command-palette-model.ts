@@ -6,15 +6,15 @@ export type PaletteCommand = { id: string; label: string; description: string; h
 export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: "today", label: "今日学习", description: "继续今天的学习任务", href: "/opening/today", kind: "page" },
   { id: "assistant", label: "学习助手", description: "提问并查看学习对话", href: "/opening/assistant", kind: "page" },
-  { id: "notes", label: "笔记", description: "查看与新建学习笔记", href: "/opening/library", kind: "page" },
+  { id: "notes", label: "笔记", description: "查看与新建学习笔记", href: "/opening/library?tab=notes", kind: "page" },
   { id: "courses", label: "课程", description: "查看课程与长期学习上下文", href: "/opening/courses", kind: "page" },
-  { id: "cards", label: "记忆卡片", description: "复习到期的记忆卡片", href: "/opening/cards", kind: "page" },
-  { id: "opening-review", label: "待确认建议", description: "审核助手生成的学习建议", href: "/opening/review", kind: "page" },
+  { id: "cards", label: "记忆卡片", description: "复习到期的记忆卡片", href: "/opening/review?tab=cards", kind: "page" },
+  { id: "opening-review", label: "AI 建议", description: "审核助手生成的学习建议", href: "/opening/suggestions", kind: "page" },
   { id: "materials", label: "材料", description: "上传与整理课程材料", href: "/opening/library?tab=materials", kind: "page" },
   { id: "connections", label: "数据连接", description: "邮箱与钉钉等数据连接设置", href: "/opening/settings/connections", kind: "page" },
   { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/search", kind: "page" },
-  { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/settings", kind: "page" },
-  { id: "settings-advanced", label: "高级设置", description: "AI 模型、每日额度、诊断与导出备份", href: "/settings/advanced", kind: "page" },
+  { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/opening/settings", kind: "page" },
+  { id: "settings-advanced", label: "高级设置", description: "AI 模型、每日额度、诊断与导出备份", href: "/opening/settings/advanced", kind: "page" },
 ] as const;
 
 export function filterPaletteCommands(query: string) {

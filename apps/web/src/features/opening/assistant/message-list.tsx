@@ -14,6 +14,7 @@ import {
   sourceViewerCopy,
   sourceViewerHref,
 } from "../inbox/source-viewer";
+import { AiSpark, ReplyCard, StreamText, ThinkingText } from "./ai-response";
 import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
 import { isQueryEvidenceHref } from "./query-evidence-links";
@@ -86,27 +87,27 @@ export const MessageList = memo(function MessageList({ messages, compact = false
   function createCard(message: ChatMessageView) {
     onCreateCard?.(message, selectedTextFor(message));
   }
-  return <div className="relative flex min-h-0 flex-1"><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-gradient-to-b from-zinc-50/30 to-white px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
-    {historyTruncated ? <p className="mb-5 rounded-lg bg-amber-50 px-3.5 py-2.5 text-xs leading-6 text-amber-900 ring-1 ring-amber-600/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
-    {!messages.length && compact ? <p className="text-xs leading-6 text-zinc-500">围绕当前页或选段提问。输入后发送，回答会保留在这里。</p> : !messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
-      <span className="mb-5 inline-flex size-14 items-center justify-center self-start rounded-2xl bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-lg shadow-zinc-900/20 ring-1 ring-white/10" aria-hidden="true"><PanelsTopLeft size={24} strokeWidth={1.75} /></span>
-      <h2 className="text-xl font-semibold tracking-tight text-zinc-950">今天，想弄懂什么？</h2>
-      <p className="mt-2 text-[15px] leading-7 text-zinc-500">还没有消息。自由交流，或选一份材料一起读。</p>
-      {onPrompt ? <div className="mt-6 divide-y divide-zinc-200/80 overflow-hidden rounded-xl border border-zinc-200/80 shadow-xs shadow-zinc-900/5">{prompts.map((prompt) => <button key={prompt.title} type="button" disabled={disabled} onClick={() => onPrompt(prompt.text)} className="group flex min-h-12 w-full items-center justify-between gap-3 bg-white px-4 text-left text-sm text-zinc-700 transition-[color,background-color] duration-150 hover:bg-zinc-50 hover:text-zinc-950 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600/50 motion-reduce:transition-none"><span className="font-medium">{prompt.title}</span><ArrowUpRight size={14} aria-hidden className="text-zinc-400 transition-colors group-hover:text-zinc-600" /></button>)}</div> : null}
+  return <div className="relative flex min-h-0 flex-1"><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-bg px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
+    {historyTruncated ? <p className="mb-5 rounded-lg bg-warn-soft px-3.5 py-2.5 text-xs leading-6 text-warn ring-1 ring-amber-600/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
+    {!messages.length && compact ? <p className="text-xs leading-6 text-text-2">围绕当前页或选段提问。输入后发送，回答会保留在这里。</p> : !messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
+      <span className="mb-5 inline-flex size-14 items-center justify-center self-start rounded-2xl bg-ink text-on-ink shadow-lg shadow-zinc-900/20 ring-1 ring-white/10" aria-hidden="true"><PanelsTopLeft size={24} strokeWidth={1.75} /></span>
+      <h2 className="text-xl font-semibold tracking-tight text-text">今天，想弄懂什么？</h2>
+      <p className="mt-2 text-[15px] leading-7 text-text-2">还没有消息。自由交流，或选一份材料一起读。</p>
+      {onPrompt ? <div className="mt-6 divide-y divide-line/80 overflow-hidden rounded-xl border border-line/80 shadow-xs shadow-zinc-900/5">{prompts.map((prompt) => <button key={prompt.title} type="button" disabled={disabled} onClick={() => onPrompt(prompt.text)} className="group flex min-h-12 w-full items-center justify-between gap-3 bg-surface px-4 text-left text-sm text-text transition-[color,background-color] duration-150 hover:bg-bg hover:text-text disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none"><span className="font-medium">{prompt.title}</span><ArrowUpRight size={14} aria-hidden className="text-text-3 transition-colors group-hover:text-text-2" /></button>)}</div> : null}
     </div> : <ul className="mx-auto flex w-full max-w-[72ch] flex-col gap-6">{messages.map((message, index) => {
       const saveAvailability = (onSaveSnippet || onCreateCard) ? snippetSaveAvailability(message) : "hidden";
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
-      return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-zinc-900 px-4 py-3 text-white shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
-      <p className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-500">{message.role === "user" ? "你" : <><span className="flex size-6 items-center justify-center rounded-lg bg-gradient-to-br from-zinc-900 to-zinc-800 text-white shadow-sm"><PanelsTopLeft size={12} aria-hidden /></span>学习助理</>}</p>
-      {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-zinc-700">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
-        ? <div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-base leading-[1.8] text-zinc-800">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div>
-        : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-white/95" : "text-[15px] text-zinc-800"}`}>{message.text}</p>}
-      {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <a key={link.href} href={link.href} className="text-emerald-700 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">{link.label}</a>)}</nav> : null}
-      {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
-        <p className="mb-2.5 text-[11px] text-zinc-500">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
+      return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-ink px-4 py-3 text-on-ink shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
+      <p className={`mb-2 flex items-center gap-2 text-xs font-medium ${message.role === "user" ? "text-on-ink" : "text-text-2"}`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
+      {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
+        ? <ReplyCard><StreamText busy={message.status === "pending"}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
+        : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-on-ink/95" : "text-[15px] text-text"}`}>{message.text}</p>}
+      {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <a key={link.href} href={link.href} className="text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{link.label}</a>)}</nav> : null}
+      {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-line/80 bg-surface px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
+        <p className="mb-2.5 text-xs text-text-2">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>
         <ArtifactView artifact={artifacts[message.id]!.artifact} registry={openingCapabilities} renderers={openingRenderers} />
       </section> : null}
-      {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-zinc-500">出处：</span>{message.citations.map((citation) => {
+      {(message.citations ?? []).length > 0 ? <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs"><span className="mr-1 text-text-2">出处：</span>{message.citations.map((citation) => {
         const { href: viewerHref, label: chipLabel } = citationLink(citation, sourceNames);
         const downloadHref = sourceDownloadHref(citation.sourceId, citation.sourceVersion, citation.page);
         const title = sourceViewerCopy({
@@ -116,15 +117,15 @@ export const MessageList = memo(function MessageList({ messages, compact = false
           page: citation.page,
         });
         return <span key={`${citation.sourceId}-${citation.chunkId}-${citation.sourceVersion}`} className="inline-flex max-w-full items-center gap-1">
-          <a className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-zinc-700 shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-zinc-300 hover:text-zinc-900 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 motion-reduce:transition-none" href={viewerHref} title={title}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{chipLabel}</span><span className="shrink-0 text-zinc-400">{`v${citation.sourceVersion}`}</span></a>
-          <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-zinc-500 transition-colors hover:border-zinc-200 hover:bg-white hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
+          <a className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-text shadow-xs transition-[color,border-color,box-shadow] duration-150 hover:border-line-strong hover:text-text hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent motion-reduce:transition-none" href={viewerHref} title={title}><BookOpen size={13} className="shrink-0" aria-hidden /><span className="min-w-0 truncate">{chipLabel}</span><span className="shrink-0 text-text-3">{`v${citation.sourceVersion}`}</span></a>
+          <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-text-2 transition-colors hover:border-line hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
         </span>;
-      })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-zinc-500" role="status">一般说明（未引用材料）</p> : null}
-      {message.status === "pending" ? <p className="mt-2 text-xs text-zinc-500">生成中…</p> : null}
-      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-amber-800">原请求不会自动重发，费用仍待确认。</p> : null}
-      {message.status === "failed" ? <p className="mt-2 text-xs text-red-700">本轮失败，未得到有效回答。</p> : null}
-      {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-amber-800">{CLARIFY_FOLLOW_UP}</p> : null}
+      })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-text-2">一般说明（未引用材料）</p> : null}
+      {message.status === "pending" ? <ThinkingText /> : null}
+      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">原请求不会自动重发，费用仍待确认。</p> : null}
+      {message.status === "failed" ? <p className="mt-2 text-xs text-danger">本轮失败，未得到有效回答。</p> : null}
+      {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-warn">{CLARIFY_FOLLOW_UP}</p> : null}
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
     </li>; })}</ul>}
-  </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-zinc-900 px-4 text-xs font-medium text-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
+  </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-ink px-4 text-xs font-medium text-on-ink shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
 });

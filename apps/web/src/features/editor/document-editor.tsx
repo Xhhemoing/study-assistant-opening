@@ -71,7 +71,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
 
   useEffect(() => {
     const handleSave = (event: KeyboardEvent) => {
-      if (event.isComposing || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s" || window.document.querySelector("dialog[open]")) return;
+      if (event.isComposing || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s" || window.document.querySelector('dialog[open],[role="dialog"][data-state="open"]')) return;
       event.preventDefault();
       void saveShortcut.current();
     };
