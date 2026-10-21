@@ -41,16 +41,16 @@ export function TaskStatusPanel({ task, retestOrigin = false, confirmingSkip = f
   onReasonChange?: (value: TaskFeedbackInput["reason"] | "") => void;
 }) {
   if (task.status !== "pending") {
-    return <p className="text-[11px] text-zinc-500">{task.status === "done" ? "已完成" : "已跳过"}</p>;
+    return <p className="text-xs text-text-3">{task.status === "done" ? "已完成" : "已跳过"}</p>;
   }
   const versionBlock = taskStatusVersionBlock(task.version);
   const unavailable = disabled || Boolean(versionBlock);
   return <div className="flex min-w-0 flex-wrap items-center gap-2">
-    {retestOrigin ? <p className="w-full text-[11px] leading-5 text-amber-800">建议先完成补测作答</p> : null}
-    {versionBlock ? <p className="w-full text-[11px] leading-5 text-amber-800">{versionBlock}</p> : null}
+    {retestOrigin ? <p className="w-full text-xs leading-5 text-warn">建议先完成补测作答</p> : null}
+    {versionBlock ? <p className="w-full text-xs leading-5 text-warn">{versionBlock}</p> : null}
     {confirmingSkip || confirmingDefer ? <>
-      <p className="w-full text-[11px] leading-5 text-zinc-600">{confirmingDefer ? "推迟至工作区明天开始；已确认安排将保留，可再调整。" : "跳过需要再次确认后才会提交，且不能撤销。"}</p>
-      <label className="w-full text-[11px] text-zinc-600">原因（可不选）
+      <p className="w-full text-xs leading-5 text-text-2">{confirmingDefer ? "推迟至工作区明天开始；已确认安排将保留，可再调整。" : "跳过需要再次确认后才会提交，且不能撤销。"}</p>
+      <label className="w-full text-xs text-text-2">原因（可不选）
         <select className={`${inputClass} ml-2 max-w-full`} value={feedbackReason} disabled={disabled} onChange={event => onReasonChange?.(event.target.value as TaskFeedbackInput["reason"] | "")}>
           <option value="">不填写</option><option value="time_short">时间不够</option><option value="too_hard">太难</option><option value="too_easy">太简单</option><option value="not_relevant">不适合当前目标</option><option value="other">其他原因</option><option value="prefer_not_say">不愿说明</option>
         </select>
@@ -63,7 +63,7 @@ export function TaskStatusPanel({ task, retestOrigin = false, confirmingSkip = f
       {onArmDefer ? <button type="button" className={secondaryButtonClass} disabled={unavailable} onClick={onArmDefer}>推迟到明天</button> : null}
       {onResume ? <button type="button" className={secondaryButtonClass} disabled={unavailable} onClick={onResume}>取消推迟</button> : null}
     </>}
-    {notice ? <p role={noticeRole} className={`w-full text-[11px] leading-5 ${noticeRole === "alert" ? "text-amber-800" : "text-zinc-600"}`}>{notice}</p> : null}
+    {notice ? <p role={noticeRole} className={`w-full text-xs leading-5 ${noticeRole === "alert" ? "text-warn" : "text-text-2"}`}>{notice}</p> : null}
     {showReread ? <button type="button" className={secondaryButtonClass} onClick={onReread}>重新读取</button> : null}
   </div>;
 }

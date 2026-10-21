@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, OpeningApiError } from "../client/api";
+import { secondaryButtonClass } from "../design/ui";
 import { ReviewCard } from "./review-card";
 import { createReviewActions, retainUnconfirmedReviews, type ReviewApi } from "./review-service";
 import { reviewItemKey, reviewItems, type ReviewItem } from "./review-types";
@@ -53,19 +54,19 @@ export function RetestProposals({ api: supplied, onChanged }: { api?: ReviewApi;
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  if (state.kind === "loading") return <p className="border-b border-zinc-200 px-4 py-3 text-[11px] text-zinc-500" role="status">正在读取补测提议…</p>;
+  if (state.kind === "loading") return <p className="border-b border-line px-4 py-3 text-xs text-text-3" role="status">正在读取补测提议…</p>;
   if (state.kind === "loggedOut" || state.kind === "empty") return null;
   if (state.kind === "error") {
-    return <div className="space-y-2 border-b border-amber-200 bg-amber-50 px-4 py-3" role="alert">
-      <p className="text-[11px] leading-5 text-amber-900">补测提议暂时无法读取：{state.message}</p>
-      <button type="button" className="text-[11px] font-medium text-amber-950 underline" onClick={() => void refresh()}>重新读取</button>
+    return <div className="space-y-2 border-b border-warn/30 bg-warn-soft px-4 py-3" role="alert">
+      <p className="text-xs leading-5 text-warn">补测提议暂时无法读取：{state.message}</p>
+      <button type="button" className={secondaryButtonClass} onClick={() => void refresh()}>重新读取</button>
     </div>;
   }
 
-  return <section className="border-b border-zinc-200 bg-white" aria-label="待审核补测提议">
-    <div className="px-4 pb-1 pt-3"><h3 className="text-[11px] font-semibold text-zinc-500">待审核补测 · {state.items.length}</h3>
-      <p className="mt-0.5 text-[11px] leading-5 text-zinc-500">接受后才会加入任务；忽略不会自动重试。</p></div>
-    <ul className="divide-y divide-zinc-200 px-4">{state.items.map((item) => (
+  return <section className="border-b border-line bg-surface" aria-label="待审核补测提议">
+    <div className="px-4 pb-1 pt-3"><h3 className="text-xs font-semibold text-text-3">待审核补测 · {state.items.length}</h3>
+      <p className="mt-0.5 text-xs leading-5 text-text-3">接受后才会加入任务；忽略不会自动重试。</p></div>
+    <ul className="divide-y divide-line px-4">{state.items.map((item) => (
       <ReviewCard key={reviewItemKey(item)} item={item} actions={actions} />
     ))}</ul>
   </section>;

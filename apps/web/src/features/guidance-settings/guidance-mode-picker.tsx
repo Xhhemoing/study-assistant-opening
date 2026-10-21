@@ -56,17 +56,17 @@ export function GuidanceModePicker({
   return (
     <div className="space-y-6">
       <fieldset className="space-y-3">
-        <legend className="text-sm font-semibold text-zinc-900">指导模式</legend>
-        <p className="text-xs text-zinc-500">
+        <legend className="text-sm font-semibold text-text">指导模式</legend>
+        <p className="text-xs text-text-3">
           决定系统能否自动调整计划，以及建议是否需要确认。
         </p>
-        <div className="divide-y divide-zinc-200 border-y border-zinc-200">
+        <div className="divide-y divide-line border-y border-line">
           {GUIDANCE_MODE_OPTIONS.map((option) => (
             <label
-              className={`block cursor-pointer px-3 py-3 transition-colors duration-150 motion-reduce:transition-none focus-within:ring-2 focus-within:ring-emerald-600 ${
+              className={`block cursor-pointer px-3 py-3 transition-colors duration-150 motion-reduce:transition-none focus-within:ring-2 focus-within:ring-accent ${
                 value.mode === option.value
-                  ? "border-emerald-600 bg-emerald-50"
-                  : "border-zinc-200 bg-white hover:bg-zinc-100"
+                  ? "border-accent bg-accent-soft"
+                  : "border-line bg-surface hover:bg-surface-2"
               }`}
               key={option.value}
             >
@@ -78,8 +78,8 @@ export function GuidanceModePicker({
                 type="radio"
                 value={option.value}
               />
-              <span className="block text-sm font-semibold text-zinc-900">{option.label}</span>
-              <span className="mt-1 block text-xs leading-5 text-zinc-500">
+              <span className="block text-sm font-semibold text-text">{option.label}</span>
+              <span className="mt-1 block text-xs leading-5 text-text-2">
                 {option.description}
               </span>
             </label>
@@ -89,28 +89,28 @@ export function GuidanceModePicker({
 
       <section className="space-y-3" aria-labelledby="protected-exploration-heading">
         <div className="flex items-center gap-2">
-          <ShieldCheck aria-hidden="true" size={16} className="text-zinc-500" />
-          <h3 className="text-sm font-semibold text-zinc-900" id="protected-exploration-heading">
+          <ShieldCheck aria-hidden="true" size={16} className="text-text-3" />
+          <h3 className="text-sm font-semibold text-text" id="protected-exploration-heading">
             预留探索时间
           </h3>
         </div>
-        <p className="text-xs text-zinc-500">
+        <p className="text-xs text-text-3">
           教练模式自动排计划时不会占用这些时段。
         </p>
         <div className="flex flex-wrap items-end gap-2">
           <label className="grid gap-1">
-            <span className="text-xs text-zinc-500">开始</span>
+            <span className="text-xs text-text-3">开始</span>
             <input
-              className="min-h-10 md:min-h-8 rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-zinc-200"
+              className={ui.input}
               onChange={(event) => setStart(event.target.value)}
               type="time"
               value={start}
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-xs text-zinc-500">结束</span>
+            <span className="text-xs text-text-3">结束</span>
             <input
-              className="min-h-10 md:min-h-8 rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-zinc-200"
+              className={ui.input}
               onChange={(event) => setEnd(event.target.value)}
               type="time"
               value={end}
@@ -126,7 +126,7 @@ export function GuidanceModePicker({
           </button>
         </div>
         {slotError ? (
-          <p className="text-sm text-red-700" role="alert">
+          <p className="text-sm text-danger" role="alert">
             {slotError}
           </p>
         ) : null}
@@ -134,7 +134,7 @@ export function GuidanceModePicker({
           <ul className="space-y-2">
             {value.protectedSlots.map((slot) => (
               <li
-                className="flex items-center justify-between rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900"
+                className="flex items-center justify-between rounded-md border border-line bg-surface px-3 py-2 text-sm text-text"
                 key={`${slot.start}-${slot.end}`}
               >
                 <span>
@@ -142,7 +142,7 @@ export function GuidanceModePicker({
                 </span>
                 <button
                   aria-label={`移除 ${slot.start}–${slot.end} 预留时段`}
-                  className="inline-flex size-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+                  className={ui.icon}
                   onClick={() => removeSlot(slot)}
                   type="button"
                 >
@@ -152,7 +152,7 @@ export function GuidanceModePicker({
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-zinc-500">尚未预留任何探索时段。</p>
+          <p className="text-xs text-text-3">尚未预留任何探索时段。</p>
         )}
       </section>
     </div>

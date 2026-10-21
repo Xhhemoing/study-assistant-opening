@@ -20,28 +20,70 @@ function isLocalApiRequest(input: RequestInfo | URL): boolean {
   return url.origin === window.location.origin && url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/auth/");
 }
 
+/** Shared boundary for fetch and the same-origin XHR staging upload. */
+export function guardSessionRequest(input: RequestInfo | URL) {
+  const target = typeof window === "undefined" ? undefined : window;
+  const local = isLocalApiRequest(input);
+  const generation = target ? sessionGenerations.get(target) ?? 0 : 0;
+  return {
+    blocked: Boolean(local && target && notifiedWindows.has(target)),
+    inspectFailure(status: number, body: unknown): void {
+      if (!target || !local || status !== 401 || !body || typeof body !== "object" || !("error" in body)) return;
+      const error = body.error;
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "UNAUTHENTICATED") return;
+      // Late responses cannot expire a session verified since this request began.
+      if (generation !== (sessionGenerations.get(target) ?? 0)) return;
+      if (/^\/(login|register)\/?$/.test(target.location.pathname) || notifiedWindows.has(target)) return;
+      notifiedWindows.add(target);
+      target.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    },
+  };
+}
+
+export function isSessionExpired(): boolean {
+  return typeof window !== "undefined" && notifiedWindows.has(window);
+}
+
 /** Inspect only explicit session failures; leave response bodies and HTTP errors intact. */
 export function createSessionFetch(fetchImpl: typeof fetch = fetch): typeof fetch {
   return async (input, init) => {
-    // Do not send the retained document's data under a newly signed-in identity.
+    const guard = guardSessionRequest(input);
     // AuthGate releases this latch only after verifying the original user/workspace.
-    if (isLocalApiRequest(input) && notifiedWindows.has(window)) {
+    if (guard.blocked) {
       return Response.json({ error: { code: "UNAUTHENTICATED", message: "请先登录原账户并验证，再继续操作。" } }, { status: 401 });
     }
-    const generation = typeof window === "undefined" ? 0 : sessionGenerations.get(window) ?? 0;
     const response = await fetchImpl(input, init);
     if (response.status !== 401 || !isLocalApiRequest(input)) return response;
-    // A provider's 401 (or a non-JSON gateway response) is not proof of session expiry.
     const body: unknown = await response.clone().json().catch(() => null);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    if (signal?.aborted || !body || typeof body !== "object" || !("error" in body)) return response;
-    const error = body.error;
-    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "UNAUTHENTICATED") return response;
-    // A response from before successful reauthentication cannot expire the new session.
-    if (generation !== (sessionGenerations.get(window) ?? 0)) return response;
-    if (/^\/(login|register)\/?$/.test(window.location.pathname) || notifiedWindows.has(window)) return response;
-    notifiedWindows.add(window);
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    if (!signal?.aborted) guard.inspectFailure(response.status, body);
     return response;
+  };
+}
+
+type InstalledFetch = { original: typeof fetch; wrapped: typeof fetch; users: number };
+const installedFetches = new WeakMap<Window, InstalledFetch>();
+
+/** Install before protected children mount; restore only the fetch this gate owns. */
+export function installSessionFetch(): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const target = window;
+  let installation = installedFetches.get(target);
+  if (!installation || target.fetch !== installation.wrapped) {
+    const original = target.fetch;
+    installation = { original, wrapped: createSessionFetch(original.bind(target)), users: 0 };
+    installedFetches.set(target, installation);
+    target.fetch = installation.wrapped;
+  }
+  installation.users += 1;
+  const installed = installation;
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    installed.users -= 1;
+    if (installed.users > 0) return;
+    if (target.fetch === installed.wrapped) target.fetch = installed.original;
+    if (installedFetches.get(target) === installed) installedFetches.delete(target);
   };
 }

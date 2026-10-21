@@ -108,7 +108,7 @@ export function MediaReader({
   });
 
   if (loading && !payload) {
-    return <p className="text-xs text-zinc-500" role="status">{mediaReaderStateCopy("loading")}</p>;
+    return <p className="text-xs text-text-3" role="status">{mediaReaderStateCopy("loading")}</p>;
   }
   if (unavailable || error) {
     return <LoadError message={error || mediaReaderStateCopy("unavailable")} onRetry={() => void load()} />;
@@ -117,10 +117,10 @@ export function MediaReader({
   return (
     <section className="space-y-3" aria-labelledby={`media-reader-${sourceId}`}>
       <div>
-        <h3 className="text-xs font-semibold text-zinc-800" id={`media-reader-${sourceId}`}>
+        <h3 className="text-xs font-semibold text-text" id={`media-reader-${sourceId}`}>
           {source?.name ?? "媒体阅读"}
         </h3>
-        <p className="mt-1 text-[11px] leading-5 text-zinc-500" role="status">
+        <p className="mt-1 text-xs leading-5 text-text-3" role="status">
           {kind === "parse_failed_original_saved" || kind === "parse_unsupported_original_saved"
             ? (source ? sourceStatusLabel(source) : mediaReaderStateCopy(kind))
             : (
@@ -134,19 +134,19 @@ export function MediaReader({
         </p>
       </div>
       {kind === "parse_failed_original_saved" || kind === "parse_unsupported_original_saved" || kind === "empty" ? null : (
-        <ul className="max-h-64 space-y-2 overflow-y-auto text-xs leading-5 text-zinc-700" aria-label="媒体时间轴">
+        <ul className="max-h-64 space-y-2 overflow-y-auto text-xs leading-5 text-text-2" aria-label="媒体时间轴">
           {(payload?.segments ?? []).map((segment, index) => (
-            <li key={`${segment.startMs}-${segment.endMs}-${index}`} className="rounded-md border border-zinc-200 bg-white px-3 py-2">
+            <li key={`${segment.startMs}-${segment.endMs}-${index}`} className="rounded-md border border-line bg-surface px-3 py-2">
               <button
                 type="button"
-                className="font-medium text-emerald-800 underline-offset-2 hover:underline"
+                className="inline-flex min-h-11 items-center font-medium text-accent underline-offset-2 hover:underline"
                 onClick={() => onSeek?.(segment.startMs)}
               >
                 {formatMs(segment.startMs)}–{formatMs(segment.endMs)}
               </button>
-              <p className="mt-1 line-clamp-3 break-words text-zinc-700">{segment.text || "（无文本）"}</p>
+              <p className="mt-1 line-clamp-3 break-words font-reading text-sm leading-6 text-text">{segment.text || "（无文本）"}</p>
               {segment.frameChunkIds.length === 0 && (source?.mime.startsWith("video/") ?? true) ? (
-                <p className="mt-1 text-[11px] text-amber-800">本段无关键帧</p>
+                <p className="mt-1 text-xs text-warn">本段无关键帧</p>
               ) : null}
             </li>
           ))}

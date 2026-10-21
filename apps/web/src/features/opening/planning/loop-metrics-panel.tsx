@@ -16,17 +16,17 @@ function metricValue(metric: LoopMetric): string {
 
 export function LoopMetricsReadout({ report }: { report: LoopMetricsReport }) {
   const groups = [["runtime", "运行可靠性"], ["learning", "学习结果"], ["burden", "负担与控制"]] as const;
-  return <div className="space-y-4 text-xs leading-6 text-zinc-600">
+  return <div className="space-y-4 text-xs leading-6 text-text-2">
     <p>近 {report.windowDays} 天 · {report.timeZone} · 截至 {new Date(report.asOf).toLocaleString("zh-CN", { timeZone: report.timeZone })}</p>
     {groups.map(([key, title]) => <section key={key} className="space-y-2">
-      <h3 className="font-medium text-zinc-900">{title}</h3>
-      {report.groups[key].map(metric => <details key={metric.id} className="rounded border border-zinc-200 px-3 py-1">
-        <summary className="cursor-pointer">{metric.label}：{metricValue(metric)}</summary>
+      <h3 className="font-medium text-text">{title}</h3>
+      {report.groups[key].map(metric => <details key={metric.id} className="rounded border border-line px-3 py-1">
+        <summary className="min-h-11 cursor-pointer py-2">{metric.label}：{metricValue(metric)}</summary>
         <p>样本 {metric.sampleSize}{metric.numerator !== null && metric.denominator !== null ? ` · 分子/分母 ${metric.numerator}/${metric.denominator}` : ""}。{metric.denominatorLabel}</p>
         {Object.entries(metric.excludedReasonCounts).filter(([, n]) => n > 0).map(([reason, n]) => <p key={reason}>{reason}：{n}</p>)}
       </details>)}
     </section>)}
-    <details><summary className="cursor-pointer font-medium">口径与限制</summary>
+    <details><summary className="min-h-11 cursor-pointer font-medium py-2">口径与限制</summary>
       {report.notes.map(note => <p key={note}>{note}</p>)}
       <p>区间 [{report.windowStart}, {report.windowEnd}) · {report.metricVersion}</p>
     </details>
@@ -46,12 +46,12 @@ export function LoopMetricsPanel({ api }: { api: { getLoopMetrics(days?: number)
     catch { setError("闭环诊断暂时无法读取，请重试。"); }
     finally { inFlight.current = false; setPending(false); }
   }
-  return <details className="border-b border-zinc-200 pb-4">
-    <summary className="cursor-pointer py-2 text-sm font-medium text-zinc-900">学习闭环诊断</summary>
+  return <details className="border-b border-line pb-4">
+    <summary className="min-h-11 cursor-pointer py-2 text-sm font-medium text-text">学习闭环诊断</summary>
     <div className="mt-3 space-y-3">
-      <p className="text-xs text-zinc-500">分别查看运行、学习证据与安排负担；不计算总体分数。</p>
+      <p className="text-xs text-text-3">分别查看运行、学习证据与安排负担；不计算总体分数。</p>
       <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void read()}>{pending ? "正在读取…" : "读取近 14 天诊断"}</button>
-      {error ? <p role="alert" className="text-xs text-amber-800">{error}</p> : null}
+      {error ? <p role="alert" className="text-xs text-warn">{error}</p> : null}
       {report ? <LoopMetricsReadout report={report} /> : null}
     </div>
   </details>;

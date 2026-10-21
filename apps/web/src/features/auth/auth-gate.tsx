@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { loginHrefForReturn } from "./auth-form-model";
-import { clearSessionExpiry, subscribeToSessionExpiry } from "./session-expiry";
+import { clearSessionExpiry, installSessionFetch, subscribeToSessionExpiry } from "./session-expiry";
 
 type SessionIdentity = { id: string; workspaceId: string };
 
@@ -28,10 +28,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const loginLink = useRef<HTMLAnchorElement | null>(null);
   const recoveryDialog = useRef<HTMLDialogElement | null>(null);
 
-  useEffect(() => subscribeToSessionExpiry(() => {
-    setExpired(true);
-    setExpiryError("");
-  }), []);
+  useEffect(() => {
+    const unsubscribe = subscribeToSessionExpiry(() => {
+      setExpired(true);
+      setExpiryError("");
+    });
+    const restoreFetch = installSessionFetch();
+    return () => { restoreFetch(); unsubscribe(); };
+  }, []);
 
   useEffect(() => {
     const dialog = recoveryDialog.current;

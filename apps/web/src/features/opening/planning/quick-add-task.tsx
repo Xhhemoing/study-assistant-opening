@@ -213,7 +213,7 @@ export function QuickAddTask({
   }
 
   return (
-    <div className="border-b border-zinc-200/70 px-4 py-3">
+    <div className="border-b border-line px-4 py-3">
       {!open ? (
         <button
           type="button"
@@ -226,7 +226,7 @@ export function QuickAddTask({
       ) : (
         <form className="space-y-3" onSubmit={(event) => void onSubmit(event)} aria-label="快速添加任务">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-zinc-800">快速添加</h3>
+            <h3 className="text-xs font-semibold text-text">快速添加</h3>
             <button
               type="button"
               className={secondaryButtonClass}
@@ -241,7 +241,7 @@ export function QuickAddTask({
               {unknown ? "收起" : "取消"}
             </button>
           </div>
-          <label className="block text-xs text-zinc-600">
+          <label className="block text-xs text-text-2">
             任务名称
             <input
               required
@@ -254,7 +254,7 @@ export function QuickAddTask({
             />
           </label>
           <fieldset disabled={busy || unknown || disabled} className="space-y-1">
-            <legend className="text-xs text-zinc-600">预计时长</legend>
+            <legend className="text-xs text-text-2">预计时长</legend>
             <div className="flex flex-wrap gap-2" role="group" aria-label="预计时长">
               {QUICK_ADD_MINUTES.map((minutes) => (
                 <button
@@ -270,7 +270,7 @@ export function QuickAddTask({
             </div>
           </fieldset>
           <div className="grid gap-2 sm:grid-cols-2">
-            <label className="block text-xs text-zinc-600">
+            <label className="block text-xs text-text-2">
               截止日期（可留空）
               <input
                 type="date"
@@ -280,7 +280,7 @@ export function QuickAddTask({
                 className={`${inputClass} mt-1`}
               />
             </label>
-            <label className="block text-xs text-zinc-600">
+            <label className="block text-xs text-text-2">
               截止时间（可留空）
               <input
                 type="time"
@@ -292,14 +292,14 @@ export function QuickAddTask({
             </label>
           </div>
           {dueWithinDayLabel(draft.dueDate, draft.dueTime) ? (
-            <p className="text-[11px] leading-5 text-zinc-500">未填具体时刻时，截止为当日内（当日 23:59）。没有确定时间不造截止。</p>
+            <p className="text-xs leading-5 text-text-3">未填具体时刻时，截止为当日内（当日 23:59）。没有确定时间不造截止。</p>
           ) : !draft.dueDate ? (
-            <p className="text-[11px] leading-5 text-zinc-500">没有确定时间不造截止。新任务进入「其他待办」，不改变已确认计划。</p>
+            <p className="text-xs leading-5 text-text-3">没有确定时间不造截止。新任务进入「其他待办」，不改变已确认计划。</p>
           ) : null}
-          {error ? <p className="text-xs leading-5 text-red-700" role="alert">{error}</p> : null}
+          {error ? <p className="text-xs leading-5 text-danger" role="alert">{error}</p> : null}
           {unknown ? (
             <div className="space-y-2">
-              <p className="text-xs leading-5 text-amber-800" role="status">可能已添加，请重新读取或重试核对。收起后会保留本次请求。</p>
+              <p className="text-xs leading-5 text-warn" role="status">可能已添加，请重新读取或重试核对。收起后会保留本次请求。</p>
               <button
                 type="button"
                 className={secondaryButtonClass}

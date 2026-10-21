@@ -1,3 +1,4 @@
+import { isSessionExpired } from "../../auth/session-expiry";
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import type { LocalUploadFile, UploadByteProgress, UploadRejected } from "./upload-client";
 
@@ -56,6 +57,12 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
 
   const process = async (item: UploadQueueItem, update?: UploadQueueUpdate): Promise<void> => {
     if (!stillActive(item.id) || item.state !== "idle") return;
+    if (isSessionExpired()) {
+      item.state = "failed";
+      item.message = "登录已过期，原件仍在本地。验证原账户后重试。";
+      update?.(snapshot());
+      return;
+    }
     item.state = "uploading";
     item.message = undefined;
     update?.(snapshot());
@@ -113,7 +120,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
 
   const retry = async (id: string, update?: UploadQueueUpdate): Promise<void> => {
     const item = items.find((candidate) => candidate.id === id);
-    if (!item || item.state !== "failed") return;
+    if (!item || item.state !== "failed" || isSessionExpired()) return;
     cancelled.delete(id);
     item.state = "idle";
     await process(item, update);

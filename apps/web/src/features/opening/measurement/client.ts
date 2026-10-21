@@ -1,3 +1,4 @@
+import { createSessionFetch } from "../../auth/session-expiry";
 import {
   measurementActionInputSchema, measurementNextInputSchema, measurementOverviewSchema,
   measurementStartInputSchema, measurementStatusInputSchema,
@@ -9,7 +10,8 @@ const courseList = z.object({ courses: z.array(z.object({ id: z.string().uuid(),
 const errorBody = z.object({ error: z.object({ message: z.string() }) });
 export type MeasurementCourse = z.infer<typeof courseList>["courses"][number];
 
-export function createMeasurementClient(fetcher: typeof fetch = fetch) {
+export function createMeasurementClient(transport: typeof fetch = (input, init) => fetch(input, init)) {
+  const fetcher = createSessionFetch(transport);
   async function request(path: string, method = "GET", body?: unknown) {
     const response = await fetcher(path, {
       method, cache: "no-store",

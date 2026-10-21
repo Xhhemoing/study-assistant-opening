@@ -219,13 +219,13 @@ export function DailyDraftCard({
   if (dailyDraftSkippedReason) {
     return (
       <section
-        className="space-y-2 border-b border-zinc-200 bg-amber-50/60 px-4 py-3"
+        className="space-y-2 border-b border-line bg-warn-soft px-4 py-3"
         aria-labelledby="daily-draft-skipped-heading"
       >
-        <h3 className="text-xs font-semibold text-zinc-800" id="daily-draft-skipped-heading">
+        <h3 className="text-xs font-semibold text-text" id="daily-draft-skipped-heading">
           今日推荐草案
         </h3>
-        <p className="text-xs leading-5 text-zinc-700" role="status">
+        <p className="text-xs leading-5 text-text-2" role="status">
           {dailyDraftSkippedCopy(dailyDraftSkippedReason, unplannedPendingCount)}
         </p>
         {dailyDraftSkippedReason === "no_settings" ? (
@@ -239,7 +239,7 @@ export function DailyDraftCard({
               {pending ? "正在生成…" : "用默认作息生成本日计划"}
             </button>
             {seedError ? (
-              <p className="text-xs leading-5 text-red-700" role="alert">{seedError}</p>
+              <p className="text-xs leading-5 text-danger" role="alert">{seedError}</p>
             ) : null}
           </div>
         ) : null}
@@ -346,39 +346,39 @@ export function DailyDraftCard({
 
   return (
     <section
-      className="space-y-3 border-b border-emerald-200 bg-emerald-50/40 px-4 py-4"
+      className="space-y-3 border-b border-line bg-surface-2 px-4 py-4"
       aria-labelledby="daily-draft-heading"
     >
       <div>
-        <h3 className="text-xs font-semibold text-zinc-800" id="daily-draft-heading">今日推荐草案</h3>
-        <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+        <h3 className="text-xs font-semibold text-text" id="daily-draft-heading">今日推荐草案</h3>
+        <p className="mt-1 text-xs leading-5 text-text-3">
           基于待办、到期补测、课表空闲与昨日顺延生成；确认后才改变正式计划。
         </p>
       </div>
       {adaptivePlanning && hasNewerSuggestion && onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>有新建议 · 点击更新</button> : null}
       {draft.blocks.some((block) => draft.reasons?.[block.taskId]?.code === "carry_over") ? (
-        <p className="text-[11px] leading-5 text-amber-900" role="status">含顺延自昨天的任务</p>
+        <p className="text-xs leading-5 text-warn" role="status">含顺延自昨天的任务</p>
       ) : null}
       {adaptivePlanning ? <AdaptiveDraftPreview draft={draft} tasks={tasks} selectedKeys={selectedKeys} disabled={pending || feedbackBlocked}
         onRejectSuggestion={api.submitSuggestionFeedback && draft.origin !== "agent" ? rejectSuggestion : undefined}
-        onSelectionChange={(keys) => { if (!action.current && !feedbackBlocked) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-zinc-700" aria-label="推荐安排">
+        onSelectionChange={(keys) => { if (!action.current && !feedbackBlocked) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-text-2" aria-label="推荐安排">
         {draft.blocks.map((block) => (
           <li key={`${block.taskId}-${block.start}`}>
-            <span className="font-medium text-zinc-900">{taskTitle(tasks, block.taskId)}</span>
+            <span className="font-medium text-text">{taskTitle(tasks, block.taskId)}</span>
             <p>{timeLabel(block.start)}–{timeLabel(block.end)}</p>
-            {(draft.reasons?.[block.taskId]?.label ?? block.reason) ? <p className="text-zinc-500">{draft.reasons?.[block.taskId]?.label ?? block.reason}</p> : null}
+            {(draft.reasons?.[block.taskId]?.label ?? block.reason) ? <p className="text-text-3">{draft.reasons?.[block.taskId]?.label ?? block.reason}</p> : null}
           </li>
         ))}
       </ul>}
       {draft.unscheduledTaskIds.length ? (
-        <p className="text-xs text-amber-800">
+        <p className="text-xs text-warn">
           未安排 {draft.unscheduledTaskIds.length} 项；可确认后改用「按建议安排」或缩短时长。
         </p>
       ) : null}
       {stale ? (
-        <p className="text-xs leading-5 text-amber-800">计划版本已变化。请拒绝旧草案或调整后重新确认。</p>
+        <p className="text-xs leading-5 text-warn">计划版本已变化。请拒绝旧草案或调整后重新确认。</p>
       ) : null}
-      {model.error ? <div className="space-y-2"><p className="text-xs leading-5 text-red-700" role="alert">{model.error}</p>{onChanged || onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>{adaptivePlanning && onRefreshSuggestions ? "刷新草案" : "重新读取"}</button> : null}</div> : null}
+      {model.error ? <div className="space-y-2"><p className="text-xs leading-5 text-danger" role="alert">{model.error}</p>{onChanged || onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>{adaptivePlanning && onRefreshSuggestions ? "刷新草案" : "重新读取"}</button> : null}</div> : null}
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
