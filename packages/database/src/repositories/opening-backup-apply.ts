@@ -122,10 +122,10 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   cards: [
     "id", "workspace_id", "owner_user_id", "front", "back", "source_document_id", "syllabus_point_id",
     "tags", "course_id", "skill_label", "source_ids", "archived", "content_version", "paused_until", "maintain_until",
-    "exclude_from_assessment", "created_at", "updated_at",
+    "exclude_from_assessment", "origin_observation_root_id", "auto_paused", "created_at", "updated_at",
   ],
   card_review_states: [
-    "workspace_id", "owner_user_id", "card_id", "ease", "interval_days", "due_at", "reps", "lapses", "last_grade", "updated_at",
+    "workspace_id", "owner_user_id", "card_id", "ease", "interval_days", "due_at", "reps", "lapses", "last_grade", "updated_at", "srs_version", "fsrs_state",
   ],
   learning_events: [
     "id", "workspace_id", "owner_user_id", "type", "schema_version", "idempotency_key", "occurred_at", "created_at",
@@ -167,7 +167,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_problem_refs: [
     "problem_id", "workspace_id", "session_id", "source_id", "source_version", "physical_page",
-    "chunk_id", "stem_snapshot", "artifact_kind", "updated_at",
+    "chunk_id", "stem_snapshot", "artifact_kind", "teaching_revision_id", "teaching_block_id", "updated_at",
   ],
   opening_learning_history_revisions: [
     "workspace_id", "owner_user_id", "course_id", "revision",
@@ -180,7 +180,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_learning_item_versions: [
     "id", "workspace_id", "owner_user_id", "course_id", "activity_id", "problem_id", "source_id", "source_version",
-    "physical_page", "chunk_id", "stem_snapshot", "artifact_kind", "evaluation_spec", "created_at",
+    "physical_page", "chunk_id", "stem_snapshot", "artifact_kind", "evaluation_spec", "teaching_revision_id", "teaching_block_id", "created_at",
   ],
   opening_learning_attempts: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "requirement_key",
@@ -213,7 +213,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "attempt_id", "item_version_id", "requirement_key", "started_at", "submitted_at", "recorded_at",
     "source_versions", "reference_check", "submitted_intent", "history_revision", "workspace_history_revision",
     "root_observation_id", "revises_observation_id", "revision_kind", "revision_reason", "actor_id",
-    "effective_head_id", "server_evaluation",
+    "effective_head_id", "server_evaluation", "ai_evaluation",
   ],
   opening_skill_evidence: [
     "id", "workspace_id", "owner_user_id", "course_id", "node_id", "observation_id", "dimension", "created_at",
@@ -293,6 +293,7 @@ const JSONB_COLUMNS = new Set([
   "opening_learning_observations.source_versions",
   "opening_learning_observations.reference_check",
   "opening_learning_observations.server_evaluation",
+  "opening_learning_observations.ai_evaluation",
   "opening_learning_item_versions.evaluation_spec",
   "opening_suggestion_feedback.intent",
   "opening_plan_acceptances.before_blocks",

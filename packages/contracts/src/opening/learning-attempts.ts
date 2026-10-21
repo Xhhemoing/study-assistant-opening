@@ -42,7 +42,7 @@ export const learningAttemptSchema = z.object({
   spanValidation: z.object({ eligible: z.boolean(), firstFamilyExposure: z.boolean(), reasonCode: z.string().nullable() }).strict().optional(),
   matrixExercise: matrixExerciseSpecSchema.optional(),
 }).strict();
-/** A resumable assistant context must bind the canonical question and captured material version. */
+/** A resumable context binds a canonical question, with a saved teaching version or captured material. */
 export const learningAttemptContextReadSchema = z.object({
   attempt: learningAttemptSchema,
   deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
@@ -50,10 +50,13 @@ export const learningAttemptContextReadSchema = z.object({
   const anchor = attempt.contextAnchor;
   return Boolean(attempt.problemId && attempt.itemVersionId && anchor?.activityId
     && anchor.attemptId === attempt.id && anchor.courseId === attempt.courseId
-    && anchor.itemVersionId === attempt.itemVersionId && anchor.sourceId
-    && attempt.sourceIds.includes(anchor.sourceId) && anchor.sourceVersion != null
-    && attempt.sourceVersions[anchor.sourceId] === anchor.sourceVersion);
-}, "assistant context requires a canonical attempt and captured material version");
+    && anchor.itemVersionId === attempt.itemVersionId
+    && (anchor.sourceId ? attempt.sourceIds.includes(anchor.sourceId) && anchor.sourceVersion != null
+      && attempt.sourceVersions[anchor.sourceId] === anchor.sourceVersion
+      : anchor.sourceVersion == null && anchor.blockId && anchor.contentVersion != null
+        && attempt.requirementKey === `teaching:${anchor.blockId}:v${anchor.contentVersion}`
+        && attempt.sourceIds.every(id => Number.isInteger(attempt.sourceVersions[id]))));
+}, "assistant context requires a canonical attempt and saved question version");
 export type LearningAttemptContextRead = z.infer<typeof learningAttemptContextReadSchema>;
 export type LearningAttempt = z.infer<typeof learningAttemptSchema>;
 export type LearningAttemptCreateInput = z.infer<typeof learningAttemptCreateInputSchema>;

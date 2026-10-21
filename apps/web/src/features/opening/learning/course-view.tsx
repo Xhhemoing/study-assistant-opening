@@ -18,7 +18,7 @@ import type { LearningEvidenceEligibility } from "@aistudy/contracts";
 
 const STATUS_LABEL: Record<LearningSummary["status"], string> = {
   unobserved: "尚无观察",
-  needs_check: "需要核验",
+  needs_check: "再做一道确认",
   observed_independent: "观察到独立完成",
   needs_review: "需要复习",
 };
@@ -26,6 +26,7 @@ const SOURCE_LABEL: Record<string, string> = {
   self_report: "自报",
   reference_checked: "参考核对记录",
   deterministic: "内置题精确核算",
+  ai_graded: "AI 批改",
   model_suggestion: "模型建议",
   unknown: "未知",
 };
@@ -39,7 +40,7 @@ function formatEvidenceTime(value: string | number): string {
 
 function resultLabel(item: LearningSummary): string {
   if (item.recentPerformance && item.status === "observed_independent") return "最近观察到独立完成";
-  if (item.recentPerformance && item.status === "needs_check") return "最近一次需要核验";
+  if (item.recentPerformance && item.status === "needs_check") return "最近一次还需确认";
   return STATUS_LABEL[item.status];
 }
 
@@ -88,7 +89,7 @@ export function CourseLearningView({ courseId, retest: retestProp = null }: { co
   return (
     <div className="space-y-6">
       <section id="course-practice" className="scroll-mt-6 space-y-3" aria-labelledby="course-practice-heading">
-        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-text">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-text-3">{retest ? "按补测提示完成作答；提交后由服务器关闭补测活动并标记任务完成，前端只重新读取。" : "默认三步：选主题 → 作答 → 保存。辅导默认收起在底部；先保留自己的尝试，再对照参考。"}</p></div>
+        <div><h2 id="course-practice-heading" className="text-sm font-semibold text-text">{retest ? "补测作答" : "独立练习"}</h2><p className="mt-1 text-xs leading-6 text-text-3">{retest ? "按补测提示完成作答，保存后查看反馈。" : "选择题目材料，写下答案或附上照片；保存后自动批改，判错了可以直接更正。"}</p></div>
         {retestNotice ? <p className="text-xs leading-6 text-warn" role="status">{retestNotice}</p> : null}
         <LearningAttemptForm key={`${courseId}:${retest?.retestId ?? "practice"}`} courseId={courseId} retest={retest} skillLabels={skillLabels} onRecorded={() => setRevision((value) => value + 1)} />
       </section>
@@ -99,13 +100,13 @@ export function CourseLearningView({ courseId, retest: retestProp = null }: { co
 
 const aggregateStatusLabel: Record<ReturnType<typeof summarizeLearningAggregate>["recentComparableEvidence"]["status"], string> = {
   unobserved: "尚无可用观察",
-  needs_check: "需要核验当前证据",
+  needs_check: "再做一道确认",
   observed_independent: "近期观察到独立完成",
 };
 
 function aggregateNextStep(summary: ReturnType<typeof summarizeLearningAggregate>): string {
-  if (summary.nextAction === "complete_due_check") return "有到期核验，请先完成核验活动。";
-  if (summary.nextAction === "continue_check") return "已有进行中的核验，完成后再读取新的结论。";
+  if (summary.nextAction === "complete_due_check") return "有到期的复测，请先完成这次练习。";
+  if (summary.nextAction === "continue_check") return "已有进行中的复测，完成后会更新学习进度。";
   if (summary.nextAction === "record_attempt") return "先完成一次自己的尝试，再记录结果。";
   if (summary.nextAction === "continue_independent") return "换一道题独立完成，继续确认；一次成功不代表掌握。";
   return "先查看作答记录，再继续练习核对结果。";
@@ -138,7 +139,7 @@ function SummaryGroup({ group, courseId }: { group: LearningSummaryAggregate; co
       <span className="text-xs text-text-3">{aggregateStatusLabel[conclusion.recentComparableEvidence.status]} · {group.sampleCount} 条观察</span>
     </div>
     <p className="text-xs leading-6 text-text-2">{aggregateNextStep(conclusion)} <a href={focusedPracticeHref(group.identity.courseId ?? courseId, group.identity.skillLabel, group.identity.requirementKey)} className="font-medium text-accent underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent">继续独立练习</a></p>
-    <p className="text-xs leading-6 text-text-3">证据来源：{sourceLabels}</p>
+    <p className="text-xs leading-6 text-text-3">评分来源：{sourceLabels}</p>
     <EvidenceCautions evidence={group.representatives} />
     {diagnostics ? <section className="text-xs text-text-3" aria-label="学习证据诊断">
       <h4 className="py-1 font-medium">来源、资格与核验计数</h4>
@@ -148,7 +149,7 @@ function SummaryGroup({ group, courseId }: { group: LearningSummaryAggregate; co
         <div><dt className="inline">适用性：</dt><dd className="inline">精确 {group.applicabilityCounts.exact} · 等价 {group.applicabilityCounts.equivalent_confirmed} · 需重新核验 {group.applicabilityCounts.changed_needs_check} · 版本未知 {group.applicabilityCounts.version_unknown} · 不可用 {group.applicabilityCounts.unavailable}</dd></div>
         <div><dt className="inline">核验活动：</dt><dd className="inline">已接受 {group.openChecks.acceptedCount} · 进行中 {group.openChecks.inProgressCount} · 到期 {group.openChecks.dueCount}</dd></div>
       </dl>
-      <p className="py-1 leading-5">证据来源：{sourceLabels} · {group.representatives.length ? `${group.representatives.length} 条代表证据` : "无代表证据"}</p>
+      <p className="py-1 leading-5">评分来源：{sourceLabels} · {group.representatives.length ? `${group.representatives.length} 条代表证据` : "无代表证据"}</p>
       {group.representatives.map((representative, index) => <div key={representative.observationId} className="py-1"><span className="break-all">代表观察 {index + 1} · 观察 ID：{representative.observationId} · 记录时间：<time dateTime={new Date(representative.attemptAt).toISOString()}>{formatEvidenceTime(representative.attemptAt)}</time></span><LearningEvidenceEligibilityDetails expanded eligibility={representative.eligibility} versionApplicability={representative.versionApplicability} /></div>)}
       {!group.representatives.length ? <p className="py-1">资格信息尚未提供，保留待核验。</p> : null}
     </section> : null}
@@ -173,8 +174,8 @@ export function CourseSummaryPanel({ courseId }: { courseId: string }) {
   const requirements = [...new Set(state.groups.flatMap(group => group.identity.requirementKey === null ? [] : [group.identity.requirementKey]))];
   const busy = state.status === "loading" || state.status === "loading_more";
   return <section id="course-learning-records" className="scroll-mt-6 space-y-3 border-t border-line pt-5" aria-labelledby="opening-learning-heading">
-    <div><h2 id="opening-learning-heading" className="text-sm font-semibold text-text">学习记录与证据</h2><p className="mt-1 text-sm leading-6 text-text-3">按学习要求查看记录和下一步。一次回答不代表已经掌握。</p></div>
-    {state.status === "loading" || state.status === "idle" ? <p className="text-sm text-text-3" role="status">正在读取学习证据…</p> : null}
+    <div><h2 id="opening-learning-heading" className="text-sm font-semibold text-text">学习记录</h2><p className="mt-1 text-sm leading-6 text-text-3">回顾练习结果，选择下一步。</p></div>
+    {state.status === "loading" || state.status === "idle" ? <p className="text-sm text-text-3" role="status">正在读取学习记录…</p> : null}
     {state.status === "updating" ? <p className="text-sm text-warn" role="status">正在核对当前页的学习记录{state.pendingProjectionCount ? `（剩余 ${state.pendingProjectionCount} 条）` : ""}，完成后再显示结论。</p> : null}
     <CourseSummaryNotice state={state} onRefresh={() => void controller.refresh()} />
     {state.status === "error" ? <LoadError message={state.error} onRetry={() => void controller.refresh()} /> : null}
@@ -197,10 +198,10 @@ export function CourseLearningRecords({ courseId, state, error, summary, onReloa
   return (
     <section id={sectionId} className="scroll-mt-6 space-y-3 border-t border-line pt-5" aria-labelledby={headingId}>
       <div>
-        <h2 id={headingId} className="text-sm font-semibold text-text">学习记录与证据</h2>
-        <p className="mt-1 text-sm leading-6 text-text-3">这里展示服务器记录的观察，不把一次回答当作掌握证明。</p>
+        <h2 id={headingId} className="text-sm font-semibold text-text">学习记录</h2>
+        <p className="mt-1 text-sm leading-6 text-text-3">回顾练习结果，选择下一步。</p>
       </div>
-      {state === "loading" ? <p className="text-sm text-text-3" role="status">正在读取学习证据…</p> : null}
+      {state === "loading" ? <p className="text-sm text-text-3" role="status">正在读取学习记录…</p> : null}
       {state === "error" ? <LoadError message={error} onRetry={onReload} /> : null}
       {state === "ready" && summary.length === 0 ? <p className="text-sm text-text-3">这门课程目前没有生效的学习观察。</p> : null}
       {state === "ready" && summary.length > 0 ? (

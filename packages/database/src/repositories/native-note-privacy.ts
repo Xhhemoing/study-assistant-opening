@@ -98,6 +98,14 @@ export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: stri
     if (!Array.isArray(ids) || ids.length > 32 || !ids.every(id => uuidSchema.safeParse(id).success)) {
       throw new BackupRestoreError("VALIDATION", "card source lineage is missing or invalid");
     }
+    if (card.originObservationRootId != null) {
+      if (!uuidSchema.safeParse(card.originObservationRootId).success || packed.sourceWorkspaceId !== workspaceId)
+        throw new BackupRestoreError("VALIDATION", "automatic cards require the original observation workspace");
+      const [origin] = await sql`SELECT id FROM opening_learning_observations
+        WHERE id=${String(card.originObservationRootId)} AND workspace_id=${workspaceId}
+          AND owner_user_id=${String(card.ownerUserId)} AND COALESCE(root_observation_id,id)=id`;
+      if (!origin) throw new BackupRestoreError("VALIDATION", "automatic card observation origin is unavailable");
+    }
     const [current] = await sql`SELECT source_ids FROM cards WHERE id=${card.id} AND workspace_id=${workspaceId}`;
     if (current && (current.source_ids as string[]).some(id => !ids.includes(id))) throw new BackupRestoreError("VALIDATION", "restore cannot remove card source lineage");
     if (ids.length && packed.sourceWorkspaceId !== workspaceId) throw new BackupRestoreError("VALIDATION", "linked cards require their original workspace and source materials");

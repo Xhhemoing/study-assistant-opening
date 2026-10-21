@@ -62,6 +62,8 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
           VALUES(${randomUUID()},${scope.workspaceId},${id},${now}) ON CONFLICT(workspace_id,source_id) DO NOTHING`;
         // Both first exclusion and later asset deletion fence in-flight model/writeback snapshots.
         await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
+        await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ? ${id}`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         if (input.action === "exclude") return { deleted: false, cleanup: { keys: [], notBefore: null } };

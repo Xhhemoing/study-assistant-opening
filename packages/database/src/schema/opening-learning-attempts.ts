@@ -6,7 +6,8 @@ export const openingLearningHistoryRevisions = pgTable("opening_learning_history
 }, (t) => ({ pk: primaryKey({ columns: [t.workspaceId, t.ownerUserId, t.courseId] }) }));
 export const openingLearningItemVersions = pgTable("opening_learning_item_versions", {
   id: uuid("id").primaryKey(), workspaceId: uuid("workspace_id").notNull(), ownerUserId: uuid("owner_user_id").notNull(),
-  courseId: uuid("course_id"), activityId: uuid("activity_id").notNull(), problemId: uuid("problem_id").notNull(), sourceId: uuid("source_id").notNull(), sourceVersion: integer("source_version").notNull(),
+  courseId: uuid("course_id"), activityId: uuid("activity_id").notNull(), problemId: uuid("problem_id").notNull(), sourceId: uuid("source_id"), sourceVersion: integer("source_version"),
+  teachingRevisionId: uuid("teaching_revision_id"), teachingBlockId: uuid("teaching_block_id"),
   physicalPage: integer("physical_page"), chunkId: uuid("chunk_id"), stemSnapshot: text("stem_snapshot").notNull(), artifactKind: text("artifact_kind").notNull(),
   evaluationSpec: jsonb("evaluation_spec"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

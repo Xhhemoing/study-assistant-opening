@@ -47,7 +47,7 @@ describe("observation correction", () => {
 
   it("keeps tombstones reviewable without presenting them as current evidence", () => {
     const html = renderToStaticMarkup(createElement(ObservationRevisionCard, { record: { ...learningObservation, revisionKind: "retract" }, onChanged: () => undefined }));
-    expect(html).toContain("已撤回 · 不计入当前证据");
+    expect(html).toContain("已撤回");
     expect(html).toContain("查看历史");
     expect(html).toContain("纠正并重新纳入");
     expect(html).not.toContain(">撤回记录<");

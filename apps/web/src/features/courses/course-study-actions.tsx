@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { localDateKeyInZone, resolveGoalLearningContext } from "@aistudy/domain";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { ArrowRight, CalendarPlus } from "lucide-react";
@@ -17,7 +18,7 @@ const CourseStudyContext = createContext<ReturnType<typeof useCourseStudy> | nul
 export function CourseStudyProvider({ courseId, children }: { courseId: string; children: ReactNode }) {
   const api = useMemo(() => createOpeningApi(), []);
   const capabilities = useOpeningCapabilities();
-  const study = useCourseStudy(courseId, api, capabilities.teachingLoop.api && capabilities.teachingLoop.ui, capabilities.adaptivePlanning);
+  const study = useCourseStudy(courseId, api, capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   return <CourseStudyContext.Provider value={study}>{children}</CourseStudyContext.Provider>;
 }
 
@@ -57,8 +58,9 @@ export function CourseStudyActions({
   const capabilities = useOpeningCapabilities();
   const enabled = opening && Boolean(courseId) && capabilities.teachingLoop.api && capabilities.teachingLoop.ui;
   const inherited = useContext(CourseStudyContext);
-  const localStudy = useCourseStudy(courseId ?? "", api, !inherited && enabled, !inherited && opening && Boolean(courseId) && capabilities.adaptivePlanning);
+  const localStudy = useCourseStudy(courseId ?? "", api, !inherited && enabled, !inherited && opening && Boolean(courseId));
   const study = inherited ?? localStudy;
+  const goalContext = study.timeZone && study.goal ? resolveGoalLearningContext(study.goal, localDateKeyInZone(new Date(), study.timeZone)) : null;
   const current = courseId ? currentCourseActivity(study.activities, courseId) : null;
   const courseActivities = courseId ? courseStudyActivities(study.activities, courseId) : [];
   const tasks = courseId ? courseStudyTasks(study.tasks, courseId) : [];
@@ -97,7 +99,8 @@ export function CourseStudyActions({
         {archived ? "课程已归档，可以阅读材料与查看记录。恢复课程后可继续学习。" : current ? current.intentSummary : tasks[0]?.title ?? "选择一个主题即可开始；也可以直接读材料或记笔记。"}
       </p>
       {current ? <p className="mt-1 text-xs leading-6 text-text-3">{courseActivityNextStep(current)}</p> : null}
-      {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && capabilities.adaptivePlanning && !study.taskError ? <p className="mt-1 text-xs text-text-3">未设置目标也可以开始。</p> : null}
+      {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && !study.taskError ? <p className="mt-1 text-xs text-text-3">未设置目标也可以开始。</p> : null}
+      {opening && courseId && !archived && goalContext?.mode === "exam" ? <p className="mt-2 text-sm text-accent">已进入考前练习{goalContext.daysRemaining !== null ? ` · 距目标 ${goalContext.daysRemaining} 天` : ""} <Link className={ui.quiet} href={`/opening/courses/${courseId}/exam`}>开始考前练习</Link></p> : null}
       <nav aria-label="课程学习方式" className="mt-3 flex flex-wrap items-center gap-2">
         {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : studyHref}>
           {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : enabled ? "开始学习" : "开始独立练习"}<ArrowRight size={14} aria-hidden="true" />
@@ -109,7 +112,7 @@ export function CourseStudyActions({
       {study.error ? <p role="alert" className="mt-2 text-xs text-warn">{study.error} <button type="button" className={ui.quiet} onClick={study.reload}>重新读取</button></p> : null}
       {study.taskError ? <p role="status" className="mt-2 text-xs text-warn">{study.taskError}</p> : null}
       {opening && !enabled ? <p className="mt-2 text-xs leading-5 text-text-3">当前可直接进入独立练习，或阅读课程材料。</p> : null}
-      {courseActivities.length ? <p className="mt-2 text-xs text-text-3">{courseActivities.filter(item => item.status === "completed").length} 次活动已结束 · {tasks.length} 项待办；活动完成不等于已掌握。</p> : null}
+      {courseActivities.length ? <p className="mt-2 text-xs text-text-3">{courseActivities.filter(item => item.status === "completed").length} 次学习已结束 · {tasks.length} 项待办。</p> : null}
       {enabled && !archived && (tasks.length || courseActivities.filter(item => item.status === "active" || item.status === "paused").length > 1) ? <a className={`${ui.quiet} mt-2`} href="#course-units">选择其他任务或学习活动</a> : null}
       {canSeed ? <div className="mt-4 border-t border-line pt-3 text-xs text-text-3"><div className="flex flex-wrap items-center gap-2">
         {canSeed ? (
@@ -124,7 +127,7 @@ export function CourseStudyActions({
           </button>
         ) : null}
         <Link className={ui.quiet} href="/opening/today">查看今日计划</Link>
-      </div><p className="mt-2 leading-5">设为今日计划会补充默认作息并添加今日任务，确认草案后再开始。</p></div> : null}
+      </div><p className="mt-2 leading-5">设为今日计划会补充默认作息并添加今日任务，确认今日安排后开始。</p></div> : null}
       {error ? (
         <p className="mt-2 text-xs leading-5 text-danger" role="alert">{error}</p>
       ) : null}

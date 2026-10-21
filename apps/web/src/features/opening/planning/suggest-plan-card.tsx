@@ -284,7 +284,7 @@ export function SuggestPlanCard({
             <p className="text-xs text-warn">未安排 {diff.unscheduledTaskIds.length} 项，确认后仍保持未排入。</p>
           ) : null}
           {stale ? (
-            <p className="text-xs leading-5 text-warn">计划版本已变化。请取消旧草案，重新生成后再确认。</p>
+            <p className="text-xs leading-5 text-warn">学习安排已变化。请取消当前建议，重新生成后再确认。</p>
           ) : null}
           <div className="flex flex-wrap gap-2">
             <button

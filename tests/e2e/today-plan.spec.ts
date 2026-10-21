@@ -13,7 +13,7 @@ async function register(context: BrowserContext, label: string) {
 }
 
 async function expectOpeningTodayEmptySurface(page: import("@playwright/test").Page) {
-  await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
   const start = page.getByRole("link", { name: "添加第一门课", exact: true });
   await expect(start).toBeVisible();

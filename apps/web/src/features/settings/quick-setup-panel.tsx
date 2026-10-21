@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 import { ProviderMediaBudgetFields } from "./provider-media-budget-fields";
 import { ui } from "../opening/design/ui";
-import { effectiveTaskRoutes } from "./ai-settings-model";
+import { availabilityLabels, effectiveTaskRoutes } from "./ai-settings-model";
 import { FREE_TIER_NOTICE } from "./provider-settings-model";
 import {
   applyQuickSetupPreset, beginQuickSetupSubmission, finishQuickSetupSubmission, initialQuickSetupDraft,
@@ -14,12 +14,22 @@ import {
   type QuickSetupDraft, type QuickSetupPreset,
 } from "./quick-setup-model";
 
-export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, onPreset, onSubmit }: {
-  draft: QuickSetupDraft; preset: QuickSetupPreset; busy: boolean; locked?: boolean;
+export function QuickSetupForm({ draft, preset, busy, locked = false, advanced = false, onChange, onPreset, onSubmit }: {
+  draft: QuickSetupDraft; preset: QuickSetupPreset; busy: boolean; locked?: boolean; advanced?: boolean;
   onChange: (draft: QuickSetupDraft) => void; onPreset: (preset: QuickSetupPreset) => void; onSubmit: () => void;
 }) {
   const problem = validateQuickSetupDraft(draft);
   const free = draft.billing === "free_tier";
+  const pricingFields = <div className="space-y-3">
+    <div className="grid gap-3 sm:grid-cols-2">
+      <label className="block space-y-1.5"><span className={ui.label}>输入价格（分 / 百万 token）</span>
+        <input className={ui.input} inputMode="decimal" value={draft.inputCentsPerMillion} placeholder={free ? "免费额度可留空，按 0 记账" : "以供应商公布价格为准"} onChange={event => onChange({ ...draft, inputCentsPerMillion: event.target.value })} /></label>
+      <label className="block space-y-1.5"><span className={ui.label}>输出价格（分 / 百万 token）</span>
+        <input className={ui.input} inputMode="decimal" value={draft.outputCentsPerMillion} placeholder={free ? "免费额度可留空，按 0 记账" : "以供应商公布价格为准"} onChange={event => onChange({ ...draft, outputCentsPerMillion: event.target.value })} /></label>
+    </div>
+    <ProviderMediaBudgetFields draft={draft} onChange={patch => onChange({ ...draft, ...patch })} />
+    <p className="text-xs leading-6 text-text-3">价格请使用统一记账币种；不自动换汇。</p>
+  </div>;
   return <form className="space-y-3" onSubmit={event => { event.preventDefault(); if ((locked || !problem) && !busy) onSubmit(); }}>
     <fieldset className="space-y-3" disabled={busy || locked}>
       <legend className="sr-only">一键配置模型</legend>
@@ -47,13 +57,11 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
         <select className={ui.input} value={draft.billing} onChange={event => onChange({ ...draft, billing: event.target.value as QuickSetupDraft["billing"], confirmBudget: false })}>
           <option value="free_tier">免费额度（限制每日请求数）</option><option value="metered">按量计费（限制每日金额）</option>
         </select></label>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="block space-y-1.5"><span className={ui.label}>输入价格（分 / 百万 token）</span>
-          <input className={ui.input} inputMode="decimal" value={draft.inputCentsPerMillion} placeholder={free ? "免费额度可留空，按 0 记账" : "以供应商公布价格为准"} onChange={event => onChange({ ...draft, inputCentsPerMillion: event.target.value })} /></label>
-        <label className="block space-y-1.5"><span className={ui.label}>输出价格（分 / 百万 token）</span>
-          <input className={ui.input} inputMode="decimal" value={draft.outputCentsPerMillion} placeholder={free ? "免费额度可留空，按 0 记账" : "以供应商公布价格为准"} onChange={event => onChange({ ...draft, outputCentsPerMillion: event.target.value })} /></label>
-      </div>
-      <ProviderMediaBudgetFields draft={draft} onChange={patch => onChange({ ...draft, ...patch })} />
+      {advanced ? pricingFields : <details className="rounded-md border border-line px-3 py-2" data-quick-setup-advanced="true">
+        <summary className="min-h-11 cursor-pointer py-2 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">高级模型选项</summary>
+        <div className="mt-3">{pricingFields}</div>
+      </details>}
+      {!advanced && !free ? <p className="text-xs leading-6 text-text-2">按量计费需在「高级模型选项」中填写供应商价格。</p> : null}
       {free ? <>
         <label className="block space-y-1.5"><span className={ui.label}>每日请求上限</span>
           <input className={ui.input} inputMode="numeric" value={draft.dailyRequestCap} onChange={event => onChange({ ...draft, dailyRequestCap: event.target.value })} /></label>
@@ -67,7 +75,7 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
           我确认开启每日额度{Number.isSafeInteger(Number(draft.dailyCapCents)) && Number(draft.dailyCapCents) > 0 ? `，每天最多约 ¥${(Number(draft.dailyCapCents) / 100).toFixed(2)}` : ""}。</label>
       </>}
     </fieldset>
-    <p className="text-xs leading-6 text-text-3">保存会将此模型设为默认，并清空已有的辅导模式及用途专属路由。价格请使用统一记账币种；不自动换汇。</p>
+    <p className="text-xs leading-6 text-text-3">保存后，各项 AI 功能默认使用这个模型。</p>
     {locked ? <p className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p className="text-xs leading-6 text-warn" role="status">{problem}</p> : null}
     <button className={ui.primary} disabled={busy || (!locked && problem !== null)} type="submit">
       {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <WandSparkles aria-hidden="true" size={14} />}{locked ? "确认上次配置结果" : "一键配置模型"}
@@ -75,19 +83,26 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, onChange, 
   </form>;
 }
 
-export function QuickSetupResult({ data, basePath = "/settings" }: { data: OpeningAiSettingsResponse; basePath?: string }) {
+export function QuickSetupResult({ data, basePath = "/settings", advanced = false }: { data: OpeningAiSettingsResponse; basePath?: string; advanced?: boolean }) {
   const routes = effectiveTaskRoutes(data, data.settings);
+  const model = data.models.find(item => item.id === (data.settings.defaultModelId ?? data.defaultModelId));
+  const problem = !model ? "默认模型尚未配置，请到高级设置检查。"
+    : model.availability !== "available" ? availabilityLabels[model.availability]
+      : routes.some(route => route.problem) ? "部分功能还需补充配置，请到高级设置查看。" : null;
   return <div className="space-y-2 rounded-lg border border-accent/30 bg-accent-soft p-3">
     <p className="flex items-center gap-2 text-sm text-accent" role="status"><Check aria-hidden="true" size={15} />配置已保存，密钥输入已清空。</p>
-    <p className="text-xs leading-6 text-text-2">下方显示配置是否满足各用途要求；实际连通性请在高级设置的模型列表中测试。</p>
+    {advanced ? <><p className="text-xs leading-6 text-text-2">下方显示配置是否满足各用途要求；实际连通性请在高级设置的模型列表中测试。</p>
     <dl className="space-y-1 text-xs leading-6">{routes.map(route => <div className="flex flex-wrap justify-between gap-x-4" key={route.task.key}>
       <dt className="text-text-2">{route.task.label}</dt><dd className={route.problem ? "text-warn" : "text-accent"}>{route.problem ?? "配置可用"}</dd>
-    </div>)}</dl>
-    <Link className={ui.quiet} href={`${basePath}/advanced`}>查看模型路由与连通性测试</Link>
+    </div>)}</dl></> : <>
+      <p className="text-sm text-text">默认模型：{model ? `${model.label}（${model.modelName}）` : "尚未配置"}</p>
+      <p className={`text-xs leading-6 ${problem ? "text-warn" : "text-text-2"}`}>{problem ?? "配置已就绪，可在高级设置测试连接。"}</p>
+    </>}
+    <Link className={ui.quiet} href={`${basePath}/advanced`}>{advanced ? "查看模型路由与连通性测试" : "打开高级设置"}</Link>
   </div>;
 }
 
-export function QuickSetupPanel({ onConfigured, basePath = "/settings" }: { onConfigured?: (data: OpeningAiSettingsResponse) => void; basePath?: string }) {
+export function QuickSetupPanel({ onConfigured, basePath = "/settings", advanced = false }: { onConfigured?: (data: OpeningAiSettingsResponse) => void; basePath?: string; advanced?: boolean }) {
   const [draft, setDraft] = useState(initialQuickSetupDraft);
   const [preset, setPreset] = useState<QuickSetupPreset>("gemini_free");
   const [busy, setBusy] = useState(false);
@@ -125,11 +140,11 @@ export function QuickSetupPanel({ onConfigured, basePath = "/settings" }: { onCo
     if (configured) onConfigured?.(configured);
   }
   return <section id="quick-model-setup" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="quick-model-setup-heading">
-    <div><h2 id="quick-model-setup-heading" className="text-sm font-medium text-text">一键配置 AI 模型</h2><p className="mt-1 text-xs leading-6 text-text-3">填写一次，将一个模型用于辅导、主讲及材料处理。各用途的输入能力要求会在保存后列出。</p></div>
+    <div><h2 id="quick-model-setup-heading" className="text-sm font-medium text-text">一键配置 AI 模型</h2><p className="mt-1 text-xs leading-6 text-text-3">填写一次，用同一个模型辅导、主讲和处理材料。</p></div>
     <div className="min-w-0 space-y-3">
-      <QuickSetupForm draft={draft} preset={preset} busy={busy} locked={submission.uncertain} onChange={value => { setDraft(value); setError(""); }} onPreset={value => { setPreset(value); setDraft(current => applyQuickSetupPreset(current, value)); setError(""); }} onSubmit={() => void submit()} />
+      <QuickSetupForm draft={draft} preset={preset} busy={busy} locked={submission.uncertain} advanced={advanced} onChange={value => { setDraft(value); setError(""); }} onPreset={value => { setPreset(value); setDraft(current => applyQuickSetupPreset(current, value)); setError(""); }} onSubmit={() => void submit()} />
       {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}
-      {result ? <QuickSetupResult data={result} basePath={basePath} /> : null}
+      {result ? <QuickSetupResult data={result} basePath={basePath} advanced={advanced} /> : null}
     </div>
   </section>;
 }

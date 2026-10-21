@@ -1,4 +1,5 @@
-import { isSystemQueryPurpose } from "@aistudy/contracts";
+import { ephemeralTurnInputSchema } from "@aistudy/contracts";
+import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
 import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
@@ -6,7 +7,7 @@ import { createOpeningTeachingContentService } from "./teaching/teaching-content
 import { createOpeningTeachingCommandService } from "./teaching/command-service";
 import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
-  createOpeningConversationRepository, readOpeningConversationSelection,
+  createOpeningTutorLearnerContextRepository, createOpeningConversationRepository, readOpeningConversationSelection,
   createOpeningStudyContextRepository, createOpeningStudyExposureRepository,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
@@ -35,7 +36,8 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
-import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
+import { createOpeningMaterialRetriever } from "../../../../worker/src/runtime/material-retrieval";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
@@ -62,6 +64,7 @@ export function getTutorService(sql: Sql): TutorService {
   const sourceChunks: OpeningSourceChunksRepository =
     createOpeningSourceChunksRepository(sql);
   return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
+    studyContext: createOpeningStudyContextRepository(sql),
     systemQueryEnabled: () => loadFeatureSwitches().systemQuery,
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
     listReadySourceIdsForCourse: (scope, courseId) =>
@@ -113,20 +116,23 @@ export function setEphemeralTutorDepsForTests(
 }
 
 export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
-  return { replyEphemeral(scope, input, signal) {
-    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
-      provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
-    return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
+  return { replyEphemeral(scope, input, signal, onTextDelta) {
+    const request = ephemeralTurnInputSchema.parse(input);
+    const resolved = inferComposerIntent(request);
+    if (resolved.querySystem) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
+      provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, { ...request, ...resolved, text: composerMessageText(request.text) }, signal);
+    return getModelEphemeralTutorService(sql).replyEphemeral(scope, request, signal, onTextDelta);
   } };
 }
 
 function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const override = ephemeralOverride;
   const catalog = override ? null : loadOpeningModelCatalog();
+  const embeddingConfig = override ? null : loadOpeningEmbeddingConfig();
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
     envCapCents: catalog?.dailyCapCents ?? 100_000,
-    pricingConfigured: Boolean(catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
+    pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0 || catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
   const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const chunks = createOpeningSourceChunksRepository(sql);
@@ -140,9 +146,11 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
     };
   });
   return {
-    replyEphemeral(scope, input, signal) {
+    replyEphemeral(scope, input, signal, onTextDelta) {
 
       return createEphemeralTutorService({
+        retrieveContext: createOpeningMaterialRetriever(sql, budgetRepo, embeddingConfig),
+        learnerContext: createOpeningTutorLearnerContextRepository(sql),
         sources: {
           listOwnedIds: async (ownedScope, sourceIds) => {
             const found: string[] = [];
@@ -179,7 +187,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
         resolveModel: override ? undefined : (ownedScope, mode) => resolveTutorModel(sql, ownedScope, mode),
         resolveFallbackModel: override ? undefined : (ownedScope, mode) => resolveTutorFallbackModel(sql, ownedScope, mode),
         config: tutor,
-      }).replyEphemeral(scope, input, signal);
+      }).replyEphemeral(scope, input, signal, onTextDelta);
     },
   };
 }

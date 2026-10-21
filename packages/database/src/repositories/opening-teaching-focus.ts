@@ -16,7 +16,7 @@ export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskI
     title: String(task.title), courseId: task.course_id as string | null,
     skillLabel: task.skill_label as string | null, requirementKey: task.requirement_key as string | null,
     suggestionKind: plannerSuggestionKind(task),
-    clientKey: task.origin === "manual" && task.client_key ? String(task.client_key) : undefined,
+    clientKey: (task.origin === "manual" || task.origin === "course_seed") && task.client_key ? String(task.client_key) : undefined,
   } : null;
 }
 

@@ -24,6 +24,7 @@ import { ChevronDown, CircleHelp, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui, tone } from "../design/ui";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 
 export const TEACHING_COMMAND_KINDS: TeachingCommandKind[] = [
   "why",
@@ -46,15 +47,15 @@ const KIND_LABEL: Record<TeachingCommandKind, string> = {
 };
 
 const CONFLICT_LABEL: Record<TeachingCommandConflictCode, string> = {
-  stale_content_version: "内容版本已过期，请重新拉取后再试",
-  stale_path_version: "路径版本已过期，请重新拉取后再试",
-  stale_revision: "教材修订号已过期，请重新拉取后再试",
-  client_key_intent_mismatch: "同一操作密钥意图不一致，请换一把新密钥重试",
-  block_not_in_spec: "该块已不在当前教学内容中，请重新拉取",
+  stale_content_version: "教学内容已更新，请重新读取后再试",
+  stale_path_version: "学习路径已更新，请重新读取后再试",
+  stale_revision: "教材已更新，请重新读取后再试",
+  client_key_intent_mismatch: "这次操作与上次提交的内容不一致，请重新读取后再试",
+  block_not_in_spec: "这部分内容已调整，请重新读取",
   branch_stack_empty: "没有可返回的分支",
   generate_in_flight: "教学内容仍在生成中，请稍后再改写",
-  draft_anchor_lost: "部分草稿锚点已失效，请确认后重新拉取",
-  validation: "命令参数无效",
+  draft_anchor_lost: "部分笔记的关联位置已改变，请保留原文并重新读取",
+  validation: "这次操作未能完成，请检查内容后重试",
 };
 
 /** Read branch stack depth from checkpoint_json (client-side; no domain import). */
@@ -96,7 +97,7 @@ export function conflictRequiresReread(code: TeachingCommandConflictCode): boole
 
 /** Honesty: skip is path-only, not a wrong-answer / incorrect observation. */
 export const SKIP_HONESTY_COPY =
-  "跳过只调整学习路径，不会记为答错，也不会写入错误观察。";
+  "可以先跳过这一步，不会记为答错。";
 
 export function newTeachingCommandClientKey(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -141,6 +142,7 @@ export function BlockCommandsBarView({
   onReread,
   rereadBusy = false,
 }: BlockCommandsBarViewProps) {
+  const diagnostics = useDiagnosticsEnabled();
   const busy = busyKind != null || rereadBusy;
   const visibleKinds = whyAvailable
     ? TEACHING_COMMAND_KINDS
@@ -236,15 +238,14 @@ export function BlockCommandsBarView({
           data-command-conflict={conflict.conflict}
         >
           <p className="font-medium">
-            命令冲突：{teachingCommandConflictLabel(conflict.conflict)}
+            {teachingCommandConflictLabel(conflict.conflict)}
           </p>
-          <p className="mt-1 text-text-2">{conflict.message}</p>
-          {conflict.currentContentVersion != null ||
-          conflict.currentPathVersion != null ? (
+          {diagnostics ? (
             <details className="mt-1 text-text-2">
               <summary className="min-h-11 cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent py-2">
                 技术信息
               </summary>
+              <p className="mt-1">{conflict.message}</p>
               <p className="mt-1 tabular-nums">
                 服务端版本
                 {conflict.currentContentVersion != null
@@ -257,7 +258,7 @@ export function BlockCommandsBarView({
             </details>
           ) : null}
           <p className="mt-1 text-text-2">
-            请重新拉取教学内容并合并本地草稿后再试；不会提供「强制覆盖」。
+            请先保留你写下的内容，重新读取后再继续。
           </p>
           {onReread && conflictRequiresReread(conflict.conflict) ? (
             <button
@@ -272,7 +273,7 @@ export function BlockCommandsBarView({
               ) : (
                 <RefreshCw size={12} aria-hidden />
               )}
-              重新拉取教学内容
+              重新读取教学内容
             </button>
           ) : null}
           {/* Explicit: no force-overwrite control */}

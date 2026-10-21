@@ -8,7 +8,7 @@ export function learningError(code: "NOT_FOUND" | "VALIDATION" | "CONFLICT", mes
 export const learningIso = (value: unknown): string | null => value == null ? null : new Date(value as string | Date).toISOString();
 /** Public manual checks retain their reference metadata without claiming independent grading. */
 export const learnerVerdictSource = (source: LearningObservation["verdictSource"]): LearningObservation["verdictSource"] =>
-  source === "reference_checked" ? "self_report" : source;
+  source === "reference_checked" || source === "ai_graded" ? "self_report" : source;
 /** Lock before any owner/course/root/activity/task lock; readers never lock this row. */
 export async function lockWorkspaceLearningHistory(tx: TransactionSql, scope: Scope): Promise<void> {
   const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -83,7 +83,8 @@ export async function admitLearningSources(tx: TransactionSql, scope: Scope, sou
   if (!ids.length) return [];
   const rows = await tx`SELECT s.id,s.version,s.bytes,s.sha256 FROM opening_sources s
     WHERE s.workspace_id = ${scope.workspaceId} AND s.id IN ${tx(ids)} AND s.upload_state = 'uploaded'
-      AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version)
+      AND (s.mime IN ('image/jpeg','image/png','image/webp')
+        OR EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version))
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)
     ORDER BY s.id FOR SHARE`;
   if (rows.length !== ids.length) throw learningError("VALIDATION", "source unavailable or privacy-excluded");
@@ -93,7 +94,7 @@ export async function admitLearningSources(tx: TransactionSql, scope: Scope, sou
 }
 /**
  * Non-throwing materials probe for resume gates (V2-14).
- * Returns ids that pass the same uploaded+chunks+not-privacy-excluded checks as admit,
+ * Returns ids that pass the same uploaded/readable+not-privacy-excluded checks as admit,
  * without throwing when some/all are missing. Does not write opening_source_versions.
  */
 export async function probeLearningSourcesAvailability(
@@ -105,7 +106,8 @@ export async function probeLearningSourcesAvailability(
   if (!ids.length) return { availableIds: [], unavailableIds: [] };
   const rows = await sql`SELECT s.id FROM opening_sources s
     WHERE s.workspace_id = ${scope.workspaceId} AND s.id IN ${sql(ids)} AND s.upload_state = 'uploaded'
-      AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version)
+      AND (s.mime IN ('image/jpeg','image/png','image/webp')
+        OR EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version))
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)
     ORDER BY s.id`;
   const availableIds = rows.map((row) => String((row as { id: unknown }).id));
@@ -131,6 +133,7 @@ export function mapLearningObservation(row: Record<string, unknown>): LearningOb
     requirementKey: (row.requirement_key ?? null) as string | null, startedAt: learningIso(row.started_at), submittedAt: learningIso(row.submitted_at),
     recordedAt: learningIso(row.recorded_at), sourceVersions: (row.source_versions ?? null) as Record<string, number> | null,
     historyRevision: Number(row.history_revision ?? 0), referenceCheck: (row.reference_check ?? null) as LearningObservation["referenceCheck"],
+    ...(row.ai_evaluation != null ? { aiEvaluation: row.ai_evaluation as LearningObservation["aiEvaluation"] } : {}),
     ...(row.server_evaluation != null ? { serverEvaluation: row.server_evaluation as LearningObservation["serverEvaluation"] } : {}),
   };
 }

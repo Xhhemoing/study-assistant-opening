@@ -63,7 +63,7 @@ export const turnInputSchema = z
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
     sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
-    mode: tutorModeSchema,
+    mode: tutorModeSchema.optional(),
     clientKey: z.string().min(8).max(200),
     privacy: z.enum(["saved", "ephemeral"]),
     learningSessionId: uuidSchema.nullable().optional(),
@@ -112,8 +112,8 @@ export const providerInputSchema = z
     maxOutputTokens: z.number().int().positive().max(16_384),
     mediaCapability: providerMediaCapabilitySchema,
     imageParts: z.array(providerImagePartSchema).max(32).default([]),
-    /** "answer" (default) = tutor answer shape; "json" = task-specific JSON object returned in `text`. */
-    outputFormat: z.enum(["answer", "json"]).optional(),
+    /** "answer" = legacy tutor JSON; "json" = task JSON; "markdown" = direct, streamed tutor prose. */
+    outputFormat: z.enum(["answer", "json", "markdown"]).optional(),
     tools: z.array(providerToolSchema).max(16).optional(),
     toolMessages: z.array(providerToolMessageSchema).max(12).optional(),
     /** Raw base64 audio (no data: prefix) for models with audio input. */
@@ -264,7 +264,7 @@ export const ephemeralTurnInputSchema = z
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
     sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
-    mode: tutorModeSchema,
+    mode: tutorModeSchema.optional(),
     history: z
       .array(
         z

@@ -97,7 +97,7 @@ export function ReferenceCheckStep({
     return (
       <div className="space-y-2 rounded border border-accent/30 bg-accent-soft px-3 py-3">
         <p className="text-sm text-text" role="status">已完成自对照参考核对。</p>
-        <p className="text-xs text-text-2">答案未改动；已保存为自对照记录，尚未经独立评分，不计作已核验正确。</p>
+        <p className="text-xs text-text-2">已保存你的对照结果，答案仍是最初提交的内容；系统尚未独立评分。</p>
         {done.eligibility ? <LearningEvidenceEligibilityDetails eligibility={done.eligibility} /> : null}
       </div>
     );
@@ -108,7 +108,7 @@ export function ReferenceCheckStep({
       <div>
         <h4 className="text-sm font-semibold text-text">自对照参考</h4>
         <p className="mt-1 text-xs leading-6 text-text-2">
-          先打开会话绑定的参考来源整体对照；答案已锁定，不能在核对时改写。自对照结果作为自报记录保留，仍需独立核验。
+          打开参考资料，对照已经提交的答案。这里记录你的判断，系统评分会单独显示。
           {referenceSourceName ? ` 参考材料：${referenceSourceName}。` : null}
         </p>
         {referenceVersion != null ? (
@@ -121,7 +121,7 @@ export function ReferenceCheckStep({
             打开参考材料（新窗口）
           </a>
         ) : (
-          <p className="mt-1 text-xs leading-6 text-warn">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
+          <p className="mt-1 text-xs leading-6 text-warn">暂时无法找到这次作答使用的参考资料。</p>
         )}
       </div>
       <label className="block text-sm text-text">

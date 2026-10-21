@@ -37,6 +37,35 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const { scope, sql } = await requireOpeningScope(request);
     const body = await readOpeningJsonBody(request);
+    if (request.headers.get("accept")?.includes("text/event-stream")) {
+      const encoder = new TextEncoder(), abort = new AbortController();
+      let closed = false;
+      const stop = () => abort.abort();
+      request.signal.addEventListener("abort", stop, { once: true });
+      if (request.signal.aborted) stop();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const send = (event: string, data: unknown) => {
+            if (!closed && !abort.signal.aborted) controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          };
+          void (async () => {
+            try {
+              const output = await getEphemeralTutorService(sql).replyEphemeral(scope, body as never, abort.signal,
+                delta => send("delta", { delta }));
+              send("complete", output);
+            } catch (error) {
+              const response = ephemeralError(error);
+              send("error", await response.json());
+            } finally {
+              request.signal.removeEventListener("abort", stop);
+              if (!closed) { closed = true; controller.close(); }
+            }
+          })();
+        },
+        cancel() { closed = true; stop(); request.signal.removeEventListener("abort", stop); },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" } });
+    }
     const output = await getEphemeralTutorService(sql).replyEphemeral(
       scope,
       body as never,

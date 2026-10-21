@@ -522,6 +522,7 @@ const COMPILE_INSTRUCTION = [
 export function buildCompileProviderInput(
   outline: TeachingOutline,
   pack: TeachingEvidencePack,
+  options: { includeEvidence?: boolean } = {},
 ): { instruction: string; text: string } {
   const focus =
     outline.items.find((i) => i.itemId === outline.focusItemId) ?? outline.items[0];
@@ -546,8 +547,7 @@ export function buildCompileProviderInput(
           notes: i.notes,
         })),
       }),
-      "--- EVIDENCE (UNTRUSTED) ---",
-      context,
+      ...(options.includeEvidence === false ? [] : ["--- EVIDENCE (UNTRUSTED) ---", context]),
     ].join("\n"),
   };
 }
@@ -573,6 +573,10 @@ export function projectClientSafeLibraryBlocks(
 }
 
 export type BuildCompilerPublishInputOptions = {
+  parentBudget?: import("./parent-interaction-budget").ParentInteractionBudget;
+  retrieveContext?: import("./hybrid-retrieval").MaterialRetriever;
+  /** Publishing uses the exact excerpts already sent to the model. */
+  evidenceChunks?: SourceChunk[];
   learnerFocus?: import("@aistudy/contracts").TeachingLearnerFocus;
   focusAttempt?: { question: string; answer: string };
   loadChunks?: (
@@ -649,9 +653,17 @@ async function prepareCompile(
 
   assertOutlineHonest(proposed);
 
+  const query = proposed.items.find((i) => i.itemId === proposed.focusItemId)?.title ?? proposed.focusItemId;
+  const evidenceChunks = options.evidenceChunks ?? (options.retrieveContext
+    ? (await options.retrieveContext(scope as { workspaceId: string; ownerUserId: string }, {
+        chunks, sourceIds, query, maxCharacters: 6000, preferPage: options.currentPage ?? undefined,
+        operationId: `teaching:${payload.activityId}:${payload.expectedContentVersion}`,
+        parentBudget: options.parentBudget,
+      })).chunks : chunks);
   const pack = assembleTeachingEvidencePack({
-    chunks,
-    query: proposed.items.find((i) => i.itemId === proposed.focusItemId)?.title ?? proposed.focusItemId,
+    chunks: evidenceChunks,
+    ranked: Boolean(options.retrieveContext || options.evidenceChunks),
+    query,
     maxCharacters: 6000,
     preferPage:
       options.currentPage == null ? undefined : options.currentPage,
@@ -666,7 +678,7 @@ async function prepareCompile(
 export function createCompilerProviderInput(options: BuildCompilerPublishInputOptions = {}) {
   return async function buildProviderInput(scope: unknown, payload: CompilePayload): Promise<ProviderInput> {
     const { outline, pack } = await prepareCompile(options, scope, payload, null);
-    const prompt = buildCompileProviderInput(outline, pack);
+    const prompt = buildCompileProviderInput(outline, pack, { includeEvidence: false });
     const intent = options.intentSummary ? `学习意图：${options.intentSummary.slice(0, 500)}\n` : "";
     const learner = options.learnerFocus ? `本次学习重点（仅用于选择教学活动，不是新的学习事实）：${JSON.stringify({
       ...options.learnerFocus,
@@ -684,7 +696,7 @@ export function createCompilerProviderInput(options: BuildCompilerPublishInputOp
     return {
       instruction: prompt.instruction + (focusInstructions ? `\n${focusInstructions}` : ""),
       text: `${intent}${learner}${prompt.text}`,
-      chunks: [],
+      chunks: pack.chunks,
       mode: "explain",
       maxOutputTokens: 3000,
       mediaCapability: "text_only",
@@ -772,9 +784,7 @@ export function createCompilerBuildPublishInput(
 export function isTeachingCompilerEnabled(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): boolean {
-  const raw =
-    env.OPENING_TEACHING_COMPILER_ENABLED ??
-    env.TEACHING_COMPILER_ENABLED ??
-    "";
+  const raw = [env.OPENING_TEACHING_COMPILER_ENABLED, env.TEACHING_COMPILER_ENABLED]
+    .map(value => value?.trim()).find(value => value) ?? "1";
   return raw === "1" || raw.toLowerCase() === "true" || raw.toLowerCase() === "yes";
 }

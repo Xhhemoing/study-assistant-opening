@@ -12,6 +12,7 @@ import {
 } from "@aistudy/database";
 import { createCompilerProviderInput } from "@aistudy/ai";
 import { createDbModelGateway, scopeBudget } from "./model-gateway";
+import { createOpeningMaterialRetriever } from "./material-retrieval";
 import {
   createTeachingCompilerPublishInput,
   createTeachingValidationAfterPublish,
@@ -36,23 +37,25 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-08 + M2b: when OPENING_TEACHING_COMPILER_ENABLED, the teaching.compile route's model
-  // writes the focus item through the model gateway (reservation, snapshot, settle there);
-  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Cancel/epoch fences unchanged.
+  // Real lessons always use the model gateway. An explicit off switch fails the job
+  // before budget/content writes instead of publishing an empty placeholder lesson.
   // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
+  const retrieveContext = createOpeningMaterialRetriever(sql, budget);
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
         callModel: (scope, input, options) =>
           models.call(scope, "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options }),
-        buildProviderInput: async (scope, payload) => {
+        buildProviderInput: async (scope, payload, options) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
           return createCompilerProviderInput({
             loadChunks,
+            retrieveContext,
+            parentBudget: options?.parentBudget,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
             ...focus,
@@ -64,20 +67,8 @@ export function createCompileTeachingUnitWorkerDeps(
     budget,
     resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
     ...modelPath,
-    provider: {
-      complete: async () => ({
-        text: JSON.stringify(
-          teachingCompilerOn
-            ? { compiler: "teaching-compiler" }
-            : { stub: true },
-        ),
-        citedChunkIds: [],
-        requestId: null,
-        candidates: [],
-        inputTokens: 1,
-        outputTokens: 1,
-      }),
-    },
+    enabled: teachingCompilerOn,
+    provider: null,
     reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
@@ -104,11 +95,12 @@ export function createCompileTeachingUnitWorkerDeps(
       return unit.id;
     },
     buildPublishInput: teachingCompilerOn
-      ? async (scope, payload, providerOutput) => {
+      ? async (scope, payload, providerOutput, providerInput) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           let revisionNumber: number | null = null;
           const build = createTeachingCompilerPublishInput({
             loadChunks,
+            evidenceChunks: providerInput?.chunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.

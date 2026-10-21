@@ -11,6 +11,6 @@ it("lets the learner inspect named before/after slots and unscheduled work befor
       previousBlocks: [{ taskId: id, start: "2026-10-19T09:00:00Z", end: "2026-10-19T09:30:00Z", reason: "原安排" }],
       proposedBlocks: [{ taskId: id, start: "2026-10-19T11:00:00Z", end: "2026-10-19T11:30:00Z", reason: "补排" }], unscheduledTaskIds: [other] } } };
   const html = renderToStaticMarkup(createElement(PlanProposalPreview, { row }));
-  for (const value of ["线性张成练习", "调整", "09:00", "11:00", "原安排", "草稿", "尚未排入", "复测错题", "UTC"]) expect(html).toContain(value);
+  for (const value of ["线性张成练习", "调整", "09:00", "11:00", "原安排", "建议安排", "尚未排入", "复测错题", "UTC"]) expect(html).toContain(value);
   expect(renderToStaticMarkup(createElement(PlanProposalPreview, { row: { ...row, prepared: null } }))).toContain("计划预览不可用");
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { loadOpeningModel, openingModelFields } from "./opening-model";
 import { loadOpeningModelCatalog } from "./opening-model-catalog";
+import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 
 export class EnvValidationError extends Error {
   readonly issues: string[];
@@ -64,6 +65,7 @@ export type AppEnv = {
 };
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
+  loadOpeningEmbeddingConfig(source);
   const usesCatalog = Boolean(source.OPENING_MODEL_CATALOG?.trim());
   const result = (usesCatalog ? envSchema : envSchema.extend(openingModelFields)).safeParse(source);
   if (!result.success) {

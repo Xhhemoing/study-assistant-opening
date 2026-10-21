@@ -11,6 +11,7 @@ import { learningError } from "./opening-learning-facts";
 import { readCurrentExamNodeIds } from "./opening-exam-skill-identity";
 import { reserveOpeningSourceQuota, type OpeningSourceQuota } from "./opening-source-quota";
 import { examPackDirectorySections } from "./opening-exam-source-format";
+import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -94,6 +95,7 @@ async function createPublicPackSource(
     if (section.lessonId !== null) lessonChunks.set(section.lessonId, chunkId);
   }
   await addSourceMembership(tx, scope, courseId, sourceId, now);
+  await enqueueOpeningSourceIndex(tx, scope, sourceId, 0);
   return { sourceId, lessonChunks };
 }
 

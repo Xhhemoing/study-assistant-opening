@@ -35,7 +35,7 @@ it("hand-counts creation cohorts, separates zero-cost TTL from actual receipts a
   await seedBudget("reserved", 9, false, true);
   await seedBudget("reserved", 5, false);
   const before = await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
-  const report = await readOpeningLoopMetrics(sql, scope, { now });
+  const report = await readOpeningLoopMetrics(sql, scope, { now, days: 14 });
   const metric = (id: string) => report.groups.runtime.find(item => item.id === id)!;
   expect(metric("jobs.tutor.succeeded_ratio")).toMatchObject({ value: 0.25, numerator: 1, denominator: 4 });
   expect(metric("jobs.tutor.outcome_unknown").value).toBe(1);
@@ -120,7 +120,7 @@ it("deduplicates regenerated suggestions by stable key and never calls their rat
       ${sql.json([{ ...suggestion, id: randomUUID(), key: "conversation-only-key" }])},'agent','2026-10-10T11:00:00Z')`;
   await sql`INSERT INTO opening_tasks(id,workspace_id,owner_user_id,title,minutes,origin,client_key,created_at)
     VALUES(${id},${scope.workspaceId},${scope.ownerUserId},'Cards',5,'planner',${key},'2026-10-10T12:00:00Z')`;
-  const report = await readOpeningLoopMetrics(sql, scope, { now });
+  const report = await readOpeningLoopMetrics(sql, scope, { now, days: 14 });
   expect(report.groups.burden.find(m => m.id === "suggestions.generated_acceptance")).toMatchObject({ value: 1, numerator: 1, denominator: 1 });
   expect(report.groups.burden.find(m => m.id === "suggestions.generated_minutes")).toMatchObject({ value: 5 });
   expect(report.groups.burden.find(m => m.id === "suggestions.display_acceptance")).toMatchObject({ value: null, dataStatus: "not_collected" });

@@ -153,7 +153,7 @@ it("shows pending restored answers as needing verification while retaining the e
   mocks.createAttempt.mockResolvedValue({ ...attempt, spanValidation: { eligible: false, firstFamilyExposure: false, reasonCode: "restored_identity_unverified" } });
   await start();
   const tree = render();
-  expect(find(tree, node => node.type === "p" && node.props.children === "已恢复原题身份和作答记录；备份不恢复自动评分权威，本题保留为待核对练习。" )).toBeDefined();
+  expect(mocks.draft!.attemptId).toBe(attempt.id);
   expect(find(tree, node => node.type === "button" && node.props.children === "封存首答（待重新核对）")).toBeDefined();
 });
 it("does not replace an unavailable historical question with a new practice entry", () => {

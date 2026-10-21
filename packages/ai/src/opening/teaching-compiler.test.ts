@@ -31,6 +31,16 @@ const hints = { direction: "从未知量和约束入手。", concept: "解空间
 const SRC_HELD = "00000000-0000-4000-8000-0000000000dd";
 
 describe("goal-driven teaching provider context", () => {
+  it("shares the teaching interaction budget and keeps retrieved evidence in one provider channel", async () => {
+    const parentBudget = { id: "study-activity:test" };
+    const selected = chunk("semantic", "矩阵的零空间");
+    const retrieveContext = vi.fn(async () => ({ chunks: [selected], mode: "hybrid" as const }));
+    const input = await createCompilerProviderInput({ parentBudget, retrieveContext, loadChunks: async () => [selected], intentSummary: "kernel" })(
+      { workspaceId: "workspace", ownerUserId: "owner" }, { activityId: ACTIVITY, expectedContentVersion: 0, sourceIds: [SRC_A] });
+    expect(retrieveContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ parentBudget }));
+    expect(input.chunks).toEqual([selected]);
+    expect(input.text).not.toContain(selected.text);
+  });
   const focus: TeachingLearnerFocus = { skillLabel: "分部积分", requirementKey: "integration",
     activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null, recentAssistance: [], strategyVersion: "adaptive-goal-1",
     goalContext: { mode: "exam", reasonCode: "deadline_near", targetDate: "2026-10-20", daysRemaining: 3, priority: 4, prerequisiteBudgetMinutes: 5 },

@@ -144,7 +144,7 @@ describe("V2-16 teaching loop flags (dual injection)", () => {
 
 describe("V2-16 teaching loop L1–L6", () => {
   it("L1–L6 enter → ready teach → skip command → attempt → pause/checkpoint → resume", async () => {
-    const activities = createOpeningTeachingActivityService(f.sql);
+    const activities = createOpeningTeachingActivityService(f.sql, { OPENING_TEACHING_COMPILER_ENABLED: "0" });
     const commands = createOpeningTeachingCommandService(f.sql);
     const resume = createOpeningTeachingResumeService(f.sql);
     const learning = createOpeningLearningRepository(f.sql);

@@ -72,7 +72,7 @@ export async function readOpeningBackupTableRows(
     ORDER BY l.id`);
   tables.opening_problem_refs = asRows(await tx`
     SELECT p.problem_id, p.workspace_id, p.session_id, p.source_id, p.source_version, p.physical_page,
-      p.chunk_id, p.stem_snapshot, p.artifact_kind, p.updated_at
+      p.chunk_id, p.stem_snapshot, p.artifact_kind, p.teaching_revision_id, p.teaching_block_id, p.updated_at
     FROM opening_problem_refs p
     WHERE ${includedProblem(tx, id, userId, "p", tx`p.session_id`)}
     ORDER BY p.problem_id`);
@@ -97,7 +97,7 @@ export async function readOpeningBackupTableRows(
       o.source_turn_ids, o.verdict_source, o.reference_source_id, o.evidence_verdict,
       o.attempt_id, o.item_version_id, o.requirement_key, o.started_at, o.submitted_at, o.recorded_at,
       o.source_versions, o.reference_check, o.submitted_intent, o.history_revision, o.workspace_history_revision,
-      o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id,o.server_evaluation
+      o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id,o.server_evaluation,o.ai_evaluation
     FROM opening_learning_observations o
     JOIN opening_learning_sessions l ON l.id = o.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     LEFT JOIN LATERAL (
@@ -222,9 +222,9 @@ export async function readOpeningBackupTableRows(
     .map(row => ({ ...row, revision: Number(row.revision) }));
   tables.opening_learning_item_versions = asRows(await tx`
     SELECT v.id,v.workspace_id,v.owner_user_id,v.course_id,v.activity_id,v.problem_id,v.source_id,v.source_version,
-      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.evaluation_spec,v.created_at
+      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.evaluation_spec,v.teaching_revision_id,v.teaching_block_id,v.created_at
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
-      AND ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)}
+      AND (v.source_id IS NULL OR ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)})
       AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`NULL::uuid`)}
       AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity WHERE backup_activity.id=v.activity_id
         AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}

@@ -14,6 +14,7 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceChunksRepository,
   createOpeningSourceRepository,
+  enqueueOpeningSourceIndex,
   reserveOpeningSourceQuota,
   type OpeningKnowledgeRepository,
   type OpeningStorage,
@@ -331,6 +332,7 @@ export function createOpeningMediaSegmentsService(
               `;
               page += 1;
             }
+            await enqueueOpeningSourceIndex(tx, scope, source.id, newVersion);
             return newVersion;
           });
 

@@ -31,6 +31,7 @@ type ControlProps = {
   value?: string;
   onChange?: (event: { target: { value: string } }) => void;
   onSubmit?: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onClick?: () => void;
 };
 
 function findControl(node: ReactNode, match: (element: ReactElement<ControlProps>) => boolean): ReactElement<ControlProps> | undefined {
@@ -95,7 +96,6 @@ describe("course creation draft", () => {
     mount();
     await flush();
     change("course-title", "高等数学");
-    change("course-slug", "calculus");
     change("course-description", "每周学习三次");
     expect(stored.has(draftKey)).toBe(true);
     unmount();
@@ -132,7 +132,6 @@ describe("course creation draft", () => {
     mount();
     await flush();
     change("course-title", "可继续填写");
-    change("course-slug", "valid");
     await submit();
     expect(push).toHaveBeenCalledOnce();
   });
@@ -144,7 +143,6 @@ describe("course creation draft", () => {
     mount();
     await flush();
     change("course-title", "无需存储权限");
-    change("course-slug", "valid");
     await submit();
     expect(push).toHaveBeenCalledOnce();
   });
@@ -155,13 +153,12 @@ describe("course creation feedback", () => {
     mount();
     await flush();
     change("course-title", "高等数学");
-    change("course-slug", "calculus");
   });
 
   it.each([
     [401, "登录状态已过期"],
     [403, "没有创建课程的权限"],
-    [409, "Slug 已被使用"],
+    [409, "课程可能已创建"],
     [400, "名称不符合要求"],
     [503, "服务暂时不可用"],
   ])("shows actionable feedback for HTTP %s and retains the draft", async (status, expected) => {
@@ -170,6 +167,35 @@ describe("course creation feedback", () => {
     expect(renderToStaticMarkup(renderForm())).toContain(expected);
     expect(stored.has(draftKey)).toBe(true);
     expect(push).not.toHaveBeenCalled();
+  });
+
+
+  it("lets the learner create a separate course after a restored legacy URL conflicts", async () => {
+    unmount(); stored.set(draftKey, JSON.stringify({ title: "高等数学", slug: "calculus", description: "" }));
+    mount(); await flush();
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ error: {} }, { status: 409 }));
+    await submit();
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]?.body)).slug).toBe("calculus");
+    const action = findControl(renderForm(), element => element.props.children === "另建一门课程");
+    expect(action).toBeDefined(); action!.props.onClick!();
+    await submit();
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1]![1]?.body)).slug).toMatch(/^course-[0-9a-f-]{36}$/);
+    expect(push).toHaveBeenCalledOnce();
+  });
+
+  it("creates a URL automatically and reuses it after an uncertain response", async () => {
+    expect(renderToStaticMarkup(renderForm())).not.toContain('id="course-slug"');
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("offline"));
+    await submit();
+    const first = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]?.body));
+    expect(first.slug).toMatch(/^course-[0-9a-f-]{36}$/);
+    expect(first.title).toBe("高等数学");
+    unmount(); mount(); await flush();
+    await submit();
+    const creates = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/courses");
+    expect(JSON.parse(String(creates[1]![1]?.body)).slug).toBe(first.slug);
   });
 
   it("explains uncertain results after a network failure without blaming the slug", async () => {

@@ -15,7 +15,7 @@ export function isSummaryBand(value: string): value is SummaryBand {
   );
 }
 
-export { SRS_VERSION, createInitialState, scheduleReview } from "./srs/scheduler";
+export { SRS_VERSION, createInitialState, scheduleReview, migrateReviewHistory } from "./srs/scheduler";
 export {
   buildReviewQueue,
   isCardEligibleForMode,
@@ -324,6 +324,7 @@ export {
 } from "./opening/backup-learning-state";
 
 export * from "./opening/evidence-eligibility";
+export { AI_GRADING_MIN_CONFIDENCE, acceptedAiGradingOutcome, isAiGradedEvidence } from "./opening/ai-evaluation";
 export { resolveLearningPreferences } from "./opening/learning-preferences";
 export { summarizeLearningAggregate, type AggregateLearningSummary } from "./opening/learning-summary-aggregate";
 export {
@@ -496,7 +497,7 @@ export * from "./opening/exam-sprint/engine";
 export { reportExamBkt } from "./opening/exam-sprint/analytics";
 export { forecastExamTopics } from "./opening/exam-sprint/forecast";
 export * from "./opening/evaluation/exam-choice-evaluator";
-export { sameKnowledgeNodeIdentity } from "./opening/knowledge-node-identity";
+export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition } from "./opening/knowledge-node-identity";
 
 export * from "./opening/span-verifier";
 
@@ -514,3 +515,8 @@ export * from "./opening/evidence-transfer-eligibility";
 
 export * from "./opening/study-language-support";
 export * from "./opening/study-intent-instruction";
+export * from "./opening/composer-intent";
+
+export { matrixErrorCardReference } from "./srs/error-card";
+
+export { tutorLearnerContextInstruction } from "./opening/tutor-learner-context";

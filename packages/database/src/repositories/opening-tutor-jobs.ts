@@ -1,12 +1,12 @@
 import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
-import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
+import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { generateOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
+import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -49,10 +49,50 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
 
 export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJobsRepository>;
 
+type CompletedCandidateTarget = {
+  scope: OpeningScope;
+  jobId: string;
+  assistantTurnId: string;
+  expectedPrivacyEpoch?: number;
+  claimToken?: string;
+  metadataLease?: { id: string; claimToken?: string };
+};
+
+/** Optional metadata consumes exactly the saved answer's still-authorized context. */
+async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: CompletedCandidateTarget) {
+  const [target] = await db`
+    SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question, t.context_source_refs
+    FROM opening_tutor_jobs j
+    JOIN workspaces w ON w.id=j.workspace_id AND w.owner_user_id=${input.scope.ownerUserId}
+    JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+      AND c.owner_user_id=w.owner_user_id
+    JOIN opening_turns t ON t.id=j.assistant_turn_id AND t.workspace_id=j.workspace_id
+      AND t.conversation_id=j.conversation_id AND t.role='assistant' AND t.status='complete'
+    JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id
+      AND u.conversation_id=j.conversation_id AND u.role='user'
+    WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId}
+      AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
+      AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
+      AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
+      AND ${contextSourceRefsIncluded(db, input.scope.workspaceId, db`t.context_source_refs`)}
+      AND (${input.metadataLease === undefined} OR EXISTS (
+        SELECT 1 FROM opening_jobs metadata WHERE metadata.id=${input.metadataLease?.id ?? null}::uuid
+          AND metadata.workspace_id=j.workspace_id AND metadata.owner_user_id=w.owner_user_id
+          AND metadata.kind='tutor-metadata' AND metadata.state='running'
+          AND metadata.claim_token IS NOT DISTINCT FROM ${input.metadataLease?.claimToken ?? null}::uuid
+          AND metadata.privacy_epoch=w.privacy_epoch AND metadata.payload->>'tutorJobId'=j.id::text
+          AND metadata.payload->>'assistantTurnId'=t.id::text
+      ))
+      AND NOT EXISTS (SELECT 1 FROM opening_assistant_candidates candidate
+        WHERE candidate.workspace_id=j.workspace_id AND candidate.source_turn_id=t.id)
+  `;
+  return target;
+}
+
 /**
  * Durable tutor job state machine (0017). Claims are CAS so a BullMQ
- * redelivery rechecks the DB before executing; results are written ONCE
- * transactionally together with the assistant turn and candidates.
+ * redelivery rechecks the DB before executing. The answer and job finish
+ * atomically; optional suggestions may be appended after that completion.
  */
 export function createOpeningTutorJobsRepository(sql: Sql) {
   async function markTerminal(input: {
@@ -237,6 +277,37 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
     },
 
+    /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
+    async readStream(scope: OpeningScope, id: string, context: {
+      privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string;
+    }): Promise<OpeningTutorJobRecord | null> {
+      return sql.begin(async tx => {
+        if (context.exposureReceiptId) await lockWorkspaceLearningHistory(tx, scope);
+        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!workspace) return null;
+        const [row] = await tx`SELECT j.* FROM opening_tutor_jobs j
+          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`;
+        if (!row) return null;
+        const job = mapJob(row as Record<string, unknown>);
+        if (job.status !== "running") return job;
+        if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
+          throw new Error("stream authorization changed");
+        }
+        const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(context.contextSourceRefs)}::jsonb`)}`;
+        if (!available) throw new Error("stream material unavailable or excluded");
+        if (context.exposureReceiptId) {
+          const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
+            AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
+          if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
+          await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+        }
+        return job;
+      }) as Promise<OpeningTutorJobRecord | null>;
+    },
+
     async listQueued(limit: number): Promise<OpeningTutorJobRecord[]> {
       // Short dispatch lease bounds Redis traffic and is recovered after a crash.
       const rows = await sql`
@@ -278,6 +349,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       };
       expectedPrivacyEpoch?: number;
       claimToken?: string;
+      enqueueMetadata?: boolean;
     }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure || input.generatedExposure) await lockWorkspaceLearningHistory(tx, input.scope);
@@ -334,6 +406,47 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         }
         if (input.helpExposure) await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure, { generatedOnly: true });
         if (input.generatedExposure) await generateOpeningStudyExposure(tx, input.scope, input.generatedExposure);
+        if (input.enqueueMetadata) {
+          const jobId = randomUUID();
+          const payload = { tutorJobId: input.jobId, assistantTurnId: input.assistantTurnId, tutorClaimToken: input.claimToken ?? null };
+          const queued = await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+            VALUES (${jobId}, ${input.scope.workspaceId}, ${input.scope.ownerUserId}, ${`tutor-metadata:${input.jobId}`},
+              'tutor-metadata', ${tx.json(payload)}, ${Number(workspace[0]!.privacy_epoch)})
+            ON CONFLICT (workspace_id, key) DO NOTHING RETURNING id`;
+          if (queued.length) await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+            VALUES (${input.scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: "tutor-metadata" })})`;
+        }
+      });
+    },
+
+    async loadCompletedTurnForMetadata(input: CompletedCandidateTarget): Promise<{
+      question: string; answer: string; mode: string; userTurnId: string;
+    } | null> {
+      const target = await findCompletedCandidateTarget(sql, input);
+      return target ? { question: String(target.question), answer: String(target.answer),
+        mode: String(target.mode), userTurnId: String(target.user_turn_id) } : null;
+    },
+
+    async canAppendCompletedTurnCandidates(input: CompletedCandidateTarget): Promise<boolean> {
+      return Boolean(await findCompletedCandidateTarget(sql, input));
+    },
+
+    /** Late suggestions never reopen a completed answer or change its text, usage, or exposure. */
+    async appendCompletedTurnCandidates(input: CompletedCandidateTarget & { candidates: unknown[] }): Promise<boolean> {
+      return sql.begin(async tx => {
+        // Serialize against privacy/deletion and another metadata write for this answer.
+        await tx`SELECT id FROM workspaces WHERE id=${input.scope.workspaceId}
+          AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE`;
+        const target = await findCompletedCandidateTarget(tx, input);
+        if (!target) return false;
+        const sourceIds = [...new Set((target.context_source_refs as ContextSourceRef[]).map(ref => ref.sourceId))];
+        for (const payload of input.candidates) {
+          await tx`INSERT INTO opening_assistant_candidates
+            (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+            VALUES (${randomUUID()}, ${input.scope.workspaceId}, ${target.conversation_id}, ${input.assistantTurnId},
+              ${tx.json(sourceIds)}, ${tx.json(payload as never)})`;
+        }
+        return true;
       });
     },
 
@@ -366,7 +479,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           AND owner_user_id=${scope.ownerUserId} AND (client_key=${clientKey} OR client_key LIKE ${`${clientKey}:signal:%`}) LIMIT 1`;
         // A retry must not reapply an older message over a subsequently confirmed preference.
         if (replay.length) return latest;
-        const text = String(row.text), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
+        const text = composerMessageText(String(row.text)), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
         const applied = parseExplicitStudyMessage(current, text);
         if (!applied) return latest;
         const changed = !isDeepStrictEqual(current, applied.intent);

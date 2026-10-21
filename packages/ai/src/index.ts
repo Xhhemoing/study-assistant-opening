@@ -4,9 +4,11 @@ export {
   createOpeningProvider,
   OpeningProviderError,
   type OpeningProviderOptions,
+  type ProviderTextDelta,
 } from "./opening/provider";
 export { assertOpeningProviderEndpoint, OpeningProviderEndpointError } from "./opening/provider-network";
 export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
+export { buildTutorMetadataInput, tutorCitationsFromMarkdown } from "./opening/tutor-metadata";
 export {
   actualCentsForOutput,
   estimateUsage,
@@ -50,6 +52,7 @@ export {
   resolveModelForTask, resolveFallbackModelForTask, openingModelSnapshot, OpeningModelRoutingError,
 } from "./opening/model-routing";
 export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
+export { buildAnswerGradingInput } from "./opening/answer-grading";
 export { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_TOOLS, SYSTEM_QUERY_LIMITS, type SystemQueryReader, type SystemQueryService, type SystemQueryFocus, type SystemQueryClock, type SystemQueryPlanner } from "./opening/system-query-agent";
 export {
   createModelGateway,
@@ -165,3 +168,5 @@ export * from "./opening/system-query-delivery";
 
 export * from "./opening/assistant-proposal-agent";
 export * from "./opening/material-retrieval-evaluation";
+export * from "./opening/embedding";
+export * from "./opening/hybrid-retrieval";

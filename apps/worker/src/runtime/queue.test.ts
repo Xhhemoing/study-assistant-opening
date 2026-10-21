@@ -18,11 +18,13 @@ describe("createQueues", () => {
       "build-course-knowledge",
       "compile-teaching-unit",
       "extract-study-actions",
+      "index-source",
       "parse",
       "parse-media",
       "remind",
       "retest",
       "tutor",
+      "tutor-metadata",
     ]);
     expect(queues["extract-study-actions"].name).toBe("opening-extract-study-actions");
   });

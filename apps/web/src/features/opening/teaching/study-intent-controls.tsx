@@ -4,10 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { studyIntentEventSchema, studySessionIntentSchema, type LearningAttempt, type StudyIntentChange, type StudyIntentEvent, type StudySessionIntent } from "@aistudy/contracts";
 import { ui } from "../design/ui";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 const resultSchema = z.object({ event: studyIntentEventSchema, currentEvent: studyIntentEventSchema, currentIntent: studySessionIntentSchema, currentVersion: z.number().int().positive(),
   move: z.object({ id: z.string(), presentation: z.object({ instructions: z.string() }), studentAction: z.string() }) });
 export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: LearningAttempt; desiredIntent?: StudySessionIntent;
   onApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"], newEvidenceEventId?: string) => void }) {
+  const diagnostics = useDiagnosticsEnabled();
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const [receipt, setReceipt] = useState<z.infer<typeof resultSchema> | null>(null);
   const [knownEvent, setKnownEvent] = useState<StudyIntentEvent | null>(null);
@@ -77,9 +79,9 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
     <p className="text-xs leading-6 text-text-2">直接说明需要什么；只改变教学安排与本次作答条件，不直接上调或下调能力。</p>
     <div className="flex flex-wrap gap-2">{([ ["confused", "我不懂"], ["too_easy", "太简单"], ["guessed", "我是猜的"], ["copied_answer", "这次抄了答案"] ] as const).map(([signal, label]) => <button key={signal} type="button" className={ui.quiet} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "signal", signal })}>{label}</button>)}</div>
     <div className="flex flex-wrap gap-2">{["快速串讲", "直接给关键步骤", "一步一步等我"].map(text => <button type="button" key={text} className={ui.secondary} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "explicit_request", text })}>{text}</button>)}</div>
-    {pending ? <p role="status" className="text-xs text-text-3">正在保存意图版本与下一步原因…</p> : null}
-    {receipt && receipt.event.version < receipt.currentVersion ? <p role="status" className="text-xs leading-6">已恢复历史请求；当前意图保持最新版本，不重新执行历史教学动作。</p> : receipt ? <div role="status" className="space-y-1 text-xs leading-6"><p>{receipt.event.action === "diagnose" ? "已放慢节奏，先回到关系与小步骤诊断。" : receipt.event.action === "increase_challenge" ? "已转入预设迁移挑战；需要新题表现后才判断效果。" : receipt.event.action === "clarify_intent" ? "这条目的有实质歧义，请明确选择串讲或拔高。" : "学习意图已保存，本次正确性记录保持不变。"}</p><p>{receipt.move.presentation.instructions}</p><p>{receipt.move.studentAction}</p>{receipt.event.signals.includes("copied_answer") ? <p>本次已报告看过答案，会限制独立证据；不会把答对直接改成答错。</p> : null}{receipt.event.action !== "clarify_intent" ? <Link className={ui.quiet} href={`/opening/courses/${attempt.courseId}/study/span?intentEvent=${receipt.event.id}&move=${receipt.move.id}`}>打开对应教学动作</Link> : null}</div> : null}
-    {knownEvent ? <details className="text-xs leading-6 text-text-3"><summary className="cursor-pointer">当前意图版本与依据</summary><p>版本 {knownEvent.version} · {knownEvent.intent.purpose} · {knownEvent.intent.pace} · {knownEvent.intent.timeBudgetMinutes} 分钟</p><p>记录时间 {knownEvent.createdAt}；新的意图事件会让旧意图版本的决策失效。</p></details> : null}
+    {pending ? <p role="status" className="text-xs text-text-3">正在调整学习安排…</p> : null}
+    {receipt && receipt.event.version < receipt.currentVersion ? <p role="status" className="text-xs leading-6">上次的选择已恢复，接下来继续按你最新的选择学习。</p> : receipt ? <div role="status" className="space-y-1 text-xs leading-6"><p>{receipt.event.action === "diagnose" ? "放慢一点，先从一个小步骤开始。" : receipt.event.action === "increase_challenge" ? "接下来试一道更有挑战的新题。" : receipt.event.action === "clarify_intent" ? "你想快速串讲，还是挑战更难的题？" : "已保存你的学习偏好。"}</p><p>{receipt.move.presentation.instructions}</p><p>{receipt.move.studentAction}</p>{receipt.event.signals.includes("copied_answer") ? <p>已记下这次参考过答案，之后可以试着独立做一道新题。</p> : null}{receipt.event.action !== "clarify_intent" ? <Link className={ui.quiet} href={`/opening/courses/${attempt.courseId}/study/span?intentEvent=${receipt.event.id}&move=${receipt.move.id}`}>按这个安排继续</Link> : null}</div> : null}
+    {diagnostics && knownEvent ? <details className="text-xs leading-6 text-text-3"><summary className="cursor-pointer">当前意图版本与依据</summary><p>版本 {knownEvent.version} · {knownEvent.intent.purpose} · {knownEvent.intent.pace} · {knownEvent.intent.timeBudgetMinutes} 分钟</p><p>记录时间 {knownEvent.createdAt}；新的意图事件会让旧意图版本的决策失效。</p></details> : null}
     {error ? <div role="alert" className="space-y-2 text-xs text-danger"><p>{error}</p>{lastChange.current ? <button type="button" disabled={pending} className={ui.secondary} onClick={() => { if (lastChange.current) void apply(lastChange.current); }}>重新确认同一次意图</button> : null}</div> : null}
   </section>;
 }

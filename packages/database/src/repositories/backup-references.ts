@@ -1,4 +1,4 @@
-import { uuidSchema } from "@aistudy/contracts";
+import { reviewStateSchema, uuidSchema } from "@aistudy/contracts";
 import type { NativeBackupRecord, NativeRestorePlan } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { COLLECTION_TABLES, asRecords } from "./backup-map";
@@ -58,6 +58,9 @@ export async function assertRestoreReferences(tx: Sql, plan: NativeRestorePlan):
     }
     if (step.collection === "cards") for (const child of nested(row, "reviewStates")) {
       if (child.cardId !== row.id) invalid();
+      if (!reviewStateSchema.safeParse({ ...child, fsrs: child.fsrsState }).success) {
+        throw new BackupRestoreError("VALIDATION", "card review state is invalid");
+      }
     }
   }
 

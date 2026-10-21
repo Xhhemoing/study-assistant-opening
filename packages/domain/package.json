@@ -32,6 +32,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aistudy/contracts": "0.0.0"
+    "@aistudy/contracts": "0.0.0",
+    "ts-fsrs": "5.4.2"
   }
 }

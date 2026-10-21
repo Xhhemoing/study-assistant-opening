@@ -30,9 +30,10 @@ it("prefills the real query purpose but waits for an explicit send", async () =>
   const submit = vi.fn(async () => ({ accepted: true }));
   await act(async () => root.render(<Composer draft="我最近的学习记录有哪些？" onDraftChange={() => undefined} onSubmit={submit} queryAvailable purposePrefill={{ purpose: "query", nonce: 1 }} />));
   expect(submit).not.toHaveBeenCalled();
-  expect(host.querySelector<HTMLSelectElement>('[aria-label="本轮目的"]')?.value).toBe("query");
+  expect(host.textContent).toContain("查学习记录");
+  expect(host.querySelector('[aria-label="本轮目的"]')).toBeNull();
   await act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
-  expect(submit).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true, purpose: "query" }));
+  expect(submit).toHaveBeenCalledWith(expect.objectContaining({ purpose: "query" }));
 });
 it("replaces the send button with an accessible stop button during a pending reply", async () => {
   const cancel = vi.fn();

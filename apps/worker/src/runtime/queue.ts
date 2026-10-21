@@ -25,12 +25,14 @@ export function createQueues(connection: IORedis, onCreate?: (queue: OpeningQueu
     [
       "parse",
       "tutor",
+      "tutor-metadata",
       "retest",
       "remind",
       "build-course-knowledge",
       "parse-media",
       "extract-study-actions",
       "compile-teaching-unit",
+      "index-source",
     ].map((kind) => {
       const queue = createQueue(kind, connection);
       onCreate?.(queue);

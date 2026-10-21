@@ -98,7 +98,7 @@ export function InboxPanel({
     if (openedInitialKey === key) return;
     const record = sources.find((item) => item.id === initialOpen.sourceId);
     if (!record || record.uploadState !== "uploaded" || initialOpen.version > record.version) {
-      setNotice({ sourceId: initialOpen.sourceId, text: !record ? "引用材料已移除或暂时无法访问，请核对资料库。" : record.uploadState !== "uploaded" ? "引用材料尚未上传完成，请重新选择文件。" : "请求的材料版本尚不可用，请刷新后核对；不会改用其他版本。" });
+      setNotice({ sourceId: initialOpen.sourceId, text: !record ? "引用材料已移除或暂时无法访问，请核对资料库。" : record.uploadState !== "uploaded" ? "引用材料尚未上传完成，请重新选择文件。" : "引用时的材料内容暂时无法读取，请刷新后重试。" });
       setOpenedInitialKey(key);
       return;
     }
@@ -296,6 +296,12 @@ export function InboxPanel({
               }}
               onDelete={() => openManage(record.id, "delete")}
               onAssign={onAssign}
+              onReindex={async id => {
+                try {
+                  await api.reindexSource(id);
+                  setNotice({ sourceId: id, text: "已安排更新，完成后可按意思查找这份材料。" });
+                } catch (reason) { showOperationFailure(reason); }
+              }}
             />}{renderMetadata?.(record)}</div></div>
             {retainedIds.has(record.id) ? <p role="status" className="px-4 py-2 text-xs text-text-2">正在编辑的材料暂时保留在此处；关闭表单后将按当前筛选显示。</p> : null}
             {sourceTools(record)}

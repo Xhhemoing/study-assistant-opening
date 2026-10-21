@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const seam = vi.hoisted(() => ({ start: vi.fn(), scope: vi.fn(), activities: {}, plans: {}, settings: {} }));
+const seam = vi.hoisted(() => ({ start: vi.fn(), scope: vi.fn(), firstLearning: {}, plans: {}, settings: {} }));
 vi.mock("../../../../features/opening/runtime", () => ({
-  requireOpeningScope: seam.scope, getTeachingActivityService: () => seam.activities, getPlanService: () => seam.plans,
+  requireOpeningScope: seam.scope, getPlanService: () => seam.plans,
 }));
-vi.mock("../../../../features/opening/server/data-services", () => ({ getPlanningSettingsService: () => seam.settings }));
+vi.mock("../../../../features/opening/server/data-services", () => ({ getFirstLearningService: () => seam.firstLearning, getPlanningSettingsService: () => seam.settings }));
 vi.mock("../../../../features/workspace/first-learning-service", () => ({ startFirstLearning: seam.start }));
 import { ApiError } from "../../../../features/auth/service";
 import { POST } from "./route";
@@ -19,7 +19,7 @@ describe("first-learning boundary", () => {
     const response = await POST(request('{"topic":"矩阵"}'));
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(seam.start).toHaveBeenCalledWith({ activities: seam.activities, plans: seam.plans, settings: seam.settings }, scope, { topic: "矩阵" });
+    expect(seam.start).toHaveBeenCalledWith({ firstLearning: seam.firstLearning, plans: seam.plans, settings: seam.settings }, scope, { topic: "矩阵" });
   });
   it("does not read or write unauthenticated input", async () => {
     seam.scope.mockRejectedValue(new ApiError("UNAUTHENTICATED", "请登录", 401));

@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LearningResume, TeachingDraftAnchor } from "@aistudy/contracts";
 import {
   checkpointConflictRequiresJuxtapose,
@@ -12,6 +12,10 @@ import {
   summarizeThoughtTrain,
   type LocalUnsentDraft,
 } from "./resume-card";
+
+const diagnostics = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnostics.enabled }));
+beforeEach(() => { diagnostics.enabled = false; });
 
 const AID = "11111111-1111-4111-8111-111111111111";
 const BID = "44444444-4444-4444-8444-444444444444";
@@ -111,13 +115,13 @@ describe("resume-card helpers", () => {
   it("labels continuable actions and gate copy", () => {
     expect(continuableActionLabel("command_return")).toMatch(/返回/);
     expect(continuableActionLabel("wait_job")).toMatch(/等待/);
-    expect(jobGateBannerCopy("unknown")).toMatch(/未知/);
+    expect(jobGateBannerCopy("unknown")).toMatch(/无法确认/);
     expect(materialsGateBannerCopy("partial")).toMatch(/部分材料/);
   });
 });
 
 describe("ResumeCardView", () => {
-  it("renders title/status, thought depth, drafts, open problems, gates, Continue CTA", () => {
+  it("keeps learner status, saved content counts, gates and Continue without technical diagnostics", () => {
     const html = renderToStaticMarkup(
       createElement(ResumeCardView, {
         activityTitle: "今日主题学习",
@@ -139,36 +143,33 @@ describe("ResumeCardView", () => {
       }),
     );
     expect(html).toContain('data-teaching-resume-card="true"');
-    expect(html).toContain("学习断点 · 继续");
+    expect(html).toContain("学习位置");
     expect(html).toContain("今日主题学习");
     expect(html).toContain('data-resume-client-init="null"');
     expect(html).toContain('data-resume-job-gate="in_flight"');
     expect(html).toContain('data-resume-materials-gate="partial"');
-    expect(html).toContain("data-resume-thought-train");
-    expect(html).toContain("分支 1");
-    expect(html).toContain("data-resume-open-problems");
-    expect(html).toContain("attempt_open");
-    expect(html).toContain('data-draft-chip="server"');
+    expect(html).toContain("1 段内容已保存");
+    expect(html).toContain("还有 1 道题可以继续");
+    expect(html).not.toContain("data-resume-diagnostics");
+    expect(html).not.toMatch(/命令日志|当前块|摘要状态|skipped|草稿为权威|attempt_open/);
     expect(html).toContain('data-resume-continue-cta="true"');
     expect(html).toContain("继续学习");
-    expect(html).toContain('data-continuable-action="wait_job"');
-    expect(html).toContain('data-continuable-action="command_return"');
-    expect(html).toContain("data-resume-summary-independence");
-    expect(html).toContain("不依赖 AI 摘要");
+    expect(html).toContain('data-resume-pause="true"');
+    expect(html).toContain('data-resume-reread="true"');
     expect(html).not.toContain("ConversationResume");
     expect(html).not.toContain("强制覆盖");
   });
 
-  it("juxtaposes server vs local unsent drafts; forbids LWW", () => {
-    const unsent: LocalUnsentDraft[] = [
-      { blockId: BID2, draftText: "本地未发送草稿" },
-    ];
+  it("keeps full conflict contents and recovery controls available without diagnostics", () => {
+    const original = "本次输入\n" + "完整内容".repeat(60) + "<script>保留结尾</script>";
+    const saved = "已保存文字\n" + "早先内容".repeat(60) + "保存结尾";
+    const unsent: LocalUnsentDraft[] = [{ blockId: BID2, draftText: original }];
     const html = renderToStaticMarkup(
       createElement(ResumeCardView, {
         activityTitle: "对照草稿",
         activityStatus: "paused",
         generateStatusLabel: "主讲内容已就绪",
-        resume: resume({ status: "paused" }),
+        resume: resume({ status: "paused", drafts: [draft(BID, saved)] }),
         localUnsent: unsent,
         conflict: {
           kind: "draft_anchor_lost",
@@ -183,15 +184,19 @@ describe("ResumeCardView", () => {
     );
     expect(html).toContain('data-forbid-lww="true"');
     expect(html).toContain("data-resume-draft-juxtapose");
-    expect(html).toContain('data-draft-chip="unsent"');
-    expect(html).toContain("未发送");
-    expect(html).toContain("服务端");
-    expect(html).toContain("本地未发送");
-    expect(html).toContain("禁止强制覆盖");
+    expect(html).toContain("1 段内容尚未保存");
+    expect(html).toContain("本次未保存内容");
+    expect(html).toContain(saved);
+    expect(html).toContain(original.replace("<script>", "&lt;script&gt;").replace("</script>", "&lt;/script&gt;"));
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("data-resume-diagnostics");
+    expect(html).not.toContain("部分草稿锚点已失效");
+    expect(html).toContain('data-resume-sync-unsent="true"');
+    expect(html).toContain('data-resume-reread="true"');
     expect(html).toContain('data-resume-unpause="true"');
     expect(html).not.toContain("force overwrite");
     expect(html).toContain('data-forbid-lww="true"');
-    expect(html).toMatch(/禁止强制覆盖|禁止后写优先/);
+    expect(html).toContain("两侧内容不会自动覆盖");
   });
 
   it("shows fail-soft gate banners for unknown job without crashing", () => {
@@ -216,7 +221,33 @@ describe("ResumeCardView", () => {
     );
     expect(html).toContain('data-resume-gate-job="unknown"');
     expect(html).toContain('data-resume-gate-materials="unavailable"');
-    expect(html).toContain("不会假装已就绪");
-    expect(html).toContain('data-draft-chip="server"');
+    expect(html).toContain("暂时无法确认内容是否生成完成");
+    expect(html).toContain("1 段内容已保存");
   });
+  it("places technical state under the existing diagnostics switch in a closed disclosure", () => {
+    diagnostics.enabled = true;
+    const html = renderToStaticMarkup(createElement(ResumeCardView, {
+      activityTitle: "学习", activityStatus: "active", generateStatusLabel: "主讲内容已就绪", resume: resume(),
+    }));
+    expect(html).toMatch(/<details[^>]*data-resume-diagnostics="true"/);
+    expect(html).not.toMatch(/<details[^>]*open=/);
+    expect(html).toContain("命令日志 1");
+    expect(html).toContain("当前块");
+    expect(html).toContain("attempt_open");
+    expect(html).toContain("摘要状态：skipped");
+    expect(html).toContain('data-draft-chip="server"');
+    expect(html).toContain('data-continuable-action="command_return"');
+  });
+
+  it("retains unsaved content and save action even with no server content or conflict", () => {
+    const html = renderToStaticMarkup(createElement(ResumeCardView, {
+      activityTitle: "学习", activityStatus: "active", generateStatusLabel: "主讲内容已就绪", resume: resume({ drafts: [] }),
+      localUnsent: [{ blockId: BID, draftText: "尚未保存的完整答案" }], onSyncUnsent: () => undefined,
+    }));
+    expect(html).toContain("1 段内容尚未保存");
+    expect(html).toContain("尚未保存的完整答案");
+    expect(html).toContain('data-resume-sync-unsent="true"');
+    expect(html).not.toContain("data-resume-diagnostics");
+  });
+
 });

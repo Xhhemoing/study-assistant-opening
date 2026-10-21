@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningPlanningSettingsRepository } from "@aistudy/database";
+import { createOpeningPlanningSettingsRepository, createOpeningFirstLearningRepository } from "@aistudy/database";
 import { createOpeningTeachingActivityService } from "../../apps/web/src/features/opening/teaching/activity-service";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { startFirstLearning } from "../../apps/web/src/features/workspace/first-learning-service";
@@ -13,7 +13,7 @@ function setup() {
   const now = new Date();
   const input = { clientKey: randomUUID(), topic: "矩阵的几何意义", goal: "能用二维变换解释矩阵乘法",
     targetDate: null, minutes: 30, startTime: "19:00", timeZone: "Asia/Shanghai", sourceIds: [] };
-  const deps = { activities: createOpeningTeachingActivityService(fixture.sql, {}),
+  const deps = { firstLearning: createOpeningFirstLearningRepository(fixture.sql),
     plans: createOpeningPlanService(fixture.sql), settings: createOpeningPlanningSettingsRepository(fixture.sql), now: () => now };
   return { input, deps };
 }
@@ -30,7 +30,7 @@ describe("first-learning persistence and recovery", () => {
     expect(activity!.content_version).toBe(0);
     const [task] = await fixture.sql`SELECT status,minutes FROM opening_tasks WHERE id=${first.taskId}`;
     expect(task).toMatchObject({ status: "pending", minutes: 30 });
-    const resumedFromTask = await deps.activities.create(fixture.scope, { clientKey: `task:${first.taskId}`,
+    const resumedFromTask = await createOpeningTeachingActivityService(fixture.sql, {}).create(fixture.scope, { clientKey: `task:${first.taskId}`,
       intentKind: "goal", intentSummary: "client title ignored", createIntent: { source: "task", taskId: first.taskId } });
     expect(resumedFromTask.id).toBe(first.activityId);
     expect(resumedFromTask.intentSummary).toContain(input.goal);

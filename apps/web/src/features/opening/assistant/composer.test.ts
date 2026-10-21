@@ -15,29 +15,28 @@ function markup(practiceMode: boolean) {
 }
 
 describe("practice composer restrictions", () => {
-  it("offers only the modes that keep the learning session", () => {
+  it("does not ask learners to choose a purpose or tutoring mode", () => {
     const html = markup(true);
-    expect(html).toContain('value="hint"');
-    expect(html).toContain('value="explain"');
-    expect(html).not.toContain('value="listen"');
-    expect(html).not.toContain('value="think_together"');
+    expect(html).not.toContain('aria-label="本轮目的"');
+    expect(html).not.toContain('aria-label="辅导模式"');
+    expect(html).toContain('aria-label="消息输入"');
   });
 
-  it("renders saved-only privacy with a disabled selector, even if a caller passes ephemeral", () => {
+  it("shows saved-only practice privacy, even if a caller passes ephemeral", () => {
     const html = markup(true);
-    const selector = html.match(/<select[^>]*aria-label="隐私模式"[^>]*>.*?<\/select>/)?.[0];
-    expect(selector).toBeDefined();
-    expect(selector).toContain('disabled=""');
-    expect(selector).toContain('value="saved" selected=""');
-    expect(selector).not.toContain('value="ephemeral"');
+    expect(html).toContain("保存对话");
+    expect(html).toContain("练习辅导会保存对话并记录帮助");
+    expect(html).not.toContain('value="ephemeral"');
   });
 
-  it("keeps every existing mode and privacy option in the ordinary assistant", () => {
+  it("keeps explicit privacy options above the input in the ordinary assistant", () => {
     const html = markup(false);
-    for (const mode of ["hint", "explain", "listen", "think_together"]) expect(html).toContain(`value="${mode}"`);
     const selector = html.match(/<select[^>]*aria-label="隐私模式"[^>]*>.*?<\/select>/)?.[0];
     expect(selector).toContain('value="ephemeral" selected=""');
     expect(selector).not.toContain('disabled=""');
+    expect(html.indexOf('aria-label="隐私模式"')).toBeLessThan(html.indexOf("<textarea"));
+    expect(html).not.toContain('aria-label="本轮目的"');
+    expect(html).not.toContain('aria-label="辅导模式"');
   });
 });
 
@@ -79,10 +78,10 @@ describe("composer logical-send idempotency", () => {
   });
 });
 
-it("keeps ordinary answer routing as the default inside a real practice attempt", () => {
+it("does not turn ordinary practice help into an explicit teaching proposal", () => {
   const html = renderToStaticMarkup(createElement(Composer, { practiceMode: true, draft: "给我一个提示", onDraftChange: () => undefined, onSubmit: () => undefined }));
-  expect(html).toMatch(/<option value="answer" selected="">/);
-  expect(html).not.toMatch(/<option value="teach" selected="">/);
+  expect(html).not.toContain("带我学习");
+  expect(html).not.toContain("撤回本轮选择");
 });
 
 it("does not reuse an unconfirmed send key after changing the material intent", () => {
@@ -104,7 +103,7 @@ describe("compact reader composer", () => {
     expect(settings?.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)?.[1]).toContain(privacy === "saved" ? "保存" : "临时");
     expect(html).toContain('aria-label="消息输入"');
     expect(html).toContain('aria-label="发送"');
-    expect(html).toContain('aria-label="本轮目的"');
+    expect(html).not.toContain('aria-label="本轮目的"');
     if (privacy === "ephemeral") expect(html).toContain("刷新后不会恢复");
   });
   it("keeps saved-only help tracking visible for a real attempt", () => {

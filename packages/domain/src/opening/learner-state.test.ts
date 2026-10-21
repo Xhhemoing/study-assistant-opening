@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { courseEvidence, courseEvidenceCases, learningObservation, qualifiedInput } from "./learning-summary-fixtures";
-import { assembleLearnerState, learnerEvidenceDisplayState } from "./learner-state";
+import { assembleLearnerState, countValidLearnerObservations, learnerEvidenceDisplayState } from "./learner-state";
 import { evaluateEvidenceEligibility } from "./evidence-eligibility";
 import { exposure } from "./evidence-eligibility-fixtures";
 
@@ -23,6 +23,7 @@ describe("LearnerState projection", () => {
     expect(result.evidence.map(row => row.observationId)).toEqual(["observation-3"]);
     expect(result.features.map(row => row.observationId)).toEqual(["observation-1", "observation-2", "observation-3"]);
     expect(result.completeness).toMatchObject({ status: "truncated", total: 3, returned: 1 });
+    expect(countValidLearnerObservations(result.features)).toBe(3);
   });
   it.each([["source changed", "stale"], ["source unavailable", "unavailable"]] as const)("distinguishes %s from absent evidence", (name, availability) => {
     const result = read(courseEvidenceCases.find(row => row.name === name)!.evidence);
@@ -35,6 +36,27 @@ describe("LearnerState projection", () => {
     expect(result.summary).toEqual([]);
     expect(result.completeness).toMatchObject({ status: "complete", gaps: ["no_observation_evidence"] });
     expect(result.display).toMatchObject({ scope: "recorded_requirements", total: 0, counts: { independent: 0, hinted: 0, retest: 0, insufficient: 0 } });
+  });
+});
+
+describe("learner progress sample count", () => {
+  it("counts correct, incorrect and assisted answers once without treating every view as another answer", () => {
+    const correct = read().features[0]!;
+    const assisted = read(courseEvidenceCases.find(row => row.name === "help before submission")!.evidence).features[0]!;
+    const wrong = read(courseEvidence({ observation: { ...qualifiedInput.observation, outcome: "incorrect" },
+      context: { ...qualifiedInput.context, referenceCheck: { ...qualifiedInput.context.referenceCheck!, outcome: "incorrect" } } })).features[0]!;
+    expect(wrong.eligibility.verifiedCorrect).toBe("no");
+    expect(assisted.eligibility.independentAttempt).toBe("no");
+    expect(countValidLearnerObservations([correct, correct,
+      { ...assisted, observationId: "assisted" }, { ...wrong, observationId: "wrong" }])).toBe(3);
+  });
+
+  it("excludes ungraded, self-reported, stale, unavailable and privacy-excluded answers", () => {
+    const invalid = ["legacy identity missing", "reference_checked label without method", "self-reported correct",
+      "source changed", "source unavailable", "source privacy excluded"].flatMap(name =>
+      read(courseEvidenceCases.find(row => row.name === name)!.evidence).features.map(row => ({ ...row, observationId: name })));
+    expect(countValidLearnerObservations(invalid)).toBe(0);
+    expect(countValidLearnerObservations([])).toBe(0);
   });
 });
 

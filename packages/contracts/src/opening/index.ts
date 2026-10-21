@@ -47,6 +47,7 @@ export {
   jobRecordSchema,
   jobStatusResponseSchema,
   tutorJobErrorSchema,
+  tutorMetadataJobPayloadSchema,
   type JobKind,
   type JobStatus,
   type JobRecord,
@@ -246,7 +247,9 @@ export * from "./teaching-resume";
 export * from "./teaching-math-model";
 
 export * from "./matrix-evaluation";
+export * from "./ai-evaluation";
 export * from "./loop-metrics";
+export * from "./learning-experience";
 
 export * from "./local-replan";
 
@@ -271,3 +274,7 @@ export { studyContextAnchorSchema, studyExposureReceiptSchema, type StudyContext
 export * from "./material-retrieval-evaluation";
 
 export * from "./span-session";
+
+export { firstLearningInputSchema, type FirstLearningInput } from "./first-learning";
+
+export * from "./tutor-learner-context";

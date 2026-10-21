@@ -1,4 +1,4 @@
-import type { ServerEvaluation } from "@aistudy/contracts";
+import type { AiEvaluation, ServerEvaluation } from "@aistudy/contracts";
 /** Local S2 policy inputs. Adapters must supply server-owned facts, not client eligibility claims. */
 export type EvidenceEligibilityValue = "yes" | "no" | "unknown";
 export type EvidenceVersionApplicability =
@@ -27,7 +27,7 @@ export interface EvidenceObservation extends EvidenceIdentity {
   submittedAt?: number | null;
   assistance?: "independent" | "hinted" | "revealed" | "unknown" | null;
   outcome?: EvidenceOutcome | null;
-  verdictSource?: "self_report" | "reference_checked" | "model_suggestion" | "unknown" | "deterministic" | null;
+  verdictSource?: "self_report" | "reference_checked" | "model_suggestion" | "unknown" | "deterministic" | "ai_graded" | null;
 }
 
 export interface EvidenceHelpExposure {
@@ -39,7 +39,7 @@ export interface EvidenceHelpExposure {
   level: "hinted" | "revealed";
   /** V2-13: instruction | hint | solution. Missing/legacy reads as hint. */
   kind?: "instruction" | "hint" | "solution" | "evaluation_feedback" | null;
-  /** Server canonical catalogue comparison; not a learner-supplied identity. */
+  /** Server canonical catalogue or exact classroom comparison; not a learner-supplied identity. */
   sameQuestion?: boolean;
   /** Persisted and retrievable by the client, not proof of reading. Null means unknown. */
   delivered: boolean | null;
@@ -50,6 +50,7 @@ export interface EvidenceEligibilityContext {
   /** Learner reports about the original answer conditions; they never change its mathematical verdict. */
   selfReportedAnswerConditions?: { copiedAnswer: boolean; reportedGuess: boolean };
   serverEvaluation?: ServerEvaluation | null;
+  aiEvaluation?: AiEvaluation | null;
   /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
   examAttempt?: {
     firstFamilyExposure: boolean | null;
@@ -132,6 +133,15 @@ export type EvidenceEligibilityReasonCode =
   | "server_evaluation_abstained"
   | "deterministic_correct"
   | "deterministic_incorrect"
+  | "ai_evaluation_incomplete"
+  | "ai_evaluation_identity_mismatch"
+  | "ai_evaluation_outcome_conflict"
+  | "ai_evaluation_question_mismatch"
+  | "ai_evaluation_low_confidence"
+  | "ai_evaluation_abstained"
+  | "ai_evaluation_criteria_inconsistent"
+  | "ai_graded_correct"
+  | "ai_graded_incorrect"
   | "reference_check_incomplete"
   | "reference_check_scope_incomplete"
   | "reference_check_identity_mismatch"

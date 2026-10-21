@@ -147,7 +147,8 @@ function CatalogBody({
     case "question":
       return (
         <ProblemCard prompt={text || "（空提问）"}>
-          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
+          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={{ ...attemptContext,
+            ...(typeof params.skillLabel === "string" && params.skillLabel.trim() ? { questionSkillLabel: params.skillLabel.trim().slice(0, 200) } : {}) }} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
         </ProblemCard>
       );
     case "draft":
@@ -156,9 +157,9 @@ function CatalogBody({
           className="rounded-lg border border-line bg-surface px-3 py-2 text-sm leading-6 text-text-2"
           data-catalog="draft"
         >
-          <p className="mb-1 text-xs font-medium text-text-2">个人草稿</p>
+          <p className="mb-1 text-xs font-medium text-text-2">我的思考</p>
           <p className="whitespace-pre-wrap text-text-2">
-            {text || "草稿锚点已预留；保存需服务端 draft-anchors 接口。"}
+            {text || "可以用「记笔记」写下你的思考。"}
           </p>
         </div>
       );

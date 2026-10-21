@@ -1,10 +1,25 @@
+import type { CourseGoal } from "@aistudy/contracts";
+
+export type TodayCourse = { id: string; title: string; archivedAt: string | null;
+  targetDate?: CourseGoal["targetDate"]; weeklyMinutes?: number; learningMode?: CourseGoal["learningMode"] };
+
 export type TodayResumeState = {
   kind: "ready" | "empty" | "error" | "loggedOut";
   continueItem?: { conversationId: string; title: string; lastUserText?: string; courseId?: string | null;
     sourceVersions?: Record<string, number>; currentPage?: number | null; manualSourceCount?: number };
   pendingReviews?: { count: number; href: "/opening/suggestions" };
-  courses?: { status: "ready"; items: Array<{ id: string; title: string; archivedAt: string | null }> } | { status: "error" };
+  courses?: { status: "ready"; items: TodayCourse[] } | { status: "error" };
 };
+
+/** Existing context wins; an unbound activity/chat must not borrow another course's goal. */
+export function currentTodayCourse(state: TodayResumeState, activity?: { courseId: string | null } | null): TodayCourse | null {
+  if (state.courses?.status !== "ready") return null;
+  if (activity || state.continueItem) {
+    const id = activity ? activity.courseId : state.continueItem?.courseId;
+    return state.courses.items.find(course => course.id === id) ?? null;
+  }
+  return state.courses.items.find(course => !course.archivedAt && (course.targetDate != null || course.weeklyMinutes !== undefined)) ?? null;
+}
 export function hasNoTodayCourses(state: TodayResumeState): boolean {
   return (state.kind === "ready" || state.kind === "empty") && state.courses?.status === "ready" && state.courses.items.length === 0;
 }

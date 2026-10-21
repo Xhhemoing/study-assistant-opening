@@ -16,7 +16,7 @@ import {
   lockLearningOwner,
 } from "./opening-learning-facts";
 
-function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
+export function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
   const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
   const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
   return {
@@ -158,6 +158,102 @@ async function insertCompileJob(
 /** Bounds the continuation walk; a learner does not finish this many sessions on one key. */
 const MAX_ACTIVITY_CONTINUATIONS = 100;
 
+/** Shared transaction boundary for activity creation and atomic first-learning setup. */
+export async function createOpeningTeachingActivityInTransaction(
+  tx: TransactionSql, scope: Scope, input: TeachingActivityCreateInput,
+  options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
+): Promise<TeachingActivity> {
+  await lockLearningOwner(tx, scope);
+  // Serializes with coach undo's workspace FOR UPDATE. A start request
+  // prepared before undo must not create an activity for a withdrawn task.
+  if (input.createIntent.source === "task" && typeof input.createIntent.taskId === "string") {
+    const withdrawn = await tx`SELECT 1 FROM opening_plan_acceptances a
+      JOIN opening_plan_drafts d ON d.id=a.draft_id AND d.workspace_id=a.workspace_id
+      WHERE a.workspace_id=${scope.workspaceId} AND d.owner_user_id=${scope.ownerUserId}
+        AND a.source='coach' AND a.undone_at IS NOT NULL
+        AND a.created_task_versions ? ${input.createIntent.taskId.toLowerCase()} LIMIT 1`;
+    if (withdrawn.length) throw learningError("CONFLICT", "该教练任务已撤销，请重新读取今日任务。");
+  }
+  const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
+  if (sourceIds.length) await admitLearningSources(tx, scope, sourceIds);
+  if (input.courseId) {
+    const course = await tx`
+      SELECT id FROM courses
+      WHERE id = ${input.courseId}
+        AND workspace_id = ${scope.workspaceId}
+        AND archived_at IS NULL
+      FOR SHARE`;
+    if (!course.length) throw learningError("NOT_FOUND", "course not found");
+  }
+  // Budget lineage is accepted only through the typed, owned user-turn reference.
+  // Arbitrary createIntent JSON cannot select a fresh or foreign parent budget.
+  if (input.createIntent.parentInteractionId !== undefined || input.createIntent.sourceTurnId !== undefined) {
+    throw learningError("CONFLICT", "budget lineage must use sourceTurnId");
+  }
+  if (input.sourceTurnId) {
+    const source = await tx`SELECT t.id FROM opening_turns t
+      JOIN opening_conversations c ON c.id = t.conversation_id
+      WHERE t.id = ${input.sourceTurnId} AND t.role = 'user'
+        AND t.workspace_id = ${scope.workspaceId} AND c.workspace_id = ${scope.workspaceId}
+        AND c.owner_user_id = ${scope.ownerUserId}
+        AND c.course_id IS NOT DISTINCT FROM ${input.courseId ?? null}::uuid
+      FOR SHARE OF t, c`;
+    if (!source.length) throw learningError("NOT_FOUND", "source user turn not found in this course");
+  }
+  const initialCreateIntent = { ...input.createIntent, ...(input.sourceTurnId ? { sourceTurnId: input.sourceTurnId } : {}) };
+  // A completed activity is final; with continueAfterCompleted the same request
+  // walks to the next key in its chain, so repeats still land on one activity.
+  let clientKey = input.clientKey;
+  let createIntent: Record<string, unknown> = initialCreateIntent;
+  for (let hop = 0; ; hop += 1) {
+    const replay = await tx`
+      SELECT * FROM opening_teaching_activities
+      WHERE workspace_id = ${scope.workspaceId}
+        AND owner_user_id = ${scope.ownerUserId}
+        AND client_key = ${clientKey}
+      FOR UPDATE`;
+    if (!replay[0]) break;
+    if (!isDeepStrictEqual(replay[0].create_intent, createIntent)) {
+      throw learningError("CONFLICT", "activity clientKey payload conflict");
+    }
+    if (!input.continueAfterCompleted || replay[0].status !== "completed") {
+      return mapTeachingActivity(replay[0] as Record<string, unknown>);
+    }
+    if (hop >= MAX_ACTIVITY_CONTINUATIONS) throw learningError("CONFLICT", "too many continued activities for this clientKey");
+    const previousId = String(replay[0].id);
+    clientKey = `${input.clientKey}:next:${previousId}`;
+    createIntent = { ...initialCreateIntent, continuesActivityId: previousId };
+  }
+  if (options.replayOnly) throw learningError("VALIDATION", "目标日期已过去，且没有可恢复的同一学习意图");
+  const id = randomUUID();
+  const goalJson = input.goalJson ?? {};
+  const generateStatus = options.enqueueCompile ? "queued" : "ready";
+  const rows = await tx`
+    INSERT INTO opening_teaching_activities (
+      id, workspace_id, owner_user_id, course_id, status, generate_status,
+      intent_kind, intent_summary, source_ids, goal_json, path_version, content_version,
+      checkpoint_json, client_key, create_intent
+    ) VALUES (
+      ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.courseId ?? null},
+      'active', ${generateStatus}, ${input.intentKind}, ${input.intentSummary}, ${sourceIds},
+      ${tx.json(goalJson as never)}, 1, 0, ${tx.json({})}, ${clientKey},
+      ${tx.json(createIntent as never)}
+    )
+    ON CONFLICT (workspace_id, owner_user_id, client_key) DO NOTHING
+    RETURNING *`;
+  if (!rows[0]) throw learningError("CONFLICT", "activity clientKey already used");
+  if (options.enqueueCompile) {
+    await insertCompileJob(tx, scope, {
+      activityId: id,
+      mode: "generate",
+      clientKey,
+      expectedContentVersion: 0,
+      sourceIds,
+    });
+  }
+  return mapTeachingActivity(rows[0] as Record<string, unknown>);
+}
+
 export function createOpeningTeachingActivitiesRepository(sql: Sql) {
   return {
     assertOwnedActivity: (scope: Scope, activityId: string) =>
@@ -192,97 +288,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       input: TeachingActivityCreateInput,
       options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
     ): Promise<TeachingActivity> {
-      return sql.begin(async (tx) => {
-        await lockLearningOwner(tx, scope);
-        // Serializes with coach undo's workspace FOR UPDATE. A start request
-        // prepared before undo must not create an activity for a withdrawn task.
-        if (input.createIntent.source === "task" && typeof input.createIntent.taskId === "string") {
-          const withdrawn = await tx`SELECT 1 FROM opening_plan_acceptances a
-            JOIN opening_plan_drafts d ON d.id=a.draft_id AND d.workspace_id=a.workspace_id
-            WHERE a.workspace_id=${scope.workspaceId} AND d.owner_user_id=${scope.ownerUserId}
-              AND a.source='coach' AND a.undone_at IS NOT NULL
-              AND a.created_task_versions ? ${input.createIntent.taskId.toLowerCase()} LIMIT 1`;
-          if (withdrawn.length) throw learningError("CONFLICT", "该教练任务已撤销，请重新读取今日任务。");
-        }
-        const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
-        if (sourceIds.length) await admitLearningSources(tx, scope, sourceIds);
-        if (input.courseId) {
-          const course = await tx`
-            SELECT id FROM courses
-            WHERE id = ${input.courseId}
-              AND workspace_id = ${scope.workspaceId}
-              AND archived_at IS NULL
-            FOR SHARE`;
-          if (!course.length) throw learningError("NOT_FOUND", "course not found");
-        }
-        // Budget lineage is accepted only through the typed, owned user-turn reference.
-        // Arbitrary createIntent JSON cannot select a fresh or foreign parent budget.
-        if (input.createIntent.parentInteractionId !== undefined || input.createIntent.sourceTurnId !== undefined) {
-          throw learningError("CONFLICT", "budget lineage must use sourceTurnId");
-        }
-        if (input.sourceTurnId) {
-          const source = await tx`SELECT t.id FROM opening_turns t
-            JOIN opening_conversations c ON c.id = t.conversation_id
-            WHERE t.id = ${input.sourceTurnId} AND t.role = 'user'
-              AND t.workspace_id = ${scope.workspaceId} AND c.workspace_id = ${scope.workspaceId}
-              AND c.owner_user_id = ${scope.ownerUserId}
-              AND c.course_id IS NOT DISTINCT FROM ${input.courseId ?? null}::uuid
-            FOR SHARE OF t, c`;
-          if (!source.length) throw learningError("NOT_FOUND", "source user turn not found in this course");
-        }
-        const initialCreateIntent = { ...input.createIntent, ...(input.sourceTurnId ? { sourceTurnId: input.sourceTurnId } : {}) };
-        // A completed activity is final; with continueAfterCompleted the same request
-        // walks to the next key in its chain, so repeats still land on one activity.
-        let clientKey = input.clientKey;
-        let createIntent: Record<string, unknown> = initialCreateIntent;
-        for (let hop = 0; ; hop += 1) {
-          const replay = await tx`
-            SELECT * FROM opening_teaching_activities
-            WHERE workspace_id = ${scope.workspaceId}
-              AND owner_user_id = ${scope.ownerUserId}
-              AND client_key = ${clientKey}
-            FOR UPDATE`;
-          if (!replay[0]) break;
-          if (!isDeepStrictEqual(replay[0].create_intent, createIntent)) {
-            throw learningError("CONFLICT", "activity clientKey payload conflict");
-          }
-          if (!input.continueAfterCompleted || replay[0].status !== "completed") {
-            return mapTeachingActivity(replay[0] as Record<string, unknown>);
-          }
-          if (hop >= MAX_ACTIVITY_CONTINUATIONS) throw learningError("CONFLICT", "too many continued activities for this clientKey");
-          const previousId = String(replay[0].id);
-          clientKey = `${input.clientKey}:next:${previousId}`;
-          createIntent = { ...initialCreateIntent, continuesActivityId: previousId };
-        }
-        if (options.replayOnly) throw learningError("VALIDATION", "目标日期已过去，且没有可恢复的同一学习意图");
-        const id = randomUUID();
-        const goalJson = input.goalJson ?? {};
-        const generateStatus = options.enqueueCompile ? "queued" : "ready";
-        const rows = await tx`
-          INSERT INTO opening_teaching_activities (
-            id, workspace_id, owner_user_id, course_id, status, generate_status,
-            intent_kind, intent_summary, source_ids, goal_json, path_version, content_version,
-            checkpoint_json, client_key, create_intent
-          ) VALUES (
-            ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.courseId ?? null},
-            'active', ${generateStatus}, ${input.intentKind}, ${input.intentSummary}, ${sourceIds},
-            ${tx.json(goalJson as never)}, 1, 0, ${tx.json({})}, ${clientKey},
-            ${tx.json(createIntent as never)}
-          )
-          ON CONFLICT (workspace_id, owner_user_id, client_key) DO NOTHING
-          RETURNING *`;
-        if (!rows[0]) throw learningError("CONFLICT", "activity clientKey already used");
-        if (options.enqueueCompile) {
-          await insertCompileJob(tx, scope, {
-            activityId: id,
-            mode: "generate",
-            clientKey,
-            expectedContentVersion: 0,
-            sourceIds,
-          });
-        }
-        return mapTeachingActivity(rows[0] as Record<string, unknown>);
-      });
+      return sql.begin(tx => createOpeningTeachingActivityInTransaction(tx, scope, input, options)) as Promise<TeachingActivity>;
     },
 
     /**

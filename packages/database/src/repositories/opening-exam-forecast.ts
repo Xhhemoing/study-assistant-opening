@@ -23,7 +23,7 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
   async function overview(tx: TransactionSql, scope: Scope, teacher: string | null): Promise<ExamForecastOverview> {
     await lockLearningOwner(tx, scope);
     const [sprint] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     const pack = sprint ? parseExamSprintSnapshot(sprint.pack_snapshot, sprint.state).pack : initialPack;
     const skillIds = [...new Set(pack.questions.map(question => question.skillId))];
     if (!sprint) return forecastExamTopics([], skillIds, teacher);
@@ -62,7 +62,7 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
         if (!owners.length) throw learningError("NOT_FOUND", "工作区不存在");
         await lockBoundExamCourse(tx, scope);
         const [sprint] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+          WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!sprint) throw conflict("请先将冲刺绑定课程");
         const [bound] = await tx`SELECT course_id,binding FROM opening_exam_bindings WHERE sprint_id=${String(sprint.id)}`;
         if (!bound) throw conflict("请先将冲刺绑定课程");

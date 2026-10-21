@@ -2,13 +2,13 @@ import { z } from "zod";
 import { isoDateTimeSchema } from "./foundation";
 
 export const loopMetricsQuerySchema = z.object({
-  days: z.coerce.number().int().min(1).max(90).default(14),
+  days: z.coerce.number().int().min(1).max(90).default(7),
 }).strict();
 
 export const loopMetricSchema = z.object({
   id: z.string().min(1).max(120),
   label: z.string().min(1).max(160),
-  unit: z.enum(["ratio", "count", "cents", "minutes"]),
+  unit: z.enum(["ratio", "count", "cents", "minutes", "milliseconds"]),
   value: z.number().finite().nonnegative().nullable(),
   numerator: z.number().finite().nonnegative().nullable(),
   denominator: z.number().finite().nonnegative().nullable(),

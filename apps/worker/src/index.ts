@@ -2,10 +2,14 @@ import { Worker } from "bullmq";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
+  createOpeningTutorLearnerContextRepository, createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
+import { createTutorStreamWriter } from "./runtime/tutor-stream";
 import { createSourcePageImages } from "./runtime/source-page-images";
-import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
+import { createOpeningSourceEmbeddingsRepository } from "@aistudy/database";
+import { createIndexSourceHandler } from "./jobs/index-source";
+import { createOpeningMaterialRetriever } from "./runtime/material-retrieval";
 import { createRedisConnection, createProducerRedisConnection, createQueues } from "./runtime/queue";
 import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
@@ -13,6 +17,8 @@ import { createHandlers, handlerForKind } from "./runtime/handlers";
 import { preflightParser } from "./parsers/parser-preflight";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
+import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
+import { tutorModelTask } from "@aistudy/ai";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
@@ -27,7 +33,7 @@ import { runJob } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
 import { createDbSystemQueryService, createDbAssistantProposalService } from "./runtime/system-query";
-import { createOpeningEphemeralProvenanceRepository } from "@aistudy/database";
+import { createOpeningEphemeralProvenanceRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -48,6 +54,7 @@ export async function main(): Promise<void> {
   const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
   const runner = await preflightParser();
   const openingModel = loadOpeningModelCatalog();
+  const embeddingConfig = loadOpeningEmbeddingConfig();
   const redis = createRedisConnection({ url: env.redisUrl });
   const producer = createProducerRedisConnection({ url: env.redisUrl });
   const reportError = (error: unknown) => console.error("worker background operation failed", error instanceof Error ? error.name : "unknown error");
@@ -115,18 +122,22 @@ export async function main(): Promise<void> {
   });
   // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
   // and counts completed spend via resolveBudgetLocalDay half-open bounds.
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0) || openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const indexSource = createIndexSourceHandler({ repository: createOpeningSourceEmbeddingsRepository(sql),
+    config: embeddingConfig, budget: scope => scopeBudget(budget, scope) });
   const models = createDbModelGateway(sql);
   const knowledge = createOpeningKnowledgeRepository(sql);
   const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
     listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
     listReferencedNodeIds: (scope, courseId) => knowledge.listReferencedNodeIds(scope, courseId),
-    get: (scope, courseId) => knowledge.get(scope, courseId),
+    get: (scope, courseId) => knowledge.getForRebuild(scope, courseId),
     replace: (scope, courseId, input) => knowledge.replace(scope, courseId, input),
     // Own task route and ledger entry; retries of one job reuse one reservation.
-    resolveProvider: async (scope, job) => models.budgetedProvider(scope, "knowledge.extract", {
+    resolveProvider: async (scope, job, batch) => models.budgetedProvider(scope, "knowledge.extract", {
       budget: scopeBudget(budget, scope),
-      operationId: `build-course-knowledge:${job.id}`,
+      operationId: `build-course-knowledge:${job.id}:batch:${batch.index}`,
+      parentBudget: { id: `build-course-knowledge:${job.id}`, maxProviderCalls: Math.max(12, batch.count * 2) },
+      beforeSend: () => knowledge.assertExtractionBatch(scope, batch.chunks[0]!.courseId, batch.chunks),
     }),
   });
   const parseMedia = createParseMediaHandler({
@@ -152,11 +163,16 @@ export async function main(): Promise<void> {
       importChunks.listAuthorizedImportChunks(scope, courseId, receiptIds),
   });
   const tutorJobs = createOpeningTutorJobsRepository(sql);
+  const tutorMetadata = createTutorMetadataHandler({ tutorJobs,
+    callModel: (scope, mode, options) => models.call(scope, tutorModelTask(mode), { ...options, budget: scopeBudget(budget, scope) }),
+  });
   // Production compile-teaching-unit dependency construction (shared with tests).
   const compileTeachingUnit = createCompileTeachingUnitHandler(
     createCompileTeachingUnitWorkerDeps(sql, { budget, chunks, privacy: privacyRepo }),
   );
   const handlers = createHandlers(parse, {
+    "index-source": indexSource,
+    "tutor-metadata": tutorMetadata,
     retest,
     remind,
     "build-course-knowledge": buildCourseKnowledge,
@@ -166,6 +182,11 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),
+    learnerContext: createOpeningTutorLearnerContextRepository(sql),
+    stream: createTutorStreamWriter(producer),
+    streamExposures: createOpeningStudyExposureRepository(sql),
+    onStreamUnavailable: reportError,
     systemQuery: createDbSystemQueryService(sql, "worker", { callModel: (scope, input, options) => models.call(scope, "tutor.listen", {
       ...options, input, budget: scopeBudget(budget, scope),
     }) }),
@@ -209,7 +230,7 @@ export async function main(): Promise<void> {
       return;
     }
     await runJob(repository, job.data.jobId ?? job.id, handlerForKind(kind, handlers));
-  }, { connection: redis, concurrency: kind === "parse" ? 1 : 2 });
+  }, { connection: redis, concurrency: kind === "parse" || kind === "tutor-metadata" ? 1 : 2 });
     workers.push(worker);
     worker.on("error", reportError);
   }

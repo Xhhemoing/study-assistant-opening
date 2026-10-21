@@ -6,7 +6,7 @@ Every pull request, every push to `main` or `feat/opening-release`, and every
 manual `workflow_dispatch` run must pass platform quality gates before merge or
 release sign-off. CI uses isolated service containers and never requires
 production secrets. Release evidence must cite the GitHub Actions `quality`
-job URL and result for the exact commit SHA being released. Record that pair
+and `opening-worker-flow` job URLs and results for the exact commit SHA being released. Record those results
 in the Q03 readiness checklist at
 `docs/superpowers/plans/opening-release/08-delivery.md` (section "Q03:
 Production image, backup recovery and operational supervision"); do not open a
@@ -39,6 +39,12 @@ Triggers:
 | Browser E2E | `npm run test:browser` | Real production web server and Playwright Chromium |
 | Build | `npm run build` | worker typecheck + Next production build |
 
+Both jobs must succeed for the final PR head: `lint-typecheck-test-build`
+(`quality`, the gates above) and `real-worker-pdf-browser-flow`
+(`opening-worker-flow`, real PDF processing and persisted learning across Web/worker restarts).
+After merge, the release branch's new SHA receives its own push CI; deployment
+uses that result rather than the previous PR head's result.
+
 The isolated CI job sets `HERMES_HEAVY_ENABLED=0` to bypass local host locks and
 CPU/IO scheduling controls. Vitest uses at most four workers in CI; integration
 and handler files remain serial because they share database fixtures. Local
@@ -53,8 +59,8 @@ run on cache hits. A failed job uploads any available `test-results` and
 
 | Service | Image | Host port |
 |---|---|---:|
-| PostgreSQL | `postgres:16-alpine` | 5432 |
-| PostgreSQL (E2E) | `postgres:16-alpine` | 5433 |
+| PostgreSQL | `pgvector/pgvector:0.8.7-pg16` | 5432 |
+| PostgreSQL (E2E) | `pgvector/pgvector:0.8.7-pg16` | 5433 |
 | Redis | `redis:7-alpine` | 6379 |
 | MinIO | `bitnamilegacy/minio:2025.4.22-debian-12-r2` | 9000 |
 

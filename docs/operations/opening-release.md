@@ -5,6 +5,17 @@ Scope: the Opening release slice (43-task plan in
 must run, what is verified, and what stays blocked. Release acceptance evidence is always bound to
 an exact commit SHA; a claim without a SHA is not evidence.
 
+## System query default (2026-10-21)
+
+`OPENING_SYSTEM_QUERY` now defaults to `1` when unset, including on existing
+deployments after this version is installed. Authenticated saved and temporary
+chat can automatically route record questions through the existing owned,
+read-only query service. To keep this feature disabled, retain explicit
+`OPENING_SYSTEM_QUERY=0` in both Web and Worker environments. This does not enable
+adaptive planning or remove confirmation from plan/teaching proposals. Existing
+authorization, source/privacy checks and model budget limits remain in force.
+Earlier default-off release records below describe their original versions.
+
 ## Status snapshot (2026-09-25, local only)
 
 Implemented locally and covered by unit tests. The earlier default-port service

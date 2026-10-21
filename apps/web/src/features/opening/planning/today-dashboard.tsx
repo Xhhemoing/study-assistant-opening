@@ -6,13 +6,12 @@ import { buttonClass, EmptyState, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningCardsClient } from "../cards/cards-client";
-import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
+import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { CourseStudyContextTools } from "../../courses/course-study-context-tools";
 import { TodayLearningContext } from "./today-overview";
-import { focusPriorityActions } from "./today-task-selection";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
   buildStartLearningCreateInput,
@@ -26,6 +25,8 @@ import {
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 import { TaskLearningActionContext } from "./task-row-actions";
+import { ReviewView } from "./review-view";
+import { useNextStepMetrics } from "./use-next-step-metrics";
 
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
@@ -53,10 +54,6 @@ export function planTodayPrimaryCta(
 
 export function shouldOpenTodayQueue(focusTaskId?: string): boolean {
   return Boolean(focusTaskId);
-}
-
-export function shouldCloseTodayQueue(source?: "focus" | "user"): boolean {
-  return source !== "focus";
 }
 
 export function TodayDashboard({
@@ -102,14 +99,11 @@ export function TodayDashboard({
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => shouldOpenTodayQueue(focusTaskId));
-  const [queueEmpty, setQueueEmpty] = useState(false);
-  const desktopQueue = !queueEmpty || queueOpen || (state.pendingReviews?.count ?? 0) > 0;
-  const [actionsRequested, setActionsRequested] = useState(false);
-  const showActions = useCallback(() => { setQueueOpen(true); setActionsRequested(true); }, []);
+  const [reviewsOpen, setReviewsOpen] = useState(false);
+  const [pendingReviewCount, setPendingReviewCount] = useState(state.pendingReviews?.count ?? 0);
   const [reloadToken, setReloadToken] = useState(0);
   const [dueCardsError, setDueCardsError] = useState(false);
   const [dueCardCount, setDueCardCount] = useState(0);
-  const showDesktopQueue = desktopQueue || dueCardCount > 0 || dueCardsError;
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
   const [activityLoad, setActivityLoad] = useState<"loading" | "ready" | "error">("loading");
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
@@ -128,8 +122,11 @@ export function TodayDashboard({
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
   const noCourses = hasNoTodayCourses(state);
-  const currentCourseId = currentActivity ? currentActivity.courseId : state.continueItem?.courseId;
-  const courseTitle = state.courses?.status === "ready" ? state.courses.items.find(course => course.id === currentCourseId)?.title : undefined;
+  const currentCourse = currentTodayCourse(state, currentActivity);
+  const nextStepMetrics = useNextStepMetrics(currentActivity ? { targetType: "activity", targetId: currentActivity.id }
+    : state.kind === "ready" && state.continueItem ? { targetType: "conversation", targetId: state.continueItem.conversationId }
+      : currentCourse ? { targetType: "course", targetId: currentCourse.id } : null);
+  const courseTitle = currentCourse?.title;
   const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
     ? `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}`
@@ -138,6 +135,13 @@ export function TodayDashboard({
   useEffect(() => {
     if (focusTaskId) setQueueOpen(true);
   }, [focusTaskId]);
+  useEffect(() => {
+    const openSuggestions = () => { if (window.location.hash === "#suggestions") setReviewsOpen(true); };
+    const showSuggestions = () => setReviewsOpen(true);
+    openSuggestions(); window.addEventListener("hashchange", openSuggestions);
+    window.addEventListener("opening:show-suggestions", showSuggestions);
+    return () => { window.removeEventListener("hashchange", openSuggestions); window.removeEventListener("opening:show-suggestions", showSuggestions); };
+  }, []);
 
   useEffect(() => {
     if (noCourses || state.kind !== "ready" && state.kind !== "empty") {
@@ -155,12 +159,6 @@ export function TodayDashboard({
       });
     return () => controller.abort();
   }, [cards, reloadToken, state.kind, noCourses]);
-  useEffect(() => {
-    if (actionsRequested && queueOpen && focusPriorityActions(document.getElementById("action-digest"))) {
-      setActionsRequested(false);
-    }
-  }, [actionsRequested, queueOpen, state.kind]);
-
   useEffect(() => {
     if (noCourses || state.kind !== "ready" && state.kind !== "empty") return;
     const controller = new AbortController();
@@ -248,9 +246,8 @@ export function TodayDashboard({
   }, [api, currentActivity, teachingLoopTrialEnabled, reloadToken]);
 
   const clearSelection = useCallback(() => setTask(null), []);
-  const select = useCallback((next: StudyTask, source?: "focus" | "user") => {
+  const select = useCallback((next: StudyTask) => {
     setTask(next);
-    if (shouldCloseTodayQueue(source)) setQueueOpen(false);
   }, []);
   const taskStartInFlight = useRef(false);
 
@@ -290,6 +287,7 @@ export function TodayDashboard({
       });
       setSelectedActivity(created);
       setActivityLoad("ready");
+      setCtaFocusNonce((n) => n + 1);
     } catch (error) {
       const message =
         error instanceof OpeningApiError ? error.message : "创建教学活动失败";
@@ -326,23 +324,30 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
-  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">今日学习工作台</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time> · 继续上次的位置，或选一项开始</p></header>;
-  if (noCourses) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /></div>;
+  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">今日学习</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time></p></header>;
+  const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
+    <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
+    <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />
+  </details>;
+  if (noCourses) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav>{suggestions}</div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex min-h-full flex-col bg-bg text-text">
         {heading}
-        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取，未将读取失败当成没有课程。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
+        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
         {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
-        <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
-          {currentActivity || state.continueItem ? <TodayLearningContext
+        <div ref={nextStepMetrics.ref} onClickCapture={event => {
+          if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
+        }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
+          {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
             item={state.continueItem}
             courseTitle={courseTitle}
+            course={currentCourse}
+            timeZone={timeZone}
             activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
             resume={learningResume}
-            onShowActions={showActions}
             primaryAction={currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
               <button
                 type="button"
@@ -353,7 +358,7 @@ export function TodayDashboard({
               >
                 {ctaBusy ? "处理中…" : ctaLabel}
               </button>
-            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : null}
+            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentCourse.id)}/study`} data-today-primary-cta="true">开始学习</Link> : null}
             secondaryAction={
               <Link href={assistantHref} className={ui.quiet}>
                 自由对话
@@ -365,25 +370,21 @@ export function TodayDashboard({
           ) : null}
           {activityLoad === "error" ? (
             <p className="px-4 text-xs text-warn sm:px-5" role="status">
-              教学活动暂时无法读取；仍可使用自由对话。
+              学习记录暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button>
             </p>
           ) : null}
         </div>
         <div className="flex min-h-0 flex-1 flex-col">
+          <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
+            <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起今日安排" : "查看今日安排"}</button>
+            <Link href="/opening/review" className={ui.quiet}>复习{dueCardCount > 0 ? ` · ${dueCardCount} 张到期` : ""}</Link>
+          </nav>
           <div
             id="today-queue"
-            className={`${queueOpen || showDesktopQueue ? "flex" : "hidden"} min-h-0 shrink-0 flex-col border-b border-line bg-surface group-data-[focus=true]/workspace:hidden`}
+            hidden={!queueOpen}
+            className={`${queueOpen ? "flex" : "hidden"} min-h-0 shrink-0 flex-col border-b border-line bg-surface`}
           >
-            {dueCardCount > 0 ? (
-              <Link
-                href="/opening/review"
-                className="shrink-0 border-b border-accent/20 bg-accent-soft px-4 py-2 text-xs leading-5 text-accent focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                {dueCardCount} 张记忆卡片到期
-              </Link>
-            ) : null}
             <TodayPlanView
-              onEmptyChange={setQueueEmpty}
               api={api}
               focusTaskId={focusTaskId}
               selectedId={task?.id}
@@ -399,7 +400,7 @@ export function TodayDashboard({
             data-today-teaching-pane="true"
             data-today-cta-focus={ctaFocusNonce > 0 ? String(ctaFocusNonce) : undefined}
           >
-            {currentActivity ? (
+            {currentActivity && ctaFocusNonce > 0 ? (
               currentActivity.courseId ? null : teachingLoopTrialEnabled ? (
                 <TeachingContinueEntry
                   key={`${currentActivity.id}:${ctaFocusNonce}`}
@@ -432,19 +433,12 @@ export function TodayDashboard({
             resumeLoad === "error" &&
             clientInitLoad === "error" ? (
               <p className="px-5 pb-4 text-xs text-warn" role="status">
-                学习断点与主讲内容暂时无法读取；已回退到活动摘要，不会伪造讲义。
+                学习内容暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button>
               </p>
             ) : null}
           </div>
         </div>
-            {(state.pendingReviews?.count ?? 0) > 0 ? (
-              <Link
-                href="/opening/suggestions"
-                className="mx-4 mb-5 mt-3 rounded-lg px-1 py-2 text-sm text-text-2 underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                {state.pendingReviews!.count} 项建议待审核 · 不影响继续学习
-              </Link>
-            ) : null}
+        {suggestions}
       </div>
       </TaskLearningActionContext.Provider>
     </TaskQueueRefreshContext.Provider>

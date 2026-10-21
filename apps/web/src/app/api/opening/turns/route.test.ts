@@ -106,6 +106,15 @@ describe("POST /api/opening/turns request boundary", () => {
     expect(submitTurn).not.toHaveBeenCalled();
   });
 
+  it("identifies an existing job replay so a refreshed tab does not report a new latency sample", async () => {
+    submitTurn.mockResolvedValue({ jobId: "job-id", turnId: "turn-id", replayed: true });
+
+    const response = await POST(post(JSON.stringify(validTurn)));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ jobId: "job-id", turnId: "turn-id", replayed: true });
+  });
+
   it("allows a legitimate maximum contract text payload", async () => {
     const body = JSON.stringify({
       ...validTurn,

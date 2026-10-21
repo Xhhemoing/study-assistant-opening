@@ -93,11 +93,11 @@ describe("startup validation", () => {
   });
 
   it("missing dependency: UI shown without API enabled", () => {
-    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_WORKSPACE: "1" })).join()).toMatch(/OPENING_TEACHING_WORKSPACE=1 .* requires OPENING_TEACHING_LOOP=1/);
+    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP: "0" })).join()).toMatch(/OPENING_TEACHING_WORKSPACE=1 .* requires OPENING_TEACHING_LOOP=1/);
   });
 
   it("missing dependency: rollout without API, and rollout out of range", () => {
-    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "50" })).join()).toMatch(/ROLLOUT_PERCENT is set/);
+    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "50", OPENING_TEACHING_LOOP: "0" })).join()).toMatch(/ROLLOUT_PERCENT is set/);
     expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "101" })).join()).toMatch(/0-100/);
     expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "12.5" })).join()).toMatch(/0-100/);
   });
@@ -139,8 +139,12 @@ describe("capabilities", () => {
   });
 
   it("api/ui/rollout combinations", () => {
-    expect(resolveCapabilities(sw({}), "u1").teachingLoop).toEqual({ api: false, ui: false });
-    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1" }), "u1").teachingLoop).toEqual({ api: true, ui: false });
+    expect(resolveCapabilities(sw({}), "u1").teachingLoop).toEqual({ api: true, ui: true });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_WORKSPACE: "0" }), "u1").teachingLoop).toEqual({ api: true, ui: false });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
+    expect(resolveCapabilities(sw({}), null).teachingLoop).toEqual({ api: false, ui: false });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
   });

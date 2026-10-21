@@ -47,8 +47,8 @@ describe("dedicated material reader", () => {
     expect(html).toContain("返回");
     expect(html).toContain("version=0");
     expect(html).toContain("#page=3");
-    expect(html).toContain("不是当前版本 v2");
-    expect(html).toContain("请求定位：第 3 页");
+    expect(html).toContain("这份材料之后已有更新");
+    expect(html).toContain("第 3 页");
     expect(html).toContain("无法同步确认当前显示页");
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain('aria-label="解析正文"');

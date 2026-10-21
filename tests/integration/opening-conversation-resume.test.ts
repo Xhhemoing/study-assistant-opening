@@ -31,11 +31,15 @@ it("loads owned continuity turns with citations and hides other owners", async (
     conversationId: owned.id,
     text: "q",
     mode: "explain",
-    clientKey: randomUUID(),
+    purpose: "answer",
+    clientKey: "resume-routing-replay",
     sourceIds: [],
     learningSessionId: null,
     currentPage: null,
     chunkId: null,
+  });
+  expect(await repo.findTurnByClientKey(fixture.scope, "resume-routing-replay", owned.id)).toMatchObject({
+    userTurnId: saved.turnId, mode: "explain", purpose: "answer", querySystem: false,
   });
   await fixture.sql`
     UPDATE opening_turns

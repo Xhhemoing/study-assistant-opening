@@ -15,7 +15,7 @@ export const publicVerdictSourceSchema = z.enum([
   "model_suggestion",
   "unknown",
 ]);
-export const verdictSourceSchema = z.enum([...publicVerdictSourceSchema.options, "deterministic"]);
+export const verdictSourceSchema = z.enum([...publicVerdictSourceSchema.options, "deterministic", "ai_graded"]);
 
 export const assistanceLevelSchema = z.enum([
   "independent",
@@ -173,7 +173,7 @@ export const learningSummarySchema = z
     /** HTTP responses may contain representative IDs; sampleCount remains the full count. */
     evidenceIds: z.array(uuidSchema).max(200),
     /** Distinguishes self-report, model suggestion, and reference-checked evidence. */
-    evidenceSources: z.array(verdictSourceSchema).max(5).optional(),
+    evidenceSources: z.array(verdictSourceSchema).max(verdictSourceSchema.options.length).optional(),
     sampleCount: z.number().int().nonnegative(),
     lastObservedAt: isoDateTimeSchema.nullable(),
     /** Latest original attempts within a known requirement; never a mastery claim. */

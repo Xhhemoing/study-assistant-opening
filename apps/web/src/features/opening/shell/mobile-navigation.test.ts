@@ -10,12 +10,12 @@ describe("Opening mobile navigation", () => {
     const html = renderToStaticMarkup(createElement(OpeningMobileNavigation, { pathname: "/opening/today" }));
     expect(html.match(/<a /g)).toHaveLength(4);
     expect(html).not.toContain("更多");
-    expect(html).toContain("/opening/review");
+    expect(html).toContain("/opening/assistant");
     expect(html).toContain("资料");
   });
-  it("keeps the review destination selected for legacy card URLs", () => {
+  it("keeps Today selected for legacy card URLs", () => {
     const html = renderToStaticMarkup(createElement(OpeningMobileNavigation, { pathname: "/opening/cards/session" }));
-    expect(html).toMatch(/href="\/opening\/review"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/opening\/review"/);
+    expect(html).toMatch(/href="\/opening\/today"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/opening\/today"/);
     expect(html.match(/aria-current="page"/g)).toHaveLength(1);
   });
   it("does not misidentify an adjacent route as a child", () => {

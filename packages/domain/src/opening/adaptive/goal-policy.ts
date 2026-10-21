@@ -1,7 +1,7 @@
 import type { CourseGoal, GoalLearningContext } from "@aistudy/contracts";
 
 /** Product policy defaults, adjustable after real use; not calibrated learning constants. */
-const EXAM_WINDOW_DAYS = 7;
+const EXAM_WINDOW_DAYS = 14;
 const PREREQUISITE_MINUTES = { exam: 5, understand: 10 } as const;
 
 /** Resolve calendar dates in the caller's local day, without host-timezone conversion. */

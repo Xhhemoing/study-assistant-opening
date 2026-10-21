@@ -102,10 +102,23 @@ export async function readOpeningLoopMetrics(sql: Sql, scope: Scope, options: { 
     const accepted = generated.size ? await tx`SELECT DISTINCT client_key FROM opening_tasks
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND origin='planner'
         AND client_key=ANY(${[...generated.keys()]}::text[]) AND created_at<${now}` : [];
+    const [timing] = await tx`SELECT count(*)::int AS samples,
+      percentile_cont(0.5) WITHIN GROUP(ORDER BY duration_ms) AS median
+      FROM opening_learning_experience_events WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND kind='first_text' AND recorded_at>=${from} AND recorded_at<${now}`;
+    const [experience] = await tx`SELECT count(*)::int AS shown,
+      count(*) FILTER(WHERE EXISTS(SELECT 1 FROM opening_learning_experience_events accepted
+        WHERE accepted.workspace_id=shown.workspace_id AND accepted.owner_user_id=shown.owner_user_id
+          AND accepted.kind='next_step_started' AND accepted.target_type=shown.target_type AND accepted.target_id=shown.target_id
+          AND accepted.local_day=shown.local_day AND accepted.recorded_at>=shown.recorded_at AND accepted.recorded_at<${now}))::int AS started
+      FROM opening_learning_experience_events shown WHERE shown.workspace_id=${scope.workspaceId} AND shown.owner_user_id=${scope.ownerUserId}
+        AND shown.kind='next_step_shown' AND shown.recorded_at>=${from} AND shown.recorded_at<${now}`;
     return buildLoopMetricsReport({ asOf: now.toISOString(), windowStart: from.toISOString(), windowDays: days, timeZone,
       jobs: jobs.map(row => ({ kind: String(row.kind), state: String(row.state), count: Number(row.n) })),
       budget: budget.map(row => ({ category: row.category as LoopMetricsInput["budget"][number]["category"], count: Number(row.n), cents: Number(row.cents) })),
       observations, learningComplete, privacyExcludedCount, feedback,
+      experience: { firstTextSamples: Number(timing?.samples ?? 0), firstTextMedianMs: timing?.median == null ? null : Number(timing.median),
+        shown: Number(experience?.shown ?? 0), started: Number(experience?.started ?? 0) },
       suggestions: { complete: suggestionsComplete, generated: generated.size, accepted: accepted.length,
         minutes: [...generated.values()].reduce((sum, n) => sum + n, 0) },
       suggestionFeedback: suggestionFeedback.map(row => ({ reason: row.reason == null ? "missing" : String(row.reason), count: Number(row.n) })),

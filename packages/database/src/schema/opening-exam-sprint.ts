@@ -1,17 +1,23 @@
 import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
-import type { ExamPack, ExamSprintCommand, ExamSprintState } from "@aistudy/contracts";
+import type { CourseExamSnapshot, ExamPack, ExamSprintCommand, ExamSprintState } from "@aistudy/contracts";
 import { users } from "./identity";
+import { sql } from "drizzle-orm";
+import { courses } from "./courses";
 import { workspaces } from "./library";
 
 export const openingExamSprints = pgTable("opening_exam_sprints", {
   id: uuid("id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  packSnapshot: jsonb("pack_snapshot").$type<ExamPack>().notNull(),
-  state: jsonb("state").$type<ExamSprintState>().notNull(),
+  courseId: uuid("course_id").references(() => courses.id, { onDelete: "cascade" }),
+  packSnapshot: jsonb("pack_snapshot").$type<ExamPack | CourseExamSnapshot>().notNull(),
+  state: jsonb("state").$type<ExamSprintState | Record<string, never>>().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, table => [uniqueIndex("opening_exam_sprint_scope_unique").on(table.workspaceId, table.ownerUserId)]);
+}, table => [
+  uniqueIndex("opening_exam_sprint_legacy_scope_unique").on(table.workspaceId, table.ownerUserId).where(sql`${table.courseId} IS NULL`),
+  uniqueIndex("opening_exam_sprint_course_scope_unique").on(table.workspaceId, table.ownerUserId, table.courseId).where(sql`${table.courseId} IS NOT NULL`),
+]);
 
 export const openingExamSprintCommands = pgTable("opening_exam_sprint_commands", {
   id: uuid("id").primaryKey(),

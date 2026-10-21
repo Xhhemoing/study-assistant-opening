@@ -14,6 +14,12 @@ const paidDraft: QuickSetupDraft = {
   ...applyQuickSetupPreset(freeDraft, "openai_compatible"), modelName: "my-model", inputCentsPerMillion: "10.5",
   outputCentsPerMillion: "20", dailyCapCents: "200", confirmBudget: true,
 };
+const setupResult: OpeningAiSettingsResponse = {
+  defaultModelId: "new", dailyCapCents: 0, envCapCents: 0, personalCeilingCents: 2000,
+  settings: { ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: "new" }, saved: true, invalidStoredSettings: false,
+  models: [{ id: "new", providerId: "custom", providerLabel: "Custom", label: "Model", modelName: "model", inputCentsPerMillion: 0, outputCentsPerMillion: 0, availability: "available", supportsAudio: false, billing: "free_tier" }],
+  tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: [] }, { key: "media.transcribe", label: "音视频转写", group: "materials", needs: ["audio"] }],
+};
 
 describe("one-click model setup", () => {
   it("fills Gemini endpoint and example capabilities without inventing token prices", () => {
@@ -71,7 +77,28 @@ describe("one-click model setup", () => {
     expect(render(freeDraft)).toContain('type="password"');
     expect(render({ ...freeDraft, apiKey: "" })).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
     expect(render(freeDraft)).not.toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
-    expect(render(freeDraft)).toContain("清空已有的辅导模式及用途专属路由");
+    expect(render(freeDraft)).toContain("各项 AI 功能默认使用这个模型");
+  });
+  it("folds prices and media bounds on the ordinary form while keeping paid validation and budget consent", () => {
+    const render = (draft: QuickSetupDraft, advanced = false) => renderToStaticMarkup(createElement(QuickSetupForm, {
+      draft, preset: "openai_compatible", busy: false, advanced, onChange() {}, onPreset() {}, onSubmit() {},
+    }));
+    const html = render(paidDraft);
+    const folded = html.match(/<details([^>]*)data-quick-setup-advanced="true"([^>]*)>([\s\S]*?)<\/details>/);
+    expect(folded).not.toBeNull();
+    expect(`${folded![1]}${folded![2]}`).not.toMatch(/\bopen(?:=|\s|$)/);
+    expect(folded![3]).toContain("输入价格");
+    expect(folded![3]).toContain("输出价格");
+    expect(folded![3]).toContain("媒体输入 token 保守上界");
+    expect(html).toContain("按量计费需在「高级模型选项」中填写供应商价格");
+    expect(html).toContain("我确认开启每日额度");
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
+    expect(render({ ...paidDraft, inputCentsPerMillion: "" })).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
+    expect(render({ ...paidDraft, confirmBudget: false })).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
+    const advancedHtml = render(paidDraft, true);
+    expect(advancedHtml).not.toContain("data-quick-setup-advanced");
+    expect(advancedHtml).toContain("输入价格");
+    expect(advancedHtml).toContain('value="10.5"');
   });
   it("binds an uncertain request to its original payload and client key", () => {
     const first = beginQuickSetupSubmission(initialQuickSetupSubmission, freeDraft, "original-client-key");
@@ -105,18 +132,26 @@ describe("one-click model setup", () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*type="submit"/);
   });
   it("reports each task's configuration requirements without claiming connection success", () => {
-    const data: OpeningAiSettingsResponse = {
-      defaultModelId: "new", dailyCapCents: 0, envCapCents: 0, personalCeilingCents: 2000,
-      settings: { ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: "new" }, saved: true, invalidStoredSettings: false,
-      models: [{ id: "new", providerId: "custom", providerLabel: "Custom", label: "Model", modelName: "model", inputCentsPerMillion: 0, outputCentsPerMillion: 0, availability: "available", supportsAudio: false, billing: "free_tier" }],
-      tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: [] }, { key: "media.transcribe", label: "音视频转写", group: "materials", needs: ["audio"] }],
-    };
-    const html = renderToStaticMarkup(createElement(QuickSetupResult, { data }));
+    const html = renderToStaticMarkup(createElement(QuickSetupResult, { data: setupResult, advanced: true }));
     expect(html).toContain("提示");
     expect(html).toContain("配置可用");
     expect(html).toContain("音视频转写");
     expect(html).toContain("不支持音频输入");
     expect(html).toContain("实际连通性请在高级设置的模型列表中测试");
     expect(html).not.toContain("连接成功");
+  });
+  it("summarizes the default model on the ordinary page without listing every task or hiding configuration gaps", () => {
+    const render = (data: OpeningAiSettingsResponse) => renderToStaticMarkup(createElement(QuickSetupResult, { data, basePath: "/opening/settings" }));
+    const html = render(setupResult);
+    expect(html).toContain("默认模型：Model（model）");
+    expect(html).toContain("部分功能还需补充配置");
+    expect(html).toContain('href="/opening/settings/advanced"');
+    expect(html).not.toContain("音视频转写");
+    expect(html).not.toContain("配置已就绪");
+    expect(html).not.toContain("连接成功");
+    expect(render({ ...setupResult, tasks: setupResult.tasks!.slice(0, 1) })).toContain("配置已就绪，可在高级设置测试连接");
+    const unavailable = render({ ...setupResult, models: [{ ...setupResult.models[0]!, availability: "missing_key" }] });
+    expect(unavailable).toContain("缺少服务器密钥");
+    expect(unavailable).not.toContain("配置已就绪");
   });
 });

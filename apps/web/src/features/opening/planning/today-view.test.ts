@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { TodayGroupedQueue, TodayPlanView, TodayTaskList, localDateKey, todayQueueIsEmpty } from "./today-view";
-import { shouldCloseTodayQueue, shouldOpenTodayQueue } from "./today-dashboard";
+import { shouldOpenTodayQueue } from "./today-dashboard";
 import { focusTodayTask } from "./today-task-selection";
 import { TaskQueueRefreshContext } from "./task-status-control";
 import { createTaskStatusSession } from "./task-status-action";
@@ -62,12 +62,6 @@ it("opens the mobile task queue for a focused deep link while ordinary entry sta
   expect(shouldOpenTodayQueue("task-1")).toBe(true);
   expect(shouldOpenTodayQueue("")) .toBe(false);
   expect(shouldOpenTodayQueue()).toBe(false);
-});
-
-it("keeps a focused deep-link queue open when async selection completes", () => {
-  expect(shouldCloseTodayQueue("focus")).toBe(false);
-  expect(shouldCloseTodayQueue("user")).toBe(true);
-  expect(shouldCloseTodayQueue()).toBe(true);
 });
 
 it("renders Chinese queue group headings from groupTodayQueue", () => {

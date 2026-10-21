@@ -26,7 +26,7 @@ test.describe("opening shell", () => {
         ).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "复习" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "助理" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "资料" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toHaveAttribute(
           "aria-current",
@@ -51,7 +51,7 @@ test.describe("opening shell", () => {
       const page = await context.newPage();
       await page.goto("/opening/today");
       // An owner without courses gets the real course entry, without invented resume data.
-      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
       await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
       await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
       await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);

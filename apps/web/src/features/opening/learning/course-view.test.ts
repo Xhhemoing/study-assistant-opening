@@ -100,7 +100,7 @@ it("does not hide a latest unresolved result behind a previous success", () => {
     ...item, status: "needs_check", recentPerformance: { status: "needs_check", evidenceIds: item.evidenceIds },
   })) }));
   const result = html.split('aria-label="学习证据诊断"')[0]!;
-  expect(result).toContain("最近一次需要核验");
+  expect(result).toContain("最近一次还需确认");
   expect(result).toContain("先查看作答记录，再继续练习核对结果");
   expect(result).not.toContain("最近观察到独立完成");
 });

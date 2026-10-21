@@ -73,12 +73,12 @@ describe("Today learning context", () => {
     expect(html).not.toContain("可恢复 0 份材料");
   });
 
-  it("keeps the relevant action entry while global destinations use the existing navigation", () => {
+  it("keeps one main action without another priority shortcut", () => {
     const html = renderToStaticMarkup(createElement(TodayLearningContext));
-    expect(html).toContain('data-today-loop-links="true"');
+    expect(html).not.toContain('data-today-loop-links="true"');
     expect(html).not.toContain("更多学习方式");
     expect(html).not.toContain("<details");
-    expect(html).toContain('href="#action-digest"');
+    expect(html).not.toContain('href="#action-digest"');
     expect(html.match(/href="\/opening\/courses"/g)).toHaveLength(1);
     expect(html).toContain('href="/opening/courses"');
   });

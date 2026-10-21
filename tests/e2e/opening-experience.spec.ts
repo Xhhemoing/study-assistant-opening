@@ -11,7 +11,7 @@ test("compact mobile navigation and settings retain every destination and predic
   await page.goto("/opening/today");
   const navigation = page.getByRole("navigation", { name: "学习工作台导航（移动端）", exact: true });
   await expect(navigation.getByRole("link")).toHaveCount(4);
-  for (const [label, href] of [["今日", "/opening/today"], ["课程", "/opening/courses"], ["复习", "/opening/review"], ["资料", "/opening/library"]] as const) {
+  for (const [label, href] of [["今日", "/opening/today"], ["课程", "/opening/courses"], ["助理", "/opening/assistant"], ["资料", "/opening/library"]] as const) {
     await expect(navigation.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
@@ -19,9 +19,11 @@ test("compact mobile navigation and settings retain every destination and predic
   await account.click();
   const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "账户与学习工具", exact: true }) });
   await expect(more).toBeVisible();
-  for (const [label, href] of [[/^AI 建议/, "/opening/suggestions"], [/^考前冲刺$/, "/opening/sprint"], [/^连接$/, "/opening/settings/connections"]] as const) {
+  for (const [label, href] of [[/^待确认建议/, "/opening/today#suggestions"], [/^设置$/, "/opening/settings"]] as const) {
     await expect(more.getByRole("link", { name: label })).toHaveAttribute("href", href);
   }
+  await expect(more.getByRole("link", { name: "连接", exact: true })).toHaveCount(0);
+  await expect(more.getByRole("link", { name: "考前冲刺", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(more).not.toBeVisible();
   await expect(account).toBeFocused();
@@ -74,20 +76,19 @@ test("a real note can be saved once with Ctrl S, restored, and found after clear
 
 test("course drafts survive navigation and server errors, and successful creation clears the draft", async ({ page }) => {
   await page.goto("/opening/courses/new");
-  const slug = `experience-${Date.now()}`;
   await page.getByLabel("课程名称", { exact: true }).fill("体验回归课程");
-  await page.getByLabel("Slug", { exact: true }).fill(slug);
   await page.getByLabel("描述", { exact: true }).fill("从真实问题开始的一门课程");
   await expect.poll(() => page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith("aistudy.course-draft.")).length)).toBe(1);
   await page.getByRole("link", { name: "全部课程", exact: true }).click();
   await page.getByRole("link", { name: "新建课程", exact: true }).click();
   await expect(page.getByLabel("课程名称", { exact: true })).toHaveValue("体验回归课程");
-  await expect(page.getByLabel("Slug", { exact: true })).toHaveValue(slug);
+  await expect(page.getByLabel("Slug", { exact: true })).toHaveCount(0);
   await page.route("**/api/courses", route => route.request().method() === "POST" ? route.fulfill({ status: 409, json: { error: { code: "CONFLICT", message: "slug conflict" } } }) : route.continue());
   await page.getByRole("button", { name: "创建课程", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "已被使用" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "课程可能已创建" })).toBeVisible();
   await expect(page.getByLabel("课程名称", { exact: true })).toHaveValue("体验回归课程");
   await page.unroute("**/api/courses");
+  await page.getByRole("button", { name: "另建一门课程", exact: true }).click();
   await page.getByRole("button", { name: "创建课程", exact: true }).click();
   await expect(page).toHaveURL(/\/opening\/courses\/[0-9a-f-]{36}$/);
   await expect.poll(() => page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith("aistudy.course-draft.")).length)).toBe(0);

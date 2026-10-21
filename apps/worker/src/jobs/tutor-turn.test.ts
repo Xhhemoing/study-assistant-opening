@@ -31,10 +31,13 @@ describe("tutor turn handler", () => {
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
+      get: vi.fn(async () => claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
+      canAppendCompletedTurnCandidates: vi.fn(async () => true),
+      appendCompletedTurnCandidates: vi.fn(async () => true),
       loadReplayedTurn: vi.fn(async (_scope: unknown, _ref: string): Promise<{ id: string; status: string; text: string } | null> => null),
       completeFromReplay: vi.fn(async () => false),
       fail: vi.fn(async () => undefined),
@@ -56,6 +59,83 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it("publishes actual Markdown deltas, settles the answer, and returns with optional metadata queued separately", async () => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    provider.complete.mockImplementationOnce(async (input, _signal, onTextDelta) => {
+      expect(input.outputFormat).toBe("markdown");
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      await onTextDelta("F = ");
+      await onTextDelta("ma [1]");
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
+      return { text: "F = ma [1]", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 };
+    });
+    tutorJobs.completeTurn.mockImplementationOnce(async () => {
+      expect(budget.settle).toHaveBeenCalledOnce();
+    });
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      text: "F = ma [1]", citations: [expect.objectContaining({ chunkId: chunkA.id })], candidates: [], enqueueMetadata: true,
+    }));
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(budget.reserve.mock.calls.map(call => call[1].requestId)).toEqual([`tutor:${claimedJob.id}`]);
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).not.toHaveBeenCalled();
+    expect(tutorJobs.appendCompletedTurnCandidates).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue another metadata extraction for legacy structured answers", async () => {
+    const { deps, tutorJobs } = setup();
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      enqueueMetadata: false, candidates: [expect.objectContaining({ payload: expect.objectContaining({ kind: "memory" }) })],
+    }));
+  });
+
+  it("generates one inert help receipt before streaming and reuses it at durable completion", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const anchor = { purpose: "learning_help" as const, attemptId: chunkA.id };
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, learningSessionId: claimedJob.conversationId,
+      sourceVersions: { [chunkA.sourceId]: 0 }, contextAnchor: anchor });
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      expect(streamExposures.generate).toHaveBeenCalledOnce();
+      expect(stream.begin).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id, expect.objectContaining({ exposureReceiptId: chunkB.id }));
+      await onTextDelta("提示");
+      return { text: "提示", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id);
+    const generated = streamExposures.generate.mock.calls[0][1];
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ generatedExposure: generated }));
+    expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
+  });
+
+  it("keeps ordinary session listening free of item-help exposure", async () => {
+    const { deps, tutorJobs } = setup({ claim: { ...claimedJob, mode: "listen" } });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, mode: "listen", learningSessionId: claimedJob.conversationId,
+      sourceVersions: { [chunkA.sourceId]: 0 } });
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
+    await createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id);
+    expect(streamExposures.generate).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("generatedExposure");
+  });
+
+  it("continues saving a completed answer when the temporary Redis stream is unavailable", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => { throw new Error("Redis offline"); }) };
+    const onStreamUnavailable = vi.fn();
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta("first"); await onTextDelta(" second");
+      return { text: "first second", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id);
+    expect(stream.append).toHaveBeenCalledOnce();
+    expect(onStreamUnavailable).toHaveBeenCalledOnce();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "first second" }));
+  });
 
   it.each(["hint", "explain", "listen", "think_together"])("generates a context-only receipt in %s mode without claiming delivery", async mode => {
     const { deps, tutorJobs } = setup({ claim: { ...claimedJob, mode } });
@@ -106,6 +186,16 @@ describe("tutor turn handler", () => {
       { userTurnId: claimedJob.userTurnId, jobId: claimedJob.id, claimToken: undefined });
     expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("放慢节奏");
     expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("先定位不懂之处");
+  });
+
+  it("applies the actual request's style without treating carried material as an instruction", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
+      text: "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n用中文，完整讲解\n\n我的问题：\n用英文，只给关键步骤" });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const input = provider.complete.mock.calls[0]?.[0];
+    expect(input.instruction).toContain("Use English");
+    expect(input.instruction).toContain("只给关键步骤");
   });
 
   it.each(["query", "explain_state", "plan", "language_support"] as const)("does not parse %s content as a learning intent mutation", async purpose => {
@@ -159,6 +249,25 @@ describe("tutor turn handler", () => {
     expect(budget.settle).not.toHaveBeenCalled();
     expect(budget.release).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("injects current course mistakes, preserves their provenance, and checks freshness before sending", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const context = { courseId: claimedJob.conversationId, title: "力学", asOf: "2026-10-21T00:00:00Z", privacyEpoch: 0,
+      goal: { description: "期末", targetDate: "2026-10-31", weeklyMinutes: 420 }, weaknesses: [],
+      recentMistakes: [{ observationId: chunkA.id, skillLabel: "合力", feedback: "先确定受力方向", unmetCriteria: ["方向"], assistance: "independent" as const }],
+      observationIds: [chunkA.id], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 0 }] };
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId: context.courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    const read = vi.fn(async () => context), assertCurrent = vi.fn(async () => {});
+    await createTutorTurnHandler({ ...deps, learnerContext: { read, assertCurrent } })(claimedJob.id);
+    expect(read).toHaveBeenCalledWith(expect.anything(), { courseId: context.courseId, sourceIds: [chunkA.sourceId] });
+    expect(assertCurrent).toHaveBeenCalledWith(expect.anything(), context);
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain("先确定受力方向");
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ contextSourceRefs: expect.arrayContaining(context.sourceRefs) }));
+    const blocked = setup();
+    await expect(createTutorTurnHandler({ ...blocked.deps, learnerContext: { read, assertCurrent: async () => { throw new Error("context changed"); } } })(claimedJob.id)).rejects.toThrow("context changed");
+    expect(blocked.provider.complete).not.toHaveBeenCalled();
+    expect(blocked.budget.release).toHaveBeenCalled();
   });
 
   it("adds a bounded owned planning summary to the same budgeted tutor request", async () => {

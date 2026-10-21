@@ -60,8 +60,8 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     const tutor = getTutorService(fixture.sql), conversation = await tutor.createConversation(fixture.scope, { title: "Query", courseId: f.courseId });
     const input = { conversationId: conversation.id, querySystem: true, text: "我的作答核验了吗", sourceIds: [], mode: "explain", privacy: "saved", clientKey: randomUUID() };
     const before = await counts(), queued = await tutor.submitTurn(fixture.scope, input);
-    expect(queued.learningSessionId).toBeNull();
-    expect(await tutor.submitTurn(fixture.scope, input)).toEqual(queued);
+    expect(queued.learningSessionId).toBeNull(); expect(queued.replayed).toBe(false);
+    expect(await tutor.submitTurn(fixture.scope, input)).toEqual({ ...queued, replayed: true });
     const process = handler(); expect(await process(queued.jobId)).toEqual({ skipped: false });
     expect(await process(queued.jobId)).toEqual({ skipped: true });
     const turns = await tutor.listTurns(fixture.scope, conversation.id), assistant = turns.find(turn => turn.role === "assistant")!;
@@ -76,7 +76,7 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     expect(assistant.text).toContain("固定规则查询");
     expect(await counts()).toEqual(before); expect(forbidden).not.toHaveBeenCalled();
     // The same status request now resolves to the same read intent without a manual switch.
-    expect(await tutor.submitTurn(fixture.scope, { ...input, querySystem: false })).toEqual(queued);
+    expect(await tutor.submitTurn(fixture.scope, { ...input, querySystem: false })).toEqual({ ...queued, replayed: true });
     await expect(tutor.submitTurn(fixture.scope, { ...input, querySystem: false, text: "解释积分中值定理" })).rejects.toMatchObject({ code: "CONFLICT" });
     const [stored] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id=${assistant.id}`;
     expect(stored!.context_source_refs).toEqual([{ sourceId: f.sourceId, sourceVersion: 1 }]);

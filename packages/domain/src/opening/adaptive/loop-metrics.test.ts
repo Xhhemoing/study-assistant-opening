@@ -124,3 +124,16 @@ it("uses recorded coach/replan creation cohorts without mistaking missing confir
   input.evaluations = { recorded: 4, abstained: 1 };
   expect(metric(input, "runtime", "evaluation.abstention")).toMatchObject({ value: 0.25, numerator: 1, denominator: 4 });
 });
+
+it("reports automatic grading independently of help, and real browser timing/click samples", () => {
+  const input = metricsInput();
+  input.observations = [
+    { identity: "a", occurredAt: input.asOf, verificationSource: "ai_graded", eligibility: eligibility({ independentAttempt: "no", verifiedCorrect: "no" }) },
+    { identity: "b", occurredAt: input.asOf, verificationSource: "self_report", eligibility: eligibility() },
+  ];
+  input.experience = { firstTextMedianMs: 1543, firstTextSamples: 2, shown: 4, started: 1 };
+  expect(metric(input, "learning", "learning.automatic_grading_coverage")).toMatchObject({ value: 0.5, numerator: 1, denominator: 2 });
+  expect(metric(input, "runtime", "experience.first_text")).toMatchObject({ value: 1543, sampleSize: 2, unit: "milliseconds" });
+  expect(metric(input, "burden", "experience.next_step_started")).toMatchObject({ value: 0.25, numerator: 1, denominator: 4 });
+  expect(metric(metricsInput(), "runtime", "experience.first_text")).toMatchObject({ value: null, dataStatus: "not_collected" });
+});

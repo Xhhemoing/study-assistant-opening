@@ -36,7 +36,7 @@ async function receipt(tx: TransactionSql, sprintId: string, clientKey: string, 
 
 export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, pack: ExamPack): Promise<ExamIntegrationOverview> {
   const [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const snapshot = row ? parseExamSprintSnapshot(row.pack_snapshot, row.state)
     : { pack, state: createExamSprintState(await clock(tx)) };
   const binding = row ? await readExamBinding(tx, String(row.id)) : null;
@@ -83,7 +83,7 @@ export function createOpeningExamIntegrationRepository(
         await lockExamCourse(tx, scope, input.courseId);
         const now = await clock(tx);
         let [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+          WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!row) {
           const initial = parseExamSprintSnapshot(pack, createExamSprintState(now));
           [row] = await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state,created_at,updated_at)

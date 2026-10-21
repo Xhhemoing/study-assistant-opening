@@ -62,12 +62,12 @@ export const DEPENDENCY_RULES: { id: string; message: string; violated: (s: Sour
   {
     id: "teaching-ui-requires-api",
     message: "OPENING_TEACHING_WORKSPACE=1 (UI shown) requires OPENING_TEACHING_LOOP=1 (API enabled)",
-    violated: (s) => isTrue(s, "OPENING_TEACHING_WORKSPACE") && !isTrue(s, "OPENING_TEACHING_LOOP"),
+    violated: (s) => isTrue(s, "OPENING_TEACHING_WORKSPACE") && present(s, "OPENING_TEACHING_LOOP") !== undefined && !isTrue(s, "OPENING_TEACHING_LOOP"),
   },
   {
     id: "teaching-rollout-requires-api",
     message: "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT is set but OPENING_TEACHING_LOOP is not 1",
-    violated: (s) => present(s, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT") !== undefined && !isTrue(s, "OPENING_TEACHING_LOOP"),
+    violated: (s) => present(s, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT") !== undefined && present(s, "OPENING_TEACHING_LOOP") !== undefined && !isTrue(s, "OPENING_TEACHING_LOOP"),
   },
   {
     id: "connection-key-id-requires-key",
@@ -138,15 +138,15 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
       return fallback;
     }
   };
-  const api = read("OPENING_TEACHING_LOOP", false);
-  const ui = read("OPENING_TEACHING_WORKSPACE", false);
+  const api = read("OPENING_TEACHING_LOOP", true);
+  const ui = read("OPENING_TEACHING_WORKSPACE", api);
   const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
-  const systemQuery = read("OPENING_SYSTEM_QUERY", false);
+  const systemQuery = read("OPENING_SYSTEM_QUERY", true);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
   let rolloutPercent = 100;
   if (rolloutRaw !== undefined) {

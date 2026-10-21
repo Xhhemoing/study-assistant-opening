@@ -108,7 +108,7 @@ function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationSc
 
 export function createOpeningConversationRepository(sql: Sql) {
   async function releaseReturnedExposures(scope: OpeningConversationScope, rows: readonly Record<string, unknown>[]) {
-    const pending = rows.flatMap(row => row.exposure_receipt && (row.exposure_receipt as Record<string, unknown>).released_at == null
+    const pending = rows.flatMap(row => row.role === "assistant" && row.status === "complete" && row.exposure_receipt && (row.exposure_receipt as Record<string, unknown>).released_at == null
       ? [String((row.exposure_receipt as Record<string, unknown>).id)] : []);
     const receipts = new Map<string, StudyExposureReceipt>();
     if (pending.length) await sql.begin(async tx => {
@@ -260,7 +260,7 @@ export function createOpeningConversationRepository(sql: Sql) {
 
     async releaseReturnedTurnIds(scope: OpeningConversationScope, conversationId: string, turnIds: readonly string[]): Promise<void> {
       if (!turnIds.length) return;
-      const rows = await sql`SELECT to_jsonb(h) AS exposure_receipt FROM opening_turns t
+      const rows = await sql`SELECT t.role,t.status,to_jsonb(h) AS exposure_receipt FROM opening_turns t
         JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
         JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         WHERE t.workspace_id=${scope.workspaceId} AND t.conversation_id=${conversationId} AND t.id=ANY(${[...turnIds]}::uuid[])
@@ -306,9 +306,13 @@ export function createOpeningConversationRepository(sql: Sql) {
       assistantTurnId: string;
       learningSessionId: string | null;
   attemptId?: string | null;
+      mode?: TutorMode;
+      purpose?: ComposerPurpose;
+      querySystem?: boolean;
     } | null> {
       const rows = await sql`
-        SELECT t.id AS turn_id, t.learning_session_id, j.id AS job_id, j.assistant_turn_id
+        SELECT t.id AS turn_id, t.learning_session_id, t.mode, t.composer_purpose, t.query_system,
+          j.id AS job_id, j.assistant_turn_id
         FROM opening_turns t
         LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
         WHERE t.workspace_id = ${scope.workspaceId}
@@ -325,6 +329,9 @@ export function createOpeningConversationRepository(sql: Sql) {
         jobId: r.job_id as string,
         assistantTurnId: r.assistant_turn_id as string,
         learningSessionId: (r.learning_session_id as string | null) ?? null,
+        mode: r.mode as TutorMode,
+        ...(r.composer_purpose ? { purpose: r.composer_purpose as ComposerPurpose } : {}),
+        querySystem: r.query_system === true,
       };
     },
 

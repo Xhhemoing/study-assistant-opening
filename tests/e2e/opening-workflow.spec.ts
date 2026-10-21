@@ -38,7 +38,8 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await expect(choice).toBeChecked();
     await expect(assistant.getByLabel("当前物理页码")).toHaveValue("1");
     await assistant.getByRole("button", { name: "关闭上下文", exact: true }).click();
-    const citation = assistant.getByRole("log").getByRole("link", { name: /v0/ }).first();
+    const citation = assistant.getByRole("log").locator('a[href^="/opening/library?tab=materials&source="][href$="&version=0&page=1"]').first();
+    await expect(citation).toHaveAccessibleName("来源 [1]：parser-two-page.pdf · 第 1 页");
     await expect(citation).toHaveAttribute("href", /\/opening\/library\?tab=materials&source=[0-9a-f-]+&version=0&page=1$/);
     await citation.click();
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });
@@ -54,7 +55,7 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await readingTools.getByRole("button", { name: "关闭学习工具", exact: true }).click();
     await page.setViewportSize(desktopViewport);
     await reader.getByText("原件与处理信息", { exact: true }).click();
-    const original = reader.getByRole("link", { name: "打开原件 v0 · 第 1 页", exact: true });
+    const original = reader.getByRole("link", { name: "打开原件 · 第 1 页", exact: true });
     await expect(original).toHaveAttribute("href", /\/api\/opening\/sources\/[0-9a-f-]+\/download\?version=0#page=1$/);
     const bytes = await context.request.get((await original.getAttribute("href"))!);
     expect(bytes.status()).toBe(200);
@@ -62,11 +63,13 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     expect(await bytes.body()).toEqual(await readFile(fixture));
     await reader.getByRole("button", { name: "返回", exact: true }).click();
     await expect(reader).not.toBeVisible();
-    const stats = await (await context.request.get("http://127.0.0.1:18081/stats")).json();
-    expect(stats.calls).toBe(1);
+    const providerStats = async () => (await context.request.get("http://127.0.0.1:18081/stats")).json();
+    // Suggestions run in their own durable job after the one completed answer.
+    await expect.poll(providerStats).toEqual({ calls: 2, answerCalls: 1, metadataCalls: 1 });
     await page.reload();
     await expect(assistant.getByRole("log").getByText("Summarize the selected page.", { exact: true })).toHaveCount(1);
     await expect(assistant.getByRole("log").getByText("[测试模型] 已收到原件第一页文本 page one。", { exact: true })).toHaveCount(1);
+    expect(await providerStats()).toEqual({ calls: 2, answerCalls: 1, metadataCalls: 1 });
     expect(errors).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath("workflow-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });

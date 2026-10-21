@@ -8,6 +8,7 @@ import { libraryNotePath } from "../../editor/library-paths";
 import { AssistantView } from "../assistant/assistant-view";
 import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 import { textareaClass, ui } from "../design/ui";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { associateStudyNote, readStudyNote, saveStudyNote, writeStudyNote, type StudyNoteDraft } from "./study-note-draft";
 
 /** The prompt's tutor must use its real attempt, so delivered help stays in the evidence chain. */
@@ -18,12 +19,13 @@ export function StudyContextTools({ context, isQuestion = false, learningAttempt
   initialQuestion?: string;
   questionBlockedReason?: string;
 }) {
+  const diagnostics = useDiagnosticsEnabled();
   const [tab, setTab] = useState<"question" | "note">("question");
   const [questionVisited, setQuestionVisited] = useState(Boolean(initialQuestion));
   const identity = studyConversationIdentity(context);
   const canAsk = !questionBlockedReason && (!isQuestion || Boolean(learningAttempt));
   return <div className="flex h-full min-h-0 min-w-0 flex-col gap-3">
-    <p title={context.label} className="line-clamp-2 shrink-0 break-words text-xs leading-5 text-text-2">围绕：{context.label || "当前内容"}{context.sourceVersion !== undefined ? ` · v${context.sourceVersion}` : ""}{context.page ? ` · 指定第 ${context.page} 页` : ""}</p>
+    <p title={context.label} className="line-clamp-2 shrink-0 break-words text-xs leading-5 text-text-2">围绕：{context.label || "当前内容"}{diagnostics && context.sourceVersion !== undefined ? ` · v${context.sourceVersion}` : ""}{context.page ? ` · 指定第 ${context.page} 页` : ""}</p>
     <div className="flex flex-wrap gap-2" aria-label="选择上下文工具">
       <button type="button" className={tab === "question" ? ui.secondary : ui.quiet} aria-pressed={tab === "question"} onClick={() => setTab("question")}>提问</button>
       <button type="button" className={tab === "note" ? ui.secondary : ui.quiet} aria-pressed={tab === "note"} onClick={() => setTab("note")}>记笔记</button>
@@ -64,17 +66,17 @@ export function StudyNotePanel({ context }: { context: StudyConversationContext 
   }
   const locked = !draft || draft.status !== "editing";
   return <div className="space-y-3">
-    <p className="text-xs leading-6 text-text-3">写下自己的理解。保存时使用已有笔记功能，并附上本次学习与固定版本原文链接。</p>
+    <p className="text-xs leading-6 text-text-3">写下自己的理解，保存后可从笔记回到本次学习和原文。</p>
     <label htmlFor={`${id}-title`} className="block space-y-1 text-xs text-text-2"><span>标题</span><input id={`${id}-title`} className={ui.input} value={draft?.title ?? ""} maxLength={200} disabled={locked} onChange={event => edit({ title: event.target.value })} /></label>
     <label htmlFor={`${id}-text`} className="block space-y-1 text-xs text-text-2"><span>笔记内容</span><textarea id={`${id}-text`} className={`${textareaClass} min-h-48`} value={draft?.text ?? ""} maxLength={20_000} readOnly={locked} onChange={event => edit({ text: event.target.value })} /></label>
     {draft?.status === "editing" ? <button type="button" className={ui.primary} disabled={!draft.title.trim() || !draft.text.trim()} onClick={() => void save()}>保存为笔记</button> : null}
     {draft?.status === "pending" ? <p role="status" className="text-xs text-text-2">正在保存笔记，请保留此处内容…</p> : null}
     {draft?.status === "unknown" ? <p role="alert" className="text-xs leading-6 text-warn">保存结果尚未确认，可能已经保存。原内容已保留，请先检查笔记列表，避免重复创建。</p> : null}
-    {draft?.status === "unavailable" ? <p role="alert" className="text-xs leading-6 text-warn">无法可靠读取原笔记草稿或保存回执，已停止新建，避免重复保存。请允许浏览器存储或检查笔记列表后重新进入。</p> : null}
+    {draft?.status === "unavailable" ? <p role="alert" className="text-xs leading-6 text-warn">原笔记或保存结果暂时无法读取，已暂停新建。请允许浏览器存储，或检查笔记列表后重新进入。</p> : null}
     {draft?.storageError && draft.status === "editing" ? <p role="alert" className="text-xs leading-6 text-warn">无法保留本次保存请求，尚未发送。原内容仍可编辑和复制；请释放浏览器存储空间后重试。</p> : null}
     {draft?.status === "saved" && draft.documentId ? <div role="status" className="space-y-2 text-xs leading-6 text-accent"><p>{draft.associationFailed ? "笔记已保存，课程关联未确认；文中的学习与原文链接仍保留。" : "笔记已保存。"}</p><Link className={ui.secondary} href={libraryNotePath("/opening/library", draft.documentId)}>打开笔记继续编辑</Link><button type="button" className={ui.quiet} onClick={() => { const next: StudyNoteDraft = { title: `${context.label || "学习"} · 笔记`.slice(0, 200), text: "", status: "editing", documentId: null, associationFailed: false, storageError: false }; setStorageWarning(!writeStudyNote(context, next)); setDraft(next); }}>另记一篇</button></div> : null}
     {message ? <p role="alert" className="text-xs text-danger">{message}</p> : null}
-    {storageWarning ? <p role="status" className="text-xs leading-6 text-warn">此浏览器无法保留草稿。工具切换期间仍保留内容，刷新前请先复制或保存。</p> : null}
+    {storageWarning ? <p role="status" className="text-xs leading-6 text-warn">此浏览器无法保留未保存的笔记。工具切换期间仍保留内容，刷新前请先复制或保存。</p> : null}
     <Link className={ui.quiet} href={`/opening/library?tab=notes${context.courseId ? `&courseId=${encodeURIComponent(context.courseId)}` : ""}`}>查看笔记列表</Link>
   </div>;
 }

@@ -21,11 +21,19 @@ export function validateOpeningBackupCards(tables: Record<string, Row[]>, errors
     if (cards.has(row.id.toLowerCase())) errors.push("card is duplicated");
     cards.set(row.id.toLowerCase(), row);
   }
+  const origins = new Set<string>();
+  for (const card of cards.values()) {
+    if (card.origin_observation_root_id == null) continue;
+    const root = (tables.opening_learning_observations ?? []).find(row => row.id === card.origin_observation_root_id
+      && row.owner_user_id === card.owner_user_id && (row.root_observation_id == null || row.root_observation_id === row.id));
+    if (!root || origins.has(String(root.id))) errors.push("automatic card observation origin is missing, duplicated or outside its owner");
+    if (root) origins.add(String(root.id));
+  }
   const states = new Set<string>();
   for (const row of tables.card_review_states ?? []) {
     const card = typeof row.card_id === "string" ? cards.get(row.card_id.toLowerCase()) : undefined;
     const parsed = reviewStateSchema.safeParse({ cardId: row.card_id, ease: row.ease, intervalDays: row.interval_days,
-      dueAt: iso(row.due_at), reps: row.reps, lapses: row.lapses, lastGrade: row.last_grade, updatedAt: iso(row.updated_at) });
+      srsVersion: row.srs_version, fsrs: row.fsrs_state, dueAt: iso(row.due_at), reps: row.reps, lapses: row.lapses, lastGrade: row.last_grade, updatedAt: iso(row.updated_at) });
     if (!card || card.owner_user_id !== row.owner_user_id || !parsed.success) errors.push("card review state is invalid or orphaned");
     const identity = `${row.owner_user_id}:${row.card_id}`;
     if (states.has(identity)) errors.push("card review state is duplicated");

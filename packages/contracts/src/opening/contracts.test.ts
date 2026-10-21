@@ -198,7 +198,7 @@ describe("F02 opening contracts", () => {
       answer: "42", outcome: "unverified", assistance: "unknown", clientKey: "obs-key-1",
     }).verdictSource).toBeUndefined();
     expect(verdictSourceSchema.options).toEqual([
-      "self_report", "reference_checked", "model_suggestion", "unknown", "deterministic",
+      "self_report", "reference_checked", "model_suggestion", "unknown", "deterministic", "ai_graded",
     ]);
     expect(observationInputSchema.safeParse({ sessionId: U, courseId: U2, skillLabel: "matrix", sourceIds: [],
       answer: "[]", outcome: "correct", assistance: "independent", clientKey: "obs-key-1", verdictSource: "deterministic" }).success).toBe(false);

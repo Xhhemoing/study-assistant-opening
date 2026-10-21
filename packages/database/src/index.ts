@@ -30,6 +30,7 @@ export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
 export { reserveOpeningSourceQuota } from "./repositories/opening-source-quota";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
+export { createOpeningCourseExamRepository, type CourseExamContext } from "./repositories/opening-course-exam";
 export {
   listReadySourceIdsForCourse,
   createOpeningCourseReadySourcesRepository,
@@ -67,6 +68,8 @@ export * from "./schema/opening-planning";
 export * from "./schema/opening-plan-feedback";
 export { readOpeningPlanFeedbackSummary } from "./repositories/opening-plan-feedback";
 export * from "./repositories/opening-plans";
+export { createOpeningFirstLearningRepository, type OpeningFirstLearningRepository, type FirstLearningDaySeed,
+  type FirstLearningInitializationInput, type FirstLearningInitializationResult } from "./repositories/opening-first-learning";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
 export * from "./schema/opening-imports";
@@ -217,6 +220,8 @@ export {
 export { createOpeningTranscriptionCheckpointsRepository, type TranscriptionChunkIdentity, type TranscriptionChunkReceipt } from "./repositories/opening-transcription-checkpoints";
 
 export { readOpeningLoopMetrics } from "./repositories/opening-loop-metrics";
+export { recordOpeningLearningExperience } from "./repositories/opening-learning-experience";
+export * from "./schema/opening-learning-experience";
 
 export { proposeOpeningLocalPlan, type LocalPlanOptions, type LocalPlanAdditional } from "./repositories/opening-local-replan";
 
@@ -238,6 +243,7 @@ export * from "./schema/opening-exam-sprint";
 export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, type OpeningExamSprintRepository, type OpeningExamSprintExport } from "./repositories/opening-exam-sprint";
 export * from "./schema/opening-exam-integration";
 export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
+export { createOpeningAiGradingRepository, type OpeningAiGradingContext } from "./repositories/opening-ai-grading";
 export { createOpeningExamReviewsRepository } from "./repositories/opening-exam-reviews";
 export * from "./schema/opening-exam-forecast";
 export { createOpeningExamForecastRepository } from "./repositories/opening-exam-forecast";
@@ -269,3 +275,8 @@ export * from "./repositories/opening-teaching-hints";
 export * from "./repositories/opening-today-courses";
 
 export * from "./repositories/opening-span-session";
+
+export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
+export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";
+
+export { createOpeningTutorLearnerContextRepository } from "./repositories/opening-tutor-learner-context";

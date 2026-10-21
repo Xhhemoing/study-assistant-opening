@@ -54,7 +54,7 @@ export function TaskReminder({ task, api, disabled }: { task: ReminderTask; api:
   const attempt = useMemo(() => task.version == null ? null
     : createTaskReminderAttempt(input => api.requestTaskReminder(input), { taskId: task.id, expectedVersion: task.version }), [api, task.id, task.version]);
   const unavailable = task.status !== "pending" ? "仅当前待办任务可以请求到期提醒。"
-    : task.version == null ? "任务版本尚未读取，请重新读取任务后再请求；不会猜测版本。" : null;
+    : task.version == null ? "任务信息还没读完整，请重新读取任务后再试。" : null;
   const locked = state.kind === "queued" || state.kind === "unknown" || state.kind === "rejected" && [401, 404, 409].includes(state.status);
   const busy = state.kind === "pending";
   async function confirm() {

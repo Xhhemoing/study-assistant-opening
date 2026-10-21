@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "./fixtures";
 import type { TurnInput, TurnRecord } from "@aistudy/contracts";
+import { inferComposerIntent } from "../../packages/domain/src/opening/composer-intent";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 import { buildAiReadinessItems } from "../../packages/ai/src/opening/ai-readiness";
 
@@ -65,7 +66,7 @@ async function unknownConversation(page: Page, { newerAnswerDuringPoll = false, 
     const input = route.request().postDataJSON() as TurnInput;
     submitted.push(input);
     turns.push(
-      { ...turns[0]!, id: "66666666-6666-4666-8666-666666666666", text: input.text, mode: input.mode },
+      { ...turns[0]!, id: "66666666-6666-4666-8666-666666666666", text: input.text, mode: inferComposerIntent(input).mode },
       { ...turns[1]!, id: "77777777-7777-4777-8777-777777777777", status: "pending", text: "" },
     );
     await route.fulfill({ status: 201, json: { jobId: newJobId, turnId: turns.at(-1)!.id } });
@@ -112,8 +113,9 @@ test("unknown recovery waits from the server timestamp across refresh, then only
   await page.clock.runFor(16);
   await expect(assistant.getByRole("textbox", { name: "消息输入" })).toHaveValue(question);
   await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeFocused();
-  await assistant.locator("summary").filter({ hasText: "保存 · 设置" }).click();
-  await expect(assistant.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
+  await expect(assistant.getByText("只给提示", { exact: true })).toBeVisible();
+  await expect(assistant.getByRole("button", { name: "撤回本轮选择，恢复自动判断", exact: true })).toBeEnabled();
+  await expect(assistant.getByRole("combobox", { name: "辅导模式" })).toHaveCount(0);
   expect(fixture.submitted).toHaveLength(0);
   await assistant.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => fixture.submitted.length).toBe(1);

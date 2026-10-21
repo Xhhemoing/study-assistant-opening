@@ -8,6 +8,13 @@ const response = (calls: unknown[], finish_reason = "tool_calls") => new Respons
   choices: [{ finish_reason, message: { content: null, tool_calls: calls } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }), { headers: { "content-type": "application/json" } });
 function provider(fetchImpl: typeof fetch) { return createOpeningProvider({ baseUrl: "https://model.example", apiKey: "fixture", model: "fixture", fetchImpl }); }
 describe("OpenAI-compatible native tool transport", () => {
+  it("keeps native tool calls non-streaming when the final answer format is Markdown", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response([native])), onTextDelta = vi.fn();
+    const result = await provider(fetchImpl).complete({ ...base, tools, outputFormat: "markdown" }, undefined, onTextDelta);
+    expect(result.toolCalls).toEqual([{ id: "c1", name: "courses", arguments: "{}" }]);
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body).stream).toBeUndefined();
+    expect(onTextDelta).not.toHaveBeenCalled();
+  });
   it("sends native definitions and exact assistant/tool transcript ids, without JSON response mode", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(response([native]));
     const result = await provider(fetchImpl).complete({ ...base, tools, toolMessages: [

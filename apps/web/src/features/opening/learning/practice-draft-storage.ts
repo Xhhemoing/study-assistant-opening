@@ -4,6 +4,8 @@ import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, lea
 const fieldsSchema = z.object({
   sourceId: z.string().max(200), referenceSourceId: z.string().max(200), skillLabel: z.string().max(200),
   stem: z.string().max(4000), answer: z.string().max(20000),
+  workSourceId: z.string().max(200).default(""), workSourceVersion: z.number().int().nonnegative().default(0),
+  workPhysicalPage: z.number().int().positive().default(1),
   outcome: z.enum(["correct", "incorrect", "unverified"]),
   assistance: z.enum(["unknown", "independent", "hinted", "revealed"]),
   deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
@@ -39,7 +41,7 @@ export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "s
 }
 
 export function emptyPracticeDraft(scope: string, fields: Partial<PracticeFields> = {}): PracticeDraft {
-  return { version: 1, id: crypto.randomUUID(), scope, fields: { sourceId: "", referenceSourceId: "", skillLabel: "", stem: "", answer: "", outcome: "unverified", assistance: "unknown", deliveredAssistance: "none", spanProblemId: "", spanVersion: 1, referenceSkipped: false, matrixMode: false, matrixKey: "multiplication", matrixVariant: 0, ...fields }, start: null, attemptId: null, observationId: null, submission: null, disputeKey: null };
+  return { version: 1, id: crypto.randomUUID(), scope, fields: { sourceId: "", referenceSourceId: "", skillLabel: "", stem: "", answer: "", workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1, outcome: "unverified", assistance: "unknown", deliveredAssistance: "none", spanProblemId: "", spanVersion: 1, referenceSkipped: false, matrixMode: false, matrixKey: "multiplication", matrixVariant: 0, ...fields }, start: null, attemptId: null, observationId: null, submission: null, disputeKey: null };
 }
 
 export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft | null {

@@ -3,6 +3,7 @@ import {
   date,
   doublePrecision,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -32,6 +33,8 @@ export const cards = pgTable(
     skillLabel: text("skill_label"),
     sourceIds: uuid("source_ids").array().notNull().default([]),
     tags: text("tags").array().notNull().default([]),
+    originObservationRootId: uuid("origin_observation_root_id"),
+    autoPaused: boolean("auto_paused").notNull().default(false),
     archived: boolean("archived").notNull().default(false),
     contentVersion: integer("content_version").notNull().default(1),
     pausedUntil: timestamp("paused_until", { withTimezone: true }),
@@ -40,7 +43,8 @@ export const cards = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("cards_workspace_id_id_uidx").on(table.workspaceId, table.id)],
+  (table) => [uniqueIndex("cards_workspace_id_id_uidx").on(table.workspaceId, table.id),
+    uniqueIndex("cards_auto_observation_uidx").on(table.workspaceId, table.ownerUserId, table.originObservationRootId)],
 );
 
 export const cardReviewStates = pgTable(
@@ -55,6 +59,8 @@ export const cardReviewStates = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    srsVersion: text("srs_version").notNull().default("srs-1"),
+    fsrsState: jsonb("fsrs_state"),
     ease: doublePrecision("ease").notNull(),
     intervalDays: integer("interval_days").notNull(),
     dueAt: timestamp("due_at", { withTimezone: true }).notNull(),

@@ -5,6 +5,7 @@ import { sourceStatusLabel } from "./upload-state";
 import { ui } from "../design/ui";
 import { sourcePreviewKind } from "../sources/preview-mime";
 import { SourceTextPreview } from "./source-text-preview";
+import { SourceVersionDetails } from "./source-version-details";
 
 export type SourceDownloadView = {
   /** Same-origin download path preferred; MinIO hosts must never appear here for browser open. */
@@ -117,9 +118,9 @@ export function sourceViewerCopy(input: {
   versionMismatch: boolean;
   page?: number | null;
 }): string {
-  const pageHint = input.page != null && input.page > 0 ? ` · 请求定位：第 ${input.page} 页` : "";
-  if (!input.versionMismatch) return `正在查看 v${input.requestedVersion}${pageHint}`;
-  return `正在查看 v${input.requestedVersion}${pageHint}，不是当前版本 v${input.currentVersion}`;
+  const pageHint = input.page != null && input.page > 0 ? ` · 第 ${input.page} 页` : "";
+  if (!input.versionMismatch) return `正在查看材料${pageHint}`;
+  return `正在查看引用时的材料${pageHint}；这份材料之后已有更新。`;
 }
 
 export function buildSourceDownloadView(
@@ -214,7 +215,7 @@ export function SourceViewer({
           <details open={!previewable} className="min-w-0 max-w-full">
             <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-accent focus-visible:ring-2 focus-visible:ring-emerald-700">原件与处理信息</summary>
             <div className="max-h-36 space-y-2 overflow-y-auto overscroll-contain py-2">
-              <p>{!versionMismatch ? sourceStatusLabel(latestRecord) : "这是历史版本，处理状态以当前版本为准"}</p>
+              <p>{!versionMismatch ? sourceStatusLabel(latestRecord) : "这里保留引用时的内容；资料库中可查看更新后的材料。"}</p>
               {sourcePreviewKind(mime) === "pdf" ? <p className="text-warn">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
               <div className="flex flex-wrap gap-2">
                 {previewable ? (
@@ -229,7 +230,7 @@ export function SourceViewer({
                   rel="noreferrer"
                   download
                 >
-                  打开原件 v{download.version}
+                  打开原件
                   {page != null && page > 0 ? ` · 第 ${page} 页` : ""}
                 </a>
               </div>
@@ -237,6 +238,7 @@ export function SourceViewer({
             </div>
           </details>
         </div>
+        <SourceVersionDetails requestedVersion={requestedVersion} currentVersion={currentVersion} />
       </div>
       {previewable ? (
         <div className={fillHeight ? "flex min-h-0 flex-1 flex-col" : "space-y-2"} aria-label="原件预览">

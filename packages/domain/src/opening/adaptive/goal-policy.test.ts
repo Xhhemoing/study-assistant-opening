@@ -44,8 +44,19 @@ describe("goal execution policy", () => {
   it("uses local calendar days across timezone and DST boundaries", () => {
     const local = localDateKeyInZone(new Date("2026-11-01T06:30:00Z"), "America/Los_Angeles");
     expect(local).toBe("2026-10-31");
-    expect(resolveGoalLearningContext(goal({ targetDate: "2026-11-07" }), local)).toMatchObject({ daysRemaining: 7, mode: "exam" });
-    expect(resolveGoalLearningContext(goal({ targetDate: "2026-11-08" }), local)).toMatchObject({ daysRemaining: 8, mode: "understand" });
+    expect(resolveGoalLearningContext(goal({ targetDate: "2026-11-14" }), local)).toMatchObject({ daysRemaining: 14, mode: "exam" });
+    expect(resolveGoalLearningContext(goal({ targetDate: "2026-11-15" }), local)).toMatchObject({ daysRemaining: 15, mode: "understand" });
     expect(resolveGoalLearningContext(goal({ targetDate: local }), local).daysRemaining).toBe(0);
+  });
+
+  it("uses the same fourteen-day window for auto mode, planning priority and its reason", () => {
+    const near = resolveGoalLearningContext(goal({ targetDate: "2026-10-31" }), "2026-10-17");
+    expect(near).toMatchObject({ mode: "exam", reasonCode: "deadline_near", daysRemaining: 14 });
+    expect(goalPlanningPriority(near)).toBe(5);
+    expect(goalPlanningReason(near)).toContain("距离目标 14 天");
+    const later = resolveGoalLearningContext(goal({ targetDate: "2026-11-01" }), "2026-10-17");
+    expect(later).toMatchObject({ mode: "understand", reasonCode: "long_term", daysRemaining: 15 });
+    expect(goalPlanningPriority(later)).toBe(0);
+    expect(goalPlanningReason(later)).toBe("按当前学习目标优先安排");
   });
 });

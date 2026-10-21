@@ -18,7 +18,7 @@ export function PracticeDraftRecovery({ courseId, answer, pending, onResume }: {
     } catch { setCopyNotice("已选中原答案，请按 Ctrl+C 或 ⌘C 复制。"); }
   }
   return <div className="space-y-3">
-    <p className="text-sm text-text-2" role="status">已找回本次练习草稿。继续原练习后读取最新记录，原答案保持不变。</p>
+    <p className="text-sm text-text-2" role="status">已找回未完成的练习，可以接着作答。</p>
     {answer ? <label className="block text-sm text-text-2">原答案（可选中复制）
       <textarea ref={answerRef} readOnly value={answer} rows={4} className="mt-1 w-full rounded border border-text-3 bg-bg px-3 py-2" />
     </label> : null}
@@ -39,17 +39,17 @@ export function PracticeDraftShelf({ continuity, allowAnother = true }: {
   const archived = drafts.filter(value => value.id !== draft.id);
   const hasCurrentWork = Boolean(draft.start || draft.submission || draft.fields.answer || draft.fields.stem || draft.fields.sourceId || draft.fields.skillLabel);
   return <div className="space-y-3">
-    {loadError ? <div className="space-y-2" role="alert"><p className="text-sm text-danger">{loadError}</p><button type="button" onClick={reload} className="rounded border border-line px-3 py-2 text-sm">重新读取草稿</button></div> : null}
+    {loadError ? <div className="space-y-2" role="alert"><p className="text-sm text-danger">{loadError}</p><button type="button" onClick={reload} className="rounded border border-line px-3 py-2 text-sm">重新读取练习</button></div> : null}
     {switchError ? <p className="text-sm text-danger" role="alert">{switchError}</p> : null}
-    {ready && allowAnother && hasCurrentWork ? <button type="button" onClick={() => startAnother()} className="rounded border border-line px-3 py-2 text-sm text-text">保留此草稿，开始其他练习</button> : null}
+    {ready && allowAnother && hasCurrentWork ? <button type="button" onClick={() => startAnother()} className="rounded border border-line px-3 py-2 text-sm text-text">保留答案，开始其他练习</button> : null}
     {ready && archived.length ? <details className="rounded border border-line px-3 py-2">
-      <summary className="cursor-pointer text-sm font-medium text-text">保留的练习草稿（{archived.length}）</summary>
-      <p className="mt-2 text-xs leading-6 text-text-3">可随时切回原草稿；当前答案也会保留。切换不会重新提交答案。</p>
+      <summary className="cursor-pointer text-sm font-medium text-text">未完成的练习（{archived.length}）</summary>
+      <p className="mt-2 text-xs leading-6 text-text-3">切换练习时会保留当前答案。</p>
       <ul className="mt-3 space-y-4">{archived.map((saved, index) => <li key={saved.id} className="space-y-2 border-t border-line pt-3">
-        <p className="text-sm font-medium text-text">草稿 {index + 1} · {saved.fields.skillLabel || "矩阵练习"}{saved.fields.skillLabel ? "" : ` · 第 ${saved.fields.matrixVariant + 1} 组`}</p>
+        <p className="text-sm font-medium text-text">练习 {index + 1} · {saved.fields.skillLabel || "矩阵练习"}{saved.fields.skillLabel ? "" : ` · 第 ${saved.fields.matrixVariant + 1} 组`}</p>
         {saved.fields.stem ? <p className="whitespace-pre-wrap break-words text-xs text-text-2">{saved.fields.stem}</p> : null}
         {saved.fields.answer ? <label className="block text-xs text-text-2">保留的原答案（可选中复制）<textarea readOnly value={saved.fields.answer} rows={3} className="mt-1 w-full rounded border border-text-3 bg-bg px-3 py-2 text-sm" /></label> : <p className="text-xs text-text-3">尚未填写答案，已保留原练习和保存请求。</p>}
-        <button type="button" onClick={() => restore(saved.id)} className="rounded border border-line px-3 py-2 text-sm text-text">切换到此草稿</button>
+        <button type="button" onClick={() => restore(saved.id)} className="rounded border border-line px-3 py-2 text-sm text-text">继续这次练习</button>
       </li>)}</ul>
     </details> : null}
   </div>;

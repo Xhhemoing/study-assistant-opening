@@ -29,6 +29,7 @@ vi.mock("../planning/today-view", async importOriginal => ({
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => {
@@ -75,6 +76,13 @@ describe("AI 主讲 entry path", () => {
 
   it.each([true, false])("Today keeps unscoped activity continuation honest when the trial gate is %s", async enabled => {
     await renderToday([activity], enabled);
+    expect(container.querySelector("[data-teaching-continue-entry]")).toBeNull();
+    expect(container.querySelector('[data-teaching-loop-trial-empty="true"]')).toBeNull();
+    const entry = container.querySelector<HTMLButtonElement>('button[data-today-primary-cta="true"]');
+    expect(entry).not.toBeNull();
+    expect(entry!.disabled).toBe(false);
+    container.querySelector<HTMLDivElement>('[data-today-teaching-pane="true"]')!.scrollIntoView = vi.fn();
+    await act(async () => entry!.click());
     expect(container.querySelector('[data-teaching-continue-entry="card"]') !== null).toBe(enabled);
     expect(container.querySelector('[data-teaching-loop-trial-empty="true"]') !== null).toBe(!enabled);
     if (!enabled) expect(container.textContent).toContain("AI 主讲试运行未开启");

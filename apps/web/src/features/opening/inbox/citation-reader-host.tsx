@@ -35,7 +35,7 @@ export async function loadCitationReaderRecord(api: Pick<OpeningApi, "listSource
   const record = (await api.listSources()).find(source => source.id === target.sourceId);
   if (!record) throw new Error("这份材料已移除或暂时无法访问，原学习内容已保留。");
   if (record.uploadState !== "uploaded") throw new Error("这份材料尚未上传完成，请到资料库处理；原学习内容已保留。");
-  if (target.version > record.version) throw new Error("请求的材料版本尚不可用，请刷新资料库后核对；不会改用其他版本。");
+  if (target.version > record.version) throw new Error("引用时的材料内容暂时无法读取，请刷新资料库后重试。");
   return record;
 }
 
