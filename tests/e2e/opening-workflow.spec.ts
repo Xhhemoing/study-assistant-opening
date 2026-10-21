@@ -43,6 +43,17 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await citation.click();
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });
     await expect(reader).toBeVisible();
+    await reader.getByRole("button", { name: "提取文字 / OCR 核对", exact: true }).click();
+    const readingTools = page.getByRole("dialog", { name: "提取文字 / OCR 核对", exact: true });
+    await expect(readingTools.getByRole("region", { name: "解析正文", exact: true }).getByText(/Opening parser page one/)).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("reader-desktop-text.png"), fullPage: true });
+    const desktopViewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(readingTools.getByRole("region", { name: "解析正文", exact: true }).getByText(/Opening parser page one/)).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("reader-mobile-text.png"), fullPage: true });
+    await readingTools.getByRole("button", { name: "关闭学习工具", exact: true }).click();
+    await page.setViewportSize(desktopViewport);
+    await reader.getByText("原件与处理信息", { exact: true }).click();
     const original = reader.getByRole("link", { name: "打开原件 v0 · 第 1 页", exact: true });
     await expect(original).toHaveAttribute("href", /\/api\/opening\/sources\/[0-9a-f-]+\/download\?version=0#page=1$/);
     const bytes = await context.request.get((await original.getAttribute("href"))!);

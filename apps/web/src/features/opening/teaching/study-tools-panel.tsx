@@ -75,7 +75,7 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
     <div className={`grid min-w-0 gap-4 ${fillHeight ? "min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" : ""} ${selected ? "lg:grid-cols-[minmax(0,1fr)_22rem]" : "grid-cols-1"}`}>
       <div className={fillHeight ? "flex min-h-0 min-w-0 flex-col overflow-y-auto overscroll-contain" : "min-w-0"}>{children}</div>
       <dialog ref={dialog} id={`${id}-panel`} aria-labelledby={`${id}-heading`}
-        onCancel={event => { event.preventDefault(); onPanelChange(null); }}
+        onCancel={event => { if (event.target !== event.currentTarget) return; event.preventDefault(); onPanelChange(null); }}
         className={`fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-xl ${fillHeight ? "overflow-hidden" : "overflow-y-auto"} overscroll-contain rounded-xl border border-line bg-surface p-4 text-text shadow-xl backdrop:bg-ink/35 lg:static lg:m-0 lg:max-h-none lg:w-full lg:max-w-none lg:self-start lg:rounded-none lg:border-0 lg:border-l lg:pl-5 lg:pr-0 lg:pt-0 lg:shadow-none ${fillHeight ? "h-[90dvh] min-h-0 open:flex open:flex-col lg:h-full lg:self-stretch" : ""}`}>
         <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
           <h2 className="text-sm font-semibold" id={`${id}-heading`}>{selected?.label ?? "学习工具"}</h2>

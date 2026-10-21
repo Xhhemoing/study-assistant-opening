@@ -33,6 +33,7 @@ export { ErrorState } from "./error-state";
 export type { ErrorStateProps } from "./error-state";
 export type { DrawerProps } from "./drawer";
 export { LessonFocusDialog } from "./lesson-focus-dialog";
+export * as Dialog from "@radix-ui/react-dialog";
 export type { EmptyStateProps } from "./empty-state";
 export { Skeleton, LoadingRows } from "./skeleton";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";

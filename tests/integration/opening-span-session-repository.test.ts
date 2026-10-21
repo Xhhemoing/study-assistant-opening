@@ -108,7 +108,8 @@ it("isolates owners, courses, and delayed-check identities", async () => {
   const f = await seed(), started = await f.repo.create(fixture.scope, f.input);
   expect(await f.repo.get(fixture.otherScope, started.activityId)).toBeNull();
   expect(await f.repo.latest(fixture.otherScope, f.courseId)).toBeNull();
-  expect(await f.repo.latest(fixture.scope, f.courseId, randomUUID())).toBeNull();
+  await expect(f.repo.latest(fixture.scope, f.courseId, randomUUID())).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.repo.latest(fixture.scope, f.courseId)).toEqual(started);
   await expect(f.repo.save(fixture.otherScope, started.activityId, patch(started))).rejects.toMatchObject({ code: "NOT_FOUND" });
   await expect(f.repo.create(fixture.scope, { ...f.input, clientKey: randomUUID(), retestId: randomUUID() })).rejects.toMatchObject({ code: "VALIDATION" });
   const retestId = randomUUID();
