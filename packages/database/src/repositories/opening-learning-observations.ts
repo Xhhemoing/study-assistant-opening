@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
-import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance } from "@aistudy/domain";
+import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
@@ -13,13 +13,13 @@ import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
 import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number> } = {}) {
+  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
 export async function insertOpeningLearningObservationInTx(tx: TransactionSql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number> } = {}) {
+  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
@@ -48,7 +48,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
       AND (candidate_id=${input.retestId} OR id=${input.retestId}) FOR UPDATE` : [];
   if (input.retestId && retestActivities.length !== 1) throw learningError("VALIDATION", "retest activity is missing or ambiguous");
-  const retestActivity = retestActivities[0] as Record<string, unknown> | undefined;
+  let retestActivity = retestActivities[0] as Record<string, unknown> | undefined;
   if (retestActivity && (retestActivity.course_id !== input.courseId || retestActivity.skill_label !== input.skillLabel)) {
     throw learningError("VALIDATION", "retest activity does not match the observation");
   }
@@ -60,9 +60,16 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if ((skillNodeId == null) !== (skillDimension == null)) {
     throw learningError("VALIDATION", "nodeId and dimension must be provided together for SkillEvidence");
   }
+  const spanActivities = await tx`SELECT status,checkpoint_json FROM opening_teaching_activities
+    WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND create_intent->>'protocol'='span-lesson-v1' FOR SHARE`;
+  // Only this release's new lesson protocol stores the original submitted choice.
+  // Legacy activities retain their effective-assistance replay semantics; facts
+  // always use the stronger server-verified `input.assistance` below.
+  const submittedAssistance = spanActivities[0] && opts.submittedAssistance !== undefined ? opts.submittedAssistance : input.assistance;
   const intent = { sessionId: input.sessionId, courseId: input.courseId, skillLabel: input.skillLabel, sourceIds: [...new Set(input.sourceIds)].sort(),
     attemptId: input.attemptId ?? null, problemId: input.problemId ?? null, retestId: (retestActivity?.id as string | undefined) ?? null,
-    answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource: submittedVerdictSource, referenceSourceId,
+    answer: input.answer, outcome: input.outcome, assistance: submittedAssistance, verdictSource: submittedVerdictSource, referenceSourceId,
     referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
     ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
   const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
@@ -85,6 +92,24 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     if (!isDeepStrictEqual(saved, intent)) throw learningError("CONFLICT", "observation clientKey payload conflict");
     await linkSkillEvidence(String(existing[0].id));
     return qualify(mapLearningObservation(existing[0]));
+  }
+  if (spanActivities[0] && spanActivities[0].status !== "active") {
+    throw learningError("CONFLICT", "paused or completed span lesson cannot accept an answer");
+  }
+  const boundRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
+  if (boundRetestId) {
+    const boundRetests = await tx`SELECT id,candidate_id,course_id,skill_label,requirement_key,task_id,status,
+      not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
+      WHERE (id=${boundRetestId} OR candidate_id=${boundRetestId}) AND workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} AND requirement_key=${SPAN_REQUIREMENT_KEY}
+        AND skill_label=${SPAN_SKILL_LABEL} AND status IN ('accepted','in_progress') FOR UPDATE`;
+    if (boundRetests.length !== 1) throw learningError("VALIDATION", "延迟复测不属于本课程、尚未接受或已结束。");
+    const boundRetest = boundRetests[0]!;
+    if (retestActivity && retestActivity.id !== boundRetest.id) throw learningError("VALIDATION", "提交的延迟复测与当前学习会话不一致。");
+    if (attempt && boundRetest.requirement_key !== attempt.requirement_key) throw learningError("VALIDATION", "retest requirement does not match the attempt");
+    // Keep `intent` based on the submitted payload for exact old-key replays;
+    // the new fact and timing gate use the trusted persisted lesson binding.
+    retestActivity = boundRetest;
   }
   if (attempt?.submitted_at) throw learningError("CONFLICT", "attempt already submitted");
   const examEvaluation = await evaluateOpeningExamAttempt(tx, scope, attempt, input.answer, attemptSources, opts.examSprintPublication === true);
@@ -137,7 +162,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
   if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
   if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;
-  if (input.retestId) {
+  if (retestActivity) {
     // Lock the activity before its task. Task status updates and direct
     // completion use the same order to serialize the shared decision.
     const activity = retestActivity as { task_id?: string | null; status?: string };
@@ -157,7 +182,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   await linkSkillEvidence(id);
   // Ordinary observations enqueue a delayed-retest scan in the same transaction.
   // Retest completions must not scan again (avoid immediate re-proposal).
-  if (!input.retestId) {
+  if (!retestActivity) {
     const jobId = randomUUID();
     const scanKey = `retest-scan:${input.courseId}:${id}`;
     const [workspace] = await tx`SELECT privacy_epoch FROM workspaces

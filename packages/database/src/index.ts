@@ -267,3 +267,5 @@ export * from "./schema/opening-assistant-proposals";
 
 export * from "./repositories/opening-teaching-hints";
 export * from "./repositories/opening-today-courses";
+
+export * from "./repositories/opening-span-session";

@@ -32,7 +32,7 @@ vi.mock("../../learning/practice-draft", async original => ({ ...await original<
 import { emptyPracticeDraft, practiceScope } from "../../learning/practice-draft";
 import { getSpanProblem } from "@aistudy/domain";
 import { HintLadder } from "../hint-ladder";
-import { SpanPractice } from "./span-practice";
+import { SpanPractice, spanPracticeScope } from "./span-practice";
 import { SpanLesson } from "./span-lesson";
 const id = "11111111-1111-4111-8111-111111111111";
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
@@ -44,9 +44,9 @@ function find(node: ReactNode, match: (element: ReactElement<Record<string, unkn
   if (!isValidElement<Record<string, unknown>>(node)) return undefined;
   return match(node) ? node : find(node.props.children as ReactNode, match);
 }
-function render() {
+function render(input: ComponentProps<typeof SpanPractice> = props) {
   hooks.cursor = 0;
-  const outer = SpanPractice(props), form = outer.props.children[0] as ReactElement;
+  const outer = SpanPractice(input), form = outer.props.children[0] as ReactElement;
   const tree = (form.type as (props: unknown) => ReactNode)(form.props);
   hooks.effects.splice(0).forEach(effect => effect()); return tree;
 }
@@ -117,4 +117,35 @@ it("registers the sole active span entry and never carries a previous step's att
   const current = find(lesson(), node => node.type === SpanPractice)!;
   (current.props.onRecorded as (record: LearningObservation) => void)({ ...record, serverEvaluation: { decision: "correct" } } as LearningObservation); lesson();
   expect(shortcuts.set.mock.lastCall![1].next).toBeTypeOf("function");
+});
+
+it("restores a server-owned sealed answer and only the exact previously released hint levels", async () => {
+  const secondSource = "22222222-2222-4222-8222-222222222222";
+  const restoredProps: ComponentProps<typeof SpanPractice> = { ...props, restoredAttempt: { ...attempt, observationId: id, sourceIds: [id, secondSource], contextAnchor: { courseId: id, attemptId: id, itemVersionId: id, activityId: id, sourceId: secondSource, purpose: "learning_help" } }, restoredHintLevels: [2],
+    session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-independent", status: "active", revision: 3, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt } };
+  mocks.draft = emptyPracticeDraft(spanPracticeScope(id, undefined, undefined, id, props.problemId), { sourceId: id, spanProblemId: props.problemId });
+  mocks.readRecord.mockResolvedValue({ observation: record, originalObservation: { ...record, answer: "sealed first answer" }, deliveredAssistance: "hinted" });
+  vi.mocked(fetch).mockResolvedValueOnce(response(2));
+  render(restoredProps); await settle(); render(restoredProps); await settle();
+  const tree = render(restoredProps);
+  const recovered = find(tree, node => node.type === HintLadder)!.props as ComponentProps<typeof HintLadder>;
+  expect(mocks.createSession).not.toHaveBeenCalled(); expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled();
+  expect(props.onRecorded).toHaveBeenCalledWith(record);
+  expect(recovered.delivered.map(hint => hint.label)).toEqual(["2. 定义提醒"]);
+  expect(recovered.next?.label).toBe("第一步");
+  expect(vi.mocked(fetch).mock.calls.map(call => JSON.parse(String(call[1]?.body)))).toEqual([{ attemptId: id, level: 2 }]);
+  expect(mocks.draft!.attemptId).toBe(attempt.id); expect(mocks.draft!.fields.deliveredAssistance).toBe("hinted");
+  expect(mocks.draft!.fields.sourceId).toBe(secondSource);
+  expect(find(tree, node => node.type === "pre" && node.props.children === "sealed first answer")).toBeDefined();
+  expect(mocks.haptic).not.toHaveBeenCalled();
+});
+
+it("isolates a practice draft by lesson, step and exact new-evidence event", () => {
+  const activity = "22222222-2222-4222-8222-222222222222";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const scope = spanPracticeScope(id, undefined, undefined, activity, "span-independent-3d");
+  expect(scope).not.toBe(spanPracticeScope(id, undefined, undefined, other, "span-independent-3d"));
+  expect(scope).not.toBe(spanPracticeScope(id, undefined, undefined, activity, "span-faded-3d"));
+  expect(scope).not.toBe(spanPracticeScope(id, undefined, other, activity, "span-independent-3d"));
+  expect(spanPracticeScope(id)).toBe(practiceScope(id, "span", null));
 });

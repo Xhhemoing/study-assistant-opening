@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningAttempt, LearningAttemptCreateInput, Scope, StudyContextAnchor } from "@aistudy/contracts";
-import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, getSpanProblem, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
+import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, assertRetestSubmitEarliestAllowed, getSpanProblem, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockWorkspaceLearningHistory, lockLearningOwner, lockLearningSession, nextLearningHistoryRevision } from "./opening-learning-facts";
 
 export function mapLearningAttempt(row: Record<string, unknown>): LearningAttempt {
@@ -74,6 +74,27 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     delete replayIntent.spanValidation;
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
+  }
+  // An acknowledged attempt remains replayable after pause/completion, but a
+  // dedicated span lesson must be resumed before it can issue another question.
+  const spanActivities = await tx`SELECT status,checkpoint_json FROM opening_teaching_activities
+    WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND create_intent->>'protocol'='span-lesson-v1' FOR SHARE`;
+  if (spanActivities[0] && spanActivities[0].status !== "active") {
+    throw learningError("CONFLICT", "paused or completed span lesson cannot accept new attempts");
+  }
+  const spanRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
+  if (spanRetestId) {
+    // Binding and timing come from the persisted lesson, so callers cannot skip
+    // preparation or omit a retestId to issue the reserved question early.
+    const retests = await tx`SELECT not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
+      WHERE (id=${spanRetestId} OR candidate_id=${spanRetestId}) AND workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND requirement_key=${SPAN_REQUIREMENT_KEY}
+        AND skill_label=${SPAN_SKILL_LABEL} AND status IN ('accepted','in_progress') FOR SHARE`;
+    if (retests.length !== 1) throw learningError("VALIDATION", "延迟复测不属于本课程、尚未接受或已结束。");
+    const retest = retests[0]!, [clock] = await tx`SELECT clock_timestamp() AS at`;
+    assertRetestSubmitEarliestAllowed({ notBeforeAt: learningIso(retest.not_before_at), recommendedAt: learningIso(retest.recommended_at),
+      scheduledStartAt: learningIso(retest.scheduled_start_at) }, learningIso(clock!.at)!);
   }
   let spanValidation: LearningAttempt["spanValidation"];
   if (spanExercise) {
