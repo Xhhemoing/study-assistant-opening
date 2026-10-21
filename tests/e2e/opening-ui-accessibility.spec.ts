@@ -131,6 +131,9 @@ for (const condition of conditions) {
         }
         expect(pageErrors).toEqual([]);
         expect(modelRequests).toBe(0);
+        const screenshotPath = testInfo.outputPath("view.png");
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        await testInfo.attach("view", { path: screenshotPath, contentType: "image/png" });
         if (view === "assistant") {
           await page.getByRole("dialog", { name: "学习助手", exact: true }).getByRole("button", { name: "关闭抽屉", exact: true }).click();
           await expect(page.getByRole("dialog", { name: "学习助手", exact: true })).toHaveCount(0);
