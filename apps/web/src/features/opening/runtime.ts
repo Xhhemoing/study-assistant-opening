@@ -113,10 +113,10 @@ export function setEphemeralTutorDepsForTests(
 }
 
 export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
-  return { replyEphemeral(scope, input, signal) {
+  return { replyEphemeral(scope, input, signal, onTextDelta) {
     if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
       provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
-    return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal);
+    return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal, onTextDelta);
   } };
 }
 
@@ -140,7 +140,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
     };
   });
   return {
-    replyEphemeral(scope, input, signal) {
+    replyEphemeral(scope, input, signal, onTextDelta) {
 
       return createEphemeralTutorService({
         sources: {
@@ -179,7 +179,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
         resolveModel: override ? undefined : (ownedScope, mode) => resolveTutorModel(sql, ownedScope, mode),
         resolveFallbackModel: override ? undefined : (ownedScope, mode) => resolveTutorFallbackModel(sql, ownedScope, mode),
         config: tutor,
-      }).replyEphemeral(scope, input, signal);
+      }).replyEphemeral(scope, input, signal, onTextDelta);
     },
   };
 }

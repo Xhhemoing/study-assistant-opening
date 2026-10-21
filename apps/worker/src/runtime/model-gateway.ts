@@ -54,7 +54,10 @@ async function loadRouting(sql: Sql, scope: Scope) {
 
 type MergedModel = ReturnType<typeof mergeOpeningCatalog>["models"][number];
 
-function toResolved(model: MergedModel): ResolvedTaskModel {
+function toResolved(model: MergedModel, task: ModelTaskKey): ResolvedTaskModel {
+  const timeoutMs = task === "teaching.compile" || task === "knowledge.extract" ? 240_000
+    : task === "media.transcribe" ? 180_000 : task.startsWith("practice.grade-") ? 120_000
+      : task === "settings.probe" ? 30_000 : 60_000;
   return {
     provider: createOpeningProvider({
       baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName,
@@ -62,6 +65,7 @@ function toResolved(model: MergedModel): ResolvedTaskModel {
       mediaInputTokenUpperBound: model.mediaInputTokenUpperBound, mediaMaxInputBytes: model.mediaMaxInputBytes,
       mediaInputCentsPerMillion: model.mediaInputCentsPerMillion,
       answerStyle: parseBooleanEnv(process.env, "OPENING_ANSWER_STYLE", true),
+      timeoutMs, idleTimeoutMs: 60_000,
     }),
     modelSnapshot: openingModelSnapshot(model),
     inputCentsPerMillion: model.inputCentsPerMillion,
@@ -77,14 +81,14 @@ function toResolved(model: MergedModel): ResolvedTaskModel {
 
 export async function resolveTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel> {
   const { settings, merged } = await loadRouting(sql, scope);
-  return toResolved(resolveModelForTask(merged.models, settings, task, merged.defaultModelId));
+  return toResolved(resolveModelForTask(merged.models, settings, task, merged.defaultModelId), task);
 }
 
 /** The user's explicit fallback for a task, or null (unset, removed or unable to serve it). */
 export async function resolveFallbackTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel | null> {
   const { settings, merged } = await loadRouting(sql, scope);
   const model = resolveFallbackModelForTask(merged.models, settings, task);
-  return model ? toResolved(model) : null;
+  return model ? toResolved(model, task) : null;
 }
 
 export function resolveTutorModel(sql: Sql, scope: Scope, mode: TutorMode): Promise<ResolvedTaskModel> {
@@ -109,7 +113,7 @@ export async function probeDbModel(sql: Sql, scope: Scope, providerId: string, m
     ...settings, mode: "automatic", taskRoutes: { ...settings.taskRoutes, "settings.probe": { primary: modelId, fallback: null } },
   }, "settings.probe", merged.defaultModelId);
   if (model.providerId !== providerId || model.source !== "workspace") throw new OpeningModelRoutingError("模型不存在或不属于此服务商。");
-  return createModelGateway({ resolve: async () => toResolved(model) }).call(scope, "settings.probe", options);
+  return createModelGateway({ resolve: async () => toResolved(model, "settings.probe") }).call(scope, "settings.probe", options);
 }
 
 /** Bind the shared ledger repository to one owner scope for runBudgetedCall. */

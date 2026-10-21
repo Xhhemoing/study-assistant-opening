@@ -1,6 +1,7 @@
 import type { Citation, ConversationResume, EphemeralTurnInput, TurnRecord } from "@aistudy/contracts";
 
 import { queryEvidenceLinks, type QueryEvidenceLink } from "./query-evidence-links";
+import type { StreamingReply } from "./job-stream";
 
 export type ChatMessageView = {
   id: string;
@@ -15,7 +16,21 @@ export type ChatMessageView = {
   queryEvidenceLinks?: readonly QueryEvidenceLink[];
   /** True when this assistant turn had selected materials / context intent (T02 general label). */
   hadMaterialContext?: boolean;
+  /** Provider text has already appeared incrementally; never replay a reveal animation. */
+  streamed?: boolean;
 };
+
+/** Streaming text never replaces a persisted terminal answer or its provenance. */
+export function messagesWithStreamingReply(messages: ChatMessageView[], reply: StreamingReply | null): ChatMessageView[] {
+  if (!reply?.text) return messages;
+  const existing = messages.find(message => message.id === reply.assistantTurnId);
+  if (existing) return existing.role !== "assistant" || existing.status !== "pending" ? messages
+    : messages.map(message => message === existing ? { ...message, text: reply.text, streamed: true } : message);
+  return [...messages, {
+    id: reply.assistantTurnId, role: "assistant", text: reply.text,
+    citations: [], citationLabels: [], status: "pending", streamed: true,
+  }];
+}
 
 /** T02: label general answers when materials were in intent but no cite chips resolved. */
 export function showsGeneralMaterialBadge(message: Pick<ChatMessageView, "role" | "citations" | "hadMaterialContext">): boolean {

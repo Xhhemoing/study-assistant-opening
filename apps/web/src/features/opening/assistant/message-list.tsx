@@ -61,11 +61,13 @@ export const MessageList = memo(function MessageList({ messages, compact = false
   const [unread, setUnread] = useState(false);
   const completed = useRef(new Set(messages.filter(message => message.role === "assistant" && (!message.status || message.status === "complete")).map(message => message.id)));
   const pendingReplies = useRef(new Set(messages.filter(message => message.role === "assistant" && message.status === "pending").map(message => message.id)));
+  const streamedReplies = useRef(new Set(messages.filter(message => message.streamed).map(message => message.id)));
   const [announcement, setAnnouncement] = useState("");
   const lastMessage = messages.at(-1);
   useEffect(() => {
     let latest: ChatMessageView | undefined;
     for (const message of messages) {
+      if (message.streamed) streamedReplies.current.add(message.id);
       if (message.role === "assistant" && message.status === "pending") pendingReplies.current.add(message.id);
       if (message.role !== "assistant" || message.status && message.status !== "complete" || completed.current.has(message.id)) continue;
       completed.current.add(message.id);
@@ -112,7 +114,7 @@ export const MessageList = memo(function MessageList({ messages, compact = false
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-surface-2 px-4 py-3 text-text sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className={`mb-2 flex items-center gap-2 text-xs font-medium text-text-2`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
-        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
+        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}
       {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <a key={link.href} href={link.href} className="text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{link.label}</a>)}</nav> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-line/80 bg-surface px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
@@ -133,7 +135,7 @@ export const MessageList = memo(function MessageList({ messages, compact = false
           <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-text-2 transition-colors hover:border-line hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
         </span>;
       })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-text-2">一般说明（未引用材料）</p> : null}
-      {message.status === "pending" ? <ThinkingText /> : null}
+      {message.status === "pending" ? <ThinkingText>{message.text ? "正在回答…" : "正在思考…"}</ThinkingText> : null}
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">原请求不会自动重发，费用仍待确认。</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-danger">本轮失败，未得到有效回答。</p> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-warn">{CLARIFY_FOLLOW_UP}</p> : null}

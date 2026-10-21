@@ -4,9 +4,11 @@ export {
   createOpeningProvider,
   OpeningProviderError,
   type OpeningProviderOptions,
+  type ProviderTextDelta,
 } from "./opening/provider";
 export { assertOpeningProviderEndpoint, OpeningProviderEndpointError } from "./opening/provider-network";
 export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
+export { buildTutorMetadataInput, tutorCitationsFromMarkdown } from "./opening/tutor-metadata";
 export {
   actualCentsForOutput,
   estimateUsage,

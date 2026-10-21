@@ -8,7 +8,7 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
 }));
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
-import { probeDbModel, resolveTutorModel } from "./model-gateway";
+import { probeDbModel, resolveTaskModel, resolveTutorModel } from "./model-gateway";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };
 beforeEach(() => {
@@ -22,7 +22,7 @@ describe("shared tutor model selection", () => {
   it("joins one owner-scoped choice to provider options and the exact ledger prices", async () => {
     const selected = await resolveTutorModel({} as never, scope, "hint");
     expect(mocks.get).toHaveBeenCalledWith(scope);
-    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: true, supportsAudio: undefined, answerStyle: true });
+    expect(mocks.provider).toHaveBeenCalledWith({ baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.modelName, supportsVision: true, supportsAudio: undefined, answerStyle: true, timeoutMs: 60_000, idleTimeoutMs: 60_000 });
     expect(selected.modelSnapshot).toEqual({ id: "chosen", providerId: "secondary", modelName: "actual-model", inputCentsPerMillion: 5, outputCentsPerMillion: 7 });
     expect(selected.inputCentsPerMillion).toBe(5);
     expect(selected.outputCentsPerMillion).toBe(7);
@@ -91,7 +91,7 @@ describe("shared tutor model selection", () => {
       outputCentsPerMillion: 20,
     });
     expect(mocks.provider).toHaveBeenCalledWith({
-      baseUrl: lant.baseUrl, apiKey: lant.apiKey, model: "glm-5.3", supportsVision: true, supportsAudio: false, answerStyle: true,
+      baseUrl: lant.baseUrl, apiKey: lant.apiKey, model: "glm-5.3", supportsVision: true, supportsAudio: false, answerStyle: true, timeoutMs: 60_000, idleTimeoutMs: 60_000,
     });
   });
   it("keeps budget 0 as a hard block even when a workspace Lant key exists", async () => {
@@ -113,6 +113,14 @@ describe("shared tutor model selection", () => {
     await expect(resolveTutorModel({} as never, scope, "explain")).rejects.toThrow(/不会自动切换供应商|暂不可用/);
     expect(mocks.provider).not.toHaveBeenCalled();
   });
+});
+
+it.each([
+  ["teaching.compile", 240_000], ["knowledge.extract", 240_000], ["practice.grade-text", 120_000],
+  ["practice.grade-photo", 120_000], ["settings.probe", 30_000],
+] as const)("gives %s its own request deadline", async (task, timeoutMs) => {
+  await resolveTaskModel({} as never, scope, task);
+  expect(mocks.provider).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs, idleTimeoutMs: 60_000 }));
 });
 
 it("wires stored workspace media bounds into provider options, snapshot and reservation model", async () => {

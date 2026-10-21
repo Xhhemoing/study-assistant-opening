@@ -108,7 +108,7 @@ function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationSc
 
 export function createOpeningConversationRepository(sql: Sql) {
   async function releaseReturnedExposures(scope: OpeningConversationScope, rows: readonly Record<string, unknown>[]) {
-    const pending = rows.flatMap(row => row.exposure_receipt && (row.exposure_receipt as Record<string, unknown>).released_at == null
+    const pending = rows.flatMap(row => row.role === "assistant" && row.status === "complete" && row.exposure_receipt && (row.exposure_receipt as Record<string, unknown>).released_at == null
       ? [String((row.exposure_receipt as Record<string, unknown>).id)] : []);
     const receipts = new Map<string, StudyExposureReceipt>();
     if (pending.length) await sql.begin(async tx => {
@@ -260,7 +260,7 @@ export function createOpeningConversationRepository(sql: Sql) {
 
     async releaseReturnedTurnIds(scope: OpeningConversationScope, conversationId: string, turnIds: readonly string[]): Promise<void> {
       if (!turnIds.length) return;
-      const rows = await sql`SELECT to_jsonb(h) AS exposure_receipt FROM opening_turns t
+      const rows = await sql`SELECT t.role,t.status,to_jsonb(h) AS exposure_receipt FROM opening_turns t
         JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
         JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         WHERE t.workspace_id=${scope.workspaceId} AND t.conversation_id=${conversationId} AND t.id=ANY(${[...turnIds]}::uuid[])

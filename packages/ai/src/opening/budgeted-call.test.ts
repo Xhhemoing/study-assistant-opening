@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ledgerActionForProviderError,
   runBudgetedCall,
   settleCentsForActual,
 } from "./budgeted-call";
-import { OpeningProviderError } from "./provider";
-import type { ProviderOutput } from "@aistudy/contracts";
+import { createOpeningProvider, OpeningProviderError } from "./provider";
+import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 
 const output: ProviderOutput = {
   text: "ok",
@@ -80,6 +80,29 @@ describe("ledgerActionForProviderError", () => {
 });
 
 describe("durable provider receipts", () => {
+  it.each(["interrupted", "aborted", "delivery failed"])("keeps a partial stream %s unknown and refuses the same ledger key on replay", async failure => {
+    const b = fakeBudget(), persistResult = vi.fn();
+    const caller = new AbortController(), deltas: string[] = [];
+    const stream = 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n';
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(stream));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
+    const input: ProviderInput = { instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
+      mediaCapability: "text_only", imageParts: [], outputFormat: "markdown" };
+    const budget = { ...b.api, reserve: async (entry: Parameters<typeof b.api.reserve>[0]) => {
+      const reservation = await b.api.reserve(entry);
+      return { ...reservation, ...(b.repo.unknowns.length ? { state: "reserved", outcomeUnknownAt: new Date() } : {}) };
+    } };
+    const call = () => runBudgetedCall({ ...options, input, provider, budget, signal: caller.signal, persistResult,
+      onTextDelta: async text => { deltas.push(text); if (failure === "aborted") caller.abort(); if (failure === "delivery failed") throw new Error("delivery failed"); },
+    });
+    await expect(call()).rejects.toMatchObject({ requestSent: true });
+    expect(deltas).toEqual(["partial"]);
+    expect(b.repo.unknowns).toEqual(["res-1"]);
+    expect(b.repo.released).toEqual([]); expect(b.repo.settled).toEqual([]); expect(persistResult).not.toHaveBeenCalled();
+    await expect(call()).rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN" });
+    expect(fetchImpl).toHaveBeenCalledOnce(); expect(b.repo.reserved).toHaveLength(1);
+  });
+
   it("persists the response with its actual charge before settlement", async () => {
     const b = fakeBudget();
     const order: string[] = [];

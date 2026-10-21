@@ -1,9 +1,9 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
-import { OpeningProviderError } from "./provider";
+import { OpeningProviderError, type ProviderTextDelta } from "./provider";
 import { assertParentInteractionBudget, hasMediaInput, mediaInputCostBound, mediaInputBytes, type ParentInteractionBudget } from "./parent-interaction-budget";
 
 export type BudgetedProvider = {
-  complete(input: ProviderInput, signal?: AbortSignal): Promise<ProviderOutput>;
+  complete(input: ProviderInput, signal?: AbortSignal, onTextDelta?: ProviderTextDelta): Promise<ProviderOutput>;
 };
 
 export type OverageAudit = {
@@ -109,6 +109,7 @@ export type BudgetedCallOptions = {
   reservedCents: number;
   actualCents: (output: ProviderOutput) => number;
   signal?: AbortSignal;
+  onTextDelta?: ProviderTextDelta;
   /** Runs after reservation, before any Provider request is authorized. */
   beforeSend?: () => Promise<void>;
   /**
@@ -241,7 +242,9 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   }
   let output: ProviderOutput;
   try {
-    output = await options.provider.complete(options.input, options.signal);
+    output = options.onTextDelta
+      ? await options.provider.complete(options.input, options.signal, options.onTextDelta)
+      : await options.provider.complete(options.input, options.signal);
   } catch (error) {
     if (error instanceof OpeningProviderError) {
       const action = ledgerActionForProviderError(error.code, { requestSent: error.requestSent });

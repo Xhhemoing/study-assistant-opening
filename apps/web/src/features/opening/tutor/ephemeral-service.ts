@@ -30,6 +30,7 @@ import {
   selectContext,
   shouldAutoPickSources,
   stripEphemeralCandidates,
+  tutorCitationsFromMarkdown,
 } from "@aistudy/ai";
 import { OpeningProviderError } from "@aistudy/ai";
 import {
@@ -60,6 +61,7 @@ export type EphemeralScope = { workspaceId: string; ownerUserId: string };
 type CompleteWithSignal = (
   input: ProviderInput,
   signal?: AbortSignal,
+  onTextDelta?: (delta: string) => void | Promise<void>,
 ) => Promise<ProviderOutput>;
 
 export type EphemeralProvider = {
@@ -109,6 +111,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       scope: EphemeralScope,
       input: EphemeralTurnInput,
       signal?: AbortSignal,
+      onTextDelta?: (delta: string) => void | Promise<void>,
     ): Promise<EphemeralTurnResponse> {
       try {
         assertEphemeralInput(input);
@@ -222,6 +225,24 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       );
       const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
       const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
+      let streamedExposure: StudyExposureReceipt | undefined;
+      const deliverHelp = async () => {
+        if (!streamedExposure && contextAnchor && deps.exposures) streamedExposure = await deps.exposures.deliver(scope, {
+          releaseKey: `ephemeral:${input.clientKey ?? requestId}`, contextAnchor, origin: "assistant", supportDomain: "unknown",
+          kind: input.mode === "explain" ? "solution" : "hint", level: input.mode === "explain" ? "revealed" : "hinted",
+        });
+        return streamedExposure;
+      };
+      const emitText = onTextDelta ? async (delta: string) => {
+        if (!delta) return;
+        if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
+        if (await deps.privacy.currentEpoch(scope) !== privacy.epoch) {
+          throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次回答已停止。", 409);
+        }
+        // A partial hint already shown to the learner must count even if the stream later fails.
+        await deliverHelp();
+        await onTextDelta(delta);
+      } : undefined;
       let selected: ResolvedTaskModel | undefined;
       let selectedRequestId = requestId;
       try {
@@ -247,6 +268,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         maxOutputTokens: deps.config.maxOutputTokens,
         mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only",
         imageParts,
+        ...(onTextDelta ? { outputFormat: "markdown" as const } : {}),
       };
       let completedRequestId = requestId;
       const callWith = async (model: ResolvedTaskModel | undefined, callRequestId: string) => {
@@ -273,6 +295,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           actualCents: (settled) => terms.requestCapPerDay ? 0 : Math.max(1, terms.actualCents(settled)),
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
           signal,
+          ...(emitText ? { onTextDelta: emitText } : {}),
           beforeSend: async () => {
             const epoch = await deps.privacy.currentEpoch(scope);
             if (epoch !== privacy.epoch) {
@@ -303,6 +326,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw error;
       }
       const validated = providerOutputSchema.parse(output);
+      const streamedCitations = onTextDelta ? tutorCitationsFromMarkdown(validated.text, context) : null;
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       let provenanceId: string | null = null;
       try {
@@ -314,24 +338,20 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw error;
       }
       const allowed = new Set(context.map((chunk) => chunk.id));
-      const citedChunkIds = validated.citedChunkIds.filter((id) => allowed.has(id));
+      const citedChunkIds = (streamedCitations?.citedChunkIds ?? validated.citedChunkIds).filter((id) => allowed.has(id));
       // Soft-filter unknown ids first; resolve only authorized context chunks (never fabricate).
       const citations = resolveCitations(citedChunkIds, context);
       // Echo effectiveSourceIds only when server changed selection vs client input.
       const selectionChanged =
         clientSourceIds.length === 0 && allowedSourceIds.length > 0;
-      const exposureReceipt = contextAnchor && deps.exposures ? await deps.exposures.deliver(scope, {
-        releaseKey: `ephemeral:${input.clientKey ?? requestId}`,
-        contextAnchor, origin: "assistant", supportDomain: "unknown",
-        kind: input.mode === "explain" ? "solution" : "hint", level: input.mode === "explain" ? "revealed" : "hinted",
-      }) : undefined;
+      const exposureReceipt = await deliverHelp();
       return {
         ...(contextAnchor ? { contextAnchor } : {}),
         ...(exposureReceipt ? { exposureReceipt } : {}),
         ...stripEphemeralCandidates({
           ...validated,
           // Model markers index its own (unfiltered) list.
-          text: renumberInlineCitations(validated.text, validated.citedChunkIds, citations),
+          text: streamedCitations?.text ?? renumberInlineCitations(validated.text, validated.citedChunkIds, citations),
           citedChunkIds,
         }),
         citations,

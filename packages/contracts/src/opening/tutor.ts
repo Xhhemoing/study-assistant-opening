@@ -112,8 +112,8 @@ export const providerInputSchema = z
     maxOutputTokens: z.number().int().positive().max(16_384),
     mediaCapability: providerMediaCapabilitySchema,
     imageParts: z.array(providerImagePartSchema).max(32).default([]),
-    /** "answer" (default) = tutor answer shape; "json" = task-specific JSON object returned in `text`. */
-    outputFormat: z.enum(["answer", "json"]).optional(),
+    /** "answer" = legacy tutor JSON; "json" = task JSON; "markdown" = direct, streamed tutor prose. */
+    outputFormat: z.enum(["answer", "json", "markdown"]).optional(),
     tools: z.array(providerToolSchema).max(16).optional(),
     toolMessages: z.array(providerToolMessageSchema).max(12).optional(),
     /** Raw base64 audio (no data: prefix) for models with audio input. */

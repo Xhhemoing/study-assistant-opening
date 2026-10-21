@@ -96,28 +96,37 @@ export async function fetchOpeningProvider(value: string, init: RequestInit): Pr
         reject(new OpeningProviderEndpointError("provider redirects are not allowed"));
         return;
       }
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      response.on("data", (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes > 8 * 1024 * 1024) {
-          request.destroy(new OpeningProviderEndpointError("provider response is too large"));
-          return;
+      try {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (value !== undefined) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
         }
-        chunks.push(chunk);
-      });
-      response.on("error", reject);
-      response.on("end", () => {
-        try {
-          const responseHeaders = new Headers();
-          for (const [name, value] of Object.entries(response.headers)) {
-            if (value !== undefined) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
-          }
-          resolve(new Response(status === 204 || status === 205 ? null : Buffer.concat(chunks), { status, headers: responseHeaders }));
-        } catch {
-          reject(new OpeningProviderEndpointError("provider returned an invalid HTTP response"));
-        }
-      });
+        let bytes = 0, closed = false;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            response.on("data", (chunk: Buffer) => {
+              if (closed) return;
+              bytes += chunk.length;
+              if (bytes > 8 * 1024 * 1024) {
+                closed = true;
+                const error = new OpeningProviderEndpointError("provider response is too large");
+                controller.error(error); request.destroy(error); return;
+              }
+              controller.enqueue(chunk);
+              if ((controller.desiredSize ?? 0) <= 0) response.pause();
+            });
+            response.on("error", error => { if (!closed) { closed = true; controller.error(error); } });
+            response.on("end", () => { if (!closed) { closed = true; controller.close(); } });
+          },
+          pull() { response.resume(); },
+          cancel() { closed = true; response.destroy(); request.destroy(); },
+        });
+        if (status === 204 || status === 205) { void body.cancel(); }
+        resolve(new Response(status === 204 || status === 205 ? null : body, { status, headers: responseHeaders }));
+      } catch {
+        response.destroy();
+        reject(new OpeningProviderEndpointError("provider returned an invalid HTTP response"));
+      }
     });
     request.on("error", reject);
     request.end(init.body as string | undefined);

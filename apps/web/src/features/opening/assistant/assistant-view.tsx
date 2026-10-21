@@ -6,7 +6,7 @@ import { OpeningApiError, createOpeningApi, type JobStatusResponse, type Opening
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
-import { ephemeralHistoryFromMessages, resolveChatMessages, type ChatMessageView } from "./message-model";
+import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
@@ -47,6 +47,7 @@ import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
+import { useJobStream } from "./use-job-stream";
 
 export { createJobPoller } from "./job-poller";
 
@@ -178,6 +179,7 @@ export function appendEphemeralResponseIfActive(
     text: string;
     /** Selected materials for this turn — drives hadMaterialContext / general badge. */
     sourceIds?: readonly string[];
+    streamed?: boolean;
     output: {
       requestId: string | null;
       text: string;
@@ -206,6 +208,7 @@ export function appendEphemeralResponseIfActive(
       systemQuery: Boolean(input.output.systemQuery),
       queryEvidenceLinks: queryEvidenceLinks(input.output.systemQuery),
       hadMaterialContext,
+      streamed: input.streamed,
     },
   ];
 }
@@ -329,6 +332,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
+  const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId);
   const draftStore = useMemo(() => createQuestionDraftStore(), []);
   const [draftUnavailable, setDraftUnavailable] = useState(false);
   const draftScope = `${assistantContextScope(studyContext)}:${initialCourseId ?? ""}:${initialConversationId ?? ""}:${[...initialSourceIds].sort().join(",")}:${initialPage ?? ""}:${learningAttempt?.id ?? ""}`;
@@ -356,6 +360,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setDraftUnavailable(draftStore.unavailable);
   }
   const [ephemeralMessages, setEphemeralMessages] = useState<ChatMessageView[]>([]);
+  const [ephemeralPendingMessages, setEphemeralPendingMessages] = useState<ChatMessageView[]>([]);
   const [ephemeralPrivacyEpoch, setEphemeralPrivacyEpoch] = useState<number>();
   const [snippetDraft, setSnippetDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
   const [cardDraft, setCardDraft] = useState<ReturnType<typeof prepareSnippetDraft>>(null);
@@ -592,12 +597,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }, [activeJobId, api, conversationId, refreshConversation]);
 
   const savedDisplay = useMemo(
-    () => resolveChatMessages({ resume, turns: recoveredTurns }),
-    [resume, recoveredTurns],
+    () => {
+      const saved = resolveChatMessages({ resume, turns: recoveredTurns });
+      return { ...saved, messages: messagesWithStreamingReply(saved.messages, streamingReply) };
+    },
+    [resume, recoveredTurns, streamingReply],
   );
   const display = useMemo(() => privacy === "ephemeral"
-    ? { messages: messagesForChatBranch(savedDisplay.messages, ephemeralMessages, privacy), historyTruncated: false }
-    : savedDisplay, [privacy, savedDisplay, ephemeralMessages]);
+    ? { messages: messagesForChatBranch(savedDisplay.messages, [...ephemeralMessages, ...ephemeralPendingMessages], privacy), historyTruncated: false }
+    : savedDisplay, [privacy, savedDisplay, ephemeralMessages, ephemeralPendingMessages]);
+  const showingPendingReply = display.messages.some(message => message.role === "assistant" && message.status === "pending");
   const currentVersions = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.version])), [sources]);
   const sourceNames = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.name])), [sources]);
   const saveSnippet = useCallback((message: ChatMessageView, selectedText?: SelectedExcerpt) => {
@@ -618,8 +627,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }
 
   function cancelCurrentTurn(): void {
+    cancelJobStream();
     abortRef.current?.abort();
     abortRef.current = null;
+    setEphemeralPendingMessages([]);
     const jobId = activeJobId;
     if (jobId) {
       void api.cancelJob(jobId).then((job) => {
@@ -640,6 +651,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     // Check the current clock at the actual send boundary, including background tabs.
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
+    setPendingHint("");
     setAutoSelectNotice(null);
     if (!input.querySystem && studyContextError) { setError(studyContextError); return { accepted: false }; }
     if (!input.querySystem && studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
@@ -672,6 +684,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     try {
       if (input.privacy === "ephemeral" && !learningAttempt) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
+        let receivedDelta = false;
+        setEphemeralPendingMessages([
+          { id: `ephemeral-user-${input.clientKey}`, role: "user", text: submittedText, citations: [], citationLabels: [], origin: "ephemeral" },
+          { id: `ephemeral-assistant-${input.clientKey}`, role: "assistant", text: "", citations: [], citationLabels: [], origin: "ephemeral", status: "pending", streamed: true },
+        ]);
         const output = await api.replyEphemeral({
           clientKey: input.clientKey,
           ...(input.purpose ? { purpose: input.purpose } : {}),
@@ -686,8 +703,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
           // Package B/C: course scope lets server fill/narrow when sourceIds empty.
           ...(boundCourseId ? { courseId: boundCourseId } : {}),
-        }, abortController.signal);
-        if (abortController.signal.aborted) return { accepted: false };
+        }, abortController.signal, delta => {
+          if (abortController.signal.aborted || abortRef.current !== abortController) return;
+          receivedDelta = true;
+          setEphemeralPendingMessages(current => current.map(message => message.role === "assistant"
+            ? { ...message, text: message.text + delta } : message));
+        });
+        if (abortController.signal.aborted || abortRef.current !== abortController) return { accepted: false };
         if (output.exposureReceipt) void acknowledgeStudyExposure(output.exposureReceipt).catch(() => undefined);
         setEphemeralPrivacyEpoch(output.privacyEpoch);
         const applied = applyEffectiveSourceIds(output.effectiveSourceIds);
@@ -702,8 +724,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           clientKey: input.clientKey,
           text: submittedText,
           sourceIds: turnSourceIds,
+          streamed: receivedDelta,
           output,
         }, abortController.signal));
+        setEphemeralPendingMessages([]);
         setPendingHint(output.historyDiscarded
           ? "隐私设置已变化或旧临时历史无法验证，已清除旧临时上下文；本次只发送当前输入和允许的材料。"
           : "本轮仅保留在当前标签页；刷新后不会恢复。");
@@ -738,7 +762,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       await refreshConversation(id);
       return { accepted: true };
     } catch (err) {
+      // A cancelled temporary request must not clear a newer request's partial reply.
+      if (abortController.signal.aborted && abortRef.current !== abortController) return { accepted: false };
       abortRef.current = null;
+      setEphemeralPendingMessages([]);
       if (abortController.signal.aborted) {
         setPending(false);
         setError("");
@@ -757,7 +784,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       ) {
         setCurrentPage("");
       }
-      setError(formatTurnError(err));
+      setError(input.privacy === "ephemeral" ? `${formatTurnError(err)} 本轮回答未完成，问题已保留。` : formatTurnError(err));
       return { accepted: false };
     }
   }
@@ -873,7 +900,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
       {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
-      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? <div className="mx-5 mb-2 py-2"><ThinkingText>{pendingHint || "正在思考…"}</ThinkingText></div> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (showingPendingReply ? null : <div className="mx-5 mb-2 py-2"><ThinkingText>{pendingHint || "正在思考…"}</ThinkingText></div>) : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-accent-soft px-3 py-2 text-xs leading-5 text-accent">
           <p className="min-w-0 flex-1">{autoSelectNotice}</p>

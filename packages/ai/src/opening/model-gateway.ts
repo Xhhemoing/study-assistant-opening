@@ -39,6 +39,7 @@ export type ModelGatewayCallOptions = {
   minReservedCents?: number;
   signal?: AbortSignal;
   beforeSend?: () => Promise<void>;
+  onTextDelta?: BudgetedCallOptions["onTextDelta"];
   /** Told which model answered (e.g. to label a fallback answer). */
   onModel?: (model: ResolvedTaskModel, info: { fallback: boolean }) => void;
 };
@@ -145,6 +146,7 @@ export function createModelGateway(deps: {
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
+          ...(options.onTextDelta ? { onTextDelta: options.onTextDelta } : {}),
         });
       },
     });
@@ -160,7 +162,7 @@ export function createModelGateway(deps: {
       options: Omit<ModelGatewayCallOptions, "input" | "signal">,
     ): BudgetedProvider {
       return {
-        complete: (input, signal) => call(scope, task, { ...options, input, ...(signal ? { signal } : {}) }),
+        complete: (input, signal, onTextDelta) => call(scope, task, { ...options, input, ...(signal ? { signal } : {}), ...(onTextDelta ? { onTextDelta } : {}) }),
       };
     },
   };

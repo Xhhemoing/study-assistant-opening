@@ -223,3 +223,93 @@ it("applies saved typed intent and answer reports once with an owned running lea
   const context = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, await f.submit(attempt));
   expect(context.context.selfReportedAnswerConditions).toMatchObject({ reportedGuess: true });
 });
+
+it.each(["cancelled", "outcome_unknown"] as const)("keeps actually streamed help after a %s job, so the next submission is not independent", async terminal => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const conversations = createOpeningConversationRepository(fixture.sql), jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const conversation = await conversations.create(fixture.scope, { title: "Partial streamed hint", courseId: f.courseId });
+  const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
+    text: "给下一步提示", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
+    attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
+  const claimed = await jobs.claim(saved.jobId);
+  const exposure = await createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, {
+    releaseKey: `assistant:${saved.assistantTurnId}`, contextAnchor: { purpose: "learning_help", attemptId: attempt.id },
+    origin: "assistant", turnId: saved.assistantTurnId, sessionId: f.sessionId, kind: "hint", level: "hinted",
+  });
+  const [workspace] = await fixture.sql`SELECT privacy_epoch FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
+  const context = { privacyEpoch: Number(workspace!.privacy_epoch), claimToken: claimed!.claimToken,
+    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id };
+  expect(await jobs.readStream(fixture.otherScope, saved.jobId, context)).toBeNull();
+  await expect(jobs.readStream(fixture.scope, saved.jobId, { ...context, privacyEpoch: context.privacyEpoch + 1 })).rejects.toThrow("authorization changed");
+  expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
+  expect(await jobs.readStream(fixture.scope, saved.jobId, context)).toMatchObject({ status: "running" });
+  const firstRelease = (await fixture.sql`SELECT released_at FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.released_at;
+  expect(firstRelease).not.toBeNull();
+  // Reconnection is a second actual delivery but must not move the first-exposure timestamp.
+  await jobs.readStream(fixture.scope, saved.jobId, context);
+  expect((await fixture.sql`SELECT released_at FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.released_at).toEqual(firstRelease);
+  if (terminal === "cancelled") await jobs.cancel(fixture.scope, saved.jobId);
+  else await jobs.markUnknown(fixture.scope, saved.jobId, "stream interrupted", claimed!.claimToken);
+  expect(await jobs.readStream(fixture.scope, saved.jobId, context)).toMatchObject({ status: terminal });
+  const reopened = await conversations.listTurns(fixture.scope, conversation.id);
+  expect(reopened.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt?.releasedAt).not.toBeNull();
+  expect((await fixture.sql`SELECT released_at FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.released_at).toEqual(firstRelease);
+  const answer = await f.submit(attempt);
+  const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, answer);
+  expect(evaluateEvidenceEligibility(evidence.observation, evidence.context).independentAttempt).toBe("no");
+});
+
+it("does not release a generated stream after cancellation or material exclusion", async () => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const conversations = createOpeningConversationRepository(fixture.sql), jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const conversation = await conversations.create(fixture.scope, { title: "Unread streamed hint", courseId: f.courseId });
+  const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
+    text: "提示", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
+    attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
+  const claimed = await jobs.claim(saved.jobId);
+  const exposure = await createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, {
+    releaseKey: `assistant:${saved.assistantTurnId}`, contextAnchor: { purpose: "learning_help", attemptId: attempt.id },
+    origin: "assistant", turnId: saved.assistantTurnId, sessionId: f.sessionId, kind: "hint", level: "hinted",
+  });
+  const [workspace] = await fixture.sql`SELECT privacy_epoch FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
+  const context = { privacyEpoch: Number(workspace!.privacy_epoch), claimToken: claimed!.claimToken,
+    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id };
+  await fixture.sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${f.sourceId}`;
+  await expect(jobs.readStream(fixture.scope, saved.jobId, context)).rejects.toThrow("material unavailable");
+  await fixture.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${f.sourceId}`;
+  await jobs.cancel(fixture.scope, saved.jobId);
+  expect(await jobs.readStream(fixture.scope, saved.jobId, context)).toMatchObject({ status: "cancelled" });
+  await conversations.listTurns(fixture.scope, conversation.id);
+  expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
+  const answer = await f.submit(attempt);
+  const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, answer);
+  expect(evaluateEvidenceEligibility(evidence.observation, evidence.context).independentAttempt).toBe("yes");
+});
+
+
+it("a pre-generated streaming receipt stays inert in pending history and releases only with completed answer delivery", async () => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const conversations = createOpeningConversationRepository(fixture.sql), jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const conversation = await conversations.create(fixture.scope, { title: "Streaming history", courseId: f.courseId });
+  const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
+    text: "提示", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
+    attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
+  const claimed = await jobs.claim(saved.jobId);
+  const generatedExposure = { releaseKey: `assistant:${saved.assistantTurnId}`,
+    contextAnchor: { purpose: "learning_help" as const, attemptId: attempt.id }, origin: "assistant" as const,
+    turnId: saved.assistantTurnId, sessionId: f.sessionId, kind: "hint" as const, level: "hinted" as const };
+  const exposure = await createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, generatedExposure);
+  const pending = await conversations.listTurns(fixture.scope, conversation.id);
+  expect(pending.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt?.releasedAt).toBeNull();
+  await conversations.releaseReturnedTurnIds(fixture.scope, conversation.id, [saved.assistantTurnId]);
+  expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
+  await jobs.completeTurn({ scope: fixture.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
+    text: "先把分母统一。", citations: [], candidates: [], claimToken: claimed!.claimToken,
+    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], generatedExposure });
+  expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
+  const complete = await conversations.listTurns(fixture.scope, conversation.id);
+  const delivered = complete.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt;
+  expect(delivered?.releasedAt).not.toBeNull();
+  const repeated = await conversations.listTurns(fixture.scope, conversation.id);
+  expect(repeated.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt).toEqual(delivered);
+});

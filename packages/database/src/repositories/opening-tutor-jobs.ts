@@ -3,7 +3,7 @@ import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentFor
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { generateOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
+import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
@@ -235,6 +235,37 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
         LIMIT 1
       `;
       return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
+    },
+
+    /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
+    async readStream(scope: OpeningScope, id: string, context: {
+      privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string;
+    }): Promise<OpeningTutorJobRecord | null> {
+      return sql.begin(async tx => {
+        if (context.exposureReceiptId) await lockWorkspaceLearningHistory(tx, scope);
+        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!workspace) return null;
+        const [row] = await tx`SELECT j.* FROM opening_tutor_jobs j
+          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`;
+        if (!row) return null;
+        const job = mapJob(row as Record<string, unknown>);
+        if (job.status !== "running") return job;
+        if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
+          throw new Error("stream authorization changed");
+        }
+        const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(context.contextSourceRefs)}::jsonb`)}`;
+        if (!available) throw new Error("stream material unavailable or excluded");
+        if (context.exposureReceiptId) {
+          const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
+            AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
+          if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
+          await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+        }
+        return job;
+      }) as Promise<OpeningTutorJobRecord | null>;
     },
 
     async listQueued(limit: number): Promise<OpeningTutorJobRecord[]> {

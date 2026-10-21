@@ -4,6 +4,7 @@ import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
   createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
+import { createTutorStreamWriter } from "./runtime/tutor-stream";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
 import { createRedisConnection, createProducerRedisConnection, createQueues } from "./runtime/queue";
@@ -27,7 +28,7 @@ import { runJob } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
 import { createDbSystemQueryService, createDbAssistantProposalService } from "./runtime/system-query";
-import { createOpeningEphemeralProvenanceRepository } from "@aistudy/database";
+import { createOpeningEphemeralProvenanceRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -166,6 +167,9 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    stream: createTutorStreamWriter(producer),
+    streamExposures: createOpeningStudyExposureRepository(sql),
+    onStreamUnavailable: reportError,
     systemQuery: createDbSystemQueryService(sql, "worker", { callModel: (scope, input, options) => models.call(scope, "tutor.listen", {
       ...options, input, budget: scopeBudget(budget, scope),
     }) }),

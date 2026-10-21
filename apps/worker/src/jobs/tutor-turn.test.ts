@@ -31,6 +31,7 @@ describe("tutor turn handler", () => {
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
+      get: vi.fn(async () => claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
@@ -56,6 +57,93 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it("publishes actual Markdown deltas before completion and keeps the answer when optional metadata fails", async () => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    provider.complete.mockImplementationOnce(async (input, _signal, onTextDelta) => {
+      expect(input.outputFormat).toBe("markdown");
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      await onTextDelta("F = ");
+      await onTextDelta("ma [1]");
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
+      return { text: "F = ma [1]", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 };
+    }).mockRejectedValueOnce(new OpeningProviderError("PROVIDER_TIMEOUT", "metadata timed out"));
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      text: "F = ma [1]", citations: [expect.objectContaining({ chunkId: chunkA.id })], candidates: [],
+    }));
+    expect(budget.reserve.mock.calls.map(call => call[1].requestId)).toEqual([`tutor:${claimedJob.id}`, `tutor:${claimedJob.id}:metadata`]);
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+  });
+
+  it("generates one inert help receipt before streaming and reuses it at durable completion", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const anchor = { purpose: "learning_help" as const, attemptId: chunkA.id };
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, learningSessionId: claimedJob.conversationId,
+      sourceVersions: { [chunkA.sourceId]: 0 }, contextAnchor: anchor });
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      expect(streamExposures.generate).toHaveBeenCalledOnce();
+      expect(stream.begin).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id, expect.objectContaining({ exposureReceiptId: chunkB.id }));
+      await onTextDelta("提示");
+      return { text: "提示", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id);
+    const generated = streamExposures.generate.mock.calls[0][1];
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ generatedExposure: generated }));
+    expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
+  });
+
+  it("does not make a new paid metadata call after the learner cancels a streamed answer", async () => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta("部分回答");
+      tutorJobs.get.mockResolvedValue({ ...claimedJob, status: "cancelled" });
+      return { text: "完整正文", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(budget.reserve).toHaveBeenCalledOnce();
+    expect(budget.settle).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks cancellation after metadata reservation and releases it without sending", async () => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    tutorJobs.get.mockResolvedValueOnce(claimedJob).mockResolvedValueOnce({ ...claimedJob, status: "cancelled" });
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(budget.reserve).toHaveBeenCalledTimes(2);
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}:metadata`, "not_sent");
+  });
+
+  it("keeps ordinary session listening free of item-help exposure", async () => {
+    const { deps, tutorJobs } = setup({ claim: { ...claimedJob, mode: "listen" } });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, mode: "listen", learningSessionId: claimedJob.conversationId,
+      sourceVersions: { [chunkA.sourceId]: 0 } });
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
+    await createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id);
+    expect(streamExposures.generate).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("generatedExposure");
+  });
+
+  it("continues saving a completed answer when the temporary Redis stream is unavailable", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => { throw new Error("Redis offline"); }) };
+    const onStreamUnavailable = vi.fn();
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta("first"); await onTextDelta(" second");
+      return { text: "first second", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id);
+    expect(stream.append).toHaveBeenCalledOnce();
+    expect(onStreamUnavailable).toHaveBeenCalledOnce();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "first second" }));
+  });
 
   it.each(["hint", "explain", "listen", "think_together"])("generates a context-only receipt in %s mode without claiming delivery", async mode => {
     const { deps, tutorJobs } = setup({ claim: { ...claimedJob, mode } });

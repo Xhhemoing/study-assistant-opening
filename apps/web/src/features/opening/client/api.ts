@@ -1,4 +1,5 @@
 import { parseOpeningResponse } from "./parse-response";
+import { readServerEvents } from "./sse";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { createSessionFetch } from "../../auth/session-expiry";
 import { createAssistantProposalClient } from "./assistant-proposal-client";
@@ -299,7 +300,38 @@ export function createOpeningApi(transport: FetchLike = fetch) {
     async replyEphemeral(
       input: EphemeralTurnInput,
       signal?: AbortSignal,
+      onDelta?: (delta: string) => void,
     ): Promise<EphemeralTurnResponse> {
+      if (onDelta) {
+        const response = await fetchImpl("/api/opening/ephemeral", {
+          method: "POST", body: JSON.stringify(input), signal,
+          headers: { "content-type": "application/json", accept: "text/event-stream" },
+        });
+        if (!response.ok) {
+          const { message, code, reason } = readError(await parseJson(response));
+          throw new OpeningApiError(response.status, message, code, reason);
+        }
+        acknowledgeStudyExposureHeaders(response, fetchImpl);
+        if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+          return parseOpeningResponse(ephemeralTurnResponseSchema, await parseJson(response));
+        }
+        let completed: EphemeralTurnResponse | undefined;
+        await readServerEvents(response, (event) => {
+          const body: unknown = JSON.parse(event.data);
+          if (event.event === "delta") {
+            const { delta } = z.object({ delta: z.string() }).parse(body);
+            onDelta(delta);
+          } else if (event.event === "complete") {
+            completed = parseOpeningResponse(ephemeralTurnResponseSchema, body);
+            return false;
+          } else if (event.event === "error") {
+            const { message, code, reason } = readError(body);
+            throw new OpeningApiError(502, message, code, reason);
+          }
+        }, signal);
+        if (!completed) throw new OpeningApiError(502, "回答连接中断，本轮尚未完成；问题已保留，请重试。", "STREAM_INCOMPLETE");
+        return completed;
+      }
       const body = await request(
         "/api/opening/ephemeral",
         { method: "POST", body: JSON.stringify(input), signal },

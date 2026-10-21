@@ -57,6 +57,33 @@ describe("model gateway", () => {
     expect(calls.reserve[0]).toMatchObject({ purpose: "tutor", amountCents: 400 });
   });
 
+  it("forwards awaited text deltas through both gateway adapters before persisting and settling", async () => {
+    const events: string[] = [];
+    const resolved = model();
+    resolved.provider.complete = async (_input, _signal, onTextDelta) => {
+      await onTextDelta?.("first"); await onTextDelta?.(" second"); return output;
+    };
+    const { repo } = budget();
+    const gateway = createModelGateway({ resolve: async () => resolved });
+    const settings = { budget: repo, operationId: "stream", persistResult: async () => { events.push("persist"); } };
+    const onTextDelta = async (value: string) => { events.push(value); };
+    await gateway.call(scope, "tutor.explain", { ...settings, input: { ...input, outputFormat: "markdown" }, onTextDelta });
+    await gateway.budgetedProvider(scope, "tutor.explain", settings).complete(input, undefined, onTextDelta);
+    expect(events).toEqual(["first", " second", "persist", "first", " second", "persist"]);
+  });
+
+  it("does not use a fallback after partial text and an unknown provider outcome", async () => {
+    const { OpeningProviderError } = await import("./provider");
+    const resolved = model(), fallback = vi.fn(), onTextDelta = vi.fn();
+    resolved.provider.complete = async (_input, _signal, deliver) => { await deliver?.("partial"); throw new OpeningProviderError("PROVIDER_TIMEOUT", "idle", true, true); };
+    const { repo } = budget();
+    const unknown = vi.fn();
+    await expect(createModelGateway({ resolve: async () => resolved, resolveFallback: fallback }).call(scope, "tutor.explain", {
+      budget: { ...repo, markUnknown: unknown }, input, operationId: "partial", onTextDelta,
+    })).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+    expect(onTextDelta).toHaveBeenCalledExactlyOnceWith("partial"); expect(unknown).toHaveBeenCalledOnce(); expect(fallback).not.toHaveBeenCalled();
+  });
+
   it("fails before reserving when the route cannot be resolved", async () => {
     const { calls, repo } = budget();
     const gateway = createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("所选模型已移除"); } });

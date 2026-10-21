@@ -8,8 +8,9 @@ import {
   type SourceChunk,
   type TutorMode,
   type ConversationPlanningContext,
+  type StudyContextAnchor,
 } from "@aistudy/contracts";
-import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService, buildTutorMetadataInput, tutorCitationsFromMarkdown } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -29,6 +30,7 @@ import type {
   ContextSourceRef,
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
+  OpeningStudyExposureInput,
 } from "@aistudy/database";
 import { mergeContextSourceRefs, OpeningBudgetError } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
@@ -43,6 +45,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
+import type { TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { withJobHeartbeat } from "../runtime/lifecycle";
 import {
@@ -59,6 +62,9 @@ export type TutorTurnDeps = {
   proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
     jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
+  stream?: TutorStreamWriter;
+  streamExposures?: { generate(scope: Scope, input: OpeningStudyExposureInput): Promise<{ id: string }> };
+  onStreamUnavailable?: (error: unknown) => void;
   tutorJobs: OpeningTutorJobsRepository;
   chunks: {
     listForSources(scope: { workspaceId: string; ownerUserId: string }, sourceIds: string[]): Promise<SourceChunk[]>;
@@ -246,20 +252,54 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const pageForImages = turn.currentPage ?? (imageOnlySources ? 1 : null);
       const imageParts = supportsVision && pageForImages != null && deps.pageImages
         ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: turn.sourceVersions, physicalPage: pageForImages }) : [];
+      const streamExposure: OpeningStudyExposureInput | undefined = deps.stream && (turn.contextAnchor || turn.learningSessionId && (turn.attemptId || mode === "hint" || mode === "explain"))
+        ? { releaseKey: `assistant:${claimed.assistantTurnId}`,
+            contextAnchor: turn.contextAnchor ?? { purpose: "learning_help", attemptId: turn.attemptId ?? null } as StudyContextAnchor,
+            origin: "assistant", turnId: claimed.assistantTurnId, supportDomain: "unknown",
+            kind: turn.learningSessionId
+              ? turn.attemptId && mode !== "explain" ? "hint" : classifyTutorHelpKind({ mode, attemptId: turn.attemptId ?? null, problemId: null })
+              : mode === "explain" ? "solution" : "hint",
+            level: mode === "explain" ? "revealed" : "hinted",
+            ...(turn.learningSessionId ? { sessionId: turn.learningSessionId } : {}) }
+        : undefined;
+      const exposureReceipt = streamExposure
+        ? await deps.streamExposures!.generate(scope, streamExposure) : null;
+      let streamAvailable = Boolean(deps.stream);
+      if (deps.stream) {
+        try {
+          await deps.stream.begin(scope.workspaceId, claimed.id, { privacyEpoch: jobEpoch ?? 0,
+            contextSourceRefs, exposureReceiptId: exposureReceipt?.id ?? null, claimToken: claimed.claimToken });
+        } catch (error) {
+          streamAvailable = false;
+          deps.onStreamUnavailable?.(error);
+        }
+      }
+      const onTextDelta = deps.stream ? async (delta: string) => {
+        if (!streamAvailable) return;
+        try { await deps.stream!.append(scope.workspaceId, claimed.id, delta); }
+        catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
+      } : undefined;
       const input: ProviderInput = {
         instruction, text: turn.text, history,
+        ...(deps.stream ? { outputFormat: "markdown" as const } : {}),
         chunks: context, mode, maxOutputTokens: deps.config.maxOutputTokens,
         mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only", imageParts,
       };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
       // reservation; a fallback model runs under its own ":fallback" key.
-      const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
+      const metadataStillWanted = async () => {
+        const current = await deps.tutorJobs.get(scope, claimed.id);
+        return current?.status === "running" && current.claimToken === claimed.claimToken;
+      };
+      let completedModel = selected;
+      const callWith = (model: ResolvedTaskModel | undefined, operationId: string, callInput: ProviderInput = input) => {
+        if (callInput === input) completedModel = model;
         const terms = model
-          ? reservationTerms(model, input, deps.config.reservedCents)
+          ? reservationTerms(model, callInput, deps.config.reservedCents)
           : (() => {
               const rates = { inputCentsPerMillion: deps.config.inputCentsPerMillion, outputCentsPerMillion: deps.config.outputCentsPerMillion };
               return {
-                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
+                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(callInput), callInput.maxOutputTokens, rates)),
                 actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
               } as ReservationTerms;
             })();
@@ -267,7 +307,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           provider: model?.provider ?? deps.provider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
-          input,
+          input: callInput,
+          ...(callInput.outputFormat === "markdown" && onTextDelta ? { onTextDelta } : {}),
           requestId: operationId,
           operationId,
           parentBudget,
@@ -276,9 +317,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           reservedCents: terms.reservedCents,
           actualCents: terms.actualCents,
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
-          beforeSend: deps.privacy && jobEpoch !== null
-            ? async () => assertCurrentEpoch(jobEpoch, await deps.privacy!.getWorkspaceEpoch(scope))
-            : undefined,
+          beforeSend: async () => {
+            if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+            if (callInput !== input && !await metadataStillWanted()) throw new Error("tutor job no longer needs metadata");
+          },
         });
       };
       let output: ProviderOutput;
@@ -313,7 +355,19 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
         throw error;
       }
-      const validated: ProviderOutput = providerOutputSchema.parse(output);
+      let validated: ProviderOutput = providerOutputSchema.parse(output);
+      if (deps.stream) {
+        // Auxiliary suggestions cannot discard a successfully completed answer or trigger a second answer call.
+        let candidates: ProviderOutput["candidates"] = [];
+        try {
+          if (await metadataStillWanted()) {
+            const metadata = await callWith(completedModel, `${tutorOperationId}:metadata`, buildTutorMetadataInput(input, validated.text));
+            candidates = providerOutputSchema.parse(metadata).candidates;
+          }
+        } catch { /* The answer remains useful without optional suggestions; the call owns its budget outcome. */ }
+        const referenced = tutorCitationsFromMarkdown(validated.text, context);
+        validated = { ...validated, text: referenced.text, citedChunkIds: referenced.citedChunkIds, candidates };
+      }
       // Soft-filter unknown cited ids (Package D); never fabricate rows / never throw on unknowns.
       let citations = resolveCitations(validated.citedChunkIds, context, { soft: true });
       // Soft page guard: empty cites = general OK; prefer on-page cites when any match.
@@ -333,7 +387,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         assertCurrentEpoch(jobEpoch, currentEpoch);
       }
       // Generate an inert receipt with the answer; only an actual HTTP delivery releases it.
-      const helpExposure = turn.learningSessionId && (turn.contextAnchor || turn.attemptId || mode === "hint" || mode === "explain")
+      const helpExposure = !deps.stream && turn.learningSessionId && (turn.contextAnchor || turn.attemptId || mode === "hint" || mode === "explain")
         ? {
             id: randomUUID(),
             sessionId: turn.learningSessionId,
@@ -351,12 +405,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             delivered: true as const,
           }
         : undefined;
-      const generatedExposure = !turn.learningSessionId && turn.contextAnchor ? {
+      const generatedExposure = streamExposure ?? (!turn.learningSessionId && turn.contextAnchor ? {
         releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
         origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "unknown" as const,
         kind: mode === "explain" ? "solution" as const : "hint" as const,
         level: mode === "explain" ? "revealed" as const : "hinted" as const,
-      } : undefined;
+      } : undefined);
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,

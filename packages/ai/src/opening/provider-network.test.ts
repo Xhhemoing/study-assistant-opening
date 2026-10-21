@@ -95,6 +95,28 @@ describe("provider outbound boundary", () => {
     } finally { await close(server); }
   });
 
+  it("delivers the first real HTTP stream delta before the server ends the response", async () => {
+    vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("OPENING_PROVIDER_ALLOW_LOCAL", "1");
+    let finish!: () => void, first!: () => void;
+    const firstDelta = new Promise<void>(resolve => { first = resolve; });
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/event-stream");
+      response.write('data: {"id":"real-stream","choices":[{"index":0,"delta":{"content":"first"}}]}\n\n');
+      finish = () => response.end('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\ndata: [DONE]\n\n');
+    });
+    const url = await listening(server);
+    try {
+      let completed = false;
+      const pending = createOpeningProvider({ baseUrl: url, apiKey: "key", model: "local" })
+        .complete({ ...input, outputFormat: "markdown" }, undefined, value => { expect(value).toBe("first"); first(); })
+        .then(value => { completed = true; return value; });
+      await firstDelta;
+      expect(completed).toBe(false);
+      finish();
+      expect(await pending).toMatchObject({ text: "first", inputTokens: 4, outputTokens: 2 });
+    } finally { await close(server); }
+  });
+
   it.each([301, 302, 303, 304, 307, 308])("refuses HTTP %i without contacting the redirect destination", async status => {
     vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("OPENING_PROVIDER_ALLOW_LOCAL", "1");
     let destinations = 0;
@@ -124,7 +146,8 @@ describe("provider outbound boundary", () => {
       const pending = createOpeningProvider({ baseUrl: url, apiKey: "key", model: "local" }).complete(input, caller.signal);
       caller.abort();
       await expect(pending).rejects.toMatchObject({ code: "PROVIDER_ABORTED", retryable: false });
-      await expect(fetchOpeningProvider(`${url}/large`, { method: "POST", body: "{}" })).rejects.toBeInstanceOf(OpeningProviderEndpointError);
+      const large = await fetchOpeningProvider(`${url}/large`, { method: "POST", body: "{}" });
+      await expect(large.text()).rejects.toBeInstanceOf(OpeningProviderEndpointError);
     } finally { await close(server); }
   });
 
