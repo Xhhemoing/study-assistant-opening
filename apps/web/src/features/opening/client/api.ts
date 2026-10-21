@@ -1,4 +1,5 @@
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { createSessionFetch } from "../../auth/session-expiry";
 import { createAssistantProposalClient } from "./assistant-proposal-client";
 import { createOpeningCoachClient } from "./coach-client";
 import {
@@ -226,7 +227,8 @@ export function sourceDownloadHref(sourceId: string, version: number): string {
   return `/api/opening/sources/${sourceId}/download?version=${version}`;
 }
 
-export function createOpeningApi(fetchImpl: FetchLike = fetch) {
+export function createOpeningApi(transport: FetchLike = fetch) {
+  const fetchImpl = createSessionFetch(transport);
   return {
     ...createOpeningCoachClient(fetchImpl),
     ...createAssistantProposalClient(fetchImpl),

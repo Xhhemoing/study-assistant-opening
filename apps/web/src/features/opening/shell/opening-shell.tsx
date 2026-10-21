@@ -90,14 +90,20 @@ export function OpeningShell({ children }: { children: ReactNode }) {
         const body = await response.json() as { user?: { displayName?: string } };
         if (!controller.signal.aborted && typeof body.user?.displayName === "string") setUserLabel(body.user.displayName);
       }).catch(() => undefined);
-    fetch("/api/opening/reviews?limit=1", { cache: "no-store", signal: controller.signal })
-      .then(async response => {
-        if (!response.ok) return;
-        const body = await response.json() as { total?: number };
-        if (!controller.signal.aborted && typeof body.total === "number") setPendingCount(body.total);
-      }).catch(() => undefined);
     return () => controller.abort();
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    // The shell survives soft navigation. Refresh the badge after reviewing
+    // suggestions rather than relying on a full page load to update it.
+    fetch("/api/opening/reviews?limit=1", { cache: "no-store", signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) { if (!controller.signal.aborted) setPendingCount(null); return; }
+        const body = await response.json() as { total?: number };
+        if (!controller.signal.aborted) setPendingCount(typeof body.total === "number" ? body.total : null);
+      }).catch(() => { if (!controller.signal.aborted) setPendingCount(null); });
+    return () => controller.abort();
+  }, [pathname]);
   async function logout() {
     if (logoutPending) return;
     setLogoutPending(true);

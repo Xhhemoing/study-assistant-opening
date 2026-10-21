@@ -1,21 +1,61 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { loginHrefForReturn } from "./auth-form-model";
+import { clearSessionExpiry, subscribeToSessionExpiry } from "./session-expiry";
+
+type SessionIdentity = { id: string; workspaceId: string };
+
+async function readSessionIdentity(response: Response): Promise<SessionIdentity | null> {
+  const body: unknown = await response.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("user" in body) || !body.user || typeof body.user !== "object") return null;
+  const user = body.user;
+  return "id" in user && typeof user.id === "string" && user.id.trim() && "workspaceId" in user && typeof user.workspaceId === "string" && user.workspaceId.trim()
+    ? { id: user.id, workspaceId: user.workspaceId } : null;
+}
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  const [expired, setExpired] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(false);
+  const [expiryError, setExpiryError] = useState("");
+  const initialIdentity = useRef<SessionIdentity | null>(null);
+  const checkingSessionRef = useRef(false);
+  const loginLink = useRef<HTMLAnchorElement | null>(null);
+  const recoveryDialog = useRef<HTMLDialogElement | null>(null);
+
+  useEffect(() => subscribeToSessionExpiry(() => {
+    setExpired(true);
+    setExpiryError("");
+  }), []);
+
+  useEffect(() => {
+    const dialog = recoveryDialog.current;
+    if (!dialog) return;
+    if (expired) {
+      // Enter the top layer above any lesson/material modal already open.
+      if (!dialog.open) dialog.showModal();
+      loginLink.current?.focus();
+    } else if (dialog.open) dialog.close();
+  }, [expired]);
 
   useEffect(() => {
     let active = true;
     fetch("/api/auth/me", { cache: "no-store" })
-      .then((response) => {
+      .then(async (response) => {
         if (!active) return;
-        if (response.ok) setReady(true);
+        if (response.ok) {
+          const identity = await readSessionIdentity(response);
+          if (!active) return;
+          if (!identity) { setError("暂时无法验证登录账户，请稍后重试。"); return; }
+          initialIdentity.current = identity;
+          clearSessionExpiry();
+          setReady(true);
+        }
         else if (response.status === 401) router.replace(loginHrefForReturn(`${window.location.pathname}${window.location.search}${window.location.hash}`));
         else setError("暂时无法验证登录状态，请稍后重试。");
       })
@@ -43,5 +83,36 @@ export function AuthGate({ children }: { children: ReactNode }) {
     );
   }
 
-  return children;
+  async function recheckSession() {
+    if (checkingSessionRef.current) return;
+    checkingSessionRef.current = true;
+    setCheckingSession(true);
+    setExpiryError("");
+    try {
+      const response = await fetch("/api/auth/me", { cache: "no-store" });
+      if (response.ok) {
+        const identity = await readSessionIdentity(response);
+        if (!identity || identity.id !== initialIdentity.current?.id || identity.workspaceId !== initialIdentity.current?.workspaceId) {
+          setExpiryError("请切回原账户和学习空间。当前草稿暂未提交。");
+          return;
+        }
+        clearSessionExpiry(); setExpired(false);
+      }
+      else setExpiryError(response.status === 401 ? "请先在新标签页完成登录。" : "暂时无法验证登录，请重试。");
+    } catch {
+      setExpiryError("无法连接到服务，请检查网络后重试。");
+    } finally { checkingSessionRef.current = false; setCheckingSession(false); }
+  }
+
+  return <>
+    <dialog ref={recoveryDialog} aria-label="登录已过期" onCancel={event => event.preventDefault()} className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-xl border border-amber-300 bg-amber-50 p-5 text-sm text-amber-950 shadow-xl backdrop:bg-black/30">
+    {expired ? <div className="flex flex-wrap items-center gap-3">
+      <p className="basis-full">登录已过期，当前学习已暂停。草稿仍保留，请在新标签页登录原账户，再回到此页继续。</p>
+      <a ref={loginLink} className="inline-flex min-h-11 items-center rounded-md bg-zinc-900 px-3 font-medium text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2" href={loginHrefForReturn(`${window.location.pathname}${window.location.search}${window.location.hash}`)} target="_blank" rel="noopener noreferrer">重新登录（新标签页）</a>
+      <button type="button" className="inline-flex min-h-11 items-center rounded-md border border-amber-800 px-3 font-medium disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2" disabled={checkingSession} onClick={() => void recheckSession()}>{checkingSession ? "正在验证登录…" : "已登录，继续"}</button>
+      {expiryError ? <p role="alert" className="basis-full">{expiryError}</p> : null}
+    </div> : null}
+    </dialog>
+    <div className="contents" inert={expired}>{children}</div>
+  </>;
 }

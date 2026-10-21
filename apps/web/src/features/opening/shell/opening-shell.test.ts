@@ -122,6 +122,21 @@ describe("OpeningShell review badge", () => {
     expect(html).toContain('aria-label="3 项待审核"');
     expect(html).toContain("bg-amber-500");
   });
+
+  it("clears a previous count when the next route cannot refresh suggestions", async () => {
+    vi.mocked(fetch).mockImplementation(async input => String(input).startsWith("/api/opening/reviews")
+      ? Response.json({ total: 3 })
+      : Response.json({ user: { displayName: "学习者" } }));
+    renderShell();
+    await runCapturedEffects();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBe(3);
+    pathname = "/opening/courses";
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 503 }));
+    renderShell();
+    await runCapturedEffects();
+    expect(stateSlots[PENDING_COUNT_SLOT]).toBeNull();
+    expect(renderShell()).not.toContain('aria-label="3 项待审核"');
+  });
 });
 
 describe("OpeningShell focus mode keyboard exit", () => {

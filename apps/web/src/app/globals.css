@@ -1,16 +1,17 @@
 @import "@blocknote/core/style.css";
 
+/* Legacy selectors are retained until workspace route retirement. This file is
+ * not imported by RootLayout; any legacy consumer shares the Tailwind tokens. */
 :root {
-  color-scheme: dark;
-  --background: #0d1117;
-  --surface: #151b23;
-  --surface-raised: #1c2430;
-  --border: #2b3543;
-  --text: #f2f5f8;
-  --text-muted: #9aa8b7;
-  --accent: #5b9cf5;
-  --accent-strong: #79adf7;
-  --focus: #9fc5ff;
+  --background: var(--color-bg);
+  --surface: var(--color-surface);
+  --surface-raised: var(--color-surface-2);
+  --border: var(--color-line);
+  --text: var(--color-text);
+  --text-muted: var(--color-text-3);
+  --accent: var(--color-accent);
+  --accent-strong: var(--color-accent);
+  --focus: var(--color-accent);
 }
 
 * {

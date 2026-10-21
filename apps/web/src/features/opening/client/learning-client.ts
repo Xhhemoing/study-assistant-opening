@@ -1,4 +1,5 @@
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
+import { createSessionFetch } from "../../auth/session-expiry";
 import {
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
@@ -50,7 +51,8 @@ async function request(
 }
 
 /** HTTP learning client. Failures throw; they never become demo summaries. */
-export function createOpeningLearningClient(fetchImpl: FetchLike = fetch) {
+export function createOpeningLearningClient(transport: FetchLike = fetch) {
+  const fetchImpl = createSessionFetch(transport);
   return {
     async getSummary(courseId: string): Promise<LearningSummary[]> {
       const body = await request(
