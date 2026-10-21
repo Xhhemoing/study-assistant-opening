@@ -82,6 +82,21 @@ describe("course study entry", () => {
       expect(client.createTeachingActivity).not.toHaveBeenCalled();
     }
   });
+  it.each([{ taskId }, { retestId: courseId }])("rechecks a retest moved to the future before opening an existing activity: %j", async query => {
+    const selected = task({ retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "独立计算", recommendedAt: "2099-10-17T00:00:00.000Z" } });
+    const client = api([activity({ clientKey: `task:${taskId}` })]);
+    client.listTasks.mockResolvedValue({ tasks: [selected] });
+    await expect(openCourseStudy(client, { ...options, ...query })).rejects.toThrow("尚未到开始时间");
+    expect(client.listTeachingActivities).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+  it("requires both retest recommendation and deferral to be due, allowing the exact boundary", () => {
+    const now = new Date("2026-10-21T12:00:00.000Z");
+    const selected = task({ retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "独立计算", recommendedAt: now.toISOString() }, notBefore: now.toISOString() });
+    expect(courseStudyTasks([selected], courseId, now)).toEqual([selected]);
+    expect(courseStudyTasks([{ ...selected, notBefore: "2026-10-22T00:00:00.000Z" }], courseId, now)).toEqual([]);
+    expect(courseStudyTasks([{ ...selected, retest: { ...selected.retest!, recommendedAt: "2026-10-22T00:00:00.000Z" } }], courseId, now)).toEqual([]);
+  });
   it.each(["cards", "practice"] as const)("uses the existing %s execution flow instead of generating a lecture", async kind => {
     const selected = kind === "cards" ? task({ suggestionKind: "review_cards" }) : task({ retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "独立计算", recommendedAt: null } });
     const client = api(); client.listTasks.mockResolvedValue({ tasks: [selected] });

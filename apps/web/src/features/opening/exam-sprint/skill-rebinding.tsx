@@ -42,16 +42,16 @@ export function SkillRebinding({ binding, overview, disabled, send }: {
   }, [binding.courseId, revision]);
   const intent = examSkillRebindingIntent(binding, overview.pack.version, selected);
   const changed = intent.action === "bind" && intent.input.skills.length > 0;
-  return <details className={`${ui.panel} p-4`}><summary className="cursor-pointer text-sm font-medium">技能变更后重新关联</summary>
-    <p className="mt-3 text-xs leading-6 text-zinc-500">原考点已失效、删除或拆分时，可明确选择有依据的新考点。旧答案和成绩保留在原技能下，新技能从新的学习记录开始；仍有效的原考点不能改贴成绩。</p>
+  return <details className={`${ui.panel} p-4`}><summary className="min-h-11 cursor-pointer text-sm font-medium py-2">技能变更后重新关联</summary>
+    <p className="mt-3 text-xs leading-6 text-text-3">原考点已失效、删除或拆分时，可明确选择有依据的新考点。旧答案和成绩保留在原技能下，新技能从新的学习记录开始；仍有效的原考点不能改贴成绩。</p>
     <button type="button" className={`${ui.quiet} mt-3`} disabled={disabled || loading} onClick={() => setRevision(value => value + 1)}>{loading ? "正在读取考点…" : "读取最新课程考点"}</button>
-    {error ? <p role="alert" className="mt-2 text-sm text-red-700">{error}</p> : null}
+    {error ? <p role="alert" className="mt-2 text-sm text-danger">{error}</p> : null}
     {nodes ? <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); if (!disabled && changed) send(intent); }}>
       {binding.skills.map(skill => <label key={skill.skillId} className="block space-y-1"><span className={ui.label}>{overview.skills.find(item => item.skillId === skill.skillId)?.title ?? skill.skillId}</span>
         <select className={ui.input} disabled={disabled} value={selected[skill.skillId] ?? ""} onChange={event => setSelected(current => ({ ...current, [skill.skillId]: event.target.value }))}>
           <option value="">保留原关联</option>{nodes.filter(node => node.id !== skill.nodeId).map(node => <option key={node.id} value={node.id}>{node.label} · {node.evidenceChunkIds.length} 段依据</option>)}
         </select></label>)}
-      {!nodes.length ? <p className="text-xs leading-6 text-zinc-500">尚无有依据的课程考点。请在课程页补齐材料并重建图谱后重新读取。</p> : null}
+      {!nodes.length ? <p className="text-xs leading-6 text-text-3">尚无有依据的课程考点。请在课程页补齐材料并重建图谱后重新读取。</p> : null}
       <button type="submit" className={ui.secondary} disabled={disabled || !changed}>确认新技能关联，保留旧记录</button>
     </form> : null}
   </details>;

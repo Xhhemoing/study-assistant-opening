@@ -63,6 +63,15 @@ it("offers a direct assistant entry when no cards are due", () => {
   expect(html).toMatch(/href="\/opening\/assistant"[^>]*>去助理制成卡片<\/a>/);
 });
 
+it("embeds the existing grading flow with a section heading and a return to the unified review", () => {
+  scenario.items = [item("a")];
+  const html = renderToStaticMarkup(createElement(CardReviewView, { embedded: true }));
+  expect(html).toMatch(/<h2[^>]*>记忆卡片<\/h2>/);
+  expect(html).not.toContain("<h1");
+  expect(html).toContain("显示卡片正面");
+  expect(html).toContain("%2Fopening%2Freview%3Ftab%3Dcards");
+});
+
 describe("card review evidence notice", () => {
   it("explains a saved review that did not become a learning fact, and stays quiet otherwise", () => {
     expect(cardEvidenceNotice("skipped_course_archived")).toContain("已归档");
