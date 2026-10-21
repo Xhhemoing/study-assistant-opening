@@ -37,7 +37,7 @@ async function loadRetestSubmitEarliestTimes(sql: Sql, scope: Scope, retestId: s
     SELECT not_before_at, recommended_at, scheduled_start_at
     FROM opening_retest_activities
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND (candidate_id=${retestId} OR id=${retestId})
+      AND (candidate_id=${retestId} OR id=${retestId} OR candidate_reference_id=${retestId})
   `;
   if (rows.length !== 1) validation("retest activity is missing or ambiguous");
   const row = rows[0] as {

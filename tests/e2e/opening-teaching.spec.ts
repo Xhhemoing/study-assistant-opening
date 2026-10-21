@@ -192,18 +192,19 @@ test.describe("Opening span durable teaching flow", () => {
       await summary.getByRole("button", { name: "安排 3 天后的正式延迟复测", exact: true }).click();
       const delayed = await delayedResponse;
       expect(delayed.ok()).toBe(true);
-      const scheduled = await delayed.json() as { candidateId: string; taskId: string; notBeforeAt: string; href: string };
+      const scheduled = await delayed.json() as { candidateId: string; activityId: string; taskId: string; notBeforeAt: string; href: string };
+      expect(new URL(scheduled.href, origin).searchParams.get("retest")).toBe(scheduled.activityId);
       expect(Date.parse(scheduled.notBeforeAt)).toBeGreaterThan(Date.parse(observation.recordedAt!) + 71 * 60 * 60 * 1000);
       const scheduleReplay = await context.request.post("/api/opening/teaching/span/delayed", { headers: { origin }, data: delayed.request().postDataJSON() });
       expect(scheduleReplay.ok()).toBe(true);
-      expect(await scheduleReplay.json()).toMatchObject({ candidateId: scheduled.candidateId, taskId: scheduled.taskId });
+      expect(await scheduleReplay.json()).toMatchObject({ candidateId: scheduled.candidateId, activityId: scheduled.activityId, taskId: scheduled.taskId, href: scheduled.href });
       await summary.getByRole("link", { name: "打开这项延迟复测", exact: true }).click();
       const retestLessonResponse = page.waitForResponse(response => response.url().endsWith(lessonEndpoint) && response.request().method() === "POST");
       await page.getByRole("button", { name: "开始本次延迟复测", exact: true }).click();
       const retestLessonCreated = await retestLessonResponse;
       expect(retestLessonCreated.ok()).toBe(true);
       const retestLesson = spanLessonSnapshotSchema.parse(await retestLessonCreated.json());
-      expect(retestLesson).toMatchObject({ status: "active", retestId: scheduled.candidateId });
+      expect(retestLesson).toMatchObject({ status: "active", retestId: scheduled.activityId });
       const earlyResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/teaching/span/session") && response.request().method() === "POST");
       await page.getByRole("button", { name: "开始这道题", exact: true }).click();
       const early = await earlyResponse;
@@ -218,7 +219,10 @@ test.describe("Opening span durable teaching flow", () => {
       } });
       expect(earlyIssue.status()).toBe(400);
       expect(await earlyIssue.json()).toMatchObject({ error: { businessCode: "RETEST_SUBMIT_TOO_EARLY" } });
-      expect((await readLesson(context.request, course.courseId, retestLesson.activityId, scheduled.candidateId)).attempts).toHaveLength(0);
+      const earlyRetest = await readLesson(context.request, course.courseId, retestLesson.activityId, scheduled.activityId);
+      expect(earlyRetest.attempts).toHaveLength(0);
+      // Old candidate links remain aliases of the same persisted retest activity.
+      expect((await readLesson(context.request, course.courseId, retestLesson.activityId, scheduled.candidateId)).session).toEqual(earlyRetest.session);
 
       await makeTeachingRetestDue(course, scheduled.candidateId);
       testInfo.annotations.push({ type: "controlled-time", description: "Only the isolated retest time gate is advanced. No real 3-day retention or learning benefit is asserted." });
@@ -253,7 +257,7 @@ test.describe("Opening span durable teaching flow", () => {
       expect(pageErrors).toEqual([]);
       await testInfo.attach("durable-flow-identities", { body: JSON.stringify({ courseId: course.courseId, activityId: lesson.activityId,
         sessionId: lesson.sessionId, attemptId: attempt.id, itemVersionId: attempt.itemVersionId, observationId: observation.id,
-        helpReceiptIds: hints.map(hint => hint.exposureReceipt.id), retestTaskId: scheduled.taskId, retestAttemptId: retestAttempt.id,
+        helpReceiptIds: hints.map(hint => hint.exposureReceipt.id), retestTaskId: scheduled.taskId, retestActivityId: scheduled.activityId, retestAttemptId: retestAttempt.id,
         retestObservationId: retestObservation.id, controlledTime: true, learningEffect: "not_measured", parser: "separate_spec" }, null, 2), contentType: "application/json" });
     } finally { await context.close(); }
   });

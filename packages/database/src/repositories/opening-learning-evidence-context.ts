@@ -123,17 +123,17 @@ export async function readOpeningLearningEvidenceContexts(
               WHERE ref->>'sourceId'=ANY(${recordSourceIds}::text[])))))
     ORDER BY h.created_at,h.id` : [];
   const retestIds = [...new Set(records.flatMap(record => record.retestId ? [record.retestId] : []))];
-  const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,
-      j.payload->'spanDelayedProtocol' AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,
+  const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.candidate_reference_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,r.accepted_at,
+      r.learning_protocol AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,baseline.submitted_at AS baseline_submitted_at,
       baseline.course_id AS baseline_course_id,baseline.requirement_key AS baseline_requirement_key,
       root.id AS baseline_root_id,COALESCE(root.effective_head_id,root.id)=baseline.id AND COALESCE(baseline.revision_kind,'original')<>'retract' AS baseline_current
-    FROM opening_retest_activities r JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+    FROM opening_retest_activities r
+    JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
       AND baseline.workspace_id=r.workspace_id AND baseline.owner_user_id=r.owner_user_id
     JOIN opening_learning_observations root ON root.id=COALESCE(baseline.root_observation_id,baseline.id)
       AND root.workspace_id=baseline.workspace_id AND root.owner_user_id=baseline.owner_user_id
     WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.purpose='retest'
-      AND (r.id=ANY(${retestIds}::uuid[]) OR r.candidate_id=ANY(${retestIds}::uuid[]))` : [];
+      AND (r.id=ANY(${retestIds}::uuid[]) OR r.candidate_id=ANY(${retestIds}::uuid[]) OR r.candidate_reference_id=ANY(${retestIds}::uuid[]))` : [];
   const baselineRecords = [...new Map(retestProtocols.map(row => [String(row.baseline_id), mapLearningObservation(row.baseline_record as Row)])).values()];
   const baselineEvidence = baselineRecords.length ? await readOpeningLearningEvidenceContexts(db, scope, baselineRecords, false) : {};
   const baselineEligibility = new Map(Object.entries(baselineEvidence).map(([id, evidence]) => [id, evaluateEvidenceEligibility(evidence.observation, evidence.context)]));
@@ -142,8 +142,7 @@ export async function readOpeningLearningEvidenceContexts(
         AND practice.course_id=o.course_id AND practice.requirement_key IS NOT DISTINCT FROM o.requirement_key AND practice.id<>o.attempt_id
         AND practice.started_at>baseline.recorded_at AND practice.started_at<=o.started_at) AS recorded_practice_count
     FROM opening_learning_observations o JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
-    JOIN opening_jobs j ON j.id=r.candidate_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-    JOIN opening_learning_observations baseline ON baseline.id::text=j.payload->'spanDelayedProtocol'->>'baselineObservationId'
+    JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
       AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
     LEFT JOIN opening_help_exposures h ON h.workspace_id=o.workspace_id AND COALESCE(h.owner_user_id,
         (SELECT l.owner_user_id FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id))=o.owner_user_id
@@ -363,11 +362,13 @@ export async function readOpeningLearningEvidenceContexts(
       })) }, referenceCheck: record.referenceCheck ?? null, version: { applicability: "version_unknown" }, delayedCheck: null,
     };
     if (record.retestId && record.requirementKey === SPAN_REQUIREMENT_KEY && record.attemptId) {
-      const retest = retestProtocols.find(row => row.id === record.retestId || row.candidate_id === record.retestId);
+      const matchingRetests = retestProtocols.filter(row => row.id === record.retestId || row.candidate_id === record.retestId || row.candidate_reference_id === record.retestId);
+      const retest = matchingRetests.length === 1 ? matchingRetests[0] : undefined;
       const protocol = retest?.protocol as { protocolId?: string; baselineObservationId?: string; baselineRootId?: string; priorAnswerPolicy?: string } | undefined;
       const earliestAt = retest?.not_before_at == null ? NaN : new Date(retest.not_before_at as Date).getTime();
-      const baselineAt = retest?.baseline_recorded_at == null ? NaN : new Date(retest.baseline_recorded_at as Date).getTime();
-      if (retest && protocol?.protocolId === "span-delayed-3d-v1" && protocol.priorAnswerPolicy === "require_unseen_problem"
+      const baselineAt = retest?.baseline_recorded_at == null || retest.baseline_submitted_at == null ? NaN
+        : Math.max(new Date(retest.baseline_recorded_at as Date).getTime(), new Date(retest.baseline_submitted_at as Date).getTime());
+      if (retest?.accepted_at && protocol?.protocolId === "span-delayed-3d-v1" && protocol.priorAnswerPolicy === "require_unseen_problem"
         && protocol.baselineObservationId === retest.baseline_id && protocol.baselineRootId === retest.baseline_root_id && retest.baseline_current === true
         && retest.course_id === record.courseId && retest.baseline_course_id === record.courseId && retest.skill_label === record.skillLabel
         && retest.requirement_key === record.requirementKey && retest.baseline_requirement_key === record.requirementKey

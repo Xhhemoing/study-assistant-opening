@@ -240,7 +240,8 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_retest_activities: [
     "id", "workspace_id", "owner_user_id", "course_id", "skill_label", "requirement_key", "purpose",
-    "evidence_cycle_id", "candidate_id", "task_id", "status", "result", "version", "snoozed_until",
+    "evidence_cycle_id", "candidate_id", "candidate_reference_id", "learning_protocol", "accept_client_key",
+    "task_id", "status", "result", "version", "snoozed_until",
     "proposed_at", "accepted_at", "started_at", "completed_at", "declined_at", "cancelled_at",
     "invalidated_at", "superseded_at", "not_before_at", "recommended_at", "scheduled_start_at",
     "deadline_at", "reason", "reopened_from_activity_id", "created_at", "updated_at",
@@ -267,6 +268,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "opening_retest_activities.learning_protocol",
   "learning_events.payload",
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",

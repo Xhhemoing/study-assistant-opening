@@ -46,7 +46,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     not_before_at, recommended_at, scheduled_start_at
     FROM opening_retest_activities
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND (candidate_id=${input.retestId} OR id=${input.retestId}) FOR UPDATE` : [];
+      AND (candidate_id=${input.retestId} OR id=${input.retestId} OR candidate_reference_id=${input.retestId}) FOR UPDATE` : [];
   if (input.retestId && retestActivities.length !== 1) throw learningError("VALIDATION", "retest activity is missing or ambiguous");
   let retestActivity = retestActivities[0] as Record<string, unknown> | undefined;
   if (retestActivity && (retestActivity.course_id !== input.courseId || retestActivity.skill_label !== input.skillLabel)) {
@@ -100,7 +100,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (boundRetestId) {
     const boundRetests = await tx`SELECT id,candidate_id,course_id,skill_label,requirement_key,task_id,status,
       not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
-      WHERE (id=${boundRetestId} OR candidate_id=${boundRetestId}) AND workspace_id=${scope.workspaceId}
+      WHERE (id=${boundRetestId} OR candidate_id=${boundRetestId} OR candidate_reference_id=${boundRetestId}) AND workspace_id=${scope.workspaceId}
         AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} AND requirement_key=${SPAN_REQUIREMENT_KEY}
         AND skill_label=${SPAN_SKILL_LABEL} AND status IN ('accepted','in_progress') FOR UPDATE`;
     if (boundRetests.length !== 1) throw learningError("VALIDATION", "延迟复测不属于本课程、尚未接受或已结束。");

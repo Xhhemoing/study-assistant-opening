@@ -502,7 +502,8 @@ describe("opening tutor turn durable path (guarded)", () => {
     const reservations = await fixture.sql`SELECT state FROM opening_budget_reservations WHERE workspace_id = ${fixture.scope.workspaceId}`;
     expect(reservations[0].state).toBe("released");
     const turns = await fixture.sql`SELECT status, text FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
-    expect(turns[0]).toMatchObject({ status: "failed", text: "bad key" });
+    expect(turns[0]).toMatchObject({ status: "failed", text: "AI 服务授权失败，请在设置中核对该服务的密钥。" });
+    expect(turns[0].text).not.toContain("bad key");
   });
 
   it("keeps outcome unknown and retains the reservation on provider timeouts", async () => {

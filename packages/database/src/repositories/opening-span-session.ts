@@ -24,6 +24,15 @@ function assertMove(input: Pick<SpanLessonSaveInput, "intent" | "moveId">, retes
     throw learningError("VALIDATION", "教学步骤不属于本次学习目的。");
   }
 }
+async function retestReferences(sql: Sql | TransactionSql, scope: Scope, courseId: string, id: string): Promise<string[]> {
+  const rows = await sql`SELECT id,candidate_id,candidate_reference_id FROM opening_retest_activities
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+      AND requirement_key=${SPAN_REQUIREMENT_KEY} AND skill_label=${SPAN_SKILL_LABEL}
+      AND (id=${id} OR candidate_id=${id} OR candidate_reference_id=${id})`;
+  if (rows.length !== 1) throw learningError("CONFLICT", "复测身份缺失或不唯一，不能用新会话覆盖原进度。");
+  return [rows[0]!.id, rows[0]!.candidate_id, rows[0]!.candidate_reference_id]
+    .filter((value): value is string => typeof value === "string").map(value => value.toLowerCase());
+}
 async function admitCourseSources(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[]) {
   const [course] = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
     AND archived_at IS NULL FOR SHARE`;
@@ -65,10 +74,10 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         }
         await admitCourseSources(tx, scope, input.courseId, sourceIds);
         if (input.retestId) {
-          const [retest] = await tx`SELECT id FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
+          const retests = await tx`SELECT id FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
             AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} AND requirement_key=${SPAN_REQUIREMENT_KEY}
-            AND (id=${input.retestId} OR candidate_id=${input.retestId}) AND status IN ('accepted','in_progress') FOR SHARE`;
-          if (!retest) throw learningError("VALIDATION", "延迟复测不属于本课程或尚未接受。");
+            AND (id=${input.retestId} OR candidate_id=${input.retestId} OR candidate_reference_id=${input.retestId}) AND status IN ('accepted','in_progress') FOR SHARE`;
+          if (retests.length !== 1) throw learningError("VALIDATION", "延迟复测不属于本课程、尚未接受或身份不唯一。");
         }
         const activityId = randomUUID(), sessionId = randomUUID(), mode = spanModeForIntent(input.intent);
         const moveId = input.retestId ? `${mode}-reserved` : createSpanTeachingSequence(mode)[0]!.id;
@@ -87,6 +96,12 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
     async get(scope: Scope, activityId: string): Promise<SpanLessonSnapshot | null> {
       const row = await read(sql, scope, activityId);
       return row ? snapshot(row) : null;
+    },
+    async matchesRetestReference(scope: Scope, courseId: string, storedId: string | null, requestedId: string | null): Promise<boolean> {
+      if (storedId === null || requestedId === null) return storedId === requestedId;
+      const stored = await retestReferences(sql, scope, courseId, storedId);
+      const requested = await retestReferences(sql, scope, courseId, requestedId);
+      return stored[0] === requested[0];
     },
     /** Restore only exact receipts already released in this lesson; reading never releases help. */
     async deliveredHintLevels(scope: Scope, activityId: string): Promise<Record<string, SpanHintLevel[]>> {
@@ -119,10 +134,12 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
       return levels;
     },
     async latest(scope: Scope, courseId: string, retestId?: string | null): Promise<SpanLessonSnapshot | null> {
+      const references = retestId ? await retestReferences(sql, scope, courseId, retestId) : null;
       const rows = await sql`SELECT a.id FROM opening_teaching_activities a JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
         WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
           AND a.create_intent->>'protocol'=${protocol} AND a.status IN ('active','paused')
-          AND (a.checkpoint_json->'spanLesson'->>'retestId') IS NOT DISTINCT FROM ${retestId ?? null}::text
+          AND ${references ? sql`lower(a.checkpoint_json->'spanLesson'->>'retestId')=ANY(${references}::text[])`
+            : sql`(a.checkpoint_json->'spanLesson'->>'retestId') IS NULL`}
         ORDER BY a.updated_at DESC,a.id DESC LIMIT 1`;
       if (!rows[0]) return null;
       const row = await read(sql, scope, String(rows[0].id));

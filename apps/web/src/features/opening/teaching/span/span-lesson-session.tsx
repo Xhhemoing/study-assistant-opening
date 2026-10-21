@@ -19,20 +19,33 @@ export function SpanLessonSession(props: Props) {
   const activityId = useRef(props.initialActivityId);
   const requestId = useRef(0), busy = useRef(false);
   const createKey = useRef<string | null>(null);
+  const readRoute = useRef({ courseId: props.courseId, retestId: props.delayedRetestId, activityId: props.initialActivityId, revision });
   const query = useCallback(() => {
     const params = new URLSearchParams({ courseId: props.courseId });
     if (activityId.current) params.set("activityId", activityId.current);
     if (props.delayedRetestId) params.set("retestId", props.delayedRetestId);
     return `${endpoint}?${params}`;
   }, [props.courseId, props.delayedRetestId]);
+  useEffect(() => () => { requestId.current++; }, []);
   useEffect(() => {
+    const previous = readRoute.current;
+    const scopeChanged = previous.courseId !== props.courseId || previous.retestId !== props.delayedRetestId;
+    const activityChanged = previous.activityId !== props.initialActivityId;
+    readRoute.current = { courseId: props.courseId, retestId: props.delayedRetestId, activityId: props.initialActivityId, revision };
+    // replaceState may expose the activity we just acknowledged to route props.
+    // Adopting that same receipt must not remount a learner's editing tree.
+    if (!scopeChanged && activityChanged && props.initialActivityId === activityId.current && previous.revision === revision) return;
+    if (scopeChanged || activityChanged) {
+      activityId.current = props.initialActivityId;
+      createKey.current = null; busy.current = false;
+      setDetails(null); setShowSummary(false); setPending(false);
+    }
     const version = ++requestId.current;
     setError("");
     void spanLessonRequest(query(), spanLessonDetailsSchema).then(value => {
       if (version === requestId.current) { setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
     }).catch(reason => { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "无法恢复本次学习。"); });
-    return () => { requestId.current++; };
-  }, [query, revision]);
+  }, [query, revision, props.initialActivityId]);
   function remember(value: SpanLessonSnapshot) {
     activityId.current = value.activityId;
     const url = new URL(window.location.href); url.searchParams.set("lesson", value.activityId);
@@ -53,7 +66,7 @@ export function SpanLessonSession(props: Props) {
       if (version !== requestId.current) return;
       remember(session); setDetails({ session, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
     } catch (reason) { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "学习暂未开始。"); }
-    finally { busy.current = false; if (version === requestId.current) setPending(false); }
+    finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
   async function save(intent: StudySessionIntent, moveId: string, status: "active" | "paused" | "completed") {
     const current = details?.session;
@@ -66,7 +79,7 @@ export function SpanLessonSession(props: Props) {
       if (status !== "active") { setShowSummary(true); setRevision(value => value + 1); }
       return true;
     } catch (reason) { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "进度保存未确认。"); return false; }
-    finally { busy.current = false; if (version === requestId.current) setPending(false); }
+    finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;

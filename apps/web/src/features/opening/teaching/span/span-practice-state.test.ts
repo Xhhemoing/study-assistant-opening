@@ -149,3 +149,17 @@ it("isolates a practice draft by lesson, step and exact new-evidence event", () 
   expect(scope).not.toBe(spanPracticeScope(id, undefined, other, activity, "span-independent-3d"));
   expect(spanPracticeScope(id)).toBe(practiceScope(id, "span", null));
 });
+it("shows pending restored answers as needing verification while retaining the exact attempt", async () => {
+  mocks.createAttempt.mockResolvedValue({ ...attempt, spanValidation: { eligible: false, firstFamilyExposure: false, reasonCode: "restored_identity_unverified" } });
+  await start();
+  const tree = render();
+  expect(find(tree, node => node.type === "p" && node.props.children === "已恢复原题身份和作答记录；备份不恢复自动评分权威，本题保留为待核对练习。" )).toBeDefined();
+  expect(find(tree, node => node.type === "button" && node.props.children === "封存首答（待重新核对）")).toBeDefined();
+});
+it("does not replace an unavailable historical question with a new practice entry", () => {
+  hooks.cursor = 0;
+  const tree = SpanLesson({ courseId: id, sourceIds: [id], sourceLoadError: false, initialMoveId: "self-independent",
+    restoredAttempts: [{ ...attempt, spanExercise: undefined }] });
+  expect(find(tree, node => node.props.role === "alert")).toBeDefined();
+  expect(find(tree, node => node.type === SpanPractice)).toBeUndefined();
+});
