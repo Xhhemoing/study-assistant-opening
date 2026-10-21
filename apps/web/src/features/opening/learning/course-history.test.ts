@@ -1,9 +1,13 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CourseHistory, CourseHistoryPageView } from "./course-history";
 import { emptyCourseHistory, type CourseHistoryState } from "./course-history-state";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+
+const preferences = vi.hoisted(() => ({ diagnostics: true }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => preferences.diagnostics }));
+beforeEach(() => { preferences.diagnostics = true; });
 
 const handlers = { onMore: () => undefined, onRefresh: () => undefined, onChanged: () => undefined };
 const ready: CourseHistoryState = { ...emptyCourseHistory(), status: "ready", snapshotRevision: 7, totalCount: 51,
@@ -14,7 +18,7 @@ describe("course history presentation", () => {
     expect(html).toContain("固定快照版本 7 · 已加载 1 / 51 条当前可见记录");
     expect(html).toContain("新作答与修订请刷新查看");
     expect(html).toContain("继续加载（每页 50 条）");
-    expect(html).toContain("刷新历史（新快照）");
+    expect(html).toContain("刷新历史");
     expect(html).toContain("查看历史");
     expect(html).toContain("纠正记录");
     expect(html).toContain("撤回记录");
@@ -30,12 +34,21 @@ describe("course history presentation", () => {
     expect(html).not.toContain("继续加载");
     expect(html).not.toContain("正在读取课程历史");
   });
-  it("keeps history collapsed and distinguishes the requirement filter modes", () => {
+  it("shows history in the progress tab and distinguishes requirement filter modes", () => {
     const html = renderToStaticMarkup(createElement(CourseHistory, { courseId: learningObservation.courseId, requirements: ["", "key / exact"], onChanged: () => undefined }));
-    expect(html).not.toContain(" open=");
+    expect(html).not.toContain("<details");
     expect(html).toContain("全部要求");
     expect(html).toContain("未指定要求");
     expect(html).toContain('value="key:"');
     expect(html).toContain('value="key:key / exact"');
+  });
+  it("hides the snapshot revision without hiding paging counts or revision controls", () => {
+    preferences.diagnostics = false;
+    const html = renderToStaticMarkup(createElement(CourseHistoryPageView, { ...handlers, state: ready }));
+    expect(html).toContain("已加载 1 / 51 条当前可见记录");
+    expect(html).toContain("继续加载（每页 50 条）");
+    expect(html).toContain("纠正记录");
+    expect(html).toContain("撤回记录");
+    expect(html).not.toContain("固定快照版本");
   });
 });

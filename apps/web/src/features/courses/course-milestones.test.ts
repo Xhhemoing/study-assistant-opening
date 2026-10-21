@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
-import { CourseMilestones, milestoneUpdate } from "./course-milestones";
+import { CourseMilestones, CourseMilestoneHistory, milestoneUpdate } from "./course-milestones";
 import type { CourseMilestone } from "@aistudy/contracts";
 
 const item: CourseMilestone = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", title: "矩阵乘法", successCriteria: "独立完成两道变式。",
@@ -24,5 +24,11 @@ it("distinguishes learner confirmation from mastery and retains visible previous
   expect(html).toContain("已由你确认");
   expect(html).toContain("均不自动代表掌握");
   expect(html).toContain("重新待核对");
-  expect(html).toContain("独立完成一道题");
+  expect(html).toContain("查看此前标准与记录");
+  expect(html).not.toContain("独立完成一道题");
+  expect(html).not.toContain("<details");
+  const history = renderToStaticMarkup(createElement(CourseMilestoneHistory, { item }));
+  expect(history).toContain("独立完成一道题");
+  expect(history).toContain("待核对");
+  expect(history).not.toContain("已由你确认");
 });

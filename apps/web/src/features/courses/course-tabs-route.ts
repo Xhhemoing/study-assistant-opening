@@ -11,7 +11,7 @@ export type CourseTab = typeof courseTabs[number]["id"];
 export function readCourseTab(search: string, hash = ""): CourseTab {
   if (hash === "#course-learning-records") return "progress";
   if (hash === "#course-assets" || hash === "#course-media") return "materials";
-  if (hash === "#course-knowledge") return "units";
+  if (hash === "#course-knowledge" || hash === "#course-units") return "units";
   const params = new URLSearchParams(search);
   const tab = params.get("tab");
   if (courseTabs.some(item => item.id === tab)) return tab as CourseTab;

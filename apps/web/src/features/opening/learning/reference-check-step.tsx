@@ -95,8 +95,8 @@ export function ReferenceCheckStep({
 
   if (done) {
     return (
-      <div className="space-y-2 rounded border border-accent/30 bg-accent-soft px-3 py-3" role="status">
-        <p className="text-sm text-text">已完成自对照参考核对。</p>
+      <div className="space-y-2 rounded border border-accent/30 bg-accent-soft px-3 py-3">
+        <p className="text-sm text-text" role="status">已完成自对照参考核对。</p>
         <p className="text-xs text-text-2">答案未改动；已保存为自对照记录，尚未经独立评分，不计作已核验正确。</p>
         {done.eligibility ? <LearningEvidenceEligibilityDetails eligibility={done.eligibility} /> : null}
       </div>
@@ -121,7 +121,7 @@ export function ReferenceCheckStep({
             打开参考材料（新窗口）
           </a>
         ) : (
-          <p className="mt-1 text-xs leading-6 text-warn" role="status">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
+          <p className="mt-1 text-xs leading-6 text-warn">这条记录未保留参考版本，暂时无法定位原参考材料。</p>
         )}
       </div>
       <label className="block text-sm text-text">

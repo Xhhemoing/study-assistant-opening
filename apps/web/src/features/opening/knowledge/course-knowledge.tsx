@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../client/api";
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
-import { KnowledgeEvidence } from "./knowledge-evidence";
+import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
 
 const KIND_ORDER: Record<KnowledgeNode["kind"], number> = {
   chapter: 0, concept: 1, procedure: 2, problem_type: 3,
@@ -108,7 +108,7 @@ export function CourseKnowledge({
     return (
       <section className="space-y-2" aria-labelledby="course-knowledge-heading" id="course-knowledge">
         <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
-        <p className="text-xs leading-6 text-text-3">尚无知识节点。有材料后再构建；不会填充示例图。</p>
+        <p className="text-xs leading-6 text-text-3">还没有整理出课程知识。添加材料后，可在这里查看章节和概念。</p>
       </section>
     );
   }
@@ -117,7 +117,7 @@ export function CourseKnowledge({
     <section className="space-y-4" aria-labelledby="course-knowledge-heading" id="course-knowledge">
       <div>
         <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
-        <p className="mt-1 text-xs leading-6 text-text-3">先看章节与下一步；知识关系按需展开。不显示掌握百分比。</p>
+        <p className="mt-1 text-xs leading-6 text-text-3">选择章节查看材料依据，或继续下一步练习。</p>
       </div>
       <div className="rounded-lg border border-line bg-surface-2 p-3">
         <h3 className="text-xs font-semibold text-text">章节</h3>
@@ -134,7 +134,7 @@ export function CourseKnowledge({
             </li>
           ))}
         </ul>
-        <div className="mt-3 space-y-2" role="status">
+        <div className="mt-3 space-y-2">
           <p className="text-xs leading-5 text-text-2">
             <span className="font-medium text-text">下一步：</span>
             {cta ? cta.reason : "暂无服务器推荐的下一步。可先独立练习，或打开材料核对依据。"}
@@ -145,7 +145,7 @@ export function CourseKnowledge({
             </a>
           ) : (
             <p className="text-xs leading-5 text-text-3">
-              没有可执行的推荐动作（可能尚未有 SkillEvidence）。不会展示假按钮。
+              目前还没有下一步建议，可以先阅读本课材料。
             </p>
           )}
         </div>
@@ -165,7 +165,7 @@ export function CourseKnowledge({
               <li key={node.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-surface px-3 py-2">
                 <button type="button" className="min-h-11 min-w-0 flex-1 py-2 text-left font-medium text-text" onClick={() => setSelected(node)}>
                   {node.label}
-                  <span className="ml-2 font-normal text-text-3">{node.kind} · {node.status}</span>
+                  <span className="ml-2 font-normal text-text-2">{knowledgeKindLabel[node.kind]} · {knowledgeStatusLabel[node.status]}</span>
                 </button>
               </li>
             ))}

@@ -34,6 +34,15 @@ it("parses a genuine empty summary without inventing skills", async () => {
   await expect(client.getSummary(COURSE)).resolves.toEqual([]);
 });
 
+it.each(["<html>upstream failure</html>", JSON.stringify([{ internalRequirementId: "private-server-diagnostic" }])])("keeps invalid learning responses as failures without displaying schema details", async body => {
+  const client = createOpeningLearningClient(async () => new Response(body, { status: 200 }));
+  await expect(client.getSummary(COURSE)).rejects.toMatchObject({
+    name: "OpeningResponseError",
+    message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+    cause: { name: "ZodError" },
+  });
+});
+
 it("reads the paginated summary through its opaque cursor without using legacy response parsing", async () => {
   const page = {
     status: "ready", groups: [], snapshotRevision: 4, nextCursor: "cursor+/=", evaluatedAt: ISO,

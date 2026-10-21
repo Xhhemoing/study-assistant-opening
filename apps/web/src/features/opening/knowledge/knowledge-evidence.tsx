@@ -2,6 +2,10 @@
 
 import type { KnowledgeNode } from "@aistudy/contracts";
 import Link from "next/link";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+
+export const knowledgeKindLabel: Record<KnowledgeNode["kind"], string> = { chapter: "章节", concept: "概念", procedure: "方法", problem_type: "题型" };
+export const knowledgeStatusLabel: Record<KnowledgeNode["status"], string> = { suggested: "待核对建议", supported: "已有材料依据", needs_check: "需要核对" };
 
 export type EvidenceTarget =
   | { kind: "material"; href: string; label: string }
@@ -17,6 +21,7 @@ export type EvidenceTargetOptions = {
   /** Optional known seek; without it we never claim fake定位. */
   videoStartMs?: number | null;
   videoSourceId?: string | null;
+  diagnostics?: boolean;
 };
 
 /** Pure: map a knowledge node to navigation targets (material / video / problem / evidence). */
@@ -63,19 +68,19 @@ export function evidenceTargetsForNode(
     });
   }
 
-  for (const chunkId of node.evidenceChunkIds.slice(0, 8)) {
+  for (const [index, chunkId] of node.evidenceChunkIds.slice(0, 8).entries()) {
     // Course page has no id="evidence-{chunkId}" anchors — do not invent dead hashes (CT-04).
     targets.push({
       kind: "evidence",
       href: null,
-      label: `已记录依据 ${chunkId.slice(0, 8)}…（课程页无片段锚点）`,
+      label: `已记录依据 ${options?.diagnostics ? chunkId : index + 1}（当前页无法定位到片段）`,
     });
   }
   if (node.evidenceChunkIds.length === 0) {
     targets.push({
       kind: "evidence",
       href: `${course}#course-knowledge`,
-      label: "尚无已保存依据（suggested 节点）",
+      label: "尚无已保存依据，请先核对材料",
     });
   }
   return targets;
@@ -91,7 +96,8 @@ export function KnowledgeEvidence({
   /** Opening course page has a media panel; set false when embedding elsewhere. */
   courseMediaAvailable?: boolean;
 }) {
-  const targets = evidenceTargetsForNode(node, { courseMediaAvailable });
+  const diagnostics = useDiagnosticsEnabled();
+  const targets = evidenceTargetsForNode(node, { courseMediaAvailable, diagnostics });
   return (
     <section
       className="space-y-2 rounded-lg border border-line bg-surface-2 p-3"
@@ -103,8 +109,7 @@ export function KnowledgeEvidence({
             {node.label}
           </h3>
           <p className="mt-0.5 text-xs text-text-3">
-            {node.kind} · {node.status}
-            {node.status === "supported" ? "" : " · 不显示掌握百分比"}
+            {knowledgeKindLabel[node.kind]} · {knowledgeStatusLabel[node.status]}
           </p>
         </div>
         {onClose ? (
@@ -113,6 +118,7 @@ export function KnowledgeEvidence({
           </button>
         ) : null}
       </div>
+      {diagnostics ? <p className="break-all text-xs text-text-2">节点 ID：{node.id} · {node.kind} · {node.status}</p> : null}
       <ul className="space-y-1.5 text-xs leading-5 text-text-2" aria-label="知识依据">
         {targets.map((target) => (
           <li key={`${target.kind}-${target.href ?? "none"}-${target.label}`}>

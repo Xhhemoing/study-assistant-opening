@@ -15,6 +15,7 @@ vi.mock("react", async importOriginal => ({
 import { CourseDetail, type CourseDetailSurface } from "./course-detail";
 import { CourseGoalForm } from "./course-goal-form";
 import { CourseSprintMode } from "./course-sprint-mode";
+import { CoursePanel } from "./course-tabs";
 
 function contains(node: ReactNode, match: (type: unknown, children: ReactNode) => boolean): boolean {
   if (Array.isArray(node)) return node.some(child => contains(child, match));
@@ -63,5 +64,11 @@ describe("course detail planning capability", () => {
     const tree = render("learn");
     expect(contains(tree, type => type === CourseGoalForm)).toBe(false);
     expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
+    expect(contains(tree, type => type === "details")).toBe(false);
+  });
+
+  it("does not expose the previous course's materials while navigation loads a new course", () => {
+    states[0] = { id: "previous-course", title: "之前的课程" };
+    expect(contains(render(), type => type === CoursePanel)).toBe(false);
   });
 });
