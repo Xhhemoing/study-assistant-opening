@@ -51,6 +51,9 @@ export function createOpeningTeachingActivityService(
   return {
     async create(scope: Scope, raw: unknown, options: { replayOnly?: boolean } = {}) {
       const input = teachingActivityCreateInputSchema.parse(raw);
+      if (input.createIntent.kind === "card_review_variant") {
+        throw new ApiError("VALIDATION", "请从卡片复习中开始这道题。", 400);
+      }
       try {
         // Always discard the client-owned derived field, including with the flag off.
         if (input.goalJson && "learnerFocus" in input.goalJson) {

@@ -37,6 +37,7 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
   const inFlight = useRef(false);
   const cards = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
   const suggested = useMemo(() => initial ?? suggestSides(draft?.text ?? ""), [draft?.text, initial]);
+  const [reviewKind, setReviewKind] = useState<"question" | "concept">(initial ? "question" : "concept");
   const [front, setFront] = useState(suggested.front);
   const [back, setBack] = useState(suggested.back);
   const [sourceDocumentId, setSourceDocumentId] = useState<string | null>(null);
@@ -84,7 +85,7 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
         documentId = snippet.documentId;
         setSourceDocumentId(documentId);
       }
-      const input = { front: front.trim(), back: back.trim(), sourceDocumentId: documentId,
+      const input = { reviewKind, front: front.trim(), back: back.trim(), sourceDocumentId: documentId,
         courseId: courseId || null, skillLabel: skillLabel.trim() || null,
         ...(initial ? { observationId: initial.observationId } : {}) };
       const intent = JSON.stringify(input);
@@ -137,7 +138,7 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
         <div className="space-y-4 px-5 py-4">
           <div id={descriptionId} className="space-y-1 text-xs leading-6 text-text-2">
             <p>{draft ? "先把当前回答存为关联笔记，再编辑正反面制成记忆卡片。" : "题干与参考内容已预填，请核对并编辑后再创建；背面为空时请补充参考答案。"}</p>
-            <p>关联课程的复习会记入学习记录，结果按自报保存，不作为独立正确的证明；未关联课程只安排复习。</p>
+            <p>定义与术语用卡片回忆，题目会换一道新变式来复习。</p>
           </div>
           {saved ? (
             <div
@@ -152,6 +153,11 @@ export function CreateCardDialog({ draft, initial, api, cards: supplied, onClose
             </div>
           ) : (
             <>
+              <label className="block space-y-1.5 text-sm">复习方式
+                <select className={textareaClass} value={reviewKind} disabled={busy || Boolean(initial)} onChange={event => setReviewKind(event.target.value as "question" | "concept")}>
+                  <option value="concept">定义或术语：翻卡回忆</option><option value="question">题目：做新变式</option>
+                </select>
+              </label>
               <div className="space-y-1.5">
                 <label className={ui.label} htmlFor={frontId}>
                   正面

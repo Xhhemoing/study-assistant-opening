@@ -59,10 +59,27 @@ const event: LearningEvent = {
 };
 
 function runtime(cards: Record<string, ReturnType<typeof vi.fn>>) {
-  return { cards } as never;
+  return { cards: { getCard: vi.fn().mockResolvedValue(card), ...cards } } as never;
 }
 
 describe("review service", () => {
+  it("rejects self-grading for a question card before scheduling", async () => {
+    const grade = vi.fn(), getCard = vi.fn().mockResolvedValue({ ...card, tags: ["review:question"] });
+    await expect(gradeReviewForPrincipal(runtime({ grade, getCard }), principal, {
+      cardId, grade: "easy", idempotencyKey: "variant-self-grade",
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(grade).not.toHaveBeenCalled();
+  });
+
+  it("does not send the original question and solution in a variant review queue", async () => {
+    const listQueue = vi.fn().mockResolvedValue([{ card: { ...card, tags: ["review:question"] }, state, goalPriority: 0 }]);
+    const result = await listReviewQueueForPrincipal(runtime({ listQueue }), principal, { mode: "auto" }, {
+      resolveTimeZone: async () => "Asia/Shanghai",
+    });
+    expect(result.items[0]!.card.front).not.toBe(card.front);
+    expect(result.items[0]!.card.back).not.toBe(card.back);
+  });
+
   it("grades through the card repository using the session principal workspace", async () => {
     const grade = vi.fn().mockResolvedValue({
       state: { ...state, workspaceId, ownerUserId },

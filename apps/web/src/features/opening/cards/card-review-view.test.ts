@@ -35,7 +35,7 @@ function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
   return {
     card: { id, ownerUserId: "owner", front: "问题", back: "答案", sourceDocumentId: null, syllabusPointId: null,
-      tags: [], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
+      tags: ["review:concept"], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
     state: { cardId: id, ease: 2.5, intervalDays: 1, dueAt: at, reps: 0, lapses: 0, lastGrade: null, updatedAt: at },
     goalPriority: 0,
   };

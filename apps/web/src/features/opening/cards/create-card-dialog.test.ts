@@ -14,7 +14,8 @@ it("prefills a wrong-answer card with editable question/reference and course/ski
   expect(html).toContain(`value="${learningObservation.courseId}"`);
   expect(html).toContain('value="derivatives"');
   expect(html).toContain("确认制成卡片");
-  expect(html).toContain("结果按自报保存");
+  expect(html).toContain("题目会换一道新变式来复习");
+  expect(html).toContain('value="question" selected=""');
 });
 
 it("offers card creation only for a current incorrect observation, without creating before confirmation", () => {

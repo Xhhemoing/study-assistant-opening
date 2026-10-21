@@ -2,6 +2,7 @@ import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack
 import { createSessionFetch } from "../../auth/session-expiry";
 import {
   createCardRequestSchema,
+  cardVariantReviewSchema,
   createCardResponseSchema,
   observationCardDraftSchema,
   type CreateCardRequest,
@@ -61,6 +62,21 @@ export type OpeningGradeCardInput = {
 export function createOpeningCardsClient(transport: FetchLike = fetch) {
   const fetchImpl = createSessionFetch(transport);
   return {
+    async startVariant(cardId: string, retry = false) {
+      return cardVariantReviewSchema.parse(await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
+        method: "POST", body: JSON.stringify({ action: retry ? "retry" : "start" }),
+      }, fetchImpl));
+    },
+    async completeVariant(cardId: string, observationId: string): Promise<GradeReviewResponse> {
+      return gradeReviewResponseSchema.parse(await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
+        method: "POST", body: JSON.stringify({ action: "complete", observationId }),
+      }, fetchImpl));
+    },
+    async classify(cardId: string, reviewKind: "question" | "concept") {
+      await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
+        method: "POST", body: JSON.stringify({ action: "classify", reviewKind }),
+      }, fetchImpl);
+    },
     async observationDraft(observationId: string) {
       return observationCardDraftSchema.parse(await request(
         `/api/opening/observations/${encodeURIComponent(observationId)}/card-draft`, { method: "GET" }, fetchImpl,

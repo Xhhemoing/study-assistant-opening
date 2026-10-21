@@ -21,7 +21,7 @@ test.beforeAll(async ({ request, baseURL }) => {
   courseId = (await course.json() as { course: { id: string } }).course.id;
   const card = await request.post("/api/cards", {
     headers: { origin: baseURL! },
-    data: { front: cardFront, back: "第一列是第一个标准基向量变换后的向量。", courseId, skillLabel: "矩阵与基向量" },
+    data: { front: cardFront, back: "第一列是第一个标准基向量变换后的向量。", reviewKind: "concept", courseId, skillLabel: "矩阵与基向量" },
   });
   expect(card.ok(), "the review must contain a real card, not only an empty shell").toBe(true);
 });

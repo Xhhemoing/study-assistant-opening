@@ -157,6 +157,12 @@ export {
 
 export {
   gradeReviewRequestSchema,
+  cardReviewKind,
+  cardVariantRequestSchema,
+  cardVariantProposalSchema,
+  type CardVariantProposal,
+  cardVariantReviewSchema,
+  type CardVariantReview,
   gradeReviewResponseSchema,
   cardReviewEvidenceSchema,
   createCardRequestSchema,

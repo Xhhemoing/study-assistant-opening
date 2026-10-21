@@ -1,7 +1,7 @@
 import { planCardEvidence, type CardEvidenceSkipReason } from "./card-sources";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
-  reviewGradeSchema,
+  reviewGradeSchema, cardReviewKind,
   openingAdaptivePrefsSchema, openingPlanningSettingsSchema,
   type LearningEvent,
   type ReviewGrade,
@@ -37,6 +37,8 @@ export async function gradeCard(
     idempotencyKey: string;
     occurredAt: string;
     assisted?: boolean;
+    /** Only the server-validated variant path supplies this existing observation. */
+    variantObservationId?: string;
     now?: Date;
   },
 ): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean; evidence: CardReviewEvidence }> {
@@ -67,9 +69,10 @@ export async function gradeCard(
       }
       const [recorded] = await tx`SELECT 1 FROM opening_learning_observations
         WHERE workspace_id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} AND client_key=${`card-review:${existing.id}`}`;
-      return { state: replayed, event: existing, created: false, evidence: recorded ? "recorded" : card.courseId ? "skipped_unknown" : "skipped_no_course" };
+      return { state: replayed, event: existing, created: false, evidence: recorded || input.variantObservationId ? "recorded" : card.courseId ? "skipped_unknown" : "skipped_no_course" };
     }
 
+    if (cardReviewKind(card) === "question" && !input.variantObservationId) throw new CardRepositoryError("CONFLICT", "请完成当前变式后再继续复习。");
     await assertWorkspaceOwner(client, input.workspaceId, input.ownerUserId);
     const currentState = await loadReviewStateForUpdate(
       client,
@@ -116,6 +119,7 @@ export async function gradeCard(
       });
       assertReplayableReviewEvent(event, input.cardId);
       // The SRS review always commits; the learning fact is written only when admissible.
+      if (input.variantObservationId) return { state, event, created: true, evidence: "recorded" };
       const plan = await planCardEvidence(tx, input.workspaceId, card);
       if (plan.kind === "record") {
         const skillLabel = card.skillLabel ?? "记忆卡片复习";
