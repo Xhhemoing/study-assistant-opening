@@ -1,8 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { ui } from "../features/opening/design/ui";
+import { ErrorState, ui } from "@aistudy/ui";
 
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
-  return <section className="flex min-h-[60vh] flex-col items-center justify-center gap-4 bg-white px-5 text-center" role="alert"><h1 className="text-lg font-semibold text-zinc-900">暂时无法打开这个页面</h1><p className="text-sm leading-7 text-zinc-500">可以重新尝试，或返回首页继续。</p><div className="flex gap-2"><button type="button" className={ui.primary} onClick={reset}>重新尝试</button><Link className={ui.secondary} href="/">返回首页</Link></div></section>;
+  return <main className="flex min-h-[60vh] flex-col items-center justify-center gap-4 bg-bg px-5">
+    <h1 className="font-serif text-2xl font-medium text-text">暂时无法打开这个页面</h1>
+    <ErrorState message="可以重新尝试，或返回首页继续。" onRetry={reset} retryLabel="重新尝试" />
+    <Link className={ui.quiet} href="/">返回首页</Link>
+  </main>;
 }

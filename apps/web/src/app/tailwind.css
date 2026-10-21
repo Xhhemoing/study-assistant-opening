@@ -9,6 +9,7 @@
 @theme static {
   --font-sans: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Iowan Old Style", "Charter", "Georgia", "Songti SC", "STSong", "Noto Serif SC", "Source Han Serif SC", serif;
+  --font-reading: var(--font-serif);
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
 
   --color-bg: #faf9f5;
@@ -127,4 +128,21 @@
   ::view-transition-old(root), ::view-transition-new(root) {
     animation-duration: 1ms !important;
   }
+}
+
+/* Reading preference changes lesson prose without changing interface typography. */
+[data-reading-font="sans"] { --font-reading: var(--font-sans); }
+
+/* Explicit user preference also applies when the OS allows motion. */
+[data-motion="reduce"],
+[data-motion="reduce"] *,
+[data-motion="reduce"] *::before,
+[data-motion="reduce"] *::after {
+  animation: none !important;
+  transition-duration: 1ms !important;
+  scroll-behavior: auto !important;
+}
+[data-motion="reduce"]::view-transition-old(root),
+[data-motion="reduce"]::view-transition-new(root) {
+  animation-duration: 1ms !important;
 }
