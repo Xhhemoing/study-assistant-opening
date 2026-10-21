@@ -3,7 +3,7 @@ import { createSessionFetch } from "../../auth/session-expiry";
 import {
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
-  learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningObservationSchema,
+  learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningAttemptContextReadSchema, learningObservationSchema,
   type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
   observationHistorySchema, observationRevisionInputSchema, observationRevisionResultSchema,
@@ -108,6 +108,10 @@ export function createOpeningLearningClient(transport: FetchLike = fetch) {
         sessionId: z.string().uuid(),
         deliveredAssistance: z.enum(["none", "hinted", "revealed"]),
       }).strict().parse(body);
+    },
+
+    async getAttemptContext(attemptId: string) {
+      return learningAttemptContextReadSchema.parse(await request(`/api/opening/attempts/${encodeURIComponent(attemptId)}/context`, { method: "GET", cache: "no-store" }, fetchImpl));
     },
 
     async submitAttempt(attemptId: string, input: LearningAttemptSubmitInput) {

@@ -264,3 +264,5 @@ export { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } fr
 export * from "./repositories/opening-content-delivery";
 
 export * from "./schema/opening-assistant-proposals";
+
+export * from "./repositories/opening-teaching-hints";

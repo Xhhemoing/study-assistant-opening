@@ -14,7 +14,7 @@ const lossLabels: Record<string, string> = {
 
 function LossBadge({ kind }: { kind: string }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
+    <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800">
       <TriangleAlert aria-hidden="true" size={11} />
       {lossLabels[kind] ?? kind}
     </span>
