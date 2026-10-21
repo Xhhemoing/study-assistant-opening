@@ -39,6 +39,27 @@ Triggers:
 | Browser E2E | `npm run test:browser` | Real production web server and Playwright Chromium |
 | Build | `npm run build` | worker typecheck + Next production build |
 
+The separate `opening-worker-flow` job uses the dedicated release environment
+(`OPENING_RELEASE=1`) to execute the two redirect cases that are skipped by the
+default browser configuration, followed by the real PDF/worker flow. This
+checks the root entry and all eight legacy mock entries against the production
+server, rather than treating a skipped case as release evidence.
+
+Its restart step runs both graceful shutdown and forced `SIGKILL` scenarios
+against the same production build. Only the two child processes created by the
+fixture may be stopped. In the forced case, the worker is killed first, an
+answer is committed through HTTP while the worker is absent, and then Web is
+killed. After restart, the original answer, hint receipts, delayed task and S3
+object must survive; the same queued scan must complete, replay must not create
+another observation/job, and the new worker must process a fresh answer.
+The process lifecycle and persisted identities are attached to each test.
+
+These are isolated application-process recovery checks: PostgreSQL, Redis and
+S3 stay running, and there is no database reset or rebuild between cycles.
+They do not establish recovery from host/power loss, an in-flight paid model
+call, a cross-version deployment, or actual delayed learning effectiveness.
+Results must come from the current commit's job, not this description.
+
 The isolated CI job sets `HERMES_HEAVY_ENABLED=0` to bypass local host locks and
 CPU/IO scheduling controls. Vitest uses at most four workers in CI; integration
 and handler files remain serial because they share database fixtures. Local

@@ -28,6 +28,7 @@ export async function readOpeningRestartBuild(root: string) {
 
 const delay = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 type Exit = { service: "web" | "worker"; pid: number; code: number | null; signal: NodeJS.Signals | null; graceful: boolean };
+type StopMode = "graceful" | "crash";
 type Owned = { service: Exit["service"]; child: ChildProcess; exited: Promise<Exit>; result?: Exit; expected: boolean; error?: Error; log: string };
 export type RestartCycle = { cycle: number; webPid: number; workerPid: number; workerClientIds: string[]; buildId: string };
 
@@ -115,28 +116,34 @@ export function createOpeningRestartServices(input: NodeJS.ProcessEnv, root = pr
     }
     throw new Error("Owned web health and real BullMQ worker registration did not become ready");
   }
-  async function stopOwned(item: Owned): Promise<Exit> {
-    live(item); item.expected = true;
-    if (!item.child.kill("SIGTERM")) throw new Error(`Could not send SIGTERM to owned ${item.service}`);
+  async function stopOwned(item: Owned, mode: StopMode = "graceful"): Promise<Exit> {
+    live(item); item.expected = mode === "graceful";
+    const signal = mode === "graceful" ? "SIGTERM" : "SIGKILL";
+    events.push({ event: "requested-stop", cycle, service: item.service, pid: item.child.pid, mode, signal });
+    if (!item.child.kill(signal)) throw new Error(`Could not send ${signal} to owned ${item.service}`);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const exit = await Promise.race([item.exited, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Owned ${item.service} did not exit gracefully within 30 seconds`)), 30_000);
+        timer = setTimeout(() => reject(new Error(`Owned ${item.service} did not exit after ${signal}`)), mode === "graceful" ? 30_000 : 5000);
       })]);
-      if (!exit.graceful) throw new Error(`Owned ${item.service} failed during shutdown`);
+      if (mode === "graceful" ? !exit.graceful : exit.signal !== "SIGKILL" || exit.graceful) {
+        throw new Error(`Owned ${item.service} did not complete the requested ${mode} stop`);
+      }
       return exit;
     } finally { clearTimeout(timer); }
   }
-  async function stop() {
-    const results = await Promise.allSettled(current.map(stopOwned));
+  async function terminate(mode: StopMode, names: Exit["service"][]) {
+    const selected = current.filter(item => names.includes(item.service));
+    if (selected.length !== new Set(names).size || !selected.length) throw new Error("Requested services are not owned and running");
+    const results = await Promise.allSettled(selected.map(item => stopOwned(item, mode)));
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Graceful restart failed; forced cleanup cannot count as success");
-    current = [];
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), `${mode} restart failed; cleanup cannot count as success`);
+    current = current.filter(item => !selected.includes(item));
     return results.map(result => (result as PromiseFulfilledResult<Exit>).value);
   }
   async function dispose() {
     const remaining = processes.filter(item => !item.result);
-    const results = await Promise.allSettled(remaining.map(stopOwned));
+    const results = await Promise.allSettled(remaining.map(item => stopOwned(item)));
     try {
       for (const item of remaining) if (!item.result) {
         item.child.kill("SIGKILL");
@@ -151,6 +158,7 @@ export function createOpeningRestartServices(input: NodeJS.ProcessEnv, root = pr
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Service cleanup required a forced stop");
   }
-  return { assertIdle, start, stop, dispose,
-    diagnostics: () => ({ kind: "same-version-graceful-restart", events, processes: processes.map(item => ({ service: item.service, pid: item.child.pid, exit: item.result, log: item.log })) }) };
+  return { assertIdle, start, stop: () => terminate("graceful", ["web", "worker"]),
+    crash: (names: Exit["service"][] = ["web", "worker"]) => terminate("crash", names), dispose,
+    diagnostics: () => ({ kind: "same-version-process-restart", events, processes: processes.map(item => ({ service: item.service, pid: item.child.pid, exit: item.result, log: item.log })) }) };
 }

@@ -102,6 +102,21 @@ describe("opening same-origin middleware", () => {
     expect(response.headers.get("location")).toBe(`${publicBase}${target}`);
   });
 
+  it.each(["http://127.0.0.1:3100", "http://[::1]:3100", "http://localhost:3100"])(
+    "preserves the request origin and query on legacy redirects (%s)",
+    (origin) => {
+      // Match next.config.mjs: NextRequest.url retains the incoming URL when
+      // skipMiddlewareUrlNormalize is enabled; nextUrl still normalizes it.
+      vi.stubEnv("__NEXT_NO_MIDDLEWARE_URL_NORMALIZE", "true");
+      vi.stubEnv("OPENING_RELEASE", "1");
+      const search = "?courseId=course-1&tag=a&tag=b&next=https%3A%2F%2Fforeign.example";
+      const incoming = new NextRequest(`${origin}/learn/review${search}`);
+      const response = middleware(incoming);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(`${origin}/opening/cards${search}`);
+    },
+  );
+
   it("redirects legacy review pages to opening memory cards", () => {
     vi.stubEnv("OPENING_RELEASE", "1");
     for (const pathname of ["/learn/review", "/learn/review/session"]) {
