@@ -4,12 +4,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LibraryFileBatch } from "./library-view";
 
-const state = vi.hoisted(() => ({ mounts: 0, batches: [] as LibraryFileBatch[] }));
+const state = vi.hoisted(() => ({ mounts: 0, empty: false, batches: [] as LibraryFileBatch[] }));
 vi.mock("./material-library", () => ({
-  MaterialLibrary: ({ incomingFiles, onIncomingFilesAccepted }: { incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void }) => {
+  MaterialLibrary: ({ incomingFiles, onIncomingFilesAccepted, onUploadRequested, onEmptyChange }: { incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadRequested?: () => void; onEmptyChange?: (empty: boolean) => void }) => {
     useEffect(() => { state.mounts += 1; }, []);
     useEffect(() => { if (incomingFiles) { state.batches.push(incomingFiles); onIncomingFilesAccepted?.(); } }, [incomingFiles, onIncomingFilesAccepted]);
-    return createElement("div", { "data-materials": true }, "材料队列");
+    useEffect(() => { onEmptyChange?.(state.empty); }, [onEmptyChange]);
+    return createElement("div", { "data-materials": true }, "材料队列", state.empty ? createElement("button", { onClick: onUploadRequested }, "上传材料") : null);
   },
 }));
 vi.mock("../../workspace/library-document-list", () => ({ LibraryDocumentList: () => createElement("div", null, "我的笔记") }));
@@ -20,7 +21,7 @@ import { LibraryView } from "./library-view";
 let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
-  state.mounts = 0; state.batches = [];
+  state.mounts = 0; state.empty = false; state.batches = [];
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   window.history.replaceState({}, "", "/opening/library?tab=notes&source=original&version=3");
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -60,4 +61,19 @@ it("keeps the material queue mounted when switching to notes", async () => {
   await act(async () => { notesTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })); });
   expect(state.mounts).toBe(1);
   expect(container.querySelectorAll('[data-materials="true"]')).toHaveLength(1);
+});
+
+it("opens the existing page picker from the empty action and validates the selected files once", async () => {
+  state.empty = true;
+  await act(async () => root.render(createElement(LibraryView, { tab: "materials" })));
+  const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const click = vi.spyOn(picker, "click");
+  await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent === "上传材料")!.click());
+  expect(click).toHaveBeenCalledTimes(1);
+  expect(container.querySelectorAll('input[type="file"]')).toHaveLength(1);
+  const file = new File(["pdf"], "notes.pdf", { type: "application/pdf" });
+  Object.defineProperty(picker, "files", { configurable: true, value: [file] });
+  await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+  expect(state.batches).toHaveLength(1);
+  expect(state.batches[0]?.files).toEqual([file]);
 });

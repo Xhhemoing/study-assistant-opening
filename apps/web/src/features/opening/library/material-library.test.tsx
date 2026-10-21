@@ -94,3 +94,50 @@ it("preserves an assignment selection after parsing no longer matches the filter
   expect(container.querySelector('select[aria-label="归入课程"]')).toBeNull();
   expect(container.textContent).not.toContain("notes.pdf");
 });
+
+it("connects the empty state action to the page upload picker without mounting a second picker", async () => {
+  state.sources = [];
+  const onUploadRequested = vi.fn(), onEmptyChange = vi.fn();
+  await act(async () => root.render(createElement(MaterialLibrary, { api, hideUploadPicker: true, onUploadRequested, onEmptyChange })));
+  expect(onEmptyChange).toHaveBeenLastCalledWith(true);
+  const empty = container.querySelector('[aria-label="还没有材料"]')!;
+  expect(empty.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector('input[type="file"]')).toBeNull();
+  await act(async () => empty.querySelector("button")!.click());
+  expect(onUploadRequested).toHaveBeenCalledTimes(1);
+});
+
+it("does not claim the library is empty when the initial material read fails", async () => {
+  const list = vi.spyOn(api, "listSources").mockRejectedValueOnce(new Error("read unavailable"));
+  const onEmptyChange = vi.fn();
+  try {
+    await act(async () => root.render(createElement(MaterialLibrary, { api, hideUploadPicker: true, onEmptyChange })));
+    expect(container.textContent).toContain("材料暂时无法读取");
+    expect(container.querySelector('[aria-label="还没有材料"]')).toBeNull();
+    expect(onEmptyChange).toHaveBeenLastCalledWith(false);
+    await act(async () => root.render(createElement(MaterialLibrary, { api, onEmptyChange })));
+    expect(container.querySelector('input[type="file"]')).not.toBeNull();
+  } finally { list.mockRestore(); }
+});
+
+it("delays refresh feedback for 300ms while keeping an open assignment mounted", async () => {
+  await render(null);
+  await act(async () => button("归入课程").click());
+  const target = container.querySelector<HTMLSelectElement>('select[aria-label="归入课程"]')!;
+  await act(async () => { target.value = "course-b"; target.dispatchEvent(new Event("change", { bubbles: true })); });
+  let finish!: (sources: SourceRecord[]) => void;
+  const list = vi.spyOn(api, "listSources").mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  vi.useFakeTimers();
+  try {
+    await act(async () => button("刷新状态").click());
+    await act(async () => vi.advanceTimersByTime(299));
+    expect(container.textContent).not.toContain("正在刷新材料状态");
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(container.textContent).toContain("正在刷新材料状态");
+    expect(container.querySelector('select[aria-label="归入课程"]')).toBe(target);
+    expect(target.value).toBe("course-b");
+    await act(async () => finish([source]));
+    expect(container.textContent).not.toContain("正在刷新材料状态");
+    expect(container.querySelector('select[aria-label="归入课程"]')).toBe(target);
+  } finally { vi.useRealTimers(); list.mockRestore(); }
+});

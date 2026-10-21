@@ -16,10 +16,12 @@ it("does not bypass source choice or missing source-version guards", () => {
 });
 it("blocks generic question help until the real attempt is available", () => {
   const value = { ...context(), isQuestion: true };
-  expect(teachingAssistantContext(value).blockedReason).toContain("先保存");
-  value.learningAttempt = { id, itemVersionId: id } as NonNullable<TeachingToolsContext["learningAttempt"]>;
+  expect(teachingAssistantContext(value).blockedReason).toContain("先开始");
+  value.learningAttempt = { id, courseId: id, requirementKey: `teaching:${id}:v3`, itemVersionId: id } as NonNullable<TeachingToolsContext["learningAttempt"]>;
   expect(teachingAssistantContext(value)).toMatchObject({ blockedReason: undefined, learningAttempt: value.learningAttempt, context: { attemptId: id, itemVersionId: id } });
   expect(teachingAssistantContext(value).context.sourceId).toBeUndefined();
+  expect(teachingAssistantContext({ ...value, contentVersion: 4 }).learningAttempt).toBeNull();
+  expect(teachingAssistantContext({ ...value, activity: { ...value.activity, courseId: null } }).learningAttempt).toBeNull();
 });
 it("separates span retest and new-evidence entries, and blocks unavailable demonstrations", () => {
   expect(spanPracticeEntryKey(id, "self_study", "reserved:auto", id)).not.toBe(spanPracticeEntryKey(id, "self_study", "reserved:auto", undefined, id));

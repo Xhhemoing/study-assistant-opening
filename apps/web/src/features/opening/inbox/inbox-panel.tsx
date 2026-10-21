@@ -43,14 +43,18 @@ export function InboxPanel({
   incomingFiles,
   onIncomingFilesAccepted,
   onUploadBusyChange,
+  onUploadRequested,
   hideUploadPicker = false,
+  showEmptyState = true,
   liveSources,
 }: {
   api: OpeningApi;
   incomingFiles?: LibraryFileBatch | null;
   onIncomingFilesAccepted?: () => void;
   onUploadBusyChange?: (busy: boolean) => void;
+  onUploadRequested?: () => void;
   hideUploadPicker?: boolean;
+  showEmptyState?: boolean;
   liveSources?: SourceRecord[];
   sources: SourceRecord[];
   onChanged: () => Promise<void>;
@@ -250,7 +254,7 @@ export function InboxPanel({
 
   return (
     <section className="space-y-3">
-      {hideUploadPicker ? null : <CaptureDialog compact={sources.length > 0} disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />}
+      {!hideUploadPicker && (sources.length > 0 || !showEmptyState) ? <CaptureDialog compact disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} /> : null}
       {refreshError ? <p className="text-sm text-warn" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
       {notice ? <p className="text-sm text-warn" role="status">{notice.text}</p> : null}
       {queueItems.some(item => item.state !== "saved") ? (
@@ -299,7 +303,7 @@ export function InboxPanel({
           </li>
         ))}
       </ul>
-      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
+      {!sources.length && showEmptyState ? <EmptyState title="还没有材料" description="添加第一份材料，上传后的处理状态会显示在这里。" action={hideUploadPicker ? onUploadRequested ? <button type="button" className={ui.primary} disabled={uploading} onClick={onUploadRequested}>上传材料</button> : undefined : <CaptureDialog disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />} /> : sources.length > 0 && !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
         record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}

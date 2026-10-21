@@ -1,6 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
+const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnosticPreference.enabled }));
+beforeEach(() => { diagnosticPreference.enabled = false; });
 import { SpanLesson } from "./span-lesson";
 it.each(["self_study", "overview", "challenge"] as const)("opens new evidence at the actual reserved step for %s", purpose => {
   const html = renderToStaticMarkup(createElement(SpanLesson, {
@@ -10,4 +13,9 @@ it.each(["self_study", "overview", "challenge"] as const)("opens new evidence at
   }));
   expect(html).toContain("离开示范，用服务器发放的保留题检查");
   expect(html).not.toContain("本步骤通过，进入下一道新题");
+});
+it("keeps learning criteria visible while hiding technical knowledge-component identifiers by default", () => {
+  const render = () => renderToStaticMarkup(createElement(SpanLesson, { courseId: "11111111-1111-4111-8111-111111111111", sourceIds: [], sourceLoadError: true }));
+  const ordinary = render(); expect(ordinary).toContain("本步骤期待观察什么"); expect(ordinary).toContain("继续或停止"); expect(ordinary).not.toContain("覆盖知识点");
+  diagnosticPreference.enabled = true; expect(render()).toContain("覆盖知识点");
 });

@@ -98,7 +98,7 @@ export function MeasurementView() {
   const readOnly = !course || course.archivedAt !== null;
   const courseTitle = course?.title;
 
-  return <main className="min-w-0 bg-surface">
+  return <div className="min-w-0 bg-surface">
     <PageHeading title="学习测试" description="分部积分小单元：记录真实作答，检查预测与实际表现的差距。" action={<Link href="/opening/settings" className={ui.quiet}><ArrowLeft size={14} aria-hidden="true" />返回设置</Link>} />
     <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
       <div className="flex flex-wrap items-end gap-3">
@@ -140,5 +140,5 @@ export function MeasurementView() {
       </> : null}
       {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
     </div>
-  </main>;
+  </div>;
 }

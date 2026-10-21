@@ -1,6 +1,9 @@
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnosticPreference.enabled }));
+beforeEach(() => { diagnosticPreference.enabled = false; });
 
 vi.mock("./preference-controls", () => ({
   PreferenceControls: () => createElement("div", { "data-testid": "session-intervention-prefs" }),
@@ -94,6 +97,13 @@ const activityReady: TeachingActivity = {
   createdAt: ISO,
   updatedAt: ISO,
 };
+
+it("shows technical diagnostics only when the appearance preference is enabled", () => {
+  const render = () => renderToStaticMarkup(createElement(TeachingWorkspace, { activity: activityReady, clientInit: clientInit(), sourceNameById: {} }));
+  expect(render()).not.toContain("活动标识：");
+  diagnosticPreference.enabled = true;
+  expect(render()).toContain("活动标识：");
+});
 
 describe("asynchronous teaching position updates", () => {
   const initial: TeachingWorkspacePositionSnapshot = { activityId: AID, contentVersion: 3, pathVersion: 2, epoch: 1 };
@@ -349,7 +359,8 @@ describe("TeachingWorkspace", () => {
       }),
     );
     expect(html).toContain("data-workspace-schema-fail=\"true\"");
-    expect(html).toContain("schema 版本不受支持");
+    expect(html).toContain("教学内容的格式暂不受支持");
+    expect(html).not.toContain("schema 版本不受支持");
   });
 
   it("binds contextual tools to the actual restored question and excludes its hidden answer", () => {
