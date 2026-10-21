@@ -9,14 +9,14 @@ describe("inline attempt skill context", () => {
     expect(defaultInlineAttemptSkill({ outlineTitle: "matrix rank" })).toBe("matrix rank");
     expect(defaultInlineAttemptSkill({})).toBe("课堂练习");
   });
-  it("keeps an edited draft, including a deliberately cleared value", () => {
+  it("keeps an edited draft, and infers a missing label", () => {
     expect(defaultInlineAttemptSkill({ draftSkillLabel: "My skill", outlineTitle: "matrix rank", knowledge })).toBe("My skill");
-    expect(defaultInlineAttemptSkill({ draftSkillLabel: "", learnerSkillLabel: "matrix rank", knowledge })).toBe("");
+    expect(defaultInlineAttemptSkill({ draftSkillLabel: "", learnerSkillLabel: "matrix rank", knowledge })).toBe("Matrix Rank");
   });
   it("records the question's own topic before the lesson default while preserving saved drafts", () => {
     expect(defaultInlineAttemptSkill({ questionSkillLabel: "矩阵秩", learnerSkillLabel: "行列式", outlineTitle: "模拟练习" })).toBe("矩阵秩");
     expect(defaultInlineAttemptSkill({ draftSkillLabel: "用户已选考点", questionSkillLabel: "矩阵秩" })).toBe("用户已选考点");
-    expect(defaultInlineAttemptSkill({ draftSkillLabel: "", questionSkillLabel: "矩阵秩" })).toBe("");
+    expect(defaultInlineAttemptSkill({ draftSkillLabel: "", questionSkillLabel: "矩阵秩" })).toBe("矩阵秩");
   });
   it("keeps the selected learning skill ahead of generic outline and chapter labels", () => {
     expect(defaultInlineAttemptSkill({ learnerSkillLabel: "matrix rank", outlineTitle: "Check understanding", knowledge })).toBe("Matrix Rank");

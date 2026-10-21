@@ -1,4 +1,4 @@
-import type { CourseGoal, LearningActivityKind, TaskItem } from "@aistudy/contracts";
+import type { CourseGoal, LearningActivityKind, TaskItem, TeachingLearnerFocus } from "@aistudy/contracts";
 import type { EvidenceEligibilityValue } from "../evidence-eligibility";
 import type { Assistance, SkillStatus } from "./types";
 
@@ -23,6 +23,7 @@ export type SnapshotObservation = {
   /** Missing historical qualification never means current evidence. */
   usableForCurrentVersion?: EvidenceEligibilityValue;
   problemId: string | null;
+  errors?: TeachingLearnerFocus["recentErrors"];
 };
 
 /** One summarizeObservations row over the course's full evidence (not the HTTP projection). */

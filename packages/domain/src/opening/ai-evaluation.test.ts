@@ -51,6 +51,24 @@ it("does not infer AI authority from model_suggestion or a missing/mismatched as
   expect(evaluateEvidenceEligibility({ ...answer, outcome: "incorrect" }, captured).verifiedCorrect).toBe("unknown");
 });
 
+it("feeds only current, accepted incorrect criteria into the next lesson", () => {
+  const mistake: AiEvaluation = { ...evaluation, outcome: "incorrect", criteria: [
+    { label: "分母", verdict: "incorrect", feedback: "同分母相加时分母保持不变。" },
+    { label: "分子", verdict: "correct", feedback: "分子相加正确。" },
+  ] };
+  const facts = { observation: { ...answer, outcome: "incorrect" as const }, context: { ...captured, aiEvaluation: mistake } };
+  const evidence = courseEvidence(facts);
+  evidence.observations[0] = { ...learningObservation, verdictSource: "ai_graded", outcome: "incorrect", aiEvaluation: mistake };
+  expect(toSnapshotEvidence(evidence, new Date()).observations[0]?.errors).toEqual([
+    { observationId: learningObservation.id, label: "分母", feedback: "同分母相加时分母保持不变。", source: "ai_feedback" },
+  ]);
+  facts.context.aiEvaluation = { ...mistake, confidence: 0.2 };
+  expect(toSnapshotEvidence(evidence, new Date()).observations[0]?.errors).toBeUndefined();
+  facts.context.aiEvaluation = mistake;
+  facts.context.version = { applicability: "unavailable" };
+  expect(toSnapshotEvidence(evidence, new Date()).observations[0]?.errors).toBeUndefined();
+});
+
 it("retains assistance and rejects independent credit after a hint or an unknown help history", () => {
   expect(evaluateEvidenceEligibility(answer, { ...captured, helpHistory: { complete: true, exposures: [exposure] } }))
     .toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForDelayedCheck: "no" });

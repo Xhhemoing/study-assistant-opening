@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import type { AiGradingProposal, LearningAttempt } from "@aistudy/contracts";
+import type { AiGradingProposal, LearningAttempt, TeachingQuestionInteraction } from "@aistudy/contracts";
 import { createOpeningAiGradingRepository, createOpeningLearningRepository, createOpeningTeachingActivitiesRepository,
-  createOpeningTeachingContentRepository, createOpeningTeachingHintRepository } from "@aistudy/database";
+  createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningTeachingCommandsRepository } from "@aistudy/database";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -16,14 +16,14 @@ const answer = "两列线性无关，所以秩为 2。";
 const proposal: AiGradingProposal = { outcome: "correct", confidence: 0.93, questionMatch: true, feedback: answer,
   criteria: [{ label: "矩阵秩", verdict: "correct", feedback: "秩为2。" }] };
 
-async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。") {
+async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction) {
   const base = await learningAttemptFixture(fixture), sourceIds = withSource ? [base.sourceId] : [];
   const activity = await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope, {
     clientKey: randomUUID(), intentKind: "topic", intentSummary: "矩阵秩", courseId: base.courseId, sourceIds, createIntent: {},
   });
   const content = createOpeningTeachingContentRepository(fixture.sql), blockId = randomUUID(), answerId = randomUUID();
   const unit = await content.createUnit(fixture.scope, { title: "矩阵秩", blocks: [
-    { id: blockId, type: "prompt", content: { text: prompt } },
+    { id: blockId, type: "prompt", content: { text: prompt, ...(interaction ? { interaction } : {}) } },
     { id: answerId, type: "answer_key", content: { answer, rubric: ["列向量线性无关", "秩等于2"], hidden: true,
       hints: { direction: "先考察列向量。", concept: "秩是线性无关列的最大数量。", firstStep: "写出第一列 (1,0)。" } } },
   ] });
@@ -153,4 +153,66 @@ it("rejects original classroom material as a work photo while retaining legitima
   expect((await f.grader.context(fixture.scope, { observationId: correction.headObservationId, ...work })).workSource?.id).toBe(photoId);
   await expect(f.grader.context(fixture.scope, { observationId: correction.headObservationId,
     workSourceId: f.sourceId, workSourceVersion: 1, physicalPage: 1 })).rejects.toMatchObject({ code: "VALIDATION" });
+});
+
+it("keeps choice options in the canonical question and preserves optional teaching feedback", async () => {
+  const f = await seed(false, "二阶单位矩阵的秩是多少？", { kind: "choice", options: [{ id: "A", label: "1" }, { id: "B", label: "2" }] });
+  const attempt = await f.start(), original = await f.submit(attempt);
+  const [problem] = await fixture.sql`SELECT stem_snapshot FROM opening_problem_refs WHERE problem_id=${attempt.problemId!}`;
+  expect(problem!.stem_snapshot).toContain("A. 1\nB. 2");
+  const followUp = { prompt: "三阶单位矩阵的秩？", options: [{ id: "A", label: "2" }, { id: "B", label: "3" }], answerId: "B", explanation: "三列线性无关，所以秩为3。" };
+  const saved = await f.grader.apply(fixture.scope, { observationId: original.id }, { ...proposal, followUp }, "fixture");
+  expect(saved.aiEvaluation?.followUp).toEqual(followUp);
+  expect(saved.answer).toBe(original.answer);
+  await fixture.sql`UPDATE opening_learning_item_versions SET stem_snapshot='二阶单位矩阵的秩是多少？' WHERE id=${attempt.itemVersionId!}`;
+  await expect(f.grader.context(fixture.scope, { observationId: saved.id })).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
+it("keeps the unit in numeric question identity", async () => {
+  const f = await seed(false, "这条边长多少？", { kind: "numeric", unit: "cm" });
+  const original = await f.submit(await f.start());
+  expect((await f.grader.context(fixture.scope, { observationId: original.id })).stem).toBe("这条边长多少？\n单位：cm");
+});
+
+it("records confusion once without rewriting the lesson, changing its versions or submitting an answer", async () => {
+  const f = await seed(), repo = createOpeningTeachingCommandsRepository(fixture.sql);
+  const request = { clientKey: randomUUID(), kind: "confused" as const, blockId: f.blockId, expectedVersion: 1 };
+  const first = await repo.executeCommand(fixture.scope, f.activity.id, request);
+  expect(first).toMatchObject({ ok: true, contentVersion: 1, pathVersion: 1, checkpointJson: { confusionCount: 1 }, assist: { kind: "confused" } });
+  expect(await repo.executeCommand(fixture.scope, f.activity.id, request)).toMatchObject({ ok: true, replayed: true, checkpointJson: { confusionCount: 1 } });
+  const [stored] = await fixture.sql`SELECT content_version,checkpoint_json FROM opening_teaching_activities WHERE id=${f.activity.id}`;
+  expect(stored!.checkpoint_json.confusionCount).toBe(1);
+  expect(stored!.checkpoint_json.lastConfusion.blockId).toBe(f.blockId);
+  const [attempts] = await fixture.sql`SELECT count(*)::int AS count FROM opening_learning_attempts WHERE session_id=${f.session.id}`;
+  expect(attempts!.count).toBe(0);
+});
+
+it("automatically assigns an unscoped lesson once and respects an existing course", async () => {
+  const repo = createOpeningTeachingActivitiesRepository(fixture.sql);
+  const activity = await repo.create(fixture.scope, { clientKey: randomUUID(), intentKind: "topic", intentSummary: "向量的小练习", sourceIds: [], createIntent: {} });
+  const first = await repo.associateCourse(fixture.scope, activity.id, { auto: true });
+  expect(first.courseId).toBeTruthy();
+  expect((await repo.associateCourse(fixture.scope, activity.id, { auto: true })).courseId).toBe(first.courseId);
+  const [course] = await fixture.sql`SELECT title FROM courses WHERE id=${first.courseId!} AND workspace_id=${fixture.scope.workspaceId}`;
+  expect(course!.title).toBe("向量的小练习");
+  await expect(repo.associateCourse(fixture.otherScope, activity.id, { auto: true })).rejects.toThrow();
+});
+
+it("infers a unique material course but isolates ambiguous material associations", async () => {
+  const base = await learningAttemptFixture(fixture), repo = createOpeningTeachingActivitiesRepository(fixture.sql);
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+    VALUES(${fixture.scope.workspaceId},${base.courseId},'source',${base.sourceId},'reference',0,'private')`;
+  const create = () => repo.create(fixture.scope, { clientKey: randomUUID(), intentKind: "topic", intentSummary: "向量", sourceIds: [base.sourceId], createIntent: {} });
+  const unique = await create();
+  expect((await repo.associateCourse(fixture.scope, unique.id, { auto: true })).courseId).toBe(base.courseId);
+  const otherCourseId = randomUUID();
+  await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${otherCourseId},${fixture.scope.workspaceId},'Another course',${otherCourseId})`;
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+    VALUES(${fixture.scope.workspaceId},${otherCourseId},'source',${base.sourceId},'reference',0,'private')`;
+  const ambiguous = await create();
+  const [first, repeat] = await Promise.all([repo.associateCourse(fixture.scope, ambiguous.id, { auto: true }), repo.associateCourse(fixture.scope, ambiguous.id, { auto: true })]);
+  expect(first.courseId).toBe(repeat.courseId);
+  expect([base.courseId, otherCourseId]).not.toContain(first.courseId);
+  const [membership] = await fixture.sql`SELECT asset_id FROM course_asset_memberships WHERE course_id=${first.courseId!}`;
+  expect(membership!.asset_id).toBe(base.sourceId);
 });

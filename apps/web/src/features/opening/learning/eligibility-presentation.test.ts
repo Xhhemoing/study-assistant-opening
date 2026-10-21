@@ -1,6 +1,7 @@
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => true }));
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eligibilityReasonLabels } from "./eligibility-presentation";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { LearningAttemptForm } from "./attempt-form";

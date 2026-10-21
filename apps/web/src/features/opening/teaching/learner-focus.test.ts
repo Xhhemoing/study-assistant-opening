@@ -92,3 +92,13 @@ it("does not insert a prerequisite detour when the current target already has in
   expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)).toMatchObject({ activityKind: "transfer_check" });
   expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)?.prerequisiteRepair).toBeUndefined();
 });
+
+it("passes only current, same-requirement historical errors to teaching", () => {
+  const value = read("no"), source = value.sources.courses[0]!;
+  const base = source.observations[0]!;
+  const error = { observationId: base.id, label: "符号", feedback: "漏掉负号", source: "ai_feedback" as const };
+  source.observations = [{ ...base, errors: [error] },
+    { ...base, id: courseId, requirementKey: "another", errors: [{ ...error, feedback: "其他要求" }] },
+    { ...base, id: courseId, usableForCurrentVersion: "no", errors: [{ ...error, feedback: "旧材料" }] }];
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)?.recentErrors).toEqual([error]);
+});

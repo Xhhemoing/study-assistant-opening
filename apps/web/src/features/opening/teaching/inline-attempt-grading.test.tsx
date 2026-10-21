@@ -8,7 +8,7 @@ import { learningObservation } from "../../../../../../packages/domain/src/openi
 const api = vi.hoisted(() => ({
   getSubmittedAttempt: vi.fn(), getSummary: vi.fn(), getCourseKnowledge: vi.fn(),
   createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), gradeObservation: vi.fn(),
-  getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(),
+  getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(), associateTeachingActivityCourse: vi.fn(),
 }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => api }));
 vi.mock("./activity-client", () => ({ createTeachingActivityClient: () => api }));
@@ -77,6 +77,16 @@ it("grades a newly saved lesson answer once and reports the effective result to 
   expect(container.querySelector('[data-feedback-verdict="correct"]')).not.toBeNull();
   expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, graded);
   expect(api.getObservationHistory).not.toHaveBeenCalled();
+});
+
+it("automatically assigns a course once without asking the learner to choose one", async () => {
+  api.associateTeachingActivityCourse.mockResolvedValue({ courseId: record.courseId });
+  await act(async () => root.render(createElement(StrictMode, null, createElement(InlineAttemptForm, {
+    blockId, prompt: initialDraft.prompt, context: { ...context, courseId: null }, ready: true, onDraftChange() {},
+  }))));
+  expect(api.associateTeachingActivityCourse).toHaveBeenCalledExactlyOnceWith(blockId, { auto: true });
+  expect(context.onCourseAssociated).toHaveBeenCalled();
+  expect(container.textContent).not.toContain("学习记录所属课程");
 });
 
 it("restores an ungraded answer without starting another model call and allows explicit grading", async () => {

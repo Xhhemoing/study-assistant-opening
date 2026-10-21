@@ -204,6 +204,20 @@ describe("exam sprint UI boundaries", () => {
     expect(html).not.toContain("这次卡在哪里");
   });
 
+  it("encourages help and hides measurement bookkeeping in the student view", () => {
+    diagnostics.enabled = false;
+    try {
+      const overview = fixture();
+      overview.activeRun!.mode = "practice";
+      overview.currentAttempt = { ...attempt, answer: null, answeredAt: null, feedback: null };
+      const html = renderToStaticMarkup(createElement(ActiveRun, { overview, disabled: false, send() {} }));
+      expect(html).toContain("卡住了就看提示");
+      expect(html).not.toMatch(/不计独立|题族|曝光|资格/);
+      overview.activeRun = null; overview.state.runs[0]!.completedAt = "2026-10-21T00:00:00Z";
+      expect(renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send() {} }))).not.toMatch(/不计独立|题族|曝光|资格/);
+    } finally { diagnostics.enabled = true; }
+  });
+
   it("distinguishes repeated question-family evidence from using help", () => {
     const repeated = { ...attempt, independent: false };
     const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: repeated, disabled: false, send: () => undefined }));

@@ -22,8 +22,8 @@ it("shows the effective uncertain verdict even when the raw model proposed corre
   expect(html).toContain("AI 批改 · 暂不能判断");
   expect(html).not.toContain("AI 批改 · 正确");
   expect(html).toContain("评分要点");
-  expect(html).toContain("<details><summary");
-  expect(html).toContain("不是判分准确率");
+  expect(html).not.toContain("批改详情");
+  expect(html).not.toContain("自评置信度");
 });
 
 it("keeps photo transcription separate from the original answer and offers dispute correction", () => {

@@ -516,3 +516,23 @@ describe("teaching-compiler", () => {
     expect(publishInput.verificationStatus).toBe("needs_check");
   });
 });
+
+it("publishes three interleaved checks while keeping all answer keys out of the client projection", async () => {
+  let blocks: Parameters<typeof projectClientSafeLibraryBlocks>[0] = [];
+  const build = createCompilerBuildPublishInput({ requireModelOutput: true, writeLibraryBlocks: async values => { blocks = values; } });
+  const items: Record<string, unknown>[] = [1, 2, 3].flatMap(n => [{ type: "text", text: `短讲解${n}` },
+    { type: "prompt", text: `检查${n}`, interaction: n === 2 ? { kind: "numeric" } : { kind: "choice", options: [{ id: "A", label: "向量" }, { id: "B", label: "系数" }] } },
+    { type: "answer_key", hints, text: `secret-solution-${n}` }]);
+  items.push({ type: "vector_diagram", text: "组合向量", vectors: { v: [1, 0], w: [0, 1] } });
+  await build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 }, { text: JSON.stringify({ blocks: items }) });
+  expect(blocks.filter(block => block.role === "prompt")).toHaveLength(3);
+  expect(blocks.find(block => block.type === "vector_diagram")?.content.vectors).toEqual({ v: [1, 0], w: [0, 1] });
+  const client = JSON.stringify(projectClientSafeLibraryBlocks(blocks));
+  expect(client).not.toContain("secret-solution");
+  expect(client).toContain('"kind":"numeric"');
+});
+it("rejects invalid interactive content rather than rendering an answer-bearing option payload", () => {
+  for (const interaction of [{ kind: "choice", options: [{ id: "A", label: "1" }, { id: "A", label: "2" }] }, { kind: "numeric", answer: "secret" }]) {
+    expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "text", text: "解释" }, { type: "prompt", text: "题目", interaction }] }), new Set())).toThrow();
+  }
+});

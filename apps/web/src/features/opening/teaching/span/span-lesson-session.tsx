@@ -20,6 +20,7 @@ export function SpanLessonSession(props: Props) {
   const requestId = useRef(0), busy = useRef(false);
   const createKey = useRef<string | null>(null);
   const autoStarted = useRef(false);
+  const recoveryReady = useRef(false);
   const readRoute = useRef({ courseId: props.courseId, retestId: props.delayedRetestId, activityId: props.initialActivityId, revision });
   const query = useCallback(() => {
     const params = new URLSearchParams({ courseId: props.courseId });
@@ -43,13 +44,14 @@ export function SpanLessonSession(props: Props) {
       setDetails(null); setShowSummary(false); setPending(false);
     }
     const version = ++requestId.current;
+    recoveryReady.current = false;
     setError("");
     void spanLessonRequest(query(), spanLessonDetailsSchema).then(value => {
-      if (version === requestId.current) { setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
+      if (version === requestId.current) { recoveryReady.current = true; setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
     }).catch(reason => { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "无法恢复本次学习。"); });
   }, [query, revision, props.initialActivityId]);
   useEffect(() => {
-    if (!details || details.session || error || props.sourceLoadError || !props.sourceIds.length || autoStarted.current) return;
+    if (!recoveryReady.current || !details || details.session || error || props.sourceLoadError || !props.sourceIds.length || autoStarted.current) return;
     autoStarted.current = true;
     void start();
   }, [details, error, props.sourceLoadError, props.sourceIds]);

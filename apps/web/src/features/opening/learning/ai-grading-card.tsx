@@ -8,6 +8,8 @@ import { LearningProse } from "../assistant/learning-prose";
 import { sourceViewerHref } from "../inbox/source-viewer";
 import { AiGradingPhotoFields, emptyGradingPhoto, type GradingPhotoSelection } from "./ai-grading-photo";
 import { runPracticeRequest } from "./practice-draft";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import { FeedbackPractice } from "./feedback-practice";
 
 export const aiOutcomeLabels = { correct: "正确", incorrect: "需改进", unverified: "暂不能判断" } as const;
 
@@ -20,6 +22,7 @@ export function canGradeObservation(record: LearningObservation) {
 }
 
 export function AiGradingResult({ record }: { record: LearningObservation }) {
+  const diagnostics = useDiagnosticsEnabled();
   const result = record.aiEvaluation;
   if (!result) return null;
   // The server may abstain even when the model proposed a confident-looking answer.
@@ -33,7 +36,8 @@ export function AiGradingResult({ record }: { record: LearningObservation }) {
       <div className="break-words text-text-2"><LearningProse text={criterion.feedback} /></div>
     </li>)}</ol>
     {result.transcription ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">查看图片识别文字</summary><p className="whitespace-pre-wrap break-words text-sm leading-6 text-text-2">{result.transcription}</p></details> : null}
-    <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">批改详情</summary><p className="text-xs leading-6 text-text-3">模型：{result.modelLabel ?? "未提供"} · 自评置信度 {Math.round(result.confidence * 100)}%（不是判分准确率）</p></details>
+    {result.followUp && outcome !== "unverified" && result.questionMatch ? <FeedbackPractice key={record.id} question={result.followUp} /> : null}
+    {diagnostics ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">批改详情</summary><p className="text-xs leading-6 text-text-3">模型：{result.modelLabel ?? "未提供"} · 自评置信度 {Math.round(result.confidence * 100)}%（不是判分准确率）</p></details> : null}
   </section>;
 }
 

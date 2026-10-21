@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
-import type { LearningAttempt, LearningObservation, TeachingActivity, TeachingAnswerKey, TeachingHintLevel, TeachingHintResponse } from "@aistudy/contracts";
+import type { LearningAttempt, LearningObservation, TeachingActivity, TeachingAnswerKey, TeachingHintLevel, TeachingHintResponse, TeachingQuestionInteraction } from "@aistudy/contracts";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { buildSelfCompareRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
@@ -14,7 +14,7 @@ import { createInlineAttemptSubmission, readInlineAttemptObservationHead, type I
 import { createInlineAttemptDrafts, inlineAttemptDraftConflict, inlineAttemptIdentityKey, type InlineAttemptDraft } from "./inline-attempt-drafts";
 import { defaultInlineAttemptSkill } from "./inline-attempt-skill";
 import { LessonFlow } from "./lesson-flow";
-import { MathInput } from "./math-input";
+import { InlineAnswerInput } from "./inline-answer-input";
 import { FeedbackPanel } from "./feedback-panel";
 import { AiGradingResult, canGradeObservation } from "../learning/ai-grading-card";
 import { ObservationRevisionCard } from "../learning/observation-revision-card";
@@ -29,6 +29,7 @@ import { studentCopy } from "./student-copy";
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
   questionSkillLabel?: string;
+  interaction?: TeachingQuestionInteraction;
   outlineTitle?: string;
   onCourseAssociated: (activity: TeachingActivity) => void;
   /** Available after the server creates or restores the canonical question identity. */
@@ -94,8 +95,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const [checked, setChecked] = useState(false);
   const [rereadNeeded, setRereadNeeded] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
-  const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
-  const [courseId, setCourseId] = useState("");
+  const autoBound = useRef(false);
   const [attempt, setAttempt] = useState<LearningAttempt | null>(null);
   const [hints, setHints] = useState<TeachingHintResponse[]>([]);
   const [hintPending, setHintPending] = useState(false);
@@ -156,11 +156,11 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   }, [ready, teaching, context.id, context.courseId, blockId, context.contentVersion, prompt, restoreRetry]);
 
   useEffect(() => {
-    if (!ready || context.courseId || context.status === "completed") return;
-    let active = true;
-    void client.listRevisionCourses().then((rows) => { if (active) setCourses(rows); }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "无法读取课程"); });
-    return () => { active = false; };
-  }, [client, ready, context.courseId, context.status]);
+    if (!ready || restoring || restoreFailed || context.courseId || context.status === "completed"
+      || recorded || initialDraft?.submission || initialDraft?.preparation || draftConflict || autoBound.current) return;
+    autoBound.current = true;
+    void bindCourse();
+  }, [ready, restoring, restoreFailed, context.courseId, context.status, recorded, draftConflict]);
 
   useEffect(() => {
     if (!ready || !context.courseId || context.status === "completed") return;
@@ -190,12 +190,11 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   }, [ready, restoring, restoreFailed, draftConflict, recorded, attempt, context.courseId, context.status, skillLabel]);
 
   async function bindCourse() {
-    if (!courseId || inFlight.current) return;
+    if (context.courseId || inFlight.current) return;
     inFlight.current = true; setPending(true); setError("");
     try {
-      const fresh = await api.getTeachingActivity(context.id);
-      const activity = await api.associateTeachingActivityCourse(context.id, { courseId, expectedUpdatedAt: fresh.updatedAt });
-      context.onCourseAssociated(activity);
+      const activity = await api.associateTeachingActivityCourse(context.id, { auto: true });
+      if (mounted.current && currentScope.current.courseId === context.courseId) context.onCourseAssociated(activity);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "课程关联未确认，请重新读取活动。"); }
     finally { inFlight.current = false; setPending(false); }
   }
@@ -287,12 +286,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const feedbackVerdict = assessed ? recorded!.outcome : "unverified";
   return <div className="mt-3 space-y-3 border-t border-line pt-3" data-inline-attempt={blockId}>
     <LessonFlow phase={hintPending ? "hint" : recorded ? checked ? "next" : "feedback" : pending && submission.current ? "submit" : "attempt"}>
-    {!context.courseId && context.status !== "completed" ? <div className="space-y-2">
-      <p className="text-xs text-text-2">先关联课程，作答才能保存到对应的学习记录。</p>
-      <label className="block text-xs text-text-2">学习记录所属课程<select className="mt-1 block w-full rounded-md border border-line bg-surface px-2 py-2" value={courseId} disabled={pending} onChange={(event) => setCourseId(event.target.value)}><option value="">选择已有课程</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label>
-      <button type="button" className={ui.secondary} disabled={!courseId || pending} onClick={() => { void bindCourse(); }}>关联此课程</button>
-      {!courses.length ? <p className="text-xs text-text-3">可先到课程页创建课程，再返回作答。</p> : null}
-    </div> : null}
+    {!context.courseId && context.status !== "completed" ? <div className="space-y-2"><p role="status" className="text-xs text-text-2">正在准备本次学习…</p>{error ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => void bindCourse()}>{studentCopy.retry}</button> : null}</div> : null}
     {ready && restoring ? <p role="status" className="text-xs text-text-2">正在恢复已保存的作答…</p> : restoreFailed ? <button type="button" className={ui.secondary} onClick={() => setRestoreRetry(value => value + 1)}>重新读取已保存的作答</button> : !recorded && context.status === "completed" ? <p className="text-xs text-text-2">本题没有可恢复的已提交作答。{initialDraft?.answer ? "本页保留的答案尚未确认保存：" : ""}{initialDraft?.answer ? <span className="block whitespace-pre-wrap">{initialDraft.answer}</span> : null}</p> : !recorded ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
       {draftConflict ? <div role="status" className="space-y-1 text-xs text-warn"><p>{draftConflict === "course_changed" ? "此答案提交时所属课程已改变。原答案和提交请求已保留为只读，请到原课程的学习记录核实保存结果。" : "当前题目与之前作答的题目不一致。原答案已保留为只读，请重新读取活动，再继续作答。"}</p><p className="whitespace-pre-wrap">原题目：{initialDraft?.prompt}</p></div> : null}
       {initialDraft?.submission && !draftConflict ? <p role="status" className="text-xs text-text-2">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
@@ -304,7 +298,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           {skillReuseHint ? <p className="text-xs leading-6 text-warn" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-accent underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); persistDraft({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
         </div>
       </details> : null}
-      <MathInput label="我的原答案" value={answer} maxLength={20_000} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt }); }} />
+      <InlineAnswerInput interaction={context.interaction} value={answer} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt }); }} />
       <button type="submit" className={ui.primary} disabled={!ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{draftConflict ? "原答案已保留（只读）" : pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : studentCopy.submit}</button>
     </form> : <FeedbackPanel verdict={feedbackVerdict} title={studentCopy.saved} evidence={recorded.aiEvaluation ? "批改结果已记录，可以查看评分要点，或纠正不准确的判断。" : canGradeObservation(recorded) ? "答案保存后可自动批改，也可以手动记录自己的判断。" : checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
       <LearnerStatePanel observation={recorded} />

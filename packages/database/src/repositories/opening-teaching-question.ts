@@ -1,4 +1,5 @@
 import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
+import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { learningError, type LearningSql } from "./opening-learning-facts";
 
@@ -13,7 +14,10 @@ export type TeachingQuestionSpec = {
 export function teachingQuestionText(content: Record<string, unknown> | undefined): string | null {
   const value = content && [content.text, content.markdown, content.prompt, content.question, content.answer, content.solution]
     .find((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()));
-  return value ?? null;
+  if (!value) return null;
+  const interaction = teachingQuestionInteractionSchema.safeParse(content?.interaction).data;
+  return interaction?.kind === "choice" ? `${value}\n${interaction.options.map(option => `${option.id}. ${option.label}`).join("\n")}`
+    : interaction?.kind === "numeric" && interaction.unit ? `${value}\n单位：${interaction.unit}` : value;
 }
 
 /** Only a published, owned teaching revision can issue this identity. Client text is never used. */
@@ -34,6 +38,9 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
   const index = ordered.findIndex(block => block.blockId === input.blockId && block.role !== "answer_key"
     && (block.role === "prompt" || ["prompt", "question"].includes(block.blockType)));
   const blocks = row.blocks as Block[], prompt = blocks.find(block => block.id === input.blockId);
+  if (prompt?.content.interaction !== undefined && !teachingQuestionInteractionSchema.safeParse(prompt.content.interaction).success) {
+    throw learningError("VALIDATION", "teaching question interaction is invalid");
+  }
   const stem = teachingQuestionText(prompt?.content);
   if (index < 0 || !prompt || !["prompt", "question"].includes(prompt.type) || !stem) {
     throw learningError("VALIDATION", "teaching question not found in the saved revision");
@@ -77,8 +84,16 @@ export function teachingQuestionIdentityMatches(db: LearningSql) {
           AND teaching_block->>'id'=v.teaching_block_id::text AND teaching_block->>'type' IN ('prompt','question')
           AND left((SELECT candidate.value FROM jsonb_array_elements_text(jsonb_build_array(
             teaching_block->'content'->>'text',teaching_block->'content'->>'markdown',
-            teaching_block->'content'->>'prompt',teaching_block->'content'->>'question')) WITH ORDINALITY candidate(value,position)
-            WHERE candidate.value ~ '[^[:space:]]' ORDER BY candidate.position LIMIT 1),2000)=v.stem_snapshot))`;
+            teaching_block->'content'->>'prompt',teaching_block->'content'->>'question',
+            teaching_block->'content'->>'answer',teaching_block->'content'->>'solution')) WITH ORDINALITY candidate(value,position)
+            WHERE candidate.value ~ '[^[:space:]]' ORDER BY candidate.position LIMIT 1)
+            || CASE teaching_block->'content'->'interaction'->>'kind'
+              WHEN 'choice' THEN chr(10) || (SELECT string_agg((option->>'id') || '. ' || (option->>'label'),chr(10) ORDER BY position)
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(teaching_block->'content'->'interaction'->'options')='array'
+                  THEN teaching_block->'content'->'interaction'->'options' ELSE '[]'::jsonb END) WITH ORDINALITY choices(option,position))
+              WHEN 'numeric' THEN CASE WHEN coalesce(teaching_block->'content'->'interaction'->>'unit','')<>''
+                THEN chr(10) || '单位：' || (teaching_block->'content'->'interaction'->>'unit') ELSE '' END
+              ELSE '' END,2000)=v.stem_snapshot))`;
 }
 
 /** Read the immutable question and its hidden answer only for server-side grading. */

@@ -11,6 +11,7 @@ import { SkillsAndLessons, SprintSettings, WeekPlan } from "./learning-plan";
 import { hasSprintAttemptHelp, modeLabels } from "./labels";
 import { IntegrationPanel } from "./integration-panel";
 import { BktPanel } from "./bkt-panel";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { ForecastPanel } from "./forecast-panel";
 import { useExamResources } from "./use-exam-resources";
 import { LearnerStateCard } from "../teaching/learner-state-card";
@@ -26,8 +27,9 @@ type LessonRequest = { intent: OpenLessonIntent; returnTarget: LessonReturnTarge
 type LessonNavigation = LessonRequest & { exposureId: string; open: boolean };
 
 function SprintSummary({ overview }: { overview: ExamSprintOverview }) {
+  const diagnostics = useDiagnosticsEnabled();
   const helped = overview.attempts.filter(attempt => attempt.answeredAt && hasSprintAttemptHelp(attempt)).length;
-  return <section className={`${ui.panel} p-4`} aria-label="冲刺学习进度"><div className="grid grid-cols-3 gap-3"><div><p className="text-xl font-semibold tabular-nums">{overview.summary.onlineIndependentCorrect}<span className="text-xs font-normal text-text-3"> / {overview.summary.onlineAnswered}</span></p><p className="mt-1 text-xs text-text-3">在线独立正确 / 已答</p></div><div><p className="text-xl font-semibold tabular-nums">{overview.summary.sourceCovered}<span className="text-xs font-normal text-text-3"> / {overview.summary.sourceTotal}</span></p><p className="mt-1 text-xs text-text-3">原题已尝试 / 总项数</p></div><div><p className="text-xl font-semibold tabular-nums">{overview.summary.sourceDelayed}</p><p className="mt-1 text-xs text-text-3">原题隔日独立通过（自评）</p></div></div><details className="mt-4 border-t border-line pt-3"><summary className="min-h-11 cursor-pointer text-xs text-text-3 py-2">如何理解这些记录</summary><p className="mt-2 text-xs leading-6 text-text-2">在线含帮助作答 {helped} 次；来源独立正确（自评）{overview.summary.sourceIndependent} 项。只阅读不会增加原题已尝试数。在线独立证据还要求首次见到该题族，重复做对不重复累计；登记、独立正确、隔日保持是不同证据；系统不会把“看懂”或“登记过”当成掌握，也不承诺考试分数。</p></details></section>;
+  return <section className={`${ui.panel} p-4`} aria-label="冲刺学习进度"><div className="grid grid-cols-3 gap-3"><div><p className="text-xl font-semibold tabular-nums">{overview.summary.onlineAnswered}</p><p className="mt-1 text-xs text-text-3">完成练习</p></div><div><p className="text-xl font-semibold tabular-nums">{overview.summary.sourceCovered}<span className="text-xs font-normal text-text-3"> / {overview.summary.sourceTotal}</span></p><p className="mt-1 text-xs text-text-3">原题已尝试 / 总项数</p></div><div><p className="text-xl font-semibold tabular-nums">{overview.summary.sourceDelayed}</p><p className="mt-1 text-xs text-text-3">完成隔日复习（自评）</p></div></div>{diagnostics ? <details className="mt-4 border-t border-line pt-3"><summary className="min-h-11 cursor-pointer text-xs text-text-3 py-2">如何理解这些记录</summary><p className="mt-2 text-xs leading-6 text-text-2">在线含帮助作答 {helped} 次；来源独立正确（自评）{overview.summary.sourceIndependent} 项。只阅读不会增加原题已尝试数。在线独立证据还要求首次见到该题族，重复做对不重复累计；登记、独立正确、隔日保持是不同证据；系统不会把“看懂”或“登记过”当成掌握，也不承诺考试分数。</p></details> : null}</section>;
 }
 
 function StartTraining({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: (command: ExamSprintIntent) => void }) {
@@ -37,9 +39,11 @@ function StartTraining({ overview, disabled, send }: { overview: ExamSprintOverv
 }
 
 export function ExamSprintView({ courseId }: { courseId?: string }) {
+  const diagnostics = useDiagnosticsEnabled();
   const [client] = useState(() => createExamSprintClient());
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   const [tab, setTab] = useState<Tab>(courseId ? "integration" : "practice");
+  useEffect(() => { if (!diagnostics && tab === "estimates") setTab("practice"); }, [diagnostics, tab]);
   const [lessonNavigation, setLessonNavigation] = useState<LessonNavigation | null>(null);
   const focusedLessonNavigation = useRef<LessonNavigation | null>(null);
   const pendingLesson = useRef<LessonRequest | null>(null);
@@ -130,7 +134,7 @@ export function ExamSprintView({ courseId }: { courseId?: string }) {
         <SprintSummary overview={overview} />
         {integration?.binding ? <details className="text-xs text-text-2"><summary className="min-h-11 cursor-pointer py-1">查看课程的共同学习证据</summary><LearnerStateCard courseId={integration.binding.courseId} revision={overview.attempts.filter(item => item.answeredAt).length} /></details> : null}
         {integration === null ? <p className="text-xs text-text-3">正在确认课程关联，目标设置暂不可编辑。</p> : integration.binding ? <section className={`${ui.panel} p-4 text-xs leading-6 text-text-2`}><p>当前使用课程目标：{integration.courseGoal?.targetDate ?? "未设日期"} · 每周 {integration.courseGoal?.weeklyMinutes ?? "未设"} 分钟{integration.courseGoal?.milestoneTitle ? ` · ${integration.courseGoal.milestoneTitle}` : ""}</p><p>冲刺与其他学习任务共用课程规划的时间预算。</p><Link className={`${ui.quiet} mt-2`} href={`/opening/courses/${integration.binding.courseId}`}>查看课程并调整目标</Link></section> : <SprintSettings key={`${overview.state.examDate}-${overview.state.dailyMinutes}`} overview={overview} disabled={disabled} send={send} />}
-        <div role="tablist" aria-label="冲刺工具" className={`${ui.segment} overflow-x-auto`}>{tabs.map(item => <button key={item.id} type="button" role="tab" id={`sprint-tab-${item.id}`} aria-selected={tab === item.id} aria-controls={`sprint-panel-${item.id}`} aria-pressed={tab === item.id} disabled={busy} className={`${ui.segmentItem} whitespace-nowrap`} onClick={() => selectTab(item.id)}>{item.label}</button>)}</div>
+        <div role="tablist" aria-label="冲刺工具" className={`${ui.segment} overflow-x-auto`}>{tabs.filter(item => diagnostics || item.id !== "estimates").map(item => <button key={item.id} type="button" role="tab" id={`sprint-tab-${item.id}`} aria-selected={tab === item.id} aria-controls={`sprint-panel-${item.id}`} aria-pressed={tab === item.id} disabled={busy} className={`${ui.segmentItem} whitespace-nowrap`} onClick={() => selectTab(item.id)}>{item.label}</button>)}</div>
         <div role="tabpanel" id="sprint-panel-practice" aria-labelledby="sprint-tab-practice" hidden={tab !== "practice"} className="space-y-5">
           <CompletedRun overview={overview} disabled={disabled} send={send} onOpenLesson={openLesson} />{overview.recommendations.length ? <section className={`${ui.panel} p-5`}><h2 className="font-semibold">下一步建议</h2><div className="mt-3 space-y-3">{overview.recommendations.slice(0, 3).map((item, index) => <div key={index} id={`sprint-recommendation-${index}`} tabIndex={-1} className="scroll-mt-24 flex flex-wrap items-start justify-between gap-3 rounded-lg bg-surface-2 p-3"><div className="max-w-xl"><p className="text-sm font-medium">{item.title}</p><p className="mt-1 text-xs leading-6 text-text-3">{item.reason}</p></div><div className="flex flex-wrap gap-2">{item.lessonId ? <LessonButton overview={overview} disabled={disabled} lessonId={item.lessonId} onOpenLesson={openLesson} returnTarget={{ id: `sprint-recommendation-${index}`, label: "返回学习建议" }} label="查看串讲" /> : null}<button type="button" className={ui.secondary} disabled={disabled || !!overview.activeRun} onClick={() => send({ action: "start", mode: item.mode })}>开始{modeLabels[item.mode]}</button></div></div>)}</div></section> : null}
         </div>

@@ -15,6 +15,7 @@ export const CATALOG_IDS = [
   "draft",
   "evidence",
   "matrix_transform",
+  "vector_diagram",
 ] as const;
 
 export type CatalogId = (typeof CATALOG_IDS)[number];
@@ -50,6 +51,7 @@ const BLOCK_TYPE_ALIASES: Record<string, CatalogId> = {
   meta: "text",
   // V2-15: matrix_transform + legacy matrix-viz* (no longer collapse to text)
   matrix_transform: "matrix_transform",
+  vector_diagram: "vector_diagram",
   "matrix-viz": "matrix_transform",
   matrix_viz: "matrix_transform",
   matrixviz: "matrix_transform",

@@ -29,6 +29,7 @@ export function teachingLearnerFocus(read: LearnerSnapshotRead, courseId: string
   const prerequisiteRepair = next.activityKind === "transfer_check" ? null : selectPrerequisiteRepair({ targetSkillLabel: skill?.skillLabel ?? label,
     knowledgeNodes: source.knowledgeNodes, observations: source.observations, goalContext, now });
   return { skillLabel: skill?.skillLabel ?? label, ...(hasTarget ? { requirementKey } : {}), ...next,
+    recentErrors: observations.filter(row => row.usableForCurrentVersion === "yes").flatMap(row => row.errors ?? []).slice(0, 3),
     goalContext, ...(prerequisiteRepair ? { prerequisiteRepair } : {}),
     recentAssistance: observations.filter(row => row.usableForCurrentVersion === "yes").slice(0, 3).map(row => row.assistance), strategyVersion: ADAPTIVE_STRATEGY_VERSION };
 }

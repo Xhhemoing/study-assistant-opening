@@ -45,7 +45,7 @@ export function SkillsAndLessons({ overview, disabled, send, onOpenLesson, lesso
     </section>
     <section className={`${ui.panel} min-w-0 p-5`} aria-labelledby="sprint-lessons-title">
       <h2 id="sprint-lessons-title" tabIndex={-1} className="scroll-mt-24 font-semibold">预置串讲与例题</h2>
-      <p className="mt-1 text-xs leading-6 text-text-3">先理解方法，再关掉例题做独立练习。阅读完整串讲会记录实际内容曝光；相关题目之后作答时会据此核对独立性。</p>
+      <p className="mt-1 text-xs leading-6 text-text-3">先看看例题怎么做，再合上解法试一道练习。卡住时随时回来看看。</p>
       <div className="mt-4 space-y-3">{overview.pack.lessons.map(lesson => {
         const reason = sprintLessonUnavailableReason(overview, lesson.id);
         const content = !reason && lessonContent?.lesson.id === lesson.id ? lessonContent.lesson : null;

@@ -33,7 +33,8 @@ vi.mock("../client/api", async original => ({ ...await original<typeof import(".
 import { InlineAttemptForm, type InlineAttemptContext } from "./inline-attempt";
 import { TeachingWorkspace, type TeachingWorkspaceProps } from "./teaching-workspace";
 import { HintLadder } from "./hint-ladder";
-import { MathInput } from "./math-input";
+import { InlineAnswerInput } from "./inline-answer-input";
+import { studentCopy } from "./student-copy";
 import { OpeningApiError } from "../client/api";
 import { TeachingBlockItem } from "./teaching-block-item";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
@@ -56,7 +57,7 @@ function unmount() { for (const value of hooks.values) (value as { cleanup?: () 
 beforeEach(() => { unmount(); vi.clearAllMocks(); api.getSubmittedAttempt.mockResolvedValue(saved); api.getAnswerKey.mockResolvedValue({ answer: "参考", referenceSourceId: id }); api.createSession.mockResolvedValue({ id }); api.createAttempt.mockResolvedValue(canonicalAttempt); api.submitAttempt.mockResolvedValue(saved.observation); hintApi.ack.mockResolvedValue(undefined); });
 it.each(["active", "completed"] as const)("restores durable answer on fresh %s mount without replaying submission", async status => {
   expect(text(render(status))).toContain("正在恢复"); await settle();
-  const output = text(render(status)); expect(output).toContain(saved.observation.answer); expect(output).toContain("参考解答尚未展开");
+  const output = text(render(status)); expect(output).toContain(saved.observation.answer); expect(output).toContain(studentCopy.referenceAvailable);
   expect(output).not.toContain("我的原答案"); expect(output).not.toContain("我答对了");
   expect(api.getSubmittedAttempt).toHaveBeenCalledWith(id, id, 3); expect(api.getAnswerKey).not.toHaveBeenCalled();
   expect(api.createSession).not.toHaveBeenCalled(); expect(api.submitAttempt).not.toHaveBeenCalled(); expect(haptic).not.toHaveBeenCalled();
@@ -109,8 +110,7 @@ it("prepares before hints without sealing an answer, then submits the edited ori
   api.getSubmittedAttempt.mockResolvedValue(null);
   const draft = { answer: "最初草稿", skillLabel: "技能", prompt: "题目" };
   render("active", draft); await settle();
-  const prepare = findNode(render("active", draft), node => node.type === "button" && node.props.children === "开始本题并启用提示")!;
-  (prepare.onClick as () => void)(); await settle();
+  render("active", draft); await settle();
   expect(api.submitAttempt).not.toHaveBeenCalled(); expect(api.getAnswerKey).not.toHaveBeenCalled();
   expect(context.onAttemptReady).toHaveBeenCalledWith(id, canonicalAttempt);
   const hint = { attemptId: id, level: 1, text: "真实方向提示", referenceSourceId: null, exposureReceipt: { id } };
@@ -119,20 +119,20 @@ it("prepares before hints without sealing an answer, then submits the edited ori
   (ladder.next as { request: () => void }).request(); await settle();
   expect(hintApi.ack).toHaveBeenCalledWith(hint.exposureReceipt);
   expect(api.submitAttempt).not.toHaveBeenCalled();
-  const input = findNode(render("active", draft), node => node.type === MathInput)!;
+  const input = findNode(render("active", draft), node => node.type === InlineAnswerInput)!;
   (input.onChange as (value: string) => void)("我继续修改后的首答");
   const form = findNode(render("active", draft), node => node.type === "form")!;
   (form.onSubmit as (event: { preventDefault(): void }) => void)({ preventDefault() {} }); await settle();
   expect(api.createSession).toHaveBeenCalledOnce(); expect(api.createAttempt.mock.calls[1]).toEqual(api.createAttempt.mock.calls[0]);
   expect(api.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: "我继续修改后的首答" }));
   expect(api.getAnswerKey).not.toHaveBeenCalled(); expect(hintApi.request).toHaveBeenCalledOnce();
-  expect(haptic).toHaveBeenCalledOnce(); expect(text(render("active", draft))).toContain("参考解答尚未展开");
+  expect(haptic).toHaveBeenCalledOnce(); expect(text(render("active", draft))).toContain(studentCopy.referenceAvailable);
 });
 it("restores prepared identity with a canonical replay while leaving the answer editable and the reference unopened", async () => {
   api.getSubmittedAttempt.mockResolvedValue(null);
   const draft = { answer: "仍在编辑的草稿", skillLabel: "技能", prompt: "题目", preparation: { input: { activityId: id, courseId: id, blockId: id, contentVersion: 3, sourceIds: [], prompt: "题目", skillLabel: "技能" }, attemptKey: `teaching-attempt:${id}`, sessionId: id, attemptId: id } };
   render("active", draft); await settle();
-  const input = findNode(render("active", draft), node => node.type === MathInput)!;
+  const input = findNode(render("active", draft), node => node.type === InlineAnswerInput)!;
   expect(input.value).toBe(draft.answer); expect(input.disabled).toBe(false);
   expect(api.createSession).not.toHaveBeenCalled(); expect(api.createAttempt).toHaveBeenCalledOnce();
   expect(context.onAttemptReady).toHaveBeenCalledWith(id, canonicalAttempt);
@@ -153,12 +153,12 @@ it("keeps an old content version's missing hints from blocking original-answer s
   api.getSubmittedAttempt.mockResolvedValue(null);
   const draft = { answer: "尚未提交的原答案", skillLabel: "技能", prompt: "题目" };
   render("active", draft); await settle();
-  (findNode(render("active", draft), node => node.type === "button" && node.props.children === "开始本题并启用提示")!.onClick as () => void)(); await settle();
+  render("active", draft); await settle();
   hintApi.request.mockRejectedValueOnce(new OpeningApiError(409, "此版教学内容没有分级提示，仍可提交作答"));
   (findNode(render("active", draft), node => node.type === HintLadder)!.next as { request: () => void }).request(); await settle();
   const tree = render("active", draft);
   expect((findNode(tree, node => node.type === HintLadder)!.next as { disabled: boolean }).disabled).toBe(true);
-  expect(findNode(tree, node => node.type === MathInput)!.value).toBe(draft.answer);
+  expect(findNode(tree, node => node.type === InlineAnswerInput)!.value).toBe(draft.answer);
   expect(hintApi.ack).not.toHaveBeenCalled();
   (findNode(tree, node => node.type === "form")!.onSubmit as (event: { preventDefault(): void }) => void)({ preventDefault() {} }); await settle();
   expect(api.submitAttempt).toHaveBeenCalledOnce();

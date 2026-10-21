@@ -37,6 +37,7 @@ export const TEACHING_COMMAND_KINDS: TeachingCommandKind[] = [
 ];
 
 const KIND_LABEL: Record<TeachingCommandKind, string> = {
+  confused: "这里没看懂",
   why: "为什么",
   rephrase: "换种说法",
   expand: "展开",
@@ -148,7 +149,7 @@ export function BlockCommandsBarView({
     ? TEACHING_COMMAND_KINDS
     : TEACHING_COMMAND_KINDS.filter((kind) => kind !== "why");
   const showAssist =
-    whyAvailable &&
+    (whyAvailable || assist?.kind === "confused") &&
     Boolean(assist?.summary) &&
     !/Why this block/i.test(assist?.summary ?? "") &&
     !(assist?.summary?.includes(blockId) ?? false);
@@ -159,6 +160,9 @@ export function BlockCommandsBarView({
       data-block-id={blockId}
       data-why-available={whyAvailable ? "true" : "false"}
     >
+      <button type="button" className={ui.secondary} disabled={disabled || busy} onClick={() => onCommand("confused")}>
+        {busyKind === "confused" ? "正在记下…" : "这里没看懂"}
+      </button>
       <details className="group/help" data-command-help="true" open={defaultOpen}>
         <summary
           className={`${ui.quiet} list-none [&::-webkit-details-marker]:hidden`}
@@ -224,9 +228,9 @@ export function BlockCommandsBarView({
         <div
           className={`rounded-lg px-3 py-2 text-xs leading-5 ${tone.success}`}
           role="status"
-          data-command-assist="why"
+          data-command-assist={assist!.kind}
         >
-          <p className="mb-0.5 font-medium">说明（不改写正文）</p>
+          <p className="mb-0.5 font-medium">{assist!.kind === "confused" ? "已记下" : "说明"}</p>
           <p className="whitespace-pre-wrap">{assist!.summary}</p>
         </div>
       ) : null}

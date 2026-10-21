@@ -11,7 +11,7 @@ export function SpanExplorer({ courseId, sourceId, sessionId }: { courseId: stri
   const [alpha, setAlpha] = useState(1), [beta, setBeta] = useState(0);
   const id = useId().replace(/:/g, "");
   if (error) return <div className="space-y-2 text-xs text-warn"><p>{error}</p><button type="button" className={ui.secondary} onClick={reload}>重新读取模拟</button></div>;
-  if (!content) return <p role="status" className="text-xs text-text-3">正在读取模拟与交付记录…</p>;
+  if (!content) return <p role="status" className="text-xs text-text-3">正在准备向量图…</p>;
   const v = content.problem.vectors[0].map(Number), w = content.problem.vectors[1].map(Number), target = content.problem.target.map(Number);
   const result = v.map((value, index) => alpha * value + beta * w[index]!);
   const x = (value: number) => 160 + value * 18;
@@ -25,6 +25,6 @@ export function SpanExplorer({ courseId, sourceId, sessionId }: { courseId: stri
       <div className="grid items-center gap-5 sm:grid-cols-2"><figure><svg viewBox="0 0 320 320" role="img" aria-label={description} className="mx-auto w-full max-w-xs rounded-lg border border-line bg-surface"><title>系数改变与向量等式同步</title><desc>{description}</desc><defs><marker id={id} markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7Z" fill="context-stroke" /></marker></defs><path d="M16 160 H304 M160 16 V304" stroke="currentColor" className="text-line-strong" /><path d="M16 304 L304 16" stroke="currentColor" strokeDasharray="4 4" className="text-text-3" /><line x1="160" y1="160" x2={x(result[0]!)} y2={y(result[1]!)} markerEnd={`url(#${id})`} stroke="currentColor" strokeWidth="3" className="text-obj-3" /><circle cx={x(target[0]!)} cy={y(target[1]!)} r="5" className="fill-obj-2" /><text x={x(target[0]!) + 7} y={y(target[1]!)} className="fill-obj-2 text-xs">u=({target.join(",")})</text></svg><figcaption className="mt-2 text-xs leading-6 text-text-3">绿色箭头：当前组合；虚线：两个坐标相等的直线；圆点：目标。</figcaption></figure>
       <div className="space-y-4">{([["α", alpha, setAlpha], ["β", beta, setBeta]] as const).map(([label, value, set]) => <label key={label} className="flex items-center gap-3 text-sm">{label}={value}<input type="range" min="-2" max="2" step="0.5" value={value} aria-label={`模拟系数 ${label}`} className="min-w-0 flex-1 accent-emerald-700" onChange={event => set(Number(event.target.value))} /></label>)}<p aria-live="polite" className="rounded-lg bg-surface p-3 font-mono text-sm leading-7">{alpha}({v.join(",")})+{beta}({w.join(",")})<br />=({result.join(", ")})</p><p className="text-sm leading-7">为什么改系数仍到不了 ({target.join(",")})？试着用“所有组合的两个坐标……”说明，而非只说试过几个数。</p></div></div>
     </>}
-    <p className="text-xs leading-6 text-text-3">这是已展示的模拟，不计独立新题证据；后面用另一道未显示解答的题检验。</p>
+    <p className="text-xs leading-6 text-text-3">试完后，看看你的预测有没有变化，再用一道新题检验想法。</p>
   </section>;
 }
