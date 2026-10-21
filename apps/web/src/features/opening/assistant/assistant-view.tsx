@@ -29,7 +29,7 @@ import {
   uniqueCappedSourceIds,
 } from "./course-source-selection";
 import { AiReadinessChecklist } from "./ai-readiness";
-import type { ThinTutorAction } from "@aistudy/domain";
+import { inferComposerIntent, type ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 import { turnsWithKnownOutcome, unknownTurnQuestion, unknownTurnRecovery } from "./unknown-turn-recovery";
@@ -353,6 +353,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }, [draftScope, draftStore]);
   function changePrivacy(next: ComposerPrivacy) {
     if (next === privacy) return;
+    setModePrefill(null); setPurposePrefill(null);
     branchDrafts.current[privacy] = draftRef.current;
     const restored = branchDrafts.current[next];
     setPrivacy(next); setDraftState(restored); draftRef.current = restored; draftEdited.current = true;
@@ -607,6 +608,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     ? { messages: messagesForChatBranch(savedDisplay.messages, [...ephemeralMessages, ...ephemeralPendingMessages], privacy), historyTruncated: false }
     : savedDisplay, [privacy, savedDisplay, ephemeralMessages, ephemeralPendingMessages]);
   const showingPendingReply = display.messages.some(message => message.role === "assistant" && message.status === "pending");
+  const composerHistory = useMemo(() => (privacy === "ephemeral" ? ephemeralMessages : savedDisplay.messages)
+    .filter(message => message.status !== "pending"), [privacy, ephemeralMessages, savedDisplay.messages]);
   const currentVersions = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.version])), [sources]);
   const sourceNames = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, source.name])), [sources]);
   const saveSnippet = useCallback((message: ChatMessageView, selectedText?: SelectedExcerpt) => {
@@ -653,8 +656,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setError("");
     setPendingHint("");
     setAutoSelectNotice(null);
-    if (!input.querySystem && studyContextError) { setError(studyContextError); return { accepted: false }; }
-    if (!input.querySystem && studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
+    const { querySystem } = inferComposerIntent({ ...input, history: composerHistory,
+      practiceMode: Boolean(learningAttempt || studyContext?.attemptId), defaultMode: studyContext?.activityId ? "hint" : undefined });
+    if (!querySystem && studyContextError) { setError(studyContextError); return { accepted: false }; }
+    if (!querySystem && studyContext?.sourceId && studyContext.sourceVersion !== undefined) {
       try {
         const sequence = ++sourceRequestSequence.current;
         const latestSources = await api.listSources();
@@ -663,17 +668,17 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         if (problem) { setError(problem); return { accepted: false }; }
       } catch { setError("无法核对指定材料版本，本次未发送；问题草稿已保留。"); return { accepted: false }; }
     }
-    const submittedText = input.querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
+    const submittedText = querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
     if (submittedText.length > 20000) { setError("问题和携入背景合计超过 20000 字，请缩短问题或选中片段后再发送。"); return { accepted: false }; }
     let page: number | null | undefined;
     try {
-      page = pageForSubmit(currentPage);
+      page = querySystem ? undefined : pageForSubmit(currentPage);
     } catch (err) {
       setError(err instanceof Error ? err.message : "页码无效");
       return { accepted: false };
     }
 
-    if (!input.querySystem && materialMode === "selected" && !requestSourceIds.length) {
+    if (!querySystem && materialMode === "selected" && !requestSourceIds.length) {
       setError("请先选择资料，或切换为自动参考 / 不用资料。"); setContextOpen(true); return { accepted: false };
     }
 
@@ -692,15 +697,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         const output = await api.replyEphemeral({
           clientKey: input.clientKey,
           ...(input.purpose ? { purpose: input.purpose } : {}),
-          ...(input.querySystem ? { querySystem: true } : { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) }),
+          ...(input.querySystem ? { querySystem: true } : {}),
+          ...(!querySystem ? { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) } : {}),
           text: submittedText,
           sourceIds: requestSourceIds,
-          ...(!input.querySystem ? { sourceSelection: materialMode } : {}),
-          mode: input.mode,
+          ...(!querySystem ? { sourceSelection: materialMode } : {}),
+          ...(input.mode ? { mode: input.mode } : {}),
           history,
           ...(ephemeralPrivacyEpoch === undefined ? {} : { historyPrivacyEpoch: ephemeralPrivacyEpoch }),
-          ...(materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
-          ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
+          ...(!querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
+          ...(!querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
           // Package B/C: course scope lets server fill/narrow when sourceIds empty.
           ...(boundCourseId ? { courseId: boundCourseId } : {}),
         }, abortController.signal, delta => {
@@ -740,17 +746,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       const id = await ensureConversation();
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
-          ...(input.querySystem ? { querySystem: true } : { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) }),
+        ...(input.querySystem ? { querySystem: true } : {}),
+        ...(!querySystem ? { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) } : {}),
         conversationId: id,
         text: submittedText,
         sourceIds: requestSourceIds,
-        ...(!input.querySystem ? { sourceSelection: materialMode } : {}),
-        mode: input.mode,
+        ...(!querySystem ? { sourceSelection: materialMode } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
         clientKey: input.clientKey,
         privacy: "saved",
         ...learningAttemptTurnContext(learningAttempt),
-        ...(materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
-        ...(studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
+        ...(!querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
+        ...(!querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
       setActiveJobId(submitted.jobId);
       setUnknownJob(null);
@@ -853,6 +860,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setPurposePrefill({ purpose: starter.purpose, nonce });
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
   }
+  function prepareReplyMode(mode: "hint" | "explain") {
+    if (pending || loading || recoveryRequired) return;
+    setModePrefill({ mode, nonce: Date.now() });
+    window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
+  }
   function prepareUnknownQuestion() {
     if (!retryQuestion || pending || loading || recoveryRequired || unknownTurnRecovery(unknownJob, Date.now())?.canRetry !== true) return;
     const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的草稿将被替换。"));
@@ -860,6 +872,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setDraft(next);
     changePrivacy("saved");
     draftStore.write(draftScope, next);
+    setPurposePrefill(null);
     setModePrefill({ mode: retryQuestion.mode, nonce: Date.now() });
     // This is an explicit new question, not a replay of an unconfirmed submission key.
     setRetryDraftVersion(value => value + 1);
@@ -899,7 +912,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         <p className="font-medium">临时对话从这里开始</p><p>本轮不接续已保存历史；只使用本标签页的临时消息、当前输入和所选背景。刷新后不会恢复。</p>
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
-      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onReplyMode={prepareReplyMode} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
       {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (showingPendingReply ? null : <div className="mx-5 mb-2 py-2"><ThinkingText>{pendingHint || "正在思考…"}</ThinkingText></div>) : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-accent-soft px-3 py-2 text-xs leading-5 text-accent">
@@ -921,8 +934,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       {privacy === "saved" && !loading && !embedded ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">准备或查看行动草稿</summary><ProposalPanel api={api} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
-      {!learningAttempt && !studyContext?.sourceId ? <label className="mx-4 mb-2 flex shrink-0 flex-wrap items-center gap-2 text-xs text-text-2">资料范围<select aria-label="本轮资料范围" className="min-h-9 max-w-full rounded border border-text-3 bg-surface px-2" value={materialMode} disabled={pending || loading} onChange={event => { const next = event.target.value as typeof materialMode; setSourceSelection(next); if (next !== "selected") setCurrentPage(""); }}><option value="auto">{boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流"}</option><option value="selected">仅用所选资料（{selectedSourceIds.length} 份）</option><option value="none">不用资料</option></select></label> : null}
-      <Composer defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      <Composer defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}

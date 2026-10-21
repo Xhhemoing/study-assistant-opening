@@ -112,8 +112,9 @@ test("unknown recovery waits from the server timestamp across refresh, then only
   await page.clock.runFor(16);
   await expect(assistant.getByRole("textbox", { name: "消息输入" })).toHaveValue(question);
   await expect(assistant.getByRole("textbox", { name: "消息输入" })).toBeFocused();
-  await assistant.locator("summary").filter({ hasText: "保存 · 设置" }).click();
-  await expect(assistant.getByRole("combobox", { name: "辅导模式" })).toHaveValue("hint");
+  await expect(assistant.getByText("只给提示", { exact: true })).toBeVisible();
+  await expect(assistant.getByRole("button", { name: "撤回本轮选择，恢复自动判断", exact: true })).toBeEnabled();
+  await expect(assistant.getByRole("combobox", { name: "辅导模式" })).toHaveCount(0);
   expect(fixture.submitted).toHaveLength(0);
   await assistant.getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => fixture.submitted.length).toBe(1);

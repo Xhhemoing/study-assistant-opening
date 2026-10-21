@@ -63,7 +63,7 @@ export const turnInputSchema = z
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
     sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
-    mode: tutorModeSchema,
+    mode: tutorModeSchema.optional(),
     clientKey: z.string().min(8).max(200),
     privacy: z.enum(["saved", "ephemeral"]),
     learningSessionId: uuidSchema.nullable().optional(),
@@ -264,7 +264,7 @@ export const ephemeralTurnInputSchema = z
     text: z.string().min(1).max(20_000),
     sourceIds: z.array(uuidSchema).max(32),
     sourceSelection: z.enum(["auto", "selected", "none"]).optional(),
-    mode: tutorModeSchema,
+    mode: tutorModeSchema.optional(),
     history: z
       .array(
         z

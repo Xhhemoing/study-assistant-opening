@@ -515,3 +515,4 @@ export * from "./opening/evidence-transfer-eligibility";
 
 export * from "./opening/study-language-support";
 export * from "./opening/study-intent-instruction";
+export * from "./opening/composer-intent";

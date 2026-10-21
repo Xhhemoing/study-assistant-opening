@@ -88,6 +88,20 @@ function deps(overrides?: {
 }
 
 describe("ephemeral tutor service", () => {
+  it("infers a hint without a client mode and keeps an ordinary explanation temporary", async () => {
+    const f = deps();
+    await f.service.replyEphemeral(scope, { text: "先别给答案，只给提示", sourceIds: [], history: [] });
+    expect(f.complete.mock.calls[0]?.[0].mode).toBe("hint");
+    await f.service.replyEphemeral(scope, { text: "解释这个证明", sourceIds: [], history: [] });
+    expect(f.complete.mock.calls[1]?.[0].mode).toBe("explain");
+  });
+  it("keeps inferred proposals and unavailable record queries out of temporary model calls", async () => {
+    const f = deps();
+    await expect(f.service.replyEphemeral(scope, { text: "帮我做学习计划", sourceIds: [], history: [] })).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(f.service.replyEphemeral(scope, { text: "我的学习记录有哪些？", sourceIds: [], history: [] })).rejects.toMatchObject({ code: "SYSTEM_QUERY_DISABLED" });
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.budget.reserve).not.toHaveBeenCalled();
+  });
   it("keeps temporary model dispatch, prices and attribution together", async () => {
     const modelSnapshot = { id: "selected", providerId: "other", modelName: "other-model", inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 2_000_000 };
     const selected = { complete: vi.fn(async () => output) };

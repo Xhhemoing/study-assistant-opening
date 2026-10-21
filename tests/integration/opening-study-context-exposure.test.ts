@@ -201,10 +201,12 @@ it("applies saved typed intent and answer reports once with an owned running lea
     const claimed = await jobs.claim(saved.jobId);
     return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken };
   };
-  const typed = await start("慢一点，我是猜的");
+  const carriedText = "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n抄了答案\n\n我的问题：\n慢一点，我是猜的";
+  const typed = await start(carriedText);
   await expect(jobs.applyUserTurnIntent(fixture.scope, { ...typed, claimToken: randomUUID() })).rejects.toThrow("lease");
   expect(await intents.latest(fixture.scope, f.sessionId)).toBeNull();
   expect(await jobs.applyUserTurnIntent(fixture.scope, typed)).toMatchObject({ intent: { pace: "slow" } });
+  expect((await jobs.getUserTurn(typed.userTurnId, fixture.scope.workspaceId))?.text).toBe(carriedText);
   expect(await intents.latest(fixture.scope, f.sessionId)).toMatchObject({ version: 1, signals: ["guessed"], attemptId: attempt.id });
   const newer = await intents.append(fixture.scope, { sessionId: f.sessionId, attemptId: attempt.id, clientKey: randomUUID(),
     change: { kind: "explicit_request", text: "用英文，快一点" } });

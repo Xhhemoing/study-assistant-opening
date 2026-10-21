@@ -1,4 +1,5 @@
-import { isSystemQueryPurpose } from "@aistudy/contracts";
+import { ephemeralTurnInputSchema } from "@aistudy/contracts";
+import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
 import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
 import { createOpeningTeachingActivityService } from "./teaching/activity-service";
@@ -62,6 +63,7 @@ export function getTutorService(sql: Sql): TutorService {
   const sourceChunks: OpeningSourceChunksRepository =
     createOpeningSourceChunksRepository(sql);
   return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
+    studyContext: createOpeningStudyContextRepository(sql),
     systemQueryEnabled: () => loadFeatureSwitches().systemQuery,
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
     listReadySourceIdsForCourse: (scope, courseId) =>
@@ -114,9 +116,11 @@ export function setEphemeralTutorDepsForTests(
 
 export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: SystemQueryPlanner } = {}): EphemeralTutorService {
   return { replyEphemeral(scope, input, signal, onTextDelta) {
-    if (input && isSystemQueryPurpose(input)) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
-      provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, input, signal);
-    return getModelEphemeralTutorService(sql).replyEphemeral(scope, input, signal, onTextDelta);
+    const request = ephemeralTurnInputSchema.parse(input);
+    const resolved = inferComposerIntent(request);
+    if (resolved.querySystem) return replyEphemeralSystemQuery({ systemQuery: createDbSystemQueryService(sql, "web", { planner: options.queryPlanner }),
+      provenance: createOpeningEphemeralProvenanceRepository(sql) }, scope, { ...request, ...resolved, text: composerMessageText(request.text) }, signal);
+    return getModelEphemeralTutorService(sql).replyEphemeral(scope, request, signal, onTextDelta);
   } };
 }
 

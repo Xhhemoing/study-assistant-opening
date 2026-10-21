@@ -3,6 +3,12 @@ import { describe, expect, it } from "vitest";
 import { ephemeralTurnInputSchema, studyContextAnchorSchema, turnInputSchema } from "./tutor";
 
 describe("Study context selection boundary", () => {
+  it("accepts automatic routing while still rejecting unknown explicit modes", () => {
+    const shared = { text: "只给提示", sourceIds: [] };
+    expect(turnInputSchema.parse({ ...shared, conversationId: randomUUID(), clientKey: randomUUID(), privacy: "saved" }).mode).toBeUndefined();
+    expect(ephemeralTurnInputSchema.parse({ ...shared, history: [] }).mode).toBeUndefined();
+    expect(ephemeralTurnInputSchema.safeParse({ ...shared, history: [], mode: "invented" }).success).toBe(false);
+  });
   it("accepts a complete, version-pinned teaching selection in both tutor paths", () => {
     const contextAnchor = { purpose: "learning_help" as const, courseId: randomUUID(), activityId: randomUUID(), blockId: randomUUID(),
       contentVersion: 2, attemptId: randomUUID(), itemVersionId: randomUUID(), sourceId: randomUUID(), sourceVersion: 0,

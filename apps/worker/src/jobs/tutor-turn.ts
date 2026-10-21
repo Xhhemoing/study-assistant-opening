@@ -14,6 +14,7 @@ import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canP
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
+  composerMessageText,
   makeStudyLanguageSupport,
   studyIntentInstruction,
   studyIntentForMessage,
@@ -179,7 +180,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }
       const currentStudyIntent = deps.tutorJobs.applyUserTurnIntent
         ? await deps.tutorJobs.applyUserTurnIntent(scope, { userTurnId: claimed.userTurnId, jobId: claimed.id, claimToken: claimed.claimToken })
-        : studyIntentForMessage(turn.studyIntent, turn.text);
+        : studyIntentForMessage(turn.studyIntent, composerMessageText(turn.text));
       const excluded = new Set(
         deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
       );

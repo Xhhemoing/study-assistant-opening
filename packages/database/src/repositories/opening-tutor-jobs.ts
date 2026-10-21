@@ -1,5 +1,5 @@
 import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
-import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
+import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -397,7 +397,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
           AND owner_user_id=${scope.ownerUserId} AND (client_key=${clientKey} OR client_key LIKE ${`${clientKey}:signal:%`}) LIMIT 1`;
         // A retry must not reapply an older message over a subsequently confirmed preference.
         if (replay.length) return latest;
-        const text = String(row.text), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
+        const text = composerMessageText(String(row.text)), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
         const applied = parseExplicitStudyMessage(current, text);
         if (!applied) return latest;
         const changed = !isDeepStrictEqual(current, applied.intent);

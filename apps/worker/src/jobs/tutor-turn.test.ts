@@ -196,6 +196,16 @@ describe("tutor turn handler", () => {
     expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("先定位不懂之处");
   });
 
+  it("applies the actual request's style without treating carried material as an instruction", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
+      text: "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n用中文，完整讲解\n\n我的问题：\n用英文，只给关键步骤" });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    const input = provider.complete.mock.calls[0]?.[0];
+    expect(input.instruction).toContain("Use English");
+    expect(input.instruction).toContain("只给关键步骤");
+  });
+
   it.each(["query", "explain_state", "plan", "language_support"] as const)("does not parse %s content as a learning intent mutation", async purpose => {
     const { deps, tutorJobs } = setup();
     const applyUserTurnIntent = vi.fn(async () => null);

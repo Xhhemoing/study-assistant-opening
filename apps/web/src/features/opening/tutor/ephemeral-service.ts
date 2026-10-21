@@ -2,8 +2,6 @@ import { randomUUID } from "node:crypto";
 import { EphemeralProvenanceError, mergeContextSourceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
 import {
   providerOutputSchema,
-  isSystemQueryPurpose,
-  resolveComposerPurpose,
   type StudyContextAnchor,
   type StudyExposureReceipt,
   type StudyIntentEvent,
@@ -15,7 +13,7 @@ import {
   type SourceChunk,
   type TutorMode,
 } from "@aistudy/contracts";
-import { makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
+import { composerMessageText, inferComposerIntent, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
 import type { SystemQueryService } from "@aistudy/ai";
 import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
 import { EphemeralServiceError } from "./ephemeral-error";
@@ -109,12 +107,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
   return {
     async replyEphemeral(
       scope: EphemeralScope,
-      input: EphemeralTurnInput,
+      request: EphemeralTurnInput,
       signal?: AbortSignal,
       onTextDelta?: (delta: string) => void | Promise<void>,
     ): Promise<EphemeralTurnResponse> {
       try {
-        assertEphemeralInput(input);
+        assertEphemeralInput(request);
       } catch (error) {
         if (error instanceof ConversationPolicyError) {
           throw new EphemeralServiceError("VALIDATION", error.message, error.status);
@@ -124,13 +122,21 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (signal?.aborted) {
         throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       }
-      if (["plan", "teach"].includes(resolveComposerPurpose(input))) throw new EphemeralServiceError("VALIDATION", "规划与教学提案需要切换到保存的对话后创建。", 409);
-      if (isSystemQueryPurpose(input)) {
+      const resolved = inferComposerIntent({ ...request,
+        practiceMode: Boolean(request.contextAnchor?.attemptId || request.contextAnchor?.activityId),
+      });
+      let input = { ...request, ...resolved };
+      if (["plan", "teach"].includes(resolved.purpose)) throw new EphemeralServiceError("VALIDATION", "规划与教学提案需要切换到保存的对话后创建。", 409);
+      if (resolved.querySystem) {
         if (!deps.systemQuery?.enabled() || !deps.provenance) throw new EphemeralServiceError("SYSTEM_QUERY_DISABLED", "系统记录查询暂未开启。", 409);
-        return replyEphemeralSystemQuery({ systemQuery: deps.systemQuery, provenance: deps.provenance, requestId: deps.requestKey }, scope, input, signal);
+        return replyEphemeralSystemQuery({ systemQuery: deps.systemQuery, provenance: deps.provenance, requestId: deps.requestKey }, scope, { ...input, text: composerMessageText(input.text) }, signal);
       }
       if (input.contextAnchor && !deps.studyContext) throw new EphemeralServiceError("VALIDATION", "study context resolver unavailable", 409);
       const contextAnchor = input.contextAnchor ? await deps.studyContext!.resolve(scope, input.contextAnchor, { courseId: input.courseId }) : undefined;
+      const sessionIntent = contextAnchor ? await deps.studyContext?.sessionIntent?.(scope, contextAnchor) : null;
+      if (request.mode === undefined) input = { ...input, mode: inferComposerIntent({ ...request,
+        practiceMode: Boolean(contextAnchor?.attemptId || contextAnchor?.activityId), studyIntent: sessionIntent,
+      }).mode };
       if (contextAnchor?.attemptId && !deps.exposures) throw new EphemeralServiceError("VALIDATION", "help delivery recorder unavailable", 409);
       if (contextAnchor?.purpose === "language_support") {
         if (!deps.exposures) throw new EphemeralServiceError("VALIDATION", "language delivery recorder unavailable", 409);
@@ -260,7 +266,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
         ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
       const providerInput: ProviderInput = {
-        instruction: instructionFor(input.mode)+studyIntentInstruction(studyIntentForMessage(contextAnchor ? await deps.studyContext?.sessionIntent?.(scope, contextAnchor) : null, input.text)),
+        instruction: instructionFor(input.mode)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
         text: input.text,
         history: history.map(({ role, text }) => ({ role, text })),
         chunks: context,

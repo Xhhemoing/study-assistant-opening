@@ -31,6 +31,7 @@ type Props = {
   currentVersions?: Readonly<Record<string, number>>;
   sourceNames?: Readonly<Record<string, string>>;
   onPrompt?: (text: string) => void;
+  onReplyMode?: (mode: "hint" | "explain") => void;
   onSaveSnippet?: (message: ChatMessageView, selection?: SelectedExcerpt) => void;
   onCreateCard?: (message: ChatMessageView, selection?: SelectedExcerpt) => void;
   /** 图解 under answers that already state a flow or numeric table (jingwei rules planner). Defaults to the server capability. */
@@ -51,7 +52,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -139,7 +140,7 @@ export const MessageList = memo(function MessageList({ messages, compact = false
       {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">原请求不会自动重发，费用仍待确认。</p> : null}
       {message.status === "failed" ? <p className="mt-2 text-xs text-danger">本轮失败，未得到有效回答。</p> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-warn">{CLARIFY_FOLLOW_UP}</p> : null}
-      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
+      {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onReplyMode={lastAssistant && !disabled && !message.systemQuery ? onReplyMode : undefined} onSave={saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
     </li>; })}</ul>}
   </div>{unread ? <button type="button" onClick={showLatest} className="absolute bottom-3 left-1/2 z-10 min-h-10 -translate-x-1/2 rounded-full bg-ink px-4 text-xs font-medium text-on-ink shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2">查看最新消息</button> : null}</div>;
 });

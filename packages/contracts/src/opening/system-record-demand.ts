@@ -10,7 +10,7 @@ export function recordTopics(text: string): RecordTopic[] {
   const jobDemand = jobPattern.test(text);
   const learningText = text.replace(jobPattern, "");
   if (/进度|学到哪|学习状态|学习情况|\blearner[ _-]?state\b|\bprogress\b/i.test(learningText)) topics.add("learner_state");
-  if (/练习|作答|测验|测试记录|核验|答对|做了几|掌握|\battempts?\b|\bquiz(?:zes)?\b/i.test(text)) topics.add("learning");
+  if (/练习|作答|测验|学习记录|测试记录|核验|答对|做了几|掌握|\battempts?\b|\bquiz(?:zes)?\b/i.test(text)) topics.add("learning");
   if (/计划|安排|日程|当前任务|学习任务|今天.*任务|明天.*任务|任务.*(有哪些|是什么|完成)|\bplans?\b|\bschedules?\b/i.test(learningText)) topics.add("planning");
   if (/课程列表|哪些课|课程目标|\bcourses\b|\bgoals?\b/i.test(text)) topics.add("courses");
   if (/卡片|复习队列|\bcards?\b|\breview queue\b/i.test(text)) topics.add("cards");

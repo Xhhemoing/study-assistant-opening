@@ -1,6 +1,6 @@
 import {
   conversationCreateInputSchema,
-  isSystemQueryPurpose, isRecordFollowup,
+  isRecordFollowup,
   shouldCreateLearningSession,
   turnInputSchema,
   type ConversationCreateInput,
@@ -9,7 +9,9 @@ import {
   type TurnInput,
   type TurnRecord,
   type StudyContextAnchor,
+  type StudyIntentEvent,
 } from "@aistudy/contracts";
+import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
 import { pickSourceIds, shouldAutoPickSources } from "@aistudy/ai";
 import type {
   OpeningConversationRepository,
@@ -63,6 +65,7 @@ export function createTutorService(deps: {
   systemQueryEnabled?: () => boolean;
   conversations: OpeningConversationRepository;
   sourceChunks: OpeningSourceChunksRepository;
+  studyContext?: { sessionIntent(scope: OpeningConversationScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
   readSelection(scope: OpeningConversationScope, conversationId: string): Promise<PageSelectionInput | null>;
   /** Course membership ready pool (Data). Caps 32 + privacy exclusions inside Data. */
@@ -154,8 +157,8 @@ export function createTutorService(deps: {
       scope: OpeningConversationScope,
       body: unknown,
     ): Promise<{ jobId: string; turnId: string; learningSessionId: string | null }> {
-      const input = turnInputSchema.parse(body) as TurnInput;
-      if (input.privacy !== "saved") {
+      const request = turnInputSchema.parse(body);
+      if (request.privacy !== "saved") {
         throw new TutorServiceError(
           "VALIDATION",
           "only privacy=saved is accepted on this path",
@@ -163,21 +166,35 @@ export function createTutorService(deps: {
         );
       }
 
-      const owned = await deps.conversations.getOwned(scope, input.conversationId);
-      const queryHistory = isRecordFollowup(input.text) ? await deps.conversations.loadContinuityTurns(scope, input.conversationId) : [];
-      if (isSystemQueryPurpose({ ...input, history: queryHistory })) {
+      const owned = await deps.conversations.getOwned(scope, request.conversationId);
+      const existing = await deps.conversations.findTurnByClientKey(scope, request.clientKey, request.conversationId);
+      const queryHistory = isRecordFollowup(composerMessageText(request.text)) ? await deps.conversations.loadContinuityTurns(scope, request.conversationId) : [];
+      const resolved = inferComposerIntent({ ...request, history: queryHistory,
+        mode: request.mode ?? existing?.mode,
+        practiceMode: Boolean(request.attemptId || request.contextAnchor?.attemptId || request.contextAnchor?.activityId),
+      });
+      // A retry reuses the original resolved defaults even if history/preferences changed.
+      if (existing?.mode && request.purpose === undefined && request.querySystem === undefined) {
+        resolved.purpose = existing.purpose ?? "answer";
+        resolved.querySystem = existing.querySystem === true || ["query", "explain_state"].includes(resolved.purpose);
+      }
+      const purpose = request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
+      let input = { ...request, mode: resolved.mode, purpose };
+      if (resolved.querySystem) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
-        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: input.text, mode: input.mode,
+        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: composerMessageText(input.text), mode: input.mode,
           clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
           contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
           learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
         return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null };
       }
-      const existing = await deps.conversations.findTurnByClientKey(
-        scope,
-        input.clientKey,
-        input.conversationId,
-      );
+      if (request.mode === undefined && !existing?.mode && deps.studyContext) {
+        const anchor = request.contextAnchor ?? (request.attemptId ? { purpose: "learning_help" as const, attemptId: request.attemptId } : undefined);
+        if (anchor) input = { ...input, mode: inferComposerIntent({ ...request, history: queryHistory,
+          practiceMode: Boolean(request.attemptId || anchor.attemptId || anchor.activityId),
+          studyIntent: await deps.studyContext.sessionIntent(scope, anchor),
+        }).mode };
+      }
 
       // Explicit client sourceIds outrank course pool. Empty + courseId → Data ready membership fill.
       const clientSourceIds = [...input.sourceIds];
@@ -244,7 +261,7 @@ export function createTutorService(deps: {
         text: input.text,
         mode: input.mode,
         clientKey: input.clientKey,
-        privacy: input.privacy,
+        privacy: "saved",
         sourceIds: effectiveSourceIds,
         learningSessionId,
         contextAnchor: input.contextAnchor, purpose: input.purpose,

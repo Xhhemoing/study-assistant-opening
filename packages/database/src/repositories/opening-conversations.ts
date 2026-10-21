@@ -306,9 +306,13 @@ export function createOpeningConversationRepository(sql: Sql) {
       assistantTurnId: string;
       learningSessionId: string | null;
   attemptId?: string | null;
+      mode?: TutorMode;
+      purpose?: ComposerPurpose;
+      querySystem?: boolean;
     } | null> {
       const rows = await sql`
-        SELECT t.id AS turn_id, t.learning_session_id, j.id AS job_id, j.assistant_turn_id
+        SELECT t.id AS turn_id, t.learning_session_id, t.mode, t.composer_purpose, t.query_system,
+          j.id AS job_id, j.assistant_turn_id
         FROM opening_turns t
         LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
         WHERE t.workspace_id = ${scope.workspaceId}
@@ -325,6 +329,9 @@ export function createOpeningConversationRepository(sql: Sql) {
         jobId: r.job_id as string,
         assistantTurnId: r.assistant_turn_id as string,
         learningSessionId: (r.learning_session_id as string | null) ?? null,
+        mode: r.mode as TutorMode,
+        ...(r.composer_purpose ? { purpose: r.composer_purpose as ComposerPurpose } : {}),
+        querySystem: r.query_system === true,
       };
     },
 
