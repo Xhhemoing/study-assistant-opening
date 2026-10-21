@@ -14,9 +14,9 @@ const CapabilityStatusContext = createContext<CapabilityStatus>({ status: "ready
 export function OpeningCapabilityNotice() {
   const { status, retry } = useContext(CapabilityStatusContext);
   if (status === "ready") return null;
-  return <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-zinc-200 px-5 py-2 text-xs leading-5 text-zinc-600" role="status">
+  return <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs leading-5 text-text-2" role="status">
     <span>{status === "loading" ? "正在确认可用的学习功能…" : status === "incompatible" ? "页面版本与服务不一致，部分功能暂不可用。请刷新页面后重试。" : "学习功能状态读取失败；这不表示功能已关闭。"}</span>
-    {status !== "loading" ? <button type="button" className="min-h-9 px-2 text-emerald-800 underline focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={status === "incompatible" ? () => window.location.reload() : retry}>{status === "incompatible" ? "刷新页面" : "重新读取"}</button> : null}
+    {status !== "loading" ? <button type="button" className="min-h-9 px-2 text-accent underline focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={status === "incompatible" ? () => window.location.reload() : retry}>{status === "incompatible" ? "刷新页面" : "重新读取"}</button> : null}
   </div>;
 }
 

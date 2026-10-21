@@ -66,15 +66,15 @@ export function CoachPlanControl({ date, draft, api, onChanged, settingsRevision
 
   if (!summary && !enabled && !error) return null;
   return <section className="space-y-2 border-b border-sky-200 bg-sky-50/30 px-4 py-3" aria-label="教练安排摘要">
-    {summary ? <><p className="text-xs leading-6 text-zinc-700">{summary.undone ? "这次教练安排已撤销，学习记录保留。" : `教练安排了${summary.scheduledMinutes}分钟，新增${summary.createdTaskIds.length}项任务。`}</p>
+    {summary ? <><p className="text-xs leading-6 text-text-2">{summary.undone ? "这次教练安排已撤销，学习记录保留。" : `教练安排了${summary.scheduledMinutes}分钟，新增${summary.createdTaskIds.length}项任务。`}</p>
       {!summary.undone && summary.undoAvailable ? <button type="button" className={secondaryButtonClass} disabled={pending || Boolean(error)} onClick={() => setConfirmUndo(true)}>撤销这次安排</button> : null}
-      {!summary.undone && !summary.undoAvailable ? <p className="text-xs text-zinc-500">安排已开始或已有后续调整，保留当前计划；可手动调整尚未完成的任务。</p> : null}
-    </> : <><p className="text-xs text-zinc-600">{pending ? "正在核对教练安排…" : "教练已启用；今日已有确认计划时仍需手动调整。"}</p>
+      {!summary.undone && !summary.undoAvailable ? <p className="text-xs text-text-3">安排已开始或已有后续调整，保留当前计划；可手动调整尚未完成的任务。</p> : null}
+    </> : <><p className="text-xs text-text-2">{pending ? "正在核对教练安排…" : "教练已启用；今日已有确认计划时仍需手动调整。"}</p>
       {enabled && draft?.origin === "auto_draft" && draft.status === "draft" && !error ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => {
         attempted.current.delete(`coach:${draft.id}:${draft.version}`); void read(true);
       }}>按预算安排今日草案</button> : null}</>}
-    {confirmUndo ? <div className="space-y-2"><p className="text-xs leading-6 text-zinc-600">仅在这次安排尚未开始、任务未改动时撤销。只关闭教练新建的任务，保留你的原有任务。</p><div className="flex gap-2"><button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void undo()}>确认撤销</button><button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => setConfirmUndo(false)}>保留安排</button></div></div> : null}
-    {error ? <p className="text-xs text-red-700" role="alert">{error}</p> : null}
+    {confirmUndo ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">仅在这次安排尚未开始、任务未改动时撤销。只关闭教练新建的任务，保留你的原有任务。</p><div className="flex gap-2"><button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void undo()}>确认撤销</button><button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => setConfirmUndo(false)}>保留安排</button></div></div> : null}
+    {error ? <p className="text-xs text-danger" role="alert">{error}</p> : null}
     {error ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void read(false)}>重新核对安排</button> : null}
   </section>;
 }

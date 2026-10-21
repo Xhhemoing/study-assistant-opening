@@ -19,8 +19,8 @@ const exclusionLabels: Record<string, string> = {
 function ModelScores({ models, label }: { models: MeasurementModelScore[]; label: (id: string) => string }) {
   return <div className="overflow-x-auto"><table className="w-full min-w-96 text-left text-xs">
     <caption className="sr-only">同一批有效作答上的预测误差</caption>
-    <thead><tr className="border-b border-zinc-200 text-zinc-500"><th className="py-2 font-medium">模型</th><th className="py-2 font-medium">有效题数</th><th className="py-2 font-medium">Brier</th><th className="py-2 font-medium">Log loss</th></tr></thead>
-    <tbody>{models.map(model => <tr key={model.modelId} className="border-b border-zinc-100"><th className="py-3 font-medium">{label(model.modelId)}</th><td>{model.count}</td><td>{number(model.brier)}</td><td>{number(model.logLoss)}</td></tr>)}</tbody>
+    <thead><tr className="border-b border-line text-text-3"><th className="py-2 font-medium">模型</th><th className="py-2 font-medium">有效题数</th><th className="py-2 font-medium">Brier</th><th className="py-2 font-medium">Log loss</th></tr></thead>
+    <tbody>{models.map(model => <tr key={model.modelId} className="border-b border-line"><th className="py-3 font-medium">{label(model.modelId)}</th><td>{model.count}</td><td>{number(model.brier)}</td><td>{number(model.logLoss)}</td></tr>)}</tbody>
   </table></div>;
 }
 
@@ -31,9 +31,9 @@ function AnswerRecord({ attempt, overview, busy, readOnly, onRetract }: {
   const [reason, setReason] = useState("");
   const delay = actualDelay(attempt, overview);
   const result = attempt.retractedAt ? "已标记无效" : attempt.outcome === "correct" ? "答对" : attempt.outcome === "incorrect" ? "答错" : attempt.outcome === "skipped" ? "已跳过" : "本轮结果待公布";
-  return <details className="border-t border-zinc-100 py-3">
-    <summary className="cursor-pointer rounded text-xs leading-6 text-zinc-700 focus-visible:ring-2 focus-visible:ring-emerald-600">第 {attempt.ordinal} 题 · {measurementPhaseLabels[attempt.item.phase]} · {attempt.item.skillLabel} · {result}</summary>
-    <div className="mt-3 space-y-3 text-xs leading-6 text-zinc-600">
+  return <details className="border-t border-line py-3">
+    <summary className="cursor-pointer rounded text-xs leading-6 text-text-2 focus-visible:ring-2 focus-visible:ring-emerald-600">第 {attempt.ordinal} 题 · {measurementPhaseLabels[attempt.item.phase]} · {attempt.item.skillLabel} · {result}</summary>
+    <div className="mt-3 space-y-3 text-xs leading-6 text-text-2">
       <p className="whitespace-pre-wrap">{attempt.item.prompt}</p>
       <p>我的选择：{attempt.item.options.find(option => option.id === attempt.answer)?.label ?? "未选择"}</p>
       {attempt.feedback ? <p className="whitespace-pre-wrap">{attempt.feedback}</p> : null}
@@ -53,21 +53,21 @@ export function MeasurementReportPanel({ overview, busy, readOnly, onRetract }: 
 }) {
   const label = (id: string) => overview.trial?.models.find(model => model.id === id)?.label ?? id;
   return <details className={`${ui.panel} p-5`}>
-    <summary className="cursor-pointer rounded text-sm font-medium text-zinc-800 focus-visible:ring-2 focus-visible:ring-emerald-600">测试数据与作答记录</summary>
+    <summary className="cursor-pointer rounded text-sm font-medium text-text focus-visible:ring-2 focus-visible:ring-emerald-600">测试数据与作答记录</summary>
     <div className="mt-5 space-y-6">
-      <p className="text-xs leading-6 text-zinc-600">固定题目让两种模型预测同一次作答。以下指标越低，代表这批数据的预测误差越小；小样本差异不能证明教学效果提升。参数尚未用你的数据校准。</p>
+      <p className="text-xs leading-6 text-text-2">固定题目让两种模型预测同一次作答。以下指标越低，代表这批数据的预测误差越小；小样本差异不能证明教学效果提升。参数尚未用你的数据校准。</p>
       <ModelScores models={overview.report.models} label={label} />
-      <p className="text-xs leading-6 text-zinc-600">配对差值（BKT − 频率基线）：Brier {number(overview.report.pairedBrierDifference)}，Log loss {number(overview.report.pairedLogLossDifference)}。正值表示 BKT 在本批作答中误差更大。</p>
-      <div className="grid gap-3 sm:grid-cols-3">{overview.report.byPhase.map(phase => <div key={phase.phase} className="rounded-lg bg-zinc-50 p-3 text-xs leading-6"><p className="font-medium text-zinc-800">{measurementPhaseLabels[phase.phase]}</p><p>{phase.eligible} 条有效独立作答</p>{phase.models.map(model => <p key={model.modelId}>{label(model.modelId)} Brier {number(model.brier)}</p>)}</div>)}</div>
-      <details className="text-xs leading-6 text-zinc-600"><summary className="cursor-pointer">校准与排除原因</summary><div className="mt-3 space-y-4">
+      <p className="text-xs leading-6 text-text-2">配对差值（BKT − 频率基线）：Brier {number(overview.report.pairedBrierDifference)}，Log loss {number(overview.report.pairedLogLossDifference)}。正值表示 BKT 在本批作答中误差更大。</p>
+      <div className="grid gap-3 sm:grid-cols-3">{overview.report.byPhase.map(phase => <div key={phase.phase} className="rounded-lg bg-bg p-3 text-xs leading-6"><p className="font-medium text-text">{measurementPhaseLabels[phase.phase]}</p><p>{phase.eligible} 条有效独立作答</p>{phase.models.map(model => <p key={model.modelId}>{label(model.modelId)} Brier {number(model.brier)}</p>)}</div>)}</div>
+      <details className="text-xs leading-6 text-text-2"><summary className="cursor-pointer">校准与排除原因</summary><div className="mt-3 space-y-4">
         <p>跳过 {overview.report.skipped} 题；尚未提交 {overview.report.pending} 题。每条记录列出一个优先排除原因；不把缺测算作答错。</p>
         <ul>{Object.entries(overview.report.excluded).map(([reason, count]) => <li key={reason}>{exclusionLabels[reason] ?? reason}：{count}</li>)}</ul>
         {overview.report.models.map(model => <div key={model.modelId}><p className="font-medium">{label(model.modelId)} · 预测区间 / 样本数 / 平均预测 / 实际正确率</p>{model.calibration.filter(bin => bin.count > 0).map(bin => <p key={bin.lower}>{Math.round(bin.lower * 100)}–{Math.round(bin.upper * 100)}% / {bin.count} / {number(bin.meanPrediction)} / {number(bin.observedAccuracy)}</p>)}</div>)}
       </div></details>
-      <div><h3 className="text-sm font-medium text-zinc-800">已提交的记录</h3>{overview.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => <AnswerRecord key={attempt.id} attempt={attempt} overview={overview} busy={busy} readOnly={readOnly} onRetract={onRetract} />)}</div>
+      <div><h3 className="text-sm font-medium text-text">已提交的记录</h3>{overview.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => <AnswerRecord key={attempt.id} attempt={attempt} overview={overview} busy={busy} readOnly={readOnly} onRetract={onRetract} />)}</div>
       {overview.trial ? <a className={ui.secondary} href={`/api/opening/measurement/export?courseId=${encodeURIComponent(overview.trial.courseId)}`} download><Download size={14} aria-hidden="true" />导出个人测试数据 JSON</a> : null}
-      <p className="text-xs leading-6 text-zinc-500">导出包含个人作答、时间、帮助与更正记录、模型版本及预测。暂停会保留记录；同一题组不重复启动，以免已见题影响复测。</p>
-      <p className="text-xs leading-6 text-zinc-600">此 JSON 仅供分析，不能用于恢复；应用的 Opening 备份暂不包含学习测试记录。恢复原试验、预测与进度需要站点管理员的完整数据库备份。</p>
+      <p className="text-xs leading-6 text-text-3">导出包含个人作答、时间、帮助与更正记录、模型版本及预测。暂停会保留记录；同一题组不重复启动，以免已见题影响复测。</p>
+      <p className="text-xs leading-6 text-text-2">此 JSON 仅供分析，不能用于恢复；应用的 Opening 备份暂不包含学习测试记录。恢复原试验、预测与进度需要站点管理员的完整数据库备份。</p>
     </div>
   </details>;
 }

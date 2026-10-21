@@ -22,7 +22,7 @@ export function MaterialAssignPanel({
   const [role, setRole] = useState<MaterialAssignRole>("reference");
   const active = courses.filter((course) => !course.archived);
   return (
-    <section aria-label="归入课程" className="space-y-2 border-t border-emerald-100 bg-emerald-50/40 px-3 py-3">
+    <section aria-label="归入课程" className="space-y-2 border-t border-accent/20 bg-accent-soft px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <label className="min-w-0">
           <span className="sr-only">归入课程</span>
@@ -64,7 +64,7 @@ export function MaterialAssignPanel({
         </button>
         <button type="button" className={ui.quiet} disabled={busy} onClick={onCancel}>取消</button>
       </div>
-      {!active.length ? <p className="text-xs text-zinc-500">暂无可用课程，请先新建课程空间。</p> : null}
+      {!active.length ? <p className="text-xs text-text-2">暂无可用课程，请先新建课程空间。</p> : null}
     </section>
   );
 }
