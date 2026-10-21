@@ -2,19 +2,18 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TaskQueueRefreshContext } from "./task-status-control";
-import { buttonClass, ui } from "../design/ui";
+import { buttonClass, EmptyState, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningCardsClient } from "../cards/cards-client";
-import type { TodayResumeState } from "./today-read";
-import { TodayResumeBody } from "./today-resume-view";
+import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
+import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
 import { CourseStudyContextTools } from "../../courses/course-study-context-tools";
 import { TodayLearningContext } from "./today-overview";
 import { focusPriorityActions } from "./today-task-selection";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
-import { TeachingActivityEmpty } from "../teaching/activity-panel";
 import {
   buildStartLearningCreateInput,
   pickCurrentTeachingActivity,
@@ -128,6 +127,9 @@ export function TodayDashboard({
   const cards = useMemo(() => createOpeningCardsClient(), []);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
+  const noCourses = hasNoTodayCourses(state);
+  const currentCourseId = currentActivity ? currentActivity.courseId : state.continueItem?.courseId;
+  const courseTitle = state.courses?.status === "ready" ? state.courses.items.find(course => course.id === currentCourseId)?.title : undefined;
   const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
     ? `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}`
@@ -138,7 +140,7 @@ export function TodayDashboard({
   }, [focusTaskId]);
 
   useEffect(() => {
-    if (state.kind !== "ready" && state.kind !== "empty") {
+    if (noCourses || state.kind !== "ready" && state.kind !== "empty") {
       setDueCardCount(0);
       return;
     }
@@ -152,7 +154,7 @@ export function TodayDashboard({
         if (!controller.signal.aborted) { setDueCardCount(0); setDueCardsError(true); }
       });
     return () => controller.abort();
-  }, [cards, reloadToken, state.kind]);
+  }, [cards, reloadToken, state.kind, noCourses]);
   useEffect(() => {
     if (actionsRequested && queueOpen && focusPriorityActions(document.getElementById("action-digest"))) {
       setActionsRequested(false);
@@ -160,7 +162,7 @@ export function TodayDashboard({
   }, [actionsRequested, queueOpen, state.kind]);
 
   useEffect(() => {
-    if (state.kind !== "ready" && state.kind !== "empty") return;
+    if (noCourses || state.kind !== "ready" && state.kind !== "empty") return;
     const controller = new AbortController();
     setActivityLoad("loading");
     api.listTeachingActivities()
@@ -176,7 +178,7 @@ export function TodayDashboard({
         setActivityLoad("error");
       });
     return () => controller.abort();
-  }, [api, reloadToken, state.kind]);
+  }, [api, reloadToken, state.kind, noCourses]);
 
   // V2-14: prefer LearningResume package for continue; clientInit may be null (fail-soft).
   useEffect(() => {
@@ -324,16 +326,20 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
+  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">今日学习工作台</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time> · 继续上次的位置，或选一项开始</p></header>;
+  if (noCourses) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /></div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex min-h-full flex-col bg-bg text-text">
-        <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-2xl text-text">今日学习工作台</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time> · 继续上次的位置，或选一项开始</p></header>
+        {heading}
+        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取，未将读取失败当成没有课程。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
         {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
         <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
-          <TodayLearningContext
+          {currentActivity || state.continueItem ? <TodayLearningContext
             item={state.continueItem}
+            courseTitle={courseTitle}
             activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
             resume={learningResume}
             onShowActions={showActions}
@@ -347,13 +353,13 @@ export function TodayDashboard({
               >
                 {ctaBusy ? "处理中…" : ctaLabel}
               </button>
-            ) : null}
+            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : null}
             secondaryAction={
               <Link href={assistantHref} className={ui.quiet}>
                 自由对话
               </Link>
             }
-          />
+          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取续学记录…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
           {ctaError ? (
             <p className="px-4 text-xs text-danger sm:px-5" role="alert">{ctaError}</p>
           ) : null}
@@ -420,14 +426,7 @@ export function TodayDashboard({
                   workspaceEnabled={teachingWorkspaceEnabled}
                 />
               )
-            ) : (
-              <TeachingActivityEmpty
-                onStart={() => void runPrimaryCta()}
-                busy={ctaBusy}
-                error={ctaError}
-                assistantHref={assistantHref}
-              />
-            )}
+            ) : null}
             {teachingLoopTrialEnabled &&
             currentActivity &&
             resumeLoad === "error" &&

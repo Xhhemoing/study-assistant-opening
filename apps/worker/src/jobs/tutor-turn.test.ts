@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError } from "@aistudy/ai";
+import { OpeningBudgetError } from "@aistudy/database";
 import type { ConversationPlanningContext, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
-import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
+import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 
 describe("tutor mode policy", () => {
@@ -203,7 +204,7 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow(VISION_REQUIRED_MESSAGE);
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, VISION_REQUIRED_MESSAGE, undefined, undefined);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, VISION_REQUIRED_MESSAGE, { code: "VISION_INPUT_REQUIRED" }, undefined);
   });
 
   it("attaches page 1 for image-only sources on a vision model even without currentPage", async () => {
@@ -313,7 +314,25 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toThrow("selected model removed");
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).not.toHaveBeenCalled();
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "selected model removed", undefined, undefined);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
+  });
+  it.each([new Error("SQL SELECT secret FROM private /server/file"), Object.assign(new Error("secret"), { code: "BUDGET_EXCEEDED" })])("does not persist unknown exception text or trust an arbitrary error code", async error => {
+    const { deps, tutorJobs, provider } = setup();
+    const resolveModel = vi.fn(async () => { throw error; });
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toBe(error);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+  it.each([
+    [new OpeningBudgetError("BUDGET_EXCEEDED", "private diagnostic"), "BUDGET_EXCEEDED", "预算"],
+    [new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "private diagnostic"), "REQUEST_CAP_EXCEEDED", "请求次数"],
+    [new OpeningModelRoutingError("private diagnostic"), "AI_ROUTE_UNAVAILABLE", "设置"],
+  ] as const)("retains a controlled actionable failure by code", async (error, code, copy) => {
+    const { deps, tutorJobs } = setup();
+    const resolveModel = vi.fn(async () => { throw error; });
+    await expect(createTutorTurnHandler({ ...deps, resolveModel })(claimedJob.id)).rejects.toBe(error);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, expect.stringContaining(copy), { code }, undefined);
+    expect(tutorJobs.fail.mock.calls[0]?.[2]).not.toContain("private diagnostic");
   });
   it("completes the turn once with program-assigned candidate provenance", async () => {
     const { deps, tutorJobs, budget, provider } = setup();
@@ -710,7 +729,7 @@ describe("tutor turn handler", () => {
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toThrow(/privacy epoch drift/);
 
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ expectedPrivacyEpoch: 7 }));
-    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, "privacy epoch drift: expected 7 current 8", undefined, undefined);
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
     expect(budget.markUnknown).not.toHaveBeenCalled();
   });

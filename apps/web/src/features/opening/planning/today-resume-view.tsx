@@ -1,10 +1,14 @@
 import Link from "next/link";
 import { buttonClass, EmptyState, secondaryButtonClass, ui } from "../design/ui";
-import type { TodayResumeState } from "./today-read";
+import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import type { TeachingActivity } from "@aistudy/contracts";
 import { todayActivityCtaLabel } from "../teaching/today-activity";
 
 const primary = `${buttonClass} mt-4`;
+
+export function TodayNoCourses() {
+  return <EmptyState title="从第一门课程开始" description="添加你想学习的课程，再把资料、练习和学习记录放在一起。" action={<Link className={buttonClass} href="/opening/courses/new" data-today-primary-cta="true">添加第一门课</Link>} />;
+}
 
 export function TodayResumeBody({
   state,
@@ -20,20 +24,15 @@ export function TodayResumeBody({
 }) {
   if (state.kind === "loggedOut") {
     return (
-      <>
-        <EmptyState title="尚未登录" description="登录后即可查看今天的学习记录。" />
-        <Link className={primary} href="/login">登录</Link>
-      </>
+      <EmptyState title="尚未登录" description="登录后即可查看今天的学习记录。" action={<Link className={buttonClass} href="/login">登录</Link>} />
     );
   }
   if (state.kind === "error") {
     return (
-      <>
-        <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" />
-        <Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>
-      </>
+      <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" action={<Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>} />
     );
   }
+  if (hasNoTodayCourses(state)) return <TodayNoCourses />;
   const item = state.continueItem;
   const ctaLabel = todayActivityCtaLabel(activity ?? null);
   // Without an interactive handler, land on Today dashboard (activity wiring lives there).

@@ -8,7 +8,7 @@ import {
   createOpeningTutorJobsRepository,
   createSqlClient,
 } from "@aistudy/database";
-import { PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError } from "@aistudy/domain";
+import { PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 
 /**
@@ -113,6 +113,6 @@ describe("LAB-U01 clarify loop (real PostgreSQL)", () => {
     await sql`UPDATE opening_tutor_jobs SET status = 'running' WHERE id = ${jobId}`;
     await tutorJobs.fail(scope, jobId, "provider rejected the request");
     expect((await turnRow(assistantTurnId))?.status).toBe("failed");
-    expect((await tutorJobs.get(scope, jobId))?.error).toEqual({ message: "provider rejected the request" });
+    expect((await tutorJobs.get(scope, jobId))?.error).toEqual({ message: TUTOR_FAILURE_MESSAGE });
   });
 });

@@ -9,7 +9,7 @@ import {
   type TutorMode,
   type ConversationPlanningContext,
 } from "@aistudy/contracts";
-import { OpeningProviderError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -23,13 +23,14 @@ import {
   resolveStrategyTemplate,
   conversationPlanningInstruction,
   CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE,
+  tutorFailureForDisplay,
 } from "@aistudy/domain";
 import type {
   ContextSourceRef,
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
 } from "@aistudy/database";
-import { mergeContextSourceRefs } from "@aistudy/database";
+import { mergeContextSourceRefs, OpeningBudgetError } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import {
@@ -239,7 +240,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }
       const supportsVision = selected?.supportsVision === true;
       if (imageOnlySources && !supportsVision) {
-        throw new Error(VISION_REQUIRED_MESSAGE);
+        throw new BudgetedCallError("VISION_INPUT_REQUIRED", VISION_REQUIRED_MESSAGE);
       }
       // Photo sources default to page 1 when the learner did not pick a page.
       const pageForImages = turn.currentPage ?? (imageOnlySources ? 1 : null);
@@ -377,7 +378,6 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       });
       return { skipped: false };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "tutor turn failed";
       const unknownOutcome =
         (error instanceof OpeningProviderError &&
           ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code)) ||
@@ -393,7 +393,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           nextAction: error.nextAction,
         }, claimed.claimToken);
       } else {
-        await deps.tutorJobs.fail(scope, claimed.id, message, undefined, claimed.claimToken);
+        const code = error instanceof OpeningProviderError || error instanceof OpeningModelRoutingError
+          || error instanceof BudgetedCallError || error instanceof OpeningBudgetError ? error.code : undefined;
+        const failure = tutorFailureForDisplay("failed", { code })!;
+        await deps.tutorJobs.fail(scope, claimed.id, failure.message, failure.code ? { code: failure.code } : undefined, claimed.claimToken);
       }
       throw error;
     }

@@ -3,7 +3,11 @@ export type TodayResumeState = {
   continueItem?: { conversationId: string; title: string; lastUserText?: string; courseId?: string | null;
     sourceVersions?: Record<string, number>; currentPage?: number | null; manualSourceCount?: number };
   pendingReviews?: { count: number; href: "/opening/suggestions" };
+  courses?: { status: "ready"; items: Array<{ id: string; title: string; archivedAt: string | null }> } | { status: "error" };
 };
+export function hasNoTodayCourses(state: TodayResumeState): boolean {
+  return (state.kind === "ready" || state.kind === "empty") && state.courses?.status === "ready" && state.courses.items.length === 0;
+}
 export type TodayConfirmCandidate = { id: string; payload: { kind?: string } | null };
 /** Compatibility helper: review navigation always opens the product page, never a write API. */
 export function todayConfirmHref(_candidates: TodayConfirmCandidate[] = []): string { return "/opening/suggestions"; }

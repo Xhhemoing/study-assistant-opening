@@ -1,5 +1,5 @@
 import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
-import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage } from "@aistudy/domain";
+import { parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -40,7 +40,7 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
     assistantTurnId: row.assistant_turn_id as string,
     status: row.status as OpeningTutorJobRecord["status"],
     mode: row.mode as string,
-    error: (row.error as OpeningTutorJobRecord["error"]) ?? null,
+    error: tutorFailureForDisplay(row.status, row.error),
     createdAt: new Date(row.created_at as string | Date).toISOString(),
     updatedAt: new Date(row.updated_at as string | Date).toISOString(),
     ...(typeof row.claim_token === "string" ? { claimToken: row.claim_token } : {}),
@@ -187,7 +187,7 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       return {
         id: row.id as string,
         status: row.status as OpeningTutorJobRecord["status"],
-        error: (row.error as OpeningTutorJobError | null) ?? null,
+        error: tutorFailureForDisplay(row.status, row.error),
         updatedAt: new Date(row.updated_at as string | Date).toISOString(),
       };
     },

@@ -1,4 +1,3 @@
-import Link from "next/link";
 import type { ReactNode } from "react";
 import type { LearningResume, TaskItem } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
@@ -44,23 +43,20 @@ export function TodayLearningContext({
   secondaryAction,
   onShowActions,
   resume,
+  courseTitle,
 }: {
   item?: TodayResumeState["continueItem"];
   activity?: { title: string; courseId: string | null; id?: string; contentVersion?: number } | null;
   resume?: LearningResume | null;
+  courseTitle?: string | null;
   primaryAction?: ReactNode;
   secondaryAction?: ReactNode;
   onShowActions?: () => void;
 }) {
   return <div className="min-w-0 px-4 py-5 sm:px-5">
-    <ContinueCard item={item} activity={activity} resume={resume} primaryAction={primaryAction} secondaryAction={secondaryAction} />
+    <ContinueCard item={item} activity={activity} courseTitle={courseTitle} resume={resume} primaryAction={primaryAction} secondaryAction={secondaryAction} />
     <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true">
       {onShowActions ? <button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button> : <a href="#action-digest" className={ui.quiet}>优先行动</a>}
-      <details className="relative"><summary className={`${ui.quiet} cursor-pointer list-none`}>更多学习方式</summary><div className="absolute left-0 top-full z-20 flex min-w-40 flex-col rounded-xl border border-line bg-surface p-2 shadow-md">
-        <Link href="/opening/review" className={`${ui.quiet} justify-start`}>复习记忆卡片</Link>
-        <Link href="/opening/suggestions" className={`${ui.quiet} justify-start`}>审核 AI 建议</Link>
-        <Link href="/opening/settings/connections" className={`${ui.quiet} justify-start`}>连接外部材料</Link>
-      </div></details>
     </nav>
   </div>;
 }
