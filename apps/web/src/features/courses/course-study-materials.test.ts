@@ -12,7 +12,10 @@ it("opens available content directly without adding a second continue action", (
 
 it("keeps partially sourced content usable while showing the actual material warning", () => {
   const html = renderToStaticMarkup(createElement(CourseStudyMaterials, { ...props, gate: "partial", children: "current unit" }));
-  expect(html).toContain("部分材料不可用");
+  expect(html).toContain('role="status"');
+  expect(html).toContain("部分材料暂时无法读取");
+  expect(html).toContain("重新核查材料");
+  expect(html).toContain(`href="${props.materialsHref}"`);
   expect(html).toContain("current unit");
 });
 

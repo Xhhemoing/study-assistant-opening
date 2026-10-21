@@ -62,7 +62,7 @@ describe("teaching activity service: compile enqueue seam", () => {
   });
   it("preserves the real task course and materials when adaptive planning is disabled", async () => {
     readTask.mockResolvedValue({ title: "Real task", courseId: activityId, skillLabel: "Matrix rank" });
-    await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0" }).create(scope, {
+    await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0", OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, {
       ...input, sourceIds: [], createIntent: { source: "task", taskId: activityId },
     });
     expect(create).toHaveBeenCalledWith(scope, expect.objectContaining({
@@ -71,19 +71,19 @@ describe("teaching activity service: compile enqueue seam", () => {
     expect(create.mock.calls[0]![1]).not.toHaveProperty("goalJson.learnerFocus");
   });
   it("discards client-supplied learner focus even when adaptive planning is off", async () => {
-    await createOpeningTeachingActivityService(sql, {}).create(scope, {
+    await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0", OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, {
       ...input, goalJson: { wantsFullExplanation: true, learnerFocus: { activityKind: "transfer_check" } },
     });
     expect(create).toHaveBeenCalledWith(scope, { ...input, goalJson: { wantsFullExplanation: true } }, { enqueueCompile: false });
   });
 
-  it("creates with enqueueCompile when the teaching compiler is on", async () => {
-    await createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "1" }).create(scope, input);
+  it.each([{}, { OPENING_TEACHING_COMPILER_ENABLED: "1" }])("creates with enqueueCompile when the teaching compiler is on by default or explicitly: %j", async env => {
+    await createOpeningTeachingActivityService(sql, env).create(scope, input);
     expect(create).toHaveBeenCalledWith(scope, input, { enqueueCompile: true });
   });
 
   it("keeps the plain activity shell when the compiler is off", async () => {
-    await createOpeningTeachingActivityService(sql, {}).create(scope, input);
+    await createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, input);
     expect(create).toHaveBeenCalledWith(scope, input, { enqueueCompile: false });
   });
 
@@ -96,7 +96,7 @@ describe("teaching activity service: compile enqueue seam", () => {
   });
 
   it("requestCompile fails as CONFIGURATION (503) when the compiler is off — never a silent no-op", async () => {
-    const service = createOpeningTeachingActivityService(sql, {});
+    const service = createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "0" });
     await expect(service.requestCompile(scope, activityId, { clientKey: "compile:abc123" })).rejects.toMatchObject({
       code: "CONFIGURATION",
       status: 503,
@@ -125,7 +125,7 @@ describe("teaching activity service: compile enqueue seam", () => {
       generateStatus: "ready",
       contentVersion: 0,
     });
-    const activity = await createOpeningTeachingActivityService(sql, {}).create(scope, input);
+    const activity = await createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, input);
     expect(create).toHaveBeenCalledWith(scope, input, { enqueueCompile: false });
     expect(teachingCreateGenerateStatusLabel(activity)).toBe("主讲内容未生成");
     expect(teachingCreateGenerateStatusLabel(activity)).not.toBe("主讲内容已就绪");

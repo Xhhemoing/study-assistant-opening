@@ -22,6 +22,8 @@ function database(priors: Record<string, unknown>[] = []) {
   return ((strings: TemplateStringsArray | unknown[]) => {
     if (!Object.hasOwn(strings, "raw")) return {};
     const query = strings.join("?");
+    // Nested identity predicates are SQL fragments, not executed mock queries.
+    if (query.trimStart().startsWith("(v.teaching_revision_id")) return {};
     if (query.includes("FROM opening_course_knowledge") || query.includes("WITH current_nodes AS")) return {};
     if (query.includes("SELECT * FROM (?) identity") || query.includes("FROM opening_exam_attempt_links")) return Promise.resolve([]);
     if (query.includes("FROM opening_study_intent_events")) return Promise.resolve([]);

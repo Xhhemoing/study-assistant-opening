@@ -63,11 +63,13 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     expect(await bytes.body()).toEqual(await readFile(fixture));
     await reader.getByRole("button", { name: "返回", exact: true }).click();
     await expect(reader).not.toBeVisible();
-    const stats = await (await context.request.get("http://127.0.0.1:18081/stats")).json();
-    expect(stats.calls).toBe(1);
+    const providerStats = async () => (await context.request.get("http://127.0.0.1:18081/stats")).json();
+    // Suggestions run in their own durable job after the one completed answer.
+    await expect.poll(providerStats).toEqual({ calls: 2, answerCalls: 1, metadataCalls: 1 });
     await page.reload();
     await expect(assistant.getByRole("log").getByText("Summarize the selected page.", { exact: true })).toHaveCount(1);
     await expect(assistant.getByRole("log").getByText("[测试模型] 已收到原件第一页文本 page one。", { exact: true })).toHaveCount(1);
+    expect(await providerStats()).toEqual({ calls: 2, answerCalls: 1, metadataCalls: 1 });
     expect(errors).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath("workflow-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
