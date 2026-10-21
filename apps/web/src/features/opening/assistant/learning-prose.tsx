@@ -1,14 +1,15 @@
 "use client";
 
 import "katex/dist/katex.min.css";
-import type { Element, ElementContent, Root } from "hast";
+import type { Element, ElementContent, Root, RootContent } from "hast";
 import type { Parent as MdastParent, Root as MdastRoot, Text as MdastText } from "mdast";
-import { Component, memo, useMemo, type ReactNode } from "react";
+import { Component, memo, useContext, useMemo, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex, { type Options as KatexOptions } from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { isQueryEvidenceHref, type QueryEvidenceLink } from "./query-evidence-links";
+import { ReplyRevealEnabled, ReplyTextGroup } from "./ai-response";
 
 /** Model text is untrusted: no `trust` commands, capped sizes and macro expansion. */
 const KATEX_OPTIONS: KatexOptions = { trust: false, strict: "ignore", maxSize: 10, maxExpand: 200, errorColor: "#b91c1c" };
@@ -93,7 +94,35 @@ export function rehypeSourceOffsets() {
   };
 }
 
+/** Only prose is grouped. Math, code, links and citations keep their complete DOM. */
+export function rehypeReplyReveal() {
+  if (typeof Intl.Segmenter !== "function") return () => undefined;
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  return (tree: Root) => {
+    let order = 0;
+    const walk = (parent: Root | Element) => {
+      parent.children = (parent.children as RootContent[]).flatMap<RootContent>(node => {
+        if (node.type === "text") {
+          if (!node.value.trim()) return [node];
+          const letters = Array.from(segmenter.segment(node.value), part => part.segment);
+          const groups: Element[] = [];
+          for (let index = 0; index < letters.length; index += 2) groups.push({ type: "element", tagName: "span", properties: { dataReplyReveal: ++order }, children: [{ type: "text", value: letters.slice(index, index + 2).join("") }] });
+          return groups;
+        }
+        if (node.type === "element" && !["a", "code", "pre", "sup"].includes(node.tagName)
+          && !(Array.isArray(node.properties.className) && node.properties.className.some(name => String(name).startsWith("katex")))) walk(node);
+        return [node];
+      }) as ElementContent[];
+    };
+    walk(tree);
+  };
+}
+
 const components: Components = {
+  span: ({ children, node, ...props }) => {
+    const order = Number(node?.properties.dataReplyReveal);
+    return Number.isFinite(order) ? <ReplyTextGroup order={order}>{children}</ReplyTextGroup> : <span {...props}>{children}</span>;
+  },
   p: ({ children, ...props }) => <p {...src(props)} className="my-3 first:mt-0 last:mb-0">{children}</p>,
   h1: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-text first:mt-0">{children}</h3>,
   h2: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-text first:mt-0">{children}</h3>,
@@ -149,6 +178,7 @@ export function sameLearningProseContent(previous: LearningProseProps, next: Lea
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
 export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS }: LearningProseProps) {
+  const reveal = useContext(ReplyRevealEnabled);
   const approvedHrefs = useMemo(() => new Set(queryEvidenceLinks.map(link => link.href).filter(isQueryEvidenceHref)), [queryEvidenceLinks]);
   const withCitations = useMemo<Components>(() => citationLinks.length ? {
     ...components,
@@ -163,7 +193,7 @@ export const LearningProse = memo(function LearningProse({ text, citationLinks =
     <div className="font-reading text-[17px] leading-[30px] break-words [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown
         remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
-        rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS]]}
+        rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS], ...(reveal ? [rehypeReplyReveal] : [])]}
         skipHtml
         urlTransform={(url, key) => key === "href" && approvedHrefs.has(url) ? url : proseUrlTransform(url)}
         components={withCitations}

@@ -81,6 +81,7 @@ describe("Today server reads", () => {
     const html = renderToStaticMarkup(createElement(TodayLoading));
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain('role="status"');
+    expect(html).toContain("正在读取学习进度与今日安排…");
     expect(html).toContain("今日学习");
   });
 });

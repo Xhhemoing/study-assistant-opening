@@ -7,6 +7,7 @@ import { createOpeningCardsClient } from "../cards/cards-client";
 import { createOpeningApi } from "../client/api";
 import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../design/ui";
 import { groupReviewTasks, loadReviewSources, type ReviewSources, type ReviewTask } from "./review-queue";
+import { MixedReviewView } from "./mixed-review-view";
 import { readReviewTab, reviewTabHref, reviewTabs, type ReviewTab } from "./review-route";
 
 function ReviewTaskList({ items, upcoming = false }: { items: ReviewTask[]; upcoming?: boolean }) {
@@ -61,9 +62,10 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-5xl space-y-6 px-5 py-5">
       <p className="rounded-lg bg-surface-2 px-4 py-3 text-sm text-text-2">AI 建议已迁移。<Link className="ml-2 font-medium text-accent underline underline-offset-4" href="/opening/suggestions">查看与审批 AI 建议</Link></p>
       <nav aria-label="复习分类" className="flex flex-wrap gap-1 border-b border-line">{reviewTabs.map(item => <a key={item.id} className={`min-h-11 border-b-2 px-4 py-3 text-sm focus-visible:ring-2 focus-visible:ring-accent ${tab === item.id ? "border-ink font-medium text-accent" : "border-transparent text-text-2"}`} href={reviewTabHref(item.id, search)} onClick={event => navigate(event, item.id)} aria-current={tab === item.id ? "page" : undefined}>{item.label}</a>)}</nav>
-      {tab === "all" ? <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-line p-5" aria-labelledby="review-cards-heading"><div><h2 id="review-cards-heading" className="font-semibold">记忆卡片{cardCount !== null ? ` · ${cardCount} 张待复习` : ""}</h2><p className="mt-1 text-sm text-text-2">翻面后自评，按服务端安排下次复习。</p>{!cardsVisited && sources?.cards.kind === "error" ? <p role="alert" className="mt-2 text-sm text-danger">卡片读取失败：{sources.cards.message}</p> : null}</div><a className={ui.primary} href={reviewTabHref("cards", search)} onClick={event => navigate(event, "cards")}>复习卡片</a></section> : null}
+      {tab === "all" ? <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-line p-5" aria-labelledby="review-cards-heading"><div><h2 id="review-cards-heading" className="font-semibold">记忆卡片{cardCount !== null ? ` · ${cardCount} 张待复习` : ""}</h2><p className="mt-1 text-sm text-text-2">翻面后自评，按服务端安排下次复习。</p>{!cardsVisited && sources?.cards.kind === "error" ? <p role="alert" className="mt-2 text-sm text-danger">卡片读取失败：{sources.cards.message}</p> : null}</div><div className="flex flex-wrap gap-2"><a className={ui.primary} href={reviewTabHref("session", search)} onClick={event => navigate(event, "session")}>开始连续复习</a><a className={ui.secondary} href={reviewTabHref("cards", search)} onClick={event => navigate(event, "cards")}>复习卡片</a></div></section> : null}
+      {tab === "session" ? <MixedReviewView cardsClient={cardsClient} taskClient={api} /> : null}
       <div hidden={tab !== "cards"}>{cardsVisited ? <CardReviewView embedded client={cardsClient} onRemainingChange={setRemainingCards} /> : null}</div>
-      {tab !== "cards" ? <section className="space-y-4" aria-labelledby="review-tasks-heading">
+      {tab !== "cards" && tab !== "session" ? <section className="space-y-4" aria-labelledby="review-tasks-heading">
         <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="review-tasks-heading" className="font-semibold">{tab === "retests" ? "待复测" : tab === "reinforcement" ? "补强练习" : "复测与补强"}</h2><button type="button" className={ui.quiet} onClick={() => setRevision(value => value + 1)} disabled={!sources}>刷新队列</button></div>
         <p className="text-sm leading-6 text-text-2">只列出已经接受并安排的任务。补强建议不等同于错题；作答结果和证据资格由对应课程记录。进入任务时会重新核对课程和开始时间。</p>
         {!sources ? <LoadingRows label="正在读取复习任务…" /> : sources.tasks.kind === "error" ? <LoadError message={`复习任务读取失败：${sources.tasks.message}`} onRetry={() => setRevision(value => value + 1)} /> : <>
