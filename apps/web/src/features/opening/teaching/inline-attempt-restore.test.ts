@@ -17,6 +17,8 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
       previous?.cleanup?.(); hooks.values[i] = { deps, cleanup: effect() }; }); },
 }));
 const api = vi.hoisted(() => ({ getSubmittedAttempt: vi.fn(), getAnswerKey: vi.fn(), createSession: vi.fn(), submitAttempt: vi.fn() }));
+const studyBinding = vi.hoisted(() => ({ set: vi.fn() }));
+vi.mock("../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
 vi.mock("./activity-client", () => ({ createTeachingActivityClient: () => api }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => ({ ...api, getSummary: async () => [] }) }));
 vi.mock("../client/api", async original => ({ ...await original<typeof import("../client/api")>(), createOpeningApi: () => ({ getCourseKnowledge: async () => ({ snapshot: null }) }) }));
@@ -124,4 +126,14 @@ it("unlocks only the current question's durable observation and rejects an old v
   expect(advance(renderWorkspace(revised)).disabled).toBe(true);
   observed(renderWorkspace(revised))(questionId, saved.observation as LearningObservation);
   expect(advance(renderWorkspace(revised)).disabled).toBe(false);
+});
+it("registers only the current question and replaces its bound attempt when the version changes", () => {
+  const props = workspaceProps(), tree = renderWorkspace(props);
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: true, learningAttempt: null, context: expect.objectContaining({ blockId: questionId, contentVersion: 1 }) }));
+  const block = findNode(tree, node => node.type === TeachingBlockItem && (node.props.block as { blockId: string }).blockId === questionId)!;
+  const attempt = { id, itemVersionId: id } as import("@aistudy/contracts").LearningAttempt;
+  (block.attemptContext as InlineAttemptContext).onAttemptReady!(questionId, attempt); renderWorkspace(props);
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: attempt, blockedReason: undefined, context: expect.objectContaining({ attemptId: id, itemVersionId: id }) }));
+  const revised = workspaceProps(questionId, 2); renderWorkspace(revised); renderWorkspace(revised);
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: null, blockedReason: expect.any(String), context: expect.objectContaining({ contentVersion: 2, attemptId: undefined }) }));
 });

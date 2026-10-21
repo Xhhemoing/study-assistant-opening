@@ -23,13 +23,14 @@ import { nextSpanHintLevel, requestSpanHint, SPAN_HINT_LABELS } from "./span-hin
 import { spanProblemText } from "./span-problem-text";
 import { readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, spanVectorInput, updateSpanDraftAnswer } from "./span-answer";
 
-export function SpanPractice(props: { courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; retestId?: string; onAttempt?: (attempt: LearningAttempt) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void }) {
+export function SpanPractice(props: { courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void }) {
   const scope = spanPracticeScope(props.courseId, props.retestId, props.newEvidenceEventId);
   const continuity = usePracticeDraft(scope, { spanProblemId: props.problemId, sourceId: props.sourceIds[0] ?? "", skillLabel: "线性组合与 span", assistance: props.problemId === "span-faded-3d" ? "hinted" : "independent" });
+  useEffect(() => { props.onAttempt?.(null); return () => props.onAttempt?.(null); }, [continuity.draft.id, props.onAttempt]);
   return <div className="space-y-4"><SpanPracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} /></div>;
 }
 function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, continuity, retestId, onAttempt, intentRevision, newEvidenceEventId }: {
-  courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; continuity: PracticeContinuity; retestId?: string; onAttempt?: (attempt: LearningAttempt) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void;
+  courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; continuity: PracticeContinuity; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void;
 }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const { draft, patch, ready, requireSaved } = continuity;
@@ -42,6 +43,8 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const [why, setWhy] = useState<{ id: string; reasonCodes: string[]; dataAsOf: string } | null>(null);
   const locked = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const fields = draft.fields;
   const differentEntry = fields.spanProblemId !== problemId && !(problemId === "reserved:auto" && fields.spanProblemId.startsWith("span-reserved-"));
   const answer = readSpanDraftAnswer(fields.answer);
@@ -99,6 +102,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
         acceptHint(await requestSpanHint(result, 1));
       }
       const state = await readPracticeRecord(client, courseId, result, draft.observationId);
+      if (!mounted.current) return;
       setAttempt(result); onAttempt?.(result); setRecord(state.observation);
       patch(current => ({ observationId: state.observation?.id ?? null, fields: restoredPracticeAssistance(current.fields, state.deliveredAssistance) }));
       if (state.observation && belongsToRequested(result)) onRecorded(state.observation);
@@ -118,6 +122,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
       patch({ observationId: saved.id });
       const state = await readPracticeRecord(client, courseId, { ...attempt, observationId: saved.id });
       if (!state.observation) throw new Error("已收到回执，最新记录暂未读取，请保留原答案重试。");
+      if (!mounted.current) return;
       setRecord(state.observation); if (belongsToRequested(attempt)) onRecorded(state.observation);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "保存未确认；重试会沿用封存的首答。"); }
     finally { locked.current = false; setPending(false); }

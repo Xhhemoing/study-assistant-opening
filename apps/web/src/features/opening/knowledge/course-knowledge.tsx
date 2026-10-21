@@ -96,7 +96,7 @@ export function CourseKnowledge({
   const cta = nextStepCta(actions[0]);
 
   if (loading) {
-    return <p className="text-xs text-zinc-500" role="status">正在读取课程知识…</p>;
+    return <p className="text-xs text-text-3" role="status">正在读取课程知识…</p>;
   }
   if (unavailable) {
     return <LoadError message={error || "知识服务不可用"} onRetry={() => void load()} />;
@@ -107,8 +107,8 @@ export function CourseKnowledge({
   if (!snapshot || snapshot.nodes.length === 0) {
     return (
       <section className="space-y-2" aria-labelledby="course-knowledge-heading" id="course-knowledge">
-        <h2 className="text-sm font-semibold text-zinc-800" id="course-knowledge-heading">课程知识</h2>
-        <p className="text-xs leading-6 text-zinc-500">尚无知识节点。有材料后再构建；不会填充示例图。</p>
+        <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
+        <p className="text-xs leading-6 text-text-3">尚无知识节点。有材料后再构建；不会填充示例图。</p>
       </section>
     );
   }
@@ -116,17 +116,17 @@ export function CourseKnowledge({
   return (
     <section className="space-y-4" aria-labelledby="course-knowledge-heading" id="course-knowledge">
       <div>
-        <h2 className="text-sm font-semibold text-zinc-800" id="course-knowledge-heading">课程知识</h2>
-        <p className="mt-1 text-xs leading-6 text-zinc-500">先看章节与下一步；知识关系按需展开。不显示掌握百分比。</p>
+        <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
+        <p className="mt-1 text-xs leading-6 text-text-3">先看章节与下一步；知识关系按需展开。不显示掌握百分比。</p>
       </div>
-      <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3">
-        <h3 className="text-xs font-semibold text-zinc-800">章节</h3>
-        <ul className="mt-2 space-y-1.5 text-xs leading-5 text-zinc-700" aria-label="课程章节">
+      <div className="rounded-lg border border-line bg-surface-2 p-3">
+        <h3 className="text-xs font-semibold text-text">章节</h3>
+        <ul className="mt-2 space-y-1.5 text-xs leading-5 text-text-2" aria-label="课程章节">
           {(chapters.length ? chapters : ordered.slice(0, 5)).map((node) => (
             <li key={node.id}>
               <button
                 type="button"
-                className="text-left text-emerald-800 underline-offset-2 hover:underline"
+                className="min-h-11 py-2 text-left text-accent underline-offset-2 hover:underline"
                 onClick={() => { setSelected(node); setGraphOpen(true); }}
               >
                 {node.label}
@@ -135,8 +135,8 @@ export function CourseKnowledge({
           ))}
         </ul>
         <div className="mt-3 space-y-2" role="status">
-          <p className="text-xs leading-5 text-zinc-700">
-            <span className="font-medium text-zinc-900">下一步：</span>
+          <p className="text-xs leading-5 text-text-2">
+            <span className="font-medium text-text">下一步：</span>
             {cta ? cta.reason : "暂无服务器推荐的下一步。可先独立练习，或打开材料核对依据。"}
           </p>
           {cta ? (
@@ -144,7 +144,7 @@ export function CourseKnowledge({
               {cta.label}
             </a>
           ) : (
-            <p className="text-[11px] leading-5 text-zinc-500">
+            <p className="text-xs leading-5 text-text-3">
               没有可执行的推荐动作（可能尚未有 SkillEvidence）。不会展示假按钮。
             </p>
           )}
@@ -160,12 +160,12 @@ export function CourseKnowledge({
           {graphOpen ? "收起知识关系" : "展开知识关系"}
         </button>
         {graphOpen ? (
-          <ul className="mt-3 space-y-2 text-xs leading-5 text-zinc-700" aria-label="知识关系">
+          <ul className="mt-3 space-y-2 text-xs leading-5 text-text-2" aria-label="知识关系">
             {ordered.map((node) => (
-              <li key={node.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2">
-                <button type="button" className="min-w-0 flex-1 text-left font-medium text-zinc-900" onClick={() => setSelected(node)}>
+              <li key={node.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-surface px-3 py-2">
+                <button type="button" className="min-h-11 min-w-0 flex-1 py-2 text-left font-medium text-text" onClick={() => setSelected(node)}>
                   {node.label}
-                  <span className="ml-2 font-normal text-zinc-500">{node.kind} · {node.status}</span>
+                  <span className="ml-2 font-normal text-text-3">{node.kind} · {node.status}</span>
                 </button>
               </li>
             ))}

@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDownWideNarrow, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { OpeningApi } from "../client/api";
 import { LoadError, LoadingRows, ui } from "../design/ui";
 import { InboxPanel } from "../inbox/inbox-panel";
@@ -44,10 +44,17 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const [filtersRestored, setFiltersRestored] = useState(false);
   const [managing, setManaging] = useState(false);
   const [assignId, setAssignId] = useState<string | null>(null);
-  // Inbound courseId query only — setLibrarySpace is stable (useCallback); do not depend on whole library identity.
+  const previousUploadCourseId = useRef<string | null | undefined>(undefined);
+  // Apply only inbound changes, preserving locally selected views or newly created courses.
   useEffect(() => {
+    // changeSpace is locked during a confirmed organization action; retry when it settles.
+    if (busy) return;
+    const previous = previousUploadCourseId.current;
+    previousUploadCourseId.current = uploadCourseId;
+    if (previous === uploadCourseId) return;
     if (uploadCourseId) setLibrarySpace(`course:${uploadCourseId}`);
-  }, [uploadCourseId, setLibrarySpace]);
+    else if (previous && space === `course:${previous}`) setLibrarySpace("all");
+  }, [uploadCourseId, space, busy, setLibrarySpace]);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setQuery((params.get("q") ?? "").slice(0, 200));
@@ -74,7 +81,7 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const courseId = space.startsWith("course:") ? space.slice(7) : null;
   const titles = { all: "全部原件", inbox: "待整理", ready: "可用于提问", attention: "需处理" };
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
-  const changeSpace = (next: typeof space) => { library.changeSpace(next); onCourseChange?.(next.startsWith("course:") ? next.slice(7) : null); setPage(1); setQuery(""); setKind("all"); setStatus("all"); setAssignId(null); };
+  const changeSpace = (next: typeof space) => { library.changeSpace(next); onCourseChange?.(next.startsWith("course:") ? next.slice(7) : null); setPage(1); setQuery(""); setKind("all"); setStatus("all"); };
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
   const incompleteUpload = scoped.filter(record => materialStatus(record) === "incomplete_upload").length;
   const parsing = scoped.filter(record => materialStatus(record) === "parsing").length;
@@ -126,7 +133,7 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
           onDelete={() => library.deleteSelected()} onClear={library.clearSelection} /> : null}
         {managing ? <label className="flex items-center gap-2 text-xs text-text-2"><input type="checkbox" aria-label="选择当前页材料" className="size-6 accent-accent" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label> : null}
-        <div id="upload" className="scroll-mt-4"><InboxPanel liveSources={scoped} incomingFiles={incomingFiles} onIncomingFilesAccepted={onIncomingFilesAccepted} onUploadBusyChange={onUploadBusyChange} hideUploadPicker={hideUploadPicker} api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={managing ? library.toggle : undefined} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
+        <div id="upload" className="scroll-mt-4"><InboxPanel liveSources={scoped} incomingFiles={incomingFiles} onIncomingFilesAccepted={onIncomingFilesAccepted} onUploadBusyChange={onUploadBusyChange} hideUploadPicker={hideUploadPicker} api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={managing ? library.toggle : undefined} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen} expandedSourceId={assignId}
           renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
           onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
           renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}

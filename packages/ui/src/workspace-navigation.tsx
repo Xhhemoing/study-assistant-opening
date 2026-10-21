@@ -40,7 +40,7 @@ export function WorkspaceNavigation({
           key={item.key}
           href={item.href}
           aria-label={item.label}
-          className={`flex min-h-11 flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-[10px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 motion-reduce:transition-none ${item.key === activeEntry ? "bg-emerald-50 text-emerald-800" : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"}`}
+          className={`flex min-h-11 flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-xs font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent motion-reduce:transition-none ${item.key === activeEntry ? "bg-accent-soft text-accent" : "text-text-3 hover:bg-surface-2 hover:text-text"}`}
           data-entry={item.key}
           aria-current={item.key === activeEntry ? "page" : undefined}
         >

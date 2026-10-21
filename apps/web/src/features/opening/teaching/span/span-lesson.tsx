@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { LearningAttempt, LearningObservation, SpanTeachingMode, StudySessionIntent } from "@aistudy/contracts";
 import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";
 import { ui } from "../../design/ui";
@@ -11,6 +11,9 @@ import { SpanWorkedExample, SpanOverviewLinks } from "./worked-example";
 import { SpanExplorer } from "./span-explorer";
 import { StudyIntentControls } from "../study-intent-controls";
 import { SpanPractice } from "./span-practice";
+import { useStudyAssistantContext } from "../../assistant/current-study-context";
+import { spanAssistantContext, spanPracticeEntryKey } from "../lesson-assistant-context";
+import { SelectionAsk } from "../selection-ask";
 
 const modeLabels = { self_study: "自学 · 例题到独立新题", overview: "串讲 · 连接方程与几何", challenge: "拔高 · 预设迁移" };
 const modeProcess: Record<SpanTeachingMode, string> = {
@@ -23,7 +26,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
   const [intent, setIntent] = useState(initialIntent ?? defaultIntent);
   const [mode, setMode] = useState<SpanTeachingMode>(spanModeForIntent(initialIntent ?? defaultIntent));
   const [step, setStep] = useState(delayedRetestId || initialNewEvidenceEventId ? createSpanTeachingSequence(spanModeForIntent(initialIntent ?? defaultIntent)).length : Math.max(0, createSpanTeachingSequence(spanModeForIntent(initialIntent ?? defaultIntent)).findIndex(move => move.id === initialMoveId)));
-  const [activeAttempt, setActiveAttempt] = useState<LearningAttempt | null>(null);
+  const [attempts, setAttempts] = useState<Record<string, LearningAttempt | null>>({});
   const [newEvidenceEventId, setNewEvidenceEventId] = useState(initialNewEvidenceEventId);
   const [intentRevision, setIntentRevision] = useState(0);
   const [records, setRecords] = useState<Record<string, LearningObservation>>({});
@@ -35,6 +38,11 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
     : mode === "overview" ? step === 1 ? "span-contrast-dependent" : "span-geometry-transfer"
       : "span-geometry-transfer";
   const currentRecord = records[problemId];
+  const entryKey = spanPracticeEntryKey(courseId, mode, problemId, delayedRetestId, newEvidenceEventId);
+  const activeAttempt = !isPresentation ? attempts[entryKey] ?? null : null;
+  const onAttempt = useCallback((attempt: LearningAttempt | null) => setAttempts(previous => previous[entryKey] === attempt ? previous : { ...previous, [entryKey]: attempt }), [entryKey]);
+  const assistantContext = useMemo(() => spanAssistantContext(courseId, isPresentation, activeAttempt, sourceLoadError || !sourceIds.length), [courseId, isPresentation, activeAttempt, sourceLoadError, sourceIds.length]);
+  useStudyAssistantContext(assistantContext);
   const complete = !isPresentation && Boolean(currentRecord);
   const successful = currentRecord?.serverEvaluation?.decision === "correct";
   return <main className="h-full overflow-y-auto bg-white text-zinc-800"><header className="flex flex-wrap items-center gap-3 border-b border-zinc-200 px-5 py-3"><Link className={ui.quiet} href={`/opening/courses/${courseId}/study`}>返回课程学习</Link><h1 className="text-sm font-semibold">线性组合与 span</h1><span className="text-xs text-zinc-500">按你的目的推进</span></header>
@@ -60,12 +68,13 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
       {intent.language !== "zh" ? <p className="text-sm leading-7">Span = all linear combinations（所有线性组合）; coefficient = 系数; consistent system = 相容方程组。Language support translates the question; it does not solve it. 深入英文解释可在本题提问中选择语言支持。</p> : null}
       {!delayedRetestId ? <p className="text-xs leading-6 text-zinc-500">可自行选择步骤；跳到新题不表示前面的观察目标已通过，原有待核对表现继续保留。</p> : null}
       <nav hidden={Boolean(delayedRetestId)} aria-label="span 教学步骤" className="flex flex-wrap gap-3">{moves.map((move, index) => <button key={move.id} type="button" className={step === index ? ui.secondary : ui.quiet} aria-current={step === index ? "step" : undefined} onClick={() => setStep(index)}>{index + 1}. {move.presentation.kind === "worked_example" ? "逐步看例题" : move.presentation.kind === "faded_example" ? "补全步骤" : move.presentation.kind === "contrast" ? "结构对比" : move.presentation.kind === "predict_then_explore" ? "预测与探索" : "独立新题"}</button>)}</nav>
-      <section className="space-y-4"><h2 className="text-lg font-semibold">{current.presentation.instructions}</h2><p className="text-sm leading-7">{current.studentAction}</p>
+      <section className="space-y-4"><h2 className="text-lg font-semibold">{current.presentation.instructions}</h2><p className="text-sm leading-7">{current.studentAction}</p><SelectionAsk binding={!isPresentation ? assistantContext : null}>
         {isPresentation ? <>
           {mode === "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} /> : <SpanWorkedExample courseId={courseId} sourceId={sourceIds[0]} fast={intent.pace === "fast"} />}
           {mode === "overview" ? <SpanOverviewLinks courseId={courseId} sourceId={sourceIds[0]} /> : null}
           {mode !== "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} /> : null}
-        </> : sourceLoadError || !sourceIds.length ? <p role="alert" className="text-sm leading-7 text-amber-900">课程材料暂不可核实，不能固定正式题目版本。请返回课程添加或恢复一份可用材料；已写草稿仍保留。</p> : <SpanPractice key={`${mode}:${problemId}:${newEvidenceEventId ?? ""}`} courseId={courseId} sourceIds={sourceIds} problemId={problemId} intent={intent} intentRevision={intentRevision} newEvidenceEventId={newEvidenceEventId} retestId={delayedRetestId} onAttempt={setActiveAttempt} onIntentApplied={(next, action) => { setIntent(next); const nextMode = spanModeForIntent(next); if (action === "diagnose" || action === "increase_challenge" || nextMode !== mode) { setMode(nextMode); setStep(0); } }} onRecorded={record => setRecords(current => ({ ...current, [problemId]: record }))} />}
+        </> : sourceLoadError || !sourceIds.length ? <p role="alert" className="text-sm leading-7 text-amber-900">课程材料暂不可核实，不能固定正式题目版本。请返回课程添加或恢复一份可用材料；已写草稿仍保留。</p> : <SpanPractice key={entryKey} courseId={courseId} sourceIds={sourceIds} problemId={problemId} intent={intent} intentRevision={intentRevision} newEvidenceEventId={newEvidenceEventId} retestId={delayedRetestId} onAttempt={onAttempt} onIntentApplied={(next, action) => { setIntent(next); const nextMode = spanModeForIntent(next); if (action === "diagnose" || action === "increase_challenge" || nextMode !== mode) { setMode(nextMode); setStep(0); } }} onRecorded={record => setRecords(current => ({ ...current, [problemId]: record }))} />}
+        </SelectionAsk>
       </section>
       {complete ? <div className="space-y-3 rounded-xl bg-zinc-50 p-4"><h3 className="text-sm font-medium">下一步</h3><p className="text-sm leading-7">{currentRecord?.serverEvaluation?.decision === "correct" ? "这道题已核对。继续用新的结构检查，稍后再做延迟复测；本次正确尚不说明保持或稳固掌握。" : "先核对未一致的步骤或输入格式。原始首答保留，修正不会覆盖它；需要时回看例题，再用新题检查。"}</p>{currentRecord?.serverEvaluation?.decision !== "correct" ? <button type="button" className={ui.secondary} onClick={() => setStep(0)}>回看关系与示范</button> : null}<p className="text-xs leading-6 text-zinc-500">文字理由与解释质量另行核对；自动核算只对结构化数学步骤负责。</p>{currentRecord && !delayedRetestId ? <SpanDelayedRetestControl key={currentRecord.id} record={currentRecord} /> : null}</div> : null}
       <details className="text-xs leading-6 text-zinc-500"><summary className="cursor-pointer">本步骤期待观察什么</summary><p>{current.expectedObservation}</p><p>继续或停止：{current.continuation.stopWhen}</p><p>覆盖知识点：{current.targetKnowledgeComponents.join("、")}</p></details>

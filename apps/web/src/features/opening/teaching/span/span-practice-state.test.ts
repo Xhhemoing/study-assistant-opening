@@ -9,10 +9,14 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
   useRef: (initial: unknown) => { const i = hooks.cursor++; if (!(i in hooks.values)) hooks.values[i] = { current: initial }; return hooks.values[i]; },
   useMemo: (factory: () => unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { value: unknown; deps: unknown[] } | undefined;
     if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.values[i] = { value: factory(), deps }; return (hooks.values[i] as { value: unknown }).value; },
+  useCallback: (callback: unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { value: unknown; deps: unknown[] } | undefined;
+    if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.values[i] = { value: callback, deps }; return (hooks.values[i] as { value: unknown }).value; },
   useEffect: (effect: () => unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { deps: unknown[]; cleanup?: () => void } | undefined;
     if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.effects.push(() => { previous?.cleanup?.(); hooks.values[i] = { deps, cleanup: effect() }; }); },
 }));
 const mocks = vi.hoisted(() => ({ draft: null as PracticeDraft | null, readRecord: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), requireSaved: vi.fn(), ack: vi.fn() }));
+const studyBinding = vi.hoisted(() => ({ set: vi.fn() }));
+vi.mock("../../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
 vi.mock("../../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
 vi.mock("../../learning/practice-draft", async original => ({ ...await original<typeof import("../../learning/practice-draft")>(),
@@ -25,11 +29,12 @@ import { emptyPracticeDraft, practiceScope } from "../../learning/practice-draft
 import { getSpanProblem } from "@aistudy/domain";
 import { HintLadder } from "../hint-ladder";
 import { SpanPractice } from "./span-practice";
+import { SpanLesson } from "./span-lesson";
 const id = "11111111-1111-4111-8111-111111111111";
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
   sourceIds: [id], sourceVersions: { [id]: 1 }, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, spanExercise: getSpanProblem("span-independent-3d")! };
 const record = { id, answer: JSON.stringify({ membership: "in_span" }), assistance: "hinted" } as LearningObservation;
-const props: ComponentProps<typeof SpanPractice> = { courseId: id, sourceIds: [id], problemId: "span-independent-3d", intent: { purpose: "self_study", timeBudgetMinutes: 15, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, onRecorded: vi.fn() };
+const props: ComponentProps<typeof SpanPractice> = { courseId: id, sourceIds: [id], problemId: "span-independent-3d", intent: { purpose: "self_study", timeBudgetMinutes: 15, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, onRecorded: vi.fn(), onAttempt: vi.fn() };
 function find(node: ReactNode, match: (element: ReactElement<Record<string, unknown>>) => boolean): ReactElement<Record<string, unknown>> | undefined {
   if (Array.isArray(node)) return node.map(value => find(value, match)).find(Boolean);
   if (!isValidElement<Record<string, unknown>>(node)) return undefined;
@@ -79,4 +84,29 @@ it("keeps full demonstration disabled until the durable original is read and pre
   vi.mocked(fetch).mockResolvedValueOnce(response(4)); ladder().next!.request(); await settle();
   expect(ladder().next).toBeUndefined(); expect(mocks.draft!.fields.deliveredAssistance).toBe("revealed");
   expect(record.assistance).toBe("hinted"); expect(mocks.submitAttempt).toHaveBeenCalledOnce(); expect(props.onRecorded).toHaveBeenCalledOnce();
+});
+it("clears the registered attempt when its draft unmounts and ignores a delayed recovery callback", async () => {
+  let resolve!: (value: { observation: null; deliveredAssistance: "none" }) => void;
+  mocks.readRecord.mockReturnValueOnce(new Promise(value => { resolve = value; }));
+  await start();
+  expect(props.onAttempt).toHaveBeenCalledWith(null);
+  for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.();
+  resolve({ observation: null, deliveredAssistance: "none" }); await settle();
+  expect(props.onAttempt).not.toHaveBeenCalledWith(attempt); expect(props.onRecorded).not.toHaveBeenCalled();
+});
+it("registers the sole active span entry and never carries a previous step's attempt into a new question", () => {
+  const lessonProps = { courseId: id, sourceIds: [id], sourceLoadError: false, initialNewEvidenceEventId: id };
+  const lesson = () => { hooks.cursor = 0; const tree = SpanLesson(lessonProps); hooks.effects.splice(0).forEach(effect => effect()); return tree; };
+  const first = lesson(); const initial = find(first, node => node.type === SpanPractice)!;
+  (initial.props.onAttempt as (value: LearningAttempt | null) => void)(attempt); lesson();
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: attempt, context: expect.objectContaining({ attemptId: id, itemVersionId: id }) }));
+  const navigation = find(lesson(), node => node.type === "nav" && node.props["aria-label"] === "span 教学步骤")!;
+  const steps = navigation.props.children as ReactElement<{ onClick: () => void }>[];
+  steps[0]!.props.onClick(); lesson();
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: false, learningAttempt: null, blockedReason: expect.any(String) }));
+  steps[1]!.props.onClick(); lesson();
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: true, learningAttempt: null }));
+  expect(studyBinding.set.mock.lastCall![0].context).not.toHaveProperty("attemptId");
+  (initial.props.onAttempt as (value: LearningAttempt | null) => void)(attempt); lesson();
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: null }));
 });

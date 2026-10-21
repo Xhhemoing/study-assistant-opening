@@ -94,32 +94,32 @@ export function KnowledgeEvidence({
   const targets = evidenceTargetsForNode(node, { courseMediaAvailable });
   return (
     <section
-      className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3"
+      className="space-y-2 rounded-lg border border-line bg-surface-2 p-3"
       aria-labelledby={`evidence-panel-${node.id}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-xs font-semibold text-zinc-900" id={`evidence-panel-${node.id}`}>
+          <h3 className="text-xs font-semibold text-text" id={`evidence-panel-${node.id}`}>
             {node.label}
           </h3>
-          <p className="mt-0.5 text-[11px] text-zinc-500">
+          <p className="mt-0.5 text-xs text-text-3">
             {node.kind} · {node.status}
             {node.status === "supported" ? "" : " · 不显示掌握百分比"}
           </p>
         </div>
         {onClose ? (
-          <button type="button" className="text-xs text-zinc-600 underline" onClick={onClose}>
+          <button type="button" className="inline-flex min-h-11 min-w-11 items-center justify-center text-xs text-text-2 underline" onClick={onClose}>
             收起
           </button>
         ) : null}
       </div>
-      <ul className="space-y-1.5 text-xs leading-5 text-zinc-700" aria-label="知识依据">
+      <ul className="space-y-1.5 text-xs leading-5 text-text-2" aria-label="知识依据">
         {targets.map((target) => (
           <li key={`${target.kind}-${target.href ?? "none"}-${target.label}`}>
             {target.href ? (
               <Link
                 href={target.href}
-                className="text-emerald-800 underline decoration-emerald-300 underline-offset-2 hover:text-emerald-950"
+                className="inline-flex min-h-11 items-center text-accent underline decoration-accent underline-offset-2 hover:text-text"
               >
                 {target.label}
                 {target.kind === "video" && target.canSeek && target.startMs != null
@@ -127,7 +127,7 @@ export function KnowledgeEvidence({
                   : ""}
               </Link>
             ) : (
-              <span className="text-zinc-600">{target.label}</span>
+              <span className="text-text-2">{target.label}</span>
             )}
           </li>
         ))}

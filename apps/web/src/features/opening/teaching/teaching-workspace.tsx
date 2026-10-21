@@ -40,6 +40,9 @@ import { ActivityEndControl } from "./activity-end-control";
 import { TeachingGoalGuidance } from "./goal-guidance";
 import { sourceViewerHref } from "../inbox/source-viewer";
 import { StudyToolsPanel } from "./study-tools-panel";
+import { useStudyAssistantContext } from "../assistant/current-study-context";
+import { teachingAssistantContext } from "./lesson-assistant-context";
+import { SelectionAsk } from "./selection-ask";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
 
 export type TeachingToolsContext = {
@@ -385,7 +388,7 @@ export function TeachingWorkspace({
   );
 
   const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
-  const toolsContext: TeachingToolsContext = {
+  const toolsContext = useMemo<TeachingToolsContext>(() => ({
     activity: { ...liveActivity, contentVersion, pathVersion },
     blockId: currentQuestionId ?? blockFocus.currentBlockId,
     contentVersion,
@@ -395,7 +398,9 @@ export function TeachingWorkspace({
     sourceNameById,
     isQuestion: Boolean(currentQuestionId),
     learningAttempt: currentQuestionId ? attempts[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`] ?? null : null,
-  };
+  }), [liveActivity, contentVersion, pathVersion, currentQuestionId, blockFocus.currentBlockId, currentUnit, liveInit.sourceRefs, sourceNameById, attempts]);
+  const assistantContext = useMemo(() => ({ ...teachingAssistantContext(toolsContext), ...(!schemaOk ? { blockedReason: "当前学习内容暂不可核实，请重新读取后再提问。" } : {}) }), [toolsContext, schemaOk]);
+  useStudyAssistantContext(assistantContext);
   const contextualContent = typeof contextualTools === "function" ? contextualTools(toolsContext) : contextualTools;
   const toggleWholeLesson = () => {
     if (!showAll) setVisitedUnits(previous => new Set([...previous, ...units.map(unit => unit.id)]));
@@ -452,7 +457,7 @@ export function TeachingWorkspace({
           if (!showAll && !current && !visitedUnits.has(unit.id)) return null;
           return <div key={unit.id} hidden={!showAll && !current} className={current ? "space-y-5" : "space-y-5 [&_[data-inline-attempt]]:hidden"} data-study-unit={unit.id} data-study-unit-current={current ? "true" : "false"}>
             <h3 tabIndex={-1} className="break-words text-lg font-semibold leading-8 text-zinc-900 outline-none focus-visible:ring-2 focus-visible:ring-emerald-700">{unit.title}</h3>
-            {unit.blocks.filter(block => block.role !== "answer_key" && block.blockType !== "answer_key").map(block => <TeachingBlockItem key={block.blockId} block={block} focusStatus={blockFocus.statusById.get(block.blockId) ?? "upcoming"} schemaVersion={schemaVersion} sourceRefs={liveInit.sourceRefs} attemptContext={attemptContext} showCommands={false} activityId={liveActivity.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} whyAvailable={WHY_ASSIST_AVAILABLE} api={api} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} unitChrome />)}
+            <SelectionAsk binding={current ? assistantContext : null}>{unit.blocks.filter(block => block.role !== "answer_key" && block.blockType !== "answer_key").map(block => <TeachingBlockItem key={block.blockId} block={block} focusStatus={blockFocus.statusById.get(block.blockId) ?? "upcoming"} schemaVersion={schemaVersion} sourceRefs={liveInit.sourceRefs} attemptContext={attemptContext} showCommands={false} activityId={liveActivity.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} whyAvailable={WHY_ASSIST_AVAILABLE} api={api} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} unitChrome />)}</SelectionAsk>
           </div>;
         }) : null}
         {schemaOk && currentUnit ? <nav aria-label="学习单元导航" className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">

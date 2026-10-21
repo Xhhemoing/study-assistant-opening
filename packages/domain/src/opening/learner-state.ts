@@ -1,7 +1,73 @@
 import type { LearningObservation } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility, type EvidenceEligibility } from "./evidence-eligibility";
+import { evaluateEvidenceEligibility, resolveEvidenceAssistance, type EvidenceEligibility } from "./evidence-eligibility";
 import { evaluateTransferEligibility, type TransferEligibility, type TransferSpecification } from "./evidence-transfer-eligibility";
-import { summarizeObservations, type CourseEvidence } from "./learning-summary";
+import { summarizeObservations, type CourseEvidence, type RetestEvidenceIdentity } from "./learning-summary";
+
+export type LearnerEvidenceDisplayState = "independent" | "hinted" | "retest" | "insufficient";
+export const learnerEvidenceDisplayLabels: Record<LearnerEvidenceDisplayState, string> = {
+  independent: "独立完成", hinted: "依赖提示", retest: "待复测", insufficient: "证据不足",
+};
+
+/** Presentation of qualified evidence only; never changes the original assessment. */
+export function learnerEvidenceDisplayState(
+  observation: Pick<LearningObservation, "assistance" | "eligibility"> | null | undefined,
+  current: { dueRetest?: boolean; solutionDelivered?: boolean } = {},
+): LearnerEvidenceDisplayState {
+  const eligibility = observation?.eligibility;
+  if (!observation || !eligibility || eligibility.usableForCurrentVersion !== "yes") return "insufficient";
+  if (current.dueRetest || current.solutionDelivered || observation.assistance === "revealed"
+    || eligibility.reasonCodes.includes("prior_answer_exposure") || eligibility.verifiedCorrect === "no") return "retest";
+  if (eligibility.verifiedCorrect !== "yes") return "insufficient";
+  if (eligibility.independentAttempt === "yes" && observation.assistance === "independent") return "independent";
+  if (eligibility.independentAttempt === "no" && observation.assistance === "hinted") return "hinted";
+  return "insufficient";
+}
+
+export type LearnerStateDisplay = {
+  scope: "recorded_requirements";
+  counts: Record<LearnerEvidenceDisplayState, number>;
+  total: number;
+  /** Unknown requirement identity cannot be merged by display label. */
+  unscopedObservations: number;
+  requirements: Array<{ courseId: string; requirementKey: string; skillLabel: string; state: LearnerEvidenceDisplayState; observationIds: string[]; dueRetest: boolean }>;
+};
+
+function projectLearnerDisplay(evidence: CourseEvidence, features: LearnerStateFeature[], dueRetests: readonly RetestEvidenceIdentity[]): LearnerStateDisplay {
+  const groups = new Map<string, LearnerStateFeature[]>();
+  for (const feature of features) {
+    if (!feature.requirementKey) continue;
+    const key = JSON.stringify([feature.courseId, feature.requirementKey]);
+    const members = groups.get(key);
+    if (members) members.push(feature);
+    else groups.set(key, [feature]);
+  }
+  const observations = new Map(evidence.observations.map(row => [row.id, row]));
+  const requirements = [...groups.values()].map(members => {
+    const latestTime = members.reduce((latest, row) => Math.max(latest, Date.parse(row.attemptedAt)), -Infinity);
+    const latest = members.filter(row => Date.parse(row.attemptedAt) === latestTime);
+    const head = latest[latest.length - 1]!;
+    const dueRetest = dueRetests.some(row => row.courseId === head.courseId && row.requirementKey === head.requirementKey);
+    const states = latest.map(feature => {
+      const row = observations.get(feature.observationId)!;
+      const facts = evidence.evidenceContexts[feature.observationId];
+      // A delivered solution changes the next learning step, not the qualification
+      // of an original answer submitted before that delivery.
+      const solutionDelivered = Boolean(feature.attemptId && facts?.context.helpHistory?.exposures.some(exposure =>
+        exposure.attemptId === feature.attemptId && exposure.kind === "solution" && exposure.level === "revealed"
+        && (exposure.supportDomain !== "language" || facts.observation.assessmentDomain === "language") && exposure.delivered === true));
+      return learnerEvidenceDisplayState({ eligibility: feature.eligibility,
+        assistance: facts ? resolveEvidenceAssistance(facts.observation, facts.context) : row.assistance }, { dueRetest, solutionDelivered });
+    });
+    // Equal timestamps do not establish an ordering between conflicting attempts.
+    const state = states.every(value => value === states[0]) ? states[0]! : "insufficient";
+    return { courseId: head.courseId, requirementKey: head.requirementKey!, skillLabel: head.skillLabel, state,
+      observationIds: latest.map(row => row.observationId), dueRetest };
+  });
+  const counts: LearnerStateDisplay["counts"] = { independent: 0, hinted: 0, retest: 0, insufficient: 0 };
+  for (const row of requirements) counts[row.state] += 1;
+  return { scope: "recorded_requirements", counts, total: requirements.length,
+    unscopedObservations: features.filter(row => !row.requirementKey).length, requirements };
+}
 
 export type LearnerEvidenceView = "independent" | "retention" | "transfer" | "help";
 export type LearnerStateEvidence = {
@@ -28,6 +94,8 @@ export type LearnerState = {
   summary: Array<{ courseId: string; requirementKey: string | null; skillLabel: string;
     status: "unobserved" | "observed_independent" | "needs_check" | "needs_review"; sampleCount: number;
     views: Record<LearnerEvidenceView, number>; gaps: string[] }>;
+  /** Mutually exclusive evidence states for recorded requirements, not curriculum coverage. */
+  display: LearnerStateDisplay;
   evidence: LearnerStateEvidence[];
   /** Full chronological sequence, independent of the UI display limit. */
   features: LearnerStateFeature[];
@@ -41,7 +109,8 @@ export type LearnerState = {
 /** No inferred transfer tags or no-review retention claims; those require canonical protocol facts. */
 export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf: string; stateVersion: string;
   persistedRows?: number; limit?: number; measurementFeatures?: LearnerMeasurementFeature[]; currentSourceVersions?: Record<string, number>;
-  transferSpecifications?: Record<string, TransferSpecification>; observationFamilies?: Record<string, string> }): LearnerState {
+  transferSpecifications?: Record<string, TransferSpecification>; observationFamilies?: Record<string, string>;
+  dueRetests?: readonly RetestEvidenceIdentity[] }): LearnerState {
   const ordered = [...input.evidence.observations].sort((a, b) => {
     const time = (row: LearningObservation) => input.evidence.evidenceContexts[row.id]?.observation.submittedAt
       ?? Date.parse(row.submittedAt ?? row.occurredAt);
@@ -103,7 +172,8 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
   }
   return { stateVersion: input.stateVersion, dataAsOf: input.dataAsOf,
     policyVersion: features[0]?.eligibility.policyVersion ?? evaluateEvidenceEligibility({}, {}).policyVersion,
-    sourceVersions, currentSourceVersions: input.currentSourceVersions ?? {}, summary, evidence, features, measurementFeatures: input.measurementFeatures ?? [],
+    sourceVersions, currentSourceVersions: input.currentSourceVersions ?? {}, summary, display: projectLearnerDisplay(input.evidence, features, input.dueRetests ?? []),
+    evidence, features, measurementFeatures: input.measurementFeatures ?? [],
     projection: { mode: "live_read", persistedRows: input.persistedRows ?? 0, eligibleHeads: features.length, repairTriggered: false },
     completeness: { status: features.length > evidence.length ? "truncated" : "complete", total: features.length,
       returned: evidence.length, gaps: [...(features.length ? [] : ["no_observation_evidence"]),

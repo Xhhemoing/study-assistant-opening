@@ -36,6 +36,7 @@ export function InboxPanel({
   renderMetadata,
   onAssign,
   renderBelow,
+  expandedSourceId = null,
   courseId = null,
   courseRole = "reference",
   initialOpen = null,
@@ -61,6 +62,8 @@ export function InboxPanel({
   renderMetadata?: (record: SourceRecord) => ReactNode;
   onAssign?: (id: string) => void;
   renderBelow?: (record: SourceRecord) => ReactNode;
+  /** Preserve an externally controlled editor across automatic filtering and pagination. */
+  expandedSourceId?: string | null;
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
   courseRole?: CourseRole;
@@ -79,6 +82,11 @@ export function InboxPanel({
   const displayed = visibleSources ?? sources.filter(record => record.name.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
   const processingSources = (liveSources ?? displayed).filter(isProcessingSource);
   const processingIds = new Set(processingSources.map(record => record.id));
+  const listedSources = [...processingSources, ...displayed.filter(record => !processingIds.has(record.id))];
+  const listedIds = new Set(listedSources.map(record => record.id));
+  const retainedSources = sources.filter(record => !listedIds.has(record.id) && (record.id === managedId || record.id === expandedSourceId));
+  const retainedIds = new Set(retainedSources.map(record => record.id));
+  const renderedSources = [...listedSources, ...retainedSources];
   const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
   useEffect(() => {
     if (!initialOpen) return;
@@ -263,7 +271,7 @@ export function InboxPanel({
       </details> : null}
       <SourceCleanupPanel revision={sources} />
       <ul className="divide-y divide-line border-y border-line">
-        {[...processingSources, ...displayed.filter(record => !processingIds.has(record.id))].map((record) => (
+        {renderedSources.map((record) => (
           <li key={record.id}>
             <div className="flex items-start gap-2 px-2 py-1">
               {onToggle ? <input aria-label={`选择材料 ${record.name}`} type="checkbox" checked={selectedIds?.has(record.id) ?? false} disabled={selectionDisabled} onChange={() => onToggle(record.id)} className="mt-3 size-6 shrink-0 accent-accent" /> : null}
@@ -285,12 +293,13 @@ export function InboxPanel({
               onDelete={() => openManage(record.id, "delete")}
               onAssign={onAssign}
             />}{renderMetadata?.(record)}</div></div>
+            {retainedIds.has(record.id) ? <p role="status" className="px-4 py-2 text-xs text-text-2">正在编辑的材料暂时保留在此处；关闭表单后将按当前筛选显示。</p> : null}
             {sourceTools(record)}
             <p className="sr-only">{sourceStatusLabel(record)}</p>
           </li>
         ))}
       </ul>
-      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !displayed.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
+      {!sources.length ? <EmptyState title="还没有材料" description="选择文件或拍照，上传后的真实处理状态会显示在这里。" /> : !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
         record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}

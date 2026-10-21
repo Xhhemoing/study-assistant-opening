@@ -29,6 +29,23 @@ export async function readOpeningLearnerState(tx: TransactionSql, scope: Scope,
   const contexts = await readOpeningLearningEvidenceContexts(tx, scope, mapped);
   const observations = mapped.filter(row => contexts[row.id]?.context.version?.applicability !== "privacy_excluded");
   const evidenceContexts = Object.fromEntries(observations.map(row => [row.id, contexts[row.id]!]));
+  const dataAsOf = new Date(owner.data_as_of as Date).toISOString();
+  // Match the accepted-retest queue's time floors in the same evidence snapshot.
+  // A proposal, a completed task, or an inferred review interval is never due.
+  const dueRows = await tx`SELECT a.course_id,a.requirement_key,a.skill_label FROM opening_retest_activities a
+    JOIN opening_tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id AND t.owner_user_id=a.owner_user_id
+      AND t.status='pending' AND (t.not_before IS NULL OR t.not_before <= ${dataAsOf})
+    JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
+    WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
+      AND a.status IN ('accepted','in_progress') AND a.purpose='retest'
+      AND COALESCE(a.scheduled_start_at,a.recommended_at) IS NOT NULL
+      AND COALESCE(a.scheduled_start_at,a.recommended_at) <= ${dataAsOf}
+      AND (a.not_before_at IS NULL OR a.not_before_at <= ${dataAsOf})
+      AND (a.snoozed_until IS NULL OR a.snoozed_until <= ${dataAsOf})
+      AND ${input.courseId ? tx`a.course_id=${input.courseId}` : tx`TRUE`}
+    ORDER BY a.course_id,a.requirement_key,a.id`;
+  const dueRetests = dueRows.map(row => ({ courseId: String(row.course_id),
+    requirementKey: row.requirement_key == null ? null : String(row.requirement_key), skillLabel: String(row.skill_label) }));
   const sourceIds = [...new Set(observations.flatMap(row => [...row.sourceIds, ...Object.keys(row.sourceVersions ?? {})]))];
   const currentSources = sourceIds.length ? await tx`SELECT id,version FROM opening_sources s WHERE workspace_id=${scope.workspaceId}
     AND id=ANY(${sourceIds}::uuid[]) AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id) ORDER BY s.id` : [];
@@ -71,9 +88,9 @@ export async function readOpeningLearnerState(tx: TransactionSql, scope: Scope,
   });
   // Source/privacy/help changes can bypass a course history counter. Bind the version to
   // the actual qualified read inputs, so an old decision cannot survive those changes.
-  const stateVersion = createHash("sha256").update(JSON.stringify({ observations, evidenceContexts, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies })).digest("hex");
+  const stateVersion = createHash("sha256").update(JSON.stringify({ observations, evidenceContexts, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies, dueRetests })).digest("hex");
   return assembleLearnerState({ evidence: { observations, evidenceContexts }, stateVersion,
-    dataAsOf: new Date(owner.data_as_of as Date).toISOString(), persistedRows: Number(projections[0]?.count ?? 0), limit: input.limit, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies });
+    dataAsOf, persistedRows: Number(projections[0]?.count ?? 0), limit: input.limit, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies, dueRetests });
 }
 
 export function createOpeningLearnerStateService(sql: Sql) {
