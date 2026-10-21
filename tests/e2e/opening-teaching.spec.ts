@@ -165,7 +165,7 @@ test.describe("Opening span durable teaching flow", () => {
       await expect(practice.getByRole("heading", { name: "本题精确核对通过", exact: true })).toBeVisible();
       await practice.getByText("封存的原答案", { exact: true }).click();
       await expect(practice.locator("pre")).toHaveText(submission.answer);
-      await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).getByRole("listitem")).toHaveCount(4);
+      await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).locator(":scope > ol > li")).toHaveCount(4);
       const recovered = await readLesson(context.request, course.courseId, lesson.activityId);
       expect(recovered.attempts.find(row => row.id === attempt.id)).toMatchObject({ itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, observationId: observation.id });
       expect(recovered.hintLevels[attempt.id]).toEqual([1, 2, 3, 4]);

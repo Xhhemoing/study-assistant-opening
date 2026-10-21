@@ -124,7 +124,7 @@ test("same-version graceful Web and worker restart restores the persisted learni
     await expect(page.getByLabel("时间预算（分钟）", { exact: true })).toHaveValue("12");
     await practice.getByText("封存的原答案", { exact: true }).click();
     await expect(practice.locator("pre")).toHaveText(submission.answer);
-    await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).getByRole("listitem")).toHaveCount(2);
+    await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).locator(":scope > ol > li")).toHaveCount(2);
     expect(await readTeachingEvidence(course, attempt.id)).toEqual(before);
     const replay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: submission });
     expect(replay.status()).toBe(201);
