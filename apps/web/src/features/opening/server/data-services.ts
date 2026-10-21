@@ -17,6 +17,7 @@ import {
   createOpeningInterventionSettingsRepository,
   createOpeningModelProvidersRepository,
   createOpeningPlanningSettingsRepository,
+  createOpeningFirstLearningRepository,
   createOpeningAdaptivePrefsRepository,
   createOpeningReminderRepository,
   createOpeningTutorJobsRepository,
@@ -58,6 +59,7 @@ export function openingQueries(sql: Sql) {
 
 export const getReminderService = (sql: Sql) =>
   createOpeningReminderService(createOpeningReminderRepository(sql));
+export const getFirstLearningService = (sql: Sql) => createOpeningFirstLearningRepository(sql);
 export const getPlanningSettingsService = (sql: Sql) => createOpeningPlanningSettingsRepository(sql);
 export const getAdaptivePrefsService = (sql: Sql) => createOpeningAdaptivePrefsRepository(sql);
 export const getInterventionSettingsService = (sql: Sql) => createOpeningInterventionSettingsRepository(sql);

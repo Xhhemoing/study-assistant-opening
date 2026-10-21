@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { CourseGoal, TaskItem, TeachingActivity } from "@aistudy/contracts";
 import type { OpeningApi } from "../opening/client/api";
 
-export function useCourseStudy(courseId: string, api: OpeningApi, enabled: boolean, adaptivePlanning: boolean) {
+export function useCourseStudy(courseId: string, api: OpeningApi, enabled: boolean, loadGoal = Boolean(courseId)) {
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [goal, setGoal] = useState<CourseGoal | null>(null);
@@ -22,11 +22,14 @@ export function useCourseStudy(courseId: string, api: OpeningApi, enabled: boole
       void api.listTasks().then(result => { if (active) setTasks(result.tasks); })
         .catch(() => { if (active) setTaskError("待办任务暂时无法读取，可继续已有活动或自由练习。"); });
     }
-    if (adaptivePlanning) {
-      void api.getAdaptivePrefs().then(result => { if (active) setGoal(result.prefs.courseGoals[courseId] ?? null); })
+    if (loadGoal && courseId) {
+      void api.getAdaptivePrefs().then(result => {
+        if (result.invalidStoredPrefs) throw new Error("stored goal preferences unavailable");
+        if (active) setGoal(result.prefs.courseGoals[courseId] ?? null);
+      })
         .catch(() => { if (active) setTaskError("目标摘要暂时无法读取，可直接练习或在课程目标中重试。"); });
     }
     return () => { active = false; };
-  }, [adaptivePlanning, api, courseId, enabled, revision]);
+  }, [loadGoal, api, courseId, enabled, revision]);
   return { activities, tasks, goal, loading, error, taskError, reload: () => setRevision(value => value + 1) };
 }

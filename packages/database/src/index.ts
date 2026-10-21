@@ -67,6 +67,8 @@ export * from "./schema/opening-planning";
 export * from "./schema/opening-plan-feedback";
 export { readOpeningPlanFeedbackSummary } from "./repositories/opening-plan-feedback";
 export * from "./repositories/opening-plans";
+export { createOpeningFirstLearningRepository, type OpeningFirstLearningRepository, type FirstLearningDaySeed,
+  type FirstLearningInitializationInput, type FirstLearningInitializationResult } from "./repositories/opening-first-learning";
 export * from "./repositories/opening-reminders";
 export * from "./repositories/opening-connections";
 export * from "./schema/opening-imports";

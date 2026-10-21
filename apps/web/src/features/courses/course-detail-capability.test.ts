@@ -41,22 +41,22 @@ describe("course detail planning capability", () => {
     states[0] = null; states[3] = "课程读取失败";
     expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(false);
   });
-  it("hides the entire goal section while capabilities are closed", () => {
+  it("keeps the basic goal section visible while adaptive planning is closed", () => {
     const tree = render();
-    expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
-    expect(contains(tree, type => type === CourseGoalForm)).toBe(false);
+    expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(true);
+    expect(contains(tree, type => type === CourseGoalForm)).toBe(true);
     expect(contains(tree, (type, children) => type === "h2" && children === "学习进展与记录")).toBe(true);
   });
 
-  it("shows the goal section and form only after adaptive planning is enabled", () => {
+  it("keeps the same goal form when adaptive planning changes", () => {
     caps.adaptivePlanning = true;
     const tree = render();
     expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(true);
     expect(contains(tree, type => type === CourseGoalForm)).toBe(true);
     caps.adaptivePlanning = false;
     const closed = render();
-    expect(contains(closed, type => type === CourseGoalForm)).toBe(false);
-    expect(contains(closed, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
+    expect(contains(closed, type => type === CourseGoalForm)).toBe(true);
+    expect(contains(closed, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(true);
   });
 
   it("keeps the legacy surface without Opening goal controls", () => {

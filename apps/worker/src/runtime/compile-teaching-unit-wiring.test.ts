@@ -159,6 +159,18 @@ const payload = {
 };
 
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
+  it("does not spend or publish an empty lesson when the operator disables compilation", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "0");
+    const dependencies = shared();
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, dependencies);
+    await expect(createCompileTeachingUnitHandler(deps)(job, payload)).rejects.toThrow("AI 主讲当前已关闭");
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(dependencies.budget.reserve).not.toHaveBeenCalled();
+    expect(content.createUnit).not.toHaveBeenCalled();
+    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(activities.setGenerateStatus).toHaveBeenCalledWith(expect.anything(), ACTIVITY, "failed", expect.anything());
+  });
+
   it("enforces the persisted prerequisite prompt boundary at actual publication even after revalidation removes the prelude", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     const learnerFocus: TeachingLearnerFocus = { skillLabel: "秩与零空间", activityKind: "diagnose", reasonCode: "no_evidence",

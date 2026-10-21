@@ -772,9 +772,7 @@ export function createCompilerBuildPublishInput(
 export function isTeachingCompilerEnabled(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): boolean {
-  const raw =
-    env.OPENING_TEACHING_COMPILER_ENABLED ??
-    env.TEACHING_COMPILER_ENABLED ??
-    "";
+  const raw = [env.OPENING_TEACHING_COMPILER_ENABLED, env.TEACHING_COMPILER_ENABLED]
+    .map(value => value?.trim()).find(value => value) ?? "1";
   return raw === "1" || raw.toLowerCase() === "true" || raw.toLowerCase() === "yes";
 }

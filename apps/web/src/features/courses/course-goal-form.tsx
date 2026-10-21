@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CourseGoal, CourseGoalUpdate, GoalLearningMode, OpeningAdaptivePrefsPatch } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../opening/client/api";
-import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 import { ui } from "../opening/design/ui";
 import { CourseMilestones } from "./course-milestones";
 
@@ -49,7 +48,6 @@ export function CourseGoalForm({
   courseId: string;
   api?: OpeningApi;
 }) {
-  const { adaptivePlanning } = useOpeningCapabilities();
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
 
   const [targetDate, setTargetDate] = useState("");
@@ -71,7 +69,6 @@ export function CourseGoalForm({
   const saving = useRef(false);
 
   useEffect(() => {
-    if (!adaptivePlanning) return;
     let active = true;
     setLoading(true);
     setError("");
@@ -80,6 +77,7 @@ export function CourseGoalForm({
       .getAdaptivePrefs()
       .then((res) => {
         if (!active) return;
+        if (res.invalidStoredPrefs) throw new Error("已保存的课程目标暂时无法读取，请重试。");
         setLoadFailed(false);
         const existing = res.prefs.courseGoals[courseId];
         setStoredGoal(existing ?? null);
@@ -111,9 +109,7 @@ export function CourseGoalForm({
     return () => {
       active = false;
     };
-  }, [adaptivePlanning, api, courseId, reloadToken]);
-
-  if (!adaptivePlanning) return null;
+  }, [api, courseId, reloadToken]);
 
   const datePast =
     Boolean(targetDate) && /^\d{4}-\d{2}-\d{2}$/.test(targetDate) && targetDate < todayLocalDate();
@@ -212,7 +208,7 @@ export function CourseGoalForm({
         <h2 id="course-goal-heading" className="text-sm font-semibold text-text">
           课程目标
         </h2>
-        <p className="text-xs text-text-3">{hasGoal ? "已设置" : "未设置"}</p>
+        <p className="text-xs text-text-3">{loading ? "读取中" : loadFailed ? "暂不可读取" : hasGoal ? "已设置" : "未设置"}</p>
       </div>
       <p className="mt-1 text-xs leading-6 text-text-3">
         先选择目标日期与讲练方式；日期留空支持长期学习。未设置目标也可以直接开始。

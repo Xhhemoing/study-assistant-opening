@@ -36,9 +36,8 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
-  // V2-08 + M2b: when OPENING_TEACHING_COMPILER_ENABLED, the teaching.compile route's model
-  // writes the focus item through the model gateway (reservation, snapshot, settle there);
-  // otherwise keep V2-07 stub publish (empty blockOrder + extras.stub). Cancel/epoch fences unchanged.
+  // Real lessons always use the model gateway. An explicit off switch fails the job
+  // before budget/content writes instead of publishing an empty placeholder lesson.
   // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
@@ -64,20 +63,8 @@ export function createCompileTeachingUnitWorkerDeps(
     budget,
     resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
     ...modelPath,
-    provider: {
-      complete: async () => ({
-        text: JSON.stringify(
-          teachingCompilerOn
-            ? { compiler: "teaching-compiler" }
-            : { stub: true },
-        ),
-        citedChunkIds: [],
-        requestId: null,
-        candidates: [],
-        inputTokens: 1,
-        outputTokens: 1,
-      }),
-    },
+    enabled: teachingCompilerOn,
+    provider: null,
     reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),

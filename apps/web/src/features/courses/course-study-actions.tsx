@@ -17,7 +17,7 @@ const CourseStudyContext = createContext<ReturnType<typeof useCourseStudy> | nul
 export function CourseStudyProvider({ courseId, children }: { courseId: string; children: ReactNode }) {
   const api = useMemo(() => createOpeningApi(), []);
   const capabilities = useOpeningCapabilities();
-  const study = useCourseStudy(courseId, api, capabilities.teachingLoop.api && capabilities.teachingLoop.ui, capabilities.adaptivePlanning);
+  const study = useCourseStudy(courseId, api, capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   return <CourseStudyContext.Provider value={study}>{children}</CourseStudyContext.Provider>;
 }
 
@@ -57,7 +57,7 @@ export function CourseStudyActions({
   const capabilities = useOpeningCapabilities();
   const enabled = opening && Boolean(courseId) && capabilities.teachingLoop.api && capabilities.teachingLoop.ui;
   const inherited = useContext(CourseStudyContext);
-  const localStudy = useCourseStudy(courseId ?? "", api, !inherited && enabled, !inherited && opening && Boolean(courseId) && capabilities.adaptivePlanning);
+  const localStudy = useCourseStudy(courseId ?? "", api, !inherited && enabled, !inherited && opening && Boolean(courseId));
   const study = inherited ?? localStudy;
   const current = courseId ? currentCourseActivity(study.activities, courseId) : null;
   const courseActivities = courseId ? courseStudyActivities(study.activities, courseId) : [];
@@ -97,7 +97,7 @@ export function CourseStudyActions({
         {archived ? "课程已归档，可以阅读材料与查看记录。恢复课程后可继续学习。" : current ? current.intentSummary : tasks[0]?.title ?? "选择一个主题即可开始；也可以直接读材料或记笔记。"}
       </p>
       {current ? <p className="mt-1 text-xs leading-6 text-text-3">{courseActivityNextStep(current)}</p> : null}
-      {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && capabilities.adaptivePlanning && !study.taskError ? <p className="mt-1 text-xs text-text-3">未设置目标也可以开始。</p> : null}
+      {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && !study.taskError ? <p className="mt-1 text-xs text-text-3">未设置目标也可以开始。</p> : null}
       <nav aria-label="课程学习方式" className="mt-3 flex flex-wrap items-center gap-2">
         {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : studyHref}>
           {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : enabled ? "开始学习" : "开始独立练习"}<ArrowRight size={14} aria-hidden="true" />

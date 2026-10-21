@@ -204,13 +204,13 @@ describe("parseWeeklyMinutes / helpers", () => {
   });
 });
 
-describe("CourseGoalForm capability gate", () => {
-  it("does not render when adaptivePlanning is false", () => {
+describe("CourseGoalForm basic availability", () => {
+  it("renders the basic goal form when adaptivePlanning is false", () => {
     capsState.adaptivePlanning = false;
     const html = renderToStaticMarkup(
       createElement(CourseGoalForm, { courseId: COURSE_ID, api: mockApi() }),
     );
-    expect(html).toBe("");
+    expect(html).toContain('data-testid="course-goal-form"');
   });
 
   it("renders section when adaptivePlanning is true", () => {

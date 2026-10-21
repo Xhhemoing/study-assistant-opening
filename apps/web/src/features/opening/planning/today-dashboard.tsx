@@ -6,7 +6,7 @@ import { buttonClass, EmptyState, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningCardsClient } from "../cards/cards-client";
-import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
+import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
@@ -128,8 +128,8 @@ export function TodayDashboard({
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
   const noCourses = hasNoTodayCourses(state);
-  const currentCourseId = currentActivity ? currentActivity.courseId : state.continueItem?.courseId;
-  const courseTitle = state.courses?.status === "ready" ? state.courses.items.find(course => course.id === currentCourseId)?.title : undefined;
+  const currentCourse = currentTodayCourse(state, currentActivity);
+  const courseTitle = currentCourse?.title;
   const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
     ? `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}`
@@ -337,9 +337,11 @@ export function TodayDashboard({
         {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取，未将读取失败当成没有课程。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
         {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
         <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
-          {currentActivity || state.continueItem ? <TodayLearningContext
+          {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
             item={state.continueItem}
             courseTitle={courseTitle}
+            course={currentCourse}
+            timeZone={timeZone}
             activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
             resume={learningResume}
             onShowActions={showActions}
@@ -353,7 +355,7 @@ export function TodayDashboard({
               >
                 {ctaBusy ? "处理中…" : ctaLabel}
               </button>
-            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : null}
+            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentCourse.id)}/study`} data-today-primary-cta="true">开始学习</Link> : null}
             secondaryAction={
               <Link href={assistantHref} className={ui.quiet}>
                 自由对话

@@ -51,6 +51,8 @@ export type TeachingGenerateStatus =
   | "stale";
 
 export type CompileTeachingUnitDeps = {
+  /** Explicit operator kill switch; false fails before creating content or spending budget. */
+  enabled?: boolean;
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
   /** Stub provider OK until V2-08; null disables model path. Ignored when callModel is set. */
   provider: BudgetedProvider | null;
@@ -224,6 +226,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
     };
 
     try {
+      if (deps.enabled === false) throw Object.assign(new Error("AI 主讲当前已关闭，请联系管理员开启后重新生成。"), { code: "TEACHING_COMPILER_DISABLED" });
       await deps.setGenerateStatus(scope, body.activityId, "generating", {
         from: ["queued", "generating"],
       });

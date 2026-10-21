@@ -272,3 +272,5 @@ export { studyContextAnchorSchema, studyExposureReceiptSchema, type StudyContext
 export * from "./material-retrieval-evaluation";
 
 export * from "./span-session";
+
+export { firstLearningInputSchema, type FirstLearningInput } from "./first-learning";

@@ -20,7 +20,6 @@ import { sourceViewerHref } from "../opening/inbox/source-viewer";
 import { CoursePanel, CourseTabs } from "./course-tabs";
 import { legacyCourseStudyHref } from "./course-tabs-route";
 import { CourseSprintMode } from "./course-sprint-mode";
-import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 import { LearnerStateCard } from "../opening/teaching/learner-state-card";
 import { useDiagnosticsEnabled } from "../opening/settings/appearance-preferences";
 
@@ -211,7 +210,6 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 /** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
 export function CourseDetail({ id, surface = "opening", mode }: { id: string; surface?: CourseDetailSurface; mode?: "sprint" }) {
   const router = useRouter();
-  const { adaptivePlanning } = useOpeningCapabilities();
   const paths = COURSE_DETAIL_PATHS[surface];
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   useEffect(() => {
@@ -254,7 +252,7 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
           <p className="text-sm leading-6 text-text-2">查看当前有效的学习证据与历史记录。自报、提示后的作答和独立完成会分别标明。</p>
-          {adaptivePlanning ? <section aria-labelledby="course-goal-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section> : null}
+          <section aria-labelledby="course-goal-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>
           <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
         </CoursePanel>
         <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</CoursePanel>
