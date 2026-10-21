@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assistantEntry, assistantRedirect, isAssistantShortcut } from "./assistant-entry";
+import { studyContextReturnHref, studyConversationHref } from "./study-conversation-context";
 const id = "11111111-1111-4111-8111-111111111111";
 
 describe("global assistant entry", () => {
@@ -15,6 +16,20 @@ describe("global assistant entry", () => {
   it("keeps invalid pinned identity blocked, never opens an unscoped fallback", () => {
     expect(assistantEntry(`/opening/assistant?version=2`).error).toContain("停止发送");
     expect(assistantEntry(`/opening/assistant?attemptId=bad`).error).toContain("停止发送");
+  });
+  it.each(["/opening/review?tab=cards", "/opening/cards?courseId=" + id])("round-trips a card question with its review return location %s", returnTo => {
+    const context = {
+      courseId: id,
+      purpose: "card_answer" as const,
+      label: "一元二次方程",
+      fragment: "判别式有什么作用？\n参考内容：判断实根的个数。",
+      returnTo,
+    };
+    const entry = assistantEntry(studyConversationHref(context));
+    expect(entry.error).toBeUndefined();
+    expect(entry.context).toEqual(context);
+    expect(entry.fresh).toBe(true);
+    expect(studyContextReturnHref(entry.context ?? undefined)).toBe(returnTo);
   });
   it("restores conversation identity and binds an unscoped open to the current course", () => {
     expect(assistantEntry("/opening/assistant?conversation=conversation-a").conversation).toBe("conversation-a");

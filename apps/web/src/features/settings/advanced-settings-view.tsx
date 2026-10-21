@@ -64,7 +64,7 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
   }
 
   return (
-    <main className="min-w-0 bg-bg text-text">
+    <div className="min-w-0 bg-bg text-text">
       <PageHeading
         title="高级设置"
         description="每日额度与 AI 模型、默认入口、计划自主权、导出与备份。学习闭环相关项在主设置页。"
@@ -163,6 +163,6 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
         </details>
         {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
       </div>
-    </main>
+    </div>
   );
 }

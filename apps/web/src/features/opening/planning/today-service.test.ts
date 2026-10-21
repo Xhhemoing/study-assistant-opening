@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../auth/service";
 import { createTodayResumeReader, loadTodayResumeState, type TodayResumeReader } from "./today-service";
+import { hasNoTodayCourses } from "./today-read";
 
 const scope = {
   workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -29,6 +30,23 @@ function reader(latest = owned, pending = 0): TodayResumeReader {
 }
 
 describe("loadTodayResumeState", () => {
+  it("uses the owned course read alone to establish first-course emptiness", async () => {
+    const noConversation = reader(null as never, 0);
+    expect(hasNoTodayCourses(await loadTodayResumeState({ scope, reader: noConversation }))).toBe(false);
+    const withCourses = { ...noConversation, courses: vi.fn(async () => [{ id: owned.courseId, title: "真实课程", archivedAt: "2026-10-01T00:00:00Z" }]) };
+    const existing = await loadTodayResumeState({ scope, reader: withCourses });
+    expect(hasNoTodayCourses(existing)).toBe(false);
+    expect(existing.courses).toMatchObject({ status: "ready", items: [{ title: "真实课程" }] });
+    const noCourses = await loadTodayResumeState({ scope, reader: { ...reader(), courses: async () => [] } });
+    expect(hasNoTodayCourses(noCourses)).toBe(true);
+    expect(noCourses.continueItem?.conversationId).toBe(owned.id);
+  });
+
+  it("keeps a failed course read distinct from zero courses while retaining usable resume facts", async () => {
+    const result = await loadTodayResumeState({ scope, reader: { ...reader(), courses: async () => { throw new Error("courses unavailable"); } } });
+    expect(result).toMatchObject({ kind: "ready", courses: { status: "error" }, continueItem: { conversationId: owned.id } });
+    expect(hasNoTodayCourses(result)).toBe(false);
+  });
   it("does not read another owner's conversation", async () => {
     const facts = reader();
     const state = await loadTodayResumeState({ scope: other, reader: facts });

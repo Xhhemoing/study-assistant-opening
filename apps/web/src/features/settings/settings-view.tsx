@@ -63,7 +63,7 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
   }
 
   return (
-    <main className="min-w-0 bg-bg">
+    <div className="min-w-0 bg-bg">
       <PageHeading
         title="设置"
         description="调整外观与阅读，配置 AI 模型，管理数据连接、开学排程与学习偏好。模型路由与默认入口见高级设置。"
@@ -191,6 +191,6 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
 
         {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
       </div>
-    </main>
+    </div>
   );
 }

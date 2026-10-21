@@ -5,6 +5,7 @@ import {
   createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 
 let fixture: OpeningFixture;
 
@@ -30,6 +31,53 @@ async function seedConversation() {
 }
 
 describe("tutor job recovery repository", () => {
+  it.each([
+    { jobStatus: "failed", turnStatus: "failed", detail: {}, message: TUTOR_FAILURE_MESSAGE },
+    { jobStatus: "failed", turnStatus: "failed", detail: { code: "REQUEST_CAP_EXCEEDED" }, message: "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。" },
+    { jobStatus: "failed", turnStatus: "clarify", detail: { code: "page_not_in_sources", nextAction: "clarify" }, message: PAGE_CITATION_CLARIFY_MESSAGE },
+    { jobStatus: "outcome_unknown", turnStatus: "outcome_unknown", detail: {}, message: TUTOR_UNKNOWN_MESSAGE },
+    { jobStatus: "outcome_unknown", turnStatus: "pending", detail: {}, message: TUTOR_UNKNOWN_MESSAGE },
+    { jobStatus: "cancelled", turnStatus: "failed", detail: {}, message: TUTOR_CANCELLED_MESSAGE },
+  ])("hides legacy $jobStatus/$turnStatus diagnostics at job, history and preview reads without rewriting storage", async ({ jobStatus, turnStatus, detail, message }) => {
+    const diagnostic = "SQL SELECT credential FROM private at /server/secret.ts:4";
+    const { conversationId, append } = await seedConversation();
+    const saved = await append(diagnostic);
+    await fixture.sql`UPDATE opening_tutor_jobs SET status=${jobStatus}, error=${fixture.sql.json({ message: diagnostic, ...detail })} WHERE id=${saved.jobId}`;
+    await fixture.sql`UPDATE opening_turns SET status=${turnStatus}, text=${diagnostic}, created_at=now()+interval '1 second' WHERE id=${saved.assistantTurnId}`;
+    const jobs = createOpeningTutorJobsRepository(fixture.sql);
+    const conversations = createOpeningConversationRepository(fixture.sql);
+
+    expect((await jobs.get(fixture.scope, saved.jobId))?.error?.message).toBe(message);
+    const turns = await conversations.listTurns(fixture.scope, conversationId);
+    expect(turns.find(turn => turn.id === saved.assistantTurnId)).toMatchObject({ text: message, status: turnStatus });
+    // A user's technical question is their content, never treated as an exception by string matching.
+    expect(turns.find(turn => turn.id === saved.turnId)?.text).toBe(diagnostic);
+    const summary = (await conversations.listSummaries(fixture.scope)).find(item => item.id === conversationId)!;
+    expect(summary.lastTurnPreview).not.toContain(diagnostic);
+    expect(summary.lastTurnPreview).toBe(turnStatus === "failed" && jobStatus !== "cancelled" ? TUTOR_FAILURE_MESSAGE : message);
+    expect(await conversations.loadContinuityTurns(fixture.scope, conversationId)).toEqual([
+      { id: saved.turnId, role: "user", text: diagnostic, citations: [] },
+      ...(turnStatus === "pending" ? [{ id: saved.assistantTurnId, role: "assistant", text: message, citations: [] }] : []),
+    ]);
+    if (jobStatus === "outcome_unknown") expect(await jobs.findPendingForConversation(fixture.scope, conversationId))
+      .toMatchObject({ id: saved.jobId, status: "outcome_unknown", error: { message: TUTOR_UNKNOWN_MESSAGE } });
+    expect(await jobs.get(fixture.otherScope, saved.jobId)).toBeNull();
+    await expect(conversations.listTurns(fixture.otherScope, conversationId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await fixture.sql`SELECT text FROM opening_turns WHERE id=${saved.assistantTurnId}`)[0]?.text).toBe(diagnostic);
+  });
+
+  it("preserves successful model and user text even when it looks like a technical exception", async () => {
+    const text = "Error: SELECT examples FROM tutorial at /example.ts:1";
+    const { conversationId, append } = await seedConversation();
+    const saved = await append(text);
+    await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${saved.jobId}`;
+    await fixture.sql`UPDATE opening_turns SET status='complete', text=${text}, created_at=now()+interval '1 second' WHERE id=${saved.assistantTurnId}`;
+    const conversations = createOpeningConversationRepository(fixture.sql);
+    expect((await conversations.listTurns(fixture.scope, conversationId)).map(turn => turn.text)).toEqual([text, text]);
+    expect((await conversations.listSummaries(fixture.scope)).find(item => item.id === conversationId)?.lastTurnPreview).toBe(text);
+    expect((await conversations.loadContinuityTurns(fixture.scope, conversationId)).map(turn => turn.text)).toEqual([text, text]);
+  });
+
   it.each(["queued", "running"] as const)("restores the latest %s job with its pending assistant turn", async (status) => {
     const { conversationId, append } = await seedConversation();
     const saved = await append();

@@ -1,10 +1,12 @@
-import { readOpeningAssistantReviewCandidates, readOpeningRetestReviewCandidates, type OpeningConversationScope } from "@aistudy/database";
+import { readOpeningAssistantReviewCandidates, readOpeningRetestReviewCandidates, readOpeningTodayCourses, type OpeningConversationScope, type OpeningTodayCourse } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
 import { validatePageSelection } from "../tutor/page-selection";
 import { resolveTodayResume, type TodayResumeState } from "./today-read";
 
 export type TodayResumeReader = {
+  /** Optional for legacy callers; absence is unknown, never an empty course list. */
+  courses?(scope: OpeningConversationScope): Promise<OpeningTodayCourse[]>;
   latestOwned(scope: OpeningConversationScope): Promise<{
     id: string;
     title: string;
@@ -69,6 +71,7 @@ export function createTodayResumeReader(sql: Sql): TodayResumeReader {
     };
   }
   return {
+    courses: scope => readOpeningTodayCourses(sql, scope),
     async latestOwned(scope) {
       const rows = await sql`
         SELECT
@@ -120,11 +123,15 @@ export async function loadTodayResumeState(input: {
     return resolveTodayResume({ hasSession: false, loadFailed: false });
   }
   try {
-    const [latest, pendingConfirmations] = await Promise.all([
+    const [latest, pendingConfirmations, courses] = await Promise.all([
       input.reader.latestOwned(input.scope),
       input.reader.pendingCandidateCount(input.scope),
+      input.reader.courses?.(input.scope).then(items => ({ status: "ready" as const, items })).catch(error => {
+        if (error instanceof ApiError && error.status === 401) throw error;
+        return { status: "error" as const };
+      }),
     ]);
-    return resolveTodayResume({
+    const state = resolveTodayResume({
       hasSession: true,
       loadFailed: false,
       pendingConfirmations,
@@ -140,6 +147,7 @@ export async function loadTodayResumeState(input: {
           }
         : undefined,
     });
+    return courses ? { ...state, courses } : state;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       return resolveTodayResume({ hasSession: false, loadFailed: false });

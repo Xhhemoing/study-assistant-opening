@@ -210,6 +210,7 @@ export {
   type AdaptiveTutorRecommendInput,
   type AdaptiveTutorActionKind,
 } from "./opening/tutor-policy";
+export { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE } from "./opening/tutor-failure";
 export {
   nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,

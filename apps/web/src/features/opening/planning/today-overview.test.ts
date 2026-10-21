@@ -73,12 +73,11 @@ describe("Today learning context", () => {
     expect(html).not.toContain("可恢复 0 份材料");
   });
 
-  it("surfaces compact Opening loop links without inventing new product routes", () => {
+  it("keeps the relevant action entry while global destinations use the existing navigation", () => {
     const html = renderToStaticMarkup(createElement(TodayLearningContext));
     expect(html).toContain('data-today-loop-links="true"');
-    expect(html).toContain('href="/opening/review"');
-    expect(html).toContain('href="/opening/suggestions"');
-    expect(html).toContain('href="/opening/settings/connections"');
+    expect(html).not.toContain("更多学习方式");
+    expect(html).not.toContain("<details");
     expect(html).toContain('href="#action-digest"');
     expect(html.match(/href="\/opening\/courses"/g)).toHaveLength(1);
     expect(html).toContain('href="/opening/courses"');

@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
+import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 import type {
   Citation,
   ConversationCreateInput,
@@ -94,11 +95,15 @@ function iso(value: string | Date): string {
 
 /** A legacy/imported receipt is untrusted JSON; never display its text after provenance rejection. */
 function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationScope) {
+  const terminalPendingJob = row.status === "pending" && ["failed", "cancelled", "outcome_unknown"].includes(String(row.job_status));
+  const failureStatus = row.role === "assistant" && (["failed", "clarify", "outcome_unknown"].includes(String(row.status)) || terminalPendingJob)
+    ? terminalPendingJob ? row.job_status : row.status === "failed" && row.job_status === "cancelled" ? "cancelled" : row.status : null;
+  const failure = tutorFailureForDisplay(failureStatus, row.job_error);
   const parsed = row.system_query == null ? null : systemQueryReceiptSchema.safeParse(row.system_query);
   const invalid = parsed !== null && (!parsed.success || parsed.data.authorization.purpose !== "system_record_lookup"
     || parsed.data.authorization.workspaceId !== scope.workspaceId || parsed.data.authorization.principalId !== scope.ownerUserId);
-  return { text: invalid ? "此查询回执的来源或权限无法核实，内容不再显示；请重新查询。" : row.text as string,
-    citations: invalid ? [] : (row.citations as Citation[] | null) ?? [], systemQuery: !invalid && parsed?.success ? parsed.data : null };
+  return { text: failure?.message ?? (invalid ? "此查询回执的来源或权限无法核实，内容不再显示；请重新查询。" : row.text as string),
+    citations: failure || invalid ? [] : (row.citations as Citation[] | null) ?? [], systemQuery: !failure && !invalid && parsed?.success ? parsed.data : null };
 }
 
 export function createOpeningConversationRepository(sql: Sql) {
@@ -175,12 +180,17 @@ export function createOpeningConversationRepository(sql: Sql) {
               CASE
                 WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)}
                   THEN '关联材料已删除，此回答内容不再显示。'
+                WHEN t.role='assistant' AND (t.status='outcome_unknown' OR (t.status='pending' AND j.status='outcome_unknown')) THEN ${TUTOR_UNKNOWN_MESSAGE}
+                WHEN t.role='assistant' AND t.status='clarify' THEN ${PAGE_CITATION_CLARIFY_MESSAGE}
+                WHEN t.role='assistant' AND (t.status='failed' OR (t.status='pending' AND j.status IN ('failed','cancelled'))) THEN
+                  CASE WHEN j.status='cancelled' THEN ${TUTOR_CANCELLED_MESSAGE} ELSE ${TUTOR_FAILURE_MESSAGE} END
                 WHEN t.system_query IS NOT NULL THEN '系统记录查询快照，请打开核对回执。'
                 ELSE coalesce(t.text, '')
               END,
               280
             )
             FROM opening_turns t
+            LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id
             WHERE t.conversation_id = c.id
             ORDER BY t.created_at DESC,t.id DESC
             LIMIT 1
@@ -213,7 +223,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       const rows = await sql`
         SELECT t.id, t.conversation_id, t.role,
           CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
-          t.mode, t.status, t.created_at,t.context_anchor,CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
+          t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
           CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
         LEFT JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id
@@ -264,13 +274,15 @@ export function createOpeningConversationRepository(sql: Sql) {
     ): Promise<Array<{ id?: string; role: "user" | "assistant"; text: string; citations: Citation[] }>> {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
-        SELECT t.id,role, CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE text END AS text,
-          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE citations END AS citations, system_query
+        SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
+          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
+          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations, t.system_query
         FROM opening_turns t
-        WHERE conversation_id = ${conversationId}
-          AND workspace_id = ${scope.workspaceId}
-          AND status IN ('complete', 'pending')
-        ORDER BY created_at ASC
+        LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id AND j.conversation_id=t.conversation_id
+        WHERE t.conversation_id = ${conversationId}
+          AND t.workspace_id = ${scope.workspaceId}
+          AND t.status IN ('complete', 'pending')
+        ORDER BY t.created_at ASC
       `;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
