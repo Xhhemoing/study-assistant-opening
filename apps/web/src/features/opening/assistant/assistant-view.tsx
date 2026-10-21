@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type ComposerPurpose, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
-import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
+import { Composer, logicalSendFingerprint, nextClientKey, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMessages, type ChatMessageView } from "./message-model";
@@ -652,7 +652,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setPendingHint("本轮已取消；不保存模式的内容不会写入对话。",);
   }
 
-  async function handleSubmit(input: ComposerSubmit): Promise<{ accepted: boolean }> {
+  async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
     // Check the current clock at the actual send boundary, including background tabs.
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
@@ -745,7 +745,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           ? "隐私设置已变化或旧临时历史无法验证，已清除旧临时上下文；本次只发送当前输入和允许的材料。"
           : "本轮仅保留在当前标签页；刷新后不会恢复。");
         preserveEntrySelection.current = false;
-        setDraft("");
+        if (!options?.preserveDraft) setDraft("");
         setPending(false);
         abortRef.current = null;
         return { accepted: true };
@@ -775,7 +775,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       setPendingHint("回答任务已提交，等待状态更新。");
       abortRef.current = null;
       preserveEntrySelection.current = false;
-      setDraft("");
+      if (!options?.preserveDraft) setDraft("");
       await refreshConversation(id);
       return { accepted: true };
     } catch (err) {
@@ -870,8 +870,24 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     setPurposePrefill({ purpose: starter.purpose, nonce });
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
   }
-  function prepareReplyMode(mode: "hint" | "explain") {
-    if (pending || loading || recoveryRequired) return;
+  const directExplainKey = useRef<{ clientKey: string; fingerprint: string } | null>(null);
+  const directExplainBusy = useRef(false);
+  async function prepareReplyMode(mode: "hint" | "explain") {
+    if (pending || loading || recoveryRequired || directExplainBusy.current) return;
+    if (mode === "explain") {
+      const reply = display.messages.filter(message => message.role === "assistant" && (!message.status || message.status === "complete")).at(-1);
+      if (!reply) return;
+      const text = "请直接完整讲解刚才的问题，包括解题步骤和每一步的理由。";
+      const issued = nextClientKey({ clientKey: directExplainKey.current?.clientKey ?? null, fingerprint: directExplainKey.current?.fingerprint ?? null,
+        nextFingerprint: `${reply.id}:${conversationId ?? ""}:${studyConversationIdentity(studyContext)}:${logicalSendFingerprint({ text, mode, privacy, sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage) })}` });
+      directExplainKey.current = issued;
+      directExplainBusy.current = true;
+      try {
+        const result = await handleSubmit({ text, mode, purpose: "answer", privacy, clientKey: issued.clientKey }, { preserveDraft: true });
+        if (result.accepted) directExplainKey.current = null;
+      } finally { directExplainBusy.current = false; }
+      return;
+    }
     setModePrefill({ mode, nonce: Date.now() });
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
   }

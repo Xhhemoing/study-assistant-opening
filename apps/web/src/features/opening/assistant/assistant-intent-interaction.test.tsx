@@ -32,6 +32,27 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 
+it("direct explanation sends once, preserves a written draft, and retries the same logical request", async () => {
+  const submitTurn = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ jobId, turnId: sourceId });
+  const turns = [{ id: sourceId, conversationId, role: "assistant", text: "先想想第一步", status: "complete", mode: "hint", citations: [], createdAt: "2026-10-21T10:00:00Z" }];
+  const api = {
+    listSources: vi.fn(async () => []), submitTurn,
+    resumeConversation: vi.fn(async () => ({ conversationId, courseId: null, sourceIds: [], boundedHistory: [], historyTruncated: false })),
+    listTurns: vi.fn(async () => turns), getPendingJob: vi.fn(async () => null),
+    getJob: vi.fn(async () => ({ id: jobId, status: "succeeded", error: null, updatedAt: "2026-10-21T10:00:00Z" })),
+  } as unknown as OpeningApi;
+  await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId} initialDraft="保留我正在写的推导" />));
+  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
+  await act(async () => { explain().click(); explain().click(); });
+  expect(submitTurn).toHaveBeenCalledOnce();
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我正在写的推导");
+  await act(async () => explain().click());
+  expect(submitTurn).toHaveBeenCalledTimes(2);
+  expect(submitTurn.mock.calls[1]?.[0]).toEqual(submitTurn.mock.calls[0]?.[0]);
+  expect(submitTurn.mock.lastCall?.[0]).toMatchObject({ mode: "explain", purpose: "answer", privacy: "saved", text: expect.stringContaining("刚才的问题") });
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我正在写的推导");
+});
+
 it("sends an automatically detected record query through the real workspace despite blocked AI/material context", async () => {
   const question = "我今天有哪些学习任务？";
   const submitTurn = vi.fn().mockResolvedValue({ jobId, turnId: sourceId });

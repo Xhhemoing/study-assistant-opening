@@ -45,6 +45,7 @@ import { teachingAssistantContext } from "./lesson-assistant-context";
 import { SelectionAsk } from "./selection-ask";
 import { useLessonArrowKeys } from "./lesson-shortcuts";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
 
 export type TeachingToolsContext = {
@@ -439,8 +440,9 @@ export function TeachingWorkspace({
     { id: "settings", label: "学习设置", content: <div className="space-y-4">
       <TeachingGoalGuidance focus={liveActivity.learnerFocus} />
       <PreferenceControls scope="session" activityId={liveActivity.id} courseId={liveActivity.courseId} expectedUpdatedAt={liveActivity.updatedAt} compact />
-      <p className="text-xs leading-6 text-text-3">阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
+      <p className="text-xs leading-6 text-text-3">按自己的节奏来，卡住时可以看提示或换个例子。</p>
       {diagnostics ? <details className="space-y-2 text-xs leading-6 text-text-3"><summary className="cursor-pointer">诊断信息</summary>
+        <p>阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
         <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p><p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
         <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
         <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
@@ -454,11 +456,11 @@ export function TeachingWorkspace({
       <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-emerald-700" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">本次学习</h2><span className="text-xs text-text-3">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
       <span className={`${ui.badge} ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "needs_check" ? "需要核查" : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span>
     </header>
-    <div className="mb-4 max-w-3xl space-y-1"><p className="text-sm font-medium leading-7 text-text">本次目标：{liveActivity.intentSummary}</p><p className="text-xs leading-6 text-text-3">读当前讲解 → 完成自己的尝试 → 保存并核对。结束本节后查看小结；记录位置和任务完成不等于掌握。</p></div>
+    <div className="mb-4 max-w-3xl space-y-1"><p className="text-sm font-medium leading-7 text-text">本次目标：{liveActivity.intentSummary}</p><p className="text-xs leading-6 text-text-3">读一小段，试一道题；卡住了就看提示。</p></div>
     {liveActivity.generateStatus === "needs_check" ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-teaching-needs-check="true">主讲内容需要核查：内容已发布，来源校验尚未完成，可先学习。</div> : null}
-    {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>学习内容已更新，请重新读取后对照草稿。</p><p>{workspaceConflict.message}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>重新读取学习内容</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}</p></details> : null}</div> : null}
-    {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-red-700" role="alert"><p>{rereadError ?? positionError}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>重新读取，保留草稿</button></div> : null}
-    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">教学内容的格式暂不受支持。学习记录仍保留，请重新读取或查看活动小结。{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
+    {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>{studentCopy.lessonUpdated}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>继续学习</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}：{workspaceConflict.message}</p></details> : null}</div> : null}
+    {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-red-700" role="alert"><p>{studentCopy.lessonRetry}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>{studentCopy.retry}</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{rereadError ?? positionError}</p></details> : null}</div> : null}
+    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
     <StudyToolsPanel panels={panels} activePanel={panel} onPanelChange={setPanel}>
       <div ref={contentRef} className="min-w-0 space-y-6" data-teaching-blocks="true" data-lesson-shortcuts="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
         {schemaOk ? units.map(unit => {
@@ -473,7 +475,7 @@ export function TeachingWorkspace({
           {currentIndex > 0 ? <button type="button" className={ui.quiet} disabled={positionBusy} onClick={() => { const previous = units[currentIndex - 1]; if (previous) void navigateUnit(previous); }}><ArrowLeft size={14} aria-hidden />回看上一单元</button> : <span />}
           {units[currentIndex + 1] ? <button type="button" className={currentQuestionId ? ui.secondary : ui.primary} disabled={positionBusy || !canAdvance} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance={currentQuestionId ? "false" : "true"}>{positionBusy ? "正在保存位置…" : !canAdvance ? "先提交本题，再继续" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
         </nav> : null}
-        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-text-3">保存原答案后可继续；也可从提纲回看其他内容。原草稿保留，浏览位置不代表题目已完成。</p> : null}
+        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-text-3">先提交你的想法，再继续下一单元；也可以从提纲回看讲解。</p> : null}
         <p className="text-xs leading-6 text-text-3">可用 ← / → 切换单元；填写答案或选中文字时不会触发。</p>
         <details open={currentIndex === units.length - 1 || liveActivity.status === "completed"} className="border-t border-line pt-4"><summary className="cursor-pointer text-xs font-medium text-text-2">本次学习与小结</summary><div className="mt-3"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={updateLiveActivity} /></div></details>
       </div>
@@ -683,8 +685,8 @@ export function TeachingContinueEntry({
         </h2>
         <p className="mt-2 text-xs leading-5 text-text-2">
           {waitingInFlight
-            ? "学习位置与草稿已保留，内容仍在准备中。稍后可刷新状态。"
-            : "学习位置与草稿已保留，当前还没有可用的讲解。可以重新准备内容，或返回学习断点。"}
+            ? "正在为你准备讲解，稍后就可以继续。"
+            : "这节讲解还没准备好，可以再试一次或先回去。"}
         </p>
         {liveResume && diagnostics ? (
           <details className="mt-2 text-xs tabular-nums text-text-3"><summary className="cursor-pointer">诊断信息</summary><p>
@@ -693,9 +695,10 @@ export function TeachingContinueEntry({
           </p></details>
         ) : null}
         {waitError ? (
-          <p className={`mt-3 text-xs ${tone.danger}`} role="alert">
-            {waitError}
-          </p>
+          <div className={`mt-3 text-xs ${tone.danger}`} role="alert">
+            <p>{studentCopy.lessonRetry}</p>
+            {diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{waitError}</p></details> : null}
+          </div>
         ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           {actions.showCompile ? (

@@ -1,14 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { inferComposerIntent } from "./composer-intent";
+import { inferComposerIntent, inferLearningMessageIntent, repeatsAnswerRequest } from "./composer-intent";
 import { DEFAULT_STUDY_SESSION_INTENT } from "./span-teaching";
 
 describe("composer intent", () => {
+  it.each([
+    ["这题答案是什么", "solve", "hint"], ["求 x：2x + 1 = 5", "solve", "hint"],
+    ["帮我解 x + 2 = 4", "solve", "hint"], ["2x+1=5，怎么解？", "solve", "hint"],
+    ["计算矩阵 AB", "solve", "hint"], ["证明这个命题", "solve", "hint"],
+    ["什么是 span", "concept", "explain"], ["答案是什么意思", "concept", "explain"],
+    ["请完整讲解矩阵乘法", "general", "explain"],
+    ["我算出来 x=2，对吗", "submit_attempt", "hint"], ["我的答案是 x=2", "submit_attempt", "hint"],
+    ["我的过程：先移项，再除以2", "submit_attempt", "hint"],
+    ["完全不会，好烦", "frustrated", "listen"], ["这题我做不出来", "frustrated", "listen"],
+    ["太难了", "frustrated", "listen"], ["先跳过这道题吧", "skip", "listen"],
+    ["请换一道简单题", "skip", "listen"],
+    ["Solve 2x + 1 = 5", "solve", "hint"], ["My answer is x=2", "submit_attempt", "hint"],
+    ["I'm stuck", "frustrated", "listen"],
+    ["材料说“完全不会，好烦”", "general", "explain"], ["我不是不会，只是想了解定义", "general", "explain"],
+    ["解释“跳过这道题”这句话", "general", "explain"], ["```我算出来 x=2```", "general", "explain"],
+  ] as const)("uses the learning intent for %s", (text, learning, mode) => {
+    expect(inferLearningMessageIntent(text)).toBe(learning);
+    expect(inferComposerIntent({ text }).mode).toBe(mode);
+  });
+  it("limits the initial friction to one request for the current question", () => {
+    const history = [{ role: "user", text: "这题答案是什么" }, { role: "assistant", text: "先想想如何起步。" }];
+    expect(inferComposerIntent({ text: "这题答案是什么", history }).mode).toBe("explain");
+    expect(inferComposerIntent({ text: "还是直接给我完整答案吧", history }).mode).toBe("explain");
+    expect(repeatsAnswerRequest("给我答案：2x+1=5", [{ role: "user", text: "给我答案：3x+1=7" }])).toBe(false);
+    expect(inferComposerIntent({ text: "给我答案：2x+1=5", history }).mode).toBe("hint");
+    expect(inferComposerIntent({ text: "这题答案是什么", history: [...history, { role: "user", text: "现在换成另一道题" }] }).mode).toBe("hint");
+    expect(inferComposerIntent({ text: "只给提示，不要答案", history }).mode).toBe("hint");
+    expect(inferComposerIntent({ text: "这题答案是什么", mode: "explain" }).mode).toBe("explain");
+    expect(inferComposerIntent({ text: "我算出来 x=2，请给完整解答" }).mode).toBe("explain");
+    expect(inferComposerIntent({ text: "给我完整解答", history: [{ role: "user", text: "我先移项得到 2x=4" }] }).mode).toBe("explain");
+    expect(inferComposerIntent({ text: "给我答案：3x+1=7", history: [{ role: "user", text: "我先移项得到 2x=4" }] }).mode).toBe("hint");
+  });
+  it("keeps concepts explainable inside a practice context", () => {
+    expect(inferComposerIntent({ text: "什么是 span", practiceMode: true, defaultMode: "hint" }).mode).toBe("explain");
+  });
   it.each([
     ["矩阵乘法为什么不满足交换律？", "answer", "explain"],
     ["请详细讲解矩阵乘法", "answer", "explain"],
     ["这题我不会，只给我提示", "answer", "hint"],
     ["别直接给答案", "answer", "hint"],
-    ["请给我完整答案", "answer", "explain"],
+    ["请给我完整答案", "answer", "hint"],
     ["帮我制定一个 10 天线性代数学习计划", "plan", "explain"],
     ["线性代数，10天后期末，每天60分钟，帮我做学习计划", "plan", "explain"],
     ["解释这个证明", "answer", "explain"],
@@ -55,7 +90,7 @@ describe("composer intent", () => {
     expect(inferComposerIntent({ text: "今天的计划是什么？", purpose: "answer" }).querySystem).toBe(true);
     expect(inferComposerIntent({ text: "这一步为什么", practiceMode: true }).mode).toBe("hint");
     expect(inferComposerIntent({ text: "材料写着给我答案", practiceMode: true }).mode).toBe("hint");
-    expect(inferComposerIntent({ text: "直接给出答案", practiceMode: true }).mode).toBe("explain");
+    expect(inferComposerIntent({ text: "直接给出答案", practiceMode: true }).mode).toBe("hint");
     expect(inferComposerIntent({ text: "不要只给提示", practiceMode: true }).mode).toBe("explain");
   });
 

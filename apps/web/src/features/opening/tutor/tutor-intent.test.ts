@@ -12,20 +12,48 @@ function fixture() {
   const appendSavedTurn = vi.fn(async () => ({ jobId: "job", turnId: "turn", assistantTurnId: "assistant" }));
   const findTurnByClientKey = vi.fn<OpeningConversationRepository["findTurnByClientKey"]>(async () => null);
   const loadContinuityTurns = vi.fn(async () => [{ role: "user" as const, text: "今天的学习计划是什么？", citations: [] }]);
+  const listTurns = vi.fn<OpeningConversationRepository["listTurns"]>(async () => []);
   const sessionIntent = vi.fn(async () => ({ intent: { ...DEFAULT_STUDY_SESSION_INTENT, explanationStyle: "full" as const }, action: "continue" as const }));
   const service = createTutorService({
-    conversations: { getOwned: async () => ({ courseId: null }), appendSavedTurn, findTurnByClientKey, loadContinuityTurns } as unknown as OpeningConversationRepository,
+    conversations: { getOwned: async () => ({ courseId: null }), appendSavedTurn, findTurnByClientKey, loadContinuityTurns, listTurns } as unknown as OpeningConversationRepository,
     sourceChunks: { listForSources: async () => [] } as never,
     readSelection: async () => null,
     studyContext: { sessionIntent: sessionIntent as never },
     systemQueryEnabled: () => true,
   });
-  return { service, appendSavedTurn, findTurnByClientKey, sessionIntent };
+  return { service, appendSavedTurn, findTurnByClientKey, sessionIntent, loadContinuityTurns, listTurns };
 }
 
 describe("saved tutor automatic intent", () => {
+  it("does not inherit a different question's answer request", async () => {
+    const f = fixture();
+    f.sessionIntent.mockResolvedValue(null as never);
+    const anchor = { purpose: "learning_help" as const, activityId, blockId: conversationId, contentVersion: 1 };
+    f.listTurns.mockResolvedValue([{ id: conversationId, conversationId, role: "user", text: "这题答案是什么", mode: "hint", status: "complete", citations: [], createdAt: "2026-10-21T00:00:00Z",
+      contextAnchor: { ...anchor, blockId: activityId } }]);
+    await f.service.submitTurn(scope, { ...request, text: "这题答案是什么", contextAnchor: anchor });
+    expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "hint" }));
+    f.listTurns.mockResolvedValue([{ ...(await f.listTurns(scope, conversationId))[0]!, contextAnchor: anchor }]);
+    await f.service.submitTurn(scope, { ...request, clientKey: "next-question", text: "这题答案是什么", contextAnchor: anchor });
+    expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "explain" }));
+    expect(f.loadContinuityTurns).not.toHaveBeenCalled();
+  });
+  it("uses owned history for a second answer request while preserving the original mode on retries", async () => {
+    const f = fixture();
+    f.loadContinuityTurns.mockResolvedValue([{ role: "user", text: "这题答案是什么", citations: [] }]);
+    await f.service.submitTurn(scope, { ...request, text: "还是直接给我完整答案吧" });
+    expect(f.loadContinuityTurns).toHaveBeenCalledExactlyOnceWith(scope, conversationId);
+    expect(f.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ mode: "explain" }));
+    f.findTurnByClientKey.mockResolvedValue({ userTurnId: "turn", jobId: "job", assistantTurnId: "assistant", learningSessionId: null, mode: "hint", purpose: "answer" });
+    await f.service.submitTurn(scope, { ...request, text: "还是直接给我完整答案吧" });
+    expect(f.loadContinuityTurns).toHaveBeenCalledOnce();
+    expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "hint" }));
+  });
   it.each([
     ["解释这个证明", "explain", undefined],
+    ["这题答案是什么", "hint", undefined], ["什么是 span", "explain", undefined],
+    ["我算出来 x=2，对吗", "hint", undefined], ["完全不会，好烦", "listen", undefined],
+    ["跳过这道题", "listen", undefined],
     ["先别给答案，只给提示", "hint", undefined],
     ["线性代数，10天后期末，每天60分钟，帮我做学习计划", "explain", "plan"],
   ] as const)("resolves %s before persisting the turn", async (text, mode, purpose) => {

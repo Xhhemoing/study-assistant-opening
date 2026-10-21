@@ -359,7 +359,7 @@ describe("TeachingWorkspace", () => {
       }),
     );
     expect(html).toContain("data-workspace-schema-fail=\"true\"");
-    expect(html).toContain("教学内容的格式暂不受支持");
+    expect(html).toContain("这节内容暂时打不开");
     expect(html).not.toContain("schema 版本不受支持");
   });
 
