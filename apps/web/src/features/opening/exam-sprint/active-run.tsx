@@ -3,6 +3,7 @@
 import type { ExamAttemptView, ExamSprintOverview } from "@aistudy/contracts";
 import { useEffect, useState } from "react";
 import { ui, tone } from "../design/ui";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { ExamSprintIntent } from "./client";
 import { causeLabels, formatDuration, hasSprintAttemptHelp, modeLabels } from "./labels";
 
@@ -18,10 +19,11 @@ function RunClock({ startedAt, deadlineAt, now }: { startedAt: string; deadlineA
 }
 
 export function AttemptFeedback({ attempt, disabled, send }: { attempt: ExamAttemptView; disabled: boolean; send: Send }) {
+  const diagnostics = useDiagnosticsEnabled();
   if (!attempt.feedback) return null;
   const assisted = hasSprintAttemptHelp(attempt);
   return <div className="space-y-3 rounded-lg bg-surface-2 p-4">
-    <p className="text-sm font-semibold text-text">{attempt.answer === null ? "未作答" : attempt.correct ? "回答正确" : "需要再练"} · {assisted ? "含帮助，不计独立正确" : !attempt.answeredAt ? "尚未形成作答证据" : attempt.exposureCoverage ? "早期资料曝光无法核验，当前不计独立证据" : attempt.independent ? "未见题族独立作答" : "当前不计新增独立证据（重复、帮助或资格变化）"}</p>
+    <p className="text-sm font-semibold text-text">{attempt.answer === null ? "未作答" : attempt.correct ? "回答正确" : "需要再练"}{diagnostics ? <> · {assisted ? "含帮助，不计独立正确" : !attempt.answeredAt ? "尚未形成作答证据" : attempt.exposureCoverage ? "早期资料曝光无法核验，当前不计独立证据" : attempt.independent ? "未见题族独立作答" : "当前不计新增独立证据（重复、帮助或资格变化）"}</> : null}</p>
     <p className="text-sm">参考答案：{attempt.feedback.answer}</p>
     <p className="whitespace-pre-wrap font-reading text-[17px] leading-[30px] text-text">{attempt.feedback.explanation}</p>
     {attempt.answeredAt ? <label className="block max-w-xs space-y-1"><span className={ui.label}>这次卡在哪里？（可修正）</span><select className={ui.input} disabled={disabled} value={attempt.errorCause ?? ""} onChange={event => send({ action: "error", attemptId: attempt.id, errorCause: (event.target.value || null) as ExamAttemptView["errorCause"] })}><option value="">未标记</option>{Object.entries(causeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : null}

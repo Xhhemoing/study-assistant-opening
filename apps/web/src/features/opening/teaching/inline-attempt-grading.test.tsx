@@ -123,3 +123,13 @@ it.each([record, graded])("keeps completed lesson history read-only: $verdictSou
   expect(Array.from(container.querySelectorAll("button")).some(button => ["AI 批改", "判错了", "纠正记录", "撤回记录"].includes(button.textContent ?? ""))).toBe(false);
   expect(api.gradeObservation).not.toHaveBeenCalled(); expect(api.submitAttempt).not.toHaveBeenCalled();
 });
+
+it("prepares a question without an extra click and does not submit or grade it", async () => {
+  await render(); await render();
+  expect(api.createSession).toHaveBeenCalledOnce();
+  expect(api.createAttempt).toHaveBeenCalledOnce();
+  expect(api.submitAttempt).not.toHaveBeenCalled();
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  expect(container.textContent).not.toMatch(/封存|曝光|回执|资格|记录的技能|开始本题并启用提示/);
+  expect(container.querySelector("form")).not.toBeNull();
+});

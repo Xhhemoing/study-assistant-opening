@@ -19,6 +19,7 @@ export function SpanLessonSession(props: Props) {
   const activityId = useRef(props.initialActivityId);
   const requestId = useRef(0), busy = useRef(false);
   const createKey = useRef<string | null>(null);
+  const autoStarted = useRef(false);
   const readRoute = useRef({ courseId: props.courseId, retestId: props.delayedRetestId, activityId: props.initialActivityId, revision });
   const query = useCallback(() => {
     const params = new URLSearchParams({ courseId: props.courseId });
@@ -37,6 +38,7 @@ export function SpanLessonSession(props: Props) {
     if (!scopeChanged && activityChanged && props.initialActivityId === activityId.current && previous.revision === revision) return;
     if (scopeChanged || activityChanged) {
       activityId.current = props.initialActivityId;
+      autoStarted.current = false;
       createKey.current = null; busy.current = false;
       setDetails(null); setShowSummary(false); setPending(false);
     }
@@ -46,6 +48,11 @@ export function SpanLessonSession(props: Props) {
       if (version === requestId.current) { setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
     }).catch(reason => { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "无法恢复本次学习。"); });
   }, [query, revision, props.initialActivityId]);
+  useEffect(() => {
+    if (!details || details.session || error || props.sourceLoadError || !props.sourceIds.length || autoStarted.current) return;
+    autoStarted.current = true;
+    void start();
+  }, [details, error, props.sourceLoadError, props.sourceIds]);
   function remember(value: SpanLessonSnapshot) {
     activityId.current = value.activityId;
     const url = new URL(window.location.href); url.searchParams.set("lesson", value.activityId);
@@ -86,11 +93,11 @@ export function SpanLessonSession(props: Props) {
   const restoredAttempts = details?.attempts.filter(attempt => !attempt.spanExercise?.id.startsWith("span-reserved-") ||
     (evidenceEvent ? attempt.startedAt >= evidenceEvent.createdAt : !props.initialNewEvidenceEventId)) ?? [];
   return <div className="h-full min-h-0 min-w-0 text-text">
-    {error ? <div role="alert" className="m-4 space-y-2 rounded-lg border border-danger p-3 text-sm"><p>{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => setRevision(value => value + 1)}>重新读取已保存进度</button></div> : null}
-    {!details ? <p role="status" className="p-5 text-sm text-text-2">正在核对本次活动、原答和提示记录…</p> : !session ? <section className="mx-auto max-w-3xl space-y-4 p-5"><h1 className="text-xl font-semibold">线性组合与 span</h1><p className="text-sm leading-7">目标：建立向量等式，求系数并检查所有坐标。本次学习会保存步骤、原题、首答和帮助记录，退出后可继续。</p><p className="text-sm text-text-2">约 {props.initialIntent?.timeBudgetMinutes ?? 20} 分钟；进入后可随时调整或暂停。</p><button type="button" className={ui.primary} disabled={pending || props.sourceLoadError || !props.sourceIds.length} onClick={() => void start()}>{pending ? "正在开始…" : props.delayedRetestId ? "开始本次延迟复测" : "开始本次学习"}</button>{props.sourceLoadError || !props.sourceIds.length ? <p className="text-sm text-warn">请先关联一份可用课程材料，再开始正式学习。</p> : null}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}/study`}>返回课程</Link></section> : <>
+    {error ? <div role="alert" className="m-4 space-y-2 rounded-lg border border-danger p-3 text-sm"><p>{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => setRevision(value => value + 1)}>继续加载</button></div> : null}
+    {!details ? <p role="status" className="p-5 text-sm text-text-2">正在准备这节课…</p> : !session ? <section className="mx-auto max-w-3xl space-y-4 p-5"><h1 className="text-xl font-semibold">线性组合与 span</h1><p className="text-sm leading-7">目标：建立向量等式，求系数并检查所有坐标。</p><p className="text-sm text-text-2">约 {props.initialIntent?.timeBudgetMinutes ?? 20} 分钟；进入后可随时调整或暂停。</p><button type="button" className={ui.primary} disabled={pending || props.sourceLoadError || !props.sourceIds.length} onClick={() => void start()}>{pending ? "正在开始…" : props.delayedRetestId ? "开始本次延迟复测" : "开始本次学习"}</button>{props.sourceLoadError || !props.sourceIds.length ? <p className="text-sm text-warn">请先关联一份可用课程材料，再开始正式学习。</p> : null}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}/study`}>返回课程</Link></section> : <>
       {session.status === "active" ? <SpanLesson key={`${session.activityId}:${readVersion}`} {...props} sourceIds={session.sourceIds} session={session} initialIntent={session.intent} initialMoveId={session.moveId} initialNewEvidenceEventId={evidenceEvent?.id ?? props.initialNewEvidenceEventId}
         restoredAttempts={restoredAttempts} restoredObservations={details.observations} restoredHintLevels={details.hintLevels} onProgress={save} savingProgress={pending}
-        onSummary={() => { setShowSummary(true); setRevision(value => value + 1); }} /> : <div className="mx-auto max-w-4xl space-y-3 p-5"><h1 className="text-xl font-semibold">{session.status === "paused" ? "本次学习已暂停" : "本次学习已结束"}</h1><p className="text-sm text-text-2">原题、首答与帮助记录已保留。</p>{session.status === "paused" ? <button className={ui.primary} disabled={pending} onClick={() => void save(session.intent, session.moveId, "active")}>继续原来的步骤</button> : null}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}/study`}>返回课程</Link></div>}
+        onSummary={() => { setShowSummary(true); setRevision(value => value + 1); }} /> : <div className="mx-auto max-w-4xl space-y-3 p-5"><h1 className="text-xl font-semibold">{session.status === "paused" ? "本次学习已暂停" : "本次学习已结束"}</h1><p className="text-sm text-text-2">下次可以接着这里学。</p>{session.status === "paused" ? <button className={ui.primary} disabled={pending} onClick={() => void save(session.intent, session.moveId, "active")}>继续原来的步骤</button> : null}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}/study`}>返回课程</Link></div>}
       {showSummary || session.status !== "active" ? <div className="mx-auto max-w-4xl px-5 pb-8"><SpanSessionSummary observations={details.observations} delayed={Boolean(props.delayedRetestId)} /></div> : null}
     </>}
   </div>;

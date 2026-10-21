@@ -1,3 +1,5 @@
+const diagnostics = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnostics.enabled }));
 import type { ExamAttemptView, ExamSprintOverview } from "@aistudy/contracts";
 import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";

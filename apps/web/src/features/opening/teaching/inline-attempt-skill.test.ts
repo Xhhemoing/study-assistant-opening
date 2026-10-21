@@ -7,7 +7,7 @@ describe("inline attempt skill context", () => {
     expect(defaultInlineAttemptSkill({ outlineTitle: "matrix rank", knowledge, skillOptions: ["MATRIXRANK"] })).toBe("Matrix Rank");
     expect(defaultInlineAttemptSkill({ outlineTitle: "matrix rank", skillOptions: ["MATRIXRANK"] })).toBe("MATRIXRANK");
     expect(defaultInlineAttemptSkill({ outlineTitle: "matrix rank" })).toBe("matrix rank");
-    expect(defaultInlineAttemptSkill({})).toBe("");
+    expect(defaultInlineAttemptSkill({})).toBe("课堂练习");
   });
   it("keeps an edited draft, including a deliberately cleared value", () => {
     expect(defaultInlineAttemptSkill({ draftSkillLabel: "My skill", outlineTitle: "matrix rank", knowledge })).toBe("My skill");

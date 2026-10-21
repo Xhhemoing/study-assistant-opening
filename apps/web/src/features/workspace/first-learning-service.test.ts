@@ -29,7 +29,7 @@ function setup() {
 describe("first learning", () => {
   it("initializes the course and dated tasks before requesting today's unaccepted plan", async () => {
     const { deps, calls } = setup();
-    await expect(startFirstLearning(deps, scope, input)).resolves.toMatchObject({ activityId: id, taskId: id, courseId: id, planDate: "2026-10-19", generateStatus: "queued" });
+    await expect(startFirstLearning(deps, scope, input)).resolves.toMatchObject({ activityId: id, taskId: id, courseId: id, planDate: "2026-10-19", generateStatus: "queued", href: `/opening/courses/${id}/study?activity=${id}` });
     expect(calls.firstLearning.initialize).toHaveBeenCalledWith(scope, expect.objectContaining({
       intent: input, startDate: "2026-10-19", planTimeZone: "Asia/Shanghai",
       days: expect.arrayContaining([expect.objectContaining({ date: "2026-10-19", minutes: 30 })]),

@@ -11,7 +11,7 @@ export function defaultInlineAttemptSkill(input: {
 }): string {
   if (input.draftSkillLabel !== undefined) return input.draftSkillLabel;
   const title = input.questionSkillLabel?.trim() || input.learnerSkillLabel?.trim() || input.outlineTitle?.trim();
-  if (!title) return "";
+  if (!title) return "课堂练习";
   const key = normalizeSkillLabelKey(title);
   const node = input.knowledge?.nodes.find(row => row.kind !== "chapter" && normalizeSkillLabelKey(row.label) === key);
   return (node?.label ?? input.skillOptions?.find(label => normalizeSkillLabelKey(label) === key) ?? title).slice(0, 200);
