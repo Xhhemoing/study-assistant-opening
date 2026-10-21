@@ -252,7 +252,7 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
           <p className="text-sm leading-6 text-text-2">回顾练习结果、用过的提示和独立完成情况。</p>
-          <section aria-labelledby="course-goal-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>
+          <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>
           <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
         </CoursePanel>
         <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</CoursePanel>

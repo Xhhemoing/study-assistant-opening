@@ -36,8 +36,9 @@ test.describe("opening upload", () => {
       }, { timeout: 30_000 });
       await page.locator("summary").filter({ hasText: "已上传 1 份材料" }).click({ timeout: 30_000 });
       await expect(page.getByRole("list", { name: "已上传任务", exact: true }).getByText(/^原件已保存，/)).toBeVisible();
-      const sourceOpener = page.getByRole("button", { name: `打开资料：${name}`, exact: true });
-      const sourceRow = page.getByRole("article").filter({ has: sourceOpener });
+      // With no worker, this source remains in the material-processing card.
+      const sourceRow = page.getByRole("article", { name: `处理材料：${name}`, exact: true });
+      const sourceOpener = sourceRow.getByRole("button", { name: "阅读已保存原件", exact: true });
       await expect(sourceRow).toBeVisible();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
       await sourceOpener.click({ timeout: 15_000 });

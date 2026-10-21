@@ -191,7 +191,7 @@ test.describe("Opening span durable teaching flow", () => {
       expect((await readTeachingEvidence(course, pendingAttempt.id)).attempt?.submitted_at).toBeNull();
 
       const delayedResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/teaching/span/delayed") && response.request().method() === "POST");
-      await summary.getByRole("button", { name: "安排 3 天后的正式延迟复测", exact: true }).click();
+      await summary.getByRole("button", { name: "安排 3 天后再练习", exact: true }).click();
       const delayed = await delayedResponse;
       expect(delayed.ok()).toBe(true);
       const scheduled = await delayed.json() as { candidateId: string; activityId: string; taskId: string; notBeforeAt: string; href: string };
@@ -200,7 +200,7 @@ test.describe("Opening span durable teaching flow", () => {
       const scheduleReplay = await context.request.post("/api/opening/teaching/span/delayed", { headers: { origin }, data: delayed.request().postDataJSON() });
       expect(scheduleReplay.ok()).toBe(true);
       expect(await scheduleReplay.json()).toMatchObject({ candidateId: scheduled.candidateId, activityId: scheduled.activityId, taskId: scheduled.taskId, href: scheduled.href });
-      await summary.getByRole("link", { name: "打开这项延迟复测", exact: true }).click();
+      await summary.getByRole("link", { name: "打开这项复习", exact: true }).click();
       const retestLessonResponse = page.waitForResponse(response => response.url().endsWith(lessonEndpoint) && response.request().method() === "POST");
       await page.getByRole("button", { name: "开始本次延迟复测", exact: true }).click();
       const retestLessonCreated = await retestLessonResponse;
