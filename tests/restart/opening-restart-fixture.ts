@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
+import { buildOpeningE2eWorkerEnvironment } from "../../scripts/opening-e2e/environment.mjs";
 
 export function assertOpeningRestartEnvironment(env: NodeJS.ProcessEnv) {
   const database = new URL(env.E2E_DATABASE_URL ?? "invalid:");
@@ -72,7 +73,8 @@ export function createOpeningRestartServices(input: NodeJS.ProcessEnv, root = pr
     }
   }
   function launch(service: Exit["service"], args: string[], cwd: string): Owned {
-    const child = spawn(process.execPath, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const childEnv = service === "worker" ? buildOpeningE2eWorkerEnvironment(env) : env;
+    const child = spawn(process.execPath, args, { cwd, env: childEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const item = { service, child, expected: false, log: "" } as Owned;
     const append = (chunk: Buffer) => { item.log = (item.log + chunk.toString()).slice(-128_000); };
     child.stdout!.on("data", append); child.stderr!.on("data", append);

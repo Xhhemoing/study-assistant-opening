@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { buildOpeningE2eEnvironment, projectRoot } from "./environment.mjs";
+import { buildOpeningE2eEnvironment, buildOpeningE2eWorkerEnvironment, projectRoot } from "./environment.mjs";
 import { prepareOpeningE2e } from "./prepare.mjs";
 import { startOpeningProviderFixture } from "../../tests/support/opening-provider.mjs";
 
@@ -8,8 +8,8 @@ const env = buildOpeningE2eEnvironment();
 const children = new Set();
 let fixture;
 let stopping = false;
-function launch(args, cwd = projectRoot) {
-  const child = spawn(process.execPath, args, { cwd, env, stdio: "inherit", windowsHide: true });
+function launch(args, cwd = projectRoot, childEnv = env) {
+  const child = spawn(process.execPath, args, { cwd, env: childEnv, stdio: "inherit", windowsHide: true });
   children.add(child);
   child.once("exit", () => children.delete(child));
   return child;
@@ -34,7 +34,7 @@ async function main() {
   await run(["--import", "tsx", "scripts/db-reset-e2e.ts"]);
   await run([path.join(projectRoot, "node_modules/next/dist/bin/next"), "build"], path.join(projectRoot, "apps/web"));
   fixture = await startOpeningProviderFixture();
-  const worker = launch(["--import", "tsx", "apps/worker/src/index.ts"]);
+  const worker = launch(["--import", "tsx", "apps/worker/src/index.ts"], projectRoot, buildOpeningE2eWorkerEnvironment(env));
   const web = launch([path.join(projectRoot, "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", "3100"], path.join(projectRoot, "apps/web"));
   for (const child of [worker, web]) {
     child.once("exit", (code) => {

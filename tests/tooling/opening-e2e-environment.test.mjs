@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildOpeningE2eEnvironment, assertOpeningE2eDatabase } from "../../scripts/opening-e2e/environment.mjs";
+import { execFileSync } from "node:child_process";
+import { buildOpeningE2eEnvironment, buildOpeningE2eWorkerEnvironment, assertOpeningE2eDatabase } from "../../scripts/opening-e2e/environment.mjs";
 
 const database = "postgres://opening:opening-local-test@127.0.0.1:15432/aistudy_opening_e2e";
 test("requires explicit opt-in before touching the isolated E2E database", () => {
@@ -52,6 +53,29 @@ for (const [key, value] of [
 }
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+test("only the isolated worker uses the existing local-provider test permission", () => {
+  const inherited = { NODE_ENV: "development", OPENING_PROVIDER_ALLOW_LOCAL: "1", DATABASE_URL: "postgres://remote/private" };
+  const original = { ...inherited };
+  const web = buildOpeningE2eEnvironment(inherited);
+  const worker = buildOpeningE2eWorkerEnvironment(web);
+  assert.deepEqual(inherited, original);
+  assert.equal(web.NODE_ENV, "production");
+  assert.equal(web.OPENING_PROVIDER_ALLOW_LOCAL, "0");
+  assert.equal(worker.NODE_ENV, "test");
+  assert.equal(worker.OPENING_PROVIDER_ALLOW_LOCAL, "1");
+  assert.deepEqual({ ...worker, NODE_ENV: web.NODE_ENV, OPENING_PROVIDER_ALLOW_LOCAL: web.OPENING_PROVIDER_ALLOW_LOCAL }, web);
+
+  // Exercise the actual production endpoint guard without making a network call.
+  const check = `import { assertOpeningProviderEndpoint } from './packages/ai/src/opening/provider-network.ts';
+    try { assertOpeningProviderEndpoint(process.env.OPENING_MODEL_BASE_URL); process.stdout.write('allowed'); }
+    catch { process.stdout.write('blocked'); }`;
+  const inspect = env => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", check], {
+    cwd: repositoryRoot, env, encoding: "utf8",
+  });
+  assert.equal(inspect(worker), "allowed");
+  assert.equal(inspect(web), "blocked");
+  assert.equal(inspect({ ...worker, NODE_ENV: "production" }), "blocked");
+});
 for (const [platform, executable] of [
   ["linux", path.join(repositoryRoot, ".local/docling-venv/bin/python")],
   ["win32", path.join(repositoryRoot, ".local/docling-venv/Scripts/python.exe")],
