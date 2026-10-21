@@ -332,6 +332,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
+  const submissionLock = useRef<symbol | null>(null);
   const submitClocks = useRef(new Map<string, number>());
   const [firstTextTiming, setFirstTextTiming] = useState<FirstTextTiming | null>(null);
   const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId, firstTextTiming);
@@ -648,11 +649,25 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       });
       return;
     }
+    if (privacy === "ephemeral") submissionLock.current = null;
     setPending(false);
     setPendingHint("本轮已取消；不保存模式的内容不会写入对话。",);
   }
 
   async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
+    // Composer and reply actions share the same preflight/send boundary.
+    if (submissionLock.current || pending || loading || recoveryRequired) return { accepted: false };
+    const token = Symbol("submission");
+    submissionLock.current = token;
+    try {
+      return await submitRequest(input, options);
+    } finally {
+      // A cancelled temporary request may finish after a newer request started.
+      if (submissionLock.current === token) submissionLock.current = null;
+    }
+  }
+
+  async function submitRequest(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
     // Check the current clock at the actual send boundary, including background tabs.
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
@@ -879,7 +894,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       if (!reply) return;
       const text = "请直接完整讲解刚才的问题，包括解题步骤和每一步的理由。";
       const issued = nextClientKey({ clientKey: directExplainKey.current?.clientKey ?? null, fingerprint: directExplainKey.current?.fingerprint ?? null,
-        nextFingerprint: `${reply.id}:${conversationId ?? ""}:${studyConversationIdentity(studyContext)}:${logicalSendFingerprint({ text, mode, privacy, sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage) })}` });
+        nextFingerprint: `${reply.id}:${conversationId ?? ""}:${studyConversationIdentity(studyContext)}:${supportPurpose}:${logicalSendFingerprint({ text, mode, privacy, sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage) })}` });
       directExplainKey.current = issued;
       directExplainBusy.current = true;
       try {

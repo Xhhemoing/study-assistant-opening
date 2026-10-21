@@ -66,4 +66,9 @@ it("loads owned continuity turns with citations and hides other owners", async (
   await expect(repo.loadContinuityTurns(fixture.scope, foreign.id)).rejects.toMatchObject({
     code: "NOT_FOUND",
   });
+  const anchor = { purpose: "learning_help", activityId: randomUUID(), blockId: randomUUID(), contentVersion: 2 };
+  await fixture.sql`UPDATE opening_turns SET context_anchor=${fixture.sql.json(anchor)} WHERE id=${saved.turnId}`;
+  expect(await repo.loadContinuityTurns(fixture.scope, owned.id, anchor)).toEqual([turns[0]]);
+  expect(await repo.loadContinuityTurns(fixture.scope, owned.id, { ...anchor, contentVersion: 3 })).toEqual([]);
+  expect(await repo.loadContinuityTurns(fixture.scope, owned.id, { ...anchor, blockId: randomUUID() })).toEqual([]);
 });

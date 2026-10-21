@@ -177,11 +177,9 @@ export function createTutorService(deps: {
         if (!attemptId && !anchor) queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
         else if (attemptId || anchor?.blockId) {
           // A second request belongs to the same issued question, never a different block or attempt.
-          const turns = await deps.conversations.listTurns(scope, request.conversationId);
-          queryHistory = turns.filter(turn => turn.status === "complete" && (attemptId
-            ? turn.contextAnchor?.attemptId === attemptId
-            : turn.contextAnchor?.activityId === anchor!.activityId && turn.contextAnchor?.blockId === anchor!.blockId
-              && turn.contextAnchor?.contentVersion === anchor!.contentVersion));
+          queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId, {
+            attemptId, activityId: anchor?.activityId, blockId: anchor?.blockId, contentVersion: anchor?.contentVersion,
+          });
         }
       }
       const resolved = inferComposerIntent({ ...request, history: queryHistory,

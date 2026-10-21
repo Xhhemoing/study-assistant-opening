@@ -271,8 +271,15 @@ export function createOpeningConversationRepository(sql: Sql) {
     async loadContinuityTurns(
       scope: OpeningConversationScope,
       conversationId: string,
+      question?: Pick<StudyContextAnchor, "attemptId" | "activityId" | "blockId" | "contentVersion">,
     ): Promise<Array<{ id?: string; role: "user" | "assistant"; text: string; citations: Citation[] }>> {
       await this.getOwned(scope, conversationId);
+      // Internal routing reads must never release generated answers as delivered help.
+      const questionFilter = !question ? sql`` : question.attemptId
+        ? sql`AND t.status='complete' AND (t.attempt_id=${question.attemptId} OR t.context_anchor->>'attemptId'=${question.attemptId})`
+        : sql`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
+            AND t.context_anchor->>'blockId'=${question.blockId ?? null}
+            AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
       const rows = await sql`
         SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
           CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
@@ -282,6 +289,7 @@ export function createOpeningConversationRepository(sql: Sql) {
         WHERE t.conversation_id = ${conversationId}
           AND t.workspace_id = ${scope.workspaceId}
           AND t.status IN ('complete', 'pending')
+          ${questionFilter}
         ORDER BY t.created_at ASC
       `;
       return rows.map((row) => {

@@ -11,7 +11,7 @@ const request = { conversationId, clientKey: "automatic-turn-1", sourceIds: [], 
 function fixture() {
   const appendSavedTurn = vi.fn(async () => ({ jobId: "job", turnId: "turn", assistantTurnId: "assistant" }));
   const findTurnByClientKey = vi.fn<OpeningConversationRepository["findTurnByClientKey"]>(async () => null);
-  const loadContinuityTurns = vi.fn(async () => [{ role: "user" as const, text: "今天的学习计划是什么？", citations: [] }]);
+  const loadContinuityTurns = vi.fn<OpeningConversationRepository["loadContinuityTurns"]>(async () => [{ role: "user" as const, text: "今天的学习计划是什么？", citations: [] }]);
   const listTurns = vi.fn<OpeningConversationRepository["listTurns"]>(async () => []);
   const sessionIntent = vi.fn(async () => ({ intent: { ...DEFAULT_STUDY_SESSION_INTENT, explanationStyle: "full" as const }, action: "continue" as const }));
   const service = createTutorService({
@@ -25,18 +25,20 @@ function fixture() {
 }
 
 describe("saved tutor automatic intent", () => {
-  it("does not inherit a different question's answer request", async () => {
+  it("uses the read-only question history without releasing unseen answers", async () => {
     const f = fixture();
     f.sessionIntent.mockResolvedValue(null as never);
     const anchor = { purpose: "learning_help" as const, activityId, blockId: conversationId, contentVersion: 1 };
-    f.listTurns.mockResolvedValue([{ id: conversationId, conversationId, role: "user", text: "这题答案是什么", mode: "hint", status: "complete", citations: [], createdAt: "2026-10-21T00:00:00Z",
-      contextAnchor: { ...anchor, blockId: activityId } }]);
+    f.loadContinuityTurns.mockResolvedValue([]);
     await f.service.submitTurn(scope, { ...request, text: "这题答案是什么", contextAnchor: anchor });
     expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "hint" }));
-    f.listTurns.mockResolvedValue([{ ...(await f.listTurns(scope, conversationId))[0]!, contextAnchor: anchor }]);
+    expect(f.loadContinuityTurns).toHaveBeenLastCalledWith(scope, conversationId, {
+      attemptId: undefined, activityId, blockId: conversationId, contentVersion: 1,
+    });
+    f.loadContinuityTurns.mockResolvedValue([{ role: "user", text: "这题答案是什么", citations: [] }]);
     await f.service.submitTurn(scope, { ...request, clientKey: "next-question", text: "这题答案是什么", contextAnchor: anchor });
     expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "explain" }));
-    expect(f.loadContinuityTurns).not.toHaveBeenCalled();
+    expect(f.listTurns).not.toHaveBeenCalled();
   });
   it("uses owned history for a second answer request while preserving the original mode on retries", async () => {
     const f = fixture();
