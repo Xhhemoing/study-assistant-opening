@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, type APIRequestContext } from "@playwright/test";
 import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
 import postgres from "postgres";
 import { z } from "zod";
 import { loginOpeningOwner, seedOpeningOwner } from "../e2e/opening-auth";
+import { test } from "../e2e/fixtures";
 import { createTeachingCourse, readTeachingEvidence, readTeachingRetest, type TeachingCourse } from "../e2e/opening-teaching-fixture";
 import { createOpeningRestartServices } from "./opening-restart-fixture";
 
@@ -27,7 +28,26 @@ async function readScanJob(course: TeachingCourse, observationId: string) {
   } finally { await sql.end({ timeout: 5 }); }
 }
 
-test("same-version graceful Web and worker restart restores the persisted learning session", async ({ browser, baseURL }, testInfo) => {
+async function submitFreshPractice(request: APIRequestContext, origin: string, course: TeachingCourse, submission: LearningAttemptSubmitInput) {
+  const created = await request.post(lessonEndpoint, { headers: { origin }, data: {
+    courseId: course.courseId, sourceIds: [course.sourceId], intent, clientKey: `restart-next-lesson:${randomUUID()}`,
+  } });
+  expect(created.status()).toBe(200);
+  const lesson = spanLessonSnapshotSchema.parse(await created.json());
+  const issued = await request.post("/api/opening/attempts", { headers: { origin }, data: {
+    sessionId: lesson.sessionId, clientKey: `restart-next-attempt:${randomUUID()}`,
+    spanExercise: { sourceId: course.sourceId, problemId: "span-independent-3d", version: 1 },
+  } });
+  expect(issued.status()).toBe(201);
+  const attempt = learningAttemptSchema.parse(await issued.json());
+  const input = { ...submission, clientKey: `restart-next-answer:${randomUUID()}`, assistance: "independent" as const };
+  const submitted = await request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: input });
+  expect(submitted.status()).toBe(201);
+  return { lesson, attempt, input, observation: submittedObservationSchema.parse(await submitted.json()) };
+}
+
+for (const mode of ["graceful", "crash"] as const) {
+test(`same-version ${mode} Web and worker restart restores the persisted learning session`, async ({ browser, baseURL }, testInfo) => {
   const services = createOpeningRestartServices(process.env);
   const origin = baseURL!;
   const storage = new S3Client({ endpoint: process.env.S3_ENDPOINT!, region: process.env.S3_REGION!, forcePathStyle: true,
@@ -92,10 +112,25 @@ test("same-version graceful Web and worker restart restores the persisted learni
     const before = await readTeachingEvidence(course, attempt.id);
     expect(before.observations).toHaveLength(1);
     expect(before.exposures.map(row => row.id).sort()).toEqual([firstHint.exposureReceipt.id, fullHint.exposureReceipt.id].sort());
+
+    let pending: Awaited<ReturnType<typeof submitFreshPractice>> | undefined;
+    let pendingScan: Awaited<ReturnType<typeof readScanJob>> | undefined;
+    let pendingEvidence: Awaited<ReturnType<typeof readTeachingEvidence>> | undefined;
+    const workerCrash = mode === "crash" ? await services.crash(["worker"]) : [];
+    if (mode === "crash") {
+      // Commit an answer while its consumer is dead. The real HTTP route must
+      // retain the outbox work; no direct SQL job creation or manual replay.
+      pending = await submitFreshPractice(context.request, origin, course, submission);
+      pendingScan = await readScanJob(course, pending.observation.id);
+      expect(pendingScan.state).toBe("queued");
+      pendingEvidence = await readTeachingEvidence(course, pending.attempt.id);
+      expect(pendingEvidence.observations).toHaveLength(1);
+    }
     await context.close();
 
-    const stopped = await services.stop();
-    expect(stopped).toHaveLength(2); expect(stopped.every(exit => exit.graceful)).toBe(true);
+    const stopped = mode === "graceful" ? await services.stop() : [...workerCrash, ...await services.crash(["web"])];
+    expect(stopped).toHaveLength(2);
+    expect(stopped.every(exit => mode === "graceful" ? exit.graceful : exit.signal === "SIGKILL" && !exit.graceful)).toBe(true);
     // No reset, Redis flush, bucket creation, seed, or build occurs between these cycles.
     const second = await services.start();
     expect(second.webPid).not.toBe(first.webPid); expect(second.workerPid).not.toBe(first.workerPid);
@@ -113,6 +148,16 @@ test("same-version graceful Web and worker restart restores the persisted learni
     expect(await readScanJob(course, observation.id)).toEqual(scan);
     const retainedObject = await storage.send(new GetObjectCommand({ Bucket, Key }));
     expect(digest(await retainedObject.Body!.transformToByteArray())).toBe(digest(probe));
+    if (pending && pendingScan) {
+      await expect.poll(async () => (await readScanJob(course, pending.observation.id)).state, { timeout: 45_000 }).toBe("succeeded");
+      expect(await readScanJob(course, pending.observation.id)).toEqual({ id: pendingScan.id, state: "succeeded" });
+      expect(await readTeachingEvidence(course, pending.attempt.id)).toEqual(pendingEvidence);
+      const replay = await context.request.post(`/api/opening/attempts/${pending.attempt.id}/submit`, { headers: { origin }, data: pending.input });
+      expect(replay.status()).toBe(201);
+      expect(submittedObservationSchema.parse(await replay.json())).toEqual(pending.observation);
+      expect(await readTeachingEvidence(course, pending.attempt.id)).toEqual(pendingEvidence);
+      expect(await readScanJob(course, pending.observation.id)).toEqual({ id: pendingScan.id, state: "succeeded" });
+    }
 
     const page = await context.newPage(); page.on("pageerror", error => pageErrors.push(error.message));
     await page.goto(`/opening/courses/${course.courseId}/study?activity=${lesson.activityId}`);
@@ -133,34 +178,22 @@ test("same-version graceful Web and worker restart restores the persisted learni
 
     // A new ordinary session produces a new durable job after restart. This
     // repeated practice item tests worker consumption, not independent retention.
-    const secondLessonResponse = await context.request.post(lessonEndpoint, { headers: { origin }, data: {
-      courseId: course.courseId, sourceIds: [course.sourceId], intent, clientKey: `restart-next-lesson:${randomUUID()}`,
-    } });
-    expect(secondLessonResponse.status()).toBe(200);
-    const secondLesson = spanLessonSnapshotSchema.parse(await secondLessonResponse.json());
-    expect(secondLesson.sessionId).not.toBe(lesson.sessionId);
-    const secondAttemptResponse = await context.request.post("/api/opening/attempts", { headers: { origin }, data: {
-      sessionId: secondLesson.sessionId, clientKey: `restart-next-attempt:${randomUUID()}`,
-      spanExercise: { sourceId: course.sourceId, problemId: "span-independent-3d", version: 1 },
-    } });
-    expect(secondAttemptResponse.status()).toBe(201);
-    const secondAttempt = learningAttemptSchema.parse(await secondAttemptResponse.json());
-    const secondSubmitResponse = await context.request.post(`/api/opening/attempts/${secondAttempt.id}/submit`, { headers: { origin }, data: {
-      ...submission, clientKey: `restart-next-answer:${randomUUID()}`, assistance: "independent",
-    } });
-    expect(secondSubmitResponse.status()).toBe(201);
-    const secondObservation = submittedObservationSchema.parse(await secondSubmitResponse.json());
-    await expect.poll(async () => (await readScanJob(course, secondObservation.id)).state, { timeout: 45_000 }).toBe("succeeded");
-    const postRestartScan = await readScanJob(course, secondObservation.id);
+    const next = await submitFreshPractice(context.request, origin, course, submission);
+    expect(next.lesson.sessionId).not.toBe(lesson.sessionId);
+    await expect.poll(async () => (await readScanJob(course, next.observation.id)).state, { timeout: 45_000 }).toBe("succeeded");
+    const postRestartScan = await readScanJob(course, next.observation.id);
     expect(postRestartScan.id).not.toBe(scan.id);
     expect(pageErrors).toEqual([]);
-    await page.screenshot({ path: testInfo.outputPath("learning-after-graceful-restart.png"), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`learning-after-${mode}-restart.png`), fullPage: true });
     await testInfo.attach("restart-persistence-evidence", { contentType: "application/json", body: JSON.stringify({
-      kind: "same-version-graceful-restart", first, stopped, second, activityId: lesson.activityId, sessionId: lesson.sessionId,
+      kind: `same-version-${mode}-restart`, first, stopped, second, activityId: lesson.activityId, sessionId: lesson.sessionId,
       attemptId: attempt.id, itemVersionId: attempt.itemVersionId, observationId: observation.id,
       receiptIds: [firstHint.exposureReceipt.id, fullHint.exposureReceipt.id], taskId: task.taskId, scan, postRestartScan,
       originalAnswerSha256: digest(Buffer.from(submission.answer)), retainedS3ObjectSha256: digest(probe),
-      parser: "pre-parsed teaching fixture; real PDF parsing is tested separately", crashRecovery: "not tested", learningEffect: "not measured",
+      pendingScan: pendingScan ? { ...pendingScan, recoveredState: "succeeded", observationId: pending!.observation.id } : null,
+      parser: "pre-parsed teaching fixture; real PDF parsing is tested separately",
+      crashRecovery: mode === "crash" ? "SIGKILL of owned Web/worker; committed answers and queued work recovered" : "not tested",
+      limits: "same build; PG/Redis/S3 stay running; no host crash, in-flight model execution or paid-provider retry", learningEffect: "not measured",
     }, null, 2) });
   } finally {
     try { await context.close(); }
@@ -174,3 +207,4 @@ test("same-version graceful Web and worker restart restores the persisted learni
     }
   }
 });
+}

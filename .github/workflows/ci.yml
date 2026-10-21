@@ -326,12 +326,12 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      - name: Real worker PDF upload and recovery browser flow
+      - name: Release redirects and real worker PDF browser flow
         timeout-minutes: 15
-        run: npm run test:browser -- --config playwright.opening.config.mts tests/e2e/opening-workflow.spec.ts --trace on --reporter=list,html,json
+        run: npm run test:browser -- --config playwright.opening.config.mts tests/e2e/opening-release-redirects.spec.ts tests/e2e/opening-workflow.spec.ts --trace on --reporter=list,html,json
 
-      - name: Persisted learning after graceful Web and worker restart
-        timeout-minutes: 8
+      - name: Persisted learning after graceful and forced Web and worker restarts
+        timeout-minutes: 12
         env:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/opening-restart
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-reports/opening-restart.json
