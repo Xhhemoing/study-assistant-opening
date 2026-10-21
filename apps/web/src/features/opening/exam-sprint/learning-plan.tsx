@@ -6,6 +6,9 @@ import { ui, tone } from "../design/ui";
 import type { ExamSprintIntent } from "./client";
 import { practiceModeForDueAt } from "./labels";
 
+import { LessonButton } from "./lesson-button";
+import { lessonElementId, sprintLessonUnavailableReason, type OpenSprintLesson } from "./lesson-navigation";
+
 export function SprintSettings({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: (command: ExamSprintIntent) => void }) {
   const [date, setDate] = useState(overview.state.examDate ?? "");
   const [minutes, setMinutes] = useState(overview.state.dailyMinutes);
@@ -20,7 +23,42 @@ export function WeekPlan({ overview, bound = false }: { overview: ExamSprintOver
 const statusLabels = { untested: "未测", weak: "薄弱", usable: "可用", secure: "稳固" } as const;
 const statusTone = { untested: tone.neutral, weak: tone.warning, usable: tone.neutral, secure: tone.success } as const;
 
-export function SkillsAndLessons({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: (command: ExamSprintIntent) => void }) {
-  return <div className="space-y-5"><section className={`${ui.panel} p-5`} aria-labelledby="sprint-skills-title"><h2 id="sprint-skills-title" className="font-semibold">技能状态</h2><p className="mt-1 text-xs leading-6 text-text-3">状态仅反映本题包客观题表现。完整推导、证明与综合题能力仍需原题过程自评或复核；来源自评、阅读解析与提示后答对不等于掌握。</p><div className="mt-4 divide-y divide-line">{overview.skills.map(skill => <details key={skill.skillId} className="py-3"><summary className="min-h-11 flex cursor-pointer flex-wrap items-center justify-between gap-2 text-sm py-2"><span>{skill.title}</span><span className={`${ui.badge} ${statusTone[skill.status]}`}>{statusLabels[skill.status]}</span></summary><div className="mt-3 space-y-2 text-xs leading-6 text-text-2"><p className="font-medium text-text">为什么</p><p>{skill.reason}</p><p>独立正确 {skill.independentCorrect} / 已尝试 {skill.attempted}{skill.dueAt ? ` · 复测时间 ${new Date(skill.dueAt).toLocaleString("zh-CN")}` : ""}</p><p className="font-medium text-text">怎么改善</p><div className="flex flex-wrap gap-2"><a className={ui.secondary} href={`#lesson-${skill.lessonId}`}>阅读对应串讲</a><button className={ui.secondary} type="button" disabled={disabled || !!overview.activeRun} onClick={() => send({ action: "start", mode: practiceModeForDueAt(skill.dueAt) })}>进入{practiceModeForDueAt(skill.dueAt) === "retest" ? "复测" : "练习"}队列</button></div></div></details>)}</div></section>
-    <section className={`${ui.panel} p-5`} aria-labelledby="sprint-lessons-title"><h2 id="sprint-lessons-title" className="font-semibold">预置串讲与例题</h2><p className="mt-1 text-xs leading-6 text-text-3">先理解方法，再关掉例题做独立练习。</p><div className="mt-4 space-y-3">{overview.pack.lessons.map(lesson => <details id={`lesson-${lesson.id}`} key={lesson.id} className="scroll-mt-24 rounded-lg border border-line p-4"><summary className="min-h-11 cursor-pointer text-sm font-medium py-2">{lesson.title}</summary><div className="mt-3 space-y-4 font-reading text-[17px] leading-[30px] text-text"><p>{lesson.summary}</p><ol className="list-decimal space-y-2 pl-5">{lesson.steps.map((step, index) => <li key={index}>{step}</li>)}</ol><div className="rounded-lg bg-surface-2 p-3"><h3 className="mb-1 font-medium">完整例题</h3><p className="whitespace-pre-wrap">{lesson.workedExample}</p></div><div><h3 className="font-medium">容易失分的地方</h3><ul className="list-disc pl-5">{lesson.pitfalls.map((pitfall, index) => <li key={index}>{pitfall}</li>)}</ul></div></div></details>)}</div></section></div>;
+export function SkillsAndLessons({ overview, disabled, send, onOpenLesson, lessonContent, onCloseLesson }: {
+  overview: ExamSprintOverview;
+  disabled: boolean;
+  send: (command: ExamSprintIntent) => void;
+  onOpenLesson?: OpenSprintLesson;
+  lessonContent?: ExamSprintOverview["lessonContents"][number] | null;
+  onCloseLesson?: () => void;
+}) {
+  return <div className="min-w-0 space-y-5">
+    <section className={`${ui.panel} p-5`} aria-labelledby="sprint-skills-title">
+      <h2 id="sprint-skills-title" className="font-semibold">技能状态</h2>
+      <p className="mt-1 text-xs leading-6 text-text-3">状态仅反映本题包客观题表现。完整推导、证明与综合题能力仍需原题过程自评或复核；来源自评、阅读解析与提示后答对不等于掌握。</p>
+      <div className="mt-4 divide-y divide-line">{overview.skills.map(skill => <details key={skill.skillId} className="py-3">
+        <summary id={`sprint-skill-${skill.skillId}`} className="scroll-mt-24 min-h-11 py-2 flex cursor-pointer flex-wrap items-center justify-between gap-2 text-sm"><span>{skill.title}</span><span className={`${ui.badge} ${statusTone[skill.status]}`}>{statusLabels[skill.status]}</span></summary>
+        <div className="mt-3 space-y-2 text-xs leading-6 text-text-2"><p className="font-medium text-text">为什么</p><p>{skill.reason}</p><p>独立正确 {skill.independentCorrect} / 已尝试 {skill.attempted}{skill.dueAt ? ` · 复测时间 ${new Date(skill.dueAt).toLocaleString("zh-CN")}` : ""}</p><p className="font-medium text-text">怎么改善</p><div className="flex flex-wrap gap-2">
+          {onOpenLesson ? <LessonButton overview={overview} lessonId={skill.lessonId} onOpenLesson={onOpenLesson} disabled={disabled} returnTarget={{ id: `sprint-skill-${skill.skillId}`, label: "返回技能状态" }} label="阅读对应串讲" /> : null}
+          <button className={ui.secondary} type="button" disabled={disabled || !!overview.activeRun} onClick={() => send({ action: "start", mode: practiceModeForDueAt(skill.dueAt) })}>进入{practiceModeForDueAt(skill.dueAt) === "retest" ? "复测" : "练习"}队列</button>
+        </div></div>
+      </details>)}</div>
+    </section>
+    <section className={`${ui.panel} min-w-0 p-5`} aria-labelledby="sprint-lessons-title">
+      <h2 id="sprint-lessons-title" tabIndex={-1} className="scroll-mt-24 font-semibold">预置串讲与例题</h2>
+      <p className="mt-1 text-xs leading-6 text-text-3">先理解方法，再关掉例题做独立练习。阅读完整串讲会记录实际内容曝光；相关题目之后作答时会据此核对独立性。</p>
+      <div className="mt-4 space-y-3">{overview.pack.lessons.map(lesson => {
+        const reason = sprintLessonUnavailableReason(overview, lesson.id);
+        const content = !reason && lessonContent?.lesson.id === lesson.id ? lessonContent.lesson : null;
+        return <details id={lessonElementId(lesson.id)} key={lesson.id} open={!!content} className="scroll-mt-24 rounded-lg border border-line p-4">
+          <summary id={`sprint-manual-${lesson.id}`} aria-disabled={disabled || !!reason || !onOpenLesson} className="min-h-11 py-2 cursor-pointer break-words text-sm font-medium" onClick={event => {
+            event.preventDefault();
+            if (disabled || reason || !onOpenLesson) return;
+            if (content) onCloseLesson?.();
+            else void onOpenLesson(lesson.id, { id: `sprint-manual-${lesson.id}`, label: "返回串讲目录" });
+          }}>{lesson.title}{reason ? <span className="mt-1 block text-xs font-normal leading-6 text-text-3">{reason}。</span> : null}</summary>
+          {content ? <div className="mt-3 min-w-0 space-y-4 break-words font-reading text-[17px] leading-[30px] text-text"><p>{content.summary}</p><ol className="list-decimal space-y-2 pl-5">{content.steps.map((step, index) => <li key={index}>{step}</li>)}</ol><div className="rounded-lg bg-surface-2 p-3"><h3 className="mb-1 font-medium">完整例题</h3><p className="whitespace-pre-wrap">{content.workedExample}</p></div><div><h3 className="font-medium">容易失分的地方</h3><ul className="list-disc pl-5">{content.pitfalls.map((pitfall, index) => <li key={index}>{pitfall}</li>)}</ul></div></div> : null}
+        </details>;
+      })}</div>
+    </section>
+  </div>;
 }

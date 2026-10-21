@@ -58,4 +58,29 @@ describe("exam sprint HTTP boundary", () => {
     expect(response.status).toBe(409);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
+
+  it("accepts only scoped lesson authorization identities and rejects client exposure claims", async () => {
+    const command = { action: "open_lesson", clientKey: "lesson-http-1", lessonId: "complex-arithmetic",
+      expectedRunId: "run-1", expectedAttemptId: "attempt-1", packVersion: "2026-10-17-v1",
+      contentFingerprint: "a".repeat(64), mappingVersion: "reviewed-v1" };
+    expect((await POST(request(command))).status).toBe(200);
+    expect(deps.act).toHaveBeenCalledWith(deps.scope, command);
+    for (const payload of [{ ...command, workspaceId: "other" }, { ...command, displayedFamilyIds: [] },
+      { ...command, lessonExposureIds: [] }, { ...command, expectedAttemptId: undefined },
+      { ...command, contentFingerprint: undefined }]) {
+      expect((await POST(request(payload))).status).toBe(400);
+    }
+    expect(deps.act).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a service refusal for an unsubmitted mock without content", async () => {
+    deps.act.mockRejectedValue(Object.assign(new Error("模拟交卷前不能打开串讲"), { code: "CONFLICT" }));
+    const response = await POST(request({ action: "open_lesson", clientKey: "lesson-http-2", lessonId: "complex-arithmetic",
+      expectedRunId: "mock-run", expectedAttemptId: "mock-attempt", packVersion: "2026-10-17-v1",
+      contentFingerprint: "a".repeat(64), mappingVersion: "reviewed-v1" }));
+    expect(response.status).toBe(409);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).not.toHaveProperty("lessonContents");
+  });
+
 });

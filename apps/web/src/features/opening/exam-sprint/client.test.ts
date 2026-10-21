@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExamSprintCommand, ExamSprintOverview } from "@aistudy/contracts";
 import { createExamSprintClient } from "./client";
+import { confirmedSprintLesson, prepareSprintLesson } from "./lesson-navigation";
 
 function overview(answered = 0): ExamSprintOverview {
   return {
     pack: { id: "math-i", version: "1", title: "考前冲刺", description: "", topics: [], lessons: [], sourceItems: [], weekPlan: [], limitations: [] },
     state: { version: 1, startedAt: "2026-10-17T00:00:00Z", examDate: null, dailyMinutes: 60, runs: [], sourceRecords: [] },
-    attempts: [], activeRun: null, currentAttempt: null, skills: [], recommendations: [],
+    lessonContents: [], attempts: [], activeRun: null, currentAttempt: null, skills: [], recommendations: [],
     summary: { sourceTotal: 0, sourceCovered: 0, sourceIndependent: 0, sourceDelayed: 0, onlineAnswered: answered, onlineIndependentCorrect: 0 },
     workload: { remainingItems: 0, estimatedMinutes: null, availableMinutes: null, overloaded: false, message: "" },
   };
@@ -22,6 +23,143 @@ function deferred<T>() {
 const intent = { action: "answer", attemptId: "attempt-1", answer: "b", confidence: 3 } as const;
 const key = "command-key-1";
 type Fetcher = typeof fetch;
+
+const lesson = { id: "lesson-1", topicId: "topic-1", title: "极限", summary: "摘要", steps: ["化简"], workedExample: "完整串讲正文", pitfalls: [] };
+const lessonIdentity = { packVersion: "1", contentFingerprint: "reviewed-content", mappingVersion: "reviewed-map" };
+const openLesson = { action: "open_lesson", lessonId: lesson.id, expectedRunId: null, expectedAttemptId: null, ...lessonIdentity } as const;
+function lessonOverview(confirmed = false) {
+  const data = overview();
+  data.pack.lessons = [{ id: lesson.id, topicId: lesson.topicId, title: lesson.title, summary: lesson.summary, exposureIdentity: lessonIdentity }];
+  if (confirmed) data.lessonContents = [{ exposureId: "exposure-1", lesson }];
+  return data;
+}
+function activeLessonOverview(): ExamSprintOverview {
+  const data = lessonOverview(true);
+  const run = { id: "run-1", mode: "practice" as const, questionIds: ["question-1"], startedAt: data.state.startedAt, deadlineAt: null, completedAt: null };
+  const attempt = { id: "attempt-1", runId: run.id, questionId: "question-1", presentedAt: run.startedAt, answeredAt: null, answer: null, correct: null, confidence: null, durationSeconds: null, help: [], errorCause: null, independent: false,
+    question: { id: "question-1", topicId: lesson.topicId, skillId: "skill-1", familyId: "family-1", lessonId: lesson.id, difficulty: "foundation" as const, prompt: "题目", options: [{ id: "A", label: "答案" }], estimatedMinutes: 2 }, feedback: null, hint: null };
+  data.state.runs = [run];
+  data.activeRun = run;
+  data.currentAttempt = attempt;
+  data.attempts = [attempt];
+  return data;
+}
+
+describe("exam sprint lesson confirmation", () => {
+  it.each(["legacy_untracked_source", "unverifiable_source"] as const)("retains the server's %s coverage fact without inventing help or sending it back", async kind => {
+    const data = activeLessonOverview();
+    const coverage = { kind, packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 2 };
+    data.currentAttempt!.exposureCoverage = coverage;
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(Response.json(data));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+    await client.load();
+    expect(client.getSnapshot().overview?.currentAttempt?.exposureCoverage).toEqual(coverage);
+    expect(client.getSnapshot().overview?.attempts[0]?.exposureCoverage).toEqual(coverage);
+    expect(client.getSnapshot().overview?.currentAttempt?.help).toEqual([]);
+    await client.send(intent);
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body))).toEqual({ ...intent, clientKey: key });
+  });
+
+  it.each([
+    { packSourceId: "not-a-uuid", sourceVersion: 2 },
+    { packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: -1 },
+    { packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 1.5 },
+  ])("rejects malformed source coverage at the HTTP boundary: %j", async fields => {
+    const data = activeLessonOverview();
+    const malformed = { ...data, currentAttempt: { ...data.currentAttempt, exposureCoverage: { kind: "legacy_untracked_source", ...fields } } };
+    const client = createExamSprintClient({ fetcher: vi.fn<Fetcher>().mockResolvedValue(Response.json(malformed)) });
+    await client.load();
+    expect(client.getSnapshot().overview).toBeNull();
+    expect(client.getSnapshot().error).not.toBeNull();
+  });
+
+  it.each<[string, (data: ExamSprintOverview) => void]>([
+    ["run", data => { data.activeRun!.id = "new-run"; data.currentAttempt!.runId = "new-run"; }],
+    ["attempt", data => { data.currentAttempt!.id = "new-attempt"; }],
+    ["pack", data => { data.pack.version = "2"; }],
+    ["content", data => { data.pack.lessons[0]!.exposureIdentity = { ...lessonIdentity, contentFingerprint: "new-content" }; }],
+    ["mapping", data => { data.pack.lessons[0]!.exposureIdentity = { ...lessonIdentity, mappingVersion: "new-map" }; }],
+    ["unavailable mapping", data => { data.pack.lessons[0]!.exposureIdentity = null; }],
+    ["mock", data => { data.activeRun!.mode = "mock-a"; data.lessonContents = []; }],
+  ])("ends only the stale lost lesson navigation after a cross-tab %s change", async (_label, change) => {
+    const original = activeLessonOverview();
+    const request = prepareSprintLesson(original, lesson.id)!;
+    const latest = activeLessonOverview();
+    change(latest);
+    const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost open response"))
+      .mockResolvedValueOnce(Response.json(latest)).mockResolvedValueOnce(Response.json(latest));
+    const keys = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("new-command-key");
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    expect(await client.send(request)).toBeNull();
+    expect(client.getSnapshot().uncertain).toBe(true);
+    const recovered = await client.recover();
+    expect(recovered).not.toBeNull();
+    expect(confirmedSprintLesson(recovered!, request)).toBeNull();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, error: expect.stringContaining("已读取最新进度") });
+    const fresh = prepareSprintLesson(recovered!, lesson.id);
+    await client.send(fresh ?? { action: "configure", examDate: null, dailyMinutes: 60 });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(keys).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for persisted confirmation and sends every reopening through the server", async () => {
+    const response = deferred<Response>();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(Response.json(lessonOverview())).mockReturnValueOnce(response.promise).mockResolvedValueOnce(Response.json(lessonOverview(true)));
+    const keyFactory = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("command-key-2");
+    const client = createExamSprintClient({ fetcher, keyFactory });
+    await client.load();
+    const first = client.send(openLesson);
+    expect(client.getSnapshot().overview?.lessonContents).toEqual([]);
+    expect(await client.send(openLesson)).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    response.resolve(Response.json(lessonOverview(true)));
+    expect((await first)?.lessonContents[0]!.lesson.workedExample).toBe(lesson.workedExample);
+    await client.send(openLesson);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(keyFactory).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body))).toEqual({ ...openLesson, clientKey: key });
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toEqual({ ...openLesson, clientKey: "command-key-2" });
+  });
+
+  it("keeps unknown opens on the original view and recovers the exact same command before returning content", async () => {
+    const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost lesson response"))
+      .mockResolvedValueOnce(Response.json(lessonOverview(true))).mockResolvedValueOnce(Response.json(lessonOverview(true)));
+    const keys = vi.fn(() => key);
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    expect(await client.send(openLesson)).toBeNull();
+    expect(client.getSnapshot()).toMatchObject({ overview: null, uncertain: true });
+    expect(await client.send(intent)).toBeNull();
+    const restored = await client.recover();
+    expect(restored?.lessonContents[0]!.exposureId).toBe("exposure-1");
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET", "POST"]);
+    expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[2]![1]?.body);
+    expect(keys).toHaveBeenCalledOnce();
+  });
+
+  it("does not disclose content on a rejected mock open or malformed acknowledgement", async () => {
+    const malformed = { ...lessonOverview(true), lessonContents: [{ exposureId: "exposure-1", lesson: { id: lesson.id } }] };
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(Response.json({ error: "模拟交卷后才能阅读串讲" }, { status: 409 })).mockResolvedValueOnce(Response.json(malformed));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+    expect(await client.send(openLesson)).toBeNull();
+    expect(client.getSnapshot()).toMatchObject({ overview: null, uncertain: false, error: "模拟交卷后才能阅读串讲" });
+    expect(await client.send(openLesson)).toBeNull();
+    expect(client.getSnapshot()).toMatchObject({ overview: null, uncertain: true });
+  });
+
+  it("ignores a disposed late lesson acknowledgement and preserves its replay key", async () => {
+    const response = deferred<Response>();
+    const fetcher = vi.fn<Fetcher>().mockReturnValueOnce(response.promise).mockResolvedValueOnce(Response.json(lessonOverview()));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+    const pending = client.send(openLesson);
+    client.dispose();
+    await client.load();
+    response.resolve(Response.json(lessonOverview(true)));
+    expect(await pending).toBeNull();
+    expect(client.getSnapshot().overview?.lessonContents).toEqual([]);
+    expect(client.getSnapshot().uncertain).toBe(true);
+  });
+});
 
 describe("exam sprint client recovery", () => {
   it("locks synchronously against double clicks and only generates one command key", async () => {
@@ -205,7 +343,7 @@ describe("exam integration shares mutation recovery", () => {
       ["/api/opening/exam-sprint/integration", "POST"], ["/api/opening/exam-sprint/integration", "GET"],
       ["/api/opening/exam-sprint/integration", "GET"], ["/api/opening/exam-sprint/integration", "POST"],
     ]);
-    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[3][1]?.body);
+    expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[3]![1]?.body);
     expect(keys).toHaveBeenCalledOnce();
     expect(client.getSnapshot()).toMatchObject({ uncertain: false, integration });
   });
@@ -218,7 +356,7 @@ describe("exam integration shares mutation recovery", () => {
     expect(client.getSnapshot().uncertain).toBe(true);
     await client.recover();
     expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["PATCH", "GET", "PATCH"]);
-    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[2][1]?.body);
+    expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[2]![1]?.body);
   });
 
   it("reuses the original image-review request when no review id was received", async () => {
@@ -228,12 +366,12 @@ describe("exam integration shares mutation recovery", () => {
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     await client.sendIntegration({ action: "review", input: reviewInput });
     await client.recover();
-    expect(fetcher.mock.calls[1][0]).toBe("/api/opening/exam-sprint");
-    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[2][1]?.body);
+    expect(fetcher.mock.calls[1]![0]).toBe("/api/opening/exam-sprint");
+    expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[2]![1]?.body);
     expect(client.getSnapshot().review?.status).toBe("pending");
     await client.loadReview(review.id);
-    expect(fetcher.mock.calls[3][0]).toBe(`/api/opening/exam-sprint/reviews?id=${review.id}`);
-    expect(fetcher.mock.calls[3][1]?.method).toBe("GET");
+    expect(fetcher.mock.calls[3]![0]).toBe(`/api/opening/exam-sprint/reviews?id=${review.id}`);
+    expect(fetcher.mock.calls[3]![1]?.method).toBe("GET");
     expect(client.getSnapshot().review?.status).toBe("unknown");
   });
 
@@ -242,7 +380,7 @@ describe("exam integration shares mutation recovery", () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(Response.json(forecast)).mockResolvedValueOnce(Response.json({ papers: [] }));
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     await client.loadForecast(" A & B ");
-    expect(fetcher.mock.calls[0][0]).toBe("/api/opening/exam-sprint/forecast?teacher=A%20%26%20B");
+    expect(fetcher.mock.calls[0]![0]).toBe("/api/opening/exam-sprint/forecast?teacher=A%20%26%20B");
     await client.sendIntegration({ action: "paper", input: { sourceId: reviewInput.referenceSourceId, sourceVersion: 2, teacher: "A & B", year: 2025, label: "期末", kind: "past_exam", skills: [{ skillId: "skill-1", points: 10 }] } });
     expect(client.getSnapshot()).toMatchObject({ uncertain: true, forecast });
   });

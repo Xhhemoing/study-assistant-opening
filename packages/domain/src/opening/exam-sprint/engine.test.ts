@@ -190,9 +190,11 @@ describe("exam sprint answer isolation and evidence", () => {
     const view = examSprintOverview(state, pack, NOW);
     view.currentAttempt!.question.options[0]!.label = "changed";
     view.state.runs[0]!.questionIds.push("fake");
-    view.pack.lessons[0]!.steps.push("changed");
+    view.pack.lessons[0]!.title = "changed";
+    expect(view.pack.lessons[0]).not.toHaveProperty("steps");
     expect(state.runs[0]!.questionIds).not.toContain("fake");
     expect(pack.lessons[0]!.steps).toEqual([]);
+    expect(pack.lessons[0]!.title).toBe("s1");
     expect(pack.questions[0]!.options[0]!.label).toBe("One");
   });
 });

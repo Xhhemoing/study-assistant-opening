@@ -4,7 +4,10 @@ import type { ExamAttemptView, ExamSprintOverview } from "@aistudy/contracts";
 import { useEffect, useState } from "react";
 import { ui, tone } from "../design/ui";
 import type { ExamSprintIntent } from "./client";
-import { causeLabels, formatDuration, modeLabels } from "./labels";
+import { causeLabels, formatDuration, hasSprintAttemptHelp, modeLabels } from "./labels";
+
+import { LessonButton } from "./lesson-button";
+import { attemptElementId, type OpenSprintLesson } from "./lesson-navigation";
 
 type Send = (command: ExamSprintIntent) => void;
 
@@ -16,8 +19,9 @@ function RunClock({ startedAt, deadlineAt, now }: { startedAt: string; deadlineA
 
 export function AttemptFeedback({ attempt, disabled, send }: { attempt: ExamAttemptView; disabled: boolean; send: Send }) {
   if (!attempt.feedback) return null;
+  const assisted = hasSprintAttemptHelp(attempt);
   return <div className="space-y-3 rounded-lg bg-surface-2 p-4">
-    <p className="text-sm font-semibold text-text">{attempt.answer === null ? "未作答" : attempt.correct ? "回答正确" : "需要再练"} · {attempt.help.length ? "含帮助，不计独立正确" : !attempt.answeredAt ? "尚未形成作答证据" : attempt.independent ? "未见题族独立作答" : "当前不计新增独立证据（重复、帮助或资格变化）"}</p>
+    <p className="text-sm font-semibold text-text">{attempt.answer === null ? "未作答" : attempt.correct ? "回答正确" : "需要再练"} · {assisted ? "含帮助，不计独立正确" : !attempt.answeredAt ? "尚未形成作答证据" : attempt.exposureCoverage ? "早期资料曝光无法核验，当前不计独立证据" : attempt.independent ? "未见题族独立作答" : "当前不计新增独立证据（重复、帮助或资格变化）"}</p>
     <p className="text-sm">参考答案：{attempt.feedback.answer}</p>
     <p className="whitespace-pre-wrap font-reading text-[17px] leading-[30px] text-text">{attempt.feedback.explanation}</p>
     {attempt.answeredAt ? <label className="block max-w-xs space-y-1"><span className={ui.label}>这次卡在哪里？（可修正）</span><select className={ui.input} disabled={disabled} value={attempt.errorCause ?? ""} onChange={event => send({ action: "error", attemptId: attempt.id, errorCause: (event.target.value || null) as ExamAttemptView["errorCause"] })}><option value="">未标记</option>{Object.entries(causeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : null}
@@ -28,7 +32,7 @@ function QuestionForm({ attempt, mock, disabled, send }: { attempt: ExamAttemptV
   const [answer, setAnswer] = useState(attempt.answer ?? "");
   const [confidence, setConfidence] = useState(attempt.confidence ?? 3);
   const answered = attempt.answeredAt !== null;
-  return <div className="space-y-5">
+  return <div id={attemptElementId(attempt.id)} tabIndex={-1} className="scroll-mt-24 space-y-5">
     <p className="whitespace-pre-wrap font-reading text-[17px] leading-[30px] text-text">{attempt.question.prompt}</p>
     <form onSubmit={event => { event.preventDefault(); if (answer && !answered && !disabled) send({ action: "answer", attemptId: attempt.id, answer, confidence }); }} className="space-y-4">
       <fieldset disabled={disabled || answered} className="space-y-2"><legend className="sr-only">选择你的答案</legend>{attempt.question.options.map(option => <label key={option.id} className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 text-sm ${answer === option.id ? "border-accent bg-accent-soft" : "border-text-3 hover:bg-surface-2"}`}><input type="radio" name={`answer-${attempt.id}`} value={option.id} checked={answer === option.id} onChange={() => setAnswer(option.id)} className="mt-1 accent-accent" /><span className="whitespace-pre-wrap leading-6">{option.id}. {option.label}</span></label>)}</fieldset>
@@ -40,7 +44,7 @@ function QuestionForm({ attempt, mock, disabled, send }: { attempt: ExamAttemptV
   </div>;
 }
 
-export function ActiveRun({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: Send }) {
+export function ActiveRun({ overview, disabled, send, onOpenLesson }: { overview: ExamSprintOverview; disabled: boolean; send: Send; onOpenLesson?: OpenSprintLesson }) {
   const run = overview.activeRun;
   const attempt = overview.currentAttempt;
   const [confirmFinish, setConfirmFinish] = useState(false);
@@ -54,6 +58,7 @@ export function ActiveRun({ overview, disabled, send }: { overview: ExamSprintOv
   return <section className={`${ui.panel} space-y-5 p-5`} aria-labelledby="current-sprint-title">
     <div className="flex flex-wrap items-start justify-between gap-2"><div><h2 id="current-sprint-title" className="font-semibold">{modeLabels[run.mode]} · {answered} / {run.questionIds.length} 题已答</h2><p className="mt-1 text-xs text-text-3">{mock ? "20–30 分钟短模拟 · 不是完整考试卷" : "作答 → 看解析 → 归因 → 独立复测"}</p></div><RunClock startedAt={run.startedAt} deadlineAt={run.deadlineAt} now={now} /></div>
     {attempt ? <QuestionForm key={`${attempt.id}-${attempt.answer ?? "pending"}`} attempt={attempt} mock={mock} disabled={disabled || expired} send={send} /> : <p className="text-sm text-text-2">本轮题目已完成，请结束本轮查看结果。</p>}
+    {attempt && onOpenLesson ? <LessonButton overview={overview} lessonId={attempt.question.lessonId} onOpenLesson={onOpenLesson} disabled={disabled} returnTarget={{ id: attemptElementId(attempt.id), label: "返回原题", runId: run.id, attemptId: attempt.id }} /> : null}
     <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
       {attempt?.answeredAt && !isLast && !expired ? <button type="button" className={ui.primary} disabled={disabled} onClick={() => send({ action: "next", runId: run.id })}>下一题</button> : null}
       {!attempt || (isLast && attempt.answeredAt) || expired ? <button type="button" className={ui.primary} disabled={disabled} onClick={() => send({ action: "finish", runId: run.id })}>{mock ? "交卷并查看解析" : "结束本轮"}</button> : <button type="button" className={ui.quiet} disabled={disabled} onClick={() => setConfirmFinish(value => !value)}>提前结束</button>}
@@ -62,12 +67,12 @@ export function ActiveRun({ overview, disabled, send }: { overview: ExamSprintOv
   </section>;
 }
 
-export function CompletedRun({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: Send }) {
+export function CompletedRun({ overview, disabled, send, onOpenLesson }: { overview: ExamSprintOverview; disabled: boolean; send: Send; onOpenLesson?: OpenSprintLesson }) {
   const runs = [...overview.state.runs].reverse().filter(item => item.completedAt);
   if (!runs.length) return null;
   return <section className="space-y-3" aria-label="历史训练结果">{runs.map((run, index) => {
     const attempts = overview.attempts.filter(item => item.runId === run.id);
     const answered = attempts.filter(item => item.answeredAt);
-    return <details key={run.id} className={`${ui.panel} p-4`} open={!overview.activeRun && index === 0 && run.mode.startsWith("mock")}><summary className="min-h-11 cursor-pointer text-sm font-medium py-2">{index === 0 ? "最近一轮" : "历史训练"} · {modeLabels[run.mode]} · 已答 {answered.length}/{run.questionIds.length}</summary><div className="mt-4 space-y-3"><p className="text-sm font-medium text-text">客观题正确 {answered.filter(item => item.correct).length} / {run.questionIds.length} · 未答 {run.questionIds.length - answered.length} · 独立新题族正确 {answered.filter(item => item.independent && item.correct).length}</p><p className="text-xs leading-6 text-text-3">结果只反映这些已做题目，不代表正式考试分数。本轮正确数保留历史评分；当前独立证据和技能状态还会考虑帮助、重复题族、撤回及版本资格。</p>{attempts.map(attempt => <details key={attempt.id} className="rounded-lg border border-line p-3"><summary className="min-h-11 cursor-pointer whitespace-pre-wrap text-sm leading-6 py-2">{attempt.question.prompt}</summary><div className="mt-3"><ul className="mb-3 space-y-2">{attempt.question.options.map(option => <li key={option.id} className="rounded-lg bg-surface-2 p-2 text-sm leading-6"><span className="whitespace-pre-wrap">{option.id}. {option.label}</span>{option.id === attempt.answer ? <span className="ml-2 text-xs font-medium text-text-2">你的选择</span> : null}{option.id === attempt.feedback?.answer ? <span className="ml-2 text-xs font-medium text-accent">参考答案</span> : null}</li>)}</ul><p className="mb-2 text-xs text-text-2">你的答案：{attempt.answer ?? "未作答"} · 用时 {formatDuration(attempt.durationSeconds ?? 0)}</p><AttemptFeedback attempt={attempt} disabled={disabled} send={send} /></div></details>)}</div></details>;
+    return <details key={run.id} className={`${ui.panel} p-4`} open={!overview.activeRun && index === 0 && run.mode.startsWith("mock")}><summary className="min-h-11 cursor-pointer text-sm font-medium py-2">{index === 0 ? "最近一轮" : "历史训练"} · {modeLabels[run.mode]} · 已答 {answered.length}/{run.questionIds.length}</summary><div className="mt-4 space-y-3"><p className="text-sm font-medium text-text">客观题正确 {answered.filter(item => item.correct).length} / {run.questionIds.length} · 未答 {run.questionIds.length - answered.length} · 独立新题族正确 {answered.filter(item => item.independent && item.correct).length}</p><p className="text-xs leading-6 text-text-3">结果只反映这些已做题目，不代表正式考试分数。本轮正确数保留历史评分；当前独立证据和技能状态还会考虑帮助、重复题族、撤回及版本资格。</p>{attempts.map(attempt => <details key={attempt.id} className="rounded-lg border border-line p-3"><summary id={attemptElementId(attempt.id)} className="scroll-mt-24 min-h-11 cursor-pointer whitespace-pre-wrap text-sm leading-6 py-2">{attempt.question.prompt}</summary><div className="mt-3"><ul className="mb-3 space-y-2">{attempt.question.options.map(option => <li key={option.id} className="rounded-lg bg-surface-2 p-2 text-sm leading-6"><span className="whitespace-pre-wrap">{option.id}. {option.label}</span>{option.id === attempt.answer ? <span className="ml-2 text-xs font-medium text-text-2">你的选择</span> : null}{option.id === attempt.feedback?.answer ? <span className="ml-2 text-xs font-medium text-accent">参考答案</span> : null}</li>)}</ul><p className="mb-2 text-xs text-text-2">你的答案：{attempt.answer ?? "未作答"} · 用时 {formatDuration(attempt.durationSeconds ?? 0)}</p><AttemptFeedback attempt={attempt} disabled={disabled} send={send} />{onOpenLesson ? <div className="mt-3"><LessonButton overview={overview} disabled={disabled} lessonId={attempt.question.lessonId} onOpenLesson={onOpenLesson} returnTarget={{ id: attemptElementId(attempt.id), label: "返回原题", runId: run.id, attemptId: attempt.id }} /></div> : null}</div></details>)}</div></details>;
   })}</section>;
 }

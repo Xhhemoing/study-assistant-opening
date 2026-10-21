@@ -52,7 +52,13 @@ export interface EvidenceEligibilityContext {
   serverEvaluation?: ServerEvaluation | null;
   /** Immutable server capture from the exam bridge, including pre-binding family exposure. */
   examAttempt?: {
-    firstFamilyExposure: boolean;
+    firstFamilyExposure: boolean | null;
+    /** Server-verified frozen Sprint lesson references; null means unprovable. */
+    lessonAssistance?: boolean | null;
+    /** Partial example exposure remains distinct from a complete worked family. */
+    partialExample?: boolean | null;
+    /** Frozen Sprint source coverage, verified against the original bound source. */
+    exposureCoverage?: "legacy_untracked_source" | "unverifiable";
     /** Every ancestor still has the captured answer; null means the chain cannot be proved. */
     answerUnchanged: boolean | null;
   } | null;
@@ -111,6 +117,10 @@ export type EvidenceEligibilityReasonCode =
   | "prior_answer_exposure"
   | "prior_evaluation_feedback"
   | "exam_family_already_seen"
+  | "exam_lesson_assistance"
+  | "exam_exposure_history_unknown"
+  | "exam_legacy_untracked_source"
+  | "exam_partial_example_exposure"
   | "exam_answer_changed"
   | "exam_answer_history_unknown"
   | "verification_source_untrusted"

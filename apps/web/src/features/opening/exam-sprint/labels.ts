@@ -1,4 +1,4 @@
-import type { ExamErrorCause, ExamMode, ExamSourceRecord } from "@aistudy/contracts";
+import type { ExamAttemptView, ExamErrorCause, ExamMode, ExamSourceRecord } from "@aistudy/contracts";
 
 export const modeLabels: Record<ExamMode, string> = { diagnostic: "摸底诊断", practice: "针对练习", retest: "无提示复测", "mock-a": "短模拟 A", "mock-b": "短模拟 B" };
 export const causeLabels: Record<ExamErrorCause, string> = { concept: "概念不清", method: "选法不当", calculation: "运算失误", conditions: "遗漏条件", modeling: "建模困难", reading: "英文审题", time: "时间不足" };
@@ -7,3 +7,4 @@ export const outcomeLabels: Record<ExamSourceRecord["outcome"], string> = { corr
 export const assistanceLabels: Record<ExamSourceRecord["assistance"], string> = { none: "独立完成", hint: "使用提示 / 外部帮助", solution: "看过答案" };
 export function formatDuration(seconds: number): string { const total = Math.max(0, Math.floor(seconds)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`; }
 export function practiceModeForDueAt(dueAt: string | null, now = Date.now()): "practice" | "retest" { return dueAt !== null && Date.parse(dueAt) <= now ? "retest" : "practice"; }
+export function hasSprintAttemptHelp(attempt: Pick<ExamAttemptView, "help" | "lessonExposureIds" | "partialExampleExposureIds">): boolean { return attempt.help.length > 0 || (attempt.lessonExposureIds?.length ?? 0) > 0 || (attempt.partialExampleExposureIds?.length ?? 0) > 0; }

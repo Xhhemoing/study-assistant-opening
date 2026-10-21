@@ -74,7 +74,7 @@ function snapshot(): KnowledgeSnapshot {
 }
 
 describe("exam course binding integration", () => {
-  it("preserves existing graph content, honors explicit nodes and creates readable public lessons without question data", async () => {
+  it("preserves graph identities and publishes a readable lesson directory without lesson bodies or question data", async () => {
     const repository = createOpeningKnowledgeRepository(f.sql), graph = snapshot();
     const previousSource = await source();
     await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
@@ -98,7 +98,17 @@ describe("exam course binding integration", () => {
     const chunks = await f.sql`SELECT text FROM opening_source_chunks WHERE source_id=${binding.packSourceId} ORDER BY page`;
     expect(chunks).toHaveLength(3);
     expect(JSON.stringify(chunks)).not.toContain("PRIVATE-");
-    expect(JSON.stringify(chunks)).toContain("Public worked example");
+    expect(JSON.stringify(chunks)).toContain("Public summary");
+    for (const lesson of pack.lessons) {
+      expect(JSON.stringify(chunks)).toContain(`串讲：${lesson.id}`);
+      expect(JSON.stringify(chunks)).toContain(`主题：${lesson.topicId}`);
+      for (const body of [...lesson.steps, lesson.workedExample, ...lesson.pitfalls]) expect(JSON.stringify(chunks)).not.toContain(body);
+    }
+    const added = saved!.snapshot.nodes[3]!;
+    expect(added).toMatchObject({ status: "supported", evidenceChunkIds: [expect.any(String)] });
+    const [evidence] = await f.sql`SELECT text FROM opening_source_chunks WHERE id=${added.evidenceChunkIds[0]!}`;
+    expect(evidence!.text).toContain("串讲：second");
+    expect(evidence!.text).toContain(`版本：${pack.version}`);
     const content = await readOpeningSourceContent(f.sql, f.scope, binding.packSourceId, { version: 0 });
     expect(content.text).toContain("Public overview");
     expect(content.pages).toEqual([1, 2, 3]);
