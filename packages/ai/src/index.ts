@@ -50,6 +50,7 @@ export {
   resolveModelForTask, resolveFallbackModelForTask, openingModelSnapshot, OpeningModelRoutingError,
 } from "./opening/model-routing";
 export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
+export { buildAnswerGradingInput } from "./opening/answer-grading";
 export { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_TOOLS, SYSTEM_QUERY_LIMITS, type SystemQueryReader, type SystemQueryService, type SystemQueryFocus, type SystemQueryClock, type SystemQueryPlanner } from "./opening/system-query-agent";
 export {
   createModelGateway,
