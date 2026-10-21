@@ -1,6 +1,8 @@
-import { createElement } from "react";
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { OpeningApi } from "../client/api";
 import { TodayStudyTools } from "./today-study-tools";
 
@@ -17,9 +19,20 @@ it("does not mount optional tools or read their data until the disclosure is ope
 
 it("offers an actionable priority control when the queue can be hidden on mobile", async () => {
   const { TodayLearningContext } = await import("./today-overview");
-  const html = renderToStaticMarkup(createElement(TodayLearningContext, { onShowActions: () => {} }));
-  expect(html).toContain("优先行动</button>");
-  expect(html).not.toContain('href="#action-digest"');
-  expect(html).toContain('href="/opening/cards"');
-  expect(html).toContain('href="/opening/settings/connections"');
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container), onShowActions = vi.fn();
+  try {
+    await act(async () => root.render(createElement(TodayLearningContext, { onShowActions })));
+    const actions = container.querySelector('nav[aria-label="学习闭环快捷入口"]');
+    const priority = actions?.querySelector("button");
+    expect(priority?.textContent).toBe("优先行动");
+    expect(priority?.type).toBe("button");
+    expect(container.querySelector('a[href="#action-digest"]')).toBeNull();
+    expect(container.querySelector('a[href="/opening/courses"]')).not.toBeNull();
+    await act(async () => priority!.click());
+    expect(onShowActions).toHaveBeenCalledOnce();
+  } finally {
+    await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals();
+  }
 });

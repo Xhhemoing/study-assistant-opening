@@ -56,20 +56,25 @@ it("production learn course and advanced settings sources do not import mock pro
   }
 });
 
-it("documents previously unchecked surfaces as real-API or static (no mock provider)", () => {
+it("keeps migrated aliases and their real-API destinations free of mock providers", () => {
+  for (const name of ["library", "search", "settings"]) {
+    const alias = readSrc(`apps/web/src/app/(workspace)/${name}/page.tsx`);
+    expect(alias).not.toMatch(/createMockProvider|useStudyProvider|lib\/data\/mock/);
+    expect(alias).toContain(`redirect(openingAliasHref("/opening/${name}", await searchParams))`);
+  }
   const surfaces: Array<{ file: string; mustNotMatch: RegExp; mustMatch?: RegExp }> = [
     {
-      file: "apps/web/src/app/(workspace)/library/page.tsx",
+      file: "apps/web/src/app/(opening)/opening/library/page.tsx",
       mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
       mustMatch: /LibraryView/,
     },
     {
-      file: "apps/web/src/app/(workspace)/search/page.tsx",
+      file: "apps/web/src/features/search/search-workspace.tsx",
       mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
       mustMatch: /createSearchApi/,
     },
     {
-      file: "apps/web/src/app/(workspace)/settings/page.tsx",
+      file: "apps/web/src/app/(opening)/opening/settings/page.tsx",
       mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
       mustMatch: /SettingsView/,
     },

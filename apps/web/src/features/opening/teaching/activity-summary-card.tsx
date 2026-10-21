@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { TaskItem, TeachingActivitySummary } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { TaskQueueRefreshContext, TaskStatusControl } from "../planning/task-status-control";
@@ -34,23 +34,35 @@ export function ActivitySummaryCard({ activityId, api: apiProp }: { activityId: 
   const refreshQueue = useContext(TaskQueueRefreshContext);
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const client = useMemo(() => createTeachingActivityClient(), []);
-  const [summary, setSummary] = useState<TeachingActivitySummary | null>(null);
-  const [task, setTask] = useState<TaskItem | null>(null);
-  const [error, setError] = useState("");
+  const [snapshot, setSnapshot] = useState<{ activityId: string; summary: TeachingActivitySummary; task: TaskItem | null } | null>(null);
+  const [failure, setFailure] = useState<{ activityId: string; message: string } | null>(null);
+  const request = useRef(0);
+  const currentActivity = useRef(activityId);
+  currentActivity.current = activityId;
   const load = useCallback(async () => {
-    setError("");
+    const version = ++request.current;
+    setFailure(null);
+    const current = () => version === request.current && currentActivity.current === activityId;
     try {
-      const next = await client.getSummary(activityId);
-      setSummary(next);
-      if (next.taskId) {
+      const summary = await client.getSummary(activityId);
+      if (!current()) return;
+      let task: TaskItem | null = null;
+      if (summary.taskId) {
         const result = await api.listTasks();
-        setTask(result.tasks.find((row) => row.id === next.taskId) ?? null);
-      } else setTask(null);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取学习小结"); }
+        task = result.tasks.find((row) => row.id === summary.taskId) ?? null;
+      }
+      // A summary and its linked task are one snapshot. Never pair a new
+      // summary with the previous activity's task while the second read waits.
+      if (current()) setSnapshot({ activityId, summary, task });
+    } catch (reason) {
+      if (current()) setFailure({ activityId, message: reason instanceof Error ? reason.message : "无法读取学习小结" });
+    }
   }, [activityId, api, client]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { request.current++; }; }, [load]);
+  const visible = snapshot?.activityId === activityId ? snapshot : null;
+  const error = failure?.activityId === activityId ? failure.message : "";
   return <div className="space-y-2">
-    {summary ? <ActivitySummaryContent summary={summary} task={task} api={api} onReread={() => { refreshQueue?.(); void load(); }} /> : <p role="status" className="text-xs text-text-2">正在读取学习小结…</p>}
+    {visible ? <ActivitySummaryContent summary={visible.summary} task={visible.task} api={api} onReread={() => { refreshQueue?.(); void load(); }} /> : <p role="status" className="text-xs text-text-2">正在读取学习小结…</p>}
     {error ? <div role="alert" className="space-y-2 text-xs text-danger"><p>{error}</p><button type="button" className={ui.secondary} onClick={() => { void load(); }}>重新读取</button></div> : null}
   </div>;
 }

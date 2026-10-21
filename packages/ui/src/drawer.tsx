@@ -43,13 +43,13 @@ export function Drawer({ open, onClose, title = "详情", description, children,
 
   const retainedContent = keepMounted && retainedHost ? createPortal(children, retainedHost) : null;
   return <Dialog.Root open={open} onOpenChange={next => { if (!next) onClose(); }}>
-    <Dialog.Portal>
-      <Dialog.Overlay data-drawer-backdrop="true" className="fixed inset-0 z-50 bg-black/30" />
-    </Dialog.Portal>
     {/* Only the decorative frame persists for its exit transition. The modal
         itself unmounts immediately so hideOthers, focus and scrolling release. */}
     <Dialog.Portal forceMount>
       <div className="pointer-events-none fixed inset-0 z-50 overflow-hidden" aria-hidden={open ? undefined : true} inert={!open}>
+        {/* Keep backdrop and frame in one portal: a newly mounted sibling
+            portal would otherwise sit above the retained frame and eat clicks. */}
+        {open ? <Dialog.Overlay data-drawer-backdrop="true" className="pointer-events-auto absolute inset-0 bg-black/30" /> : null}
         <div
           data-drawer-frame="true"
           data-state={open ? "open" : "closed"}

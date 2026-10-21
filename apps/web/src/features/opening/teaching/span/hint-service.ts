@@ -1,33 +1,43 @@
-import { spanHintRequestSchema, type Scope, type SpanHintLevel, type SpanHintResponse, type SpanProblem, type SpanSolution } from "@aistudy/contracts";
+import { spanHintRequestSchema, type Scope, type SpanHintLevel, type SpanHintResponse, type SpanProblem } from "@aistudy/contracts";
 import { createOpeningLearningAttemptRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
+import { getSpanProblem, solveSpanProblemWithSteps, type SpanRowOperation, type SpanWorkedSolution } from "@aistudy/domain";
+import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import type { Sql } from "postgres";
 import { createSpanFeedbackService } from "./feedback-service";
 
-/** Reviewed explanations for the immutable v1 catalog, including reserved items.
- * This server module is never imported by the lesson's client bundle. */
-const WORKED_STEPS: Record<string, string> = {
-  "span-example-2d": "From coordinate 1, α=3. From coordinate 2, 2β=−1, so β=−1/2. Check: 3(1,0)+(−1/2)(0,2)=(3,−1)=u.",
-  "span-faded-3d": "From coordinates 1 and 2, α=2 and β=−1. Check coordinate 3: α+β=2−1=1. Thus 2(1,0,1)−(0,1,1)=(2,−1,1)=u.",
-  "span-independent-3d": "Coordinates 1 and 2 force α=2 and α+β=3, hence β=1. Coordinate 3 requires β=2. The same β cannot be both 1 and 2; the system is inconsistent.",
-  "span-contrast-dependent": "The equations are α−2β=3 and −2α+4β=−6. The second is −2 times the first. Let β=t; then α=3+2t. Check: (3+2t)(1,−2)+t(−2,4)=(3,−6)=u for every real t.",
-  "span-geometry-transfer": "Coordinates 1 and 2 force α=1 and β=2. Coordinate 3 would give α+β=3, but u has third coordinate 4. Thus every combination satisfies z=x+y, while this u does not.",
-  "span-simulation-dependent": "Every combination has equal coordinates: α(1,1)+β(2,2)=(α+2β,α+2β). The target requires α+2β=3 and α+2β=1 simultaneously, an impossibility.",
-  "span-reserved-fraction": "The first two equations give 2α=1 and 3β=−2, hence α=1/2 and β=−2/3. Check coordinate 3: α−β=1/2+2/3=7/6. The resulting vector is (1,−2,7/6)=u.",
-  "span-reserved-dependent": "The second equation is α+3β=−2; the first is twice this equation and the third is its negative. Let β=t, α=−2−3t. Substitution gives (2α+6β,α+3β,−α−3β)=(−4,−2,2)=u.",
-  "span-reserved-transfer": "Coordinate 1 gives α−2β=1/2. Coordinate 2 gives −α+2β=1, so α−2β=−1. These contradict each other. Already the first two coordinates exclude any common coefficients.",
-};
+/** Only the server's canonical, immutable catalog can authorize hint content. */
+function canonicalProblem(problem: SpanProblem): SpanProblem {
+  const known = getSpanProblem(problem.id, problem.version) ?? getSpanReservedProblem(problem.id, problem.version);
+  const same = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((value, index) => value === right[index]);
+  if (!known || problem.familyId !== known.familyId || !same(problem.target, known.target) ||
+      !same(problem.vectors[0], known.vectors[0]) || !same(problem.vectors[1], known.vectors[1]) ||
+      !same(problem.knowledgeComponents, known.knowledgeComponents)) {
+    throw Object.assign(new Error("本题身份、版本或内容与题库不一致，请保留原答案。"), { code: "VALIDATION" });
+  }
+  return known;
+}
 
 function coordinateEquation(problem: SpanProblem, coordinate: number): string {
   return `(${problem.vectors[0][coordinate]})α+(${problem.vectors[1][coordinate]})β=${problem.target[coordinate]}`;
 }
 
-function workedExplanation(problem: SpanProblem, solution: SpanSolution): string {
-  const derivation = problem.version === "1" ? WORKED_STEPS[problem.id] : undefined;
-  if (!derivation || solution.kind === "unknown") throw Object.assign(new Error("本题版本的完整示范尚未核对，请保留原答案。"), { code: "VALIDATION" });
-  const conclusion = solution.kind === "none" ? "u ∉ span{v,w}. 方程组无解，所以不属于。"
-    : solution.kind === "unique" ? `α=${solution.coefficients[0]}, β=${solution.coefficients[1]}; u ∈ span{v,w}. 全部坐标使用同一组系数，且都满足。`
-      : `(α,β)=(${solution.particular.join(",")})${solution.directions.map((direction, index) => `+t${index + 1}(${direction.join(",")})`).join("")}; u ∈ span{v,w}. 系数不唯一，仍然属于。`;
-  return `Sol.\n1. Write αv+βw=u. The coordinate equations are ${problem.target.map((_, index) => coordinateEquation(problem, index)).join("; ")}.\n2. ${derivation}\n3. ${conclusion}\n本题解法已交付；同题后续作答会保留这次帮助，不能作为新的无提示作答。`;
+function rowOperation(operation: SpanRowOperation): string {
+  if (operation.kind === "swap") return `R${operation.rows[0] + 1} ↔ R${operation.rows[1] + 1}`;
+  if (operation.kind === "scale") return `R${operation.row + 1} ← (${operation.factor})R${operation.row + 1}`;
+  return `R${operation.row + 1} ← R${operation.row + 1} − (${operation.factor})R${operation.sourceRow + 1}`;
+}
+function workedExplanation(problem: SpanProblem, working: SpanWorkedSolution): string {
+  const { solution, steps, reducedMatrix } = working;
+  if (solution.kind === "unknown") throw Object.assign(new Error("本题版本的完整示范尚未核对，请保留原答案。"), { code: "VALIDATION" });
+  const equations = (rows: [string, string, string][]) => rows.map(([a, b, u]) => `(${a})α+(${b})β=${u}`).join("; ");
+  const derivation = steps.length
+    ? steps.map(step => `${rowOperation(step.operation)} ⇒ ${equations(step.matrix)}.`).join("\n")
+    : "The equations are already reduced. 方程组已经是简化形式。";
+  const contradiction = reducedMatrix.find(([a, b, u]) => a === "0" && b === "0" && u !== "0");
+  const conclusion = solution.kind === "none" ? `A reduced equation gives 0=${contradiction![2]}, a contradiction. u ∉ span{v,w}. 方程组无解，所以不属于。`
+    : solution.kind === "unique" ? `α=${solution.coefficients[0]}, β=${solution.coefficients[1]}; u ∈ span{v,w}. 全部坐标使用同一组系数，且都满足。\nCheck: ${problem.target.map((target, i) => `(${solution.coefficients[0]})(${problem.vectors[0][i]})+(${solution.coefficients[1]})(${problem.vectors[1][i]})=${target}`).join("; ")}.`
+      : `(α,β)=(${solution.particular.join(",")})${solution.directions.map((direction, index) => `+t${index + 1}(${direction.join(",")})`).join("")}; u ∈ span{v,w}. 每个 t 为任意实数；这些系数组合满足全部简化方程，等价地满足原方程。系数不唯一，仍然属于。`;
+  return `Sol.\n1. Write αv+βw=u. The coordinate equations are ${problem.target.map((_, index) => coordinateEquation(problem, index)).join("; ")}.\n2. Row reduction. 每次行变换同时作用于 α、β 的系数和等号右侧，保持同一个方程组的解：\n${derivation}\n3. ${conclusion}\n本题解法已交付；同题后续作答会保留这次帮助，不能作为新的无提示作答。`;
 }
 
 function partialHint(problem: SpanProblem, level: Exclude<SpanHintLevel, 4>): string {
@@ -40,14 +50,15 @@ export function createSpanHintService(sql: Sql) {
   return { async read(scope: Scope, raw: unknown): Promise<SpanHintResponse> {
     const { attemptId, level } = spanHintRequestSchema.parse(raw);
     const attempt = await createOpeningLearningAttemptRepository(sql).assertAccess(scope, attemptId);
-    const problem = attempt.spanExercise;
-    if (!problem) throw Object.assign(new Error("这条作答不是 span 练习。"), { code: "VALIDATION" });
+    const storedProblem = attempt.spanExercise;
+    if (!storedProblem) throw Object.assign(new Error("这条作答不是 span 练习。"), { code: "VALIDATION" });
+    const problem = canonicalProblem(storedProblem);
     if (level === 4) {
-      if (problem.version !== "1" || !WORKED_STEPS[problem.id]) throw Object.assign(new Error("本题版本的完整示范尚未核对。"), { code: "VALIDATION" });
+      const text = workedExplanation(problem, solveSpanProblemWithSteps(problem));
       // Reuse the existing sealed-original guard, source/version recheck and
       // solution exposure transaction. Never fabricate or submit an answer here.
       const feedback = await createSpanFeedbackService(sql).read(scope, { attemptId });
-      return { attemptId, level, text: workedExplanation(problem, feedback.result.solution), exposureReceipt: feedback.exposureReceipt };
+      return { attemptId, level, text, exposureReceipt: feedback.exposureReceipt };
     }
     const text = partialHint(problem, level);
     const exposureReceipt = await createOpeningStudyExposureRepository(sql).deliver(scope, {

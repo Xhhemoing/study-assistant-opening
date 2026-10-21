@@ -46,7 +46,7 @@ export function advanceGradedCard(state: ReadState, cardId: string, queueRequest
   return { ...state, index: state.index + 1, flipped: false };
 }
 
-export function CardReviewView({ client: supplied, embedded = false, onRemainingChange }: { client?: OpeningCardsClient; embedded?: boolean; onRemainingChange?: (remaining: number | null) => void }) {
+export function CardReviewView({ client: supplied, embedded = false, compact = false, onRemainingChange, onGraded, onBusyChange, returnTo = "/opening/review?tab=cards" }: { client?: OpeningCardsClient; embedded?: boolean; compact?: boolean; onRemainingChange?: (remaining: number | null) => void; onGraded?: (cardId: string, result: GradeReviewResponse) => void; onBusyChange?: (busy: boolean) => void; returnTo?: string }) {
   const client = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
   const [state, setState] = useState<ReadState>({ kind: "loading" });
   const [grading, setGrading] = useState(false);
@@ -96,6 +96,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
     gradeInFlight.current = true;
     const queueRequest = requestId.current;
     setGrading(true);
+    onBusyChange?.(true);
     setGradeError("");
     setEvidenceNotice("");
     const identity = resolveCardGradeIdentity(
@@ -121,6 +122,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
         if (queueRequest !== requestId.current) return;
       }
       setState((currentState) => advanceGradedCard(currentState, current.card.id, queueRequest, requestId.current));
+      onGraded?.(current.card.id, result);
     } catch (error) {
       if (queueRequest !== requestId.current) return;
       setGradeError(
@@ -130,8 +132,9 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
       gradeInFlight.current = false;
       setExiting(false);
       setGrading(false);
+      onBusyChange?.(false);
     }
-  }, [client, current, grading, state]);
+  }, [client, current, grading, state, onGraded, onBusyChange]);
 
   const headerActions = <div className="flex flex-wrap gap-2">
     {state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" className={secondaryButtonClass} disabled={grading} onClick={() => setRetryToken(value => value + 1)}><RefreshCw size={14} aria-hidden />重新读取</button> : null}
@@ -140,13 +143,13 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
 
   return (
     <section className={embedded ? "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
-      {embedded ? <header className="space-y-3"><h2 className="text-lg font-semibold">记忆卡片</h2><p className="text-sm leading-6 text-text-2">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p>{headerActions}</header> : <PageHeader
+      {embedded ? <header className="space-y-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{!compact ? <><p className="text-sm leading-6 text-text-2">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p>{headerActions}</> : null}</header> : <PageHeader
         title="记忆卡片"
         description="复习你制成的卡片。关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。"
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
-        {state.kind === "ready" ? <details className="mx-auto mb-4 max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
+        {state.kind === "ready" && !compact ? <details className="mx-auto mb-4 max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
         {state.kind === "loading" ? <LoadingRows label="正在读取到期记忆卡片…" /> : null}
         {state.kind === "loggedOut" ? (
           <>
@@ -207,7 +210,7 @@ export function CardReviewView({ client: supplied, embedded = false, onRemaining
             <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index} exiting={exiting} entering={state.index > 0}
               onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
               onGrade={gradeCard} />
-            <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo: "/opening/review?tab=cards" })}>围绕这张卡片提问</Link>
+            <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo })}>围绕这张卡片提问</Link>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {gradeOptions.map(({ grade, label, icon: Icon }) => (
                 <button

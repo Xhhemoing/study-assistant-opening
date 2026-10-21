@@ -1,5 +1,6 @@
 export const reviewTabs = [
   { id: "all", label: "全部" },
+  { id: "session", label: "连续复习" },
   { id: "cards", label: "记忆卡片" },
   { id: "retests", label: "待复测" },
   { id: "reinforcement", label: "补强练习" },

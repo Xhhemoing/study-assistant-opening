@@ -2,6 +2,19 @@ import type { SpanAnswer, SpanProblem, SpanSolution, SpanVerification } from "@a
 import { addRational, divideRational, equalRational, formatSpanRational, multiplyRational, parseSpanRational, rational, subtractRational, type SpanRational } from "./span-rational";
 
 type ParsedProblem = { vectors: [SpanRational[], SpanRational[]]; target: SpanRational[] };
+/** Row indices are zero-based; each operation applies to the whole augmented row. */
+export type SpanRowOperation =
+  | { kind: "swap"; rows: [number, number] }
+  | { kind: "scale"; row: number; factor: string }
+  | { kind: "subtract"; row: number; sourceRow: number; factor: string };
+export type SpanAugmentedMatrix = [string, string, string][];
+export type SpanWorkedSolution = {
+  solution: SpanSolution;
+  initialMatrix: SpanAugmentedMatrix;
+  steps: { operation: SpanRowOperation; matrix: SpanAugmentedMatrix }[];
+  reducedMatrix: SpanAugmentedMatrix;
+};
+const formatMatrix = (rows: SpanRational[][]): SpanAugmentedMatrix => rows.map(row => [formatSpanRational(row[0]!), formatSpanRational(row[1]!), formatSpanRational(row[2]!)]);
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseVector(raw: unknown): SpanRational[] | null {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 8) return null;
@@ -18,20 +31,28 @@ function parseProblem(raw: unknown): ParsedProblem | null {
 }
 
 /** RREF on an augmented n×3 matrix, using BigInt fractions throughout. */
-function solveParsed(problem: ParsedProblem): Exclude<SpanSolution, { kind: "unknown" }> {
+function solveParsed(problem: ParsedProblem, record?: (operation: SpanRowOperation, rows: SpanRational[][]) => void): Exclude<SpanSolution, { kind: "unknown" }> {
   const rows = problem.target.map((u, i) => [problem.vectors[0][i]!, problem.vectors[1][i]!, u]);
   const pivots: number[] = [];
   let rank = 0;
   for (let column = 0; column < 2; column++) {
     const candidate = rows.findIndex((row, index) => index >= rank && row[column]!.n !== 0n);
     if (candidate < 0) continue;
-    [rows[rank], rows[candidate]] = [rows[candidate]!, rows[rank]!];
+    if (candidate !== rank) {
+      [rows[rank], rows[candidate]] = [rows[candidate]!, rows[rank]!];
+      record?.({ kind: "swap", rows: [rank, candidate] }, rows);
+    }
     const divisor = rows[rank]![column]!;
-    rows[rank] = rows[rank]!.map((cell) => divideRational(cell, divisor));
+    if (!equalRational(divisor, rational(1n))) {
+      rows[rank] = rows[rank]!.map((cell) => divideRational(cell, divisor));
+      record?.({ kind: "scale", row: rank, factor: formatSpanRational(divideRational(rational(1n), divisor)) }, rows);
+    }
     for (let row = 0; row < rows.length; row++) {
       if (row === rank) continue;
       const factor = rows[row]![column]!;
+      if (factor.n === 0n) continue;
       rows[row] = rows[row]!.map((cell, j) => subtractRational(cell, multiplyRational(factor, rows[rank]![j]!)));
+      record?.({ kind: "subtract", row, sourceRow: rank, factor: formatSpanRational(factor) }, rows);
     }
     pivots.push(column);
     rank++;
@@ -55,6 +76,16 @@ function solveParsed(problem: ParsedProblem): Exclude<SpanSolution, { kind: "unk
 export function solveSpanProblem(problem: SpanProblem): SpanSolution {
   const parsed = parseProblem(problem);
   return parsed ? solveParsed(parsed) : { kind: "unknown", reason: "invalid_problem" };
+}
+
+/** Exact derivation from the same solver used for scoring; no catalog ID lookup. */
+export function solveSpanProblemWithSteps(problem: SpanProblem): SpanWorkedSolution {
+  const parsed = parseProblem(problem);
+  if (!parsed) return { solution: { kind: "unknown", reason: "invalid_problem" }, initialMatrix: [], steps: [], reducedMatrix: [] };
+  const initialMatrix = formatMatrix(parsed.target.map((target, index) => [parsed.vectors[0][index]!, parsed.vectors[1][index]!, target]));
+  const steps: SpanWorkedSolution["steps"] = [];
+  const solution = solveParsed(parsed, (operation, rows) => steps.push({ operation, matrix: formatMatrix(rows) }));
+  return { solution, initialMatrix, steps, reducedMatrix: (steps.at(-1)?.matrix ?? initialMatrix).map(row => [...row]) };
 }
 
 function parseAnswer(raw: unknown): SpanAnswer | null {

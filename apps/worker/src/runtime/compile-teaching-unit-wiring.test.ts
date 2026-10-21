@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus } from "@aistudy/contracts";
+import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus, TeachingPartialHints } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
 
 const activities = vi.hoisted(() => ({
@@ -126,6 +126,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+const rankHints: TeachingPartialHints = {
+  direction: "先找矩阵的列数与秩，再联系零空间维数。",
+  concept: "秩与零空间维数的和等于矩阵的列数。",
+  firstStep: "将已知列数 5 和秩 2 代入 rank(A) + dim N(A) = 5，先写出等式。",
+};
+
 /** What a real model returns: grounded blocks when evidence was supplied, uncited otherwise. */
 function modelAnswer(input: { text: string }, options: { formula?: boolean } = {}) {
   const grounded = input.text.includes(CHUNK);
@@ -137,7 +143,7 @@ function modelAnswer(input: { text: string }, options: { formula?: boolean } = {
         { type: "text", text: grounded ? "矩阵的秩与零空间维数之和等于列数，这就是秩—零化度定理。" : "秩与零空间的关系可以从线性方程组的解来理解。", citedChunkIds: cite },
         ...(options.formula === false ? [] : [{ type: "formula", text: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: cite }]),
         { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: [] },
-        { type: "answer_key", text: "5 − 2 = 3", citedChunkIds: [] },
+        { type: "answer_key", text: "5 − 2 = 3", hints: rankHints, citedChunkIds: [] },
       ],
     }),
     citedChunkIds: [], requestId: "req-1", candidates: [], inputTokens: 100, outputTokens: 100,
@@ -167,7 +173,13 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     model.complete.mockImplementation(async (input: { text: string }) => {
       const answer = modelAnswer(input);
       const parsed = JSON.parse(answer.text);
-      parsed.blocks.splice(1, 0, { type: "prompt", text: "先做一道线性方程组题" }, { type: "answer_key", text: "前置题答案" });
+      parsed.blocks.splice(1, 0, { type: "prompt", text: "先做一道线性方程组题" }, {
+        type: "answer_key", text: "前置题答案", hints: {
+          direction: "先把每个条件写成关于未知数的等式。",
+          concept: "方程组的解必须同时满足全部方程。",
+          firstStep: "先为第一个条件写出等式，保留其他条件供后续核对。",
+        },
+      });
       return { ...answer, text: JSON.stringify(parsed) };
     });
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
@@ -227,8 +239,9 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
-    expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hidden: true });
+    expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hints: rankHints, hidden: true });
     expect(answerKey.content).not.toHaveProperty("citedChunkIds");
+    expect(writtenBlocks.find((b) => b.type === "prompt")!.content).not.toHaveProperty("hints");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
   });

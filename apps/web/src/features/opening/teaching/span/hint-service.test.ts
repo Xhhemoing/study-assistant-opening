@@ -108,4 +108,30 @@ describe("span hint ladder", () => {
     await expect(service.read(scope, { attemptId: id, level: 4 })).rejects.toMatchObject({ code: "VALIDATION" });
     expect(mocks.deliver).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { name: "unknown identity", change: { id: "span-reserved-parallel-q01" } },
+    { name: "unknown version", change: { version: "2" } },
+    { name: "changed target", change: { target: ["2", "-1", "2"] } },
+    { name: "changed operands", change: { vectors: [["9", "0", "1"], ["0", "1", "1"]] } },
+    { name: "changed evidence family", change: { familyId: "unseen-family" } },
+    { name: "changed knowledge components", change: { knowledgeComponents: ["unrelated"] } },
+  ])("rejects $name before any hint or solution exposure", async ({ change }) => {
+    const problem = { ...getSpanProblem("span-faded-3d")!, ...change } as SpanProblem;
+    mocks.assertAccess.mockResolvedValue(attempt(problem, true));
+    for (const level of [1, 2, 3, 4] as const) {
+      await expect(service.read(scope, { attemptId: id, level })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    expect(mocks.sql).not.toHaveBeenCalled();
+    expect(mocks.deliver).not.toHaveBeenCalled();
+  });
+
+  it("does not return the generated explanation when its original read or durable exposure fails", async () => {
+    mocks.assertAccess.mockResolvedValue(attempt(getSpanProblem("span-faded-3d")!, true));
+    mocks.sql.mockRejectedValueOnce(new Error("original read failed"));
+    await expect(service.read(scope, { attemptId: id, level: 4 })).rejects.toThrow("original read failed");
+    expect(mocks.deliver).not.toHaveBeenCalled();
+    mocks.deliver.mockRejectedValueOnce(new Error("solution release failed"));
+    await expect(service.read(scope, { attemptId: id, level: 4 })).rejects.toThrow("solution release failed");
+  });
 });

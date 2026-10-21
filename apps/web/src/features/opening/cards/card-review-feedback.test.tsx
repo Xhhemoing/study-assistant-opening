@@ -117,3 +117,21 @@ it("finishes the last card after its confirmed exit and emits one success pulse"
   expect(container.textContent).toContain("这组记忆卡片已经处理完毕");
   expect(vibrate).toHaveBeenCalledExactlyOnceWith(8);
 });
+
+
+it("notifies the mixed queue only after a saved grade and keeps navigation busy during an uncertain response", async () => {
+  const onGraded = vi.fn();
+  const onBusyChange = vi.fn();
+  grade.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => root.render(createElement(CardReviewView, { client, onGraded, onBusyChange })));
+  await reveal();
+  await act(async () => gradeButton().click());
+  expect(onGraded).not.toHaveBeenCalled();
+  expect(onBusyChange.mock.calls.map(call => call[0])).toEqual([true, false]);
+  await act(async () => gradeButton().click());
+  expect(onGraded).not.toHaveBeenCalled();
+  expect(onBusyChange).toHaveBeenLastCalledWith(true);
+  await tick();
+  expect(onGraded).toHaveBeenCalledExactlyOnceWith("a", result);
+  expect(onBusyChange).toHaveBeenLastCalledWith(false);
+});
