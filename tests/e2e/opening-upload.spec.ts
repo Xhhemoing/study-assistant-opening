@@ -36,22 +36,26 @@ test.describe("opening upload", () => {
       }, { timeout: 30_000 });
       await page.locator("summary").filter({ hasText: "已上传 1 份材料" }).click({ timeout: 30_000 });
       await expect(page.getByRole("list", { name: "已上传任务", exact: true }).getByText(/^原件已保存，/)).toBeVisible();
-      const sourceRow = page.getByRole("article", { name: `处理材料：${name}`, exact: true });
+      const sourceOpener = page.getByRole("button", { name: `打开资料：${name}`, exact: true });
+      const sourceRow = page.getByRole("article").filter({ has: sourceOpener });
       await expect(sourceRow).toBeVisible();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: "阅读已保存原件", exact: true }).click({ timeout: 15_000 });
+      await sourceOpener.click({ timeout: 15_000 });
       const reader = page.getByRole("dialog", { name, exact: true });
       await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
-      const originalLink = reader.getByRole("link", { name: "打开原件 v0", exact: true });
+      const originalLink = reader.getByRole("link", { name: "打开原件", exact: true });
       await expect(originalLink).toBeVisible();
+      await expect(originalLink).toHaveAttribute("href", /^\/api\/opening\/sources\/[0-9a-f-]{36}\/download\?version=0$/);
       const download = await context.request.get((await originalLink.getAttribute("href"))!);
       expect(download.status()).toBe(200);
+      expect(download.headers()["x-opening-source-version"]).toBe("0");
       expect(await download.body()).toEqual(original);
       await page.reload();
       await expect(sourceRow.getByText(/^原件已保存，/)).toBeVisible();
-      await sourceRow.getByRole("button", { name: "阅读已保存原件", exact: true }).click({ timeout: 15_000 });
+      await sourceOpener.click({ timeout: 15_000 });
       await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
       await expect(originalLink).toBeVisible();
+      await expect(originalLink).toHaveAttribute("href", /^\/api\/opening\/sources\/[0-9a-f-]{36}\/download\?version=0$/);
     } finally {
       await context.close();
     }

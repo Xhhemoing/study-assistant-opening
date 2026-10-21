@@ -39,7 +39,7 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await expect(assistant.getByLabel("当前物理页码")).toHaveValue("1");
     await assistant.getByRole("button", { name: "关闭上下文", exact: true }).click();
     const citation = assistant.getByRole("log").locator('a[href^="/opening/library?tab=materials&source="][href$="&version=0&page=1"]').first();
-    await expect(citation).toContainText("parser-two-page.pdf");
+    await expect(citation).toHaveAccessibleName("来源 [1]：parser-two-page.pdf · 第 1 页");
     await expect(citation).toHaveAttribute("href", /\/opening\/library\?tab=materials&source=[0-9a-f-]+&version=0&page=1$/);
     await citation.click();
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });
@@ -55,7 +55,7 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await readingTools.getByRole("button", { name: "关闭学习工具", exact: true }).click();
     await page.setViewportSize(desktopViewport);
     await reader.getByText("原件与处理信息", { exact: true }).click();
-    const original = reader.getByRole("link", { name: "打开原件 v0 · 第 1 页", exact: true });
+    const original = reader.getByRole("link", { name: "打开原件 · 第 1 页", exact: true });
     await expect(original).toHaveAttribute("href", /\/api\/opening\/sources\/[0-9a-f-]+\/download\?version=0#page=1$/);
     const bytes = await context.request.get((await original.getAttribute("href"))!);
     expect(bytes.status()).toBe(200);
