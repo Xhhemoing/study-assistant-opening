@@ -20,8 +20,10 @@ import type {
   TeachingGoal,
   TeachingSourceRef,
   TeachingPartialHints,
+  TeachingMisconception,
+  TeachingStartChoice,
 } from "@aistudy/contracts";
-import { teachingPartialHintsSchema, teachingQuestionInteractionSchema, teachingVectorDiagramSchema,
+import { teachingPartialHintsSchema, teachingMisconceptionsSchema, teachingStartChoiceSchema, teachingQuestionInteractionSchema, teachingVectorDiagramSchema,
   type TeachingQuestionInteraction, type TeachingVectorDiagram } from "@aistudy/contracts";
 import {
   assertOutlineHonest,
@@ -58,6 +60,8 @@ export type CompileModelBlock = {
   text: string;
   citedChunkIds: string[];
   hints?: TeachingPartialHints;
+  misconceptions?: TeachingMisconception[];
+  startChoice?: TeachingStartChoice;
   interaction?: TeachingQuestionInteraction;
   vectors?: TeachingVectorDiagram;
 };
@@ -98,6 +102,12 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
       : [];
     const hints = block.type === "answer_key" ? teachingPartialHintsSchema.safeParse(block.hints) : null;
     if (hints && !hints.success) throw new TeachingCompileOutputError("answer_key requires question-specific direction, concept and firstStep hints");
+    const misconceptions = block.type === "answer_key" ? teachingMisconceptionsSchema.safeParse(block.misconceptions) : null;
+    const startChoice = block.type === "answer_key" ? teachingStartChoiceSchema.safeParse(block.startChoice) : null;
+    if (misconceptions && (!misconceptions.success || !startChoice?.success
+      || !misconceptions.data.some(item => item.id === startChoice.data.misconception.misconceptionId))) {
+      throw new TeachingCompileOutputError("answer_key requires 2–3 misconceptions and two starting directions linked to one of them");
+    }
     const interaction = block.type === "prompt" && block.interaction !== undefined ? teachingQuestionInteractionSchema.safeParse(block.interaction) : null;
     if (interaction && !interaction.success) throw new TeachingCompileOutputError("invalid question interaction");
     const vectors = block.type === "vector_diagram" ? teachingVectorDiagramSchema.safeParse(block.vectors) : null;
@@ -107,6 +117,8 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
       text: block.text.trim().slice(0, MODEL_TEXT_LIMIT),
       citedChunkIds: [...new Set(cited)].slice(0, 16),
       ...(hints?.success ? { hints: hints.data } : {}),
+      ...(misconceptions?.success ? { misconceptions: misconceptions.data } : {}),
+      ...(startChoice?.success ? { startChoice: startChoice.data } : {}),
       ...(interaction?.success ? { interaction: interaction.data } : {}),
       ...(vectors?.success ? { vectors: vectors.data } : {}),
     });
@@ -132,7 +144,8 @@ function blocksFromModel(blocks: CompileModelBlock[], newBlockId: () => string):
         return { id, type: "vector_diagram", role: "teach", content: { text: block.text, vectors: block.vectors, ...cite } };
       case "answer_key":
         // Server-side only; never projected to client init while hidden.
-        return { id, type: "answer_key", role: "answer_key", content: { answer: block.text, hidden: true, ...(block.hints ? { hints: block.hints } : {}), ...cite } };
+        return { id, type: "answer_key", role: "answer_key", content: { answer: block.text, hidden: true, ...(block.hints ? { hints: block.hints } : {}),
+          ...(block.misconceptions ? { misconceptions: block.misconceptions } : {}), ...(block.startChoice ? { startChoice: block.startChoice } : {}), ...cite } };
       case "formula":
         // Preserve provenance; a citation is not a mathematical correctness check.
         return { id, type: "formula", role: "teach", content: { latex: block.text, ...cite } };
@@ -528,6 +541,7 @@ const COMPILE_INSTRUCTION = [
   '选择题在 prompt 加 interaction:{"kind":"choice","options":[{"id":"A","label":"选项文字"},{"id":"B","label":"选项文字"}]}；数值填空用 interaction:{"kind":"numeric","unit":"可选单位"}。不要在interaction或题干里写正确答案、评分或解答。不能用数值/选择回答的证明题仍用普通prompt。',
   '二维向量主题可加 type:"vector_diagram",text:"先预测系数改变后向量会往哪移动",vectors:{"v":[1,0],"w":[0,1]} 的教学块。只用于讲解实例，不能包含正在检查的题目的目标向量或答案。此块由受控SVG绘图，不输出HTML或JS。',
   "每个 answer_key 必须含 hints 对象，为紧邻的前一道 prompt 编写三个非空、不同的提示：direction 只指出本题的解题方向；concept 说明本题所用概念或定义；firstStep 写出本题的第一个具体步骤并停下。不要把这些提示放在 prompt 或普通教学块中。",
+  '每个 answer_key 还必须含 misconceptions:[{id:"简短英文标识",manifestation:"会写出什么错误",reason:"为什么错",correction:"具体怎么改"}]，2–3条不同的常见错误；id仅小写字母、数字、连字符或下划线，不能用other。startChoice:{correct:{step:"可行的第一步",why:"为什么可行"},misconception:{step:"体现一个常见误区的第一步",why:"为什么不可行",misconceptionId:"对应错因id"}}。两个方向都只到起步，不包含最终答案；所有错因和起步选项只写在隐藏的answer_key中。',
   "三级提示均不能给出本题最终答案、完整推导或将答案换措辞；不能用空泛的学习建议代替题目专属内容。解答只放 answer_key.text。不要将生成的提示或解答称作已核验。",
   "text 使用 Markdown，行内公式写成 $...$。语言与学习意图一致，默认中文。",
   "依据材料的块在 citedChunkIds 中列出支持它的 chunk id；没有依据就给 []，不要编造 id，也不要声称内容来自材料。",
@@ -714,7 +728,7 @@ export function createCompilerProviderInput(options: BuildCompilerPublishInputOp
       text: `${intent}${learner}${prompt.text}`,
       chunks: pack.chunks,
       mode: "explain",
-      maxOutputTokens: 3000,
+      maxOutputTokens: 5500,
       mediaCapability: "text_only",
       imageParts: [],
       outputFormat: "json",
@@ -759,6 +773,14 @@ export function createCompilerBuildPublishInput(
       const answerIndexes = modelOutput.blocks.flatMap((block, index) => block.type === "answer_key" ? [index] : []);
       if (promptIndexes.length !== 1 || answerIndexes.length !== 1 || answerIndexes[0] !== promptIndexes[0]! + 1) {
         throw new TeachingCompileOutputError("prerequisite prelude requires one original-target prompt immediately followed by its answer key");
+      }
+    }
+    if (modelOutput && !options.learnerFocus?.prerequisiteRepair) {
+      const checks = modelOutput.blocks.filter(block => block.type === "prompt");
+      if (checks.length < 2 || checks.length > 3) throw new TeachingCompileOutputError("current item requires two or three checks");
+      if (modelOutput.blocks.some((block, index, blocks) => block.type === "prompt" && blocks[index + 1]?.type !== "answer_key"
+        || block.type === "answer_key" && blocks[index - 1]?.type !== "prompt")) {
+        throw new TeachingCompileOutputError("each check must be immediately followed by its own answer key");
       }
     }
     if (modelOutput) proposed = applyModelItemTitles(proposed, modelOutput.itemTitles);

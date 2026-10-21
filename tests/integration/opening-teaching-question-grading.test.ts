@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import type { AiGradingProposal, LearningAttempt, TeachingQuestionInteraction } from "@aistudy/contracts";
+import type { AiGradingProposal, LearningAttempt, TeachingQuestionInteraction, TeachingMisconception } from "@aistudy/contracts";
 import { createOpeningAiGradingRepository, createOpeningLearningRepository, createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningTeachingCommandsRepository } from "@aistudy/database";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
@@ -16,7 +16,7 @@ const answer = "两列线性无关，所以秩为 2。";
 const proposal: AiGradingProposal = { outcome: "correct", confidence: 0.93, questionMatch: true, feedback: answer,
   criteria: [{ label: "矩阵秩", verdict: "correct", feedback: "秩为2。" }] };
 
-async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction) {
+async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction, misconceptions?: TeachingMisconception[]) {
   const base = await learningAttemptFixture(fixture), sourceIds = withSource ? [base.sourceId] : [];
   const activity = await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope, {
     clientKey: randomUUID(), intentKind: "topic", intentSummary: "矩阵秩", courseId: base.courseId, sourceIds, createIntent: {},
@@ -25,6 +25,7 @@ async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。
   const unit = await content.createUnit(fixture.scope, { title: "矩阵秩", blocks: [
     { id: blockId, type: "prompt", content: { text: prompt, ...(interaction ? { interaction } : {}) } },
     { id: answerId, type: "answer_key", content: { answer, rubric: ["列向量线性无关", "秩等于2"], hidden: true,
+      ...(misconceptions ? { misconceptions } : {}),
       hints: { direction: "先考察列向量。", concept: "秩是线性无关列的最大数量。", firstStep: "写出第一列 (1,0)。" } } },
   ] });
   await content.publishActivitySpec(fixture.scope, { activityId: activity.id, teachingUnitId: unit.id, expectedVersion: 0,
@@ -67,6 +68,30 @@ it.each([false, true])("grades a canonical classroom question and preserves corr
   expect(corrected.observation).toMatchObject({ outcome: "incorrect", revisesObservationId: graded.id });
   const [saved] = await fixture.sql`SELECT answer,outcome FROM opening_learning_observations WHERE id=${original.id}`;
   expect(saved).toMatchObject({ answer: "2", outcome: "unverified" });
+});
+
+const rankErrors: TeachingMisconception[] = [
+  { id: "count_entries", manifestation: "把矩阵元素个数当成秩。", reason: "秩数的是线性无关的列，不是元素。", correction: "检查两列是否线性无关。" },
+  { id: "equal_entries", manifestation: "因为两个非零元素都等于1，就认为只有一个独立方向。", reason: "列向量分量的位置也影响方向。", correction: "分别写出两个列向量，再检查倍数关系。" },
+];
+
+it.each(["count_entries", "foreign_error", undefined])("binds misconception %s to the saved question dictionary", async misconceptionId => {
+  const f = await seed(false, undefined, undefined, rankErrors), original = await f.submit(await f.start());
+  expect((await f.grader.context(fixture.scope, { observationId: original.id })).misconceptions).toEqual(rankErrors);
+  expect(JSON.stringify(await f.content.getClientInit(fixture.scope, f.activity.id))).not.toContain("count_entries");
+  const graded = await f.grader.apply(fixture.scope, { observationId: original.id }, { ...proposal, outcome: "incorrect", misconceptionId,
+    criteria: [{ label: "秩的定义", verdict: "incorrect", feedback: "秩不是元素个数。" }] }, "fixture");
+  expect(graded.aiEvaluation?.misconceptionId).toBe(misconceptionId === "count_entries" ? "count_entries" : "other");
+  expect((await f.grader.context(fixture.scope, { observationId: original.id })).existing?.aiEvaluation?.misconceptionId).toBe(graded.aiEvaluation?.misconceptionId);
+});
+
+it.each(["correct", "unverified", "low_confidence"])("does not attach a diagnosed misconception to %s feedback", async mode => {
+  const f = await seed(false, undefined, undefined, rankErrors), original = await f.submit(await f.start());
+  const outcome = mode === "low_confidence" ? "incorrect" : mode as "correct" | "unverified";
+  const graded = await f.grader.apply(fixture.scope, { observationId: original.id }, { ...proposal, outcome,
+    confidence: mode === "low_confidence" ? 0.1 : 0.93, misconceptionId: "count_entries",
+    criteria: [{ label: "定义", verdict: outcome, feedback: "核对定义。" }] }, "fixture");
+  expect(graded.aiEvaluation?.misconceptionId).toBeNull();
 });
 
 it("ignores client prompt text, retains the full saved question, and replays the exact identity", async () => {

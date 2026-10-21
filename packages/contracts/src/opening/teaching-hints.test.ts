@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { teachingHintRequestSchema, teachingPartialHintsSchema } from "./teaching-hints";
+import { teachingHintRequestSchema, teachingPartialHintsSchema, teachingMisconceptionsSchema, teachingStartChoiceSchema } from "./teaching-hints";
+import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
 
 describe("teaching hints boundary", () => {
   const attemptId = "00000000-0000-4000-8000-000000000001";
@@ -14,5 +15,15 @@ describe("teaching hints boundary", () => {
     expect(teachingPartialHintsSchema.safeParse({ direction: "方向", concept: "概念" }).success).toBe(false);
     expect(teachingPartialHintsSchema.safeParse({ direction: " ", concept: "概念", firstStep: "第一步" }).success).toBe(false);
     expect(teachingPartialHintsSchema.safeParse({ direction: "方向", concept: "概念", firstStep: "第一步", answer: "答案" }).success).toBe(false);
+  });
+  it("requires 2–3 distinct, actionable misconceptions and different starting directions", () => {
+    expect(teachingMisconceptionsSchema.parse(rankPedagogy.misconceptions)).toEqual(rankPedagogy.misconceptions);
+    for (const items of [[], [rankPedagogy.misconceptions[0]], [rankPedagogy.misconceptions[0], rankPedagogy.misconceptions[0]],
+      rankPedagogy.misconceptions.map(item => ({ ...item, correction: " " }))]) {
+      expect(teachingMisconceptionsSchema.safeParse(items).success).toBe(false);
+    }
+    expect(teachingStartChoiceSchema.safeParse({ ...rankPedagogy.startChoice, misconception: {
+      ...rankPedagogy.startChoice.misconception, step: rankPedagogy.startChoice.correct.step,
+    } }).success).toBe(false);
   });
 });

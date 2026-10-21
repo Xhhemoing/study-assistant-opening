@@ -13,6 +13,8 @@ export const aiGradingProposalSchema = z.object({
     feedback: z.string().trim().min(1).max(2000),
   }).strict()).min(1).max(30),
   transcription: z.string().max(20_000).optional(),
+  /** Checked against the saved question's dictionary by the grading repository. */
+  misconceptionId: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/).nullable().optional(),
   /** A teaching exercise only; its client-side answer never becomes mastery evidence. */
   followUp: z.object({
     prompt: z.string().trim().min(1).max(1200),

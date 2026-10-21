@@ -1,3 +1,4 @@
+import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
 /**
  * PR-D: completed-key replay through the REAL worker wiring
  * (createCompileTeachingUnitWorkerDeps, as constructed by apps/worker main):
@@ -35,10 +36,13 @@ const modelServer = createServer(async (request, response) => {
       blocks: [
         { type: "text", text: "矩阵的秩与零空间维数之和等于列数。" },
         { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？" },
-        { type: "answer_key", text: "5 − 2 = 3", hints: {
+        { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", hints: {
           direction: "先找矩阵的列数与秩。", concept: "秩与零空间维数之和等于列数。",
           firstStep: "将列数 5 和秩 2 代入 rank(A) + dim N(A) = 5。",
         } },
+        { type: "text", text: "再换一个列数，检查主元与自由变量的关系。" },
+        { type: "prompt", text: "一个 3×4 矩阵的秩为 2，零空间维数是多少？" },
+        { type: "answer_key", ...rankPedagogy, text: "4 − 2 = 2", hints: { direction: "先找列数。", concept: "主元和自由变量合计为列数。", firstStep: "写出 2 + dim N(A) = 4。" } },
       ],
     }) }, finish_reason: "stop" }],
     usage: { prompt_tokens: 100, completion_tokens: 100 },

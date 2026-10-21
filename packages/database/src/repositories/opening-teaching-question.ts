@@ -1,5 +1,5 @@
 import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
-import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
+import { teachingMisconceptionsSchema, teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { learningError, type LearningSql } from "./opening-learning-facts";
 
@@ -110,6 +110,7 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
   const answer = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
   const text = teachingQuestionText(answer?.content);
   const rubric = answer?.content.rubric ?? answer?.content.criteria ?? answer?.content.scoringCriteria;
-  return { stem, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
+  const misconceptions = teachingMisconceptionsSchema.safeParse(answer?.content.misconceptions).data ?? [];
+  return { stem, misconceptions, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
     rubric ? `评分要点：\n${typeof rubric === "string" ? rubric : JSON.stringify(rubric)}` : ""].filter(Boolean).join("\n\n") };
 }

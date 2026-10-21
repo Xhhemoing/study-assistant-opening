@@ -77,7 +77,8 @@ export const teachingLearnerFocusSchema = z
     recentAssistance: z.array(assistanceLevelSchema).max(3),
     /** Historical feedback, not a diagnosis or proof of mastery. */
     recentErrors: z.array(z.object({ observationId: uuidSchema, label: z.string().min(1).max(200),
-      feedback: z.string().max(1000), source: z.enum(["ai_feedback", "verified_steps"]) }).strict()).max(3).optional(),
+      feedback: z.string().max(1000), source: z.enum(["ai_feedback", "verified_steps"]),
+      misconceptionId: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/).optional() }).strict()).max(3).optional(),
     strategyVersion: z.string().min(1).max(40),
     goalContext: goalLearningContextSchema.optional(),
     prerequisiteRepair: prerequisiteRepairSchema.optional(),

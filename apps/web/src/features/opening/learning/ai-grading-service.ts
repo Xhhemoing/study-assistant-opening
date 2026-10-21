@@ -54,7 +54,7 @@ export function createOpeningAiGradingService(deps: {
           beforeSend: async () => { await deps.repository.context(scope, input); },
           onModel: model => { modelLabel = model.modelSnapshot.modelName; },
           input: buildAnswerGradingInput({ question: context.stem, answer: context.observation.answer,
-            referenceText: context.referenceText, imageParts }),
+            referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts }),
           persistResult: async output => {
             let proposal;
             try { proposal = aiGradingProposalSchema.parse(JSON.parse(output.text)); }

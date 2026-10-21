@@ -53,3 +53,10 @@ it("validates a follow-up answer against its own distinct choices", () => {
     expect(aiGradingProposalSchema.safeParse({ ...proposal, followUp: { ...followUp, ...change } }).success).toBe(false);
   }
 });
+
+it("reads historical grading without a misconception and accepts only bounded identifiers", () => {
+  expect(aiGradingProposalSchema.parse(proposal)).not.toHaveProperty("misconceptionId");
+  expect(aiGradingProposalSchema.parse({ ...proposal, misconceptionId: null }).misconceptionId).toBeNull();
+  expect(aiGradingProposalSchema.parse({ ...proposal, misconceptionId: "rows_for_columns" }).misconceptionId).toBe("rows_for_columns");
+  expect(aiGradingProposalSchema.safeParse({ ...proposal, misconceptionId: "<script>" }).success).toBe(false);
+});
