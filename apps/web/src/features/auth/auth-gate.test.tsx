@@ -22,6 +22,7 @@ vi.mock("react", async importOriginal => ({
 }));
 
 let cleanups: Array<() => void>;
+let transport: ReturnType<typeof vi.fn<typeof fetch>>;
 const child = createElement("textarea", { defaultValue: "尚未保存的答案" });
 function render() {
   hooks.cursor = 0;
@@ -30,7 +31,7 @@ function render() {
 }
 async function flush() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
 async function mount(response: Response = Response.json({ user: { id: "u1", workspaceId: "w1" } })) {
-  vi.mocked(fetch).mockResolvedValueOnce(response);
+  transport.mockResolvedValueOnce(response);
   render();
   cleanups = hooks.effects.map(effect => effect()).filter((value): value is () => void => typeof value === "function");
   await flush();
@@ -51,12 +52,31 @@ beforeEach(() => {
   hooks.cursor = 0;
   hooks.replace.mockClear();
   cleanups = [];
-  vi.stubGlobal("window", Object.assign(new EventTarget(), { location: new URL("https://study.example/opening/courses/c1?tab=units#q2") }));
-  vi.stubGlobal("fetch", vi.fn());
+  transport = vi.fn<typeof fetch>();
+  vi.stubGlobal("fetch", transport);
+  const target = Object.assign(new EventTarget(), { location: new URL("https://study.example/opening/courses/c1?tab=units#q2") });
+  Object.defineProperty(target, "fetch", { get: () => globalThis.fetch, set: value => { globalThis.fetch = value; } });
+  vi.stubGlobal("window", target);
 });
 afterEach(() => { cleanups.forEach(cleanup => cleanup()); clearSessionExpiry(); vi.unstubAllGlobals(); });
 
 describe("AuthGate session recovery", () => {
+  it("installs global fetch before opening protected children and restores it on unmount", async () => {
+    let authenticate!: (response: Response) => void;
+    transport.mockImplementationOnce(() => new Promise(resolve => { authenticate = resolve; }));
+    expect(renderToStaticMarkup(render())).not.toContain("尚未保存的答案");
+    cleanups = hooks.effects.map(effect => effect()).filter((value): value is () => void => typeof value === "function");
+    expect(fetch).not.toBe(transport);
+    authenticate(Response.json({ user: { id: "u1", workspaceId: "w1" } }));
+    await flush();
+    expect(content().props.children).toBe(child);
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 }));
+    await fetch("/api/opening/conversations", { method: "POST" });
+    expect(content().props.inert).toBe(true);
+    cleanups.forEach(cleanup => cleanup());
+    expect(fetch).toBe(transport);
+  });
+
   it("retains the existing initial unauthenticated redirect with the exact return destination", async () => {
     await mount(new Response(null, { status: 401 }));
     expect(hooks.replace).toHaveBeenCalledWith("/login?returnTo=%2Fopening%2Fcourses%2Fc1%3Ftab%3Dunits%23q2");
@@ -97,15 +117,15 @@ describe("AuthGate session recovery", () => {
   it("removes the notice after explicit revalidation without remounting or replaying any writes", async () => {
     await mount();
     await expire();
-    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ user: { id: "u1", workspaceId: "w1" } }));
+    transport.mockResolvedValueOnce(Response.json({ user: { id: "u1", workspaceId: "w1" } }));
     recheckButton().props.onClick();
     await flush();
     const ready = render();
     expect(dialog(ready).props.children).toBeNull();
     expect(content(ready).props.children).toBe(child);
     expect(content(ready).props.inert).toBe(false);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch).toHaveBeenLastCalledWith("/api/auth/me", { cache: "no-store" });
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport).toHaveBeenLastCalledWith("/api/auth/me", { cache: "no-store" });
     expect(hooks.replace).not.toHaveBeenCalled();
     const closed = { open: true, close: vi.fn() };
     dialog(ready).props.ref.current = closed;
@@ -118,7 +138,7 @@ describe("AuthGate session recovery", () => {
   it("keeps the child and an actionable notice if revalidation fails", async () => {
     await mount();
     await expire();
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 401 }));
+    transport.mockResolvedValueOnce(new Response(null, { status: 401 }));
     recheckButton().props.onClick();
     await flush();
     expect(renderToStaticMarkup(render())).toContain("请先在新标签页完成登录。");
@@ -136,16 +156,16 @@ describe("AuthGate session recovery", () => {
   ])("does not unlock another account, workspace or missing identity: %j", async identity => {
     await mount();
     await expire();
-    vi.mocked(fetch).mockResolvedValueOnce(Response.json(identity));
+    transport.mockResolvedValueOnce(Response.json(identity));
     recheckButton().props.onClick();
     await flush();
     expect(renderToStaticMarkup(render())).toContain("请切回原账户和学习空间");
     expect(content().props.children).toBe(child);
     expect(content().props.inert).toBe(true);
-    const transport = vi.fn(async () => Response.json({ id: "unexpected-write" }));
-    const response = await createSessionFetch(transport)("/api/opening/conversations", { method: "POST", body: "private draft" });
+    const callsBeforeWrite = transport.mock.calls.length;
+    const response = await fetch("/api/opening/conversations", { method: "POST", body: "private draft" });
     expect(response.status).toBe(401);
-    expect(transport).not.toHaveBeenCalled();
+    expect(transport).toHaveBeenCalledTimes(callsBeforeWrite);
     expect(hooks.replace).not.toHaveBeenCalled();
   });
 

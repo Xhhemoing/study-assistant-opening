@@ -1,3 +1,5 @@
+import { guardSessionRequest } from "../../auth/session-expiry";
+
 export type PutProgress = (loaded: number, total: number) => void;
 
 /** Private object PUT. Progress counts uploaded bytes, never server parse percent. */
@@ -9,6 +11,8 @@ export function putPrivateBytes(
   xhrFactory: () => XMLHttpRequest = () => new XMLHttpRequest(),
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const guard = guardSessionRequest(url);
+    if (guard.blocked) { reject(new Error("请先登录原账户并验证，再继续上传。")); return; }
     const xhr = xhrFactory();
     xhr.open("PUT", url);
     // Same-origin relative URLs send cookies by default; keep credentials if begin ever returns absolute same-site URL.
@@ -19,7 +23,14 @@ export function putPrivateBytes(
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`上传对象失败 (${xhr.status})`));
+      else {
+        if (xhr.status === 401) {
+          let body: unknown = null;
+          try { body = JSON.parse(xhr.responseText); } catch { /* Non-JSON gateway errors retain upload error handling. */ }
+          guard.inspectFailure(xhr.status, body);
+        }
+        reject(new Error(`上传对象失败 (${xhr.status})`));
+      }
     };
     xhr.onerror = () => reject(new Error("上传中断（网络错误）"));
     xhr.onabort = () => reject(new Error("上传已取消"));

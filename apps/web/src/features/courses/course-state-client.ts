@@ -1,3 +1,4 @@
+import { createSessionFetch } from "../auth/session-expiry";
 import { courseLearningPreferencesUpdateSchema, learningPreferencesSchema, type CourseLearningPreferencesUpdate } from "@aistudy/contracts";
 import { z } from "zod";
 import type { CourseAsset, CourseSummary } from "./course-model";
@@ -9,7 +10,8 @@ const courseSchema = z.object({
 });
 const preferencesResponse = z.object({ learningPreferences: learningPreferencesSchema });
 
-export function createCourseStateClient(fetcher: typeof fetch = fetch) {
+export function createCourseStateClient(transport: typeof fetch = (input, init) => fetch(input, init)) {
+  const fetcher = createSessionFetch(transport);
   async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
     const response = await fetcher(path, {
       method, cache: "no-store",

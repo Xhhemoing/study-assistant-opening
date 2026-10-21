@@ -27,6 +27,8 @@ export { Card, Drawer, EmptyState, Field, StatusBadge } from "./primitives";
 
 export { Button } from "./button";
 export type { ButtonProps } from "./button";
+export { CourseCover } from "./course-cover";
+export type { CourseCoverProps } from "./course-cover";
 export { ErrorState } from "./error-state";
 export type { ErrorStateProps } from "./error-state";
 export type { DrawerProps } from "./drawer";

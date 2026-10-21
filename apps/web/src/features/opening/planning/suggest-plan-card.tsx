@@ -226,10 +226,10 @@ export function SuggestPlanCard({
   }
 
   return (
-    <section className="space-y-3 border-b border-zinc-200 bg-white px-4 py-4" aria-labelledby="suggest-plan-heading">
+    <section className="space-y-3 border-b border-line bg-surface px-4 py-4" aria-labelledby="suggest-plan-heading">
       <div>
-        <h3 className="text-xs font-semibold text-zinc-800" id="suggest-plan-heading">按建议安排</h3>
-        <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+        <h3 className="text-xs font-semibold text-text" id="suggest-plan-heading">按建议安排</h3>
+        <p className="mt-1 text-xs leading-5 text-text-3">
           一键生成草案并预览差异；确认后才改变正式计划（时区 {timeZone}）。
         </p>
       </div>
@@ -240,7 +240,7 @@ export function SuggestPlanCard({
             type="button"
             aria-pressed={preset === value}
             disabled={pending || Boolean(draft)}
-            className={`${secondaryButtonClass} ${preset === value ? "border-emerald-600 bg-emerald-50 text-emerald-900" : ""}`}
+            className={`${secondaryButtonClass} ${preset === value ? "border-accent bg-accent-soft text-accent" : ""}`}
             onClick={() => setPreset(value)}
           >
             {SUGGEST_PRESET_LABELS[value]}
@@ -255,15 +255,15 @@ export function SuggestPlanCard({
       >
         {pending && !draft ? "正在生成建议…" : "生成建议计划"}
       </button>
-      {error ? <p className="text-xs leading-5 text-red-700" role="alert">{error}</p> : null}
+      {error ? <p className="text-xs leading-5 text-danger" role="alert">{error}</p> : null}
       {draft && diff ? (
-        <div className="space-y-3 border-t border-zinc-200 pt-3">
-          <p className="text-xs font-semibold text-zinc-900">与已确认计划的差异</p>
-          <p className="text-xs leading-5 text-zinc-600">
+        <div className="space-y-3 border-t border-line pt-3">
+          <p className="text-xs font-semibold text-text">与已确认计划的差异</p>
+          <p className="text-xs leading-5 text-text-2">
             新增 {diff.added.length} · 移动 {diff.moved.length} · 移出 {diff.removed.length} · 未安排 {diff.unscheduledTaskIds.length}
           </p>
           {diff.added.length ? (
-            <ul className="space-y-1 text-xs text-zinc-600" aria-label="新增安排">
+            <ul className="space-y-1 text-xs text-text-2" aria-label="新增安排">
               {diff.added.map((block) => (
                 <li key={`add-${block.taskId}-${block.start}`}>
                   新增：{taskTitle(tasks, block.taskId)} · {timeLabel(block.start)}–{timeLabel(block.end)}
@@ -272,7 +272,7 @@ export function SuggestPlanCard({
             </ul>
           ) : null}
           {diff.moved.length ? (
-            <ul className="space-y-1 text-xs text-zinc-600" aria-label="移动安排">
+            <ul className="space-y-1 text-xs text-text-2" aria-label="移动安排">
               {diff.moved.map((block) => (
                 <li key={`move-${block.taskId}-${block.start}`}>
                   移动：{taskTitle(tasks, block.taskId)} · {timeLabel(block.start)}–{timeLabel(block.end)}
@@ -281,10 +281,10 @@ export function SuggestPlanCard({
             </ul>
           ) : null}
           {diff.unscheduledTaskIds.length ? (
-            <p className="text-xs text-amber-800">未安排 {diff.unscheduledTaskIds.length} 项，确认后仍保持未排入。</p>
+            <p className="text-xs text-warn">未安排 {diff.unscheduledTaskIds.length} 项，确认后仍保持未排入。</p>
           ) : null}
           {stale ? (
-            <p className="text-xs leading-5 text-amber-800">计划版本已变化。请取消旧草案，重新生成后再确认。</p>
+            <p className="text-xs leading-5 text-warn">计划版本已变化。请取消旧草案，重新生成后再确认。</p>
           ) : null}
           <div className="flex flex-wrap gap-2">
             <button

@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningApi, OpeningApiError } from "../opening/client/api";
 import { createOpeningLearningClient } from "../opening/client/learning-client";
 import { createOpeningCardsClient } from "../opening/cards/cards-client";
-import { clearSessionExpiry, createSessionFetch, subscribeToSessionExpiry } from "./session-expiry";
+import { createCourseStateClient } from "../courses/course-state-client";
+import { createSourceActionsClient } from "../opening/inbox/source-actions-client";
+import { createMeasurementClient } from "../opening/measurement/client";
+import { clearSessionExpiry, createSessionFetch, installSessionFetch, subscribeToSessionExpiry } from "./session-expiry";
 
 const sessionError = { error: { code: "UNAUTHENTICATED", message: "Authentication required" } };
 let onExpired: ReturnType<typeof vi.fn>;
@@ -105,5 +108,107 @@ describe("session expiry transport", () => {
     }
     expect(onExpired).toHaveBeenCalledOnce();
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("global session fetch installation", () => {
+  it("protects module-created clients even when they were constructed before the global install", async () => {
+    const original = vi.fn(async () => Response.json(sessionError, { status: 401 }));
+    vi.stubGlobal("fetch", original);
+    const course = createCourseStateClient();
+    const source = createSourceActionsClient();
+    const measurement = createMeasurementClient();
+    // These are also safe without an active gate; their local guard owns the same latch.
+    await expect(measurement.read("course1")).rejects.toThrow("登录状态已过期");
+    await expect(course.removeAsset("course1", { assetId: "source1", assetType: "source" })).rejects.toThrow("登录状态已过期");
+    await expect(source.act("source1", { action: "retry_cleanup" })).rejects.toMatchObject({ status: 401 });
+    await expect(measurement.act("attempt1", { action: "answer", clientKey: "client-key-123", answer: "A private answer" })).rejects.toThrow("登录状态已过期");
+    expect(original).toHaveBeenCalledOnce();
+    expect(onExpired).toHaveBeenCalledOnce();
+    clearSessionExpiry();
+    const afterInstall = vi.fn(async () => Response.json(sessionError, { status: 401 }));
+    vi.stubGlobal("fetch", afterInstall);
+    await expect(measurement.read("course1")).rejects.toThrow("登录状态已过期");
+    expect(afterInstall).toHaveBeenCalledOnce();
+    expect(original).toHaveBeenCalledOnce();
+  });
+
+  it("covers raw fetch with native receiver binding, deduplicates nested wrappers and blocks later writes", async () => {
+    const original = vi.fn(function (this: Window) {
+      expect(this).toBe(window);
+      return Promise.resolve(Response.json(sessionError, { status: 401 }));
+    });
+    window.fetch = original;
+    const uninstall = installSessionFetch();
+    try {
+      const wrappedClient = createSessionFetch(window.fetch);
+      await Promise.all([window.fetch("/api/opening/today"), wrappedClient("/api/opening/courses")]);
+      expect(onExpired).toHaveBeenCalledOnce();
+      expect(original).toHaveBeenCalledTimes(2);
+      expect((await window.fetch("/api/opening/conversations", { method: "POST", body: "A draft" })).status).toBe(401);
+      expect(original).toHaveBeenCalledTimes(2);
+      clearSessionExpiry();
+      original.mockResolvedValueOnce(Response.json({ id: "saved" }));
+      expect((await window.fetch("/api/opening/conversations", { method: "POST" })).ok).toBe(true);
+    } finally { uninstall(); }
+    expect(window.fetch).toBe(original);
+  });
+
+  it("leaves external/provider/auth failures and non-JSON 401s unchanged", async () => {
+    const original = vi.fn<typeof fetch>();
+    window.fetch = original;
+    const uninstall = installSessionFetch();
+    try {
+      for (const [url, response] of [
+        ["https://provider.example/api/chat", Response.json(sessionError, { status: 401 })],
+        ["/api/auth/me", Response.json(sessionError, { status: 401 })],
+        ["/api/opening/tutor", Response.json({ error: { code: "PROVIDER_AUTH" } }, { status: 401 })],
+        ["/api/opening/today", new Response("gateway unavailable", { status: 401 })],
+      ] as const) {
+        original.mockResolvedValueOnce(response);
+        expect(await window.fetch(url)).toBe(response);
+      }
+      expect(onExpired).not.toHaveBeenCalled();
+    } finally { uninstall(); }
+  });
+
+  it("ignores a late raw-fetch 401 after successful identity revalidation", async () => {
+    let finish!: (response: Response) => void;
+    window.fetch = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    const uninstall = installSessionFetch();
+    try {
+      const request = window.fetch("/api/opening/today");
+      clearSessionExpiry();
+      finish(Response.json(sessionError, { status: 401 }));
+      expect((await request).status).toBe(401);
+      expect(onExpired).not.toHaveBeenCalled();
+    } finally { uninstall(); }
+  });
+
+  it("shares overlapping gate ownership and cleans up idempotently before reinstalling", () => {
+    const original = vi.fn<typeof fetch>();
+    window.fetch = original;
+    const first = installSessionFetch();
+    const wrapped = window.fetch;
+    const second = installSessionFetch();
+    expect(window.fetch).toBe(wrapped);
+    first(); first();
+    expect(window.fetch).toBe(wrapped);
+    second();
+    expect(window.fetch).toBe(original);
+    const strictModeRemount = installSessionFetch();
+    expect(window.fetch).not.toBe(original);
+    strictModeRemount();
+    expect(window.fetch).toBe(original);
+  });
+
+  it("does not overwrite a fetch installed later by another owner", () => {
+    window.fetch = vi.fn<typeof fetch>();
+    const uninstall = installSessionFetch();
+    const laterFetch = vi.fn<typeof fetch>();
+    window.fetch = laterFetch;
+    uninstall();
+    expect(window.fetch).toBe(laterFetch);
   });
 });
