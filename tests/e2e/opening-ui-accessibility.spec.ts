@@ -106,7 +106,7 @@ for (const condition of conditions) {
     test.use({ viewport: condition.viewport, colorScheme: condition.colorScheme,
       contextOptions: { reducedMotion: condition.reducedMotion } });
     for (const view of views) {
-      test(`${view} has no serious or critical axe violations`, async ({ page }, testInfo) => {
+      test(`${view} has no axe violations at any severity`, async ({ page }, testInfo) => {
         const pageErrors: string[] = [];
         page.on("pageerror", error => pageErrors.push(error.message));
         let modelRequests = 0;
@@ -118,12 +118,11 @@ for (const condition of conditions) {
         await expect(page.locator("html")).toHaveAttribute("data-theme", condition.colorScheme);
         await expect(page.locator("html")).toHaveAttribute("data-motion", condition.reducedMotion === "reduce" ? "reduce" : "full");
 
-        // Keep all default axe rules, including WCAG contrast and best practices.
+        // All default axe violations block, including moderate/minor best practices.
         // Incomplete/manual-review findings stay in the attached full report.
         const result = await new AxeBuilder({ page }).analyze();
         await testInfo.attach("axe-results", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
-        const blocking = result.violations.filter(violation => violation.impact === "serious" || violation.impact === "critical");
-        expect(blocking.map(({ id, impact, help, nodes }) => ({ id, impact, help, targets: nodes.map(node => node.target) }))).toEqual([]);
+        expect(result.violations.map(({ id, impact, help, nodes }) => ({ id, impact, help, targets: nodes.map(node => node.target) }))).toEqual([]);
         await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(condition.viewport.width);
         if (view === "settings") {
           // Long forms and their sr-only labels belong to the shell's scroll

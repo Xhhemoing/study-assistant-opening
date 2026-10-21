@@ -20,7 +20,7 @@ export function MaterialSpaceNav({ sources, organization, space, onSpace, onCrea
     try { await onCreate(title); setTitle(""); setCreating(false); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "课程创建失败"); }
   }
-  return <aside className="min-w-0 lg:border-r lg:border-line lg:pr-4">
+  return <div className="min-w-0 lg:border-r lg:border-line lg:pr-4">
     <h2 className="mb-2 text-xs font-semibold text-text-3">资料视图</h2>
     <nav aria-label="资料视图" className="flex gap-1 overflow-x-auto lg:flex-col">
       {views.filter(view => view.id !== "attention" || space === "attention" || materialsInSpace(sources, organization, "attention").length > 0).map(({ id, title: label, icon: Icon }) => <button key={id} disabled={disabled} type="button" aria-pressed={space === id}
@@ -44,5 +44,5 @@ export function MaterialSpaceNav({ sources, organization, space, onSpace, onCrea
       </button>)}
     </nav>
     {!organization.courses.length ? <p className="py-2 text-xs leading-5 text-text-3">暂无课程空间</p> : null}
-  </aside>;
+  </div>;
 }

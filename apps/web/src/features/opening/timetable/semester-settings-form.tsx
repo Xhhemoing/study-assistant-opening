@@ -215,7 +215,7 @@ export function SemesterSettingsForm() {
   const entries = periodEntries(draft.periodTimes);
 
   return (
-    <div className="space-y-4" aria-labelledby="semester-settings-heading">
+    <section className="space-y-4" aria-labelledby="semester-settings-heading">
       <div>
         <h3 className="text-sm font-medium text-text" id="semester-settings-heading">学期与可用时间</h3>
         <p className="mt-1 text-xs leading-6 text-text-3">
@@ -373,6 +373,6 @@ export function SemesterSettingsForm() {
         </button>
       </div>
       {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
-    </div>
+    </section>
   );
 }
