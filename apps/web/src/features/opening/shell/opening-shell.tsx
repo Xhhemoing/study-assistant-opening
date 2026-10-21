@@ -7,6 +7,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { CommandPalette } from "../../search/command-palette";
 import { ui } from "../design/ui";
+import { ConnectionNotice } from "./connection-notice";
 import { OpeningAccountMenu } from "./account-menu";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { openAssistantDrawer } from "../assistant/assistant-entry";
@@ -116,7 +117,7 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   })}</nav>;
   return <>
     <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={studySurface ? "课程学习" : activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} mobileNavigation={<OpeningMobileNavigation pathname={pathname} pendingCount={pendingCount} />} settingsHref="/opening/settings" focusMode={effectiveFocusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} accountMenu={<OpeningAccountMenu userLabel={userLabel} pendingCount={pendingCount} focusMode={effectiveFocusMode} onToggleFocus={toggleFocusMode} onLogout={logout} logoutPending={logoutPending} />} topbar={<button type="button" className={ui.icon} aria-label="打开学习助手" title="学习助手 (Ctrl / ⌘ J)" onClick={() => openAssistantDrawer()}><Sparkles size={18} aria-hidden="true" /></button>}>
-      {logoutError ? <div className="border-b border-danger/30 bg-danger/10 px-5 py-2 text-xs text-danger" role="alert">{logoutError}</div> : null}<OpeningCapabilityNotice />{children}
+      {logoutError ? <div className="border-b border-danger/30 bg-danger/10 px-5 py-2 text-xs text-danger" role="alert">{logoutError}</div> : null}<ConnectionNotice /><OpeningCapabilityNotice />{children}
     </AppShell>
     <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
     <Suspense fallback={null}><AssistantDrawer /></Suspense>

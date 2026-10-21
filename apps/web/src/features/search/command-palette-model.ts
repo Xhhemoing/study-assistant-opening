@@ -12,7 +12,7 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: "opening-review", label: "AI 建议", description: "审核助手生成的学习建议", href: "/opening/suggestions", kind: "page" },
   { id: "materials", label: "材料", description: "上传与整理课程材料", href: "/opening/library?tab=materials", kind: "page" },
   { id: "connections", label: "数据连接", description: "邮箱与钉钉等数据连接设置", href: "/opening/settings/connections", kind: "page" },
-  { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/search", kind: "page" },
+  { id: "search", label: "全局搜索", description: "搜索笔记和课程", href: "/opening/search", kind: "page" },
   { id: "settings", label: "设置", description: "数据连接、排程与学习偏好", href: "/opening/settings", kind: "page" },
   { id: "settings-advanced", label: "高级设置", description: "AI 模型、每日额度、诊断与导出备份", href: "/opening/settings/advanced", kind: "page" },
 ] as const;

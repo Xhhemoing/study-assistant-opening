@@ -13,8 +13,8 @@ async function register(context: BrowserContext, label: string) {
 }
 
 async function expectOpeningTodaySurface(page: import("@playwright/test").Page) {
-  // sr-only h1 on TodayDashboard — stable closed-loop marker
-  await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeAttached();
+  await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeVisible();
+  await expect(page.getByRole("article", { name: "继续学习", exact: true })).toBeVisible();
   await expect(page.locator('[data-today-loop-links="true"]')).toBeVisible();
   await expect(
     page.getByRole("navigation", { name: "学习工作台导航" }).getByRole("link", { name: "今日" }),

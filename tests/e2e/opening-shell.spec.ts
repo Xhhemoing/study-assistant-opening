@@ -26,7 +26,8 @@ test.describe("opening shell", () => {
         ).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "复习" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "资料" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "今日" })).toHaveAttribute(
           "aria-current",
           "page",
@@ -124,7 +125,7 @@ test.describe("opening shell", () => {
         await nav.getByRole("link", { name: "资料", exact: true }).click();
         await expect(page).toHaveURL(/\/opening\/library$/);
         await expect(nav.getByRole("link", { name: "资料", exact: true })).toHaveAttribute("aria-current", "page");
-        await expect(page.getByRole("heading", { name: "资料库", exact: true })).toBeVisible();
+        await expect(page.getByRole("heading", { name: "资料", exact: true })).toBeVisible();
         await page.goBack();
         await expect(page).toHaveURL(/\/opening\/courses$/);
         await expect(nav.getByRole("link", { name: "课程", exact: true })).toHaveAttribute("aria-current", "page");
@@ -132,7 +133,7 @@ test.describe("opening shell", () => {
         await page.goForward();
         await expect(page).toHaveURL(/\/opening\/library$/);
         await expect(nav.getByRole("link", { name: "资料", exact: true })).toHaveAttribute("aria-current", "page");
-        await expect(page.getByRole("heading", { name: "资料库", exact: true })).toBeVisible();
+        await expect(page.getByRole("heading", { name: "资料", exact: true })).toBeVisible();
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         expect(documentRequests).toEqual([]);
         expect(pageErrors).toEqual([]);

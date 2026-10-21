@@ -1,6 +1,6 @@
-import { LibraryView } from "../../../features/opening/library/library-view";
+import { redirect } from "next/navigation";
+import { openingAliasHref, type LegacySearchParams } from "@/features/opening/shell/legacy-routes";
 
-export default async function LibraryPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
-  const { tab } = await searchParams;
-  return <LibraryView tab={tab} basePath="/library" />;
+export default async function LegacyPage({ searchParams }: { searchParams: Promise<LegacySearchParams> }) {
+  redirect(openingAliasHref("/opening/library", await searchParams));
 }
