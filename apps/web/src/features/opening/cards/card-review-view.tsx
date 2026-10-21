@@ -142,8 +142,8 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
   </div>;
 
   return (
-    <section className={embedded ? "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
-      {embedded ? <header className="space-y-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{!compact ? <><p className="text-sm leading-6 text-text-2">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p>{headerActions}</> : null}</header> : <PageHeader
+    <section aria-label={compact ? "当前记忆卡片" : undefined} className={embedded ? compact ? "space-y-3" : "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
+      {embedded ? !compact ? <header className="space-y-3"><h2 className="text-lg font-semibold">记忆卡片</h2><p className="text-sm leading-6 text-text-2">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p>{headerActions}</header> : null : <PageHeader
         title="记忆卡片"
         description="复习你制成的卡片。关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。"
         action={headerActions}
@@ -188,7 +188,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
           />
         ) : null}
         {state.kind === "ready" && current ? (
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+          <div className={`mx-auto flex w-full max-w-3xl flex-col ${compact ? "gap-2" : "gap-5"}`}>
             <progress value={state.index} max={state.items.length} aria-label="本组卡片已完成" className="h-[3px] w-full overflow-hidden rounded-full border-0 bg-surface-2 text-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" />
             <div className="flex items-end justify-between gap-3">
               <p className="text-xs text-text-3">正面 → 揭示 → 四档评分</p>

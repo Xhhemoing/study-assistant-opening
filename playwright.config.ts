@@ -22,6 +22,8 @@ export default defineConfig({
     env: {
       NODE_ENV: "production",
       OPENING_RELEASE: "0",
+      OPENING_TEACHING_LOOP: "1",
+      OPENING_TEACHING_WORKSPACE: "1",
       HERMES_HEAVY_LOCK_HELD: "1",
       DATABASE_URL: e2eDatabaseUrl,
       E2E_DATABASE_URL: e2eDatabaseUrl,
