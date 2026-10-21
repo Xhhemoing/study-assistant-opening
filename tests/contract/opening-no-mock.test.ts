@@ -52,7 +52,7 @@ function resolveImport(fromFile: string, spec: string): string | null {
 /** Ways a reachable file can still load the mock provider without a literal import. */
 export function concealedMockImport(text: string): string | null {
   // A service method such as Redis.eval executes Lua remotely, not JavaScript imports.
-  if (/\bnew\s+Function\b|(?:^|[^.\w])eval\s*\(|\b(?:globalThis|window|self)\s*\.\s*eval\s*\(/.test(text)) return "new Function or eval";
+  if (/\bnew\s+Function\b|(?:^|[^.\w])eval\s*\(|\b(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*eval\s*\(/.test(text)) return "new Function or eval";
   const dynamic = /(?:^|[^.\w])import\s*\(\s*([\s\S]*?)\)/g;
   for (const match of text.matchAll(dynamic)) {
     const arg = match[1].replace(/\/\*[\s\S]*?\*\//g, "").trim();
@@ -99,6 +99,8 @@ it("rejects concealed mock imports that a literal-import scan would miss", () =>
   expect(concealedMockImport(OLD_CONCEALED_IMPORT)).toBe("new Function or eval");
   expect(concealedMockImport(`eval("import(specifier)");`)).toBe("new Function or eval");
   expect(concealedMockImport(`globalThis.eval("import(specifier)");`)).toBe("new Function or eval");
+  expect(concealedMockImport(`global.eval(code);`)).toBe("new Function or eval");
+  expect(concealedMockImport(`globalThis?.eval(code);`)).toBe("new Function or eval");
   expect(concealedMockImport(`window.eval("import(specifier)");`)).toBe("new Function or eval");
   expect(concealedMockImport(`await redis.eval("return redis.call('GET', KEYS[1])", 1, key);`)).toBeNull();
   expect(concealedMockImport(`const spec = "../../lib/data/react"; await import(spec);`)).toBe("non-literal dynamic import");
