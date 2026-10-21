@@ -146,7 +146,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
-  const systemQuery = read("OPENING_SYSTEM_QUERY", false);
+  const systemQuery = read("OPENING_SYSTEM_QUERY", true);
   const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
   let rolloutPercent = 100;
   if (rolloutRaw !== undefined) {

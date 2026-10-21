@@ -22,6 +22,16 @@ const BID2 = "22222222-2222-4222-8222-222222222222";
 const SRC = "33333333-3333-4333-8333-333333333333";
 
 describe("BlockRenderer", () => {
+  it("carries the generated question topic into the inline answer form", () => {
+    const html = renderToStaticMarkup(createElement(BlockRenderer, {
+      block: { blockId: BID, position: 0, blockType: "prompt", role: "prompt", content: { text: "求矩阵秩。", skillLabel: "矩阵秩" } },
+      attemptContext: { id: BID, courseId: SRC, sourceIds: [], contentVersion: 1, intentSummary: "模拟练习", status: "active",
+        outlineTitle: "整节练习标题", onCourseAssociated: () => undefined },
+    }));
+    expect(html).toContain("矩阵秩");
+    expect(html).toContain('value="矩阵秩"');
+    expect(html).not.toContain('value="整节练习标题"');
+  });
   it("renders text / math / step allowlist blocks as plain React text", () => {
     const textHtml = renderToStaticMarkup(
       createElement(BlockRenderer, {

@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, loadOpeningUploadQuota, EnvValidationError } from "./env";
 import { loadOpeningTutorConfig } from "./opening-model";
-import { loadFeatureSwitches } from "./server-config";
+import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
+import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 
-it("keeps system queries independent from adaptive planning and validates their switch", () => {
-  expect(loadFeatureSwitches({}).systemQuery).toBe(false);
-  for (const adaptive of ["0", "1"]) expect(loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "1", OPENING_ADAPTIVE_PLANNING: adaptive }).systemQuery).toBe(true);
+it("enables owned system queries by default while respecting explicit off and authentication", () => {
+  expect(loadFeatureSwitches({}).systemQuery).toBe(true);
+  for (const adaptive of ["0", "1"]) {
+    expect(loadFeatureSwitches({ OPENING_ADAPTIVE_PLANNING: adaptive }).systemQuery).toBe(true);
+    expect(loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "1", OPENING_ADAPTIVE_PLANNING: adaptive }).systemQuery).toBe(true);
+    const disabled = loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "0", OPENING_ADAPTIVE_PLANNING: adaptive });
+    expect(disabled.systemQuery).toBe(false);
+    expect(resolveCapabilities(disabled, "owner").systemQuery).toBe(false);
+  }
+  expect(resolveCapabilities(loadFeatureSwitches({}), "owner").systemQuery).toBe(true);
+  expect(resolveCapabilities(loadFeatureSwitches({}), null).systemQuery).toBe(false);
   expect(() => loadFeatureSwitches({ OPENING_SYSTEM_QUERY: "perhaps" })).toThrow(EnvValidationError);
 });
 
@@ -157,5 +166,30 @@ describe("optional opening model catalog environment", () => {
     const { loadOpeningModelCatalog } = await import("./opening-model-catalog");
     expect(loadOpeningModelCatalog({ OPENING_MODEL_CATALOG: "[]" }).models).toEqual([]);
     expect(() => loadOpeningModelCatalog({ OPENING_MODEL_CATALOG: "invalid-private-config" })).toThrow(/服务器模型目录配置无效/);
+  });
+});
+
+describe("optional semantic retrieval configuration", () => {
+  const config = { baseUrl: "https://model.example/v1/", modelName: "embedding", apiKeyEnv: "TEST_MODEL_KEY",
+    dimensions: 1536, inputCentsPerMillion: 2 };
+  const load = (overrides: Record<string, unknown> = {}) => loadOpeningEmbeddingConfig({
+    OPENING_EMBEDDING_CONFIG: JSON.stringify({ ...config, ...overrides }), TEST_MODEL_KEY: "secret-value",
+  });
+  it("keeps retrieval optional and separates the non-secret model identity from credentials", () => {
+    expect(loadOpeningEmbeddingConfig({})).toBeNull();
+    expect(load()).toMatchObject({ baseUrl: "https://model.example/v1", apiKey: "secret-value", requestDimensions: true });
+    expect(load()!.modelKey).toBe(JSON.stringify(["https://model.example/v1", "embedding", 1536]));
+    expect(load({ dimensions: 768 })!.modelKey).not.toBe(load()!.modelKey);
+    expect(loadOpeningEmbeddingConfig({ OPENING_EMBEDDING_CONFIG: JSON.stringify(config) })!.apiKey).toBe("");
+  });
+  it("rejects malformed, credential-bearing and unpriced settings without revealing raw input", () => {
+    for (const invalid of [{ dimensions: 0 }, { dimensions: 4097 }, { inputCentsPerMillion: 0 },
+      { baseUrl: "https://secret-value@model.example" }, { baseUrl: "http://model.example" },
+      { apiKey: "secret-value" }, { billing: "free_tier", inputCentsPerMillion: 0 }]) {
+      expect(() => load(invalid)).toThrow(/资料检索模型配置无效/);
+      try { load(invalid); } catch (error) { expect(String(error)).not.toContain("secret-value"); }
+    }
+    expect(load({ billing: "free_tier", inputCentsPerMillion: 0, dailyRequestCap: 10, requestDimensions: false }))
+      .toMatchObject({ billing: "free_tier", dailyRequestCap: 10, requestDimensions: false });
   });
 });

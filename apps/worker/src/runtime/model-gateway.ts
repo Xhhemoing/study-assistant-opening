@@ -55,7 +55,7 @@ async function loadRouting(sql: Sql, scope: Scope) {
 type MergedModel = ReturnType<typeof mergeOpeningCatalog>["models"][number];
 
 function toResolved(model: MergedModel, task: ModelTaskKey): ResolvedTaskModel {
-  const timeoutMs = task === "teaching.compile" || task === "knowledge.extract" ? 240_000
+  const timeoutMs = task === "teaching.compile" || task === "knowledge.extract" || task === "practice.exam" ? 240_000
     : task === "media.transcribe" ? 180_000 : task.startsWith("practice.grade-") ? 120_000
       : task === "settings.probe" ? 30_000 : 60_000;
   return {

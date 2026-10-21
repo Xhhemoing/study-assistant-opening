@@ -34,12 +34,12 @@ export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspa
   const cards: Rows = [...await tx`
     SELECT id,workspace_id,owner_user_id,front,back,source_document_id,syllabus_point_id,tags,
       course_id,skill_label,source_ids,archived,content_version,paused_until,maintain_until,
-      exclude_from_assessment,created_at,updated_at
+      exclude_from_assessment,origin_observation_root_id,auto_paused,created_at,updated_at
     FROM cards c WHERE workspace_id=${workspaceId} AND source_document_id IS NULL
       AND ${cardReadable(tx, workspaceId)} ORDER BY id`];
   const cardIds = cards.map(row => String(row.id));
   const card_review_states: Rows = cardIds.length ? [...await tx`
-    SELECT workspace_id,owner_user_id,card_id,ease,interval_days,due_at,reps,lapses,last_grade,updated_at
+    SELECT workspace_id,owner_user_id,card_id,ease,interval_days,due_at,reps,lapses,last_grade,updated_at,srs_version,fsrs_state
     FROM card_review_states WHERE workspace_id=${workspaceId} AND card_id=ANY(${cardIds}::uuid[])
     ORDER BY owner_user_id,card_id`] : [];
   const learning_events: Rows = cardIds.length ? [...await tx`

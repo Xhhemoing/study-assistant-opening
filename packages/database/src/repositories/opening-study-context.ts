@@ -4,6 +4,7 @@ import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import type { Sql, TransactionSql } from "postgres";
 import { studyContextAnchorSchema, type Scope, type StudyContextAnchor } from "@aistudy/contracts";
 import { learningError } from "./opening-learning-facts";
+import { teachingQuestionIdentityMatches, type TeachingQuestionSpec } from "./opening-teaching-question";
 
 type Row = Record<string, unknown>;
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -96,12 +97,21 @@ export async function resolveOpeningStudyContext(
       AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
     if (!item) throw learningError("NOT_FOUND", "study item version not found");
     bind("courseId", item.course_id as string | null);
-    itemSourceId = item.source_id as string;
+    itemSourceId = item.source_id as string | null;
     if (attempt && (item.problem_id !== attempt.problem_id || item.id !== attempt.item_version_id)) throw conflict("item version does not belong to attempt");
     // Reused problems can originate in an earlier activity. The attempt owns activity identity.
     if (!attempt && anchor.activityId && item.activity_id !== anchor.activityId) throw conflict("item version does not belong to activity");
     if (!attempt && !anchor.activityId) bind("activityId", item.activity_id as string);
-    if (!anchor.sourceId || anchor.sourceId === item.source_id) {
+    if (item.teaching_revision_id != null) {
+      const [canonical] = await tx`SELECT id FROM opening_learning_item_versions v WHERE id=${String(item.id)}
+        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND ${teachingQuestionIdentityMatches(tx)}`;
+      if (!canonical) throw conflict("saved teaching question is unavailable");
+      const spec = item.evaluation_spec as TeachingQuestionSpec;
+      bind("activityId", item.activity_id as string);
+      bind("blockId", spec.blockId);
+      bind("contentVersion", spec.contentVersion);
+    }
+    if (item.source_id != null && (!anchor.sourceId || anchor.sourceId === item.source_id)) {
       bind("sourceId", item.source_id as string);
       bind("sourceVersion", Number(item.source_version));
       if (!anchor.chunkId) anchor.chunkId = item.chunk_id as string | null;

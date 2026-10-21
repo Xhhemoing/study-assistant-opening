@@ -7,21 +7,25 @@ export function createHandlers(
     retest?: JobHandler;
     remind?: JobHandler;
     tutor?: JobHandler;
+    "tutor-metadata"?: JobHandler;
     "build-course-knowledge"?: JobHandler;
     "parse-media"?: JobHandler;
     "extract-study-actions"?: JobHandler;
     "compile-teaching-unit"?: JobHandler;
+    "index-source"?: JobHandler;
   } = {},
 ): Record<string, JobHandler> {
   return {
     parse,
     tutor: extras.tutor ?? notImplemented,
+    "tutor-metadata": extras["tutor-metadata"] ?? notImplemented,
     retest: extras.retest ?? notImplemented,
     remind: extras.remind ?? notImplemented,
     "build-course-knowledge": extras["build-course-knowledge"] ?? notImplemented,
     "parse-media": extras["parse-media"] ?? notImplemented,
     "extract-study-actions": extras["extract-study-actions"] ?? notImplemented,
     "compile-teaching-unit": extras["compile-teaching-unit"] ?? notImplemented,
+    "index-source": extras["index-source"] ?? notImplemented,
   };
 }
 export const handlers = createHandlers(notImplemented);

@@ -16,3 +16,21 @@ it("rejects missing courses, source-note references, and orphaned states/events"
   expect(errors).toContain("card review state is invalid or orphaned");
   expect(errors).toContain("card review event is invalid or orphaned");
 });
+
+it("rejects automatic cards with missing or foreign observation roots", () => {
+  const root = "44444444-4444-4444-8444-444444444444";
+  const base = { courses: [{ id: course }], cards: [{ ...card, origin_observation_root_id: root }] };
+  const missing: string[] = [], foreign: string[] = [], valid: string[] = [];
+  validateOpeningBackupCards(base, missing);
+  validateOpeningBackupCards({ ...base, opening_learning_observations: [{ id: root, owner_user_id: id }] }, foreign);
+  validateOpeningBackupCards({ ...base, opening_learning_observations: [{ id: root, owner_user_id: owner, root_observation_id: root }] }, valid);
+  expect(missing.length).toBeGreaterThan(0);
+  expect(foreign.length).toBeGreaterThan(0);
+  expect(valid).toEqual([]);
+});
+it("rejects an FSRS algorithm label without its required memory state", () => {
+  const errors: string[] = [];
+  validateOpeningBackupCards({ courses: [{ id: course }], cards: [card], card_review_states: [{ card_id: id, owner_user_id: owner,
+    ease: 2.5, interval_days: 1, due_at: "2026-10-01T00:00:00Z", reps: 1, lapses: 0, last_grade: "good", updated_at: "2026-09-30T00:00:00Z", srs_version: "fsrs-5.4.2" }] }, errors);
+  expect(errors).toContain("card review state is invalid or orphaned");
+});

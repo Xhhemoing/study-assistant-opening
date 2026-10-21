@@ -36,6 +36,8 @@ describe("tutor turn handler", () => {
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
+      canAppendCompletedTurnCandidates: vi.fn(async () => true),
+      appendCompletedTurnCandidates: vi.fn(async () => true),
       loadReplayedTurn: vi.fn(async (_scope: unknown, _ref: string): Promise<{ id: string; status: string; text: string } | null> => null),
       completeFromReplay: vi.fn(async () => false),
       fail: vi.fn(async () => undefined),
@@ -58,7 +60,7 @@ describe("tutor turn handler", () => {
     return { deps, tutorJobs, chunks, budget, provider };
   }
 
-  it("publishes actual Markdown deltas before completion and keeps the answer when optional metadata fails", async () => {
+  it("publishes actual Markdown deltas, settles the answer, and returns with optional metadata queued separately", async () => {
     const { deps, tutorJobs, budget, provider } = setup();
     const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
     provider.complete.mockImplementationOnce(async (input, _signal, onTextDelta) => {
@@ -68,13 +70,27 @@ describe("tutor turn handler", () => {
       await onTextDelta("ma [1]");
       expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
       return { text: "F = ma [1]", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 };
-    }).mockRejectedValueOnce(new OpeningProviderError("PROVIDER_TIMEOUT", "metadata timed out"));
+    });
+    tutorJobs.completeTurn.mockImplementationOnce(async () => {
+      expect(budget.settle).toHaveBeenCalledOnce();
+    });
     await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
-      text: "F = ma [1]", citations: [expect.objectContaining({ chunkId: chunkA.id })], candidates: [],
+      text: "F = ma [1]", citations: [expect.objectContaining({ chunkId: chunkA.id })], candidates: [], enqueueMetadata: true,
     }));
-    expect(budget.reserve.mock.calls.map(call => call[1].requestId)).toEqual([`tutor:${claimedJob.id}`, `tutor:${claimedJob.id}:metadata`]);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(budget.reserve.mock.calls.map(call => call[1].requestId)).toEqual([`tutor:${claimedJob.id}`]);
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).not.toHaveBeenCalled();
+    expect(tutorJobs.appendCompletedTurnCandidates).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue another metadata extraction for legacy structured answers", async () => {
+    const { deps, tutorJobs } = setup();
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      enqueueMetadata: false, candidates: [expect.objectContaining({ payload: expect.objectContaining({ kind: "memory" }) })],
+    }));
   });
 
   it("generates one inert help receipt before streaming and reuses it at durable completion", async () => {
@@ -94,30 +110,6 @@ describe("tutor turn handler", () => {
     const generated = streamExposures.generate.mock.calls[0][1];
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ generatedExposure: generated }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
-  });
-
-  it("does not make a new paid metadata call after the learner cancels a streamed answer", async () => {
-    const { deps, tutorJobs, provider, budget } = setup();
-    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
-    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
-      await onTextDelta("部分回答");
-      tutorJobs.get.mockResolvedValue({ ...claimedJob, status: "cancelled" });
-      return { text: "完整正文", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
-    });
-    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
-    expect(provider.complete).toHaveBeenCalledOnce();
-    expect(budget.reserve).toHaveBeenCalledOnce();
-    expect(budget.settle).toHaveBeenCalledOnce();
-  });
-
-  it("rechecks cancellation after metadata reservation and releases it without sending", async () => {
-    const { deps, tutorJobs, provider, budget } = setup();
-    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
-    tutorJobs.get.mockResolvedValueOnce(claimedJob).mockResolvedValueOnce({ ...claimedJob, status: "cancelled" });
-    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
-    expect(provider.complete).toHaveBeenCalledOnce();
-    expect(budget.reserve).toHaveBeenCalledTimes(2);
-    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}:metadata`, "not_sent");
   });
 
   it("keeps ordinary session listening free of item-help exposure", async () => {
@@ -257,6 +249,25 @@ describe("tutor turn handler", () => {
     expect(budget.settle).not.toHaveBeenCalled();
     expect(budget.release).not.toHaveBeenCalled();
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("injects current course mistakes, preserves their provenance, and checks freshness before sending", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const context = { courseId: claimedJob.conversationId, title: "力学", asOf: "2026-10-21T00:00:00Z", privacyEpoch: 0,
+      goal: { description: "期末", targetDate: "2026-10-31", weeklyMinutes: 420 }, weaknesses: [],
+      recentMistakes: [{ observationId: chunkA.id, skillLabel: "合力", feedback: "先确定受力方向", unmetCriteria: ["方向"], assistance: "independent" as const }],
+      observationIds: [chunkA.id], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 0 }] };
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId: context.courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    const read = vi.fn(async () => context), assertCurrent = vi.fn(async () => {});
+    await createTutorTurnHandler({ ...deps, learnerContext: { read, assertCurrent } })(claimedJob.id);
+    expect(read).toHaveBeenCalledWith(expect.anything(), { courseId: context.courseId, sourceIds: [chunkA.sourceId] });
+    expect(assertCurrent).toHaveBeenCalledWith(expect.anything(), context);
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain("先确定受力方向");
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ contextSourceRefs: expect.arrayContaining(context.sourceRefs) }));
+    const blocked = setup();
+    await expect(createTutorTurnHandler({ ...blocked.deps, learnerContext: { read, assertCurrent: async () => { throw new Error("context changed"); } } })(claimedJob.id)).rejects.toThrow("context changed");
+    expect(blocked.provider.complete).not.toHaveBeenCalled();
+    expect(blocked.budget.release).toHaveBeenCalled();
   });
 
   it("adds a bounded owned planning summary to the same budgeted tutor request", async () => {

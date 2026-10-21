@@ -27,8 +27,10 @@ export const openingProblemRefs = pgTable("opening_problem_refs", {
   sessionId: uuid("session_id")
     .notNull()
     .references(() => openingLearningSessions.id, { onDelete: "cascade" }),
-  sourceId: uuid("source_id").notNull(),
-  sourceVersion: integer("source_version").notNull(),
+  sourceId: uuid("source_id"),
+  sourceVersion: integer("source_version"),
+  teachingRevisionId: uuid("teaching_revision_id"),
+  teachingBlockId: uuid("teaching_block_id"),
   physicalPage: integer("physical_page"),
   chunkId: uuid("chunk_id"),
   stemSnapshot: text("stem_snapshot").notNull(),

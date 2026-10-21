@@ -28,6 +28,7 @@ function transaction(usage = { bytes: "0", objects: "0" }) {
     queries.push({ query: text, values });
     if (text.startsWith("SELECT c.id FROM courses")) return [{ id: courseId }];
     if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("SELECT w.privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
     if (text.startsWith("WITH quota_objects AS")) return [usage];
     if (text.startsWith("SELECT owner_user_id")) return [];
     if (text.startsWith("SELECT snapshot FROM opening_course_knowledge")) return graph ? [{ snapshot: graph }] : [];

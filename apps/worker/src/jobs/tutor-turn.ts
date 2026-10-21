@@ -9,8 +9,9 @@ import {
   type TutorMode,
   type ConversationPlanningContext,
   type StudyContextAnchor,
+  type TutorLearnerContext,
 } from "@aistudy/contracts";
-import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService, buildTutorMetadataInput, tutorCitationsFromMarkdown } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService, tutorCitationsFromMarkdown } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -26,6 +27,7 @@ import {
   conversationPlanningInstruction,
   CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE,
   tutorFailureForDisplay,
+  tutorLearnerContextInstruction,
 } from "@aistudy/domain";
 import type {
   ContextSourceRef,
@@ -60,6 +62,9 @@ import {
 type Scope = { workspaceId: string; ownerUserId: string };
 
 export type TutorTurnDeps = {
+  retrieveContext?: import("@aistudy/ai").MaterialRetriever;
+  learnerContext?: { read(scope: Scope, input: { courseId?: string | null; sourceIds: readonly string[] }): Promise<TutorLearnerContext | null>;
+    assertCurrent(scope: Scope, context: TutorLearnerContext): Promise<void> };
   proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
     jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
@@ -197,24 +202,29 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
-      // Package C thin pick runs only at submit (tutor-service / ephemeral) when
-      // client sourceIds were empty and pool > K. Worker turns already carry the
-      // effective persisted sourceIds — never re-narrow explicit large selections.
-      const context = selectContext({
+      const retrievalInput = {
         chunks,
+        sourceIds: allowedSourceIds,
         query: turn.text,
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: turn.chunkId ?? undefined,
         preferPage,
-      }).slice(0, MAX_PROVIDER_CHUNKS);
+        operationId: claimed.id,
+        parentBudget,
+      };
+      const context = (deps.retrieveContext
+        ? (await deps.retrieveContext(scope, retrievalInput)).chunks
+        : selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
       const { history, sourceRefs: historySourceRefs } = await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
         ? await deps.memories.listContext(scope, contextNow)
         : { memories: [], sourceRefs: [] };
+      const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
+        sourceIds: allowedSourceIds }) ?? null;
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
-        historySourceRefs, memoryContext.sourceRefs,
+        historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [],
       );
       const mode = claimed.mode as TutorMode;
       const baseInstruction = instructionWithMemories(
@@ -232,7 +242,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           planningInstruction = CONVERSATION_PLANNING_CONTEXT_UNAVAILABLE;
         }
       }
-      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`+planningInstruction+studyIntentInstruction(currentStudyIntent);
+      const instruction = `${baseInstruction}`+"\n"+`${strategyTemplate.instructionSuffix}`+planningInstruction+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(currentStudyIntent);
       const tutorOperationId = `tutor:${claimed.id}`;
       // An unusable primary route may hand over to the user's fallback before anything is sent.
       let selected: ResolvedTaskModel | undefined;
@@ -288,19 +298,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
       // reservation; a fallback model runs under its own ":fallback" key.
-      const metadataStillWanted = async () => {
-        const current = await deps.tutorJobs.get(scope, claimed.id);
-        return current?.status === "running" && current.claimToken === claimed.claimToken;
-      };
-      let completedModel = selected;
-      const callWith = (model: ResolvedTaskModel | undefined, operationId: string, callInput: ProviderInput = input) => {
-        if (callInput === input) completedModel = model;
+      const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
         const terms = model
-          ? reservationTerms(model, callInput, deps.config.reservedCents)
+          ? reservationTerms(model, input, deps.config.reservedCents)
           : (() => {
               const rates = { inputCentsPerMillion: deps.config.inputCentsPerMillion, outputCentsPerMillion: deps.config.outputCentsPerMillion };
               return {
-                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(callInput), callInput.maxOutputTokens, rates)),
+                reservedCents: Math.max(deps.config.reservedCents, reservationCentsForInput(JSON.stringify(input), input.maxOutputTokens, rates)),
                 actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
               } as ReservationTerms;
             })();
@@ -308,19 +312,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           provider: model?.provider ?? deps.provider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
-          input: callInput,
-          ...(callInput.outputFormat === "markdown" && onTextDelta ? { onTextDelta } : {}),
+          input,
+          ...(input.outputFormat === "markdown" && onTextDelta ? { onTextDelta } : {}),
           requestId: operationId,
           operationId,
           parentBudget,
-          // Persisted result reference: the assistant turn this call fills.
           resultRef: `opening_turn:${claimed.assistantTurnId}`,
           reservedCents: terms.reservedCents,
           actualCents: terms.actualCents,
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
           beforeSend: async () => {
+            if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
-            if (callInput !== input && !await metadataStillWanted()) throw new Error("tutor job no longer needs metadata");
           },
         });
       };
@@ -358,16 +361,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }
       let validated: ProviderOutput = providerOutputSchema.parse(output);
       if (deps.stream) {
-        // Auxiliary suggestions cannot discard a successfully completed answer or trigger a second answer call.
-        let candidates: ProviderOutput["candidates"] = [];
-        try {
-          if (await metadataStillWanted()) {
-            const metadata = await callWith(completedModel, `${tutorOperationId}:metadata`, buildTutorMetadataInput(input, validated.text));
-            candidates = providerOutputSchema.parse(metadata).candidates;
-          }
-        } catch { /* The answer remains useful without optional suggestions; the call owns its budget outcome. */ }
         const referenced = tutorCitationsFromMarkdown(validated.text, context);
-        validated = { ...validated, text: referenced.text, citedChunkIds: referenced.citedChunkIds, candidates };
+        validated = { ...validated, text: referenced.text, citedChunkIds: referenced.citedChunkIds, candidates: [] };
       }
       // Soft-filter unknown cited ids (Package D); never fabricate rows / never throw on unknowns.
       let citations = resolveCitations(validated.citedChunkIds, context, { soft: true });
@@ -430,7 +425,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ...(generatedExposure ? { generatedExposure } : {}),
         expectedPrivacyEpoch: jobEpoch ?? undefined,
         claimToken: claimed.claimToken,
+        enqueueMetadata: Boolean(deps.stream),
       });
+      // The answer and optional metadata outbox entry are durable. Release this
+      // tutor worker slot; suggestions run in their own bounded queue.
       return { skipped: false };
     } catch (error) {
       const unknownOutcome =

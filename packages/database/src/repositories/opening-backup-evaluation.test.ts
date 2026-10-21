@@ -22,3 +22,8 @@ it.each(["ai_graded", "self_report"])("does not restore AI scoring authority und
   expect(normalizeOpeningImportedEvaluation("opening_learning_observations", row)).toEqual({ ...row,
     verdict_source: "unknown", outcome: "unverified", ai_evaluation: null, server_evaluation: null, evidence_verdict: "MASTERY_NOT_ESTABLISHED" });
 });
+it("retains imported classroom identity without inventing access to its original revision", () => {
+  const row = { id: "item", source_id: null, source_version: null, teaching_revision_id: "revision", teaching_block_id: "block",
+    stem_snapshot: "Original question", evaluation_spec: { kind: "teaching_question", revisionId: "revision", blockId: "block" } };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_item_versions", row)).toEqual({ ...row, evaluation_spec: null });
+});

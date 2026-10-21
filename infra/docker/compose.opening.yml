@@ -18,7 +18,7 @@ name: aistudy-opening
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:0.8.7-pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${OPENING_POSTGRES_USER:?set OPENING_POSTGRES_USER}

@@ -117,7 +117,7 @@ export function Composer({ compact = false, practiceMode = false, defaultMode, d
       </div>
     </div>
     {querySystem || practiceMode || effectivePrivacy === "ephemeral" ? <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs leading-5 text-text-2">
-      <span>{querySystem ? queryAvailable ? "直接查学习记录，无需 AI 辅导额度。" : "学习记录暂时不可查询，可以继续编辑问题。" : practiceMode ? "练习辅导会保存对话并记录帮助。" : "本轮仅保留在当前标签页；刷新后不会恢复。"}</span>
+      <span>{querySystem ? queryAvailable ? "查询你的学习记录。" : "学习记录暂时不可查询，可以继续编辑问题。" : practiceMode ? "练习辅导会保存对话并记录帮助。" : "本轮仅保留在当前标签页；刷新后不会恢复。"}</span>
     </div> : null}
   </form>;
 }

@@ -14,6 +14,7 @@ import {
   type SourceAnchor,
 } from "@aistudy/domain";
 import { renderContext, selectContext } from "./context";
+import { budgetRankedMaterial } from "./hybrid-retrieval";
 
 export type TeachingEvidenceDenylist = {
   problemIds?: readonly string[];
@@ -34,6 +35,8 @@ export type TeachingEvidencePack = {
 };
 
 export type AssembleTeachingEvidencePackInput = {
+  /** Shared retrieval already ranked these chunks; preserve its semantic order. */
+  ranked?: boolean;
   chunks: SourceChunk[];
   query: string;
   maxCharacters: number;
@@ -134,7 +137,7 @@ export function assembleTeachingEvidencePack(
     denylist: input.denylist ?? {},
   });
 
-  const selected = selectContext({
+  const selected = input.ranked ? budgetRankedMaterial(filtered, input.maxCharacters) : selectContext({
     chunks: filtered,
     query: input.query,
     maxCharacters: input.maxCharacters,

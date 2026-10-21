@@ -18,6 +18,7 @@ export const openingCourseKnowledge = pgTable(
     version: integer("version").notNull().default(0),
     snapshot: jsonb("snapshot").notNull(),
     sourceVersions: jsonb("source_versions").notNull().default({}),
+    nodeDefinitions: jsonb("node_definitions").notNull().default({}),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

@@ -55,6 +55,9 @@ export const ENV_GROUPS: { id: EnvGroupId; title: string }[] = [
 ];
 
 const both: EnvConsumer[] = ["web", "worker"];
+const embeddingExample: TemplateLine = { value: JSON.stringify({ baseUrl: "https://your-provider.example/v1",
+  modelName: "your-embedding-model", apiKeyEnv: "PRIMARY_MODEL_API_KEY", dimensions: 1536,
+  inputCentsPerMillion: 2, requestDimensions: true }), commented: true };
 const modelCatalogExample: TemplateLine = {
   value: JSON.stringify([{ id: "fast", label: "日常模型", providerId: "primary", providerLabel: "主供应商", modelName: "your-model-name",
     baseUrl: "https://your-provider.example/v1", apiKeyEnv: "PRIMARY_MODEL_API_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20,
@@ -110,6 +113,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_MODEL_OUTPUT_CENTS_PER_MILLION", group: "model", doc: "Output price per million tokens.", consumers: both, kind: "string", secret: false, dev: { value: "0" }, docker: { value: "0" } },
   { name: "OPENING_MODEL_CATALOG", group: "model", doc: "Optional JSON catalog (max 32). apiKeyEnv names a SERVER secret; never inline a key. supportsAudio defaults false; billing=metered requires positive prices, billing=free_tier allows zero prices and requires dailyRequestCap=1..100000. See docs/operations/opening-model-routing.md.", consumers: both, kind: "json", secret: false, dev: modelCatalogExample, docker: modelCatalogExample },
   { name: "OPENING_MODEL_DEFAULT_ID", group: "model", doc: "Catalog default model id.", consumers: both, kind: "string", secret: false, dev: { value: "fast", commented: true }, docker: { value: "fast", commented: true } },
+  { name: "OPENING_EMBEDDING_CONFIG", group: "model", doc: "Optional server JSON for semantic retrieval: HTTPS baseUrl, modelName, apiKeyEnv, dimensions (1..4096), inputCentsPerMillion. Set requestDimensions=false for providers that do not accept that parameter. A free_tier requires zero price and dailyRequestCap. Missing configuration/key keeps lexical retrieval. Index and query use the same model identity.", consumers: both, kind: "json", secret: false, dev: embeddingExample, docker: embeddingExample },
   { name: "PRIMARY_MODEL_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true }, docker: { value: "", commented: true } },
   { name: "LANT_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target for a Lant provider (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true } },
 
@@ -150,7 +154,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_CHAT_PROSE", group: "teaching", doc: "UI-only: render chat answers as Markdown with math; 0 falls back to plain text (default 1). Delivered via capabilities.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "1", commented: true }, docker: { value: "1", commented: true } },
   { name: "OPENING_ADAPTIVE_PLANNING", group: "teaching", doc: "Daily drafts from learning signals, autonomy modes (manual/copilot/coach) and suggested tasks (default 0 = rules-only drafts). Delivered via capabilities; plan routes re-check.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "0", commented: true }, docker: { value: "0", commented: true } },
   { name: "OPENING_PLAN_AGENT", group: "teaching", doc: "Model-assisted re-planning; only effective with OPENING_ADAPTIVE_PLANNING=1 (default 0).", consumers: ["web", "worker"], kind: "bool", secret: false, dev: { value: "0", commented: true }, docker: { value: "0", commented: true } },
-  { name: "OPENING_SYSTEM_QUERY", group: "tutor", doc: "Owned read-only system queries in saved/ephemeral chat. Uses bounded native tools when a model is available, with deterministic fallback. Independent of adaptive planning; default 0.", consumers: ["web", "worker"], kind: "bool", secret: false, dev: { value: "0", commented: true }, docker: { value: "0", commented: true } },
+  { name: "OPENING_SYSTEM_QUERY", group: "tutor", doc: "Owned read-only system queries in saved/ephemeral chat. Uses bounded native tools when a model is available, with deterministic fallback. Independent of adaptive planning; default 1. Explicit 0 disables both automatic and explicit queries.", consumers: ["web", "worker"], kind: "bool", secret: false, dev: { value: "1", commented: true }, docker: { value: "1", commented: true } },
 
   { name: "E2E_DATABASE_URL", group: "e2e", doc: "Browser E2E resets only this isolated database; its name must end in _e2e.", consumers: ["tests"], kind: "string", secret: true, dev: { value: "postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e" } },
   { name: "OPENING_TEST_DB", group: "e2e", doc: "1 enables the integration DB guard.", consumers: ["tests"], kind: "bool", secret: false },

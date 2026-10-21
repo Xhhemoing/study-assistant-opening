@@ -147,7 +147,8 @@ function CatalogBody({
     case "question":
       return (
         <ProblemCard prompt={text || "（空提问）"}>
-          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
+          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={{ ...attemptContext,
+            ...(typeof params.skillLabel === "string" && params.skillLabel.trim() ? { questionSkillLabel: params.skillLabel.trim().slice(0, 200) } : {}) }} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
         </ProblemCard>
       );
     case "draft":

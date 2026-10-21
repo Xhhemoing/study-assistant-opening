@@ -1,3 +1,4 @@
+import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
 import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
@@ -52,24 +53,8 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (session.skill_label !== matrixExerciseSkillLabel(input.matrixExercise.exerciseKey)) throw learningError("VALIDATION", "matrix exercise does not match session skill");
     requirementKey = matrixExerciseRequirement(matrixExercise!);
   }
-  let referencedProblemVersionKnown = !input.teachingBlock;
   if (input.teachingBlock) {
-    if (input.requirementKey) throw learningError("VALIDATION", "teaching block sets its own requirement key");
-    const specs = await tx`SELECT s.block_order, s.source_refs, s.version, a.content_version, a.status FROM opening_teaching_activity_specs s
-      JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
-      WHERE s.activity_id=${String(session.activity_id)} AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} FOR SHARE OF a,s`;
-    const spec = specs[0];
-    if (!spec || Number(spec.content_version) !== input.teachingBlock.contentVersion || Number(spec.version) !== input.teachingBlock.contentVersion) throw learningError("CONFLICT", "teaching content changed; reread before answering");
-    if (spec.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot accept new attempts");
-    const refs = spec.block_order as Array<{ blockId: string; blockType: string; role: string }>;
-    const ref = refs.find((block) => block.blockId === input.teachingBlock!.blockId);
-    if (!ref || ref.role === "answer_key" || !["prompt", "question"].includes(ref.blockType) && ref.role !== "prompt") throw learningError("VALIDATION", "teaching question not found");
-    const references = spec.source_refs as Array<{ sourceId: string; version?: string | number | null }>;
-    for (const source of references) {
-      const version = source.version == null ? NaN : Number(source.version);
-      if (Number.isInteger(version) && sourceVersions[source.sourceId] !== version) throw learningError("CONFLICT", "teaching reference material version changed; reread the teaching content");
-    }
-    referencedProblemVersionKnown = references.some((source) => source.sourceId === input.problem?.sourceId && source.version != null && Number.isInteger(Number(source.version)));
+    if (input.requirementKey || input.problemId) throw learningError("VALIDATION", "teaching block sets its own question and requirement key");
     requirementKey = `teaching:${input.teachingBlock.blockId}:v${input.teachingBlock.contentVersion}`;
   }
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
@@ -84,6 +69,8 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
   }
+  const teachingQuestion = input.teachingBlock ? await readTeachingQuestionForAttempt(tx, scope,
+    String(session.activity_id), input.teachingBlock, sourceVersions) : null;
   // An acknowledged attempt remains replayable after pause/completion, but a
   // dedicated span lesson must be resumed before it can issue another question.
   const spanActivities = await tx`SELECT status,checkpoint_json FROM opening_teaching_activities
@@ -114,7 +101,27 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   }
   const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
   let problemId = input.problemId ?? null, itemVersionId: string | null = null;
-  let problem = input.problem;
+  // Older browser checkpoints still contain a material problem payload. Retain it
+  // only as request identity; classroom content always comes from the saved revision.
+  let problem = teachingQuestion ? undefined : input.problem;
+  if (teachingQuestion) {
+    const spec = teachingQuestion.spec;
+    const [existing] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+        AND activity_id=${String(session.activity_id)} AND teaching_revision_id=${spec.revisionId} AND teaching_block_id=${spec.blockId}
+        AND evaluation_spec=${tx.json(spec)} ORDER BY created_at,id LIMIT 1`;
+    problemId = existing ? String(existing.problem_id) : randomUUID();
+    itemVersionId = existing ? String(existing.id) : randomUUID();
+    if (!existing) {
+      const stem = Array.from(teachingQuestion.stem).slice(0, 2000).join("");
+      await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,stem_snapshot,artifact_kind,teaching_revision_id,teaching_block_id)
+        VALUES(${problemId},${scope.workspaceId},${input.sessionId},NULL,NULL,${stem},'unknown',${spec.revisionId},${spec.blockId})`;
+      await tx`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,
+        source_id,source_version,stem_snapshot,artifact_kind,evaluation_spec,teaching_revision_id,teaching_block_id)
+        VALUES(${itemVersionId},${scope.workspaceId},${scope.ownerUserId},${courseId},${String(session.activity_id)},${problemId},
+          NULL,NULL,${stem},'unknown',${tx.json(spec)},${spec.revisionId},${spec.blockId})`;
+    }
+  }
   if (input.spanExercise && spanExercise && spanSpec) {
     const existing = await tx`SELECT problem_id FROM opening_learning_item_versions
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
@@ -142,13 +149,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     }
     problemId = randomUUID();
     await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
-      VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${referencedProblemVersionKnown ? problem.artifactKind : "unknown"})`;
+      VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${problem.artifactKind})`;
   }
-  if (problemId) {
+  if (problemId && !teachingQuestion) {
     const examItems = await tx`SELECT id FROM opening_learning_item_versions
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-        AND problem_id=${problemId} AND evaluation_spec->>'kind'='exam_choice' LIMIT 1`;
-    if (examItems.length) throw learningError("CONFLICT", "冲刺题目只能在冲刺入口创建作答，不能复制为普通练习");
+        AND problem_id=${problemId} AND (evaluation_spec->>'kind'='exam_choice' OR teaching_revision_id IS NOT NULL) LIMIT 1`;
+    if (examItems.length) throw learningError("CONFLICT", "这道题须在原课程或冲刺入口创建作答，不能复制为普通练习");
     const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id
       WHERE p.problem_id=${problemId} AND p.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id=${courseId} FOR SHARE OF p`;
     const ref = refs[0];

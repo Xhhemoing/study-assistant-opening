@@ -29,6 +29,8 @@ export type CardRecord = {
   tags: string[];
   courseId: string | null;
   skillLabel: string | null;
+  originObservationRootId?: string | null;
+  autoPaused?: boolean;
   archived: boolean;
   contentVersion: number;
   pausedUntil: string | null;
@@ -126,6 +128,8 @@ export function mapCard(row: Row): CardRecord {
     tags: row.tags ?? [],
     courseId: row.course_id ?? null,
     skillLabel: row.skill_label ?? null,
+    originObservationRootId: row.origin_observation_root_id ?? null,
+    autoPaused: row.auto_paused ?? false,
     archived: row.archived,
     contentVersion: row.content_version,
     pausedUntil: row.paused_until == null ? null : toIso(row.paused_until),
@@ -138,6 +142,8 @@ export function mapCard(row: Row): CardRecord {
 export function mapState(row: Row): CardStateRecord {
   const state = reviewStateSchema.parse({
     cardId: row.card_id,
+    srsVersion: row.srs_version ?? "srs-1",
+    fsrs: row.fsrs_state ?? null,
     ease: Number(row.ease),
     intervalDays: Number(row.interval_days),
     dueAt: toIso(row.due_at),

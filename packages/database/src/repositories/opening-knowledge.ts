@@ -6,7 +6,7 @@ import {
   type SourceChunk,
   type Scope,
 } from "@aistudy/contracts";
-import { sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
+import { knowledgeNodeDefinition, sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
 
@@ -66,7 +66,7 @@ function mapRecord(row: Record<string, unknown>): OpeningKnowledgeRecord {
   };
 }
 
-async function assertOwnedCourse(sql: Sql, scope: Scope, courseId: string): Promise<void> {
+async function assertOwnedCourse(sql: Sql | TransactionSql, scope: Scope, courseId: string): Promise<void> {
   const rows = await sql`
     SELECT c.id FROM courses c
     JOIN workspaces w ON w.id = c.workspace_id
@@ -92,28 +92,22 @@ async function referencedNodeIds(db: Sql | TransactionSql, scope: Scope, courseI
 }
 
 /** Evidence chunks must belong to course-linked, uploaded sources in this workspace. */
-async function assertAuthorizedChunkRefs(
+async function assertAuthorizedChunks(
   tx: TransactionSql,
   scope: Scope,
   courseId: string,
-  snapshot: KnowledgeSnapshot,
+  chunkIds: string[],
   sourceVersions: Record<string, number>,
-): Promise<void> {
-  const chunkIds = [
-    ...new Set([
-      ...snapshot.nodes.flatMap((node) => node.evidenceChunkIds),
-      ...snapshot.edges.flatMap((edge) => edge.evidenceChunkIds),
-    ]),
-  ].sort();
+): Promise<SourceChunk[]> {
   if (!chunkIds.length) {
     if (Object.keys(sourceVersions).length) {
       throw new OpeningKnowledgeError("VALIDATION", "sourceVersions provided without evidence chunks");
     }
-    return;
+    return [];
   }
 
   const rows = await tx`
-    SELECT c.id, c.source_id, c.source_version
+    SELECT c.*
     FROM opening_source_chunks c
     JOIN opening_sources s ON s.id = c.source_id
     JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=c.source_version
@@ -156,10 +150,27 @@ async function assertAuthorizedChunkRefs(
       throw new OpeningKnowledgeError("VALIDATION", `sourceVersions includes unused source ${sourceId}`);
     }
   }
+  return rows.map(row => mapChunk(row));
 }
 
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
+    /** Definitions contain source text and are only available to the rebuild worker. */
+    async getForRebuild(scope: Scope, courseId: string): Promise<(OpeningKnowledgeRecord & { nodeDefinitions: Record<string, string> }) | null> {
+      await assertOwnedCourse(sql, scope, courseId);
+      const [row] = await sql`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
+        WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+      return row ? { ...mapRecord(row), nodeDefinitions: row.node_definitions as Record<string, string> } : null;
+    },
+    async assertExtractionBatch(scope: Scope, courseId: string, chunks: readonly SourceChunk[]): Promise<void> {
+      await sql.begin(async tx => {
+        await lockOpeningJobExecution(tx, scope);
+        await assertOwnedCourse(tx, scope, courseId);
+        const ids = [...new Set(chunks.map(chunk => chunk.id))];
+        const versions = Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion]));
+        await assertAuthorizedChunks(tx, scope, courseId, ids, versions);
+      });
+    },
     async listReferencedNodeIds(scope: Scope, courseId: string): Promise<string[]> {
       await assertOwnedCourse(sql, scope, courseId);
       return referencedNodeIds(sql, scope, courseId);
@@ -253,7 +264,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         await lockOpeningJobExecution(tx, scope);
 
         const currentRows = await tx`
-          SELECT version, snapshot, source_versions FROM opening_course_knowledge
+          SELECT version, snapshot, source_versions, node_definitions FROM opening_course_knowledge
           WHERE workspace_id = ${scope.workspaceId} AND course_id = ${courseId}
           FOR UPDATE`;
         const current = currentRows[0] as Record<string, unknown> | undefined;
@@ -268,6 +279,13 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
 
         const previous = current ? mapRecord(current) : null;
+        const evidence = await assertAuthorizedChunks(tx, scope, courseId,
+          [...new Set([...draft.nodes, ...draft.edges].flatMap(item => item.evidenceChunkIds))].sort(), sourceVersions);
+        const definitions = Object.fromEntries(draft.nodes.flatMap(node => {
+          const definition = knowledgeNodeDefinition(node, evidence);
+          return definition ? [[node.id, definition]] : [];
+        }));
+        const previousDefinitions = (current?.node_definitions ?? {}) as Record<string, string>;
         const referenced = new Set(await referencedNodeIds(tx, scope, courseId));
         if (input.expectedReferencedNodeIds && (referenced.size !== new Set(input.expectedReferencedNodeIds).size
           || input.expectedReferencedNodeIds.some(id => !referenced.has(id)))) {
@@ -275,25 +293,25 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
         for (const node of draft.nodes) {
           const existing = previous?.snapshot.nodes.find(item => item.id === node.id);
-          if ((!existing && referenced.has(node.id)) || (existing && !sameKnowledgeNodeIdentity(existing, node))) {
+          const sameDefinition = Boolean(definitions[node.id] && definitions[node.id] === previousDefinitions[node.id]);
+          if ((!existing && referenced.has(node.id)) || (existing && !sameKnowledgeNodeIdentity(existing, node) && !sameDefinition)) {
             throw new OpeningKnowledgeError("CONFLICT", "知识节点身份已退役或内容已变化，请创建新节点身份；历史学习证据不会转给新技能。");
           }
         }
 
-        await assertAuthorizedChunkRefs(tx, scope, courseId, draft, sourceVersions);
-
         const stored: KnowledgeSnapshot = { ...draft, version: newVersion };
         const rows = await tx`
           INSERT INTO opening_course_knowledge (
-            workspace_id, owner_user_id, course_id, version, snapshot, source_versions, updated_at
+            workspace_id, owner_user_id, course_id, version, snapshot, source_versions, node_definitions, updated_at
           ) VALUES (
             ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, ${newVersion},
-            ${tx.json(stored as never)}, ${tx.json(sourceVersions as never)}, now()
+            ${tx.json(stored as never)}, ${tx.json(sourceVersions as never)}, ${tx.json(definitions)}, now()
           )
           ON CONFLICT (workspace_id, course_id) DO UPDATE SET
             version = EXCLUDED.version,
             snapshot = EXCLUDED.snapshot,
             source_versions = EXCLUDED.source_versions,
+            node_definitions = EXCLUDED.node_definitions,
             owner_user_id = EXCLUDED.owner_user_id,
             updated_at = now()
           WHERE opening_course_knowledge.version = ${input.expectedVersion}

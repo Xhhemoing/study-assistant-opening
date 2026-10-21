@@ -1,3 +1,4 @@
+import { readTeachingQuestionForGrading } from "./opening-teaching-question";
 import { isDeepStrictEqual } from "node:util";
 import { aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
@@ -41,14 +42,15 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   if (observation.revisionKind === "retract" || observation.verdictSource === "deterministic" || observation.aiEvaluation) {
     throw learningError("CONFLICT", "请查看已有结果，或先更正作答后再批改");
   }
-  const [item] = await tx`SELECT v.* FROM opening_learning_item_versions v
+  const [item] = await tx`SELECT v.*,a.source_ids AS attempt_source_ids FROM opening_learning_item_versions v
     JOIN opening_learning_attempts a ON a.item_version_id=v.id AND a.problem_id=v.problem_id
       AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
     WHERE v.id=${observation.itemVersionId} AND a.id=${observation.attemptId}
       AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND a.session_id=${observation.sessionId} AND a.submitted_at IS NOT NULL`;
   if (!item || typeof item.stem_snapshot !== "string" || !item.stem_snapshot.trim()) throw learningError("VALIDATION", "缺少完整题目，请补充题目后开始新练习");
-  if (observation.eligibility?.usableForCurrentVersion !== "yes") throw learningError("CONFLICT", "题目材料已变化，请刷新后重新开始这道题");
+  if (observation.eligibility?.usableForCurrentVersion !== "yes") throw learningError("CONFLICT", item.teaching_revision_id
+    ? "原课堂内容或关联资料不可读取，请重新打开课程开始新练习" : "题目材料已变化，请刷新后重新开始这道题");
   if (!input.workSourceId && !observation.answer.trim()) throw learningError("VALIDATION", "请填写答案或选择作答照片");
   const sourceIds = [...new Set([...observation.sourceIds, ...Object.keys(observation.sourceVersions ?? {}),
     ...(observation.referenceSourceId ? [observation.referenceSourceId] : []), ...(input.workSourceId ? [input.workSourceId] : [])])].sort();
@@ -65,7 +67,10 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   }
   const workSource = input.workSourceId ? { id: input.workSourceId, version: input.workSourceVersion!, physicalPage: input.physicalPage! } : null;
   if (workSource) {
-    if (workSource.id === item.source_id || observation.referenceSourceId === workSource.id) throw learningError("VALIDATION", "请选择自己的作答照片，不要选择原题或参考答案");
+    // Classroom items have no synthetic material source. Their attempt sealed the original
+    // teaching materials; a later student photo is added only to observation provenance.
+    if (workSource.id === item.source_id || observation.referenceSourceId === workSource.id
+      || item.teaching_revision_id != null && (item.attempt_source_ids as string[]).includes(workSource.id)) throw learningError("VALIDATION", "请选择自己的作答照片，不要选择原题或参考答案");
     const [photo] = await tx`SELECT id,mime,version,bytes,sha256,parse_state FROM opening_sources s
       WHERE s.id=${workSource.id} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
@@ -84,12 +89,14 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
       ON CONFLICT(source_id,version) DO NOTHING`;
     sourceVersions[workSource.id] = workSource.version;
   }
+  const teaching = await readTeachingQuestionForGrading(tx, scope, item);
   const referenceIds = sourceIds.filter(id => id !== input.workSourceId);
   const chunks = referenceIds.length ? await tx`SELECT c.source_id,c.page,c.text FROM opening_source_chunks c
     WHERE c.source_id=ANY(${referenceIds}::uuid[]) AND c.source_version::text=${tx.json(sourceVersions)}->>c.source_id::text
       AND (c.source_id=${observation.referenceSourceId} OR c.id=${item.chunk_id as string | null}
-        OR c.source_id=${item.source_id as string} AND c.page IS NOT DISTINCT FROM ${item.physical_page as number | null})
+        OR c.source_id=${item.source_id as string | null} AND c.page IS NOT DISTINCT FROM ${item.physical_page as number | null})
     ORDER BY (c.source_id=${observation.referenceSourceId}) DESC NULLS LAST,c.page,c.id LIMIT 24` : [];
-  return { observation, stem: item.stem_snapshot, referenceText: chunks.map(chunk => String(chunk.text ?? "")).join("\n\n").slice(0, 16000),
+  return { observation, stem: teaching?.stem ?? item.stem_snapshot,
+    referenceText: [teaching?.referenceText, ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
     sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null };
 }

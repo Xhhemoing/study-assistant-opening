@@ -96,13 +96,15 @@ export async function writeState(
   const rows = await client`
     INSERT INTO card_review_states (
       owner_user_id, card_id, workspace_id, ease, interval_days, due_at,
-      reps, lapses, last_grade, updated_at
+      reps, lapses, last_grade, updated_at, srs_version, fsrs_state
     ) VALUES (
       ${ownerUserId}, ${state.cardId}, ${workspaceId}, ${state.ease},
       ${state.intervalDays}, ${state.dueAt}, ${state.reps}, ${state.lapses},
-      ${state.lastGrade}, ${state.updatedAt}
+      ${state.lastGrade}, ${state.updatedAt}, ${state.srsVersion ?? "srs-1"}, ${state.fsrs ? client.json(state.fsrs) : null}
     )
     ON CONFLICT (owner_user_id, card_id) DO UPDATE SET
+      srs_version = EXCLUDED.srs_version,
+      fsrs_state = EXCLUDED.fsrs_state,
       ease = EXCLUDED.ease,
       interval_days = EXCLUDED.interval_days,
       due_at = EXCLUDED.due_at,
@@ -151,7 +153,7 @@ export async function listCardQueue(
   // Local business day of `now` in the workspace zone — NOT the UTC date (TZ01).
   const today = input.today ?? localDateKeyInZone(now, resolveWorkspaceTimeZone(input.timeZone));
   const rows = await sql`
-    SELECT c.*, s.ease, s.interval_days, s.due_at, s.reps, s.lapses, s.last_grade,
+    SELECT c.*, s.srs_version, s.fsrs_state, s.ease, s.interval_days, s.due_at, s.reps, s.lapses, s.last_grade,
       s.updated_at AS state_updated_at, s.owner_user_id AS state_owner_user_id,
       COALESCE(MAX(g.priority), 0)::int AS goal_priority
     FROM cards c
@@ -165,8 +167,9 @@ export async function listCardQueue(
       ON g.course_id = m.course_id AND g.workspace_id = c.workspace_id
      AND g.active = true AND g.archived_at IS NULL
     WHERE c.workspace_id = ${input.workspaceId}
+      AND c.auto_paused = false
       AND ${cardReadable(sql, input.workspaceId)}
-    GROUP BY c.id, s.owner_user_id, s.card_id, s.workspace_id, s.ease, s.interval_days,
+    GROUP BY c.id, s.owner_user_id, s.card_id, s.workspace_id, s.srs_version, s.fsrs_state, s.ease, s.interval_days,
       s.due_at, s.reps, s.lapses, s.last_grade, s.updated_at
   `;
 

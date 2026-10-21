@@ -26,6 +26,7 @@ import { acknowledgeStudyExposure } from "../assistant/study-exposure-ack";
 
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
+  questionSkillLabel?: string;
   outlineTitle?: string;
   onCourseAssociated: (activity: TeachingActivity) => void;
   /** Available after the server creates or restores the canonical question identity. */
@@ -72,7 +73,8 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   currentScope.current = { courseId: context.courseId, prompt };
   const [answer, setAnswer] = useState(initialDraft?.answer ?? "");
   const [skillLabel, setSkillLabel] = useState(() => defaultInlineAttemptSkill({
-    draftSkillLabel: initialDraft?.skillLabel, learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
+    draftSkillLabel: initialDraft?.skillLabel, questionSkillLabel: context.questionSkillLabel,
+    learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
   }));
   const [skillEditorOpen, setSkillEditorOpen] = useState(() => !skillLabel.trim());
   // Delayed optional reads must never replace an edited (including cleared) skill.
@@ -166,12 +168,12 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       if (!active) return;
       setSkillOptions(options);
       if (!skillEdited.current && !submission.current && !preparation.current) setSkillLabel(defaultInlineAttemptSkill({
-        learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
+        questionSkillLabel: context.questionSkillLabel, learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
         skillOptions: options, knowledge,
       }));
     });
     return () => { active = false; };
-  }, [api, client, ready, context.courseId, context.status, context.learnerFocus?.skillLabel, context.outlineTitle]);
+  }, [api, client, ready, context.courseId, context.status, context.questionSkillLabel, context.learnerFocus?.skillLabel, context.outlineTitle]);
 
   const skillReuseHint = findSkillLabelReuseHint(skillLabel, skillOptions);
   const skillListId = useId();

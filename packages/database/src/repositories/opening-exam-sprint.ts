@@ -40,7 +40,7 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
 
   async function current(tx: TransactionSql, scope: Scope, now: string) {
     const [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+      WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
     const snapshot = row ? parseExamSprintSnapshot(row.pack_snapshot, row.state)
       : { pack: initialPack, state: createExamSprintState(now) };
     if (row) snapshot.pack = await packWithExamSourceMappings(tx, String(row.id), snapshot.pack);
@@ -65,7 +65,7 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
         await lockBoundExamCourse(tx, scope);
         const now = await nowIso(tx);
         const [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+          WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         const snapshot = row ? parseExamSprintSnapshot(row.pack_snapshot, row.state)
           : { pack: initialPack, state: createExamSprintState(now) };
         const sprintId = row ? String(row.id) : randomUUID();

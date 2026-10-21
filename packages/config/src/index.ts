@@ -16,6 +16,7 @@ export {
 } from "./test-database";
 
 export { loadOpeningModelCatalog, OpeningModelConfigurationError, type OpeningModelCatalog } from "./opening-model-catalog";
+export { loadOpeningEmbeddingConfig, OpeningEmbeddingConfigurationError, type OpeningEmbeddingConfig } from "./opening-embedding";
 export { loadWorkerEnv, type WorkerEnv } from "./worker-env";
 
 // PR-H typed configuration (server-only). Client code imports `@aistudy/config/public`.

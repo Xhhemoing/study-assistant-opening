@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { apiFailureSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
 
-export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media", "extract-study-actions"]);
+export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media", "extract-study-actions", "index-source", "tutor-metadata"]);
+export const tutorMetadataJobPayloadSchema = z.object({
+  tutorJobId: uuidSchema,
+  assistantTurnId: uuidSchema,
+  tutorClaimToken: uuidSchema.nullable(),
+}).strict();
 export const jobStatusSchema = z.enum([
   "queued",
   "running",

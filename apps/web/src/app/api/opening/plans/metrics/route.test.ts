@@ -13,16 +13,16 @@ it("requires authentication and does not read metrics for an anonymous caller", 
   expect((await GET(new Request("http://x/api/opening/plans/metrics"))).status).toBe(401);
   expect(read).not.toHaveBeenCalled();
 });
-it("keeps the feature off path closed without reading metrics", async () => {
+it("keeps basic learning metrics readable when automatic planning is disabled", async () => {
   vi.stubEnv("OPENING_ADAPTIVE_PLANNING", "0");
   const response = await GET(new Request("http://x/api/opening/plans/metrics"));
-  expect(response.status).toBe(404); expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(read).not.toHaveBeenCalled();
+  expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(read).toHaveBeenCalledWith(sql, scope, { days: 7 });
 });
-it("defaults to fourteen days and passes only the authenticated scope", async () => {
+it("defaults to seven days and passes only the authenticated scope", async () => {
   const response = await GET(new Request("http://x/api/opening/plans/metrics?ownerUserId=spoof"));
   expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(read).toHaveBeenCalledWith(sql, scope, { days: 14 });
+  expect(read).toHaveBeenCalledWith(sql, scope, { days: 7 });
 });
 it.each(["0", "91", "1.2", "NaN", ""])("rejects invalid days %s before database work", async days => {
   expect((await GET(new Request(`http://x/api/opening/plans/metrics?days=${days}`))).status).toBe(400);

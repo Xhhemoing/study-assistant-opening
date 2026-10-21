@@ -235,8 +235,43 @@ describe("createBuildCourseKnowledgeHandler", () => {
       resolveProvider,
     });
     await handler(job as never, { courseId });
-    expect(resolveProvider).toHaveBeenCalledWith({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }, job);
+    expect(resolveProvider).toHaveBeenCalledWith({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }, job,
+      expect.objectContaining({ index: 0, count: 1, chunks: [chunk()] }));
     expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("extracts chapters independently and does not publish a partial graph if a later chapter fails", async () => {
+    const replace = vi.fn();
+    const resolveProvider = vi.fn(async (_scope, _job, batch) => ({ complete: vi.fn(async () => {
+      if (batch.index === 1) throw new Error("chapter unavailable");
+      return { text: JSON.stringify({ nodes: [], edges: [] }), citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1 };
+    }) }));
+    const handler = createBuildCourseKnowledgeHandler({ get: async () => null, replace, resolveProvider,
+      listAuthorizedChunks: async () => [chunk({ text: "# 第一章\n函数" }), chunk({ id: foreignChunkId, text: "# 第二章\n极限" })] });
+    await expect(handler(job, { courseId })).rejects.toThrow("chapter unavailable");
+    expect(resolveProvider.mock.calls.map(call => [call[2].index, call[2].count])).toEqual([[0, 2], [1, 2]]);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("links a later chapter to a unique earlier concept without guessing ambiguous labels (%s)", async ambiguous => {
+    const earlier = chunk({ text: "# 第一章\n向量空间" });
+    const later = chunk({ id: foreignChunkId, text: "# 第二章\n线性无关建立在向量空间上" });
+    const handler = createBuildCourseKnowledgeHandler({ get: async () => null,
+      listAuthorizedChunks: async () => [earlier, later],
+      extractGraph: async chunks => chunks[0]!.id === earlier.id ? { nodes: [
+        { label: "向量空间", kind: "concept", evidenceChunkIds: [earlier.id] },
+        ...(ambiguous ? [{ label: "向量空间", kind: "procedure" as const, evidenceChunkIds: [earlier.id] }] : []),
+      ], edges: [] } : { nodes: [{ label: "线性无关", kind: "concept", evidenceChunkIds: [later.id] }],
+        edges: [{ fromLabel: "向量空间", toLabel: "线性无关", kind: "prerequisite", evidenceChunkIds: [later.id, "invented-id"] }] },
+      replace: async (_scope, _course, input) => ({ version: 1, snapshot: input.snapshot }),
+    });
+    const { snapshot } = await handler(job, { courseId });
+    expect(snapshot.edges).toHaveLength(ambiguous ? 0 : 1);
+    if (!ambiguous) expect(snapshot.edges[0]).toMatchObject({
+      from: snapshot.nodes.find(node => node.label === "向量空间")!.id,
+      to: snapshot.nodes.find(node => node.label === "线性无关")!.id,
+      kind: "prerequisite", evidenceChunkIds: [later.id], status: "supported",
+    });
   });
 
   it("rejects a missing courseId payload", async () => {

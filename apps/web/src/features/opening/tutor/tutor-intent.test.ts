@@ -30,13 +30,15 @@ describe("saved tutor automatic intent", () => {
     ["线性代数，10天后期末，每天60分钟，帮我做学习计划", "explain", "plan"],
   ] as const)("resolves %s before persisting the turn", async (text, mode, purpose) => {
     const f = fixture();
-    await f.service.submitTurn(scope, { ...request, text });
+    const result = await f.service.submitTurn(scope, { ...request, text });
+    expect(result.replayed).toBe(false);
     expect(f.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ mode, purpose }));
   });
 
   it("uses a confirmed full-explanation preference ahead of the activity hint default", async () => {
     const f = fixture();
-    await f.service.submitTurn(scope, { ...request, text: "继续", contextAnchor: { purpose: "learning_help", activityId } });
+    const result = await f.service.submitTurn(scope, { ...request, text: "继续", contextAnchor: { purpose: "learning_help", activityId } });
+    expect(result.replayed).toBe(false);
     expect(f.sessionIntent).toHaveBeenCalledOnce();
     expect(f.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ mode: "explain" }));
   });
@@ -44,7 +46,8 @@ describe("saved tutor automatic intent", () => {
   it("preserves resolved defaults on retry and still passes explicit changes to the replay guard", async () => {
     const f = fixture();
     f.findTurnByClientKey.mockResolvedValue({ userTurnId: "turn", jobId: "job", assistantTurnId: "assistant", learningSessionId: null, mode: "hint", purpose: "answer", querySystem: false });
-    await f.service.submitTurn(scope, { ...request, text: "继续", contextAnchor: { purpose: "learning_help", activityId } });
+    const result = await f.service.submitTurn(scope, { ...request, text: "继续", contextAnchor: { purpose: "learning_help", activityId } });
+    expect(result.replayed).toBe(true);
     expect(f.sessionIntent).not.toHaveBeenCalled();
     expect(f.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "hint", purpose: "answer" }));
     await f.service.submitTurn(scope, { ...request, text: "继续", mode: "explain" });

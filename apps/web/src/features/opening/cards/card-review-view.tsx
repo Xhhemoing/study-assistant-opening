@@ -10,6 +10,7 @@ import { OpeningApiError } from "../client/api";
 import { EmptyState, LoadError, LoadingRows, PageHeader, secondaryButtonClass, ui } from "../design/ui";
 import { interactionMotionReduced, successfulInteractionHaptic } from "../design/haptics";
 import { CardStack } from "./card-stack";
+import { CardObservationOrigin } from "./card-observation-origin";
 import {
   createOpeningCardsClient,
   resolveCardGradeIdentity,
@@ -145,7 +146,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     <section aria-label={compact ? "当前记忆卡片" : undefined} className={embedded ? compact ? "space-y-3" : "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
       {embedded ? !compact ? <header className="space-y-1"><div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{headerActions}</div><p className="text-xs leading-5 text-text-2">翻面后自评，不作为独立正确的证明。</p></header> : null : <PageHeader
         title="记忆卡片"
-        description="复习你制成的卡片。关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。"
+        description="复习手工卡片和自动整理的错题。翻面检查后，按记忆情况安排下一次复习。"
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
@@ -167,7 +168,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
         {state.kind === "ready" && state.items.length === 0 ? (
           <EmptyState
             title="今天没有到期的记忆卡片"
-            description="可在辅导回答中用「制成卡片」把材料沉淀为记忆卡；到期后会出现在这里。"
+            description="批改后的错题会自动整理为卡片，也可以在辅导回答中手动制卡；到期后会出现在这里。"
             action={
               <Link href="/opening/assistant" className={ui.primary}>
                 去助理制成卡片
@@ -209,6 +210,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
             <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index} exiting={exiting} entering={state.index > 0}
               onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
               onGrade={gradeCard} />
+            {current.card.originObservationRootId ? <CardObservationOrigin key={current.card.id} observationId={current.card.originObservationRootId} onChanged={() => void refresh()} /> : null}
             <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo })}>围绕这张卡片提问</Link>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {gradeOptions.map(({ grade, label, icon: Icon }) => (

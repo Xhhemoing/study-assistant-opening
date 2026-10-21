@@ -3,9 +3,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   createOpeningConversationRepository,
   createOpeningTutorJobsRepository,
+  createOpeningJobRepository,
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
+import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createTutorMetadataHandler } from "../../apps/worker/src/jobs/tutor-metadata";
+import { runJob } from "../../apps/worker/src/runtime/run-job";
 
 let fixture: OpeningFixture;
 
@@ -31,6 +35,135 @@ async function seedConversation() {
 }
 
 describe("tutor job recovery repository", () => {
+  it("releases tutor work while a separately claimed metadata job is waiting, and attaches late suggestions to the original answer", async () => {
+    const { conversationId, append } = await seedConversation();
+    const first = await append();
+    const jobs = createOpeningTutorJobsRepository(fixture.sql);
+    const metadataJobs = createOpeningJobRepository(fixture.sql);
+    const conversations = createOpeningConversationRepository(fixture.sql);
+    let releaseMetadata!: () => void;
+    const metadataGate = new Promise<void>(resolve => { releaseMetadata = resolve; });
+    let metadataStarted!: () => void;
+    const started = new Promise<void>(resolve => { metadataStarted = resolve; });
+    let settled = 0;
+    const candidate = { kind: "memory" as const, text: "Learner asked about Newton", temporary: false };
+    const processTurn = createTutorTurnHandler({
+      tutorJobs: jobs,
+      chunks: { listForSources: async () => [], listChunksAtVersion: async () => [] },
+      stream: { begin: async () => {}, append: async () => {} },
+      budget: { reserve: async () => ({ id: randomUUID() }), claimExecution: async () => true,
+        settle: async () => { settled += 1; }, release: async () => {}, markUnknown: async () => {} } as never,
+      provider: { complete: async () => ({ text: "Force equals mass times acceleration.",
+        citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 }) },
+      config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048,
+        inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+    });
+    await processTurn(first.jobId);
+    expect(settled).toBe(1);
+    expect(await jobs.get(fixture.scope, first.jobId)).toMatchObject({ status: "succeeded" });
+    expect(await jobs.findPendingForConversation(fixture.scope, conversationId)).toBeNull();
+    expect((await conversations.listTurns(fixture.scope, conversationId)).find(turn => turn.id === first.assistantTurnId))
+      .toMatchObject({ status: "complete", text: "Force equals mass times acceleration." });
+    const [outbox] = await fixture.sql`SELECT j.id, j.payload, o.state FROM opening_jobs j JOIN opening_outbox o ON o.job_id=j.id
+      WHERE j.key=${`tutor-metadata:${first.jobId}`}`;
+    expect(outbox).toMatchObject({ state: "pending", payload: { tutorJobId: first.jobId, assistantTurnId: first.assistantTurnId } });
+    const processMetadata = createTutorMetadataHandler({ tutorJobs: jobs, callModel: async (_scope, _mode, options) => {
+      await options.beforeSend?.();
+      metadataStarted();
+      await metadataGate;
+      const output = { text: "", citedChunkIds: [], candidates: [candidate], requestId: null, inputTokens: 10, outputTokens: 10 };
+      await options.persistResult?.(output, { reservationId: "metadata", settledCents: 1 });
+      settled += 1;
+      return output;
+    } });
+    const run = runJob(metadataJobs, String(outbox!.id), processMetadata);
+    try {
+      await Promise.race([started, run.then(() => { throw new Error("metadata was never requested"); })]);
+      // More than the tutor queue's two slots: none remains occupied by metadata.
+      for (let index = 0; index < 3; index += 1) {
+        const next = await append(`What happens when mass is ${index + 2}?`);
+        await processTurn(next.jobId);
+        expect(await jobs.get(fixture.scope, next.jobId)).toMatchObject({ status: "succeeded" });
+      }
+      expect(settled).toBe(4);
+      releaseMetadata();
+      await run;
+      expect(settled).toBe(5);
+      expect(await jobs.findPendingForConversation(fixture.scope, conversationId)).toBeNull();
+      expect((await metadataJobs.get(fixture.scope, String(outbox!.id))).state).toBe("succeeded");
+      const candidates = await fixture.sql`SELECT source_turn_id, payload FROM opening_assistant_candidates WHERE conversation_id=${conversationId}`;
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({ source_turn_id: first.assistantTurnId, payload: candidate });
+    } finally {
+      releaseMetadata();
+      await run;
+    }
+  });
+
+  async function completedMetadataTarget() {
+    const { conversationId, append } = await seedConversation();
+    const saved = await append();
+    const jobs = createOpeningTutorJobsRepository(fixture.sql);
+    const claimed = await jobs.claim(saved.jobId);
+    const sourceId = randomUUID();
+    await fixture.sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
+      VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'notes.pdf', 'application/pdf', 1, ${"a".repeat(64)}, 0, 'uploaded', 'ready')`;
+    const [workspace] = await fixture.sql`SELECT privacy_epoch FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
+    const target = { scope: fixture.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
+      claimToken: claimed!.claimToken, expectedPrivacyEpoch: Number(workspace!.privacy_epoch) };
+    await jobs.completeTurn({ ...target, text: "Saved answer", citations: [], candidates: [], enqueueMetadata: true,
+      contextSourceRefs: [{ sourceId, sourceVersion: 0 }] });
+    const [metadata] = await fixture.sql`SELECT id FROM opening_jobs WHERE key=${`tutor-metadata:${saved.jobId}`}`;
+    const metadataJobs = createOpeningJobRepository(fixture.sql);
+    const metadataClaim = await metadataJobs.claim(String(metadata!.id));
+    return { jobs, target: { ...target, metadataLease: { id: metadataClaim!.id, claimToken: metadataClaim!.claimToken } }, sourceId, conversationId };
+  }
+
+  it("keeps late suggestions owned, tied to the saved answer's sources, and idempotent even after acceptance", async () => {
+    const { jobs, target, sourceId } = await completedMetadataTarget();
+    const candidates = [{ kind: "memory", text: "Useful note", temporary: false }];
+    expect(await jobs.canAppendCompletedTurnCandidates(target)).toBe(true);
+    for (const invalid of [
+      { ...target, scope: fixture.otherScope },
+      { ...target, scope: { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId } },
+      { ...target, assistantTurnId: randomUUID() },
+      { ...target, claimToken: randomUUID() },
+      { ...target, metadataLease: { ...target.metadataLease, claimToken: randomUUID() } },
+    ]) {
+      expect(await jobs.canAppendCompletedTurnCandidates(invalid)).toBe(false);
+      expect(await jobs.appendCompletedTurnCandidates({ ...invalid, candidates })).toBe(false);
+    }
+    expect(await jobs.appendCompletedTurnCandidates({ ...target, candidates })).toBe(true);
+    await fixture.sql`UPDATE opening_assistant_candidates SET status='accepted' WHERE source_turn_id=${target.assistantTurnId}`;
+    expect(await jobs.canAppendCompletedTurnCandidates(target)).toBe(false);
+    expect(await jobs.appendCompletedTurnCandidates({ ...target, candidates })).toBe(false);
+    const rows = await fixture.sql`SELECT source_ids FROM opening_assistant_candidates WHERE source_turn_id=${target.assistantTurnId}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.source_ids).toEqual([sourceId]);
+    expect(await jobs.get(fixture.scope, target.jobId)).toMatchObject({ status: "succeeded" });
+    expect((await fixture.sql`SELECT text, status FROM opening_turns WHERE id=${target.assistantTurnId}`)[0])
+      .toMatchObject({ text: "Saved answer", status: "complete" });
+  });
+
+  it.each(["privacy changed", "source replaced", "source excluded", "answer deleted", "answer moved", "metadata cancelled"])(
+    "does not send or append late suggestions after %s", async change => {
+      const { jobs, target, sourceId } = await completedMetadataTarget();
+      if (change === "privacy changed") await fixture.sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${fixture.scope.workspaceId}`;
+      if (change === "source replaced") await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${sourceId}`;
+      if (change === "source excluded") await fixture.sql`INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, memory_id, deleted_at)
+        VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${sourceId}, NULL, now())`;
+      if (change === "metadata cancelled") await createOpeningJobRepository(fixture.sql).cancel(fixture.scope, target.metadataLease.id);
+      if (change === "answer deleted") await fixture.sql`DELETE FROM opening_turns WHERE id=${target.assistantTurnId}`;
+      if (change === "answer moved") {
+        const other = await seedConversation();
+        await fixture.sql`UPDATE opening_turns SET conversation_id=${other.conversationId} WHERE id=${target.assistantTurnId}`;
+      }
+      expect(await jobs.canAppendCompletedTurnCandidates(target)).toBe(false);
+      expect(await jobs.appendCompletedTurnCandidates({ ...target, candidates: [{ kind: "memory", text: "Old context", temporary: false }] })).toBe(false);
+      expect(await fixture.sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${target.assistantTurnId}`).toHaveLength(0);
+    },
+  );
+
   it.each([
     { jobStatus: "failed", turnStatus: "failed", detail: {}, message: TUTOR_FAILURE_MESSAGE },
     { jobStatus: "failed", turnStatus: "failed", detail: { code: "REQUEST_CAP_EXCEEDED" }, message: "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。" },

@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { KnowledgeSnapshot } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
+  createOpeningSourceActionsRepository,
+  createOpeningSourceChunksRepository,
   OpeningKnowledgeError,
 } from "@aistudy/database";
 import { validateKnowledgeSnapshot } from "@aistudy/domain";
@@ -169,6 +171,71 @@ describe("opening knowledge repository", () => {
     const reviewed = await repo.replace(f.scope, courseId, { expectedVersion: 1, sourceVersions: { [sourceId]: 1 },
       snapshot: { ...saved.snapshot, nodes: saved.snapshot.nodes.map(node => ({ ...node, status: "needs_check" })) } });
     expect(reviewed.snapshot.nodes.map(node => node.id)).toEqual(saved.snapshot.nodes.map(node => node.id));
+  });
+
+  it("keeps node IDs after identical text is reparsed and never exposes the private definition map", async () => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const original = await repo.replace(f.scope, courseId, { expectedVersion: 0,
+      snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } });
+    expect(Object.keys((await repo.getForRebuild(f.scope, courseId))!.nodeDefinitions)).toHaveLength(2);
+    expect(await repo.get(f.scope, courseId)).not.toHaveProperty("nodeDefinitions");
+    const replacement = randomUUID();
+    await f.sql`UPDATE opening_source_chunks SET id=${replacement} WHERE id=${chunkId}`;
+    const graph = snapshotFor(courseId, replacement, 2);
+    const saved = await repo.replace(f.scope, courseId, { expectedVersion: 1, snapshot: graph, sourceVersions: { [sourceId]: 1 } });
+    expect(saved.snapshot.nodes.map(node => node.id)).toEqual(original.snapshot.nodes.map(node => node.id));
+    expect(saved.snapshot.nodes[0]!.evidenceChunkIds).toEqual([replacement]);
+    const another = randomUUID();
+    await f.sql`UPDATE opening_source_chunks SET id=${another},text=text || ' with a changed mathematical definition'
+      WHERE id=${replacement}`;
+    await expect(repo.replace(f.scope, courseId, { expectedVersion: 2,
+      snapshot: snapshotFor(courseId, another, 3), sourceVersions: { [sourceId]: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it.each(["exclude", "delete"] as const)("clears private definition text on material %s and rejects another batch send", async action => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    await f.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE source_id=${sourceId}`;
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const chunks = await repo.listAuthorizedChunks(f.scope, courseId);
+    await repo.replace(f.scope, courseId, { expectedVersion: 0,
+      snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } });
+    const sources = createOpeningSourceActionsRepository(f.sql);
+    const impact = await sources.impact(f.scope, sourceId);
+    await sources.apply(f.scope, sourceId, { action, expectedVersion: 1, expectedMembershipIds: impact.courses.map(course => course.membershipId) },
+      { stagingKey: id => `opening/sources/${id}/staging`, finalKey: (id, version) => `opening/sources/${id}/${version}` }, new Date());
+    expect((await repo.getForRebuild(f.scope, courseId))!.nodeDefinitions).toEqual({});
+    await expect(repo.assertExtractionBatch(f.scope, courseId, chunks)).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it.each([false, true])("checks the course owner before authorizing a batch without a job claim (empty: %s)", async empty => {
+    const { courseId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const chunks = empty ? [] : await repo.listAuthorizedChunks(f.scope, courseId);
+    await expect(repo.assertExtractionBatch({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, courseId, chunks))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it.each([false, true])("preserves an existing graph before its first reparse, without recovering excluded text (%s)", async excluded => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const original = await repo.replace(f.scope, courseId, { expectedVersion: 0,
+      snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } });
+    await f.sql`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb WHERE course_id=${courseId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const old = (await chunks.listChunks(f.scope, sourceId))[0]!;
+    if (excluded) await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id,deleted_at)
+      VALUES(${f.scope.workspaceId},${sourceId},now())`;
+    await chunks.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [{ page: old.page, slideLabel: old.slideLabel,
+      startMs: old.startMs, endMs: old.endMs, text: old.text, imageObjectKey: old.imageObjectKey }] });
+    const definitions = (await repo.getForRebuild(f.scope, courseId))!.nodeDefinitions;
+    if (excluded) { expect(definitions).toEqual({}); return; }
+    expect(Object.keys(definitions)).toHaveLength(2);
+    const replacement = (await chunks.listChunks(f.scope, sourceId))[0]!;
+    expect(replacement.id).not.toBe(chunkId);
+    const saved = await repo.replace(f.scope, courseId, { expectedVersion: 1,
+      snapshot: snapshotFor(courseId, replacement.id, 2), sourceVersions: { [sourceId]: 1 } });
+    expect(saved.snapshot.nodes.map(node => node.id)).toEqual(original.snapshot.nodes.map(node => node.id));
   });
 
   it("rejects other owner / other course", async () => {

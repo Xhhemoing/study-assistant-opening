@@ -72,6 +72,7 @@ const COLUMNS: Record<RestoreCollection, Record<string, string>> = {
     back: "back", source_document_id: "sourceDocumentId", syllabus_point_id: "syllabusPointId",
     source_ids: "sourceIds", tags: "tags", course_id: "courseId", skill_label: "skillLabel", archived: "archived", content_version: "contentVersion",
     paused_until: "pausedUntil", maintain_until: "maintainUntil",
+    origin_observation_root_id: "originObservationRootId", auto_paused: "autoPaused",
     exclude_from_assessment: "excludeFromAssessment", created_at: "createdAt",
     updated_at: "updatedAt",
   },
@@ -103,6 +104,7 @@ const STATE_COLS = {
   owner_user_id: "ownerUserId", card_id: "cardId", workspace_id: "workspaceId",
   ease: "ease", interval_days: "intervalDays", due_at: "dueAt", reps: "reps",
   lapses: "lapses", last_grade: "lastGrade", updated_at: "updatedAt",
+  srs_version: "srsVersion", fsrs_state: "fsrsState",
 };
 
 export async function loadExistingIds(

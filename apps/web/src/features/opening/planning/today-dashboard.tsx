@@ -26,6 +26,7 @@ import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 import { TaskLearningActionContext } from "./task-row-actions";
 import { ReviewView } from "./review-view";
+import { useNextStepMetrics } from "./use-next-step-metrics";
 
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
@@ -122,6 +123,9 @@ export function TodayDashboard({
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
   const noCourses = hasNoTodayCourses(state);
   const currentCourse = currentTodayCourse(state, currentActivity);
+  const nextStepMetrics = useNextStepMetrics(currentActivity ? { targetType: "activity", targetId: currentActivity.id }
+    : state.kind === "ready" && state.continueItem ? { targetType: "conversation", targetId: state.continueItem.conversationId }
+      : currentCourse ? { targetType: "course", targetId: currentCourse.id } : null);
   const courseTitle = currentCourse?.title;
   const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
@@ -334,7 +338,9 @@ export function TodayDashboard({
         {heading}
         {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
         {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
-        <div className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
+        <div ref={nextStepMetrics.ref} onClickCapture={event => {
+          if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
+        }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
           {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
             item={state.continueItem}
             courseTitle={courseTitle}

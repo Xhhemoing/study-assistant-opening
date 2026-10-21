@@ -386,3 +386,4 @@ export * from "./opening/exam-sprint";
 export * from "./opening/exam-integration";
 
 export * from "./opening/teaching-hints";
+export * from "./opening/course-exam";

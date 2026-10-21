@@ -1,3 +1,4 @@
+import { syncOpeningAutomaticErrorCard } from "./opening-auto-error-cards";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -179,6 +180,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     }
   }
   await refreshOpeningLearningEligibility(tx, scope, [id]);
+  if (effectiveVerdictSource === "deterministic" && effectiveOutcome === "incorrect") await syncOpeningAutomaticErrorCard(tx, scope, id);
   await linkSkillEvidence(id);
   // Ordinary observations enqueue a delayed-retest scan in the same transaction.
   // Retest completions must not scan again (avoid immediate re-proposal).

@@ -98,6 +98,7 @@ describe("learning semantic revision writers", () => {
   it("records raw privacy exclusions under one owned transaction and skips replay", async () => {
     const exclusions = new Set<string>();
     const db = database((query, values) => {
+      if (query.startsWith("UPDATE opening_course_knowledge SET node_definitions")) return [];
       if (query.startsWith("INSERT INTO opening_privacy_exclusions")) {
         const source = String(values[2]);
         if (exclusions.has(source)) return [];
@@ -117,6 +118,7 @@ describe("learning semantic revision writers", () => {
   it("counts exclusion and later asset deletion separately, but skips both replays", async () => {
     let sourceExists = true, exclusion: Row | null = null;
     const db = database((query, values) => {
+      if (query.startsWith("UPDATE opening_course_knowledge SET node_definitions")) return [];
       if (query.startsWith("SELECT version, upload_url_expires_at")) return sourceExists ? [{ version: 0 }] : [];
       if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) return exclusion ? [exclusion] : [];
       if (query.startsWith("SELECT m.id") || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")) return [];

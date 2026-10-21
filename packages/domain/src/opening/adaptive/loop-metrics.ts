@@ -12,6 +12,7 @@ export type LoopMetricsInput = {
   coach?: { accepted: number; undone: number };
   replans?: { created: number; accepted: number; rejected: number };
   evaluations?: { recorded: number; abstained: number };
+  experience?: { firstTextMedianMs: number | null; firstTextSamples: number; shown: number; started: number };
 };
 
 function ratio(id: string, label: string, numerator: number, denominator: number, denominatorLabel: string,
@@ -36,7 +37,11 @@ const qualified = (e: LearningEvidenceEligibility) => e.independentAttempt === "
 
 /** A descriptive snapshot. Reference checking, task completion and predictions never establish mastery here. */
 export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsReport {
-  const runtime: LoopMetric[] = [];
+  const timing = input.experience;
+  const runtime: LoopMetric[] = [{ id: "experience.first_text", label: "首次正文显示时间（中位数）", unit: "milliseconds",
+    value: timing?.firstTextSamples ? timing.firstTextMedianMs : null, numerator: null, denominator: null,
+    sampleSize: timing?.firstTextSamples ?? 0, denominatorLabel: "本标签页点击发送到首次非空流式正文显示，包含网络与排队；不含刷新恢复、临时对话与未采集请求",
+    dataStatus: timing?.firstTextSamples ? "available" : "not_collected", excludedReasonCounts: {} }];
   for (const kind of [...new Set(input.jobs.map(row => row.kind))].sort()) {
     const states = Object.fromEntries(input.jobs.filter(row => row.kind === kind).map(row => [row.state, row.count]));
     const total = Object.values(states).reduce((sum, n) => sum + n, 0);
@@ -75,7 +80,11 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
   const referenceChecks = checks.filter(row => row.verificationSource === "reference_checked");
   const deterministicChecks = checks.filter(row => row.verificationSource === "deterministic");
   const unknown = observations.filter(({ eligibility: e }) => [e.independentAttempt, e.verifiedCorrect, e.usableForCurrentVersion].includes("unknown"));
+  const automatic = observations.filter(row => ["ai_graded", "deterministic"].includes(row.verificationSource)
+    && row.eligibility.verifiedCorrect !== "unknown" && row.eligibility.usableForCurrentVersion === "yes");
   const learning = [
+    ratio("learning.automatic_grading_coverage", "自动判分覆盖率", automatic.length, observations.length,
+      "窗口内当前非撤回作答，自动给出明确对错且材料版本可用；包含使用提示的作答，排除隐私材料", exclusions, input.learningComplete),
     ratio("learning.independent_check_coverage", "当前合格独立核对覆盖（分来源）", checks.length, observations.length,
       "窗口内作答的当前非撤回有效 head，排除隐私材料", exclusions, input.learningComplete),
     ratio("learning.qualification_unknown", "资格仍未知比例", unknown.length, observations.length,
@@ -110,6 +119,9 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
   const { actions, reasons } = input.feedback;
   const totalActions = Object.values(actions).reduce((sum, n) => sum + n, 0);
   const burden = [
+    input.experience ? ratio("experience.next_step_started", "下一步建议点击开始比例", input.experience.started, input.experience.shown,
+      "今日主建议实际可见后点击开始；同一对象每天计一次，仅统计已采集的展示，不代表学习完成")
+      : missing("experience.next_step_started", "下一步建议点击开始比例", "尚未采集今日主建议展示与点击"),
     ...(["done", "skipped", "deferred", "resumed"] as const).map(action => ({
       ...count(`feedback.${action}`, { done: "手动标记完成", skipped: "跳过", deferred: "推迟", resumed: "取消推迟" }[action], actions[action], totalActions),
       denominator: totalActions, denominatorLabel: "窗口内记录的任务操作次数，同一任务可多次操作，不是完成率",

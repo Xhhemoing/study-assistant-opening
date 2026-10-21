@@ -66,6 +66,16 @@ export function evaluateAssistance(
       reasons.add("prior_evaluation_feedback");
       continue;
     }
+    // A classroom retry is still the exact saved question. Its server-resolved
+    // hint/solution identity survives reopening; generic past practice remains
+    // governed by the existing delayed-check policy below.
+    if (!sameAttempt && help.sameQuestion === true) {
+      assisted = true;
+      if (help.level === "revealed" || assistance !== "revealed") assistance = help.level;
+      reasons.add("help_before_submission");
+      if (help.level === "revealed") { priorAnswer = "yes"; reasons.add("prior_answer_exposure"); }
+      continue;
+    }
     if (sameAttempt) {
       if (!help.serverOrder && knownTime(startedAt) && knownTime(help.deliveredAt) && help.deliveredAt < startedAt) {
         markUnknown("help_order_unknown");

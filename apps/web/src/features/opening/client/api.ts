@@ -352,7 +352,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
 
     async submitTurn(
       input: TurnInput,
-    ): Promise<{ jobId: string; turnId: string }> {
+    ): Promise<{ jobId: string; turnId: string; replayed?: boolean }> {
       const payload = turnInputSchema.parse(input);
       if (payload.privacy !== "saved") {
         throw new OpeningApiError(400, "thin chat only accepts privacy=saved");
@@ -363,7 +363,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         fetchImpl,
       );
       return parseOpeningResponse(z
-        .object({ jobId: z.string().uuid(), turnId: z.string().uuid() }), body);
+        .object({ jobId: z.string().uuid(), turnId: z.string().uuid(), replayed: z.boolean().optional() }), body);
     },
 
     async listSources(): Promise<SourceRecord[]> {
@@ -397,6 +397,10 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         fetchImpl,
       );
       return parseOpeningResponse(sourceRecordSchema, body);
+    },
+
+    async reindexSource(sourceId: string): Promise<void> {
+      await request(`/api/opening/sources/${sourceId}/reindex`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
     },
 
     async refreshUploadTicket(sourceId: string): Promise<UploadTicket> {
@@ -581,7 +585,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(suggestionFeedbackResultSchema, body);
     },
 
-    async getLoopMetrics(days = 14) {
+    async getLoopMetrics(days = 7) {
       const body = await request(`/api/opening/plans/metrics?days=${encodeURIComponent(days)}`, { method: "GET" }, fetchImpl);
       return parseOpeningResponse(loopMetricsReportSchema, body);
     },

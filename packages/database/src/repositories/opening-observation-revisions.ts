@@ -1,3 +1,4 @@
+import { syncOpeningAutomaticErrorCard } from "./opening-auto-error-cards";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -119,6 +120,7 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     await reconcileOpeningRetestEvidence(tx, scope, { rootObservationId: String(root.id), previousHeadObservationId: headId, headObservationId: id,
       previousIdentity: identity(previous), currentIdentity: input.revisionKind === "retract" ? null : identity({ courseId, requirementKey, skillLabel }), historyRevision: revision });
     await refreshOpeningLearningEligibility(tx, scope, [String(root.id)]);
+    await syncOpeningAutomaticErrorCard(tx, scope, id);
     if (aiEvaluation && aiEvaluation.outcome !== "unverified" && !head.retest_id) {
       // The original ungraded scan may already have finished; evaluate the new effective result.
       const jobId = randomUUID();

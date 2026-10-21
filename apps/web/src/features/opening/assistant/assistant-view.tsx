@@ -47,7 +47,7 @@ import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
-import { useJobStream } from "./use-job-stream";
+import { useJobStream, type FirstTextTiming } from "./use-job-stream";
 
 export { createJobPoller } from "./job-poller";
 
@@ -332,7 +332,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [privacy, setPrivacy] = useState<ComposerPrivacy>("saved");
-  const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId);
+  const submitClocks = useRef(new Map<string, number>());
+  const [firstTextTiming, setFirstTextTiming] = useState<FirstTextTiming | null>(null);
+  const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId, firstTextTiming);
   const draftStore = useMemo(() => createQuestionDraftStore(), []);
   const [draftUnavailable, setDraftUnavailable] = useState(false);
   const draftScope = `${assistantContextScope(studyContext)}:${initialCourseId ?? ""}:${initialConversationId ?? ""}:${[...initialSourceIds].sort().join(",")}:${initialPage ?? ""}:${learningAttempt?.id ?? ""}`;
@@ -682,6 +684,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       setError("请先选择资料，或切换为自动参考 / 不用资料。"); setContextOpen(true); return { accepted: false };
     }
 
+    const priorSubmittedAt = submitClocks.current.get(input.clientKey);
+    const submittedAt = priorSubmittedAt ?? performance.now();
+    submitClocks.current.set(input.clientKey, submittedAt);
+    if (submitClocks.current.size > 32) submitClocks.current.delete(submitClocks.current.keys().next().value!);
+    setFirstTextTiming(null);
     setPending(true);
     let jobSubmitted = false;
     const abortController = new AbortController();
@@ -759,6 +766,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         ...(!querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
         ...(!querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
+      if (submitted.replayed === false || priorSubmittedAt !== undefined) {
+        setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
+      }
       setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;

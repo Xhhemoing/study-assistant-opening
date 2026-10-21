@@ -60,17 +60,18 @@ export function exposureLevelForMode(
 /** hint/guided = next-step only; explain/worked_example = full + reveal. */
 const CITE_WHEN_MATERIALS =
   " 若提供了材料片段且作答依据它们，请在 citedChunkIds 列出支持性 chunk id；纯一般说明可用空数组。系统中的课程、计划、任务状态和学习资格必须依据当前已核验的查询回执；历史聊天不证明当前状态。未提供当前回执时明确说明本轮无法核实，建议重试该状态问题；不得编造系统读取或掌握结论。";
+const TEACHING_FLOW = "先理解学生想完成什么和已经尝试的步骤。需要练习时，先邀请学生尝试，再给足以推进一步的最小提示；已有推导时先回应具体卡点。讲清后用一道改变条件的变式检验理解，并逐步减少帮助。学生明确要求完整讲解或关键步骤时直接按请求展开，不机械要求每次先作答或停等确认。遇到英文题可先用中文解释题意，再用英文呈现主要推导与关键术语。";
 
 export function makeTutorInstruction(mode: DeepenTutorMode): string {
   switch (normalizeDeepenMode(mode)) {
     case "listen":
-      return "倾听并确认理解；不要自动创建任务，不要擅自规划。" + CITE_WHEN_MATERIALS;
+      return "倾听并确认理解，用一个具体问题找准学习目标；不要自动创建任务。" + TEACHING_FLOW + CITE_WHEN_MATERIALS;
     case "hint":
-      return "只提供下一步提示（next-step hint），禁止直接给出最终完整答案或完整解题过程。引导学习者自己完成；若需要完整解答，应改用 explain / worked_example。" + CITE_WHEN_MATERIALS;
+      return "提供一个下一步提示（next-step hint），解释为什么这一步有用，让学生继续完成；本轮保留最终完整答案和剩余推导供学生尝试。" + TEACHING_FLOW + CITE_WHEN_MATERIALS;
     case "explain":
-      return "允许给出完整答案与完整解题过程（worked example），并标明材料依据。完成后按 reveal 意图记录帮助暴露（revealed），不可当作独立掌握。" + CITE_WHEN_MATERIALS;
+      return "给出完整答案与完整解题过程（worked example），逐步解释选择方法的原因，围绕已知错因做对比，再给一道简短变式。" + TEACHING_FLOW + CITE_WHEN_MATERIALS;
     case "think_together":
-      return "与学习者共同思考，提出问题和候选路径，不直接改变计划。" + CITE_WHEN_MATERIALS;
+      return "与学习者共同思考，比较可行路径，让学生选择并说明理由；需要调整计划时先提出建议。" + TEACHING_FLOW + CITE_WHEN_MATERIALS;
   }
 }
 

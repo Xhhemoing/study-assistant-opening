@@ -13,6 +13,11 @@ describe("inline attempt skill context", () => {
     expect(defaultInlineAttemptSkill({ draftSkillLabel: "My skill", outlineTitle: "matrix rank", knowledge })).toBe("My skill");
     expect(defaultInlineAttemptSkill({ draftSkillLabel: "", learnerSkillLabel: "matrix rank", knowledge })).toBe("");
   });
+  it("records the question's own topic before the lesson default while preserving saved drafts", () => {
+    expect(defaultInlineAttemptSkill({ questionSkillLabel: "矩阵秩", learnerSkillLabel: "行列式", outlineTitle: "模拟练习" })).toBe("矩阵秩");
+    expect(defaultInlineAttemptSkill({ draftSkillLabel: "用户已选考点", questionSkillLabel: "矩阵秩" })).toBe("用户已选考点");
+    expect(defaultInlineAttemptSkill({ draftSkillLabel: "", questionSkillLabel: "矩阵秩" })).toBe("");
+  });
   it("keeps the selected learning skill ahead of generic outline and chapter labels", () => {
     expect(defaultInlineAttemptSkill({ learnerSkillLabel: "matrix rank", outlineTitle: "Check understanding", knowledge })).toBe("Matrix Rank");
     expect(defaultInlineAttemptSkill({ outlineTitle: "rank", knowledge: { nodes: [{ id: "chapter", label: "RANK", kind: "chapter" }] } })).toBe("rank");

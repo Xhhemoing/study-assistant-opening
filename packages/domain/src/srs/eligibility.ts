@@ -32,7 +32,7 @@ export function reviewEligibilityForMode(
   now: Date,
   today: string,
 ): ReviewEligibility {
-  if (card.archived || isPaused(card, now)) {
+  if (card.archived || card.autoPaused || isPaused(card, now)) {
     return { eligible: false, excludeFromAssessment: card.excludeFromAssessment };
   }
   if (mode === "auto") {

@@ -12,6 +12,7 @@ import {
 } from "@aistudy/database";
 import { createCompilerProviderInput } from "@aistudy/ai";
 import { createDbModelGateway, scopeBudget } from "./model-gateway";
+import { createOpeningMaterialRetriever } from "./material-retrieval";
 import {
   createTeachingCompilerPublishInput,
   createTeachingValidationAfterPublish,
@@ -42,16 +43,19 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
+  const retrieveContext = createOpeningMaterialRetriever(sql, budget);
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
         callModel: (scope, input, options) =>
           models.call(scope, "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options }),
-        buildProviderInput: async (scope, payload) => {
+        buildProviderInput: async (scope, payload, options) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
           return createCompilerProviderInput({
             loadChunks,
+            retrieveContext,
+            parentBudget: options?.parentBudget,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
             ...focus,
@@ -91,11 +95,12 @@ export function createCompileTeachingUnitWorkerDeps(
       return unit.id;
     },
     buildPublishInput: teachingCompilerOn
-      ? async (scope, payload, providerOutput) => {
+      ? async (scope, payload, providerOutput, providerInput) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           let revisionNumber: number | null = null;
           const build = createTeachingCompilerPublishInput({
             loadChunks,
+            evidenceChunks: providerInput?.chunks,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.

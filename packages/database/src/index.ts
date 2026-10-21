@@ -30,6 +30,7 @@ export * from "./schema/opening-source-chunks";
 export * from "./repositories/opening-sources";
 export { reserveOpeningSourceQuota } from "./repositories/opening-source-quota";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
+export { createOpeningCourseExamRepository, type CourseExamContext } from "./repositories/opening-course-exam";
 export {
   listReadySourceIdsForCourse,
   createOpeningCourseReadySourcesRepository,
@@ -219,6 +220,8 @@ export {
 export { createOpeningTranscriptionCheckpointsRepository, type TranscriptionChunkIdentity, type TranscriptionChunkReceipt } from "./repositories/opening-transcription-checkpoints";
 
 export { readOpeningLoopMetrics } from "./repositories/opening-loop-metrics";
+export { recordOpeningLearningExperience } from "./repositories/opening-learning-experience";
+export * from "./schema/opening-learning-experience";
 
 export { proposeOpeningLocalPlan, type LocalPlanOptions, type LocalPlanAdditional } from "./repositories/opening-local-replan";
 
@@ -272,3 +275,8 @@ export * from "./repositories/opening-teaching-hints";
 export * from "./repositories/opening-today-courses";
 
 export * from "./repositories/opening-span-session";
+
+export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
+export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";
+
+export { createOpeningTutorLearnerContextRepository } from "./repositories/opening-tutor-learner-context";

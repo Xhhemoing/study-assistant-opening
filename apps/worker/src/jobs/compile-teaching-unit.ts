@@ -68,7 +68,7 @@ export type CompileTeachingUnitDeps = {
     options: { operationId: string; resultRef: string; parentBudget?: ParentInteractionBudget; beforeSend?: () => Promise<void> },
   ): Promise<ProviderOutput>;
   /** Prompt with outline + authorized evidence; defaults to the V2-07 stub prompt. */
-  buildProviderInput?(scope: Scope, payload: CompileTeachingUnitPayload): Promise<ProviderInput>;
+  buildProviderInput?(scope: Scope, payload: CompileTeachingUnitPayload, options?: { parentBudget: ParentInteractionBudget }): Promise<ProviderInput>;
   reservedCents?: number;
   /**
    * When true and mode=repair, skip provider and set generate_status=ready
@@ -100,6 +100,7 @@ export type CompileTeachingUnitDeps = {
     scope: Scope,
     payload: CompileTeachingUnitPayload,
     providerOutput: ProviderOutput | null,
+    providerInput?: ProviderInput,
   ): Promise<ActivitySpecPublishInput>;
   /** Create-or-bind unit when generate omits teachingUnitId. */
   ensureTeachingUnitId?(
@@ -242,13 +243,14 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       const skipProvider = body.mode === "repair" && deps.skipProviderForRepair === true;
       let providerOutput: ProviderOutput | null = null;
+      let sentInput: ProviderInput | undefined;
 
       if (!skipProvider) {
         const parentBudget = deps.resolveParentBudget
           ? await deps.resolveParentBudget(scope, body)
           : { id: `study-activity:${body.activityId}` };
         const input: ProviderInput = deps.buildProviderInput
-          ? await deps.buildProviderInput(scope, { ...body, sourceIds: allowedSources })
+          ? await deps.buildProviderInput(scope, { ...body, sourceIds: allowedSources }, { parentBudget })
           : {
               instruction: deps.buildPublishInput
                 ? "Compile the current teaching activity from editable outline + authorized sources (V2-08)."
@@ -265,6 +267,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
               mediaCapability: "text_only",
               imageParts: [],
             };
+        sentInput = input;
         const beforeSend = deps.privacy
           ? async () =>
               assertCurrentEpoch(
@@ -344,7 +347,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
       }
 
       const publishInput = deps.buildPublishInput
-        ? await deps.buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput)
+        ? await deps.buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput, sentInput)
         : defaultStubPublish({ ...body, teachingUnitId, sourceIds: allowedSources }, teachingUnitId);
 
       // Re-check cancel immediately before publish (late-result fence).

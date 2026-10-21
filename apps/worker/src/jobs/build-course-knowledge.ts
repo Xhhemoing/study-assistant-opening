@@ -9,7 +9,8 @@ import type {
   SourceChunk,
 } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
-import { sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
+import { knowledgeNodeDefinition, sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
+import { connectKnowledgeChapters, knowledgeExtractionBatches, mergeKnowledgeBatches, type KnowledgeExtractionBatch } from "./knowledge-extraction-batches";
 
 type Scope = { workspaceId: string; ownerUserId: string };
 
@@ -34,7 +35,7 @@ export type BuildCourseKnowledgeDeps = {
   get(
     scope: Scope,
     courseId: string,
-  ): Promise<{ version: number; snapshot: KnowledgeSnapshot; sourceVersions: Record<string, number> } | null>;
+  ): Promise<{ version: number; snapshot: KnowledgeSnapshot; sourceVersions: Record<string, number>; nodeDefinitions?: Record<string, string> } | null>;
   /** Defaults to domain validateKnowledgeSnapshot. */
   validateSnapshot?(snapshot: KnowledgeSnapshot): KnowledgeSnapshot;
   /** Data repo replace — CAS write. */
@@ -50,7 +51,7 @@ export type BuildCourseKnowledgeDeps = {
   ): Promise<{ version: number; snapshot: KnowledgeSnapshot }>;
   provider?: KnowledgeExtractProvider | null;
   /** Resolve a live, budgeted provider when extractGraph is not injected (production). */
-  resolveProvider?: (scope: Scope, job: OpeningJobRecord) => Promise<KnowledgeExtractProvider>;
+  resolveProvider?: (scope: Scope, job: OpeningJobRecord, batch: KnowledgeExtractionBatch & { count: number }) => Promise<KnowledgeExtractProvider>;
   /** Optional: override LLM extraction for tests. */
   extractGraph?: (chunks: AuthorizedChunk[]) => Promise<ExtractedGraph>;
 };
@@ -72,7 +73,7 @@ export type ExtractedGraph = {
 };
 
 const EXTRACTION_INSTRUCTION = [
-  "从已授权课程材料分块中提取知识结构。",
+  "从当前章节的已授权材料分块中提取知识结构。相同概念仅输出一次，标签要带必要限定词，以区分不同定义。",
   "只输出 JSON：{nodes:[{label,kind,evidenceChunkIds,status}],edges:[{fromLabel,toLabel,kind,evidenceChunkIds,status}]}。",
   "kind 仅限 chapter|concept|procedure|problem_type；边 kind 仅限 contains|prerequisite|applies_to。",
   "supported 必须引用真实 chunk id；无原文依据的先修只能标 suggested；含糊公式不要标 supported。",
@@ -90,17 +91,20 @@ export function reconcileExtractedSnapshot(
   authorized: AuthorizedChunk[],
   previous?: KnowledgeSnapshot,
   referencedNodeIds: readonly string[] = [],
+  previousDefinitions: Record<string, string> = {},
 ): KnowledgeSnapshot {
   const byId = new Map(authorized.map((chunk) => [chunk.id, chunk]));
   const allowed = new Set(authorized.filter((chunk) => chunk.courseId === courseId).map((chunk) => chunk.id));
 
   const labelToId = new Map<string, string>();
+  const ambiguousLabels = new Set<string>();
   const nodes: KnowledgeNode[] = [];
   for (const raw of extracted.nodes) {
     const evidenceChunkIds = [...new Set(raw.evidenceChunkIds.filter((id) => allowed.has(id)))];
     let status: KnowledgeNode["status"] = raw.status ?? (evidenceChunkIds.length ? "supported" : "suggested");
     if (status === "supported" && evidenceChunkIds.length === 0) status = "suggested";
     const id = randomUUID();
+    if (labelToId.has(raw.label)) ambiguousLabels.add(raw.label);
     labelToId.set(raw.label, id);
     nodes.push({
       id,
@@ -112,35 +116,10 @@ export function reconcileExtractedSnapshot(
     });
   }
 
-  // Automatic reuse requires one exact, evidence-anchored definition on each
-  // side. A shared/nearby label, ambiguous duplicate, changed evidence or split
-  // is never permission to attach old learning evidence to a new concept.
-  const old = previous?.courseId === courseId ? previous.nodes : [];
-  const generated = [...nodes];
-  for (const node of generated) {
-    if (!node.evidenceChunkIds.length) continue;
-    const matches = old.filter(candidate => sameKnowledgeNodeIdentity(candidate, node));
-    if (matches.length !== 1 || generated.filter(candidate => sameKnowledgeNodeIdentity(candidate, node)).length !== 1) continue;
-    const originalId = node.id;
-    node.id = matches[0]!.id;
-    if (matches[0]!.status === "needs_check") node.status = "needs_check";
-    for (const [label, id] of labelToId) if (id === originalId) labelToId.set(label, node.id);
-  }
-  // Model omission cannot delete an explicitly referenced identity. Retain its
-  // original definition only while all its immutable chunks remain authorized.
-  // A node explicitly removed from the current snapshot is never resurrected.
-  for (const id of referencedNodeIds) {
-    if (nodes.some(node => node.id === id)) continue;
-    const node = old.find(candidate => candidate.id === id);
-    if (node && node.evidenceChunkIds.every(chunkId => allowed.has(chunkId))) {
-      const reinterpreted = generated.some(candidate => candidate.evidenceChunkIds.some(chunkId => node.evidenceChunkIds.includes(chunkId)));
-      nodes.push({ ...structuredClone(node), ...(reinterpreted ? { status: "needs_check" as const } : {}) });
-    }
-  }
-
   const nodeIds = new Set(nodes.map((node) => node.id));
   const edges: KnowledgeEdge[] = [];
   for (const raw of extracted.edges) {
+    if (ambiguousLabels.has(raw.fromLabel) || ambiguousLabels.has(raw.toLabel)) continue;
     const from = labelToId.get(raw.fromLabel);
     const to = labelToId.get(raw.toLabel);
     if (!from || !to || !nodeIds.has(from) || !nodeIds.has(to)) continue;
@@ -157,7 +136,36 @@ export function reconcileExtractedSnapshot(
     edges.push({ from, to, kind: raw.kind, evidenceChunkIds, status });
   }
 
-  return { courseId, version, nodes, edges };
+  return retainKnowledgeIdentities({ courseId, version, nodes, edges }, authorized, previous, referencedNodeIds, previousDefinitions);
+}
+
+/** Reuse only a unique, unchanged definition; a reparse may replace the chunk UUIDs. */
+export function retainKnowledgeIdentities(snapshot: KnowledgeSnapshot, authorized: AuthorizedChunk[], previous?: KnowledgeSnapshot,
+  referencedNodeIds: readonly string[] = [], previousDefinitions: Record<string, string> = {}): KnowledgeSnapshot {
+  const old = previous?.courseId === snapshot.courseId ? previous.nodes : [];
+  const definitions = new Map(snapshot.nodes.map(node => [node.id, knowledgeNodeDefinition(node, authorized)]));
+  const replacements = new Map<string, string>();
+  const nodes = snapshot.nodes.map(node => {
+    const definition = definitions.get(node.id);
+    const matches = old.filter(candidate => sameKnowledgeNodeIdentity(candidate, node)
+      || Boolean(definition && previousDefinitions[candidate.id] === definition));
+    const unique = snapshot.nodes.filter(candidate => sameKnowledgeNodeIdentity(candidate, node)
+      || Boolean(definition && definitions.get(candidate.id) === definition)).length === 1;
+    if (!node.evidenceChunkIds.length || matches.length !== 1 || !unique) return node;
+    replacements.set(node.id, matches[0]!.id);
+    return { ...node, id: matches[0]!.id, ...(matches[0]!.status === "needs_check" ? { status: "needs_check" as const } : {}) };
+  });
+  const allowed = new Set(authorized.filter(chunk => chunk.courseId === snapshot.courseId).map(chunk => chunk.id));
+  for (const id of referencedNodeIds) {
+    if (nodes.some(node => node.id === id)) continue;
+    const node = old.find(candidate => candidate.id === id);
+    if (node && node.evidenceChunkIds.every(chunkId => allowed.has(chunkId))) {
+      const reinterpreted = nodes.some(candidate => candidate.evidenceChunkIds.some(chunkId => node.evidenceChunkIds.includes(chunkId)));
+      nodes.push({ ...structuredClone(node), ...(reinterpreted ? { status: "needs_check" as const } : {}) });
+    }
+  }
+  return { ...snapshot, nodes, edges: snapshot.edges.map(edge => ({ ...edge,
+    from: replacements.get(edge.from) ?? edge.from, to: replacements.get(edge.to) ?? edge.to })) };
 }
 
 export function sourceVersionsFromChunks(chunks: AuthorizedChunk[]): Record<string, number> {
@@ -184,13 +192,13 @@ function parseExtractedGraph(text: string): ExtractedGraph {
 
 async function defaultExtract(
   provider: KnowledgeExtractProvider,
-  chunks: AuthorizedChunk[],
+  batch: KnowledgeExtractionBatch,
 ): Promise<ExtractedGraph> {
   const output = await provider.complete({
     instruction: EXTRACTION_INSTRUCTION,
-    text: "提取本课知识结构",
+    text: batch.chapter ? `提取本章节知识结构：${batch.chapter}` : "提取当前资料片段的知识结构",
     history: [],
-    chunks,
+    chunks: batch.chunks,
     mode: "explain",
     maxOutputTokens: 4096,
     mediaCapability: "text_only",
@@ -210,20 +218,29 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
     const scope = openingJobScope(job);
     const current = await deps.get(scope, body.courseId);
     const expectedVersion = current?.version ?? 0;
-    const chunks = await deps.listAuthorizedChunks(scope, body.courseId);
-    const extracted = deps.extractGraph
-      ? await deps.extractGraph(chunks)
-      : await (async () => {
-          const provider = deps.provider
-            ?? (deps.resolveProvider ? await deps.resolveProvider(scope, job) : null);
-          if (!provider) {
-            if (!chunks.length) return { nodes: [], edges: [] };
-            throw new Error("build-course-knowledge requires a model provider");
-          }
-          return defaultExtract(provider, chunks);
-        })();
+    const chunks = (await deps.listAuthorizedChunks(scope, body.courseId)).filter(chunk => chunk.courseId === body.courseId);
+    const batches = knowledgeExtractionBatches(chunks), extracted: KnowledgeSnapshot[] = [];
+    const chapterEdges: ExtractedGraph["edges"] = [];
+    for (const batch of batches) {
+      const provider = deps.extractGraph ? null : deps.provider
+        ?? (deps.resolveProvider ? await deps.resolveProvider(scope, job, { ...batch, count: batches.length }) : null);
+      if (!deps.extractGraph && !provider) throw new Error("build-course-knowledge requires a model provider");
+      const graph = deps.extractGraph ? await deps.extractGraph(batch.chunks) : await defaultExtract(provider!, batch);
+      extracted.push(reconcileExtractedSnapshot(body.courseId, expectedVersion + 1, graph, batch.chunks));
+      const labels = new Set(graph.nodes.map(node => node.label)), allowed = new Set(batch.chunks.map(chunk => chunk.id));
+      chapterEdges.push(...graph.edges.filter(edge => !labels.has(edge.fromLabel) || !labels.has(edge.toLabel)).map(edge => ({
+        ...edge, evidenceChunkIds: [...new Set(edge.evidenceChunkIds.filter(id => allowed.has(id)))],
+      })));
+    }
     const referenced = await deps.listReferencedNodeIds?.(scope, body.courseId) ?? [];
-    const draft = reconcileExtractedSnapshot(body.courseId, expectedVersion + 1, extracted, chunks, current?.snapshot, referenced);
+    const seenChunkIds = new Set<string>(), slicedChunkIds = new Set<string>();
+    for (const batch of batches) for (const chunk of batch.chunks) {
+      if (seenChunkIds.has(chunk.id)) slicedChunkIds.add(chunk.id);
+      seenChunkIds.add(chunk.id);
+    }
+    const combined = connectKnowledgeChapters(mergeKnowledgeBatches(body.courseId, expectedVersion + 1, extracted, chunks, slicedChunkIds), chapterEdges);
+    const draft = retainKnowledgeIdentities(combined,
+      chunks, current?.snapshot, referenced, current?.nodeDefinitions);
     const validated = (deps.validateSnapshot ?? validateKnowledgeSnapshot)(draft);
     const used = new Set([...validated.nodes, ...validated.edges].flatMap(item => item.evidenceChunkIds));
     const sourceVersions = sourceVersionsFromChunks(chunks.filter(chunk => used.has(chunk.id)));

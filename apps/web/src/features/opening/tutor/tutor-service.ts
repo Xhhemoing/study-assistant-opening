@@ -12,7 +12,6 @@ import {
   type StudyIntentEvent,
 } from "@aistudy/contracts";
 import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
-import { pickSourceIds, shouldAutoPickSources } from "@aistudy/ai";
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
@@ -156,7 +155,7 @@ export function createTutorService(deps: {
     async submitTurn(
       scope: OpeningConversationScope,
       body: unknown,
-    ): Promise<{ jobId: string; turnId: string; learningSessionId: string | null }> {
+    ): Promise<{ jobId: string; turnId: string; learningSessionId: string | null; replayed: boolean }> {
       const request = turnInputSchema.parse(body);
       if (request.privacy !== "saved") {
         throw new TutorServiceError(
@@ -186,7 +185,7 @@ export function createTutorService(deps: {
           clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
           contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
           learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
-        return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null };
+        return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null, replayed: Boolean(existing) };
       }
       if (request.mode === undefined && !existing?.mode && deps.studyContext) {
         const anchor = request.contextAnchor ?? (request.attemptId ? { purpose: "learning_help" as const, attemptId: request.attemptId } : undefined);
@@ -212,23 +211,12 @@ export function createTutorService(deps: {
       }
 
       if (!existing) {
-        let authorized = await authorizedChunksFor(scope, effectiveSourceIds, input.contextAnchor);
+        const authorized = await authorizedChunksFor(scope, effectiveSourceIds, input.contextAnchor);
         if (clientSourceIds.length === 0) {
-          // Auto/course-pool: drop unreadables; then keyword top-K when pool is large.
+          // Keep the full readable pool so semantic retrieval can find differently worded material.
           effectiveSourceIds = effectiveSourceIds.filter(id =>
             authorized.some(chunk => chunk.sourceId === id),
           );
-          if (shouldAutoPickSources(clientSourceIds, effectiveSourceIds)) {
-            const poolChunks = await deps.sourceChunks.listForSources(scope, effectiveSourceIds);
-            effectiveSourceIds = pickSourceIds({
-              chunks: poolChunks,
-              query: input.text,
-              sourceIds: effectiveSourceIds,
-            });
-            authorized = authorized.filter(chunk =>
-              effectiveSourceIds.includes(chunk.sourceId),
-            );
-          }
         } else if (effectiveSourceIds.some(id => !authorized.some(chunk => chunk.sourceId === id))) {
           throw new TutorServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
         }
@@ -274,7 +262,7 @@ export function createTutorService(deps: {
       return {
         jobId: saved.jobId,
         turnId: saved.turnId,
-        learningSessionId,
+        learningSessionId, replayed: Boolean(existing),
       };
     },
   };

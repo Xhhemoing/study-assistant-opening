@@ -62,7 +62,7 @@ describe("server-owned query evidence links", () => {
     expect(anchors(plain)).toEqual([]);
   });
 
-  it.each([`/opening/library/${id}`, "/opening/cards", "/opening/sprint"])("renders newly supported record evidence %s in both modes", href => {
+  it.each([`/opening/library/${id}`, `/opening/courses/${id}/exam`, "/opening/cards", "/opening/sprint"])("renders newly supported record evidence %s in both modes", href => {
     for (const proseEnabled of [true, false]) {
       const html = renderToStaticMarkup(createElement(MessageList, { messages: [{ id, role: "assistant", text: `[记录](${href})`, citations: [], citationLabels: [], queryEvidenceLinks: [{ href, label: "记录" }] }], proseEnabled, artifactsEnabled: false }));
       expect(anchors(html)).toEqual([href]);

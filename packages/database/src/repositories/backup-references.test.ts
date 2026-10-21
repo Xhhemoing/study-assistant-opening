@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
-import type { NativeRestorePlan, NativeBackupRecord, RestoreCollection } from "@aistudy/domain";
+import { createInitialState, type NativeRestorePlan, type NativeBackupRecord, type RestoreCollection } from "@aistudy/domain";
 import { assertRestoreReferences } from "./backup-references";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -97,4 +97,13 @@ describe("native restore reference boundary", () => {
       ["events", [{ id, type: "attempt", contentId: targetId }]],
     ]))).rejects.toMatchObject({ code: "VALIDATION" });
   });
+});
+
+it("rejects malformed FSRS state before any native restore inserts and accepts a complete state", async () => {
+  const { sql } = database();
+  const state = createInitialState(id, new Date("2026-10-21T00:00:00Z"));
+  const card = { id, reviewStates: [{ id, ...state, fsrsState: state.fsrs }] };
+  await expect(assertRestoreReferences(sql, plan([["cards", [card]]]))).resolves.toBeUndefined();
+  await expect(assertRestoreReferences(sql, plan([["cards", [{ ...card, reviewStates: [{ id, ...state, fsrsState: {} }] }]]])))
+    .rejects.toMatchObject({ code: "VALIDATION", message: "card review state is invalid" });
 });

@@ -39,7 +39,7 @@ export interface EvidenceHelpExposure {
   level: "hinted" | "revealed";
   /** V2-13: instruction | hint | solution. Missing/legacy reads as hint. */
   kind?: "instruction" | "hint" | "solution" | "evaluation_feedback" | null;
-  /** Server canonical catalogue comparison; not a learner-supplied identity. */
+  /** Server canonical catalogue or exact classroom comparison; not a learner-supplied identity. */
   sameQuestion?: boolean;
   /** Persisted and retrievable by the client, not proof of reading. Null means unknown. */
   delivered: boolean | null;

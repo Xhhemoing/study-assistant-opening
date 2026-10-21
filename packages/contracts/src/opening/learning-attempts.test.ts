@@ -63,3 +63,9 @@ it.each([
 ])("rejects incomplete or inconsistent assistant restore identities: %j", change => {
   expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...contextAttempt, ...change }, deliveredAssistance: "none" }).success).toBe(false);
 });
+it("accepts a canonical classroom context without pretending that its revision is a source", () => {
+  const attempt = { ...contextAttempt, requirementKey: `teaching:${sessionId}:v1`, sourceIds: [], sourceVersions: {},
+    contextAnchor: { ...contextAttempt.contextAnchor, sourceId: null, sourceVersion: null, blockId: sessionId, contentVersion: 1 } };
+  expect(learningAttemptContextReadSchema.safeParse({ attempt, deliveredAssistance: "none" }).success).toBe(true);
+  expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, requirementKey: "span:v1" }, deliveredAssistance: "none" }).success).toBe(false);
+});

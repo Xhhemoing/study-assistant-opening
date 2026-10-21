@@ -2,10 +2,11 @@ import { planCardEvidence, type CardEvidenceSkipReason } from "./card-sources";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
   reviewGradeSchema,
+  openingAdaptivePrefsSchema, openingPlanningSettingsSchema,
   type LearningEvent,
   type ReviewGrade,
 } from "@aistudy/contracts";
-import { createInitialState, scheduleReview } from "@aistudy/domain";
+import { createInitialState, scheduleReview, migrateReviewHistory, SRS_VERSION, localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { createOpeningLearningSessionInTx } from "./opening-learning-session-create";
 import { insertOpeningLearningObservationInTx } from "./opening-learning-observations";
@@ -76,8 +77,26 @@ export async function gradeCard(
       input.ownerUserId,
       input.cardId,
     );
-    const current = currentState ?? createInitialState(input.cardId, now);
-    const next = scheduleReview(current, grade, now);
+    if (card.autoPaused) throw new CardRepositoryError("CONFLICT", "这张错题卡已随作答更正暂停");
+    let current = currentState ?? createInitialState(input.cardId, now);
+    if (current.srsVersion !== SRS_VERSION || !current.fsrs) {
+      const history = await client`SELECT payload,occurred_at,corrects_event_id FROM learning_events
+        WHERE workspace_id=${input.workspaceId} AND owner_user_id=${input.ownerUserId}
+          AND content_id=${input.cardId} AND type='review' ORDER BY occurred_at,created_at,id`;
+      if (history.every(row => row.corrects_event_id == null && reviewGradeSchema.safeParse(row.payload?.grade).success)) {
+        current = migrateReviewHistory(current, history.map(row => ({ grade: row.payload.grade as ReviewGrade,
+          occurredAt: new Date(row.occurred_at).toISOString() })));
+      }
+    }
+    const [prefs] = card.courseId ? await client`SELECT adaptive_planning,planning_settings FROM workspace_preferences
+      WHERE workspace_id=${input.workspaceId}` : [];
+    const adaptive = openingAdaptivePrefsSchema.safeParse(prefs?.adaptive_planning);
+    const planning = openingPlanningSettingsSchema.safeParse(prefs?.planning_settings);
+    const goal = adaptive.success && card.courseId ? adaptive.data.courseGoals[card.courseId] : undefined;
+    const today = localDateKeyInZone(now, resolveWorkspaceTimeZone(planning.success ? planning.data.timeZone : undefined));
+    if (current.fsrs?.lastReview && now.getTime() < Date.parse(current.fsrs.lastReview))
+      throw new CardRepositoryError("CONFLICT", "复习时间早于上一条记录，请刷新后重试");
+    const next = scheduleReview(current, grade, now, goal ? { targetDate: goal.targetDate, learningMode: goal.learningMode, today, timeZone: planning.success ? planning.data.timeZone : undefined } : undefined);
     const state = await writeState(client, input.workspaceId, input.ownerUserId, next);
     try {
       const event = await events.append({

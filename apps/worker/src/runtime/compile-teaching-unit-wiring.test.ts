@@ -37,6 +37,10 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
   readOpeningTeachingCompilerFocus: readFocus,
+  createOpeningSourceEmbeddingsRepository: () => ({
+    authorizeChunks: async (_scope: unknown, chunks: SourceChunk[]) => ({ chunks, privacyEpoch: 0 }),
+    hasIndex: async () => false,
+  }),
 }));
 
 import { createCompileTeachingUnitHandler } from "../jobs/compile-teaching-unit";
@@ -133,8 +137,8 @@ const rankHints: TeachingPartialHints = {
 };
 
 /** What a real model returns: grounded blocks when evidence was supplied, uncited otherwise. */
-function modelAnswer(input: { text: string }, options: { formula?: boolean } = {}) {
-  const grounded = input.text.includes(CHUNK);
+function modelAnswer(input: { text: string; chunks?: SourceChunk[] }, options: { formula?: boolean } = {}) {
+  const grounded = input.text.includes(CHUNK) || input.chunks?.some(chunk => chunk.id === CHUNK);
   const cite = grounded ? [CHUNK] : [];
   return {
     text: JSON.stringify({
@@ -242,10 +246,10 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     // The routed model writes the blocks; the learner's intent and evidence reach the prompt.
     expect(JSON.stringify(writtenBlocks)).toContain("秩—零化度定理");
     expect(spec.generationConfig?.extras).toMatchObject({ contentSource: "model" });
-    const sent = model.complete.mock.calls[0]![0] as { text: string; outputFormat?: string };
+    const sent = model.complete.mock.calls[0]![0] as { text: string; outputFormat?: string; chunks: SourceChunk[] };
     expect(sent.outputFormat).toBe("json");
     expect(sent.text).toContain("学习意图：秩与零空间");
-    expect(sent.text).toContain(CHUNK);
+    expect(sent.chunks.map(chunk => chunk.id)).toContain(CHUNK);
     // Preserve formula provenance without treating a citation as a correctness check.
     expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],

@@ -92,6 +92,14 @@ describe("evaluateEvidenceEligibility assistance", () => {
     expect(result.reasonCodes).not.toContain("prior_answer_exposure");
   });
 
+  it.each(["hinted", "revealed"] as const)("keeps server-resolved exact classroom %s when the same question is reopened", level => {
+    const result = evaluateEvidenceEligibility(observation, withHelp([
+      { ...exposure, attemptId: "earlier-attempt", deliveredAt: 100, sameQuestion: true, level },
+    ]));
+    expect(result.independentAttempt).toBe("no");
+    expect(result.reasonCodes).toContain("help_before_submission");
+  });
+
   it("keeps same-problem help during a different concurrent attempt unresolved", () => {
     const result = evaluateEvidenceEligibility(observation, withHelp([
       { ...exposure, attemptId: "attempt-1", deliveredAt: 250, level: "revealed" },

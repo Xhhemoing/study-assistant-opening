@@ -81,6 +81,9 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
           if (inserted.length) recorded.push(sourceId);
         }
         if (recorded.length) {
+          await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND source_versions ?| ${recorded}::text[]`;
           await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now() WHERE id=${scope.workspaceId}`;
           await nextWorkspaceLearningHistoryRevision(tx, scope);
           await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: recorded });

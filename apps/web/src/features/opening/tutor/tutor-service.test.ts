@@ -321,7 +321,7 @@ describe("tutor-service Package B course pool fill", () => {
 describe("tutor-service Package C thin pick", () => {
   const poolIds = Array.from({ length: 8 }, (_, i) => `cccccccc-cccc-4ccc-8ccc-cccccccccc${i}${i}`);
 
-  it("auto-picks top-K when client sourceIds empty and course pool > K", async () => {
+  it("keeps the readable course pool for downstream semantic retrieval", async () => {
     const listReady = vi.fn(async () => poolIds);
     const { service, conversations, sourceChunks } = createService({
       courseId: COURSE,
@@ -349,9 +349,7 @@ describe("tutor-service Package C thin pick", () => {
       privacy: "saved",
     })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
     const savedIds = conversations.appendSavedTurn.mock.calls[0][0].sourceIds as string[];
-    expect(savedIds.length).toBeLessThanOrEqual(6);
-    expect(savedIds.length).toBeGreaterThan(0);
-    expect(savedIds[0]).toBe(poolIds[2]);
+    expect(savedIds).toEqual(poolIds);
   });
 
   it("does not narrow an explicit large client selection", async () => {

@@ -20,7 +20,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:0.8.7-pg16
         env:
           POSTGRES_USER: aistudy
           POSTGRES_PASSWORD: aistudy
@@ -34,7 +34,7 @@ jobs:
           --health-retries 10
 
       postgres-e2e:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:0.8.7-pg16
         env:
           POSTGRES_USER: aistudy
           POSTGRES_PASSWORD: aistudy
@@ -223,7 +223,7 @@ jobs:
     # Redis FLUSHDB must never target the quality job's queue instance.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:0.8.7-pg16
         env:
           POSTGRES_USER: opening
           POSTGRES_PASSWORD: opening-local-test

@@ -296,6 +296,12 @@ export function InboxPanel({
               }}
               onDelete={() => openManage(record.id, "delete")}
               onAssign={onAssign}
+              onReindex={async id => {
+                try {
+                  await api.reindexSource(id);
+                  setNotice({ sourceId: id, text: "已安排更新，完成后可按意思查找这份材料。" });
+                } catch (reason) { showOperationFailure(reason); }
+              }}
             />}{renderMetadata?.(record)}</div></div>
             {retainedIds.has(record.id) ? <p role="status" className="px-4 py-2 text-xs text-text-2">正在编辑的材料暂时保留在此处；关闭表单后将按当前筛选显示。</p> : null}
             {sourceTools(record)}

@@ -44,12 +44,21 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
   const [latest, setLatest] = useState<LearningObservation | null>(null);
   const [disputing, setDisputing] = useState(false);
   const retry = useRef<{ intent: string; clientKey: string } | null>(null);
+  const historyRequest = useRef(0);
+  const recordId = useRef(record.id);
+  recordId.current = record.id;
   const client = createOpeningLearningClient();
   const current = history ? currentHistoryRecord(history) : latest ?? record;
-  useEffect(() => { setLatest(null); }, [record]);
+  useEffect(() => {
+    historyRequest.current += 1;
+    setLatest(null); updateHistory({ type: "clear" }); setEditor(null); setBusy(false);
+    return () => { historyRequest.current += 1; };
+  }, [record.id]);
 
   function updated(next: LearningObservation) {
-    setLatest(next); updateHistory({ type: "clear" }); onUpdated?.(next); onChanged();
+    // A history read started before this grade/correction cannot restore its old head.
+    historyRequest.current += 1;
+    setBusy(false); setEditor(null); setLatest(next); updateHistory({ type: "clear" }); onUpdated?.(next); onChanged();
   }
 
   const fail = (error: unknown) => {
@@ -69,29 +78,36 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
   }
 
   async function load(kind?: "replace" | "retract", dispute = false) {
+    const request = ++historyRequest.current;
+    const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
     setBusy(true); setMessage("");
     try {
       const next = await client.getObservationHistory(record.rootObservationId ?? record.id);
+      if (!isCurrent()) return;
       const head = currentHistoryRecord(next);
       updateHistory({ type: "loaded", history: next });
       if (kind) {
         const options = kind === "replace" && !dispute ? await client.listRevisionCourses() : [];
+        if (!isCurrent()) return;
         setCourses(options);
         setDisputing(dispute);
         if (dispute) updateHistory({ type: "close" });
         setEditor({ record: head, expectedHead: next.headObservationId, draft: { ...observationRevisionDraft(head), ...(dispute ? { outcome: "unverified" as const } : {}) }, revisionKind: kind, reason: dispute ? "AI 批改结果不准确" : "", conflict: false });
       }
-    } catch (error) { fail(error); } finally { setBusy(false); }
+    } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
   async function reload() {
     if (!editor) return;
+    const request = ++historyRequest.current;
+    const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
     setBusy(true);
     try {
       const next = await client.getObservationHistory(record.rootObservationId ?? record.id);
+      if (!isCurrent()) return;
       setEditor(reloadObservationRevisionEditor(editor, next)); updateHistory({ type: "loaded", history: next });
       setMessage("已载入最新记录，输入已保留。请对照历史后确认提交。");
-    } catch (error) { fail(error); } finally { setBusy(false); }
+    } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
   async function submit(event: React.FormEvent) {

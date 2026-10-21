@@ -42,6 +42,7 @@ function deps(overrides?: {
   listReadySourceIdsForCourse?: EphemeralTutorDeps["listReadySourceIdsForCourse"];
   studyContext?: EphemeralTutorDeps["studyContext"];
   exposures?: EphemeralTutorDeps["exposures"];
+  learnerContext?: EphemeralTutorDeps["learnerContext"];
 }) {
   const writes: string[] = [];
   const budget = {
@@ -70,6 +71,7 @@ function deps(overrides?: {
     budget,
     provenance: overrides?.provenance,
     studyContext: overrides?.studyContext,
+    learnerContext: overrides?.learnerContext,
     exposures: overrides?.exposures,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
@@ -349,7 +351,7 @@ describe("ephemeral content-free provenance", () => {
     expect(sent.chunks[0]?.sourceId).toBe(sourceId);
   });
 
-  it("Package C: empty client sourceIds + courseId fills, picks, and echoes effectiveSourceIds", async () => {
+  it("empty client sourceIds keeps and echoes the whole readable course pool", async () => {
     const courseId = "10000000-0000-4000-8000-0000000000c0";
     const pool = Array.from({ length: 9 }, (_, i) => {
       const id = "10000000-0000-4000-8000-00000000001" + String(i);
@@ -377,9 +379,7 @@ describe("ephemeral content-free provenance", () => {
     });
     expect(listReady).toHaveBeenCalledWith(scope, courseId);
     expect(reply.effectiveSourceIds).toBeDefined();
-    expect(reply.effectiveSourceIds!.length).toBeLessThanOrEqual(6);
-    expect(reply.effectiveSourceIds!.length).toBeGreaterThan(0);
-    expect(reply.effectiveSourceIds![0]).toBe(pool[2]!.sourceId);
+    expect(reply.effectiveSourceIds).toEqual(pool.map(row => row.sourceId));
     const sent = f.complete.mock.calls[0]![0]!;
     expect(sent.chunks.length).toBeGreaterThan(0);
     expect(sent.chunks.every((row) => reply.effectiveSourceIds!.includes(row.sourceId))).toBe(true);
@@ -487,4 +487,23 @@ it("refuses an empty explicit selection before dispatching a temporary model req
   const f = deps();
   await expect(f.service.replyEphemeral(scope, { text: "selected", sourceIds: [], sourceSelection: "selected", mode: "listen", history: [] })).rejects.toThrow();
   expect(f.complete).not.toHaveBeenCalled();
+});
+
+
+it("uses the same course context and provenance for temporary tutoring and rechecks before paying", async () => {
+  const context = { courseId: chunkId, title: "力学", asOf: "2026-10-21T00:00:00Z", privacyEpoch: 0,
+    goal: { description: "期末", targetDate: "2026-10-31", weeklyMinutes: 420 }, weaknesses: [],
+    recentMistakes: [{ observationId: chunkId, skillLabel: "合力", feedback: "先确定受力方向", unmetCriteria: ["方向"], assistance: "independent" as const }],
+    observationIds: [chunkId], sourceRefs: [{ sourceId, sourceVersion: 1 }] };
+  const read = vi.fn(async () => context), assertCurrent = vi.fn(async () => {}), record = vi.fn(async () => chunkId);
+  const f = deps({ learnerContext: { read, assertCurrent }, provenance: { record, resolveHistory: async () => [] } });
+  await f.service.replyEphemeral(scope, { text: "讲讲这道题", courseId: chunkId, sourceIds: [sourceId], history: [] });
+  expect(read).toHaveBeenCalledWith(scope, { courseId: chunkId, sourceIds: [sourceId] });
+  expect(f.complete.mock.calls[0]![0].instruction).toContain("先确定受力方向");
+  expect(assertCurrent).toHaveBeenCalledWith(scope, context);
+  expect(record).toHaveBeenCalledWith(scope, expect.objectContaining({ contextSourceRefs: context.sourceRefs }));
+  const blocked = deps({ learnerContext: { read, assertCurrent: async () => { throw Object.assign(new Error("context changed"), { code: "CONFLICT" }); } } });
+  await expect(blocked.service.replyEphemeral(scope, { text: "讲讲这道题", courseId: chunkId, sourceIds: [sourceId], history: [] })).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+  expect(blocked.complete).not.toHaveBeenCalled();
+  expect(blocked.budget.release).toHaveBeenCalled();
 });

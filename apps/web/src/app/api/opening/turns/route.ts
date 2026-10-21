@@ -49,7 +49,7 @@ export async function POST(request: Request): Promise<Response> {
     const body = await readOpeningJsonBody(request);
     const result = await getTutorService(sql).submitTurn(scope, body);
     return Response.json(
-      { jobId: result.jobId, turnId: result.turnId },
+      { jobId: result.jobId, turnId: result.turnId, replayed: result.replayed },
       { status: 201, headers: { "x-request-id": correlationId } },
     );
   } catch (error) {

@@ -100,7 +100,7 @@ export function CourseStudyActions({
       </p>
       {current ? <p className="mt-1 text-xs leading-6 text-text-3">{courseActivityNextStep(current)}</p> : null}
       {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : opening && !study.taskError ? <p className="mt-1 text-xs text-text-3">未设置目标也可以开始。</p> : null}
-      {opening && courseId && !archived && goalContext?.mode === "exam" ? <p className="mt-2 text-sm text-accent">已进入考前练习{goalContext.daysRemaining !== null ? ` · 距目标 ${goalContext.daysRemaining} 天` : ""} <Link className={ui.quiet} href={studyHref}>开始考前练习</Link></p> : null}
+      {opening && courseId && !archived && goalContext?.mode === "exam" ? <p className="mt-2 text-sm text-accent">已进入考前练习{goalContext.daysRemaining !== null ? ` · 距目标 ${goalContext.daysRemaining} 天` : ""} <Link className={ui.quiet} href={`/opening/courses/${courseId}/exam`}>开始考前练习</Link></p> : null}
       <nav aria-label="课程学习方式" className="mt-3 flex flex-wrap items-center gap-2">
         {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : studyHref}>
           {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : enabled ? "开始学习" : "开始独立练习"}<ArrowRight size={14} aria-hidden="true" />

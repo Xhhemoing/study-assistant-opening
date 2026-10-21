@@ -36,6 +36,9 @@ export function createOpeningLearningRepository(sql: Sql) {
         const session = await lockLearningSession(tx, scope, ref.sessionId);
         if (!(session.source_ids as string[]).includes(ref.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
         await admitLearningSources(tx, scope, [ref.sourceId]);
+        const [teaching] = await tx`SELECT problem_id FROM opening_problem_refs WHERE problem_id=${ref.problemId}
+          AND workspace_id=${scope.workspaceId} AND teaching_revision_id IS NOT NULL`;
+        if (teaching) throw learningError("CONFLICT", "课堂题目已固定到原课程内容，不能改写为材料题目");
         const changed = await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
           VALUES (${ref.problemId},${scope.workspaceId},${ref.sessionId},${ref.sourceId},${ref.sourceVersion},${ref.physicalPage},${ref.chunkId},${ref.stemSnapshot},${ref.artifactKind})
           ON CONFLICT(problem_id) DO UPDATE SET source_id=EXCLUDED.source_id,source_version=EXCLUDED.source_version,physical_page=EXCLUDED.physical_page,

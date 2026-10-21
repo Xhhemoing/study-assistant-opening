@@ -2,7 +2,7 @@
 import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AiEvaluation, LearningObservation } from "@aistudy/contracts";
+import type { AiEvaluation, LearningObservation, ObservationHistory } from "@aistudy/contracts";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 
 // These exercise React interactions against mocked HTTP-client boundaries, not a live service.
@@ -75,6 +75,38 @@ it("preserves the original answer after failure and allows an explicit successfu
   expect(onUpdated).toHaveBeenCalledExactlyOnceWith(graded);
   expect(container.textContent).toContain(record.answer);
   expect(container.textContent).toContain("AI 批改 · 正确");
+});
+
+it("keeps the completed grade when an earlier history request returns the ungraded head later", async () => {
+  const grading = deferred<LearningObservation>(), history = deferred<ObservationHistory>();
+  const nextGrade = { ...graded, id: "77777777-7777-4777-8777-777777777777", rootObservationId: record.id };
+  api.gradeObservation.mockReturnValue(grading.promise);
+  api.getObservationHistory.mockReturnValue(history.promise);
+  const onUpdated = vi.fn();
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record, autoGrade: true, onChanged() {}, onUpdated })));
+  await click("查看历史");
+  await act(async () => grading.resolve(nextGrade));
+  expect(container.textContent).toContain("AI 批改 · 正确");
+  await act(async () => history.resolve({ rootObservationId: record.id, headObservationId: record.id, revisions: [record] }));
+  expect(container.textContent).toContain("AI 批改 · 正确");
+  expect(container.querySelector('[aria-label="观察修订历史"]')).toBeNull();
+  expect(container.textContent).toContain("判错了");
+  expect(onUpdated).toHaveBeenCalledExactlyOnceWith(nextGrade);
+  expect(api.gradeObservation).toHaveBeenCalledTimes(1);
+  expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "查看历史")?.disabled).toBe(false);
+});
+
+it("ignores a history response after the card switches to another observation", async () => {
+  const history = deferred<ObservationHistory>();
+  const next = { ...record, id: "99999999-9999-4999-8999-999999999999", answer: "另一道题的原答" };
+  api.getObservationHistory.mockReturnValue(history.promise);
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record, onChanged() {} })));
+  await click("查看历史");
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record: next, onChanged() {} })));
+  await act(async () => history.resolve({ rootObservationId: record.id, headObservationId: record.id, revisions: [record] }));
+  expect(container.textContent).toContain(next.answer);
+  expect(container.textContent).not.toContain(record.answer);
+  expect(container.querySelector('[aria-label="观察修订历史"]')).toBeNull();
 });
 
 it("ignores an old response after switching the record and can grade the new record", async () => {

@@ -1,3 +1,4 @@
+import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { aiEvaluationSchema, serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
@@ -113,6 +114,11 @@ export async function readOpeningLearningEvidenceContexts(
       AND (${attemptIds.length ? db`h.attempt_id =ANY(${attemptIds}::uuid[])` : db`FALSE`}
         OR ${problemIds.length ? db`h.problem_id =ANY(${problemIds}::uuid[])` : db`FALSE`}
         OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id =ANY(${sessionIds}::uuid[]))
+        OR EXISTS(SELECT 1 FROM opening_learning_item_versions v WHERE v.id=ANY(${itemIds}::uuid[])
+          AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.teaching_revision_id IS NOT NULL
+          AND h.context_anchor->>'activityId'=v.activity_id::text
+          AND h.context_anchor->>'blockId'=v.evaluation_spec->>'blockId'
+          AND h.context_anchor->>'contentVersion'=v.evaluation_spec->>'contentVersion')
         OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND EXISTS(SELECT 1 FROM opening_learning_item_versions v
           WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
             AND v.source_id::text=h.context_anchor->>'sourceId' AND v.source_version::text=h.context_anchor->>'sourceVersion'
@@ -223,9 +229,11 @@ export async function readOpeningLearningEvidenceContexts(
   const versions = sourceIds.length ? await db`SELECT source_id,version,availability FROM opening_source_versions
     WHERE workspace_id=${scope.workspaceId} AND source_id =ANY(${sourceIds}::uuid[])` : [];
   const unavailableVersions = new Set(versions.filter(row => row.availability === "unavailable").map(row => `${row.source_id}:${row.version}`));
-  const items = itemIds.length ? await db`SELECT v.id,p.problem_id,v.course_id,v.evaluation_spec,v.source_id,v.source_version,v.physical_page,v.chunk_id FROM opening_learning_item_versions v
+  const items = itemIds.length ? await db`SELECT v.id,p.problem_id,v.course_id,v.evaluation_spec,v.source_id,v.source_version,v.physical_page,v.chunk_id,v.teaching_revision_id,v.teaching_block_id FROM opening_learning_item_versions v
     LEFT JOIN opening_problem_refs p ON p.problem_id=v.problem_id AND p.workspace_id=v.workspace_id
-      AND p.source_id=v.source_id AND p.source_version=v.source_version AND p.stem_snapshot=v.stem_snapshot
+      AND p.source_id IS NOT DISTINCT FROM v.source_id AND p.source_version IS NOT DISTINCT FROM v.source_version AND p.stem_snapshot=v.stem_snapshot
+      AND p.teaching_revision_id IS NOT DISTINCT FROM v.teaching_revision_id AND p.teaching_block_id IS NOT DISTINCT FROM v.teaching_block_id
+      AND ${teachingQuestionIdentityMatches(db)}
       AND p.chunk_id IS NOT DISTINCT FROM v.chunk_id AND p.physical_page IS NOT DISTINCT FROM v.physical_page AND p.artifact_kind=v.artifact_kind
     WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.id =ANY(${itemIds}::uuid[])` : [];
   const matchingItems = new Set(items.filter(row => row.problem_id != null).map(row => String(row.id)));
@@ -271,8 +279,22 @@ export async function readOpeningLearningEvidenceContexts(
       AND (o.verdict_source IN ('reference_checked','ai_graded') OR o.reference_check IS NOT NULL OR o.submitted_intent ? 'aiGrading')
       AND o.attempt_id IS NOT NULL
       AND (o.revision_kind IS DISTINCT FROM 'retract')` : [];
+  // Pre-upgrade teaching attempts did not share a canonical problem. Their
+  // delivered answers remain exposure to this exact activity/block/version.
+  const legacyTeachingFeedback = items.some(item => item.teaching_revision_id) ? await db`SELECT DISTINCT
+      o.id,o.attempt_id,v.problem_id,v.id AS item_version_id,o.verdict_source,o.submitted_at,o.recorded_at,o.workspace_history_revision,
+      (o.verdict_source='ai_graded' OR o.submitted_intent ? 'aiGrading') AS ai_feedback
+    FROM opening_learning_item_versions v
+    JOIN opening_learning_attempts a ON a.activity_id=v.activity_id AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
+      AND a.create_intent->'teachingBlock'->>'blockId'=v.evaluation_spec->>'blockId'
+      AND a.create_intent->'teachingBlock'->>'contentVersion'=v.evaluation_spec->>'contentVersion'
+    JOIN opening_learning_observations o ON o.attempt_id=a.id AND o.workspace_id=a.workspace_id AND o.owner_user_id=a.owner_user_id
+    WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+      AND v.teaching_revision_id IS NOT NULL AND a.problem_id IS DISTINCT FROM v.problem_id
+      AND (o.verdict_source IN ('reference_checked','ai_graded') OR o.reference_check IS NOT NULL OR o.submitted_intent ? 'aiGrading')
+      AND o.revision_kind IS DISTINCT FROM 'retract'` : [];
   const priorsByProblem = new Map<string, Row[]>();
-  for (const row of priorReferenceHeads) {
+  for (const row of [...priorReferenceHeads, ...legacyTeachingFeedback]) {
     const key = String(row.problem_id);
     const entries = priorsByProblem.get(key) ?? [];
     entries.push(row); priorsByProblem.set(key, entries);
@@ -301,11 +323,16 @@ export async function readOpeningLearningEvidenceContexts(
         && Boolean(ref.sourceRefs?.some(source => record.sourceIds.includes(source.sourceId)
           && (source.sourceVersion == null || source.sourceVersion === record.sourceVersions?.[source.sourceId])));
     });
+    const teachingSpec = item?.teaching_revision_id ? item.evaluation_spec as { activityId: string; blockId: string; contentVersion: number } : null;
+    const teachingHelp: Row[] = teachingSpec ? help.filter(row => {
+      const anchor = row.context_anchor as { activityId?: string; blockId?: string; contentVersion?: number } | null;
+      return anchor?.activityId === teachingSpec.activityId && anchor.blockId === teachingSpec.blockId && anchor.contentVersion === teachingSpec.contentVersion;
+    }).map(row => ({ ...row, problem_id: record.problemId, same_question: true })) : [];
     const history = [...new Map([
       ...sourceHelp, ...uncertainSourceHelp,
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
-      ...(legacyHelp.get(record.sessionId) ?? []),
+      ...(legacyHelp.get(record.sessionId) ?? []), ...teachingHelp,
     ].map(row => [String(row.id), row])).values()];
     if (record.problemId) {
       for (const prior of priorsByProblem.get(record.problemId) ?? []) {
@@ -458,6 +485,10 @@ export async function readOpeningLearningEvidenceContexts(
         else if (record.itemVersionId && record.problemId) context.version = itemMatches
           ? { applicability: "exact", currentItemVersionId: record.itemVersionId } : { applicability: "changed_needs_check" };
       }
+    }
+    else if (record.itemVersionId && record.problemId && item?.teaching_revision_id) {
+      context.version = itemMatches ? { applicability: "exact", currentItemVersionId: record.itemVersionId }
+        : { applicability: "changed_needs_check" };
     }
     if (!identityCurrent && context.version?.applicability !== "privacy_excluded") context.version = { applicability: "unavailable" };
     result[record.id] = { observation, context, dependencies: {

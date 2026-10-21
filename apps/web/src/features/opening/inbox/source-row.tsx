@@ -47,6 +47,7 @@ export function SourceRow({
   onManage,
   onDelete,
   onAssign,
+  onReindex,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "error"> & Partial<Pick<SourceRecord, "mime" | "bytes" | "createdAt">>;
   bytePercent?: number | null;
@@ -56,6 +57,7 @@ export function SourceRow({
   onManage?: (id: string) => void;
   onDelete?: (id: string) => void;
   onAssign?: (id: string) => void;
+  onReindex?: (id: string) => void;
 }) {
   const percent = bytePercent == null ? null : Math.min(100, Math.max(0, Math.round(bytePercent)));
   const format = sourceFormatLabel(record);
@@ -92,13 +94,14 @@ export function SourceRow({
             <RefreshCw size={14} aria-hidden="true" />{record.parseState === "failed" ? "重新解析" : "重试上传"}
           </button>
         ) : null}
-        {metadata || onAssign || onManage || (canDeleteShortcut && onDelete) ? (
+        {metadata || onAssign || onManage || onReindex || (canDeleteShortcut && onDelete) ? (
           <details className="max-w-full rounded-lg">
             <summary className="cursor-pointer rounded-lg px-3 py-2 text-xs text-text-2 hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">更多操作</summary>
             <div className="flex max-w-full flex-col items-start gap-2 rounded-lg border border-line bg-surface-2 p-3">
               {metadata ? <p className="text-xs tabular-nums text-text-3">{metadata}</p> : null}
               {onAssign ? <button className={ui.quiet} onClick={() => onAssign(record.id)} type="button"><FolderInput size={14} aria-hidden="true" />归入课程</button> : null}
               {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button"><Settings2 size={14} aria-hidden="true" />管理材料</button> : null}
+              {onReindex && record.parseState === "ready" ? <button className={ui.quiet} onClick={() => onReindex(record.id)} type="button"><RefreshCw size={14} aria-hidden="true" />更新材料搜索</button> : null}
               {canDeleteShortcut && onDelete ? (
                 <button className={dangerQuiet} onClick={() => onDelete(record.id)} type="button">
                   <Trash2 size={14} aria-hidden="true" />删除

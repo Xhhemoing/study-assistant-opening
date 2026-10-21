@@ -12,8 +12,9 @@ import {
   type ProviderOutput,
   type SourceChunk,
   type TutorMode,
+  type TutorLearnerContext,
 } from "@aistudy/contracts";
-import { composerMessageText, inferComposerIntent, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
+import { composerMessageText, inferComposerIntent, tutorLearnerContextInstruction, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
 import type { SystemQueryService } from "@aistudy/ai";
 import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
 import { EphemeralServiceError } from "./ephemeral-error";
@@ -22,11 +23,9 @@ import {
   assertEphemeralInput,
   canProposeTask,
   ConversationPolicyError,
-  pickSourceIds,
   renumberInlineCitations,
   resolveCitations,
   selectContext,
-  shouldAutoPickSources,
   stripEphemeralCandidates,
   tutorCitationsFromMarkdown,
 } from "@aistudy/ai";
@@ -67,6 +66,9 @@ export type EphemeralProvider = {
 };
 
 export type EphemeralTutorDeps = {
+  retrieveContext?: import("@aistudy/ai").MaterialRetriever;
+  learnerContext?: { read(scope: EphemeralScope, input: { courseId?: string | null; sourceIds: readonly string[] }): Promise<TutorLearnerContext | null>;
+    assertCurrent(scope: EphemeralScope, context: TutorLearnerContext): Promise<void> };
   studyContext?: { resolve(scope: EphemeralScope, anchor: StudyContextAnchor, expected?: { courseId?: string | null; sourceIds?: readonly string[] }): Promise<StudyContextAnchor>; languageSupport?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<string | null>; sessionIntent?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   exposures?: { deliver(scope: EphemeralScope, input: { releaseKey: string; contextAnchor: StudyContextAnchor; origin: "assistant"; kind: "hint" | "solution"; level: "hinted" | "revealed"; supportDomain: "unknown" | "language" }): Promise<StudyExposureReceipt> };
   systemQuery?: SystemQueryService;
@@ -101,6 +103,17 @@ function instructionFor(mode: TutorMode): string {
   const base = makeTutorInstruction(mode);
   if (!canProposeTask(mode)) return `${base} Do not create tasks.`;
   return base;
+}
+
+/** Known learning-context changes should invite a fresh question, not appear as a server failure. */
+async function withLearnerContextError<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+    if (code === "NOT_FOUND" || code === "CONFLICT") {
+      throw new EphemeralServiceError("CONFLICT", "课程、学习记录或资料已变化，请重新发送问题。", 409);
+    }
+    throw error;
+  }
 }
 
 export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
@@ -196,15 +209,6 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       } else if (allowedSourceIds.some(id => !chunks.some(chunk => chunk.sourceId === id))) {
         throw new EphemeralServiceError("SOURCE_UNAVAILABLE", "所选材料尚无可读正文，请检查解析内容或取消选择后重试。", 422);
       }
-      // Auto path only: narrow a large course pool by keyword before selectContext.
-      if (shouldAutoPickSources(clientSourceIds, allowedSourceIds)) {
-        allowedSourceIds = pickSourceIds({
-          chunks,
-          query: input.text,
-          sourceIds: allowedSourceIds,
-        });
-        chunks = chunks.filter(chunk => allowedSourceIds.includes(chunk.sourceId));
-      }
       const authorized: AuthorizedChunk[] = chunks.map(({ id, sourceId, page }) => ({ id, sourceId, page }));
       const selection = validatePageSelection(
         { ...input, sourceIds: allowedSourceIds, currentPage: selectedPage, chunkId: selectedChunk },
@@ -215,22 +219,29 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       }
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       const preferPage = selectedPage ?? (imageOnlySources ? 1 : undefined);
-      const context = selectContext({
+      const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
+      const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
+      const retrievalInput = {
         chunks,
+        sourceIds: allowedSourceIds,
         query: input.text,
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: selectedChunk ?? undefined,
         preferPage,
-      });
+        operationId: requestId,
+        parentBudget,
+        signal,
+      };
+      const context = deps.retrieveContext ? (await deps.retrieveContext(scope, retrievalInput)).chunks : selectContext(retrievalInput);
       const historyToResolve = epochChanged ? [] : input.history;
       const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
       const historyDiscarded = epochChanged || historyRefs === null;
       const history = historyDiscarded ? [] : historyToResolve;
+      const learnerContext = deps.learnerContext ? await withLearnerContextError(() => deps.learnerContext!.read(scope, {
+        courseId: input.courseId ?? contextAnchor?.courseId, sourceIds: allowedSourceIds })) : null;
       const contextSourceRefs = mergeContextSourceRefs(
-        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [],
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [], learnerContext?.sourceRefs ?? [],
       );
-      const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
-      const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
       let streamedExposure: StudyExposureReceipt | undefined;
       const deliverHelp = async () => {
         if (!streamedExposure && contextAnchor && deps.exposures) streamedExposure = await deps.exposures.deliver(scope, {
@@ -266,7 +277,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
         ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
       const providerInput: ProviderInput = {
-        instruction: instructionFor(input.mode)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
+        instruction: instructionFor(input.mode)+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
         text: input.text,
         history: history.map(({ role, text }) => ({ role, text })),
         chunks: context,
@@ -303,6 +314,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           signal,
           ...(emitText ? { onTextDelta: emitText } : {}),
           beforeSend: async () => {
+            if (learnerContext) await withLearnerContextError(() => deps.learnerContext!.assertCurrent(scope, learnerContext));
             const epoch = await deps.privacy.currentEpoch(scope);
             if (epoch !== privacy.epoch) {
               throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次未发送。请确认材料后重新提问。", 409);

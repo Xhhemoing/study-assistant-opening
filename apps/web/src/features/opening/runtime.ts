@@ -7,7 +7,7 @@ import { createOpeningTeachingContentService } from "./teaching/teaching-content
 import { createOpeningTeachingCommandService } from "./teaching/command-service";
 import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
-  createOpeningConversationRepository, readOpeningConversationSelection,
+  createOpeningTutorLearnerContextRepository, createOpeningConversationRepository, readOpeningConversationSelection,
   createOpeningStudyContextRepository, createOpeningStudyExposureRepository,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
@@ -36,7 +36,8 @@ import {
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
 } from "@aistudy/database";
-import { loadFeatureSwitches, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
+import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
+import { createOpeningMaterialRetriever } from "../../../../worker/src/runtime/material-retrieval";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
@@ -127,10 +128,11 @@ export function getEphemeralTutorService(sql: Sql, options: { queryPlanner?: Sys
 function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const override = ephemeralOverride;
   const catalog = override ? null : loadOpeningModelCatalog();
+  const embeddingConfig = override ? null : loadOpeningEmbeddingConfig();
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
     envCapCents: catalog?.dailyCapCents ?? 100_000,
-    pricingConfigured: Boolean(catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
+    pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0 || catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
   const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const chunks = createOpeningSourceChunksRepository(sql);
@@ -147,6 +149,8 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
     replyEphemeral(scope, input, signal, onTextDelta) {
 
       return createEphemeralTutorService({
+        retrieveContext: createOpeningMaterialRetriever(sql, budgetRepo, embeddingConfig),
+        learnerContext: createOpeningTutorLearnerContextRepository(sql),
         sources: {
           listOwnedIds: async (ownedScope, sourceIds) => {
             const found: string[] = [];
