@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService } from "@aistudy/database";
+import { nextLearningStep } from "@aistudy/domain";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
@@ -38,6 +39,33 @@ async function seed(hints: unknown = generatedHints) {
 }
 
 describe("generic teaching hint ledger", () => {
+  it.each([false, true])("feeds a graded classroom answer into the next step and preserves help history (hinted=%s)", async hinted => {
+    const f = await seed();
+    if (hinted) await f.read(1);
+    const original = await f.submit();
+    const grader = createOpeningAiGradingRepository(fixture.sql);
+    expect((await grader.context(fixture.scope, { observationId: original.id })).stem).toBe("求二阶单位矩阵的秩。");
+    const graded = await grader.apply(fixture.scope, { observationId: original.id }, {
+      outcome: "correct", questionMatch: true, confidence: 0.93,
+      feedback: "二阶单位矩阵有两个线性无关的列，秩为2。",
+      criteria: [{ label: "矩阵秩", verdict: "correct", feedback: "秩为2。" }],
+    }, "test-grader");
+    const state = await createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
+    const feature = state.features.find(row => row.observationId === graded.id)!;
+    expect(feature.eligibility).toMatchObject({ verifiedCorrect: "yes", usableForCurrentVersion: "yes", independentAttempt: hinted ? "no" : "yes" });
+    expect(state.features.some(row => row.observationId === original.id)).toBe(false);
+    const summary = state.summary.find(row => row.requirementKey === graded.requirementKey)!;
+    expect(summary).toMatchObject({ sampleCount: 1, status: hinted ? "needs_check" : "observed_independent" });
+    expect(nextLearningStep({ wantsFullExplanation: false, status: summary.status, observations: [{
+      id: graded.id, skillLabel: graded.skillLabel, attemptedAt: graded.submittedAt ?? graded.occurredAt,
+      problemId: graded.problemId ?? null, assistance: graded.assistance,
+      independentAttempt: feature.eligibility.independentAttempt,
+      verifiedCorrect: feature.eligibility.verifiedCorrect, usableForCurrentVersion: feature.eligibility.usableForCurrentVersion,
+    }] }).activityKind).toBe(hinted ? "reduced_help_practice" : "transfer_check");
+    const [saved] = await fixture.sql`SELECT answer,outcome FROM opening_learning_observations WHERE id=${original.id}`;
+    expect(saved).toMatchObject({ answer: "2", outcome: "unverified" });
+  });
+
   it("hides all generated stages until requested and releases each actual stage only once", async () => {
     const f = await seed();
     const init = await f.content.getClientInit(fixture.scope, f.activity.id);
