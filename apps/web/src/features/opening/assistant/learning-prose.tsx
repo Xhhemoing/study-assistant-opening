@@ -110,7 +110,7 @@ const components: Components = {
   pre: ({ children, ...props }) => <pre {...src(props)} className="my-3 overflow-x-auto rounded-lg bg-ink px-4 py-3 text-[13px] leading-6 text-on-ink">{children}</pre>,
   code: ({ className, children }) => className
     ? <code className={className}>{children}</code>
-    : <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.9em] text-text">{children}</code>,
+    : <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[length:max(12px,0.9em)] text-text">{children}</code>,
   table: ({ children, ...props }) => <div {...src(props)} className="my-3 overflow-x-auto"><table className="min-w-full border-collapse text-sm">{children}</table></div>,
   th: ({ children }) => <th className="border-b border-line-strong px-3 py-1.5 text-left font-semibold text-text">{children}</th>,
   td: ({ children }) => <td className="border-b border-line px-3 py-1.5 align-top">{children}</td>,

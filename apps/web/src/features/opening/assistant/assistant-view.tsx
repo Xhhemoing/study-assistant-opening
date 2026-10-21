@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
+import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type ComposerPurpose, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
 import { Composer, type ComposerPrivacy, type ComposerSubmit } from "./composer";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
@@ -43,6 +43,9 @@ import { LearnerStateCard } from "../teaching/learner-state-card";
 import { acknowledgeStudyExposure } from "./study-exposure-ack";
 import { pinnedStudySourceProblem, questionWithStudyContext, studyContextAnchor, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "./study-conversation-context";
 import { createConversationReader } from "./conversation-reader";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import type { AssistantStarter } from "./assistant-starters";
+import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 
 export { createJobPoller } from "./job-poller";
@@ -306,6 +309,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const requestSourceIds = materialMode === "selected" ? selectedSourceIds : [];
   const [currentPage, setCurrentPage] = useState(initialPage == null ? "" : String(initialPage));
   const [turns, setTurns] = useState<TurnRecord[]>([]);
+  const diagnostics = useDiagnosticsEnabled();
+  const [purposePrefill, setPurposePrefill] = useState<{ purpose: ComposerPurpose; nonce: number } | null>(null);
   const [supportPurpose, setSupportPurpose] = useState(studyContext?.purpose ?? "learning_help");
   useEffect(() => { for (const turn of turns) if (turn.exposureReceipt) void acknowledgeStudyExposure(turn.exposureReceipt).catch(() => undefined); }, [turns]);
   const [draft, setDraftState] = useState(initialDraft);
@@ -811,6 +816,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     if (pending || loading || recoveryRequired) return;
     setDraft(replacePromptDraft(draftRef.current, value, () => window.confirm("将内容带入输入？已有未发送的草稿将被替换。")));
   }, [pending, loading, recoveryRequired, setDraft]);
+  function prepareStarter(starter: AssistantStarter) {
+    if (pending || loading || recoveryRequired) return;
+    const next = replacePromptDraft(draftRef.current, starter.text, () => window.confirm("替换当前未发送的提问？"));
+    if (next !== starter.text) return;
+    const nonce = Date.now();
+    setDraft(next);
+    setModePrefill({ mode: starter.mode, nonce });
+    setPurposePrefill({ purpose: starter.purpose, nonce });
+    window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
+  }
   function prepareUnknownQuestion() {
     if (!retryQuestion || pending || loading || recoveryRequired || unknownTurnRecovery(unknownJob, Date.now())?.canRetry !== true) return;
     const next = replacePromptDraft(draft, retryQuestion.text, () => window.confirm("将原问题带回输入框？当前未发送的草稿将被替换。"));
@@ -839,17 +854,17 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       </header> : null}
       {!embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
       {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
-        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="rounded border border-line bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
+        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
         <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : studyContext.sourceId ? "指定材料" : "已绑定的课程")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
         <p>{studyContext.activityId || studyContext.fragment ? "背景将在你发送时作为文字附上；资料依据仍以回答中的真实引用为准。" : studyContext.sourceId ? "已指定参考材料和位置；回答中的实际引用用于核对依据。" : "继续先前绑定的课程提问；导航不会自动更换这段对话的课程。"}</p>
         {returnHref && !embedded ? <a href={returnHref} className="text-accent underline">返回原内容</a> : null}
-        <details><summary className="cursor-pointer">上下文详情</summary><dl className="break-all">
+        {studyContext.fragment ? <p className="line-clamp-3 whitespace-pre-wrap border-l-2 border-line-strong pl-2">{studyContext.fragment}</p> : null}
+        {diagnostics ? <dl aria-label="提问背景诊断" className="break-all">
           {studyContext.courseId ? <><dt>课程</dt><dd>{studyContext.courseId}</dd></> : null}
           {studyContext.activityId ? <><dt>活动 / 内容版本</dt><dd>{studyContext.activityId} / {studyContext.contentVersion ?? "未指定"}</dd></> : null}
           {studyContext.blockId ? <><dt>学习单元</dt><dd>{studyContext.blockId}</dd></> : null}
           {studyContext.sourceId ? <><dt>材料 / 版本</dt><dd>{studyContext.sourceId} / {studyContext.sourceVersion ?? "提交时当前版本"}</dd></> : null}
-          {studyContext.fragment ? <><dt>带入片段</dt><dd className="whitespace-pre-wrap">{studyContext.fragment}</dd></> : null}
-        </dl></details>
+        </dl> : null}
       </div> : null}
       {contextProblem ? <p role="alert" className="mx-4 mt-2 rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">{contextProblem}{returnHref ? <a href={returnHref} className="ml-2 underline">返回阅读</a> : null}</p> : null}
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired} onPrompt={setPrompt} /> : null}
@@ -857,12 +872,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         <p className="font-medium">临时对话从这里开始</p><p>本轮不接续已保存历史；只使用本标签页的临时消息、当前输入和所选背景。刷新后不会恢复。</p>
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
-      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
-      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
+      {loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={embedded} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onSaveSnippet={saveSnippet} onCreateCard={createCard} />}
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? <div className="mx-5 mb-2 py-2"><ThinkingText>{pendingHint || "正在思考…"}</ThinkingText></div> : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-emerald-200 bg-accent-soft px-3 py-2 text-xs leading-5 text-accent">
           <p className="min-w-0 flex-1">{autoSelectNotice}</p>
-          <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-emerald-300 underline-offset-2 hover:text-emerald-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
+          <button type="button" className="min-h-6 min-w-6 shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-emerald-300 underline-offset-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
         </div>
       ) : null}
       {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
@@ -879,15 +894,15 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       {privacy === "saved" && !loading && !embedded ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">准备或查看行动草稿</summary><ProposalPanel api={api} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题草稿会保留在当前页面；浏览器无法持久保存，刷新或关闭前请先复制。</p> : null}
-      {!learningAttempt && !studyContext?.sourceId ? <label className="mx-4 mb-2 flex shrink-0 flex-wrap items-center gap-2 text-xs text-text-2">资料范围<select aria-label="本轮资料范围" className="min-h-9 max-w-full rounded border border-line px-2" value={materialMode} disabled={pending || loading} onChange={event => { const next = event.target.value as typeof materialMode; setSourceSelection(next); if (next !== "selected") setCurrentPage(""); }}><option value="auto">{boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流"}</option><option value="selected">仅用所选资料（{selectedSourceIds.length} 份）</option><option value="none">不用资料</option></select></label> : null}
-      <Composer defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} draft={draft} modePrefill={modePrefill} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+      {!learningAttempt && !studyContext?.sourceId ? <label className="mx-4 mb-2 flex shrink-0 flex-wrap items-center gap-2 text-xs text-text-2">资料范围<select aria-label="本轮资料范围" className="min-h-9 max-w-full rounded border border-text-3 bg-surface px-2" value={materialMode} disabled={pending || loading} onChange={event => { const next = event.target.value as typeof materialMode; setSourceSelection(next); if (next !== "selected") setCurrentPage(""); }}><option value="auto">{boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流"}</option><option value="selected">仅用所选资料（{selectedSourceIds.length} 份）</option><option value="none">不用资料</option></select></label> : null}
+      <Composer defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={embedded} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
     </div>
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
       <p className="mb-4 text-xs leading-6 text-text-2">{assistantContextHint(selectedSourceIds)}</p>
       {sourceRefreshError ? <div className="mb-3 space-y-2 text-xs text-warn"><p role="status">材料状态暂时无法读取；已保留上次状态，会继续核实，尚未标记为解析完成。</p><button type="button" className={secondaryButtonClass} onClick={() => { if (sourceRefresh.current) sourceRefresh.current.retry(); else void refreshSources().catch(() => setSourceRefreshError(true)); }}>重新读取材料状态</button></div> : null}
-      {!learningAttempt && !studyContext?.sourceId ? <label className="mb-4 block space-y-2 text-xs text-text"><span>资料使用方式</span><select aria-label="资料使用方式" className="min-h-10 w-full rounded border border-line px-2" value={materialMode} disabled={pending || loading} onChange={event => { const mode = event.target.value as typeof materialMode; setSourceSelection(mode); if (mode !== "selected") setCurrentPage(""); }}><option value="auto">自动参考本课资料</option><option value="selected">仅用所选资料</option><option value="none">不用资料</option></select><p>{materialMode === "auto" ? (boundCourseId ? "自动查找本课程可读资料；回答后列出实际引用。" : "未绑定课程，不会自动补入课程资料。") : materialMode === "selected" ? "只检索你选择的资料；尚未选择时不能发送。" : "本轮不检索资料。已有对话文字仍可能包含先前讨论的内容。"}</p></label> : null}
+      {!learningAttempt && !studyContext?.sourceId ? <label className="mb-4 block space-y-2 text-xs text-text"><span>资料使用方式</span><select aria-label="资料使用方式" className="min-h-10 w-full rounded border border-text-3 bg-surface px-2" value={materialMode} disabled={pending || loading} onChange={event => { const mode = event.target.value as typeof materialMode; setSourceSelection(mode); if (mode !== "selected") setCurrentPage(""); }}><option value="auto">自动参考本课资料</option><option value="selected">仅用所选资料</option><option value="none">不用资料</option></select><p>{materialMode === "auto" ? (boundCourseId ? "自动查找本课程可读资料；回答后列出实际引用。" : "未绑定课程，不会自动补入课程资料。") : materialMode === "selected" ? "只检索你选择的资料；尚未选择时不能发送。" : "本轮不检索资料。已有对话文字仍可能包含先前讨论的内容。"}</p></label> : null}
       <UploadStrip sources={sources} api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired} courseId={boundCourseId} />
       {organizationError && boundCourseId ? <p role="status" className="mb-3 text-xs text-warn">课程资料关系暂时无法读取，不能据此判断本课没有资料。<button type="button" className={secondaryButtonClass} onClick={() => void refreshOrganization()}>重新读取</button></p> : null}
       <SourcePageControls

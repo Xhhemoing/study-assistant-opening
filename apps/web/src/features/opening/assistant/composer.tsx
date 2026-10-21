@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, LoaderCircle, LockKeyhole, Paperclip, Square } from "lucide-react";
+import { ArrowUp, LockKeyhole, Paperclip, Square } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 import { isSystemQueryPurpose, type ComposerPurpose, type TutorMode } from "@aistudy/contracts";
 import { secondaryButtonClass } from "../design/ui";
@@ -21,6 +21,7 @@ type Props = {
   intent?: { sourceSelection?: "auto" | "selected" | "none"; sourceIds: readonly string[]; currentPage?: number | null; chunkId?: string | null };
   /** Chip prefill: switches the selected mode once per nonce change. */
   modePrefill?: { mode: TutorMode; nonce: number } | null;
+  purposePrefill?: { purpose: ComposerPurpose; nonce: number } | null;
   onDraftChange: (value: string) => void;
   onSubmit: (input: ComposerSubmit) => void | Promise<void | ComposerSubmitResult>;
 };
@@ -44,8 +45,13 @@ export function shouldSubmitShortcut(event: { key: string; ctrlKey: boolean; met
   return (event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing;
 }
 export function Composer({ compact = false, practiceMode = false, defaultMode, disabled, pending, privacy = "saved", onPrivacyChange,
-  onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, onDraftChange, onSubmit, queryAvailable = false, contextBlocked = false }: Props) {
+  onCancel, onContext, contextLabel, draft, draftId, intent, modePrefill = null, purposePrefill = null, onDraftChange, onSubmit, queryAvailable = false, contextBlocked = false }: Props) {
   const [purpose, setPurpose] = useState<ComposerPurpose>("answer");
+  const lastPurposePrefill = useRef<number | null>(null);
+  if (purposePrefill && purposePrefill.nonce !== lastPurposePrefill.current) {
+    lastPurposePrefill.current = purposePrefill.nonce;
+    if (!isSystemQueryPurpose({ purpose: purposePrefill.purpose }) || queryAvailable) setPurpose(purposePrefill.purpose);
+  }
   const querySystem = queryAvailable && isSystemQueryPurpose({ purpose });
   const [selectedMode, setMode] = useState<TutorMode>(defaultMode ?? (practiceMode ? "hint" : "explain"));
   const lastPrefill = useRef<number | null>(null);
@@ -77,8 +83,8 @@ export function Composer({ compact = false, practiceMode = false, defaultMode, d
       // The parent shows the error; retain this intent's idempotency key.
     } finally { locked.current = false; setSending(false); }
   }
-  return <form ref={form} className="shrink-0 border-t border-line/70 bg-surface px-3 py-2 sm:px-5" onSubmit={handleSubmit}>
-    <div className="overflow-hidden rounded-xl border border-line-strong bg-surface shadow-sm shadow-zinc-900/5 transition-[border-color,box-shadow] duration-200 focus-within:border-accent focus-within:shadow-md focus-within:shadow-emerald-600/10 motion-reduce:transition-none">
+  return <form ref={form} aria-busy={Boolean(pending || sending)} className="shrink-0 border-t border-line/70 bg-surface px-3 py-2 sm:px-5" onSubmit={handleSubmit}>
+    <div className="overflow-hidden rounded-xl border border-text-3 bg-surface shadow-sm shadow-zinc-900/5 transition-[border-color,box-shadow] duration-200 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent focus-within:ring-offset-2 focus-within:shadow-md focus-within:shadow-emerald-600/10 motion-reduce:transition-none">
       <textarea id={draftId} className="max-h-40 min-h-20 w-full resize-y border-0 bg-transparent px-4 py-2 text-base leading-7 text-text outline-none placeholder:text-text-3 disabled:opacity-60 md:text-sm"
         value={draft} disabled={blocked} onChange={(event) => onDraftChange(event.target.value)}
         onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
@@ -103,10 +109,9 @@ export function Composer({ compact = false, practiceMode = false, defaultMode, d
           </details>
         </div>
         <div className="flex items-center gap-1.5">
-          {pending && onCancel ? <button type="button" className={secondaryButtonClass} onClick={onCancel}><Square size={12} aria-hidden />取消</button> : null}
-          <button type="submit" className="inline-flex size-11 shrink-0 items-center justify-center rounded-xl bg-ink text-on-ink shadow-md shadow-zinc-900/20 transition-[background-color,transform,box-shadow] duration-200 ease-out-expo hover:bg-ink hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 active:scale-95 disabled:pointer-events-none disabled:bg-surface-2 disabled:text-text-3 disabled:shadow-none motion-reduce:transition-none motion-reduce:active:scale-100 md:size-11" disabled={blocked || !draft.trim()} aria-label="发送" title="发送 · Ctrl / ⌘ + Enter">
-            {pending || sending ? <LoaderCircle size={17} className="motion-safe:animate-spin" aria-hidden /> : <ArrowUp size={18} aria-hidden />}
-          </button>
+          {pending && onCancel ? <button type="button" className="inline-flex size-11 items-center justify-center rounded-xl bg-ink text-on-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2" onClick={onCancel} aria-label="停止回答" title="停止回答"><Square size={16} aria-hidden="true" /></button> : <button type="submit" className="inline-flex size-11 shrink-0 items-center justify-center rounded-xl bg-ink text-on-ink shadow-md transition-transform duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 active:scale-95 disabled:pointer-events-none disabled:bg-surface-2 disabled:text-text-3 disabled:shadow-none motion-reduce:transition-none motion-reduce:active:scale-100" disabled={blocked || !draft.trim()} aria-label="发送" title="发送 · Ctrl / ⌘ + Enter">
+            <ArrowUp size={18} aria-hidden="true" />
+          </button>}
         </div>
       </div>
     </div>

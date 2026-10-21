@@ -47,4 +47,11 @@ describe("global assistant entry", () => {
     expect(isAssistantShortcut({ ...event, isComposing: true }, false)).toBe(false);
     expect(isAssistantShortcut({ ...event, defaultPrevented: true }, false)).toBe(false);
   });
+  it("starts an explicitly unbound conversation without restoring course history, but keeps study protection", () => {
+    const entry = assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}`);
+    expect(entry.context).toBeUndefined();
+    expect(entry.fresh).toBe(true);
+    expect(entry.conversation).toBeNull();
+    expect(assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}/study`).error).toBeTruthy();
+  });
 });

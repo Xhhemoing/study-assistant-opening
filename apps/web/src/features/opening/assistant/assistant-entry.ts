@@ -14,11 +14,12 @@ export function assistantEntry(href: string, currentPath = "/opening/today"): As
   const query: StudyConversationQuery = {};
   for (const key of contextKeys) if (url.searchParams.has(key)) query[key] = url.searchParams.get(key)!;
   const course = /^\/opening\/courses\/([0-9a-f-]{36})(?:\/|$)/.exec(currentPath)?.[1];
-  if (!Object.keys(query).length && course) query.courseId = course;
+  const unbound = url.searchParams.get("context") === "none";
+  if (!Object.keys(query).length && course && !unbound) query.courseId = course;
   const parsed = parseStudyConversationContext(query);
   const { context } = parsed;
   const error = parsed.error ?? (isStudySurface(currentPath) && !context?.attemptId && !context?.activityId ? "请从当前题目的提问入口打开助手，以便把帮助记录到本次作答。" : null);
-  const fresh = Boolean(context?.attemptId || context?.activityId || context?.sourceId || context?.fragment || error);
+  const fresh = unbound || Boolean(context?.attemptId || context?.activityId || context?.sourceId || context?.fragment || error);
   const conversation = fresh ? null : url.searchParams.get("conversation");
   return { key: `${studyConversationIdentity(context)}:${context?.purpose ?? "learning_help"}:${fresh ? "fresh" : conversation ?? "chat"}:${error ?? ""}`,
     label: context?.label || (context?.fragment ? "选中内容" : context?.sourceId ? "材料提问" : context?.courseId ? "课程提问" : "自由提问"),

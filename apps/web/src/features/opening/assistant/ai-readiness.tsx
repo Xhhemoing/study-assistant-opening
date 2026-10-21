@@ -53,10 +53,10 @@ export function AiReadinessChecklistView({
   if (!hardBlocked) {
     if (!showVisionHint || !visionFail) return null;
     return (
-      <section className={`space-y-1 rounded-lg border border-zinc-200 bg-zinc-50/80 p-3 ${className}`} aria-labelledby="ai-readiness-soft-heading">
-        <h3 id="ai-readiness-soft-heading" className="text-sm font-medium text-zinc-800">提示（不挡文字辅导）</h3>
-        <p className="text-xs leading-6 text-zinc-600">照片/PDF 图片材料需要视觉模型；文字辅导仍可用。</p>
-        <p className="text-xs text-zinc-700">
+      <section className={`space-y-1 rounded-lg border border-line bg-surface-2 p-3 ${className}`} aria-labelledby="ai-readiness-soft-heading">
+        <h3 id="ai-readiness-soft-heading" className="text-sm font-medium text-text">提示（不挡文字辅导）</h3>
+        <p className="text-xs leading-6 text-text-2">照片/PDF 图片材料需要视觉模型；文字辅导仍可用。</p>
+        <p className="text-xs text-text">
           <Link href="/opening/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
         </p>
       </section>
@@ -65,36 +65,36 @@ export function AiReadinessChecklistView({
 
   return (
     <section
-      className={`shrink-0 border-l-2 border-amber-300 bg-amber-50/50 px-3 py-1 ${className}`}
+      className={`shrink-0 border-l-2 border-warn/40 bg-warn-soft px-3 py-1 ${className}`}
       aria-labelledby="ai-readiness-heading"
       data-ai-readiness="hard-blocked"
       data-budget-confirm={showBudgetCta ? "needed" : "not-needed"}
     >
       <div className="flex items-start justify-between gap-2" role="status" data-testid={showBudgetCta ? "ai-readiness-budget-banner" : undefined}>
-      <details className="min-w-0 flex-1"><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700"><span id="ai-readiness-heading">{showBudgetCta ? BUDGET_CONFIRM_LEAD : "AI 辅导暂不可用"}</span><span className="ml-2 font-normal">查看原因</span></summary>
+      <details className="min-w-0 flex-1"><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><span id="ai-readiness-heading">{showBudgetCta ? BUDGET_CONFIRM_LEAD : "AI 辅导暂不可用"}</span><span className="ml-2 font-normal">查看原因</span></summary>
       <div className="max-h-32 overflow-y-auto overscroll-contain pb-2">
-      <ul className="space-y-2 text-xs leading-6 text-amber-950">
+      <ul className="space-y-2 text-xs leading-6 text-warn">
         {displayItems.map(item => (
           <li key={item.key} className="flex flex-col gap-0.5">
             <span>{item.ok ? "✓" : "✗"} {labelForItem(item)}：{item.detail}</span>
-            {!item.ok ? <span className="text-amber-800/90">去哪里修：{item.fixHint}</span> : null}
+            {!item.ok ? <span className="text-warn">去哪里修：{item.fixHint}</span> : null}
           </li>
         ))}
       </ul>
       {!showBudgetCta ? (
-        <p className="text-xs text-amber-900">
+        <p className="text-xs text-warn">
           <Link href="/opening/settings/advanced" className="underline underline-offset-2">打开高级设置 · AI 模型与每日额度</Link>
           {" "}调整密钥、定价与每日额度。
         </p>
       ) : (
-        <p className="text-xs text-amber-900">
+        <p className="text-xs text-warn">
           也可从{" "}
           <Link href={BUDGET_CONFIRM_HREF} className="underline underline-offset-2">高级设置 · 每日额度</Link>
           {" "}调整密钥、定价与确认状态。
         </p>
       )}
       </div></details>
-      <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-9 shrink-0 items-center text-xs text-emerald-900 underline underline-offset-2" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
+      <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-9 shrink-0 items-center text-xs text-accent underline underline-offset-2" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
       </div>
     </section>
   );
@@ -130,8 +130,8 @@ export function AiReadinessChecklist({
 
   useEffect(() => { onBlockedChange?.(Boolean(error) || items === null || items.some(isAiReadinessChecklistHardBlocker)); }, [error, items, onBlockedChange]);
 
-  if (error) return <p role="alert" className={`text-sm text-amber-800 ${className}`}>{error}</p>;
-  if (!items) return <p className={`text-sm text-zinc-500 ${className}`} role="status">正在检查 AI 就绪状态…</p>;
+  if (error) return <p role="alert" className={`text-sm text-warn ${className}`}>{error}</p>;
+  if (!items) return <p className={`text-sm text-text-3 ${className}`} role="status">正在检查 AI 就绪状态…</p>;
 
   return <AiReadinessChecklistView items={items} className={className} showVisionHint={showVisionHint} />;
 }

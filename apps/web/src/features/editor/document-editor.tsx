@@ -39,11 +39,13 @@ import { extractWikiLinks } from "./link-utils";
 import { RevisionReviewPanel } from "../revision-review/revision-review-panel";
 
 import { Inspector } from "../opening/design/inspector";
-import { LoadError, ui } from "../opening/design/ui";
+import { LoadError, LoadingRows, ui } from "../opening/design/ui";
+import { useAppearancePreferences } from "../opening/settings/appearance-preferences";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
 export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PATH }: { documentId: string; basePath?: LibraryBasePath }) {
+  const { resolvedTheme } = useAppearancePreferences();
   const api = useMemo(() => createEditorApi(), []);
   const knowledgeLinksApi = useMemo(() => createKnowledgeLinksApi(), []);
   const [document, setDocument] = useState<EditorDocument | null>(null);
@@ -307,7 +309,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
 
   if (loadError) return <DocumentLoadError message={loadError} onRetry={() => setReloadToken((value) => value + 1)} />;
   if (!document || !draft) {
-    return <div className="flex min-h-screen items-center justify-center bg-white p-6 text-zinc-500" role="status">正在准备编辑器...</div>;
+    return <LoadingRows label="正在准备编辑器…" />;
   }
 
   const statusText = {
@@ -318,20 +320,20 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     conflict: "保存冲突：本地修改已保留，请选择处理方式",
   }[saveState];
 
-  return <div className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
-    <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2">
+  return <div className="flex h-full min-h-0 flex-col bg-surface text-text">
+    <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2">
       <Link className={ui.quiet} href={basePath} aria-label="返回知识库"><ArrowLeft aria-hidden="true" size={14} /><span className="hidden sm:inline">知识库</span></Link>
       <label className="min-w-28 flex-1"><span className="sr-only">笔记标题</span><input className={`${ui.input} border-transparent font-medium`} value={draft.title} onChange={(event) => updateSafetyCopy({ ...draft, title: event.target.value, updatedAt: new Date().toISOString() })} /></label>
-      <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-emerald-700" /> : null}{notice || statusText}</span>
-      <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-emerald-50 text-emerald-800" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
+      <span className="inline-flex items-center gap-1.5 text-xs text-text-3" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-accent" /> : null}{notice || statusText}</span>
+      <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-accent-soft text-accent" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
       <button className={ui.primary} title="保存 · Ctrl / ⌘ S" type="button" onClick={saveDocument} disabled={saveState === "saving" || conflict !== null}><Save aria-hidden="true" size={14} />保存</button>
     </header>
     <div className="flex min-h-0 flex-1">
-      <main className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-zinc-500">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-zinc-500">本地保留安全副本；保存会创建服务器版本。</p></div>
+      <div className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-4xl px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-text-3">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}<p className="text-xs leading-6 text-text-3">本地保留安全副本；保存会创建服务器版本。</p></div>
         {conflict ? <DraftConflictPanel reason={conflict} diff={diff} busy={conflictBusy} confirmingDiscard={confirmingDiscard} savedAsNewHref={savedAsNewHref} relationNote={relationNote} onViewDiff={() => void viewDiff()} onSaveAsNew={() => void saveAsNewNote()} onDiscard={requestDiscard} onCancelDiscard={() => setConfirmingDiscard(false)} /> : null}
-        {!conflict && savedAsNewHref ? <p className="mb-4 text-xs text-zinc-600" role="status">本地修改已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
-        <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-white [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-white [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-zinc-800" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme="light" onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
-      </div></main>
+        {!conflict && savedAsNewHref ? <p className="mb-4 text-xs text-text-2" role="status">本地修改已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
+        <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-surface [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-surface [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-text" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme={resolvedTheme} onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
+      </div></div>
       <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4"><PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
     </div>
@@ -339,5 +341,5 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
 }
 
 export function DocumentLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return <main className="mx-auto max-w-lg p-5"><LoadError message={message} onRetry={onRetry} /></main>;
+  return <section aria-label="笔记读取失败" className="mx-auto max-w-lg p-5"><LoadError message={message} onRetry={onRetry} /></section>;
 }

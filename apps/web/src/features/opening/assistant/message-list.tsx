@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, BookOpen, Download, PanelsTopLeft } from "lucide-react";
+import { ArrowUpRight, BookOpen, Download } from "lucide-react";
 import type { Citation } from "@aistudy/contracts";
 import { ArtifactView } from "@aistudy/jingwei/react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -19,6 +19,7 @@ import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
 import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
+import { assistantStarters, type AssistantStarter } from "./assistant-starters";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -37,12 +38,10 @@ type Props = {
   /** Markdown + math rendering for assistant answers. Defaults to the server capability. */
   proseEnabled?: boolean;
   disabled?: boolean;
+  studyMode?: boolean;
+  queryAvailable?: boolean;
+  onStarter?: (starter: AssistantStarter) => void;
 };
-const prompts = [
-  { title: "把一个概念讲明白", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。" },
-  { title: "检验自己的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。" },
-  { title: "从一个问题展开", text: "我有一个还没想清楚的问题，请和我一起拆解它，区分事实与假设。" },
-];
 /** Shared by the 出处 chips and inline `[k]` links so both open the same place. */
 function citationLink(citation: Citation, sourceNames: Readonly<Record<string, string>>): CitationLink {
   const locators = { page: citation.page, startMs: citation.startMs, slideLabel: citation.slideLabel };
@@ -52,7 +51,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export const MessageList = memo(function MessageList({ messages, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onSaveSnippet, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -60,7 +59,18 @@ export const MessageList = memo(function MessageList({ messages, compact = false
   const scrollArea = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const [unread, setUnread] = useState(false);
+  const completed = useRef(new Set(messages.filter(message => message.role === "assistant" && (!message.status || message.status === "complete")).map(message => message.id)));
+  const [announcement, setAnnouncement] = useState("");
   const lastMessage = messages.at(-1);
+  useEffect(() => {
+    let latest: ChatMessageView | undefined;
+    for (const message of messages) {
+      if (message.role !== "assistant" || message.status && message.status !== "complete" || completed.current.has(message.id)) continue;
+      completed.current.add(message.id);
+      latest = message;
+    }
+    if (latest) setAnnouncement(latest.text);
+  }, [messages]);
   function showLatest() {
     const element = scrollArea.current;
     if (element) element.scrollTop = element.scrollHeight;
@@ -87,21 +97,21 @@ export const MessageList = memo(function MessageList({ messages, compact = false
   function createCard(message: ChatMessageView) {
     onCreateCard?.(message, selectedTextFor(message));
   }
-  return <div className="relative flex min-h-0 flex-1"><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-bg px-5 py-6 sm:px-7" role="log" aria-live="polite" aria-label="学习对话">
+  return <div className="relative flex min-h-0 flex-1"><p className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-reply-announcement="true">{announcement}</p><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-bg px-5 py-6 sm:px-7" role="log" aria-live="off" aria-busy={messages.some(message => message.status === "pending")} aria-label="学习对话">
     {historyTruncated ? <p className="mb-5 rounded-lg bg-warn-soft px-3.5 py-2.5 text-xs leading-6 text-warn ring-1 ring-amber-600/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
-    {!messages.length && compact ? <p className="text-xs leading-6 text-text-2">围绕当前页或选段提问。输入后发送，回答会保留在这里。</p> : !messages.length ? <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center py-12 motion-safe:animate-enter">
-      <span className="mb-5 inline-flex size-14 items-center justify-center self-start rounded-2xl bg-ink text-on-ink shadow-lg shadow-zinc-900/20 ring-1 ring-white/10" aria-hidden="true"><PanelsTopLeft size={24} strokeWidth={1.75} /></span>
-      <h2 className="text-xl font-semibold tracking-tight text-text">今天，想弄懂什么？</h2>
-      <p className="mt-2 text-[15px] leading-7 text-text-2">还没有消息。自由交流，或选一份材料一起读。</p>
-      {onPrompt ? <div className="mt-6 divide-y divide-line/80 overflow-hidden rounded-xl border border-line/80 shadow-xs shadow-zinc-900/5">{prompts.map((prompt) => <button key={prompt.title} type="button" disabled={disabled} onClick={() => onPrompt(prompt.text)} className="group flex min-h-12 w-full items-center justify-between gap-3 bg-surface px-4 text-left text-sm text-text transition-[color,background-color] duration-150 hover:bg-bg hover:text-text disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none"><span className="font-medium">{prompt.title}</span><ArrowUpRight size={14} aria-hidden className="text-text-3 transition-colors group-hover:text-text-2" /></button>)}</div> : null}
+    {!messages.length ? <div className={`mx-auto flex w-full max-w-lg flex-1 flex-col justify-center motion-safe:animate-enter ${compact ? "py-4" : "py-12"}`}>
+      <span className="mb-4 inline-flex self-start" aria-hidden="true"><AiSpark size={compact ? 28 : 36} /></span>
+      <h2 className="font-serif text-xl font-medium leading-7 text-text">想弄懂什么？</h2>
+      <p className="mt-2 text-sm leading-6 text-text-2">{studyMode ? "围绕当前这一步提问，帮助会关联本次学习。" : "自由交流，或选一份材料一起读。"}</p>
+      {onStarter || onPrompt ? <div className="mt-4 divide-y divide-line overflow-hidden rounded-xl border border-line">{assistantStarters(studyMode, queryAvailable).map(starter => <button key={starter.label} type="button" disabled={disabled} onClick={() => onStarter ? onStarter(starter) : onPrompt?.(starter.text)} className="group flex min-h-11 w-full items-center justify-between gap-3 bg-surface px-4 text-left text-sm text-text transition-colors duration-150 hover:bg-surface-2 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none"><span>{starter.label}</span><ArrowUpRight size={14} aria-hidden="true" className="text-text-3" /></button>)}</div> : null}
     </div> : <ul className="mx-auto flex w-full max-w-[72ch] flex-col gap-6">{messages.map((message, index) => {
       const saveAvailability = (onSaveSnippet || onCreateCard) ? snippetSaveAvailability(message) : "hidden";
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
-      return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-ink px-4 py-3 text-on-ink shadow-sm shadow-zinc-900/10 sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
-      <p className={`mb-2 flex items-center gap-2 text-xs font-medium ${message.role === "user" ? "text-on-ink" : "text-text-2"}`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
+      return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-surface-2 px-4 py-3 text-text sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
+      <p className={`mb-2 flex items-center gap-2 text-xs font-medium text-text-2`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
         ? <ReplyCard><StreamText busy={message.status === "pending"}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
-        : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-on-ink/95" : "text-[15px] text-text"}`}>{message.text}</p>}
+        : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}
       {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <a key={link.href} href={link.href} className="text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{link.label}</a>)}</nav> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-line/80 bg-surface px-4 py-3 shadow-xs shadow-zinc-900/5" aria-label="图解" data-message-artifact={message.id}>
         <p className="mb-2.5 text-xs text-text-2">图解 · {artifacts[message.id]!.reason}（由回答内容整理，原文为准）</p>

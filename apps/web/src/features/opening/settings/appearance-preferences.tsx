@@ -12,9 +12,9 @@ export type AppearancePreferences = {
 export const appearanceStorageKey = "aistudy.appearance.v1";
 const defaultPreferences: AppearancePreferences = { theme: "system", readingFont: "serif", motion: "system", diagnostics: false };
 type AppearanceState = { preferences: AppearancePreferences; hydrated: boolean; persistenceError: boolean };
-type AppearanceContextValue = AppearanceState & { updatePreferences: (patch: Partial<AppearancePreferences>) => void };
+type AppearanceContextValue = AppearanceState & { resolvedTheme: "light" | "dark"; updatePreferences: (patch: Partial<AppearancePreferences>) => void };
 const initialState: AppearanceState = { preferences: defaultPreferences, hydrated: false, persistenceError: false };
-const AppearanceContext = createContext<AppearanceContextValue>({ ...initialState, updatePreferences: () => {} });
+const AppearanceContext = createContext<AppearanceContextValue>({ ...initialState, resolvedTheme: "light", updatePreferences: () => {} });
 
 function readPreferences(raw: string | null, defaults: AppearancePreferences): AppearancePreferences {
   if (!raw) return defaults;
@@ -101,7 +101,7 @@ export function AppearancePreferencesProvider({ children }: { children: ReactNod
     setState({ preferences, hydrated: true, persistenceError });
   }, []);
 
-  return <AppearanceContext.Provider value={{ ...state, updatePreferences }}>{children}</AppearanceContext.Provider>;
+  return <AppearanceContext.Provider value={{ ...state, resolvedTheme: state.preferences.theme === "system" ? (system.dark ? "dark" : "light") : state.preferences.theme, updatePreferences }}>{children}</AppearanceContext.Provider>;
 }
 
 export function useAppearancePreferences() {
