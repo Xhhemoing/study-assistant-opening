@@ -4,6 +4,7 @@ import {
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   createOpeningStudyContextRepository,
+  createOpeningSpanSessionRepository,
 } from "@aistudy/database";
 import { assertRetestSubmitEarliestAllowed, prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -97,6 +98,12 @@ export function createOpeningAttemptService(sql: Sql) {
         sourceIds: attempt.sourceIds,
         problemId: attempt.problemId,
       };
+      // Span's canonical evaluation and retest binding are checked together in
+      // the observation transaction. Keep the learner's original request level
+      // separate from help delivered later so an exact retry remains a replay.
+      const spanLesson = attempt.spanExercise && attempt.contextAnchor?.activityId
+        ? await createOpeningSpanSessionRepository(sql).get(scope, attempt.contextAnchor.activityId) : null;
+      if (spanLesson?.sessionId === attempt.sessionId) return learning.insertObservation(scope, base, { submittedAssistance: input.assistance });
       // K02 L02 close: resolve nodeId for independent retest so Data links SkillEvidence in the same tx.
       if (!input.retestId) {
         return learning.insertObservation(scope, base);

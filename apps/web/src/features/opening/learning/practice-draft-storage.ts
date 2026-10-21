@@ -48,7 +48,10 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
   const draft: PracticeDraft = { ...parsed.data, id: parsed.data.id ?? crypto.randomUUID() };
   let context: unknown;
   try { context = JSON.parse(scope); } catch { return null; }
-  if (!Array.isArray(context) || (context.length !== 7 && context.length !== 9)) return null;
+  if (!Array.isArray(context) || ![7, 8, 9].includes(context.length)) return null;
+  // The eighth span element identifies a new-evidence request. It is not the
+  // ordinary practice focus pair (elements eight and nine).
+  if (context.length === 8 && (context[1] !== "span" || !z.string().uuid().safeParse(context[7]).success)) return null;
   const [courseId, mode, retestId, , requirementKey] = context;
   const start = draft.start;
   if (context.length === 9 && (draft.fields.skillLabel !== context[7] || start?.sessionInput && (start.sessionInput.requirementKey ?? null) !== context[8])) return null;
@@ -61,6 +64,7 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
       if (input && (!input.matrixExercise || input.matrixExercise.sourceId !== draft.fields.sourceId || input.matrixExercise.exerciseKey !== draft.fields.matrixKey || input.matrixExercise.variant !== draft.fields.matrixVariant)) return null;
       if (start.sessionInput && JSON.stringify(start.sessionInput.sourceIds) !== JSON.stringify([draft.fields.sourceId])) return null;
     } else if (mode === "span") {
+      if (context[3] !== null && (!z.string().uuid().safeParse(context[3]).success || start.sessionInput?.activityId !== context[3])) return null;
       if (input && (!input.spanExercise || input.spanExercise.sourceId !== draft.fields.sourceId || input.spanExercise.problemId !== draft.fields.spanProblemId || input.spanExercise.version !== draft.fields.spanVersion)) return null;
       if (start.sessionInput && JSON.stringify(start.sessionInput.sourceIds) !== JSON.stringify([draft.fields.sourceId])) return null;
     } else if (mode === "ordinary") {

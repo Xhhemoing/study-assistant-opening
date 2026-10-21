@@ -5,8 +5,8 @@ import { useSpanPresentation } from "./use-span-presentation";
 import { ui } from "../../design/ui";
 
 /** A demonstration family only; no independent item operands or answer is used here. */
-export function SpanExplorer({ courseId, sourceId }: { courseId: string; sourceId?: string }) {
-  const { content, error, reload } = useSpanPresentation(courseId, sourceId, "simulation");
+export function SpanExplorer({ courseId, sourceId, sessionId }: { courseId: string; sourceId?: string; sessionId?: string }) {
+  const { content, error, reload } = useSpanPresentation(courseId, sourceId, "simulation", sessionId);
   const [prediction, setPrediction] = useState(""), [sealed, setSealed] = useState<string | null>(null);
   const [alpha, setAlpha] = useState(1), [beta, setBeta] = useState(0);
   const id = useId().replace(/:/g, "");
