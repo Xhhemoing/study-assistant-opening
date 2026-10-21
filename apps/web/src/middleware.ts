@@ -42,7 +42,9 @@ export function middleware(request: NextRequest) {
   // Production isolates mock pages without requiring OPENING_RELEASE=1.
   // /learn/courses* stays reachable by product decision (see access-middleware.test.ts).
   if (shouldRedirectLegacyMockPages() && legacyRedirect) {
-    const target = request.nextUrl.clone();
+    // nextUrl normalizes loopback IPs to localhost even with URL normalization
+    // disabled. The raw request URL preserves the host-only session cookie scope.
+    const target = new URL(request.url);
     target.pathname = legacyRedirect;
     return NextResponse.redirect(target);
   }
