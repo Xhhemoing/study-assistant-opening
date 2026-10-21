@@ -1,9 +1,8 @@
 "use client";
 import Link from "next/link";
-import { ChevronDown, ListTodo } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TaskQueueRefreshContext } from "./task-status-control";
-import { buttonClass, secondaryButtonClass, ui } from "../design/ui";
+import { buttonClass, ui } from "../design/ui";
 import type { OpeningApi } from "../client/api";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningCardsClient } from "../cards/cards-client";
@@ -318,7 +317,8 @@ export function TodayDashboard({
 
   useEffect(() => {
     if (ctaFocusNonce === 0) return;
-    teachingPaneRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const reducedMotion = document.documentElement.dataset.motion === "reduce" || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    teachingPaneRef.current?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
   }, [ctaFocusNonce]);
 
   if (state.kind === "loggedOut" || state.kind === "error") {
@@ -328,27 +328,14 @@ export function TodayDashboard({
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
-      <div className="flex h-full min-h-0 flex-col">
-        <h1 className="sr-only">今日学习工作台</h1>
-        {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-amber-800">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
-        <header className={`flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 ${showDesktopQueue && !queueEmpty ? "lg:hidden" : ""} group-data-[focus=true]/workspace:hidden`}>
-          <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800" title={task?.title}>{task?.title ?? (queueEmpty ? "今天还未安排任务" : "今日学习 · 可直接开始自由学习")}</span>
-          <button
-            className={secondaryButtonClass}
-            type="button"
-            aria-expanded={queueOpen}
-            aria-controls="today-queue"
-            onClick={() => setQueueOpen(!queueOpen)}
-          >
-            <ListTodo size={14} aria-hidden />
-            任务队列
-            <ChevronDown size={12} aria-hidden />
-          </button>
-        </header>
+      <div className="flex min-h-full flex-col bg-bg text-text">
+        <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-2xl text-text">今日学习工作台</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time> · 继续上次的位置，或选一项开始</p></header>
+        {dueCardsError ? <p role="status" className="shrink-0 px-5 py-2 text-xs text-warn">到期卡片暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button></p> : null}
         <div className="shrink-0 group-data-[focus=true]/workspace:hidden">
           <TodayLearningContext
             item={state.continueItem}
-            activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId } : null}
+            activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
+            resume={learningResume}
             onShowActions={showActions}
             primaryAction={currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
               <button
@@ -368,31 +355,23 @@ export function TodayDashboard({
             }
           />
           {ctaError ? (
-            <p className="px-4 text-xs text-red-700 sm:px-5" role="alert">{ctaError}</p>
+            <p className="px-4 text-xs text-danger sm:px-5" role="alert">{ctaError}</p>
           ) : null}
           {activityLoad === "error" ? (
-            <p className="px-4 text-xs text-amber-800 sm:px-5" role="status">
+            <p className="px-4 text-xs text-warn sm:px-5" role="status">
               教学活动暂时无法读取；仍可使用自由对话。
             </p>
           ) : null}
         </div>
-        <div className={`flex min-h-0 flex-1 flex-col lg:grid ${showDesktopQueue ? "lg:grid-cols-[260px_minmax(0,1fr)]" : "lg:grid-cols-1"} lg:grid-rows-1 group-data-[focus=true]/workspace:lg:grid-cols-1`}>
+        <div className="flex min-h-0 flex-1 flex-col">
           <div
             id="today-queue"
-            className={`${queueOpen ? "flex" : "hidden"} max-h-72 min-h-0 shrink-0 flex-col overflow-y-auto border-b border-zinc-200 bg-zinc-50 ${showDesktopQueue ? "lg:flex" : ""} lg:max-h-none lg:border-b-0 lg:border-r group-data-[focus=true]/workspace:hidden`}
+            className={`${queueOpen || showDesktopQueue ? "flex" : "hidden"} min-h-0 shrink-0 flex-col border-b border-line bg-surface group-data-[focus=true]/workspace:hidden`}
           >
-            {(state.pendingReviews?.count ?? 0) > 0 ? (
-              <Link
-                href="/opening/review"
-                className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] leading-5 text-amber-900 focus-visible:ring-2 focus-visible:ring-emerald-700"
-              >
-                {state.pendingReviews!.count} 项建议待审核 · 不影响继续学习
-              </Link>
-            ) : null}
             {dueCardCount > 0 ? (
               <Link
-                href="/opening/cards"
-                className="shrink-0 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-[11px] leading-5 text-emerald-900 focus-visible:ring-2 focus-visible:ring-emerald-700"
+                href="/opening/review"
+                className="shrink-0 border-b border-accent/20 bg-accent-soft px-4 py-2 text-xs leading-5 text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >
                 {dueCardCount} 张记忆卡片到期
               </Link>
@@ -410,12 +389,12 @@ export function TodayDashboard({
           </div>
           <div
             ref={teachingPaneRef}
-            className="min-h-0 min-w-0 flex-1 bg-white"
+            className="min-h-0 min-w-0 flex-1 bg-surface"
             data-today-teaching-pane="true"
             data-today-cta-focus={ctaFocusNonce > 0 ? String(ctaFocusNonce) : undefined}
           >
             {currentActivity ? (
-              currentActivity.courseId ? <div className="mx-auto max-w-3xl space-y-3 px-5 py-6"><h2 className="text-lg font-semibold">{currentActivity.intentSummary}</h2><p className="text-xs leading-6 text-zinc-500">进入课程工作区，恢复原学习断点、材料、提问与笔记。</p><Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`}>进入学习工作区</Link></div> : teachingLoopTrialEnabled ? (
+              currentActivity.courseId ? null : teachingLoopTrialEnabled ? (
                 <TeachingContinueEntry
                   key={`${currentActivity.id}:${ctaFocusNonce}`}
                   activity={currentActivity}
@@ -453,12 +432,20 @@ export function TodayDashboard({
             currentActivity &&
             resumeLoad === "error" &&
             clientInitLoad === "error" ? (
-              <p className="px-5 pb-4 text-[11px] text-amber-800" role="status">
+              <p className="px-5 pb-4 text-xs text-warn" role="status">
                 学习断点与主讲内容暂时无法读取；已回退到活动摘要，不会伪造讲义。
               </p>
             ) : null}
           </div>
         </div>
+            {(state.pendingReviews?.count ?? 0) > 0 ? (
+              <Link
+                href="/opening/suggestions"
+                className="mx-4 mb-5 mt-3 rounded-lg px-1 py-2 text-sm text-text-2 underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {state.pendingReviews!.count} 项建议待审核 · 不影响继续学习
+              </Link>
+            ) : null}
       </div>
       </TaskLearningActionContext.Provider>
     </TaskQueueRefreshContext.Provider>

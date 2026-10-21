@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupTodayQueue, type TodayQueueTask } from "./today-queue-groups";
+import { groupTodayQueue, previewTodayQueue, type TodayQueueTask } from "./today-queue-groups";
 import type { PlannedBlock } from "@aistudy/contracts";
 
 function task(partial: Partial<TodayQueueTask> & Pick<TodayQueueTask, "id" | "title">): TodayQueueTask {
@@ -190,4 +190,21 @@ describe("groupTodayQueue", () => {
     expect(groups.upcomingRetestCount).toBe(1);
   });
 
+});
+
+describe("previewTodayQueue", () => {
+  it("limits the combined actionable queue rather than five rows per group", () => {
+    const rows = Array.from({ length: 8 }, (_, i) => task({ id: String(i), title: `任务${i}` }));
+    const groups = { confirmed: rows.slice(0, 2), dueRetests: rows.slice(2, 4), overdue: rows.slice(4, 6), other: rows.slice(6), deferred: [], done: [], upcomingRetestCount: 2 };
+    const preview = previewTodayQueue(groups);
+    expect([...preview.confirmed, ...preview.dueRetests, ...preview.overdue, ...preview.other].map(row => row.id)).toEqual(["0", "1", "2", "3", "4"]);
+    expect(groups.other).toHaveLength(2);
+    expect(preview.upcomingRetestCount).toBe(2);
+  });
+  it("keeps a deep-linked task visible without admitting deferred or future retests", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => task({ id: String(i), title: `任务${i}` }));
+    const groups = { confirmed: rows.slice(0, 3), dueRetests: [], overdue: [], other: rows.slice(3), deferred: [task({ id: "later", title: "明天" })], done: [], upcomingRetestCount: 1 };
+    expect(previewTodayQueue(groups, "6").other.map(row => row.id)).toEqual(["3", "6"]);
+    expect(previewTodayQueue(groups, "later").other.map(row => row.id)).toEqual(["3", "4"]);
+  });
 });

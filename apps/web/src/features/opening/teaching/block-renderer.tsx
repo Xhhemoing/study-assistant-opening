@@ -14,6 +14,7 @@ import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { LearningProse } from "../assistant/learning-prose";
 import { InlineAttempt, type InlineAttemptContext } from "./inline-attempt";
+import { ProblemCard } from "./problem-card";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
   teachingArtifactBlock,
@@ -145,14 +146,9 @@ function CatalogBody({
       );
     case "question":
       return (
-        <div
-          className="rounded-lg border border-amber-200/80 bg-amber-50/30 px-3 py-2 text-sm leading-6 text-zinc-800"
-          data-catalog="question"
-        >
-          <p className="mb-1 text-[11px] font-medium text-amber-900">试一试</p>
-          {text ? <LearningProse text={text} /> : <p>（空提问）</p>}
-          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="mt-2 text-[11px] text-zinc-500">请从教学工作区打开本题以保存作答。</p>}
-        </div>
+        <ProblemCard prompt={text || "（空提问）"}>
+          {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={attemptContext} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
+        </ProblemCard>
       );
     case "draft":
       return (

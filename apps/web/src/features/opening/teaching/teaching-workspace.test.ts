@@ -484,3 +484,17 @@ describe("waitInitActionVisibility (S6)", () => {
     expect(actions.showCompile).toBe(false);
   });
 });
+
+
+it("keeps the next-unit action disabled until this question has a saved observation", () => {
+  const nextBlockId = "88888888-8888-4888-8888-888888888888";
+  const initial = clientInit();
+  const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+    activity: activityReady,
+    clientInit: { ...initial, checkpointJson: { currentBlockId: BID2 }, blocks: [...initial.blocks, {
+      blockId: nextBlockId, position: 3, blockType: "text", role: "teach", content: { text: "下一知识单元" },
+    }] },
+  }));
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-teaching-primary-advance="false"[^>]*>先提交本题，再继续/);
+  expect(html).toContain("提纲与回看");
+});

@@ -5,7 +5,7 @@ import { canDeleteSourceShortcut, sourceStatusLabel } from "./upload-state";
 import { FileText, FolderInput, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { ui, tone } from "../design/ui";
 
-const dangerQuiet = `${ui.secondary} border-red-200 text-red-700 hover:bg-red-50`;
+const dangerQuiet = `${ui.secondary} border-danger/20 text-danger hover:bg-danger/10`;
 
 const formatLabels: Record<string, string> = {
   "application/pdf": "PDF",
@@ -64,13 +64,13 @@ export function SourceRow({
   const canDeleteShortcut = canDeleteSourceShortcut(record);
   const stateTone = failed ? tone.danger : record.uploadState === "uploaded" && record.parseState === "ready" ? tone.success : tone.neutral;
   return (
-    <article className="flex flex-wrap items-center justify-between gap-3 bg-white px-2 py-1.5">
-      <FileText size={15} aria-hidden="true" className="shrink-0 text-zinc-500" /><div className="min-w-0 flex-1">
-        <h3 title={record.name} className="line-clamp-2 break-words text-sm font-medium text-zinc-950 [overflow-wrap:anywhere]">
+    <article className="flex flex-wrap items-center justify-between gap-3 bg-surface px-2 py-1.5">
+      <span className={`flex size-[30px] shrink-0 items-center justify-center rounded-lg ${record.mime?.startsWith("image/") ? "bg-warn-soft text-warn" : record.mime?.startsWith("audio/") || record.mime?.startsWith("video/") ? "bg-ai-2/15 text-text-2" : "bg-accent-soft text-accent"}`}><FileText size={17} aria-hidden="true" /></span><div className="min-w-0 flex-1">
+        <h3 title={record.name} className="line-clamp-2 break-words text-sm font-medium text-text [overflow-wrap:anywhere]">
           {onOpen ? (
             <button
               aria-label={`打开资料：${record.name}`}
-              className="rounded-sm text-left hover:text-emerald-800 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-emerald-700"
+              className="min-h-6 rounded-sm text-left hover:text-accent hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
               data-source-open={record.id}
               onClick={() => onOpen(record.id)}
               type="button"
@@ -78,13 +78,13 @@ export function SourceRow({
           ) : record.name}
         </h3>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-          {format ? <span className="text-xs text-zinc-500">{format}</span> : null}
+          {format ? <span className="text-xs text-text-3">{format}</span> : null}
           <span className={`${ui.badge} ${stateTone}`}>{record.uploadState === "rejected" ? "上传被拒绝" : sourceStatusLabel(record)}</span>
         </div>
         {percent != null ? (
-          <p className="text-xs tabular-nums text-zinc-700">已上传 {percent}%</p>
+          <p className="text-xs tabular-nums text-text-2">已上传 {percent}%</p>
         ) : null}
-        {notice ? <p className="text-xs text-amber-800">{notice}</p> : null}
+        {notice ? <p className="text-xs text-warn">{notice}</p> : null}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         {onRetry && record.error?.retryable !== false ? (
@@ -94,9 +94,9 @@ export function SourceRow({
         ) : null}
         {metadata || onAssign || onManage || (canDeleteShortcut && onDelete) ? (
           <details className="max-w-full rounded-lg">
-            <summary className="cursor-pointer rounded-lg px-3 py-2 text-xs text-zinc-600 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700">更多操作</summary>
-            <div className="flex max-w-full flex-col items-start gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
-              {metadata ? <p className="text-xs tabular-nums text-zinc-500">{metadata}</p> : null}
+            <summary className="cursor-pointer rounded-lg px-3 py-2 text-xs text-text-2 hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">更多操作</summary>
+            <div className="flex max-w-full flex-col items-start gap-2 rounded-lg border border-line bg-surface-2 p-3">
+              {metadata ? <p className="text-xs tabular-nums text-text-3">{metadata}</p> : null}
               {onAssign ? <button className={ui.quiet} onClick={() => onAssign(record.id)} type="button"><FolderInput size={14} aria-hidden="true" />归入课程</button> : null}
               {onManage ? <button className={ui.quiet} onClick={() => onManage(record.id)} type="button"><Settings2 size={14} aria-hidden="true" />管理材料</button> : null}
               {canDeleteShortcut && onDelete ? (
