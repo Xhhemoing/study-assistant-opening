@@ -108,3 +108,16 @@ export function groupTodayQueue(
 
   return { confirmed, dueRetests, overdue, other, upcomingRetestCount, deferred, done };
 }
+
+/** Show at most five actionable rows, retaining a linked/selected task in view. */
+export function previewTodayQueue(groups: TodayQueueGroups, focusTaskId?: string, limit = 5): TodayQueueGroups {
+  const pending = [...groups.confirmed, ...groups.dueRetests, ...groups.overdue, ...groups.other];
+  const focused = pending.find(task => task.id === focusTaskId);
+  const visible = new Set((focused ? [focused, ...pending.filter(task => task.id !== focused.id)] : pending).slice(0, limit).map(task => task.id));
+  return { ...groups,
+    confirmed: groups.confirmed.filter(task => visible.has(task.id)),
+    dueRetests: groups.dueRetests.filter(task => visible.has(task.id)),
+    overdue: groups.overdue.filter(task => visible.has(task.id)),
+    other: groups.other.filter(task => visible.has(task.id)),
+  };
+}

@@ -13,6 +13,7 @@ import { materialsInSpace } from "./material-spaces";
 import { useMaterialLibrary } from "./use-material-library";
 import { MaterialCourseLabels } from "./material-course-labels";
 import type { SourceViewerTarget } from "../inbox/source-viewer";
+import type { LibraryFileBatch } from "./library-view";
 
 const kinds: Array<{ value: MaterialKind; label: string }> = [
   { value: "all", label: "全部材料" }, { value: "pdf", label: "PDF 文档" },
@@ -32,7 +33,7 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
   { value: "name", label: "名称排序" }, { value: "largest", label: "文件大小" },
 ];
 
-export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void }) {
+export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange, incomingFiles, onIncomingFilesAccepted, onUploadBusyChange, hideUploadPicker = false }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void; incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadBusyChange?: (busy: boolean) => void; hideUploadPicker?: boolean }) {
   const library = useMaterialLibrary(api, { uploadCourseId });
   const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load, changeSpace: setLibrarySpace } = library;
   const [query, setQuery] = useState("");
@@ -82,16 +83,16 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
     <MaterialSpaceNav sources={sources} organization={organization} space={space} onSpace={changeSpace} onCreate={library.createCourse} disabled={busy || loading || !library.organizationReady} />
     <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-600"><h2 className="text-sm font-semibold text-zinc-900">{title}</h2><span>{scoped.length} 份材料</span>
+        <div className="flex flex-wrap items-center gap-3 text-xs text-text-2"><h2 className="text-sm font-semibold text-text">{title}</h2><span>{scoped.length} 份材料</span>
           {incompleteUpload > 0 ? <span role="status">{incompleteUpload} 份上传未完成</span> : null}
           {parsing > 0 ? <span role="status">{parsing} 份正在解析</span> : null}
-          {failures > 0 ? <span className="text-red-700">{failures} 份需处理</span> : null}
+          {failures > 0 ? <span className="text-danger">{failures} 份需处理</span> : null}
         </div>
         <button type="button" className={ui.secondary} disabled={refreshing || busy} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" className={refreshing ? "motion-safe:animate-spin" : ""} />刷新状态</button>
       </div>
-      <div className="flex flex-wrap items-end gap-3 border-b border-zinc-200 pb-4">
+      <div className="flex flex-wrap items-end gap-3 border-b border-line pb-4">
         <label className="min-w-0 flex-1 basis-56"><span className={`${ui.label} mb-1 block`}>搜索</span><span className="relative block">
-          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-3" aria-hidden="true" />
           <input aria-label="搜索材料名称" className={`${ui.input} pl-9`} placeholder="搜索材料名称" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} />
         </span></label>
         <details className="min-w-0"><summary className={`${ui.quiet} cursor-pointer`}>筛选与排序{kind !== "all" || status !== "all" || sort !== "newest" ? " · 已启用" : ""}</summary><div className="mt-3 flex flex-wrap gap-3">
@@ -108,30 +109,30 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
         <button type="button" className={ui.quiet} disabled={busy} aria-pressed={managing} onClick={() => { setManaging(value => !value); library.clearSelection(); }}>{managing ? "退出批量管理" : "批量管理"}</button>
         {filtered || sort !== "newest" ? <button type="button" className={ui.quiet} onClick={() => { setQuery(""); setKind("all"); setStatus("all"); setSort("newest"); setPage(1); }}><X size={14} aria-hidden="true" />清除筛选</button> : null}
       </div>
-      {kind !== "all" || status !== "all" || sort !== "newest" ? <p className="text-xs leading-5 text-zinc-600" role="status">当前条件：{[kind !== "all" ? kinds.find(item => item.value === kind)?.label : null, status !== "all" ? statuses.find(item => item.value === status)?.label : null, sort !== "newest" ? sorts.find(item => item.value === sort)?.label : null].filter(Boolean).join(" · ")}</p> : null}
+      {kind !== "all" || status !== "all" || sort !== "newest" ? <p className="text-xs leading-5 text-text-2" role="status">当前条件：{[kind !== "all" ? kinds.find(item => item.value === kind)?.label : null, status !== "all" ? statuses.find(item => item.value === status)?.label : null, sort !== "newest" ? sorts.find(item => item.value === sort)?.label : null].filter(Boolean).join(" · ")}</p> : null}
       {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
       {organizationError ? <LoadError message={organizationError} onRetry={() => void load()} /> : null}
       {!loading && !library.organizationReady && !organizationError ? (
-        <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <p role="status" className="rounded-lg border border-warn/20 bg-warn-soft px-3 py-2 text-xs text-warn">
           课程关系尚未就绪，暂时无法归入课程或批量整理；仍可查看与上传原件。请稍后刷新。
         </p>
       ) : null}
-      {library.result ? <div role="status" className="space-y-1 text-xs text-zinc-700"><p>{library.result.succeeded.length} 份整理成功{library.result.failed.length ? `，${library.result.failed.length} 份未完成` : ""}。</p>
-        {library.result.failed.map(item => <p key={item.id} className="break-words text-red-700">{sources.find(source => source.id === item.id)?.name ?? item.id}：{item.message}</p>)}
+      {library.result ? <div role="status" className="space-y-1 text-xs text-text-2"><p>{library.result.succeeded.length} 份整理成功{library.result.failed.length ? `，${library.result.failed.length} 份未完成` : ""}。</p>
+        {library.result.failed.map(item => <p key={item.id} className="break-words text-danger">{sources.find(source => source.id === item.id)?.name ?? item.id}：{item.message}</p>)}
       </div> : null}
       {loading ? <LoadingRows label="正在读取材料…" /> : <>
         {selection.size ? <MaterialBatchActions key={space} count={selection.size} courses={organization.courses} busy={busy || !library.organizationReady} courseId={courseId}
           onAdd={(target, role) => library.batch(target, role)} onRemove={() => courseId ? library.batch(courseId) : Promise.resolve()}
           onDelete={() => library.deleteSelected()} onClear={library.clearSelection} /> : null}
-        {managing ? <label className="flex items-center gap-2 text-xs text-zinc-600"><input type="checkbox" aria-label="选择当前页材料" className="size-4 accent-emerald-700" disabled={busy || !collection.items.length || !library.organizationReady}
+        {managing ? <label className="flex items-center gap-2 text-xs text-text-2"><input type="checkbox" aria-label="选择当前页材料" className="size-6 accent-accent" disabled={busy || !collection.items.length || !library.organizationReady}
           checked={!!collection.items.length && collection.items.every(item => selection.has(item.id))} onChange={() => library.togglePage(collection.items.map(item => item.id))} />选择当前页</label> : null}
-        <div id="upload" className="scroll-mt-4"><InboxPanel api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={managing ? library.toggle : undefined} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
+        <div id="upload" className="scroll-mt-4"><InboxPanel liveSources={scoped} incomingFiles={incomingFiles} onIncomingFilesAccepted={onIncomingFilesAccepted} onUploadBusyChange={onUploadBusyChange} hideUploadPicker={hideUploadPicker} api={api} sources={sources} visibleSources={collection.items} onChanged={refresh} selectedIds={selection} onToggle={managing ? library.toggle : undefined} selectionDisabled={busy || !library.organizationReady} courseId={courseId} initialOpen={initialOpen}
           renderMetadata={record => library.organizationReady ? <MaterialCourseLabels sourceId={record.id} organization={organization} /> : null}
           onAssign={library.organizationReady ? (id) => setAssignId(current => current === id ? null : id) : undefined}
           renderBelow={record => assignId === record.id ? <MaterialAssignPanel courses={organization.courses} busy={busy || !library.organizationReady}
             onConfirm={async (courseId, role) => { await library.assignOne(record.id, courseId, role); setAssignId(null); }}
             onCancel={() => setAssignId(null)} /> : null} /></div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-xs text-zinc-600">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3 text-xs text-text-2">
           <p role="status">{collection.total === 0 ? "0 份材料" : `${(collection.page - 1) * 20 + 1}–${Math.min(collection.page * 20, collection.total)} / ${collection.total} 份材料`}</p>
           <nav aria-label="材料分页" className="flex items-center gap-2">
             <button type="button" aria-label="上一页材料" title="上一页" className={ui.icon} disabled={collection.page <= 1} onClick={() => setPage(collection.page - 1)}><ChevronLeft size={16} aria-hidden="true" /></button>

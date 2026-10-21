@@ -2,11 +2,11 @@ export type TodayResumeState = {
   kind: "ready" | "empty" | "error" | "loggedOut";
   continueItem?: { conversationId: string; title: string; lastUserText?: string; courseId?: string | null;
     sourceVersions?: Record<string, number>; currentPage?: number | null; manualSourceCount?: number };
-  pendingReviews?: { count: number; href: "/opening/review" };
+  pendingReviews?: { count: number; href: "/opening/suggestions" };
 };
 export type TodayConfirmCandidate = { id: string; payload: { kind?: string } | null };
 /** Compatibility helper: review navigation always opens the product page, never a write API. */
-export function todayConfirmHref(_candidates: TodayConfirmCandidate[] = []): string { return "/opening/review"; }
+export function todayConfirmHref(_candidates: TodayConfirmCandidate[] = []): string { return "/opening/suggestions"; }
 export type TodayResumeInput = {
   hasSession: boolean; loadFailed: boolean;
   lastConversation?: { id: string; title: string; lastUserText?: string; courseId?: string | null;
@@ -22,5 +22,5 @@ export function resolveTodayResume(input: TodayResumeInput): TodayResumeState {
     courseId: input.lastConversation.courseId, sourceVersions: input.lastConversation.sourceVersions,
     currentPage: input.lastConversation.currentPage, manualSourceCount: input.lastConversation.manualSourceCount } : undefined;
   if (!continueItem && count === 0) return { kind: "empty" };
-  return { kind: "ready", continueItem, pendingReviews: { count, href: "/opening/review" } };
+  return { kind: "ready", continueItem, pendingReviews: { count, href: "/opening/suggestions" } };
 }

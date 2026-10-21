@@ -12,6 +12,10 @@ import { createTeachingActivityClient } from "./activity-client";
 import { createInlineAttemptSubmission, readInlineAttemptObservationHead, type InlineAttemptSubmissionCheckpoint } from "./inline-attempt-submission";
 import { createInlineAttemptDrafts, inlineAttemptDraftConflict, inlineAttemptIdentityKey, type InlineAttemptDraft } from "./inline-attempt-drafts";
 import { defaultInlineAttemptSkill } from "./inline-attempt-skill";
+import { LessonFlow } from "./lesson-flow";
+import { MathInput } from "./math-input";
+import { FeedbackPanel } from "./feedback-panel";
+import { LearnerStatePanel } from "./learner-state-panel";
 
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
@@ -19,6 +23,8 @@ export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "s
   onCourseAssociated: (activity: TeachingActivity) => void;
   /** Available only after the original answer is durably saved and identity checked. */
   onAttemptReady?: (blockId: string, attempt: LearningAttempt) => void;
+  /** Called only for a durably saved observation, including restored work. */
+  onObservationReady?: (blockId: string, observation: LearningObservation) => void;
 };
 
 /** The reference is fetched only after the original answer is durably submitted. */
@@ -100,6 +106,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
         setUnavailable(true); setError("这条作答记录已撤回或不可用，无法继续核对。"); return;
       }
       setRecorded(saved.observation); setAttemptId(saved.attempt.id);
+      context.onObservationReady?.(blockId, saved.observation);
       setChecked(Boolean(saved.observation.referenceCheck));
       onAttemptReady.current?.(blockId, saved.attempt);
       // A reference failure must not hide the original answer that was just recovered.
@@ -166,6 +173,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
       if (!observation) { setUnavailable(true); setError("这条作答记录已撤回，无法继续核对。"); return; }
       setRecorded(observation); setAttemptId(result.attemptId); setChecked(Boolean(observation.referenceCheck));
+      context.onObservationReady?.(blockId, observation);
       context.onAttemptReady?.(blockId, result.attempt);
       await readAnswer(result.attemptId);
     } catch (reason) { setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : reason instanceof Error ? reason.message : "答案保存未确认，可用相同请求重新确认。"); }
@@ -204,7 +212,8 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   }
 
   if (unavailable) return <p role="alert" className="mt-3 text-xs text-red-700">{error || "本条作答记录已不可用，请重新读取活动。"}</p>;
-  return <div className="mt-3 space-y-3 border-t border-amber-200/70 pt-3" data-inline-attempt={blockId}>
+  return <div className="mt-3 space-y-3 border-t border-line pt-3" data-inline-attempt={blockId}>
+    <LessonFlow hasHints={false} phase={recorded ? checked ? "next" : "feedback" : pending ? "submit" : "attempt"}>
     {!context.courseId && context.status !== "completed" ? <div className="space-y-2">
       <p className="text-xs text-zinc-600">先关联课程，作答才能保存到对应的学习记录。</p>
       <label className="block text-xs text-zinc-700">学习记录所属课程<select className="mt-1 block w-full rounded-md border border-zinc-200 bg-white px-2 py-2" value={courseId} disabled={pending} onChange={(event) => setCourseId(event.target.value)}><option value="">选择已有课程</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.title}</option>)}</select></label>
@@ -223,16 +232,18 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           {skillReuseHint ? <p className="text-xs leading-6 text-amber-800" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-emerald-800 underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); onDraftChange({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
         </div>
       </details>
-      <label className="block text-xs text-zinc-700">我的原答案<textarea className="mt-1 min-h-24 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm" value={answer} maxLength={20_000} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={(event) => { setAnswer(event.target.value); onDraftChange({ answer: event.target.value, skillLabel, prompt }); }} /></label>
+      <MathInput label="我的原答案" value={answer} maxLength={20_000} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={value => { setAnswer(value); onDraftChange({ answer: value, skillLabel, prompt }); }} />
       <button type="submit" className={ui.primary} disabled={!ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{draftConflict ? "原草稿已保留（只读）" : pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : "提交原答案，再看参考"}</button>
-    </form> : <div className="space-y-2">
-      <p className="text-xs font-medium text-zinc-700">原答案已保存</p><p className="whitespace-pre-wrap text-sm text-zinc-800">{recorded.answer}</p>
+    </form> : <FeedbackPanel verdict="unverified" title="原答案已保存" evidence={checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
+      <LearnerStatePanel observation={recorded} />
+      <p className="text-xs font-medium text-zinc-700">封存的原答案</p><p className="whitespace-pre-wrap text-sm text-zinc-800">{recorded.answer}</p>
       {answerKey ? <div className="rounded-lg bg-white p-3 ring-1 ring-zinc-900/5"><p className="mb-2 text-xs font-medium text-zinc-600">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-zinc-500">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <button type="button" className={ui.secondary} disabled={pending || !attemptId} onClick={() => { if (attemptId) void readAnswer(attemptId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取参考答案")); }}>重新读取参考答案</button>}
       {context.status !== "completed" && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
       {answerKey?.answer && !answerKey.referenceSourceId ? <p className="text-xs text-zinc-600">参考答案没有关联可核验材料，本次保留为未核对。</p> : null}
       {checked ? <p role="status" className="text-xs text-zinc-600">{recorded.outcome === "correct" ? "已保存你自对照后的正确判断，仍未经独立评分。" : recorded.outcome === "incorrect" ? "已记录需要复查，后续可安排复测。" : "已保留未核对记录。"}</p> : null}
-    </div>}
+    </FeedbackPanel>}
     {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
+    </LessonFlow>
   </div>;
 }

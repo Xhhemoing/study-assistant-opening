@@ -95,3 +95,19 @@ describe("inbox upload course association helpers", () => {
     expect(html).not.toContain("127.0.0.1:9000");
   });
 });
+
+it("pins a processing material once and retains selection, management and aged-queue deletion", () => {
+  const queued = { ...source("queued", "Processing.pdf"), parseState: "queued" as const };
+  const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [queued], onChanged, selectedIds: new Set([queued.id]), onToggle: () => {}, onAssign: () => {}, renderMetadata: () => createElement("span", null, "关联课程") }));
+  expect(html).toContain('aria-label="材料处理任务"');
+  expect(html).toContain("原件已保存，解析排队中");
+  expect(html).toContain("阅读已保存原件");
+  expect(html).toContain("管理材料");
+  expect(html).toContain("归入课程");
+  expect(html).toContain("删除");
+  expect(html).toContain("关联课程");
+  expect(html).toContain('aria-label="选择材料 Processing.pdf"');
+  expect(html).toContain('checked=""');
+  expect(html.match(/<h3/g)).toHaveLength(1);
+  expect(html).not.toContain("<progress");
+});

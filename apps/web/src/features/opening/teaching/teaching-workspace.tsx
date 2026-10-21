@@ -7,6 +7,7 @@ import type {
   ActivitySpecClientInit,
   LearningResume,
   LearningAttempt,
+  LearningObservation,
   TeachingActivity,
   TeachingCommandConflict,
   TeachingCommandSuccess,
@@ -165,6 +166,7 @@ export function TeachingWorkspace({
   const [positionBusy, setPositionBusy] = useState(false);
   const [positionError, setPositionError] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<Record<string, LearningAttempt>>({});
+  const [observations, setObservations] = useState<Record<string, LearningObservation>>({});
   const positionInFlight = useRef(false);
   const commandInFlight = useRef(false);
   const positionSnapshot = useRef<TeachingWorkspacePositionSnapshot>({ activityId: activity.id, contentVersion: clientInitProp.contentVersion ?? activity.contentVersion, pathVersion: activity.pathVersion, epoch: 0 });
@@ -362,6 +364,11 @@ export function TeachingWorkspace({
     setAttempts(previous => ({ ...previous, [`${liveActivity.id}:${blockId}:${contentVersion}`]: attempt }));
   }, [contentVersion, liveActivity.id]);
 
+  const onObservationReady = useCallback((blockId: string, observation: LearningObservation) => {
+    setObservations(previous => ({ ...previous, [`${liveActivity.id}:${blockId}:${contentVersion}`]: observation }));
+  }, [contentVersion, liveActivity.id]);
+  const questionSubmitted = !currentQuestionId || Boolean(observations[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`]);
+
   const attemptContext = useMemo(
     () => ({
       ...liveActivity,
@@ -372,8 +379,9 @@ export function TeachingWorkspace({
         updateLiveActivity(next);
       },
       onAttemptReady,
+      onObservationReady,
     }),
-    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady],
+    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady],
   );
 
   const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
@@ -449,9 +457,9 @@ export function TeachingWorkspace({
         }) : null}
         {schemaOk && currentUnit ? <nav aria-label="学习单元导航" className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
           {currentIndex > 0 ? <button type="button" className={ui.quiet} disabled={positionBusy} onClick={() => { const previous = units[currentIndex - 1]; if (previous) void navigateUnit(previous); }}><ArrowLeft size={14} aria-hidden />回看上一单元</button> : <span />}
-          {units[currentIndex + 1] ? <button type="button" className={currentQuestionId ? ui.secondary : ui.primary} disabled={positionBusy} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance={currentQuestionId ? "false" : "true"}>{positionBusy ? "正在保存位置…" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
+          {units[currentIndex + 1] ? <button type="button" className={currentQuestionId ? ui.secondary : ui.primary} disabled={positionBusy || (!questionSubmitted && liveActivity.status !== "completed")} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance={currentQuestionId ? "false" : "true"}>{positionBusy ? "正在保存位置…" : !questionSubmitted && liveActivity.status !== "completed" ? "先提交本题，再继续" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
         </nav> : null}
-        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-zinc-500">切换单元会保留原答案草稿；作答与核对结果按实际保存情况记录。</p> : null}
+        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-zinc-500">保存原答案后可继续；也可从提纲回看其他内容。原草稿保留，浏览位置不代表题目已完成。</p> : null}
         <details open={currentIndex === units.length - 1 || liveActivity.status === "completed"} className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer text-xs font-medium text-zinc-600">本次学习与小结</summary><div className="mt-3"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={updateLiveActivity} /></div></details>
       </div>
     </StudyToolsPanel>
