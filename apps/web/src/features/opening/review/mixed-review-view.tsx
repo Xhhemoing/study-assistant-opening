@@ -93,10 +93,10 @@ export function MixedReviewView({ cardsClient: suppliedCards, taskClient: suppli
   const doneTasks = resolved.filter(entry => entry.status === "done").length;
   const removedCards = resolved.filter(entry => entry.status === "no_longer_due").length;
 
-  return <section aria-labelledby="mixed-review-heading" className="min-w-0 space-y-5">
-    <header className="space-y-3"><h2 id="mixed-review-heading" className="text-lg font-semibold">连续复习</h2>
-      <p className="text-sm leading-7 text-text-2">到期卡片和已安排的练习交替进行。卡片保留自评含义；任务完成状态以服务端记录为准。</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={ui.quiet} disabled={loading || busy} onClick={() => void refresh()}>核对最新进度</button><button type="button" className={ui.quiet} disabled={loading || busy || sources?.cards.kind !== "ready" || sources.tasks.kind !== "ready"} onClick={restart}>重新安排本轮</button></div>
+  return <section aria-labelledby="mixed-review-heading" className="min-w-0 space-y-3">
+    <header className="space-y-2"><div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1"><h2 id="mixed-review-heading" className="text-lg font-semibold">连续复习</h2>
+      <div className="flex flex-wrap gap-1"><button type="button" className={ui.quiet} disabled={loading || busy} onClick={() => void refresh()}>核对最新进度</button><button type="button" className={ui.quiet} disabled={loading || busy || sources?.cards.kind !== "ready" || sources.tasks.kind !== "ready"} onClick={restart}>重新安排本轮</button></div></div>
+      <p className="text-sm leading-6 text-text-2">到期卡片与已安排任务交替；卡片自评不代表独立掌握，任务以保存记录为准。</p>
     </header>
     {storageError ? <p role="alert" className="text-sm text-warn">{storageError}</p> : null}
     {loading ? <LoadingRows label="正在核对当前复习项目…" /> : sources?.cards.kind === "error" || sources?.tasks.kind === "error" ? <LoadError message={`无法核对完整队列：${[sources.cards.kind === "error" ? sources.cards.message : "", sources.tasks.kind === "error" ? sources.tasks.message : ""].filter(Boolean).join("；")}`} onRetry={() => void refresh()} /> : !storageBlocked && session ? <>

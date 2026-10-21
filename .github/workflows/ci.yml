@@ -181,7 +181,19 @@ jobs:
         run: npm run test:handler -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/handler.json
 
       - name: Browser tests
+        id: browser_tests
         run: npm run test:browser
+
+      - name: Upload browser acceptance evidence
+        if: ${{ always() && (steps.browser_tests.outcome == 'success' || steps.browser_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build
         run: npm run build

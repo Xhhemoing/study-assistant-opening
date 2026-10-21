@@ -17,6 +17,7 @@ export function buildOpeningE2eEnvironment(inherited = process.env, platform = p
   return {
     ...inherited,
     OPENING_E2E: "1", OPENING_RELEASE: "1", NODE_ENV: "production",
+    OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1",
     DATABASE_URL: database, E2E_DATABASE_URL: database,
     REDIS_URL: "redis://127.0.0.1:16379/0",
     S3_ENDPOINT: "http://127.0.0.1:19000", S3_REGION: "us-east-1", S3_BUCKET: "opening-e2e",
