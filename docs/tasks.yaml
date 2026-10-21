@@ -1,0 +1,75 @@
+# Bootstrap ledger: only Sprint R2 may be dispatched until its source is verified.
+# unknown means no authoritative task evidence; it is not a completion level.
+schema_version: 1
+baseline:
+  branch: feat/opening-release
+  head_sha: 0e290af0f4b3a144c3821c33dd11739d65761ddd
+tasks:
+  - id: SPRINT-R2
+    title: Sprint R2 入库与独立验证
+    learner_change: 串讲后返回原题，并按实际帮助和来源曝光保留正确的作答资格。
+    batch: B1
+    depends_on: []
+    owner: root; r2_environment_review (read-only environment verification)
+    acceptance:
+      - 核对39文件候选及R1至R2的部分答案曝光修正，不以历史报告替代源码。
+      - 经核验的R2源码按主题提交并推送到命名分支，建立Draft PR并记录完整head SHA。
+      - 在R2 head上执行相关单元、真实PostgreSQL集成、四包类型、lint及Web和Worker生产构建。
+      - 完整CI实际触发且有结果；区分首次通过、重试后通过、失败、环境受阻和未执行。
+      - 不将基线或R1验证结果计入R2；不合并、不部署。
+    status: unknown
+    branch: codex/sprint-lesson-r2-20261020
+    pr: https://github.com/Xhhemoing/study-assistant-opening/pull/78
+    head_sha: unknown
+    merge_sha: unknown
+    ci_run: unknown
+    deployed_sha: unknown
+    blockers:
+      - reason: "git push -u origin HEAD:refs/heads/codex/sprint-lesson-r2-20261020失败：fatal: could not read Username for 'https://github.com': No such device or address。远端https://github.com/Xhhemoing/study-assistant-opening.git；HTTPS未配置credential helper，GH_TOKEN/GITHUB_TOKEN/GIT_ASKPASS均未设置。首次停止命令行推送；续办已通过连接的GitHub应用将同一文档树写入同一命名分支。"
+        recovery_condition: 命令行需有效HTTPS写入凭据；2026-10-21续办已确认连接的GitHub应用身份为仓库所有者且权限为admin，可使用该授权应用发布到同一仓库的命名分支，不改交接目标。
+      - reason: 'R2原工作区不可访问；保存补丁的读取失败：library download request failed: hosted apps tools/list request failed with HTTP status 403。未换通道重试。'
+        recovery_condition: 原工作区恢复可访问，或R2发布为远端ref，或当前文件读取权限恢复后取得可校验的候选源码。
+      - reason: '本地PostgreSQL安装受阻：apt-get update返回setgroups Operation not permitted及seteuid Invalid argument；容器只映射UID/GID 0。'
+        recovery_condition: 使用具备普通用户能力的隔离PostgreSQL环境，或在候选SHA上运行既有GitHub CI PostgreSQL服务。
+    updated_at: '2026-10-21T00:41:15+00:00'
+    dispatch:
+      task_id: SPRINT-R2
+      slice: PR 78 文档证据独立审查；不实现产品功能
+      baseline_sha: 0e290af0f4b3a144c3821c33dd11739d65761ddd
+      review_head_sha: 157cc7151dcc4625c44fe1c1f5de6cca023c70fd
+      allowed_files: []
+      forbidden_files: 所有跟踪文件；尤其资格、首答、曝光、学习证据上下文、迁移及共享契约。
+      acceptance:
+        - 只审指定SHA，对照SPRINT-R2验收逐条给出满足、不满足或无证据。
+        - 亲自检查文档diff与YAML，确认没有冒用R1或基线结果、没有共享规则改动。
+        - 不绕过403或用户映射限制；不推送、合并、部署或调用真实模型。
+    environment:
+      recovery_ledger_commit_sha: 157cc7151dcc4625c44fe1c1f5de6cca023c70fd
+      checkout: fresh_isolated_candidate
+      source_import: not_run
+      npm_ci: first_attempt_passed
+      real_model: not_run
+      verification_scope: baseline_only_not_R2
+      verification_sha: 0e290af0f4b3a144c3821c33dd11739d65761ddd
+      unit_command: npm test -- --project unit packages/contracts/src/opening/exam-sprint.test.ts packages/domain/src/opening/exam-sprint/engine.test.ts
+      unit_result: first_attempt_passed_35_tests_2_files
+      typecheck_command: npm run typecheck -w @aistudy/domain
+      typecheck_result: first_attempt_passed
+      postgres_local: environment_blocked
+      postgres_ci: service_containers_started_in_documentation_ci_integration_pending
+      github_app_permission: admin_confirmed
+      documentation_delivery:
+        status: pushed
+        head_sha: 157cc7151dcc4625c44fe1c1f5de6cca023c70fd
+        pr: https://github.com/Xhhemoing/study-assistant-opening/pull/78
+        ci_run: https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39522452797
+        ci_scope: documentation_and_baseline_only_not_R2
+        ci_result: in_progress_at_snapshot
+        source_head_sha: unknown
+      independent_review:
+        head_sha: 157cc7151dcc4625c44fe1c1f5de6cca023c70fd
+        result: changes_required
+        issue: 文档快照未记录已建立的PR和已触发的CI；本次修订补齐。
+        r2_acceptance: source_and_verification_missing
+        diff_check: first_attempt_passed
+        yaml_parse: first_attempt_passed

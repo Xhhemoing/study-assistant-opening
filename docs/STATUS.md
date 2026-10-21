@@ -2,7 +2,7 @@
 
 每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
 
-**更新：** 2026-10-19
+**更新：** 2026-10-21（主干与 Sprint R2 行；其余历史行待账本任务整理）
 **目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
 
 ## 主干
@@ -10,12 +10,13 @@
 - 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
 - `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
 - 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 当前发布主干为 `c5cb6424`（#75，包含 #74、Study 工作区与自动记录查询）；迁移末号 0081。#75 最终 head 的完整 CI 39359526594 成功；合并后的主干 CI 39361727094 已成功，发布必须以目标 SHA 的 push CI 成功为准。
+- 当前发布主干为 `0e290af0f4b3a144c3821c33dd11739d65761ddd`（[#77](https://github.com/Xhhemoing/study-assistant-opening/pull/77)，已包含 #76）；2026-10-21 远端核实，迁移末号 0081。发布仍须以目标 SHA 的 push CI 成功为准；本轮不合并、不部署。
 
 ## 进行中
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| Sprint R2 入库 | root + gpt-6.1-sol/high 环境复核 | `codex/sprint-lesson-r2-20261020` | 状态与阻塞以 [任务账本](tasks.yaml) 的 SPRINT-R2 为准。仅恢复基线检出和锁文件依赖；基线35项单元及domain类型首次通过，不是R2验证。R2源码读取403，本地PG安装受用户映射限制；Draft [#78](https://github.com/Xhhemoing/study-assistant-opening/pull/78) 已建立，文档CI已触发；不代表R2已入库。R2源码及其head和验证仍未取得。未合并/部署。 |
 | 2026-10-20 线上报告整改 | Codex + 独立复核 | `codex/report-remediation-20261020` | 基于已合 #76（170204ff）核实 QA01–09；修作答恢复、费用截断、停用账号存量会话、设置调试泄露和匿名健康详情，备份入口明确 measurement 限制。最近非浏览器测试与四包类型/lint/边界通过，隐私复审修复及24项复查通过，最终CI待收口。内测公开注册且暂不新增/收紧额度为用户决定；可信IP证书已安装并默认TLS实测200，自动续期已启用；完整注销未实现。Hermes根盘已清理/迁备份至3.47GiB，保留原路径与current；9项工具测试及57秒真实parser预检成功，/www发布继续，浏览器待用户。见[逐项记录](operations/report-remediation-2026-10-20.md) |
 | 首次学习与发布保护（2026-10-19） | Codex | [#76](https://github.com/Xhhemoing/study-assistant-opening/pull/76) · `codex/first-learning-20261019` | 已整合c5cb6424并推送71f3ce6a；66项最近单元、Web/Database类型通过，最终head待完整CI。补systemd路径引用、跨盘受管发布及0081兼容回退保护；14项真实systemd/配置测试及59项部署模拟通过，旧脚本实际重现5项不安全降级；独立复审无P1/P2。CI39365804145暴露runner无/usr/bin/node，修测试夹具后最终a5f228ad完整CI39366647158成功，已合并为170204ff。Hermes线上保持6c4a4ea8；已按用户授权两次安全停止另一发布构建并持有既有发布锁；另一会话仍重试，待用户停止其发布，Web/Worker PID未变，/www约13.6GiB可用于发布。现有备份在隔离PG16恢复成功（93表/74迁移），未改生产数据库。真实IP限流及用户浏览器/真实学习待验收；见[首启与试用](plans/2026-10-19-first-learning.md) |
 | 2026-10-19 GitHub Study 链路整合与清理 | Codex | [#74](https://github.com/Xhhemoing/study-assistant-opening/pull/74) 已合；整合 [#75](https://github.com/Xhhemoing/study-assistant-opening/pull/75) | 用户限定本轮优化与Study链路，历史草稿#46/#51/#63保留。#71、内容前置fe24bd8、#73已整合；修复查询兼容、追问来源隔离、检索评估、历史曝光响应契约及旧夹具。1a321316的CI中1151项集成（1既有跳过）和291项handler均通过；浏览器36通过/5跳过/4个旧夹具失配，已维护折叠入口及显式就绪transport，保留恢复安全和原件字节断言，未本地运行浏览器。完整CI和合并结果以PR75最终head检查为准。0075–0081已在隔离PG迁移，回滚见查询架构与升级计划；未部署，待用户浏览器验收。已清理17个远端/2个本地已合分支，独有提交者保留 |
