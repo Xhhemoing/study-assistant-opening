@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import {
   createOpeningTeachingContentRepository,
@@ -7,6 +7,11 @@ import {
   sanitizeCheckpointForRestore,
 } from "./opening-teaching-content";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
+
+vi.mock("./opening-study-exposure", () => ({
+  generateOpeningStudyExposure: vi.fn(async () => ({ id: "released-answer" })),
+  releaseOpeningStudyExposure: vi.fn(async () => ({ id: "released-answer" })),
+}));
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const ownerUserId = "00000000-0000-4000-8000-000000000002";
@@ -88,7 +93,7 @@ describe("opening teaching content repository (unit)", () => {
       if (query.includes("FROM opening_teaching_activities")) return [{ content_version: 1, source_ids: [sourceId] }];
       if (query.includes("FROM opening_sources")) return [{ id: sourceId, version: 1 }];
       if (query.includes("FROM opening_source_chunks")) return live ? [{ id: "answer-chunk", source_id: sourceId, source_version: 1 }] : [];
-      if (query.includes("FROM opening_learning_attempts")) return [{ submitted_at: now,
+      if (query.includes("FROM opening_learning_attempts")) return [{ submitted_at: now, activity_id: activityId, course_id: workspaceId, session_id: workspaceId,
         create_intent: { teachingBlock: { blockId: blockTeach, contentVersion: 1 } }, source_versions: { [sourceId]: 1 } }];
       if (query.includes("FROM opening_teaching_activity_specs")) return [{ document_id: documentId, revision_number: 1, version: 1,
         block_order: [{ ...blockOrder[0], blockType: "prompt", role: "prompt" }, blockOrder[1]],

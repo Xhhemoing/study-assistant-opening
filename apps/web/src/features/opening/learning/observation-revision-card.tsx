@@ -5,6 +5,7 @@ import type { LearningObservation, ObservationHistory, ObservationCardDraft } fr
 import { createOpeningLearningClient } from "../client/learning-client";
 import { CreateCardDialog } from "../cards/create-card-dialog";
 import { createOpeningCardsClient } from "../cards/cards-client";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { ObservationRevisionFields } from "./observation-revision-fields";
 import { currentHistoryRecord, observationRevisionCommand, observationRevisionDraft, observationRevisionFailure, reloadObservationRevisionEditor, type ObservationRevisionEditor } from "./observation-revision-model";
 
@@ -26,6 +27,7 @@ export function observationHistoryPanelReducer(state: HistoryPanel, action: Hist
 }
 
 export function ObservationRevisionCard({ record, onChanged }: { record: LearningObservation; onChanged: () => void }) {
+  const diagnostics = useDiagnosticsEnabled();
   const [{ history, open: historyOpen }, updateHistory] = useReducer(observationHistoryPanelReducer, { history: null, open: false });
   const [editor, setEditor] = useState<ObservationRevisionEditor | null>(null);
   const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
@@ -98,7 +100,7 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
       <span className="text-xs text-text-3">{current.revisionKind === "retract" ? "已撤回 · 不计入当前证据" : `${outcomeLabel(current)} · ${helpLabels[current.assistance]}`}</span>
     </div>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
-    <p className="text-xs text-text-3">原观察时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
+    <p className="text-xs text-text-3">原观察时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{diagnostics && current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
     <div className="flex flex-wrap gap-2">
       {current.outcome === "incorrect" && current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
       <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => historyOpen ? updateHistory({ type: "close" }) : void load()}>{historyOpen ? "收起历史" : "查看历史"}</button>
@@ -106,8 +108,8 @@ export function ObservationRevisionCard({ record, onChanged }: { record: Learnin
       {current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void load("retract")}>撤回记录</button> : null}
     </div>
     {historyOpen && history ? <ol className="space-y-3 border-l border-line pl-4" aria-label="观察修订历史">{history.revisions.map((item, index) => <li key={item.id} className="space-y-1 text-xs text-text-3">
-      <p className="font-medium text-text">版本 {index + 1} · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前版本" : " · 历史版本（不重复计数）"}</p>
-      <p>{item.skillLabel} · {outcomeLabel(item)} · {helpLabels[item.assistance]}{item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
+      <p className="font-medium text-text">第 {index + 1} 次记录 · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前记录" : " · 历史记录（不重复计数）"}</p>
+      <p>{item.skillLabel} · {outcomeLabel(item)} · {helpLabels[item.assistance]}{diagnostics && item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
       <p className="whitespace-pre-wrap break-words">{item.answer || "（未填写回答）"}</p>
       {item.revisionReason ? <p className="whitespace-pre-wrap break-words">原因：{item.revisionReason}</p> : null}
       <p>记录时间：{new Date(item.recordedAt ?? item.occurredAt).toLocaleString("zh-CN")}</p>

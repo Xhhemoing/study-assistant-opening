@@ -1,8 +1,9 @@
-import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
+import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema, uuidSchema, type Scope } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
+  createOpeningStudyContextRepository,
 } from "@aistudy/database";
 import { assertRetestSubmitEarliestAllowed, prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -65,6 +66,19 @@ export function createOpeningAttemptService(sql: Sql) {
         sessionId: attempt.sessionId,
         deliveredAssistance: highestDeliveredAssistance(exposures),
       };
+    },
+    async getContext(scope: Scope, id: string) {
+      const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
+      const contextAnchor = await createOpeningStudyContextRepository(sql).resolve(scope,
+        attempt.contextAnchor ?? { purpose: "learning_help" },
+        { attemptId: attempt.id, sessionId: attempt.sessionId, courseId: attempt.courseId, sourceIds: attempt.sourceIds });
+      const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId, {
+        attemptId: attempt.id, assessmentDomain: attempt.requirementKey?.startsWith("language:") ? "language" : "math",
+      });
+      const result = learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, contextAnchor },
+        deliveredAssistance: highestDeliveredAssistance(exposures) });
+      if (!result.success) validation("本次作答缺少可验证的题目或材料版本，请返回原题重新打开。");
+      return result.data;
     },
     async submit(scope: Scope, id: string, raw: unknown) {
       const input = learningAttemptSubmitInputSchema.parse(raw);

@@ -109,7 +109,7 @@ export function CandidatePanel({
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="break-words text-sm font-semibold text-zinc-900">{candidate.title}</h3>
-                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-500">{candidateKindLabel(candidate.kind)}</span>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500">{candidateKindLabel(candidate.kind)}</span>
                   </div>
                   <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-zinc-500">{candidate.body}</p>
                 </div>
