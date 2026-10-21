@@ -50,11 +50,14 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      // Today is now a dashboard (queue + embedded assistant); a fresh owner sees the neutral start prompt, not fabricated progress.
-      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeAttached();
-      await expect(page.getByText("从一个问题、一次练习或一篇笔记开始", { exact: true })).toBeVisible();
+      // An owner without courses gets the real course entry, without invented resume data.
+      await expect(page.getByRole("heading", { name: "今日学习工作台", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
       await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
-      await expect(page.getByRole("link", { name: "课程与自主练习", exact: true })).toHaveAttribute("href", "/opening/courses");
+      await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
+      const start = page.getByRole("link", { name: "添加第一门课", exact: true });
+      await expect(start).toBeVisible();
+      await expect(start).toHaveAttribute("href", "/opening/courses/new");
     } finally {
       await context.close();
     }

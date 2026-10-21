@@ -34,11 +34,11 @@ async function fillNonmemberAnswer(practice: Locator) {
   await practice.getByLabel("α（候选系数）", { exact: true }).fill("2");
   await practice.getByLabel("β（候选系数）", { exact: true }).fill("2");
   await practice.getByLabel("我算出的 αv+βw 各坐标", { exact: true }).fill("2, 4, 2");
-  await practice.getByLabel("我的判断", { exact: true }).selectOption("not_in_span");
-  await practice.getByLabel("方程组的解结构", { exact: true }).selectOption("none");
-  await practice.getByLabel("所有组合构成什么几何集合？", { exact: true }).selectOption("plane");
-  await practice.getByLabel("导出系数所用坐标 1", { exact: true }).selectOption("0");
-  await practice.getByLabel("导出系数所用坐标 2", { exact: true }).selectOption("2");
+  await practice.getByRole("combobox", { name: "我的判断", exact: true }).selectOption("not_in_span");
+  await practice.getByRole("combobox", { name: "方程组的解结构", exact: true }).selectOption("none");
+  await practice.getByRole("combobox", { name: "所有组合构成什么几何集合？", exact: true }).selectOption("plane");
+  await practice.getByRole("combobox", { name: "导出系数所用坐标 1", exact: true }).selectOption("0");
+  await practice.getByRole("combobox", { name: "导出系数所用坐标 2", exact: true }).selectOption("2");
   await practice.getByLabel("我的理由（如无解冲突、几何约束）", { exact: true }).fill("第一和第三坐标强制 α=β=2，但第二坐标算出 4，不等于 3。");
 }
 
@@ -246,7 +246,7 @@ test.describe("Opening span durable teaching flow", () => {
       await practice.getByLabel("α（候选系数）", { exact: true }).fill("0");
       await practice.getByLabel("β（候选系数）", { exact: true }).fill("0");
       await practice.getByLabel("我算出的 αv+βw 各坐标", { exact: true }).fill(problem.target.map(() => "0").join(", "));
-      await practice.getByLabel("我的判断", { exact: true }).selectOption("in_span");
+      await practice.getByRole("combobox", { name: "我的判断", exact: true }).selectOption("in_span");
       const retestedResponse = page.waitForResponse(response => response.url().endsWith(`/attempts/${retestAttempt.id}/submit`) && response.request().method() === "POST");
       await practice.getByRole("button", { name: "封存首答并精确核对", exact: true }).click();
       const retested = await retestedResponse;

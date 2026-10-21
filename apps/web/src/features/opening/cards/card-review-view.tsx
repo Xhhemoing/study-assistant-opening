@@ -143,13 +143,12 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
 
   return (
     <section aria-label={compact ? "当前记忆卡片" : undefined} className={embedded ? compact ? "space-y-3" : "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
-      {embedded ? !compact ? <header className="space-y-3"><h2 className="text-lg font-semibold">记忆卡片</h2><p className="text-sm leading-6 text-text-2">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p>{headerActions}</header> : null : <PageHeader
+      {embedded ? !compact ? <header className="space-y-1"><div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{headerActions}</div><p className="text-xs leading-5 text-text-2">翻面后自评，不作为独立正确的证明。</p></header> : null : <PageHeader
         title="记忆卡片"
         description="复习你制成的卡片。关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。"
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
-        {state.kind === "ready" && !compact ? <details className="mx-auto mb-4 max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-1">查看相同学习记录的证据视角</summary><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
         {state.kind === "loading" ? <LoadingRows label="正在读取到期记忆卡片…" /> : null}
         {state.kind === "loggedOut" ? (
           <>
@@ -227,6 +226,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
             </div>
           </div>
         ) : null}
+        {state.kind === "ready" && !compact ? <details className="mx-auto max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-2">评分如何计入学习记录</summary><p className="py-2 leading-5">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
       </div>
     </section>
   );

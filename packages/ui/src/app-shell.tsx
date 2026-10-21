@@ -51,7 +51,8 @@ export function AppShell({ activeEntry, children, userLabel, onLogout, onOpenCom
           {onLogout ? <button className={`${iconClass} md:hidden`} type="button" onClick={onLogout} disabled={logoutPending} aria-label="退出登录"><LogOut aria-hidden="true" size={16} /></button> : null}</>}
         </div>
       </header>
-      <main className="min-h-0 min-w-0 flex-1 overflow-auto" id="main-content" tabIndex={-1}>{children}</main>
+      {/* Keep absolutely positioned accessible labels inside this scroll area. */}
+      <main className="relative min-h-0 min-w-0 flex-1 overflow-auto" id="main-content" tabIndex={-1}>{children}</main>
       <div className="shrink-0 overflow-x-auto border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] pt-1 backdrop-blur-md group-data-[focus=true]/workspace:hidden md:hidden" data-shell-navigation="mobile">{mobileNavigation ?? navigation ?? <WorkspaceNavigation activeEntry={activeEntry} placement="bottom" />}</div>
     </div>
   </div>;
