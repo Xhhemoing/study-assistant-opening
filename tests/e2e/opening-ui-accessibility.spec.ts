@@ -150,6 +150,19 @@ for (const condition of conditions) {
           const continuous = await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === "running" && animation.effect?.getTiming().iterations === Infinity).map(animation => animation.id || animation.constructor.name));
           expect(continuous, "reduced motion must stop continuous animation").toEqual([]);
         }
+        if (view === "review" && condition.name === "mobile 390px") {
+          await page.setViewportSize({ width: 320, height: condition.viewport.height });
+          const categories = page.getByRole("navigation", { name: "复习分类", exact: true }).getByRole("link");
+          await categories.first().focus();
+          for (let index = 1; index < await categories.count(); index += 1) await page.keyboard.press("Tab");
+          await expect(categories.last()).toBeFocused();
+          await expect(categories.last()).toBeInViewport({ ratio: 1 });
+          expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+          const narrowPath = testInfo.outputPath("review-320-keyboard.png");
+          await page.screenshot({ path: narrowPath });
+          await testInfo.attach("review-320-keyboard", { path: narrowPath, contentType: "image/png" });
+          await page.setViewportSize(condition.viewport);
+        }
         expect(pageErrors).toEqual([]);
         expect(modelRequests).toBe(0);
         const screenshotPath = testInfo.outputPath("view.png");
