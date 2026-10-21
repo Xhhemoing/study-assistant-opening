@@ -31,14 +31,14 @@ function ProviderForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel, 
 }) {
   const problem = validateProviderDraft(draft, current);
   const dirty = !current || draft.apiKey.length > 0 || draft.label.trim() !== current.label || draft.baseUrl.trim() !== current.baseUrl;
-  return <div className="space-y-2 rounded-md border border-zinc-200 p-3">
+  return <div className="space-y-2 rounded-md border border-line p-3">
     <label className="block space-y-1.5"><span className={ui.label}>服务商名称</span>
       <input className={ui.input} disabled={busy} maxLength={120} onChange={event => onChange({ ...draft, label: event.target.value })} placeholder="例如：DeepSeek" value={draft.label} /></label>
     <label className="block space-y-1.5"><span className={ui.label}>接口地址（OpenAI 兼容 baseUrl）</span>
       <input className={ui.input} disabled={busy} onChange={event => onChange({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" value={draft.baseUrl} /></label>
     <label className="block space-y-1.5"><span className={ui.label}>API 密钥{draft.apiKey ? "" : "（地址不变时可留空）"}</span>
       <input autoComplete="new-password" className={ui.input} disabled={busy} maxLength={4096} onChange={event => onChange({ ...draft, apiKey: event.target.value })} type="password" value={draft.apiKey} /></label>
-    {problem ? <p className="text-xs leading-6 text-amber-800" role="alert">{problem}</p> : null}
+    {problem ? <p className="text-xs leading-6 text-warn" role="alert">{problem}</p> : null}
     <div className="flex flex-wrap gap-2">
       <button className={ui.primary} disabled={busy || problem !== null || !dirty} onClick={onSubmit} type="button">
         {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}{submitLabel}</button>
@@ -52,7 +52,7 @@ function ModelForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
   onChange: (draft: ProviderModelDraft) => void; onSubmit: () => void; onCancel?: () => void;
 }) {
   const problem = validateModelDraft(draft);
-  return <div className="space-y-2 rounded-md border border-zinc-200 p-3">
+  return <div className="space-y-2 rounded-md border border-line p-3">
     <div className="grid gap-2 sm:grid-cols-2">
       <label className="block space-y-1.5"><span className={ui.label}>模型显示名</span>
         <input className={ui.input} disabled={busy} maxLength={120} onChange={event => onChange({ ...draft, label: event.target.value })} value={draft.label} /></label>
@@ -63,30 +63,30 @@ function ModelForm({ draft, busy, onChange, onSubmit, submitLabel, onCancel }: {
       <label className="block space-y-1.5"><span className={ui.label}>输出价格（分 / 百万 token）</span>
         <input className={ui.input} disabled={busy} inputMode="decimal" onChange={event => onChange({ ...draft, outputCentsPerMillion: event.target.value })} value={draft.outputCentsPerMillion} /></label>
     </div>
-    <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-zinc-700">
+    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-text-2">
       <span>支持视觉（可分析 PDF 页图像）</span>
-      <input checked={draft.supportsVision} className="size-4 accent-emerald-700" disabled={busy} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} type="checkbox" />
+      <input checked={draft.supportsVision} className="size-4 accent-accent" disabled={busy} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} type="checkbox" />
     </label>
-    <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-zinc-700">
+    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-text-2">
       <span>支持音频输入（可用于转写音视频材料）</span>
-      <input checked={draft.supportsAudio} className="size-4 accent-emerald-700" disabled={busy} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} type="checkbox" />
+      <input checked={draft.supportsAudio} className="size-4 accent-accent" disabled={busy} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} type="checkbox" />
     </label>
     <fieldset className="space-y-2 px-3" disabled={busy}>
       <legend className={ui.label}>计费方式</legend>
       <div className="flex flex-wrap gap-4">
         {([["metered", "按量计费（计入每日额度）"], ["free_tier", "免费额度（按每日请求数限制）"]] as const).map(([value, label]) =>
-          <label key={value} className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-700">
-            <input checked={draft.billing === value} className="size-4 accent-emerald-700" name={`billing-${submitLabel}`} onChange={() => onChange({ ...draft, billing: value })} type="radio" />{label}
+          <label key={value} className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2">
+            <input checked={draft.billing === value} className="size-4 accent-accent" name={`billing-${submitLabel}`} onChange={() => onChange({ ...draft, billing: value })} type="radio" />{label}
           </label>)}
       </div>
       {draft.billing === "free_tier" ? <>
         <label className="block space-y-1.5"><span className={ui.label}>每日请求上限</span>
           <input className={ui.input} inputMode="numeric" onChange={event => onChange({ ...draft, dailyRequestCap: event.target.value })} placeholder="例如 200（以供应商免费额度为准）" value={draft.dailyRequestCap} /></label>
-        <p className="text-xs leading-6 text-amber-800" role="note">{FREE_TIER_NOTICE}</p>
+        <p className="text-xs leading-6 text-warn" role="note">{FREE_TIER_NOTICE}</p>
       </> : null}
     </fieldset>
     <ProviderMediaBudgetFields draft={draft} disabled={busy} onChange={patch => onChange({ ...draft, ...patch })} />
-    {problem ? <p className="text-xs leading-6 text-amber-800" role="alert">{problem}</p> : null}
+    {problem ? <p className="text-xs leading-6 text-warn" role="alert">{problem}</p> : null}
     <div className="flex flex-wrap gap-2">
       <button className={ui.primary} disabled={busy || problem !== null} onClick={onSubmit} type="button">
         {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}{submitLabel}</button>
@@ -113,18 +113,18 @@ export function ProviderSettingsForm({ data, busy, probingId, probeResults = {},
   const [newModel, setNewModel] = useState<ProviderModelDraft>(emptyModelDraft);
   const [editingModels, setEditingModels] = useState<Record<string, ProviderModelDraft>>({});
   return <div className="space-y-4">
-    <p className="text-xs leading-6 text-zinc-500">这里配置本工作区自己的模型供应商与密钥：密钥加密保存在服务器、永不下发浏览器，配置后可在上方「模型路由」选择这些模型。价格按分 / 百万 token 记账，与服务器目录使用同一预算上限。</p>
-    <p className="text-xs leading-6 text-zinc-500">连通性测试会发送一次小请求，计入模型的费用或免费请求上限；每次点击只测试一次，不评价回答质量，也不会自动重发。</p>
-    {data.providers.length === 0 && !creating ? <p className="text-sm leading-6 text-zinc-500">尚未添加自定义供应商。服务器目录中的模型不受影响。</p> : null}
+    <p className="text-xs leading-6 text-text-3">这里配置本工作区自己的模型供应商与密钥：密钥加密保存在服务器、永不下发浏览器，配置后可在上方「模型路由」选择这些模型。价格按分 / 百万 token 记账，与服务器目录使用同一预算上限。</p>
+    <p className="text-xs leading-6 text-text-3">连通性测试会发送一次小请求，计入模型的费用或免费请求上限；每次点击只测试一次，不评价回答质量，也不会自动重发。</p>
+    {data.providers.length === 0 && !creating ? <p className="text-sm leading-6 text-text-3">尚未添加自定义供应商。服务器目录中的模型不受影响。</p> : null}
     <ul className="space-y-3">{data.providers.map(provider => {
       const models = data.models.filter(model => model.providerId === provider.id);
       const edit = editing[provider.id];
-      return <li className="rounded-md border border-zinc-100 p-3" key={provider.id}>
+      return <li className="rounded-md border border-line p-3" key={provider.id}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-zinc-900">{provider.label}</p>
-            <p className="truncate text-xs leading-6 text-zinc-500">{provider.baseUrl}</p>
-            <p className="text-xs leading-6 text-zinc-500"><KeyRound aria-hidden="true" className="inline" size={12} /> {keyStatusText(provider)} · {models.length} 个模型</p>
+            <p className="truncate text-sm font-medium text-text">{provider.label}</p>
+            <p className="truncate text-xs leading-6 text-text-3">{provider.baseUrl}</p>
+            <p className="text-xs leading-6 text-text-3"><KeyRound aria-hidden="true" className="inline" size={12} /> {keyStatusText(provider)} · {models.length} 个模型</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button className={ui.quiet} disabled={busy} onClick={() => setAddingModelFor(addingModelFor === provider.id ? null : provider.id)} type="button"><Plus aria-hidden="true" size={14} />添加模型</button>
@@ -133,7 +133,7 @@ export function ProviderSettingsForm({ data, busy, probingId, probeResults = {},
               if (next[provider.id]) delete next[provider.id]; else next[provider.id] = providerDraftFromView(provider);
               return next;
             })} type="button">编辑</button>
-            <button className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-red-200 px-2 text-xs text-red-700 hover:bg-red-50" disabled={busy} onClick={() => onDeleteProvider(provider)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
+            <button className={ui.danger} disabled={busy} onClick={() => onDeleteProvider(provider)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
           </div>
         </div>
         {edit ? <div className="mt-3"><ProviderForm draft={edit} current={provider} busy={busy} onCancel={() => setEditing(current => { const next = { ...current }; delete next[provider.id]; return next; })} onChange={value => setEditing({ ...editing, [provider.id]: value })} onSubmit={() => onUpdateProvider(provider.id, edit)} submitLabel="保存服务商" /></div> : null}
@@ -141,10 +141,10 @@ export function ProviderSettingsForm({ data, busy, probingId, probeResults = {},
         {models.length ? <ul className="mt-3 space-y-2">{models.map(model => {
           const modelEdit = editingModels[model.id];
           const probeResult = probeResults[model.id];
-          return <li className="rounded-md bg-zinc-50 p-2" key={model.id}>
+          return <li className="rounded-md bg-surface-2 p-2" key={model.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0 text-xs leading-6 text-zinc-700">
-                <p className="font-medium text-zinc-900">{model.label} · {model.modelName}{model.supportsVision ? " · 视觉" : ""}{model.supportsAudio ? " · 音频" : ""}</p>
+              <div className="min-w-0 text-xs leading-6 text-text-2">
+                <p className="font-medium text-text">{model.label} · {model.modelName}{model.supportsVision ? " · 视觉" : ""}{model.supportsAudio ? " · 音频" : ""}</p>
                 <p>{model.billing === "free_tier" ? `免费额度 · 每日最多 ${model.dailyRequestCap ?? "?"} 次请求` : `输入 ${model.inputCentsPerMillion}、输出 ${model.outputCentsPerMillion} 分 / 百万 token`}</p>
               </div>
               <div className="flex gap-2">
@@ -156,10 +156,10 @@ export function ProviderSettingsForm({ data, busy, probingId, probeResults = {},
                   if (next[model.id]) delete next[model.id]; else next[model.id] = modelDraftFromView(model);
                   return next;
                 })} type="button">编辑</button>
-                <button className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-red-200 px-2 text-xs text-red-700 hover:bg-red-50" disabled={busy} onClick={() => onDeleteModel(model)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
+                <button className={ui.danger} disabled={busy} onClick={() => onDeleteModel(model)} type="button"><Trash2 aria-hidden="true" size={14} />删除</button>
               </div>
             </div>
-            {probeResult ? <p className={`mt-1 text-xs leading-6 ${probeResult.ok ? "text-emerald-700" : "text-amber-800"}`} role="status">{probeResult.message}</p> : null}
+            {probeResult ? <p className={`mt-1 text-xs leading-6 ${probeResult.ok ? "text-accent" : "text-warn"}`} role="status">{probeResult.message}</p> : null}
             {modelEdit ? <div className="mt-2"><ModelForm draft={modelEdit} busy={busy} onCancel={() => setEditingModels(current => { const next = { ...current }; delete next[model.id]; return next; })} onChange={value => setEditingModels({ ...editingModels, [model.id]: value })} onSubmit={() => onUpdateModel(model, modelEdit)} submitLabel="保存模型" /></div> : null}
           </li>;
         })}</ul> : null}
@@ -213,11 +213,11 @@ export function ProviderSettingsPanel() {
       setProbeResults(current => ({ ...current, [model.id]: { ok: false, message: "本次请求失败（无法确认远端执行结果）。不会自动重发；再次点击会发出新请求。" } }));
     } finally { activeProbe.current = false; setProbingId(null); setBusy(false); }
   }
-  return <section aria-labelledby="provider-settings-heading" className="grid gap-4 border-b border-zinc-200 pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
-    <div><h2 className="text-sm font-medium text-zinc-900" id="provider-settings-heading">自定义供应商与密钥</h2><p className="mt-1 text-xs leading-6 text-zinc-500">管理工作区自己的模型供应商。</p></div>
+  return <section aria-labelledby="provider-settings-heading" className="grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
+    <div><h2 className="text-sm font-medium text-text" id="provider-settings-heading">自定义供应商与密钥</h2><p className="mt-1 text-xs leading-6 text-text-3">管理工作区自己的模型供应商。</p></div>
     <div className="min-w-0 space-y-3">
-      {error ? <p className="text-sm leading-6 text-red-700" role="alert">{error}</p> : null}
-      {busy && !data ? <p className="text-sm text-zinc-500" role="status">正在读取服务商配置…</p> : null}
+      {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}
+      {busy && !data ? <p className="text-sm text-text-3" role="status">正在读取服务商配置…</p> : null}
       {data ? <ProviderSettingsForm
         busy={busy}
         data={data}
@@ -256,7 +256,7 @@ export function ProviderSettingsPanel() {
         }}
       /> : null}
       <button className={ui.quiet} disabled={busy} onClick={() => void load()} type="button"><RefreshCw aria-hidden="true" size={14} />重新读取服务商配置</button>
-      {notice ? <p className="text-sm leading-6 text-emerald-700" role="status">{notice}</p> : null}
+      {notice ? <p className="text-sm leading-6 text-accent" role="status">{notice}</p> : null}
     </div>
   </section>;
 }

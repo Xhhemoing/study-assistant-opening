@@ -1,5 +1,6 @@
-import { CardReviewView } from "../../../../features/opening/cards/card-review-view";
+import { redirect } from "next/navigation";
+import { legacyCardsHref, type ReviewSearch } from "../../../../features/opening/review/review-route";
 
-export default function OpeningCardsPage() {
-  return <CardReviewView />;
+export default async function OpeningCardsPage({ searchParams }: { searchParams: Promise<ReviewSearch> }) {
+  redirect(legacyCardsHref(await searchParams));
 }

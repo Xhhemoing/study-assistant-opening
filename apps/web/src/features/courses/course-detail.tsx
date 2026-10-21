@@ -17,7 +17,8 @@ import { CourseExamProgress } from "../opening/exam-sprint/course-exam-progress"
 import { MediaReader } from "../opening/sources/media-reader";
 import { createOpeningApi } from "../opening/client/api";
 import { sourceViewerHref } from "../opening/inbox/source-viewer";
-import { courseStudyHref } from "./course-study-model";
+import { CoursePanel, CourseTabs } from "./course-tabs";
+import { legacyCourseStudyHref } from "./course-tabs-route";
 import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
 
 function revealCourseMaterials() {
@@ -208,61 +209,54 @@ export function CourseDetail({ id, surface = "opening" }: { id: string; surface?
   const { adaptivePlanning } = useOpeningCapabilities();
   const paths = COURSE_DETAIL_PATHS[surface];
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
-  const [mediaOpen, setMediaOpen] = useState(false);
-  useEffect(() => { setMediaOpen(Boolean(readCourseMediaDeepLink(window.location.search).sourceId)); }, [id]);
   useEffect(() => {
     if (!paths.openingActions) return;
     function followLegacyStudyLink() {
-      const params = new URLSearchParams(window.location.search);
-      const retest = params.get("retest");
-      if (retest) router.replace(`${courseStudyHref(id)}?retest=${encodeURIComponent(retest)}`);
-      if (window.location.hash === "#course-practice" && !retest) router.replace(courseStudyHref(id));
-      if (window.location.hash === "#course-learning-records") {
-        const records = document.getElementById("course-learning-records");
-        const details = records?.closest("details");
-        if (details) details.open = true;
-      }
+      const href = legacyCourseStudyHref(id, window.location.search, window.location.hash);
+      if (href) router.replace(href);
     }
     followLegacyStudyLink();
     window.addEventListener("hashchange", followLegacyStudyLink);
     return () => window.removeEventListener("hashchange", followLegacyStudyLink);
-  }, [id, loading, paths.openingActions, router]);
+  }, [id, paths.openingActions, router]);
   if (loading) return <LoadingRows label="正在读取课程…" />;
-  if (error || !course) return <main className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></main>;
-  return <main className="flex h-full min-h-0 flex-col bg-white text-zinc-800">
+  if (error || !course) return <section className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></section>;
+
+  const studyActions = <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />;
+  const settings = <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
+  const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h2 className="text-base font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
+      <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={reload} /><Link className={ui.quiet} href={paths.libraryMaterials}>管理知识库</Link></div>
+    </div>
+    {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有挂接材料" description="点「添加材料」从知识库挂入，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={paths.upload(id)}>上传并归入本课</Link>} />}
+  </section>;
+
+  return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
     <PageHeading title={course.title} description={course.description || "课程材料与实际观察记录。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
-      <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />
-      {paths.openingActions ? <><CourseContents courseId={id} assets={assets} /><details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">概念课示例</summary><p className="mt-2 text-xs leading-6 text-zinc-500">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习断点。</p><Link className={`${ui.secondary} mt-3`} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></details></> : null}
-      {paths.openingActions && adaptivePlanning ? <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">目标与学习安排</summary><div className="mt-3"><CourseGoalForm courseId={id} /></div></details> : null}
-      {paths.openingActions ? <details className="scroll-mt-6 border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">学习进展与记录</summary><div className="mt-3 space-y-5"><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} /></div></details> : <CourseLearningView courseId={id} />}
-      <details className="border-t border-zinc-200 pt-4"><summary className="min-h-10 cursor-pointer text-sm text-zinc-600 focus-visible:ring-2 focus-visible:ring-emerald-700">课程资料与设置</summary><div className="mt-3 space-y-5">
-      <details className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">知识关联与完整目录</summary><div className="mt-3"><CourseKnowledge courseId={id} /></div></details>
-      <details id="course-assets" className="scroll-mt-6 border-t border-zinc-200 pt-5" >
-        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
-          <h2 className="text-sm font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
-          <span className="text-xs text-zinc-500">{assets.length ? "点击展开 / 收起" : "空课 · 默认展开"}</span>
-        </summary>
-        <div className="mt-3 space-y-3" aria-labelledby="course-assets-heading">
-          <div className="flex flex-wrap items-center gap-2">
-            <CourseAddMaterials courseId={id} assets={assets} onAdded={reload} />
-            <Link className={ui.quiet} href={paths.libraryMaterials}>管理知识库</Link>
-          </div>
-          {assets.length ? (
-            <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} />
-          ) : (
-            <EmptyState
-              title="还没有挂接材料"
-              description="点「添加材料」从知识库挂入，或「上传并归入本课」直接上传。"
-              action={<Link className={ui.quiet} href={paths.upload(id)}>上传并归入本课</Link>}
-            />
-          )}
-        </div>
-      </details>
-      {paths.openingActions ? <details open={mediaOpen} className="border-t border-zinc-200 pt-4"><summary className="cursor-pointer py-1 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-700">媒体阅读与片段定位</summary><CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} /></details> : <CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />}
-      <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />
-      </div></details>
+      {paths.openingActions ? <CourseTabs key={id} courseId={id}>
+        <CoursePanel name="overview">
+          {studyActions}
+          <CourseContents courseId={id} assets={assets} />
+          {adaptivePlanning ? <section aria-labelledby="course-goal-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section> : null}
+          {settings}
+        </CoursePanel>
+        <CoursePanel name="units">
+          <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
+          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习断点。</p><Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></section>
+        </CoursePanel>
+        <CoursePanel name="progress">
+          <h2 className="text-base font-semibold">学习进展与记录</h2>
+          <p className="text-sm leading-6 text-text-2">查看当前有效的学习证据与历史记录。自报、提示后的作答和独立完成会分别标明。</p>
+          <CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
+        </CoursePanel>
+        <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} /></CoursePanel>
+      </CourseTabs> : <>
+        {studyActions}<CourseLearningView courseId={id} />
+        <details className="border-t border-line pt-4"><summary className="min-h-10 cursor-pointer text-sm text-text-2 focus-visible:ring-2 focus-visible:ring-accent">课程资料与设置</summary><div className="mt-3 space-y-5"><CourseKnowledge courseId={id} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</div></details>
+      </>}
       <Link className={ui.quiet} href={paths.today}><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>
-  </main>;
+  </section>;
 }

@@ -17,7 +17,8 @@ export function currentCourseActivity(rows: readonly TeachingActivity[], courseI
 
 export function courseStudyTasks(rows: readonly TaskItem[], courseId: string, now = new Date()): TaskItem[] {
   return rows.filter(row => row.courseId === courseId && row.status === "pending"
-    && (!row.notBefore || Date.parse(row.notBefore) <= now.getTime()))
+    && (!row.notBefore || Date.parse(row.notBefore) <= now.getTime())
+    && (!row.retest?.recommendedAt || Date.parse(row.retest.recommendedAt) <= now.getTime()))
     .sort((a, b) => b.priority - a.priority || (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999") || a.id.localeCompare(b.id));
 }
 

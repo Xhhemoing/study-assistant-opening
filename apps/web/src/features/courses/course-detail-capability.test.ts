@@ -28,32 +28,32 @@ function render(surface: CourseDetailSurface = "opening") {
 
 beforeEach(() => {
   caps.adaptivePlanning = false;
-  states.splice(0, states.length, { id: "course", title: "数学", description: "" }, [], false, "", 0, false);
+  states.splice(0, states.length, { id: "course", title: "数学", description: "" }, [], false, "", 0);
 });
 
 describe("course detail planning capability", () => {
-  it("hides the entire goal disclosure while capabilities are closed", () => {
+  it("hides the entire goal section while capabilities are closed", () => {
     const tree = render();
-    expect(contains(tree, (type, children) => type === "summary" && children === "目标与学习安排")).toBe(false);
+    expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
     expect(contains(tree, type => type === CourseGoalForm)).toBe(false);
-    expect(contains(tree, (type, children) => type === "summary" && children === "学习进展与记录")).toBe(true);
+    expect(contains(tree, (type, children) => type === "h2" && children === "学习进展与记录")).toBe(true);
   });
 
-  it("shows the goal disclosure and form only after adaptive planning is enabled", () => {
+  it("shows the goal section and form only after adaptive planning is enabled", () => {
     caps.adaptivePlanning = true;
     const tree = render();
-    expect(contains(tree, (type, children) => type === "summary" && children === "目标与学习安排")).toBe(true);
+    expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(true);
     expect(contains(tree, type => type === CourseGoalForm)).toBe(true);
     caps.adaptivePlanning = false;
     const closed = render();
     expect(contains(closed, type => type === CourseGoalForm)).toBe(false);
-    expect(contains(closed, (type, children) => type === "summary" && children === "目标与学习安排")).toBe(false);
+    expect(contains(closed, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
   });
 
   it("keeps the legacy surface without Opening goal controls", () => {
     caps.adaptivePlanning = true;
     const tree = render("learn");
     expect(contains(tree, type => type === CourseGoalForm)).toBe(false);
-    expect(contains(tree, (type, children) => type === "summary" && children === "目标与学习安排")).toBe(false);
+    expect(contains(tree, (type, children) => type === "h2" && children === "目标与学习安排")).toBe(false);
   });
 });
