@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { APIRequestContext, Locator } from "@playwright/test";
 import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
+import { z } from "zod";
 import { expect, test } from "./fixtures";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
 import { createTeachingCourse, makeTeachingRetestDue, readTeachingEvidence, readTeachingRetest } from "./opening-teaching-fixture";
@@ -9,6 +10,7 @@ import { createTeachingCourse, makeTeachingRetestDue, readTeachingEvidence, read
 // fixture does not certify parsing; the controlled due date does not certify retention.
 const lessonEndpoint = "/api/opening/teaching/span/lesson";
 const hintEndpoint = "/api/opening/teaching/span/hint";
+const submittedObservationSchema = learningObservationSchema.extend({ allowsIndependent: z.boolean() });
 
 async function readLesson(request: APIRequestContext, courseId: string, activityId: string, retestId?: string) {
   const query = new URLSearchParams({ courseId, activityId, ...(retestId ? { retestId } : {}) });
@@ -32,11 +34,11 @@ async function fillNonmemberAnswer(practice: Locator) {
   await practice.getByLabel("α（候选系数）", { exact: true }).fill("2");
   await practice.getByLabel("β（候选系数）", { exact: true }).fill("2");
   await practice.getByLabel("我算出的 αv+βw 各坐标", { exact: true }).fill("2, 4, 2");
-  await practice.getByLabel("我的判断", { exact: true }).selectOption("not_in_span");
-  await practice.getByLabel("方程组的解结构", { exact: true }).selectOption("none");
-  await practice.getByLabel("所有组合构成什么几何集合？", { exact: true }).selectOption("plane");
-  await practice.getByLabel("导出系数所用坐标 1", { exact: true }).selectOption("0");
-  await practice.getByLabel("导出系数所用坐标 2", { exact: true }).selectOption("2");
+  await practice.getByRole("combobox", { name: "我的判断", exact: true }).selectOption("not_in_span");
+  await practice.getByRole("combobox", { name: "方程组的解结构", exact: true }).selectOption("none");
+  await practice.getByRole("combobox", { name: "所有组合构成什么几何集合？", exact: true }).selectOption("plane");
+  await practice.getByRole("combobox", { name: "导出系数所用坐标 1", exact: true }).selectOption("0");
+  await practice.getByRole("combobox", { name: "导出系数所用坐标 2", exact: true }).selectOption("2");
   await practice.getByLabel("我的理由（如无解冲突、几何约束）", { exact: true }).fill("第一和第三坐标强制 α=β=2，但第二坐标算出 4，不等于 3。");
 }
 
@@ -112,8 +114,8 @@ test.describe("Opening span durable teaching flow", () => {
       const submitted = await submittedResponse;
       expect(submitted.status()).toBe(201);
       const submission = submitted.request().postDataJSON() as LearningAttemptSubmitInput;
-      const observation = learningObservationSchema.parse(await submitted.json());
-      expect(observation).toMatchObject({ attemptId: attempt.id, assistance: "hinted", outcome: "correct", serverEvaluation: { decision: "correct" } });
+      const observation = submittedObservationSchema.parse(await submitted.json());
+      expect(observation).toMatchObject({ attemptId: attempt.id, assistance: "hinted", outcome: "correct", allowsIndependent: false, serverEvaluation: { decision: "correct" } });
       await expect(practice.getByRole("heading", { name: "本题精确核对通过", exact: true })).toBeVisible();
       const solutionResponse = page.waitForResponse(response => response.url().endsWith(hintEndpoint) && response.request().method() === "POST");
       await practice.getByRole("button", { name: "查看完整示范", exact: true }).click();
@@ -163,7 +165,7 @@ test.describe("Opening span durable teaching flow", () => {
       await expect(practice.getByRole("heading", { name: "本题精确核对通过", exact: true })).toBeVisible();
       await practice.getByText("封存的原答案", { exact: true }).click();
       await expect(practice.locator("pre")).toHaveText(submission.answer);
-      await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).getByRole("listitem")).toHaveCount(4);
+      await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).locator(":scope > ol > li")).toHaveCount(4);
       const recovered = await readLesson(context.request, course.courseId, lesson.activityId);
       expect(recovered.attempts.find(row => row.id === attempt.id)).toMatchObject({ itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, observationId: observation.id });
       expect(recovered.hintLevels[attempt.id]).toEqual([1, 2, 3, 4]);
@@ -180,7 +182,7 @@ test.describe("Opening span durable teaching flow", () => {
       await expect(summary.locator("dl > div").filter({ hasText: "使用帮助作答" }).locator("dd")).toHaveText("1");
       const replay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: submission });
       expect(replay.status()).toBe(201);
-      expect(learningObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer });
+      expect(submittedObservationSchema.parse(await replay.json())).toMatchObject({ id: observation.id, answer: submission.answer, allowsIndependent: false });
       const changedReplay = await context.request.post(`/api/opening/attempts/${attempt.id}/submit`, { headers: { origin }, data: { ...submission, answer: '{"membership":"in_span"}' } });
       expect(changedReplay.status()).toBe(409);
       const lateInput: LearningAttemptSubmitInput = { clientKey: `late:${randomUUID()}`, answer: '{"membership":"in_span"}', outcome: "unverified", assistance: "independent", verdictSource: "self_report" };
@@ -244,13 +246,13 @@ test.describe("Opening span durable teaching flow", () => {
       await practice.getByLabel("α（候选系数）", { exact: true }).fill("0");
       await practice.getByLabel("β（候选系数）", { exact: true }).fill("0");
       await practice.getByLabel("我算出的 αv+βw 各坐标", { exact: true }).fill(problem.target.map(() => "0").join(", "));
-      await practice.getByLabel("我的判断", { exact: true }).selectOption("in_span");
+      await practice.getByRole("combobox", { name: "我的判断", exact: true }).selectOption("in_span");
       const retestedResponse = page.waitForResponse(response => response.url().endsWith(`/attempts/${retestAttempt.id}/submit`) && response.request().method() === "POST");
       await practice.getByRole("button", { name: "封存首答并精确核对", exact: true }).click();
       const retested = await retestedResponse;
       expect(retested.status()).toBe(201);
-      const retestObservation = learningObservationSchema.parse(await retested.json());
-      expect(retestObservation).toMatchObject({ attemptId: retestAttempt.id, outcome: "incorrect", serverEvaluation: { decision: "incorrect" } });
+      const retestObservation = submittedObservationSchema.parse(await retested.json());
+      expect(retestObservation).toMatchObject({ attemptId: retestAttempt.id, outcome: "incorrect", allowsIndependent: false, serverEvaluation: { decision: "incorrect" } });
       await expect(practice.getByRole("heading", { name: "本题有需要修正的数学步骤", exact: true })).toBeVisible();
       expect(await readTeachingRetest(course, scheduled.candidateId)).toMatchObject({ status: "completed", task_status: "done" });
       expect((await readTeachingEvidence(course, attempt.id)).observations).toHaveLength(1);

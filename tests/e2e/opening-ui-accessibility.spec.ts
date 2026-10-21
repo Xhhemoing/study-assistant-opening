@@ -125,12 +125,49 @@ for (const condition of conditions) {
         const blocking = result.violations.filter(violation => violation.impact === "serious" || violation.impact === "critical");
         expect(blocking.map(({ id, impact, help, nodes }) => ({ id, impact, help, targets: nodes.map(node => node.target) }))).toEqual([]);
         await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(condition.viewport.width);
+        if (view === "settings") {
+          // Long forms and their sr-only labels belong to the shell's scroll
+          // area; they must not create an empty outer-document scroll range.
+          await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(condition.viewport.height);
+          const main = page.locator("#main-content");
+          const save = main.getByRole("button", { name: "保存介入偏好", exact: true });
+          await expect(save).toBeEnabled();
+          await save.scrollIntoViewIfNeeded();
+          await expect(save).toBeInViewport();
+          await save.focus();
+          await page.keyboard.press("Tab");
+          await expect(main.getByRole("button", { name: "重置为默认", exact: true })).toBeFocused();
+          await page.keyboard.press("Shift+Tab");
+          await expect(save).toBeFocused();
+          expect(await main.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+          expect(await page.evaluate(() => window.scrollY)).toBe(0);
+          const bottomPath = testInfo.outputPath("settings-bottom.png");
+          await page.screenshot({ path: bottomPath });
+          await testInfo.attach("settings-bottom", { path: bottomPath, contentType: "image/png" });
+          await main.evaluate(element => { element.focus({ preventScroll: true }); element.scrollTop = 0; });
+        }
         if (condition.reducedMotion === "reduce") {
           const continuous = await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === "running" && animation.effect?.getTiming().iterations === Infinity).map(animation => animation.id || animation.constructor.name));
           expect(continuous, "reduced motion must stop continuous animation").toEqual([]);
         }
+        if (view === "review" && condition.name === "mobile 390px") {
+          await page.setViewportSize({ width: 320, height: condition.viewport.height });
+          const categories = page.getByRole("navigation", { name: "复习分类", exact: true }).getByRole("link");
+          await categories.first().focus();
+          for (let index = 1; index < await categories.count(); index += 1) await page.keyboard.press("Tab");
+          await expect(categories.last()).toBeFocused();
+          await expect(categories.last()).toBeInViewport({ ratio: 1 });
+          expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+          const narrowPath = testInfo.outputPath("review-320-keyboard.png");
+          await page.screenshot({ path: narrowPath });
+          await testInfo.attach("review-320-keyboard", { path: narrowPath, contentType: "image/png" });
+          await page.setViewportSize(condition.viewport);
+        }
         expect(pageErrors).toEqual([]);
         expect(modelRequests).toBe(0);
+        const screenshotPath = testInfo.outputPath("view.png");
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        await testInfo.attach("view", { path: screenshotPath, contentType: "image/png" });
         if (view === "assistant") {
           await page.getByRole("dialog", { name: "学习助手", exact: true }).getByRole("button", { name: "关闭抽屉", exact: true }).click();
           await expect(page.getByRole("dialog", { name: "学习助手", exact: true })).toHaveCount(0);
