@@ -49,6 +49,6 @@ export function openingSearchHitHref(hit: SearchHit): string | null {
   const id = encodeURIComponent(hit.id);
   if (hit.type === "document") return `/opening/library/${id}`;
   if (hit.type === "course") return `/opening/courses/${id}`;
-  if (hit.type === "card") return "/opening/cards";
+  if (hit.type === "card") return "/opening/review?tab=cards";
   return null;
 }

@@ -95,26 +95,26 @@ export function rehypeSourceOffsets() {
 
 const components: Components = {
   p: ({ children, ...props }) => <p {...src(props)} className="my-3 first:mt-0 last:mb-0">{children}</p>,
-  h1: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-zinc-950 first:mt-0">{children}</h3>,
-  h2: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-zinc-950 first:mt-0">{children}</h3>,
-  h3: ({ children, ...props }) => <h4 {...src(props)} className="mb-1.5 mt-4 font-semibold text-zinc-900 first:mt-0">{children}</h4>,
-  h4: ({ children, ...props }) => <h4 {...src(props)} className="mb-1.5 mt-4 font-semibold text-zinc-900 first:mt-0">{children}</h4>,
-  ul: ({ children, ...props }) => <ul {...src(props)} className="my-3 list-disc space-y-1 pl-6 marker:text-zinc-400">{children}</ul>,
-  ol: ({ children, ...props }) => <ol {...src(props)} className="my-3 list-decimal space-y-1 pl-6 marker:text-zinc-500">{children}</ol>,
-  blockquote: ({ children, ...props }) => <blockquote {...src(props)} className="my-3 border-l-2 border-zinc-300 pl-4 text-zinc-600">{children}</blockquote>,
+  h1: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-text first:mt-0">{children}</h3>,
+  h2: ({ children, ...props }) => <h3 {...src(props)} className="mb-2 mt-5 text-base font-semibold text-text first:mt-0">{children}</h3>,
+  h3: ({ children, ...props }) => <h4 {...src(props)} className="mb-1.5 mt-4 font-semibold text-text first:mt-0">{children}</h4>,
+  h4: ({ children, ...props }) => <h4 {...src(props)} className="mb-1.5 mt-4 font-semibold text-text first:mt-0">{children}</h4>,
+  ul: ({ children, ...props }) => <ul {...src(props)} className="my-3 list-disc space-y-1 pl-6 marker:text-text-3">{children}</ul>,
+  ol: ({ children, ...props }) => <ol {...src(props)} className="my-3 list-decimal space-y-1 pl-6 marker:text-text-2">{children}</ol>,
+  blockquote: ({ children, ...props }) => <blockquote {...src(props)} className="my-3 border-l-2 border-line-strong pl-4 text-text-2">{children}</blockquote>,
   a: ({ href, children }) => href
-    ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-emerald-700 underline decoration-emerald-700/30 underline-offset-2 hover:decoration-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50">{children}</a>
+    ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline decoration-emerald-700/30 underline-offset-2 hover:decoration-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{children}</a>
     : <span>{children}</span>,
   // No remote images in answers: they would leak the reader to arbitrary hosts.
-  img: ({ alt }) => alt ? <span className="text-zinc-500">[图片：{alt}]</span> : null,
-  pre: ({ children, ...props }) => <pre {...src(props)} className="my-3 overflow-x-auto rounded-lg bg-zinc-950 px-4 py-3 text-[13px] leading-6 text-zinc-100">{children}</pre>,
+  img: ({ alt }) => alt ? <span className="text-text-2">[图片：{alt}]</span> : null,
+  pre: ({ children, ...props }) => <pre {...src(props)} className="my-3 overflow-x-auto rounded-lg bg-ink px-4 py-3 text-[13px] leading-6 text-on-ink">{children}</pre>,
   code: ({ className, children }) => className
     ? <code className={className}>{children}</code>
-    : <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[0.9em] text-zinc-800">{children}</code>,
+    : <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.9em] text-text">{children}</code>,
   table: ({ children, ...props }) => <div {...src(props)} className="my-3 overflow-x-auto"><table className="min-w-full border-collapse text-sm">{children}</table></div>,
-  th: ({ children }) => <th className="border-b border-zinc-300 px-3 py-1.5 text-left font-semibold text-zinc-900">{children}</th>,
-  td: ({ children }) => <td className="border-b border-zinc-200 px-3 py-1.5 align-top">{children}</td>,
-  hr: (props) => <hr {...src(props)} className="my-5 border-zinc-200" />,
+  th: ({ children }) => <th className="border-b border-line-strong px-3 py-1.5 text-left font-semibold text-text">{children}</th>,
+  td: ({ children }) => <td className="border-b border-line px-3 py-1.5 align-top">{children}</td>,
+  hr: (props) => <hr {...src(props)} className="my-5 border-line" />,
   li: ({ children, ...props }) => <li {...src(props)}>{children}</li>,
 };
 
@@ -127,7 +127,7 @@ export class PlainTextFallback extends Component<{ text: string; children: React
   }
 }
 
-const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-emerald-700 no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50";
+const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-accent no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 const NO_CITATIONS: readonly CitationLink[] = [];
 type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[] };
 
@@ -155,12 +155,12 @@ export const LearningProse = memo(function LearningProse({ text, citationLinks =
     sup: ({ children, ...props }) => {
       const link = citationLinks[Number((props as { "data-cite"?: number })["data-cite"]) - 1];
       return link
-        ? <sup className="text-[0.7em]"><a href={link.href} title={link.label} aria-label={`来源 ${String(children)}：${link.label}`} className={CITE_LINK_CLASS}>{children}</a></sup>
+        ? <sup className="text-xs"><a href={link.href} title={link.label} aria-label={`来源 ${String(children)}：${link.label}`} className={CITE_LINK_CLASS}>{children}</a></sup>
         : <sup>{children}</sup>;
     },
   } : components, [citationLinks]);
   return <PlainTextFallback text={text}>
-    <div className="break-words [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
+    <div className="font-reading text-[17px] leading-[30px] break-words [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown
         remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
         rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS]]}

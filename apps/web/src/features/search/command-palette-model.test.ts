@@ -61,15 +61,15 @@ describe("command palette keyboard model", () => {
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "page").map((command) => command.href)).toEqual(expect.arrayContaining([
       "/opening/today",
       "/opening/assistant",
-      "/opening/library",
+      "/opening/library?tab=notes",
       "/opening/courses",
-      "/opening/cards",
-      "/opening/review",
+      "/opening/review?tab=cards",
+      "/opening/suggestions",
       "/opening/library?tab=materials",
       "/opening/settings/connections",
       "/search",
-      "/settings",
-      "/settings/advanced",
+      "/opening/settings",
+      "/opening/settings/advanced",
     ]));
     expect(PALETTE_COMMANDS.find((command) => command.id === "materials")?.label).toBe("材料");
   });

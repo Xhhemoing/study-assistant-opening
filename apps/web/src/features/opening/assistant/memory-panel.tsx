@@ -90,31 +90,31 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
   return (
     <section className="space-y-3 pt-3" aria-label="记忆管理">
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-sm font-semibold text-zinc-900">记忆管理</h2>
-        <span className="text-xs text-zinc-500">模型建议不是事实</span>
+        <h2 className="text-sm font-semibold text-text">记忆管理</h2>
+        <span className="text-xs text-text-2">模型建议不是事实</span>
       </div>
-      {message ? <div className="space-y-2"><p className="text-xs leading-5 text-red-700" role="alert">{message}</p><button type="button" className={secondaryButtonClass} disabled={loading || Boolean(busyId)} onClick={() => { setLoading(true); setMessage(""); void refresh().catch((error) => setMessage(error instanceof Error ? error.message : "记忆暂时无法读取")).finally(() => setLoading(false)); }}>重新读取记忆</button></div> : null}
-      {loading ? <p role="status" className="text-xs text-zinc-500">正在读取记忆…</p> : !message && !candidates.length && !memories.length ? <p className="text-xs leading-5 text-zinc-500">暂无已确认记忆或待确认记忆。</p> : null}
+      {message ? <div className="space-y-2"><p className="text-xs leading-5 text-danger" role="alert">{message}</p><button type="button" className={secondaryButtonClass} disabled={loading || Boolean(busyId)} onClick={() => { setLoading(true); setMessage(""); void refresh().catch((error) => setMessage(error instanceof Error ? error.message : "记忆暂时无法读取")).finally(() => setLoading(false)); }}>重新读取记忆</button></div> : null}
+      {loading ? <p role="status" className="text-xs text-text-2">正在读取记忆…</p> : !message && !candidates.length && !memories.length ? <p className="text-xs leading-5 text-text-2">暂无已确认记忆或待确认记忆。</p> : null}
       {memories.length > 0 ? (
         <div className="mt-3 space-y-2">
-          <p className="text-xs font-medium text-zinc-600">已确认记忆</p>
+          <p className="text-xs font-medium text-text-2">已确认记忆</p>
           {memories.map((memory) => (
-            <div key={memory.id} className="border-b border-zinc-200 py-3">
-              <p className="text-sm text-zinc-800">{memory.text}</p>
-              <p className="mt-1 break-all text-xs text-zinc-500">{memory.kind === "temporary" ? "临时记忆" : "确认记忆"} · {memorySourceSummary(memory.sourceTurnIds)} · 创建于 <time dateTime={memory.createdAt}>{formatMemoryTime(memory.createdAt)}</time></p>
-              <button type="button" disabled={busyId === memory.id} onClick={() => void removeMemory(memory)} className={`${secondaryButtonClass} mt-2 text-red-700`}>删除记忆</button>
+            <div key={memory.id} className="border-b border-line py-3">
+              <p className="text-sm text-text">{memory.text}</p>
+              <p className="mt-1 break-all text-xs text-text-2">{memory.kind === "temporary" ? "临时记忆" : "确认记忆"} · {memorySourceSummary(memory.sourceTurnIds)} · 创建于 <time dateTime={memory.createdAt}>{formatMemoryTime(memory.createdAt)}</time></p>
+              <button type="button" disabled={busyId === memory.id} onClick={() => void removeMemory(memory)} className={`${secondaryButtonClass} mt-2 text-danger`}>删除记忆</button>
             </div>
           ))}
-          <p className="text-xs text-zinc-500">删除的是记忆条目；原始学习材料不会因此删除。</p>
+          <p className="text-xs text-text-2">删除的是记忆条目；原始学习材料不会因此删除。</p>
         </div>
       ) : null}
       <ul className="mt-3 space-y-2">
         {candidates.map((row) => {
           if (row.candidate.kind !== "memory") return null;
           return (
-            <li key={row.id} className="border-b border-zinc-200 py-3">
-              <p className="text-sm text-zinc-800">{row.candidate.text}</p>
-              <p className="mt-1 break-all text-xs text-zinc-500">{memorySourceSummary([row.sourceTurnId], row.sourceIds)} · 创建于 <time dateTime={row.createdAt}>{formatMemoryTime(row.createdAt)}</time>。确认后才会进入后续上下文。</p>
+            <li key={row.id} className="border-b border-line py-3">
+              <p className="text-sm text-text">{row.candidate.text}</p>
+              <p className="mt-1 break-all text-xs text-text-2">{memorySourceSummary([row.sourceTurnId], row.sourceIds)} · 创建于 <time dateTime={row.createdAt}>{formatMemoryTime(row.createdAt)}</time>。确认后才会进入后续上下文。</p>
               <div className="mt-2 flex gap-2">
                 <button type="button" disabled={busyId === row.id} onClick={() => void decide(row, "confirm")} className={buttonClass}>确认</button>
                 <button type="button" disabled={busyId === row.id} onClick={() => void decide(row, "reject")} className={secondaryButtonClass}>不记住</button>
@@ -123,7 +123,7 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
           );
         })}
       </ul>
-      <Link href="/opening/review" className={`${secondaryButtonClass} w-full`}>审核任务、记忆与补测建议</Link>
+      <Link href="/opening/suggestions" className={`${secondaryButtonClass} w-full`}>审核任务、记忆与补测建议</Link>
     </section>
   );
 }
