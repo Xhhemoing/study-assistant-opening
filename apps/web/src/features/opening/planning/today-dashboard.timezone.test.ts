@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * PR-B component-level zone test for TodayDashboard: it must hand the
@@ -12,6 +12,9 @@ vi.mock("./today-view", async () => {
   const actual = await vi.importActual<typeof import("./today-view")>("./today-view");
   return { ...actual, TodayPlanView: (props: Record<string, unknown>) => { planViewProps.push(props); return null; } };
 });
+
+// 冷启动导入（整页依赖图）与时区逻辑无关，预热后各用例只测渲染，避免慢机器上首个用例超时。
+beforeAll(async () => { await import("./today-dashboard"); }, 30_000);
 
 let originalTz: string | undefined;
 beforeEach(() => {

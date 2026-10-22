@@ -27,6 +27,7 @@ import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 import { TaskLearningActionContext } from "./task-row-actions";
 import { ReviewView } from "./review-view";
 import { useNextStepMetrics } from "./use-next-step-metrics";
+import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
@@ -324,7 +325,7 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
-  const heading = <header className="px-5 pt-6 group-data-[focus=true]/workspace:hidden"><h1 className="font-serif text-[26px] leading-[34px] text-text md:text-[30px] md:leading-10">今日学习</h1><p className="mt-2 text-xs text-text-3"><time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time></p></header>;
+  const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title="今日学习" fact={<time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time>} /></div>;
   const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
     <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
     <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />

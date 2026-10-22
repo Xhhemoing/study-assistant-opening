@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ArrowUpRight, ClipboardCheck, Layers2, Link2, Notebook, Sun } from "lucide-react";
 
 import { ui, fieldClass } from "@aistudy/ui";
+import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 export { ui, tone, EmptyState, Skeleton, LoadingRows } from "@aistudy/ui";
 export { ErrorState as LoadError, ErrorState as ErrorNotice } from "@aistudy/ui";
 
@@ -12,11 +13,16 @@ export const inputClass = ui.input;
 export const selectClass = ui.input;
 export const textareaClass = `${fieldClass} min-h-24 resize-y text-sm leading-7`;
 export const panelClass = ui.panel;
+/**
+ * 旧页面统一页头：直接使用 v3 PageHeader（标题在顶栏左上、滚动后玻璃），
+ * description 作为一行事实显示；手机自动带搜索/更多。
+ */
 export function PageHeading({ title, description, action, actions }: { title: string; description?: ReactNode; action?: ReactNode; actions?: ReactNode }) {
-  return <header className="flex min-h-16 flex-wrap items-end justify-between gap-3 border-b border-line px-5 pb-4 pt-5 sm:px-7">
-    <div className="min-w-0 motion-safe:animate-enter"><h1 className="font-serif text-[26px] font-medium leading-[34px] text-text sm:text-[30px] sm:leading-10">{title}</h1>
-      {description ? <p className="mt-1 max-w-3xl text-[13px] leading-6 text-text-2">{description}</p> : null}</div>{action ?? actions}
-  </header>;
+  const long = typeof description === "string" && description.length > 36;
+  return <>
+    <V3PageHeader title={title} fact={long ? undefined : description} action={action ?? actions} />
+    {long ? <p className="max-w-3xl px-4 pb-1 text-xs leading-5 text-text-2 md:px-6">{description}</p> : null}
+  </>;
 }
 export const PageHeader = PageHeading;
 export function EntryLinks() {

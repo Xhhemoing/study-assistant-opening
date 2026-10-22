@@ -42,7 +42,7 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
   return <main className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6 sm:px-6">
     <header className="space-y-2">
       <Link className={ui.quiet} href={`/opening/courses/${initial.courseId}`}>返回课程</Link>
-      <h1 className="text-2xl font-semibold">{data.courseTitle} · 考前练习</h1>
+      <h1 className="text-title font-semibold tracking-[-0.01em]">{data.courseTitle} · 考前练习</h1>
       <p className="text-sm text-text-2">{data.targetDate ? `考试目标 ${data.targetDate}` : "按课程内容准备考试"}{data.dailyMinutes ? ` · 每天约 ${data.dailyMinutes} 分钟` : ""}</p>
       <p className="text-sm text-text-2">上传真题后，AI 帮你找考点、出一份变式练习；作答后可以批改和改评。</p>
     </header>
