@@ -1,6 +1,16 @@
 # UI v3（前端界面重构终稿）
 
-本目录是终稿界面的生产代码：壳层、页面模板、动效系统与组合原语。它与现有页面并存，按下面的步骤逐个路由切换，不需要一次性替换。
+本目录是终稿界面的视图层代码：壳层、页面模板、动效系统与组合原语。它与现有页面并存，按下面的步骤逐个路由切换，不需要一次性替换。
+
+## 状态（三者互不替代）
+
+| 项 | 状态 |
+|---|---|
+| 视图已实现 | 是：本目录全部组件，类型检查 / lint / 单元测试通过 |
+| 真实服务已接入 | **否**：批改、帮助记录、复习安排、材料处理、保存都需在页面适配层接入既有服务；原型中的判分、回答、上传均为模拟 |
+| 验证范围 | 独立原型的浏览器自检（Chromium，桌面/手机/320px，明暗、减少动效、axe）；**未**测真实 PDF、扫描件、真实模型与跨设备恢复；仓库内浏览器验收按 AGENTS.md 由用户负责 |
+
+接入分层：既有业务服务 → 页面适配层（尝试身份、提交快照、上下文、恢复、业务状态转 UI 状态）→ v3 展示组件。前端不根据提示次数推断独立掌握，不决定复测日期，不把模型不确定改写成学生答错。
 
 ## 目录
 
@@ -9,12 +19,28 @@
 | `motion/` | 动效系统：`TransitionLink` / `useTransitionRouter`（页面过渡）、`runViewTransition`（同页重排）、`Collapse`（高度展开）、`usePresence`（退场）、`useTween`（SVG 逐帧补间）、`motion` 类名配方 |
 | `ui/` | 组合原语：`Sheet`（Radix Dialog）、`ListSection` / `ListRow`、`ProgressSteps`、`SaveButton`、`Segmented`、`Field`、`StatusToastProvider`。基础按钮和输入继续使用 `@aistudy/ui` 中的 `ui.*` 与 `Button` |
 | `shell/` | `features.ts` 功能注册表（唯一路由来源）、`AppShell`、`PageHeader` / `LocationLine` / `ListPage`、图标映射、布局偏好 |
-| `start/` `assistant/` | T2 开始页、对话视图与对象卡 |
-| `workspace/` `learning/` | T3/T4 学习工作区、辅助区、阶段操作条、补充解释、提示、卡片草稿 |
-| `reader/` `canvas/` | PDF/照片阅读与选区提问；交互画布（矩阵/张成） |
+| `start/` `assistant/` | T2 开始页（首选行动 + 两条次要）、对话视图（只在接近底部时跟随、「新回答」提示、停止/重试、可移除上下文、回答渲染插槽）与对象卡 |
+| `workspace/` `learning/` | T3/T4 学习工作区（窄屏辅助区顶部保留上下文摘要）、阶段操作条（五类结果 + 改评不默认判对 + 草稿/提交/批改分开表达）、尝试历史、帮助记录、拍照作答（缩略图/删除/排序）、识别核对、补充解释、提示、卡片草稿、T11 本次小结 |
+| `review/` | T12 复习会话（回忆 → 揭示 → 自评 → 下一项 → 结束；评分写入既有复习服务） |
+| `reader/` `canvas/` | PDF/照片阅读与选区提问（引用保留完整选段与页码）；交互画布（按秩区分点/线/面）与 `PredictPrompt`（先预测 → 操作 → 解释 → 验证） |
 | `course/` `sprint/` `forms/` | T5 课程空间、T7 冲刺、T8 表单页、T9 设置、T10 无壳层页、上传区 |
 
-## 动效规范
+## 动效规范（参考 transitions.dev 的用途刻度）
+
+| 用途 | 时长 | 曲线 | 位移 / 模糊 |
+|---|---|---|---|
+| 页面前进/后退 | 进 250ms、出 150ms | out-expo / in | 8px + 3px 模糊 |
+| 同级切换 | 进 250ms、出 150ms | 同上 | 仅淡入 + 2px 模糊 |
+| 弹层（桌面） | 开 320ms pop、关 150ms | spring / in | scale .96 |
+| 底部抽屉、辅助区 | 开 320ms、关 150ms | out-expo | 宽度或 100% 位移 |
+| 展开收起（Collapse） | 开 320ms、关 150ms | out-expo | grid-rows |
+| 原地换字（状态/计数） | 250ms | out-expo | 4px + 2px 模糊 |
+| 成功勾号 | 500ms + 80ms 描边延迟 | bounce | 旋转 + 6px 模糊 |
+| 错误抖动 | 400ms | 专用曲线 | 8→6→4→2px |
+| 指示条滑动（标签、分段、导航） | 250ms | out-expo | View Transition 命名元素 |
+| AI 进行中 | 循环 | linear | 文字流光，不显示假进度 |
+
+组件：`TextSwap`、`ThinkingLine`、`SuccessCheck`、`DisclosureChevron`、`useReplay`（重播抖动）、`runIndicatorTransition`（滑动指示条，无需测量、无内联样式）。
 
 - 时长只用 `--duration-micro / state / panel / scene`（120 / 220 / 320 / 600ms），曲线只用 `--ease-standard / out-expo / in / spring`。
 - 只对 transform 和 opacity 做动画。例外只有四处：导航宽度、辅助区宽度、`Collapse` 的行高、阅读器缩放宽度。
@@ -57,13 +83,15 @@
 | 路由 | 现有实现 | v3 模板 | 迁移时要接入的数据 |
 |---|---|---|---|
 | `/opening/today` | `planning/today-dashboard` | `StartComposer` | `loadTodayResumeState` → suggestions（继续位置、到期数、考期，最多 3 条）；草稿沿用现有机制 |
-| `/opening/assistant` | `assistant/assistant-entry` | `ThreadView` | 现有对话流；对象卡由回答中的引用生成 |
+| `/opening/assistant` | `assistant/assistant-entry` | `ThreadView` | 现有对话流；`renderAnswer` 传入仓库 `LearningProse` + `StreamText`（原型已如此接入）；`thinking` 用服务端阶段；对象卡由回答中的引用生成 |
 | `/opening/courses` | courses/page | `ListPage` + `ListRow` | 课程列表 |
 | `/opening/courses/new` | `courses/course-create` | `FormPage` + `Field` | 创建课程接口 |
 | `/opening/courses/[id]` | `courses/course-detail` | `CourseSpace` | 各分区数据；`?section=` 需按现有课程路由调整 |
 | `/opening/courses/[id]/exam` | `exam-sprint/course-exam-view` | `FormPage` | `getCourseExamService` |
-| `/opening/courses/[id]/study` | `opening/study/*` | `StudyWorkspace` + `StageActionBar` + `InlineExplain` + `HintList` + `CardDraftSheet` | 作答与批改响应映射为 `AttemptStage`；草稿与请求 id 持久化；笔记和卡片写入接口 |
+| `/opening/courses/[id]/study` | `opening/study/*` | `StudyWorkspace` + `StageActionBar` + `AttemptHistory` + `AssistanceNote` + `PhotoAttachments` + `RecognitionCheck` + `InlineExplain` + `HintList` + `CardDraftSheet` | 批改响应映射为 `AttemptStage`/`Verdict`（含评价来源）；每次提交一个尝试 id 与答案快照；所有帮助入口写帮助事件；改评走复核接口；草稿本机/同步状态 |
 | `…/study/span`、`…/study/matrix` | `teaching/span/span-lesson-session`、`courses/course-matrix-lesson` | `StudyWorkspace` + `LinearMapCanvas` | 教学序列与互动状态 |
+| `/opening/courses/[id]/study/summary`（新增） | — | `SessionSummary` | 学习会话汇总（独立/提示后/要再练/尚需验证）与复习服务给出的下一步 |
+| `/opening/review/session`（新增） | `cards/card-review-view` 的评分接口 | `ReviewSession` | 复习队列（卡片、原题重做、未见变式）与评分写入 |
 | `/opening/review` | `review/review-hub` | `ListPage` + `ListRow` | `readReviewTab` |
 | `/opening/library` | library/page | `ListPage` | 资料列表 |
 | `/opening/library/new` | `editor/new-document` | `FormPage` + `UploadDropzone` | 上传与解析状态（ready / processing / failed，与 `STATUS_LABEL` 一致） |
