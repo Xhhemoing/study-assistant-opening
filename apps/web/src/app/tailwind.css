@@ -77,6 +77,51 @@
   }
 }
 
+
+/* ===== UI v3（终稿）补充：语义角色、布局尺寸、动效 ===== */
+@theme static {
+  --color-on-accent: #ffffff;
+  --color-danger-soft: #fbeceb;
+  --color-popover: #ffffff;
+  --color-reader-mat: #ebe8df;
+  --color-focus-ring: #2b6cb0;
+  --color-selection: rgb(43 108 176 / .18);
+
+  /* 布局：正文 / 宽内容 / 导航 / 辅助区。用法 w-(--layout-companion) */
+  --layout-prose: 680px;
+  --layout-wide: 1040px;
+  --layout-nav: 232px;
+  --layout-nav-compact: 72px;
+  --layout-companion: 340px;
+
+  /* 动效角色：时长与曲线沿用上方 --duration-* / --ease-*，这里只补关键帧 */
+  --animate-fade-in: fade-in var(--duration-state) var(--ease-standard) both;
+  --animate-fade-out: fade-out var(--duration-micro) var(--ease-in) both;
+  --animate-pop-out: pop-out var(--duration-state) var(--ease-in) both;
+  --animate-sheet-in: sheet-in var(--duration-panel) var(--ease-out-expo) both;
+  --animate-sheet-out: sheet-out var(--duration-state) var(--ease-in) both;
+  --animate-slide-in: slide-in var(--duration-panel) var(--ease-out-expo) both;
+  --animate-settle: settle var(--duration-scene) var(--ease-standard) both;
+  --animate-draw: draw var(--duration-panel) var(--ease-out-expo) both;
+  --animate-toast-in: toast-in var(--duration-panel) var(--ease-spring) both;
+
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
+  @keyframes pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(0.97); } }
+  @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
+  @keyframes sheet-out { from { transform: none; } to { transform: translateY(100%); } }
+  @keyframes slide-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+  @keyframes settle { from { background-color: var(--color-accent-soft); } to { background-color: transparent; } }
+  @keyframes draw { from { stroke-dashoffset: 24; } to { stroke-dashoffset: 0; } }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; transform: none; } }
+  @keyframes vt-fade-out { to { opacity: 0; } }
+  @keyframes vt-rise-in { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes vt-forward-out { to { opacity: 0; transform: translateX(-16px); } }
+  @keyframes vt-forward-in { from { opacity: 0; transform: translateX(24px); } }
+  @keyframes vt-back-out { to { opacity: 0; transform: translateX(16px); } }
+  @keyframes vt-back-in { from { opacity: 0; transform: translateX(-24px); } }
+}
+
 /* Existing components keep working while they migrate to the canonical names. */
 @theme inline {
   --color-text-dim: var(--color-text-3);
@@ -110,12 +155,19 @@
   --color-obj-1: #7ba4ff;
   --color-obj-2: #f0aa78;
   --color-obj-3: #5fcb9c;
+  /* UI v3：深色下强调底变亮，前景必须变深 */
+  --color-on-accent: #1f1e1c;
+  --color-danger-soft: rgb(255 155 145 / .13);
+  --color-popover: #30302d;
+  --color-reader-mat: #161614;
+  --color-focus-ring: #7ba4ff;
+  --color-selection: rgb(123 164 255 / .28);
 }
 
 @layer base {
   html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-  ::selection { background-color: var(--color-ink); color: var(--color-on-ink); }
-  :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  ::selection { background-color: var(--color-selection); color: inherit; }
+  :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 }
 
 /* Also cover existing animate-spin/pulse users without per-component motion classes. */
@@ -146,3 +198,51 @@
 [data-motion="reduce"]::view-transition-new(root) {
   animation-duration: 1ms !important;
 }
+
+/* ===== UI v3：内容宽度三档（Tailwind 原生 @utility） ===== */
+@utility content-grid {
+  --gutter: 16px;
+  display: grid;
+  row-gap: 24px;
+  grid-template-columns:
+    [full-start] minmax(var(--gutter), 1fr)
+    [wide-start] minmax(0, calc((var(--layout-wide) - var(--layout-prose)) / 2))
+    [prose-start] min(var(--layout-prose), 100% - 2 * var(--gutter))
+    [prose-end] minmax(0, calc((var(--layout-wide) - var(--layout-prose)) / 2))
+    [wide-end] minmax(var(--gutter), 1fr) [full-end];
+  @media (width >= 48rem) { --gutter: 24px; }
+  @media (width >= 64rem) { --gutter: 32px; }
+  & > * { grid-column: prose; min-width: 0; }
+}
+/* 提高一级特异性，覆盖 content-grid 的默认 prose 列 */
+@utility col-wide { &:is(.content-grid > *) { grid-column: wide; } }
+@utility col-full { &:is(.content-grid > *) { grid-column: full; } }
+@utility prose-reading {
+  font-family: var(--font-reading);
+  font-size: 17px;
+  line-height: 1.75;
+  color: var(--color-text);
+}
+/* 列表进入：前 6 项错开 30ms，其余同时出现 */
+@utility stagger {
+  & > * { animation: enter var(--duration-state) var(--ease-out-expo) both; }
+  & > :nth-child(2) { animation-delay: 30ms; }
+  & > :nth-child(3) { animation-delay: 60ms; }
+  & > :nth-child(4) { animation-delay: 90ms; }
+  & > :nth-child(5) { animation-delay: 120ms; }
+  & > :nth-child(n + 6) { animation-delay: 150ms; }
+}
+
+/* ===== UI v3：页面过渡（View Transitions）=====
+   只有主内容区参与；导航、底栏保持静止；激活指示条在入口间滑动。
+   方向由 html[data-nav-direction] 给出：forward（进入更深）/ back / swap（同级切换）。 */
+::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+::view-transition-group(*) { animation-duration: var(--duration-panel); animation-timing-function: var(--ease-standard); }
+::view-transition-old(app-main) { animation: vt-fade-out var(--duration-micro) var(--ease-in) both; }
+::view-transition-new(app-main) { animation: vt-rise-in var(--duration-panel) var(--ease-out-expo) both; }
+html[data-nav-direction="forward"]::view-transition-old(app-main) { animation: vt-forward-out var(--duration-state) var(--ease-in) both; }
+html[data-nav-direction="forward"]::view-transition-new(app-main) { animation: vt-forward-in var(--duration-panel) var(--ease-out-expo) both; }
+html[data-nav-direction="back"]::view-transition-old(app-main) { animation: vt-back-out var(--duration-state) var(--ease-in) both; }
+html[data-nav-direction="back"]::view-transition-new(app-main) { animation: vt-back-in var(--duration-panel) var(--ease-out-expo) both; }
+/* 共享元素：点击来源打上 data-vt-source，目标标题用 [view-transition-name:object-title] */
+[data-vt-source="object-title"] { view-transition-name: object-title; }
