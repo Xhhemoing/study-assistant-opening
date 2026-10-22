@@ -29,6 +29,17 @@ describe("practice composer restrictions", () => {
     expect(html).not.toContain('value="ephemeral"');
   });
 
+  it.each([true, false])("keeps practice disclosure alongside record-query feedback when queries are available: %s", queryAvailable => {
+    const html = renderToStaticMarkup(createElement(Composer, {
+      compact: true, practiceMode: true, privacy: "ephemeral", queryAvailable,
+      draft: "我今天有哪些学习任务？", onDraftChange() {}, onSubmit() {}, onPrivacyChange() {},
+    }));
+    expect(html).toContain("练习辅导会保存对话并记录帮助");
+    expect(html).toContain(queryAvailable ? "查询你的学习记录。" : "学习记录暂时不可查询");
+    expect(html).not.toContain('aria-label="隐私模式"');
+    expect(html).not.toContain("刷新后不会恢复");
+  });
+
   it("keeps explicit privacy options above the input in the ordinary assistant", () => {
     const html = markup(false);
     const selector = html.match(/<select[^>]*aria-label="隐私模式"[^>]*>.*?<\/select>/)?.[0];

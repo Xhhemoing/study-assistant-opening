@@ -47,14 +47,19 @@ const activity: TeachingActivity = {
 
 async function renderToday(activities: TeachingActivity[], trialEnabled: boolean) {
   const api = {
-    listTeachingActivities: vi.fn().mockResolvedValue(activities),
-    getTeachingResume: vi.fn(() => new Promise(() => {})),
-  } as unknown as OpeningApi;
+    listTeachingActivities: vi.fn<OpeningApi["listTeachingActivities"]>().mockResolvedValue(activities),
+    getTeachingResume: vi.fn<OpeningApi["getTeachingResume"]>(() => new Promise(() => {})),
+    listTasks: vi.fn<OpeningApi["listTasks"]>().mockResolvedValue({ tasks: [] }),
+    getToday: vi.fn<OpeningApi["getToday"]>(async date => ({ date, acceptedVersion: 0, blocks: [], hardBlocks: [] })),
+  } satisfies Pick<OpeningApi, "listTeachingActivities" | "getTeachingResume" | "listTasks" | "getToday">;
   await act(async () => root.render(createElement(TodayDashboard, {
-    state: { kind: "ready" }, api, teachingLoopEnabled: true,
+    state: { kind: "ready" }, api: api as unknown as OpeningApi, teachingLoopEnabled: true,
     teachingWorkspaceEnabled: trialEnabled, teachingLoopTrialEnabled: trialEnabled,
   })));
   expect(api.listTeachingActivities).toHaveBeenCalledOnce();
+  expect(api.listTasks).toHaveBeenCalledOnce();
+  expect(api.getToday).toHaveBeenCalledOnce();
+  expect(container.querySelector('[aria-label="今天的进度"]')?.textContent).toContain("复习 · 0 项");
   expect(container.querySelector('a[href^="/opening/library"]')).toBeNull();
 }
 
