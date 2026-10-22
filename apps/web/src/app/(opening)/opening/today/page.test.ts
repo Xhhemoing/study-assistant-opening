@@ -84,11 +84,13 @@ describe("Today server reads", () => {
     expect((await page()).props).toMatchObject({ state: { kind: "error" }, timeZone: "Asia/Shanghai" });
   });
 
-  it("announces the pending Today read without presenting it as completed", () => {
+  it("renders the pending start-page shell before the shared delayed loading announcement mounts", () => {
     const html = renderToStaticMarkup(createElement(TodayLoading));
     expect(html).toContain('aria-busy="true"');
-    expect(html).toContain('role="status"');
-    expect(html).toContain("正在读取学习进度与今日安排…");
-    expect(html).toContain("今日学习");
+    expect(html).toContain('aria-labelledby="today-loading-title"');
+    expect(html).toMatch(/<h1\b[^>]*id="today-loading-title"[^>]*>开始<\/h1>/);
+    // LoadingRows announces after its client-side delay; its timer and unmount
+    // behavior are covered by the shared UI component's interaction tests.
+    expect(html).not.toContain('role="status"');
   });
 });

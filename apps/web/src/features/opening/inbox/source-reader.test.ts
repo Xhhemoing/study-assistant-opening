@@ -9,6 +9,7 @@ import { SourceReader, SourceReaderFrame } from "./source-reader";
 import { captureReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { SaveSnippetDialog } from "../assistant/save-snippet-dialog";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 const originalConversation = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: (props: { conversationId: string; className?: string }) => {
@@ -19,17 +20,19 @@ vi.mock("./source-content", () => ({ SourceContent: () => createElement("section
 const record = { id: "11111111-1111-4111-8111-111111111111", name: "讲义.pdf", mime: "application/pdf", version: 2, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
 let host: HTMLDivElement;
 let root: Root;
+let clearIdentity: () => void;
 const originalClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
 const originalShow = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "show");
 const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
 beforeEach(() => {
+  clearIdentity = publishVerifiedSessionIdentity({ id: "source-reader-owner", workspaceId: "source-reader-workspace" });
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
   for (const method of ["show", "showModal"]) Object.defineProperty(HTMLDialogElement.prototype, method, { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
   host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); clearIdentity(); vi.restoreAllMocks(); vi.unstubAllGlobals();
   if (originalClose) Object.defineProperty(HTMLDialogElement.prototype, "close", originalClose); else Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
   for (const [method, original] of [["show", originalShow], ["showModal", originalShowModal]] as const) {
     if (original) Object.defineProperty(HTMLDialogElement.prototype, method, original); else Reflect.deleteProperty(HTMLDialogElement.prototype, method);
