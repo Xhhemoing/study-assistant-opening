@@ -14,6 +14,8 @@ import { openCourseStudy, type CompletedRetestTask, type CourseStudyEntry } from
 import { useCourseBundle } from "./course-detail";
 import { CourseStudyMaterials } from "./course-study-materials";
 import { CourseStudyContextTools } from "./course-study-context-tools";
+import { TopBar, TopBarTools } from "../opening/v3/shell/top-bar";
+import { ui as v3ui } from "../opening/v3/ui/controls";
 
 export function CourseRetestReview({ courseId, task }: { courseId: string; task: CompletedRetestTask }) {
   return <section className="space-y-3 px-5 py-6" aria-labelledby="course-retest-review-heading">
@@ -74,12 +76,13 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
   const activity = entry?.kind === "activity" ? entry.activity : null;
   const anchorProblem = historicalAnchorError || (historicalAnchor && resume && (historicalAnchor.contentVersion !== resume.contentVersion || resume.clientInit?.checkpointJson?.currentBlockId !== historicalAnchor.blockId) ? "原笔记对应的单元或内容版本与当前断点不同。原笔记内容仍保留；可返回笔记回顾，或明确选择继续当前断点。" : "");
   return <section aria-label="课程学习台" className="flex h-full min-h-0 flex-col bg-surface text-text" data-course-study={courseId}>
-    <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3">
-      <Link className={ui.quiet} href={courseHref}><ArrowLeft aria-hidden="true" size={14} />返回课程</Link>
-      <h1 className="min-w-0 flex-1 break-words font-serif text-xl font-medium">{course.title}</h1>
-      {teachingEnabled ? <Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(courseId)}/study/span`}>自学 / 串讲 / 挑战 · 线性组合示例</Link> : null}
-      <Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>课程材料</Link>
-    </header>
+    <TopBar label="课程学习顶栏"
+      leading={<Link className={v3ui.icon} href={courseHref} aria-label="返回课程"><ArrowLeft aria-hidden="true" size={18} /></Link>}
+      title={<h1 className="truncate text-title font-semibold tracking-[-0.01em]">{course.title}</h1>}
+      actions={<TopBarTools label="学习工具">
+        {teachingEnabled ? <Link className={`${v3ui.toolbarButton} hidden sm:inline-flex`} href={`/opening/courses/${encodeURIComponent(courseId)}/study/span`}>自学 / 串讲 / 挑战</Link> : null}
+        <Link className={v3ui.toolbarButton} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>课程材料</Link>
+      </TopBarTools>} />
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-4xl pb-10">
       {archived ? <div className="space-y-3 px-5 pt-4"><p className="text-sm leading-6 text-text-2">课程已归档，材料与历史记录仍保留。恢复课程后可继续主讲和记录新作答。</p><Link className={ui.secondary} href={`${courseHref}#course-settings-heading`}>返回课程设置以恢复</Link></div> : null}
       {sourceLoadError ? <p className="px-5 pt-4 text-xs leading-6 text-warn" role="status">课程材料暂时无法核实，暂不创建新讲解。可独立练习，或重新进入本页。</p> : null}

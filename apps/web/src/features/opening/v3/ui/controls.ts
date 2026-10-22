@@ -5,7 +5,7 @@
 const press = "transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-(--duration-micro) ease-out-expo active:scale-[0.97] motion-reduce:active:scale-100";
 const base = `inline-flex h-(--control-h) shrink-0 select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-pill px-(--control-px) text-ui font-medium disabled:pointer-events-none disabled:opacity-45 ${press}`;
 
-export const fieldClass = "block min-h-(--control-h) w-full min-w-0 rounded-ctl border border-line-strong bg-surface/80 px-3 py-2 text-ui text-text placeholder:text-text-3 transition-[border-color,box-shadow] duration-(--duration-micro) focus:border-text-3 focus:shadow-[0_0_0_4px_var(--color-surface-2)] focus:outline-none disabled:opacity-50";
+export const fieldClass = "block min-h-(--control-h) w-full min-w-0 rounded-ctl border border-text-3 bg-surface px-3 py-2 text-ui text-text placeholder:text-text-3 transition-[border-color,box-shadow] duration-(--duration-micro) focus:border-text focus:shadow-[0_0_0_3px_var(--color-surface-2)] focus:outline-none disabled:opacity-50";
 
 export const ui = {
   primary: `${base} bg-ink text-on-ink shadow-[inset_0_1px_0_rgb(255_255_255/.12)] hover:bg-ink/88`,

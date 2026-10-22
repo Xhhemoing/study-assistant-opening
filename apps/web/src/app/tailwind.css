@@ -309,6 +309,16 @@
     radial-gradient(1200px 600px at 85% -10%, rgb(123 164 255 / .10), transparent 60%),
     radial-gradient(900px 500px at -10% 110%, rgb(4 120 87 / .07), transparent 60%),
     var(--color-shell);
+  /* 旧页面迁移层：v3 根节点内把旧组件的 Tailwind 字号/圆角一起缩放（约 -15%，最小 12px），
+     旧页面在逐页改写前也立即获得新外观。 */
+  --text-sm: 13px; --text-sm--line-height: 20px;
+  --text-base: 14px; --text-base--line-height: 22px;
+  --text-lg: 16px; --text-lg--line-height: 24px;
+  --text-xl: 17px; --text-xl--line-height: 26px;
+  --text-2xl: 20px; --text-2xl--line-height: 28px;
+  --text-3xl: 26px; --text-3xl--line-height: 34px;
+  --radius-pill-ctl: 999px;
+  --radius-sm: 8px; --radius-md: 12px; --radius-lg: 12px; --radius-xl: 16px; --radius-2xl: 22px; --radius-card: 18px;
 }
 [data-ui="v3"][data-theme="dark"], [data-theme="dark"] [data-ui="v3"] {
   --color-line: rgb(236 234 227 / .08);
@@ -328,11 +338,12 @@
   --text-read: 17px; --text-read--line-height: 30px; --text-read-lg: 19px; --text-read-lg--line-height: 32px;
   --text-title: 20px; --text-title--line-height: 28px; --text-display: 24px; --text-display--line-height: 32px; --text-hero: 32px; --text-hero--line-height: 40px;
   --control-h: 44px; --control-h-sm: 36px; --control-px: 16px; --topbar-h: 56px;
+  --text-sm: 14px; --text-base: 16px; --text-lg: 18px; --text-xl: 20px; --text-2xl: 24px; --text-3xl: 30px;
 }
 /* 触屏始终保证 44px 主要触控目标（只放大点击区域，不放大字号） */
 @media (pointer: coarse) { [data-ui="v3"] { --control-h: 44px; --control-h-sm: 40px; } }
 /* 圆角：round（默认，参考 Gemini / Hark 的圆润卡片）/ crisp（更利落） */
-[data-ui="v3"][data-corner="crisp"] { --radius-ctl: 8px; --radius-tile: 10px; --radius-panel: 14px; --radius-sheet: 18px; }
+[data-ui="v3"][data-corner="crisp"] { --radius-ctl: 8px; --radius-tile: 10px; --radius-panel: 14px; --radius-sheet: 18px; --radius-md: 8px; --radius-lg: 8px; --radius-xl: 10px; --radius-2xl: 14px; --radius-card: 12px; --radius-pill-ctl: 8px; }
 /* 纸面皮肤：去掉玻璃，回到实色表面 */
 [data-ui="v3"][data-skin="paper"] {
   --glass-bg: var(--color-surface); --glass-bg-strong: var(--color-surface); --glass-bar-bg: var(--color-bg); --glass-blur: 0px;
@@ -345,12 +356,12 @@
 
 /* 玻璃表面：浮层、顶栏、工具条、输入框。不支持 backdrop-filter 时用较实的底色。 */
 @utility glass {
-  background-color: var(--glass-bg);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
-  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
-  border: 1px solid var(--glass-line);
-  box-shadow: 0 0 0 1px var(--glass-edge), var(--glass-shadow);
-  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { background-color: var(--glass-bg-strong); }
+  background-color: var(--glass-bg, var(--color-surface));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.5);
+  backdrop-filter: blur(var(--glass-blur, 0px)) saturate(1.5);
+  border: 1px solid var(--glass-line, var(--color-line));
+  box-shadow: 0 0 0 1px var(--glass-edge, transparent), var(--glass-shadow, var(--shadow-float));
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { background-color: var(--glass-bg-strong, var(--color-surface)); }
 }
 /* 顶栏：页面顶部时透明无边，滚动后变为玻璃（data-scrolled 由 TopBar 设置） */
 @utility glass-bar {

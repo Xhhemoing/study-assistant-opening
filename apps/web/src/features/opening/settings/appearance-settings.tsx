@@ -2,6 +2,7 @@
 
 import { ui } from "../design/ui";
 import { useAppearancePreferences, type AppearancePreferences } from "./appearance-preferences";
+import { UiStyleSettings } from "../../settings/ui-style-settings";
 
 export function AppearanceSettings() {
   const { preferences, hydrated, persistenceError, updatePreferences } = useAppearancePreferences();
@@ -37,7 +38,8 @@ export function AppearanceSettings() {
           </select>
         </label>
       </div>
-      <p className="rounded-lg bg-surface-2 px-4 py-3 font-reading text-[17px] leading-[30px] text-text">阅读预览：先理解一个概念，再用自己的话说清楚。</p>
+      <UiStyleSettings />
+      <p className="rounded-lg bg-surface-2 px-4 py-3 font-reading text-read text-text">阅读预览：先理解一个概念，再用自己的话说清楚。</p>
       <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-lg text-sm text-text focus-within:ring-2 focus-within:ring-accent">
         <span>诊断模式<span className="mt-1 block text-xs leading-6 text-text-3">显示学习过程的 ID、版本、资格与请求诊断；不改变学习评价。</span></span>
         <input className="size-6 shrink-0 accent-accent" type="checkbox" checked={preferences.diagnostics} disabled={!hydrated} onChange={event => updatePreferences({ diagnostics: event.target.checked })} />

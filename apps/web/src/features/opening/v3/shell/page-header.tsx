@@ -3,24 +3,20 @@ import { TransitionLink } from "../motion/view-transition";
 import { TopBar } from "./top-bar";
 
 /**
- * 页头：大标题在内容里，顶栏只在大标题滚出后显示小标题（iOS 式）。
- * h1 + 可选一行事实 + 一个主操作 + 手机工具。有意不提供 description：必要说明放在相关内容旁。
- * sharedTitle 时标题承接来源行（共享元素过渡）。必须放在 ListPage 内。
+ * 页头 = 顶栏：标题直接放在顶栏左侧、贴近顶部与左缘，不再单独占一块大标题区，把面积留给核心内容。
+ * 一行：h1 + 可选一行事实 + 一个主操作 + 工具。滚动后顶栏变玻璃。
+ * 有意不提供长 description：必要说明放在相关内容旁。sharedTitle 时标题承接来源行（共享元素过渡）。
  */
 export function PageHeader({ title, fact, action, tools, sharedTitle = false }: { title: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
   return (
-    <>
-      <TopBar title={title} collapsedTitle actions={tools} />
-      <div className="content-grid pb-2 pt-1">
-        <div className="col-wide flex flex-wrap items-end gap-x-4 gap-y-2">
-          <div className="min-w-0 flex-1">
-            <h1 className={`truncate text-display font-semibold tracking-[-0.01em] text-text ${sharedTitle ? "[view-transition-name:object-title]" : ""}`}>{title}</h1>
-            {fact ? <p className="mt-0.5 truncate text-meta text-text-2">{fact}</p> : null}
-          </div>
-          {action}
+    <TopBar label={`${title} 顶栏`}
+      title={
+        <div className="flex min-w-0 flex-col sm:flex-row sm:items-baseline sm:gap-3">
+          <h1 className={`truncate text-title font-semibold tracking-[-0.01em] text-text ${sharedTitle ? "[view-transition-name:object-title]" : ""}`}>{title}</h1>
+          {fact ? <p className="truncate text-meta text-text-2">{fact}</p> : null}
         </div>
-      </div>
-    </>
+      }
+      actions={(action || tools) ? <>{action}{tools}</> : undefined} />
   );
 }
 
@@ -52,7 +48,7 @@ export function ListPage({ header, children }: { header: ReactNode; children: Re
   return (
     <div data-scroll-root className="h-full overflow-y-auto [scrollbar-gutter:stable]">
       {header}
-      <div className="content-grid pb-10 pt-4">{children}</div>
+      <div className="content-grid pb-10 pt-3">{children}</div>
     </div>
   );
 }

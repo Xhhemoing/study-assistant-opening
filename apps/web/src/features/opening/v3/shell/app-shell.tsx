@@ -1,6 +1,6 @@
 "use client";
 import { usePathname } from "next/navigation";
-import { Suspense, useState, type ReactNode } from "react";
+import { Suspense, createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { MessageSquare, MoreHorizontal, PanelLeft, Search } from "lucide-react";
 import { TransitionLink, ViewTransitionBoundary } from "../motion/view-transition";
 import { Sheet } from "../ui/sheet";
@@ -11,11 +11,26 @@ import { ui } from "../ui/controls";
 
 export type RecentThread = { id: string; title: string; href: string };
 
+/** 手机「更多」抽屉底部的全局项（问 AI、账户），由 AppShell 提供给每页的 MobileHeaderTools */
+const MobileMenuExtra = createContext<ReactNode>(null);
+/** 只有在壳层内才渲染手机工具（独立渲染/测试时没有路由与导航，不输出） */
+const InShell = createContext(false);
+
 type AppShellProps = {
   children: ReactNode;
   /** 真实计数（如复习到期），键为功能 id；没有数据就不传，不显示 0 */
   counts?: Partial<Record<string, number>>;
   recent?: RecentThread[];
+  /** 导航里「问 AI」等全局入口，放在核心导航之后 */
+  navExtra?: ReactNode;
+  /** 导航底部账户区（菜单、退出），在设置之后 */
+  account?: ReactNode;
+  /** 主区顶部全局提示（连接、能力、错误），不占独立页头 */
+  banner?: ReactNode;
+  /** 专注：隐藏导航与手机底栏 */
+  hideNav?: boolean;
+  /** 手机「更多」抽屉底部的全局项 */
+  mobileMenuExtra?: ReactNode;
 };
 
 /**
@@ -24,18 +39,25 @@ type AppShellProps = {
  * 导航铺在柔和背景上，主区是一张圆角内容页；手机底栏为悬浮玻璃胶囊。
  * 动效：导航宽度 232↔72 过渡；激活底块带 view-transition-name，在入口间滑动；主区参与页面过渡。
  */
-export function AppShell({ children, counts = {}, recent = [] }: AppShellProps) {
+export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null }: AppShellProps) {
   const pathname = usePathname() ?? "";
   const active = activeNavId(pathname);
   const [pref, setPref] = useLayoutPref();
   const compact = pref.nav === "compact";
+  // 外观属性同时写到 <html>：Radix 弹层、抽屉渲染在 body 下，也要读到外观层变量
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.ui = "v3"; root.dataset.skin = pref.skin; root.dataset.density = pref.density; root.dataset.corner = pref.corner;
+    return () => { delete root.dataset.ui; delete root.dataset.skin; delete root.dataset.density; delete root.dataset.corner; };
+  }, [pref.skin, pref.density, pref.corner]);
 
   return (
+    <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}>
     <div data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
-      <nav aria-label="主导航" data-compact={compact}
+      <nav aria-label="主导航" data-compact={compact} hidden={hideNav}
         className="hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
         <button type="button" onClick={() => setPref({ nav: compact ? "expanded" : "compact" })}
           aria-label={compact ? "展开导航" : "收起导航"} aria-expanded={!compact}
@@ -43,6 +65,7 @@ export function AppShell({ children, counts = {}, recent = [] }: AppShellProps) 
           <PanelLeft size={18} aria-hidden="true" />
         </button>
         <NavGroup items={NAV_CORE} active={active} compact={compact} counts={counts} />
+        {navExtra ? <div className="mt-1 px-2">{navExtra}</div> : null}
         <NavGroup items={NAV_TOOLS} active={active} compact={compact} counts={counts} divided />
         <section aria-label="最近对话" data-hidden={compact || recent.length === 0} inert={compact}
           className="mt-4 min-h-0 flex-1 overflow-y-auto px-2 pt-1 transition-opacity duration-(--duration-state) data-[hidden=true]:pointer-events-none data-[hidden=true]:opacity-0">
@@ -52,14 +75,18 @@ export function AppShell({ children, counts = {}, recent = [] }: AppShellProps) 
           ))}</ul>
           {recent.length > 0 && <TransitionLink href={featureHref("assistant")} className="block whitespace-nowrap px-3 py-2 text-meta text-text-2 hover:text-text">全部对话</TransitionLink>}
         </section>
-        <div className="mt-auto"><NavGroup items={NAV_SYSTEM} active={active} compact={compact} counts={counts} /></div>
+        <div className="mt-auto"><NavGroup items={NAV_SYSTEM} active={active} compact={compact} counts={counts} />{account ? <div className="mt-1 px-2">{account}</div> : null}</div>
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <main id="main" className="min-h-0 flex-1 overflow-hidden bg-bg [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card">{children}</main>
-        <MobileTabBar active={active} counts={counts} />
+        <main id="main" data-scroll-root data-focus={hideNav} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable] [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card data-[focus=true]:m-0 data-[focus=true]:rounded-none data-[focus=true]:border-0">
+          {banner}
+          <div className="flex-1">{children}</div>
+        </main>
+        {!hideNav && <MobileTabBar active={active} counts={counts} />}
       </div>
     </div>
+    </MobileMenuExtra.Provider></InShell.Provider>
   );
 }
 
@@ -109,8 +136,17 @@ function MobileTabBar({ active, counts }: { active: string | null; counts: Parti
 }
 
 /** 手机每页右上：搜索 + 更多（学习工具、最近对话、设置）。 */
-export function MobileHeaderTools({ recent = [] }: { recent?: RecentThread[] }) {
+/** 首次挂载后才渲染：手机工具依赖客户端路由，服务端/静态渲染时不输出，也避免多余的水合。 */
+export function MobileHeaderTools(props: { recent?: RecentThread[] }) {
+  const inShell = useContext(InShell);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  return inShell && mounted ? <MobileHeaderToolsInner {...props} /> : null;
+}
+
+function MobileHeaderToolsInner({ recent = [] }: { recent?: RecentThread[] }) {
   const [open, setOpen] = useState(false);
+  const extra = useContext(MobileMenuExtra);
   return (
     <div className="flex items-center gap-1 md:hidden">
       <TransitionLink href={featureHref("search")} aria-label="搜索" className={ui.icon}><Search size={18} aria-hidden="true" /></TransitionLink>
@@ -127,6 +163,7 @@ export function MobileHeaderTools({ recent = [] }: { recent?: RecentThread[] }) 
         {recent.length > 0 && <ul className="mt-2 border-t border-line pt-2">{recent.slice(0, 5).map(thread => (
           <li key={thread.id}><TransitionLink href={thread.href} onClick={() => setOpen(false)} className="flex min-h-(--control-h) items-center gap-2 truncate px-2 text-ui text-text-2"><MessageSquare size={16} aria-hidden="true" />{thread.title}</TransitionLink></li>
         ))}</ul>}
+        {extra ? <div className="mt-2 border-t border-line pt-2" onClickCapture={() => setOpen(false)}>{extra}</div> : null}
       </Sheet>
     </div>
   );

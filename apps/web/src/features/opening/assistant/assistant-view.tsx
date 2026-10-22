@@ -48,6 +48,8 @@ import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 import { useJobStream, type FirstTextTiming } from "./use-job-stream";
+import { TopBar, TopBarTools } from "../v3/shell/top-bar";
+import { ui as v3ui } from "../v3/ui/controls";
 
 export { createJobPoller } from "./job-poller";
 
@@ -895,13 +897,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const returnHref = studyContextReturnHref(studyContext);
   return <section aria-label="自由探索工作台" className={`flex h-full min-w-0 overflow-hidden bg-surface ${embedded ? "min-h-0" : "min-h-[400px] lg:min-h-0"}`}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {!embedded ? <header className={`flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-line px-4 py-2 sm:px-5 `}>
-        <Heading className="min-w-0 truncate text-sm font-semibold text-text">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "自由探索")}</Heading>
-        <div className="flex shrink-0 items-center gap-1">
-          <button type="button" className={secondaryButtonClass} aria-expanded={contextOpen} aria-controls="exploration-context" onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
-          {!learningAttempt ? <button type="button" className={secondaryButtonClass} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; draftStore.remove(draftScope); onNew(selectedSourceIds, pageIntentValue(currentPage)); }}><Plus size={15} aria-hidden /></button> : null}
-        </div>
-      </header> : null}
+      {!embedded ? <TopBar label="对话顶栏"
+        title={<Heading className="min-w-0 truncate text-ui-lg font-semibold text-text">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "自由探索")}</Heading>}
+        actions={<TopBarTools label="对话工具">
+          <button type="button" className={v3ui.toolbarButton} aria-expanded={contextOpen} aria-controls="exploration-context" aria-pressed={contextOpen} onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
+          {!learningAttempt ? <button type="button" className={v3ui.iconSm} aria-label="新对话" title="新对话" disabled={pending || loading} onClick={() => { if (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。")) return; draftStore.remove(draftScope); onNew(selectedSourceIds, pageIntentValue(currentPage)); }}><Plus size={15} aria-hidden /></button> : null}
+        </TopBarTools>} /> : null}
       {!embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
       {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
         {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}

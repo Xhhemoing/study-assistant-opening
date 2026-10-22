@@ -133,3 +133,11 @@ AppShell 根节点：`data-ui="v3" data-skin data-density data-corner`，由 `ta
 - 还原 `tailwind.css` 中的两行全局规则（`::selection`、`:focus-visible`），并删除追加的内容块。
 
 不涉及数据库或接口改动。
+
+## v3.3 生产切换（2026-10-22）
+
+- `(opening)/opening/layout.tsx` 改用 `shell/opening-shell-v3.tsx`：v3 AppShell + StatusToastProvider，保留复习计数、账户菜单（专注/退出）、⌘K 命令面板、⌘J 学习助手抽屉（右侧浮动玻璃面板）、引用阅读器、连接/能力提示。专注改为用户主动进入，学习页不再自动隐藏导航。旧 `opening-shell.tsx` 暂留作回滚：layout 改回 `OpeningShell` 即可。
+- 页头：`PageHeader` 标题直接放进顶栏左上（text-title，贴近顶部与左缘），不再单独占大标题区；旧 `design/ui.tsx` 的 `PageHeading` 委托给它（≤36 字的说明在标题旁一行显示，更长的在顶栏下方一行小字），所有用 PageHeading 的旧页面同时生效。今日、课程学习台、对话、考前练习、AI 记忆页的手写页头已改。
+- 旧组件迁移层：`[data-ui="v3"]` 内覆盖 Tailwind `--text-sm…3xl`、`--radius-sm…2xl/card`（约 -15%，最小 12px；圆角放大）；`@aistudy/ui` 控件高度读 `--control-h`（缺省 44px），按钮胶囊化；外观属性同时写到 `<html>`，body 下的 Radix 弹层/抽屉也读得到外观层变量。`glass` 在外观层之外回退为实色表面。
+- 主区 `<main>` 成为滚动根（`data-scroll-root`），旧页面的粘顶页头与 v3 页面自带滚动区都可用。
+- 设置 → 外观与阅读：新增材质 / 密度 / 圆角（水合后显示）。
