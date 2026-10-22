@@ -8,11 +8,33 @@ import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { openAssistantDrawer } from "../assistant/assistant-entry";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
-import { AppShell } from "../v3/shell/app-shell";
+import { AppShell, type ShellNav } from "../v3/shell/app-shell";
+import { FEATURES, type Feature } from "../v3/shell/features";
+import { navigationIsActive, openingNavigation } from "./navigation";
 import { StatusToastProvider } from "../v3/ui/toast";
 import { ui } from "../v3/ui/controls";
 import { OpeningAccountMenu } from "./account-menu";
 import { ConnectionNotice } from "./connection-notice";
+
+const ICONS: Record<string, Feature["icon"]> = { today: "start", courses: "courses", assistant: "assistant", library: "library" };
+const feature = (id: string) => FEATURES.find(item => item.id === id)!;
+const TOOLS: Feature[] = [feature("review"), feature("sprint"), feature("cards"), feature("search")];
+const exact = (item: Feature, pathname: string) => pathname === item.route || pathname.startsWith(`${item.route}/`);
+
+/** 生产导航沿用既有四个入口（今日/课程/助理/资料）与无障碍名称；学习工具只在桌面侧栏。每个路径只高亮一项。 */
+const OPENING_NAV: ShellNav = {
+  label: "学习工作台导航",
+  mobileLabel: "学习工作台导航（移动端）",
+  core: openingNavigation().map(item => ({ id: item.icon, route: item.href, label: item.label, icon: ICONS[item.icon] ?? "start", placement: "core", depth: 0, layout: "list", source: "features/opening/shell/navigation" })),
+  tools: TOOLS,
+  system: [feature("settings")],
+  isActive: (item, pathname) => {
+    const tool = TOOLS.find(candidate => exact(candidate, pathname));
+    if (item.placement === "tool" || item.id === "settings") return exact(item, pathname);
+    if (tool || pathname.startsWith("/opening/settings")) return false;
+    return navigationIsActive(item.route, pathname);
+  },
+};
 
 /**
  * 生产壳层（UI v3）：v3 AppShell 负责导航、外观层与页面过渡；这里只接业务数据与全局能力：
@@ -84,22 +106,17 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
     finally { setLogoutPending(false); }
   }
 
-  const askButton = (
-    <button type="button" onClick={() => openAssistantDrawer()} title="学习助手 (Ctrl / ⌘ J)"
-      className="flex min-h-(--control-h) w-full items-center gap-0 rounded-pill bg-linear-to-r from-ai-1/12 via-ai-2/10 to-ai-3/12 text-ui font-medium text-text transition-[background-color,transform] duration-(--duration-micro) hover:from-ai-1/20 hover:to-ai-3/20 active:scale-[0.98]">
-      <span className="grid w-12 shrink-0 justify-items-center text-ai-2"><Sparkles size={17} aria-hidden="true" /></span>
-      <span className="truncate in-data-[compact=true]:sr-only">问 AI</span>
-    </button>
-  );
+  const accountMenu = <OpeningAccountMenu userLabel={userLabel} pendingCount={pendingCount} focusMode={focusMode} onToggleFocus={toggleFocus} onLogout={logout} logoutPending={logoutPending} />;
 
   return (
     <StatusToastProvider>
       <AppShell
         counts={pendingCount ? { review: pendingCount } : {}}
         hideNav={focusMode}
-        navExtra={askButton}
+        nav={OPENING_NAV}
+        mobileTrailing={accountMenu}
         account={<div className="flex items-center gap-2 px-1.5 py-1">
-          <OpeningAccountMenu userLabel={userLabel} pendingCount={pendingCount} focusMode={focusMode} onToggleFocus={toggleFocus} onLogout={logout} logoutPending={logoutPending} />
+          {accountMenu}
           <span className="truncate text-meta text-text-2 in-data-[compact=true]:sr-only">{userLabel}</span>
         </div>}
         mobileMenuExtra={<div className="grid gap-1">
@@ -114,7 +131,10 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
         </>}>
         {children}
       </AppShell>
-      {focusMode ? <button type="button" onClick={toggleFocus} className="fixed right-3 top-3 z-40 inline-flex h-(--control-h-sm) items-center gap-1.5 rounded-pill glass px-3 text-meta font-medium text-text"><Minimize2 size={14} aria-hidden="true" />退出专注</button> : null}
+      {focusMode ? <div className="fixed right-3 top-2 z-40 flex items-center gap-1 rounded-pill glass p-1">
+        <button type="button" onClick={toggleFocus} className="inline-flex h-(--control-h-sm) items-center gap-1.5 rounded-pill px-3 text-meta font-medium text-text hover:bg-text/5"><Minimize2 size={14} aria-hidden="true" />退出专注</button>
+        {accountMenu}
+      </div> : null}
       <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
       <Suspense fallback={null}><AssistantDrawer /></Suspense>
       <CitationReaderHost />

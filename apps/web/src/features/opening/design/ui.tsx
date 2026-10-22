@@ -4,7 +4,6 @@ import { ArrowUpRight, ClipboardCheck, Layers2, Link2, Notebook, Sun } from "luc
 
 import { ui, fieldClass } from "@aistudy/ui";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
-import { MobileHeaderTools } from "../v3/shell/app-shell";
 export { ui, tone, EmptyState, Skeleton, LoadingRows } from "@aistudy/ui";
 export { ErrorState as LoadError, ErrorState as ErrorNotice } from "@aistudy/ui";
 
@@ -21,7 +20,7 @@ export const panelClass = ui.panel;
 export function PageHeading({ title, description, action, actions }: { title: string; description?: ReactNode; action?: ReactNode; actions?: ReactNode }) {
   const long = typeof description === "string" && description.length > 36;
   return <>
-    <V3PageHeader title={title} fact={long ? undefined : description} action={action ?? actions} tools={<MobileHeaderTools />} />
+    <V3PageHeader title={title} fact={long ? undefined : description} action={action ?? actions} />
     {long ? <p className="max-w-3xl px-4 pb-1 text-xs leading-5 text-text-2 md:px-6">{description}</p> : null}
   </>;
 }

@@ -1,13 +1,14 @@
 import type { ReactNode } from "react";
 import { TransitionLink } from "../motion/view-transition";
 import { TopBar } from "./top-bar";
+import { ShellHeaderTools } from "./header-tools-slot";
 
 /**
  * 页头 = 顶栏：标题直接放在顶栏左侧、贴近顶部与左缘，不再单独占一块大标题区，把面积留给核心内容。
  * 一行：h1 + 可选一行事实 + 一个主操作 + 工具。滚动后顶栏变玻璃。
  * 有意不提供长 description：必要说明放在相关内容旁。sharedTitle 时标题承接来源行（共享元素过渡）。
  */
-export function PageHeader({ title, fact, action, tools, sharedTitle = false }: { title: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
+export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false }: { title: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
   return (
     <TopBar label={`${title} 顶栏`}
       title={
@@ -16,7 +17,7 @@ export function PageHeader({ title, fact, action, tools, sharedTitle = false }: 
           {fact ? <p className="truncate text-meta text-text-2">{fact}</p> : null}
         </div>
       }
-      actions={(action || tools) ? <>{action}{tools}</> : undefined} />
+      actions={<>{action}{tools}</>} />
   );
 }
 

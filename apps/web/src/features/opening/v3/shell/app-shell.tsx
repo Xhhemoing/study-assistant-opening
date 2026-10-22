@@ -7,9 +7,20 @@ import { Sheet } from "../ui/sheet";
 import { NAV_CORE, NAV_SYSTEM, NAV_TOOLS, activeNavId, featureHref, type Feature } from "./features";
 import { FEATURE_ICONS } from "./icons";
 import { useLayoutPref } from "./use-layout-pref";
+import { HeaderToolsSlot } from "./header-tools-slot";
 import { ui } from "../ui/controls";
 
 export type RecentThread = { id: string; title: string; href: string };
+
+/** 生产可覆盖的导航：入口、无障碍名称、激活判定。不传则用功能注册表的默认导航。 */
+export type ShellNav = {
+  label: string;
+  mobileLabel: string;
+  core: Feature[];
+  tools: Feature[];
+  system: Feature[];
+  isActive: (item: Feature, pathname: string) => boolean;
+};
 
 /** 手机「更多」抽屉底部的全局项（问 AI、账户），由 AppShell 提供给每页的 MobileHeaderTools */
 const MobileMenuExtra = createContext<ReactNode>(null);
@@ -31,6 +42,10 @@ type AppShellProps = {
   hideNav?: boolean;
   /** 手机「更多」抽屉底部的全局项 */
   mobileMenuExtra?: ReactNode;
+  /** 覆盖导航（生产沿用既有入口与无障碍名称） */
+  nav?: ShellNav;
+  /** 手机底栏末尾（如账户按钮） */
+  mobileTrailing?: ReactNode;
 };
 
 /**
@@ -39,9 +54,10 @@ type AppShellProps = {
  * 导航铺在柔和背景上，主区是一张圆角内容页；手机底栏为悬浮玻璃胶囊。
  * 动效：导航宽度 232↔72 过渡；激活底块带 view-transition-name，在入口间滑动；主区参与页面过渡。
  */
-export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null }: AppShellProps) {
+export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null, nav, mobileTrailing }: AppShellProps) {
   const pathname = usePathname() ?? "";
-  const active = activeNavId(pathname);
+  const activeId = activeNavId(pathname);
+  const isActive = (item: Feature) => nav ? nav.isActive(item, pathname) : activeId === item.id;
   const [pref, setPref] = useLayoutPref();
   const compact = pref.nav === "compact";
   // 外观属性同时写到 <html>：Radix 弹层、抽屉渲染在 body 下，也要读到外观层变量
@@ -52,21 +68,21 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
   }, [pref.skin, pref.density, pref.corner]);
 
   return (
-    <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}>
-    <div data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
+    <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
+    <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
-      <nav aria-label="主导航" data-compact={compact} hidden={hideNav}
+      <nav aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
         className="hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
         <button type="button" onClick={() => setPref({ nav: compact ? "expanded" : "compact" })}
           aria-label={compact ? "展开导航" : "收起导航"} aria-expanded={!compact}
           className={`${ui.icon} mx-4 mb-2`}>
           <PanelLeft size={18} aria-hidden="true" />
         </button>
-        <NavGroup items={NAV_CORE} active={active} compact={compact} counts={counts} />
+        <NavGroup items={nav?.core ?? NAV_CORE} isActive={isActive} compact={compact} counts={counts} />
         {navExtra ? <div className="mt-1 px-2">{navExtra}</div> : null}
-        <NavGroup items={NAV_TOOLS} active={active} compact={compact} counts={counts} divided />
+        <NavGroup items={nav?.tools ?? NAV_TOOLS} isActive={isActive} compact={compact} counts={counts} divided />
         <section aria-label="最近对话" data-hidden={compact || recent.length === 0} inert={compact}
           className="mt-4 min-h-0 flex-1 overflow-y-auto px-2 pt-1 transition-opacity duration-(--duration-state) data-[hidden=true]:pointer-events-none data-[hidden=true]:opacity-0">
           <p className="px-3 pb-1 text-cap text-text-3">最近</p>
@@ -75,7 +91,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           ))}</ul>
           {recent.length > 0 && <TransitionLink href={featureHref("assistant")} className="block whitespace-nowrap px-3 py-2 text-meta text-text-2 hover:text-text">全部对话</TransitionLink>}
         </section>
-        <div className="mt-auto"><NavGroup items={NAV_SYSTEM} active={active} compact={compact} counts={counts} />{account ? <div className="mt-1 px-2">{account}</div> : null}</div>
+        <div className="mt-auto"><NavGroup items={nav?.system ?? NAV_SYSTEM} isActive={isActive} compact={compact} counts={counts} />{account ? <div className="mt-1 px-2">{account}</div> : null}</div>
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -83,19 +99,19 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           {banner}
           <div className="flex-1">{children}</div>
         </main>
-        {!hideNav && <MobileTabBar active={active} counts={counts} />}
+        {!hideNav && <MobileTabBar items={nav?.core ?? NAV_CORE} label={nav?.mobileLabel ?? "主导航"} isActive={isActive} counts={counts} trailing={mobileTrailing} />}
       </div>
     </div>
-    </MobileMenuExtra.Provider></InShell.Provider>
+    </HeaderToolsSlot.Provider></MobileMenuExtra.Provider></InShell.Provider>
   );
 }
 
-function NavGroup({ items, active, compact, counts, divided = false }: { items: Feature[]; active: string | null; compact: boolean; counts: Partial<Record<string, number>>; divided?: boolean }) {
+function NavGroup({ items, isActive, compact, counts, divided = false }: { items: Feature[]; isActive: (item: Feature) => boolean; compact: boolean; counts: Partial<Record<string, number>>; divided?: boolean }) {
   return (
     <ul className={divided ? "mt-4 space-y-0.5" : "space-y-0.5"}>
       {items.map(item => {
         const Icon = FEATURE_ICONS[item.icon];
-        const current = active === item.id;
+        const current = isActive(item);
         const count = counts[item.id];
         return (
           <li key={item.id} className="px-2">
@@ -116,12 +132,13 @@ function NavGroup({ items, active, compact, counts, divided = false }: { items: 
   );
 }
 
-function MobileTabBar({ active, counts }: { active: string | null; counts: Partial<Record<string, number>> }) {
+function MobileTabBar({ items, label, isActive, counts, trailing }: { items: Feature[]; label: string; isActive: (item: Feature) => boolean; counts: Partial<Record<string, number>>; trailing?: ReactNode }) {
   return (
-    <nav aria-label="主导航" className="mx-3 mb-[calc(8px+env(safe-area-inset-bottom))] mt-1 grid grid-cols-4 rounded-pill glass p-1 [view-transition-name:app-tabbar] md:hidden">
-      {NAV_CORE.map(item => {
+    <div className="mx-3 mb-[calc(8px+env(safe-area-inset-bottom))] mt-1 flex items-center gap-1 rounded-pill glass p-1 [view-transition-name:app-tabbar] md:hidden">
+    <nav aria-label={label} className="grid min-w-0 flex-1 grid-flow-col auto-cols-fr">
+      {items.map(item => {
         const Icon = FEATURE_ICONS[item.icon];
-        const current = active === item.id;
+        const current = isActive(item);
         return (
           <TransitionLink key={item.id} href={item.route} aria-current={current ? "page" : undefined}
             className="relative flex h-12 flex-col items-center justify-center gap-0.5 rounded-pill text-cap text-text-2 transition-transform duration-(--duration-micro) active:scale-95 aria-[current=page]:font-medium aria-[current=page]:text-text">
@@ -132,6 +149,8 @@ function MobileTabBar({ active, counts }: { active: string | null; counts: Parti
         );
       })}
     </nav>
+    {trailing ? <div className="shrink-0 pr-0.5">{trailing}</div> : null}
+    </div>
   );
 }
 
