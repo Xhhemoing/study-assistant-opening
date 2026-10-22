@@ -225,7 +225,8 @@ export async function readOpeningBackupTableRows(
       v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.evaluation_spec,v.teaching_revision_id,v.teaching_block_id,v.created_at
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
       AND (v.source_id IS NULL OR ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)})
-      AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`NULL::uuid`)}
+      AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`(SELECT original.session_id FROM opening_problem_refs original
+        WHERE original.problem_id=v.problem_id AND original.workspace_id=v.workspace_id)`)}
       AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity WHERE backup_activity.id=v.activity_id
         AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
         AND ${cleanUuidSources(tx,id,tx`backup_activity.source_ids`)}) ORDER BY v.id`);

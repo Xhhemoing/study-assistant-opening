@@ -76,7 +76,7 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
     } else if (mode === "ordinary") {
       if (input?.matrixExercise || input?.spanExercise || input?.teachingBlock) return null;
       if (start.sessionInput && start.sessionInput.skillLabel !== draft.fields.skillLabel.trim()) return null;
-      if (input?.problem && (input.problem.sourceId !== draft.fields.sourceId || input.problem.stemSnapshot !== draft.fields.stem.trim())) return null;
+      if (input?.problem && ((input.problem.sourceId ?? "") !== draft.fields.sourceId || input.problem.stemSnapshot !== draft.fields.stem.trim())) return null;
       if (retestId !== null && ((input && (input.requirementKey ?? null) !== requirementKey) || (start.sessionInput && (start.sessionInput.requirementKey ?? null) !== requirementKey))) return null;
     } else return null;
   }

@@ -32,7 +32,7 @@ describe("opening worker runtime guards", () => {
   });
 
   it("exposes only supported handlers and rejects unknown kinds", async () => {
-    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "index-source", "parse", "parse-media", "remind", "retest", "tutor", "tutor-metadata"]);
+    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "index-source", "parse", "parse-media", "recognize-photo-question", "remind", "retest", "tutor", "tutor-metadata"]);
     await expect(handlers.parse({} as never, {})).rejects.toThrow("not implemented until I02/T02");
     expect(() => handlerForKind("unknown")).toThrow("unknown opening job kind");
   });
@@ -90,6 +90,18 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     };
     expect(await runJob(repository, "job-1", async () => ({ ok: true }))).toBe(true);
     expect(finished).toEqual(["succeeded"]);
+  });
+
+  it.each([
+    new BudgetReplayError({ kind: "unknown", reservationId: "r1", pendingReconcileCents: 1, reconciled: false }),
+    new BudgetReplayError({ kind: "in_flight", reservationId: "r1" }),
+    new OpeningProviderError("PROVIDER_ABORTED", "response interrupted", false, true),
+    new OpeningProviderError("PROVIDER_RESPONSE", "response incomplete", false, true),
+  ])("keeps the recognition job unknown when its ledger cannot confirm completion: %s", async error => {
+    const states: string[] = [];
+    await runJob({ claim: async () => baseJob({ kind: "recognize-photo-question" }),
+      finish: async (_id, state) => { states.push(state); return true; } }, "job-1", async () => { throw error; });
+    expect(states).toEqual(["outcome_unknown"]);
   });
 
   it("propagates a pre-dispatch epoch lookup failure without running or finishing the job", async () => {

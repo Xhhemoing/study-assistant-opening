@@ -15,9 +15,10 @@ import { AssistantSession } from "../assistant/assistant-session";
 import { assistantEntry } from "../assistant/assistant-entry";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
+import { PhotoRecognitionEditor } from "./photo-recognition-editor";
 import { useWorkspaceLayout } from "../shell/workspace-layout-context";
 
-const draftSchema = z.object({ sourceVersion: z.number().int().positive(), stem: z.string().max(2000), confirmed: z.boolean() }).strict();
+const draftSchema = z.object({ sourceVersion: z.number().int().nonnegative(), stem: z.string().max(2000), confirmed: z.boolean() }).strict();
 const storageKey = (sourceId: string) => `study:photo-practice:v1:${sourceId}`;
 
 type PhotoPracticeProps = { sourceId: string; conversationId?: string; conversationError?: string };
@@ -124,12 +125,15 @@ function PhotoPracticeContent({ sourceId, conversationId, conversationError }: P
         initialFocus={{ skillLabel: "随手练习", requirementKey: null }}
         initialProblem={{ sourceId, sourceVersion: prepared.sourceVersion, stem }} onRecorded={() => {}} onAskAttempt={askAttempt} />
         : <form className="space-y-3" onSubmit={event => { event.preventDefault(); void begin(); }}>
+          <PhotoRecognitionEditor key={`${source.id}:${source.version}`} sourceId={source.id} sourceVersion={source.version} disabled={pending || loading} onUse={proposal => {
+            setStem(proposal.stem); save({ sourceVersion: source.version, stem: proposal.stem, confirmed: false });
+          }} />
           <label className="block space-y-2 text-sm text-text">题干
             <textarea value={stem} maxLength={2000} rows={5} disabled={pending || loading} className={ui.input} onChange={event => {
               setStem(event.target.value); save({ sourceVersion: source.version, stem: event.target.value, confirmed: false });
             }} />
           </label>
-          <p className="text-xs leading-6 text-text-2">对照题图填写完整题干。这是题目；我的解答会在开始后单独填写或上传。</p>
+          <p className="text-xs leading-6 text-text-2">对照题图核对识别结果，或手动填写完整题干。这是题目；我的解答会在开始后单独填写或上传。</p>
           <button className={ui.primary} disabled={loading || pending || !stem.trim()}>{pending ? "正在准备…" : "确认题干，开始作答"}</button>
         </form>}</ContentBlock>
     </ContentGrid> : null}

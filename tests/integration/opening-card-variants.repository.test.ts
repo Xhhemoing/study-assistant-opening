@@ -12,6 +12,19 @@ const proposal = { prompt: "计算分数加法：2/3 + 1/3 等于多少？", ref
   rubric: ["保留分母", "相加分子", "约分"], hints: { direction: "比较分母。", concept: "同分母分数相加。", firstStep: "把分子相加。" }, estimatedMinutes: 2 };
 const repo = () => createOpeningCardVariantRepository(f.sql);
 
+it("rejects a wrong arithmetic variant before publishing content or changing FSRS", async () => {
+  const base = await learningAttemptFixture(f);
+  const card = await createCardRepository(f.sql).createCard({ ...f.scope, courseId: base.courseId,
+    reviewKind: "question", front: "1/2 + 1/2?", back: "同分母相加" });
+  const begun = await repo().begin(f.scope, card.id);
+  await expect(repo().complete(f.scope, card.id, begun.review.activity.id,
+    { ...proposal, prompt: "计算 1/3+1/6", referenceAnswer: "1" })).rejects.toMatchObject({ code: "VALIDATION" });
+  const current = await repo().read(f.scope, card.id, begun.review.activity.id);
+  expect(current.clientInit).toBeNull();
+  expect(current.activity.contentVersion).toBe(0);
+  expect(await f.sql`SELECT id FROM learning_events WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+
 async function seed(assistance: "independent" | "hinted" = "independent") {
   const base = await learningAttemptFixture(f), cards = createCardRepository(f.sql);
   const card = await cards.createCard({ ...f.scope, courseId: base.courseId, reviewKind: "question", skillLabel: "fractions", front: "1/2 + 1/2?", back: "同分母相加" });
@@ -31,6 +44,10 @@ async function seed(assistance: "independent" | "hinted" = "independent") {
 
 it("restores the same hidden-answer variation and saves one FSRS event from an accepted answer", async () => {
   const s = await seed();
+  const context = await createOpeningAiGradingRepository(f.sql).context(f.scope, { observationId: s.original.id });
+  expect(context.referenceText).toContain(proposal.referenceAnswer);
+  expect(context.referenceText).toContain("评分要点");
+  for (const point of proposal.rubric) expect(context.referenceText).toContain(point);
   expect((await repo().begin(f.scope, s.card.id)).review.activity.id).toBe(s.ready.activity.id);
   expect(s.ready.clientInit!.blocks.find(block => block.role === "answer_key")!.content).toBeNull();
   await expect(s.cards.grade({ ...f.scope, cardId: s.card.id, grade: "easy", occurredAt: new Date().toISOString(), idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });

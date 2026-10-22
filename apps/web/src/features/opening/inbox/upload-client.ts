@@ -1,5 +1,6 @@
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
 import { resolveUploadMime, unsupportedUploadMessage } from "./upload-state";
+import { uploadErrorMessage } from "./upload-error";
 
 export type LocalUploadFile = {
   name: string;
@@ -11,6 +12,7 @@ export type UploadByteProgress = {
   onBytes?: (loaded: number, total: number) => void;
   resumeSourceId?: string;
   ticket?: UploadTicket;
+  completionPending?: boolean;
 };
 
 export type UploadRejected = {
@@ -18,6 +20,7 @@ export type UploadRejected = {
   sourceId?: string;
   ticket?: UploadTicket;
   keptLocal: true;
+  completionPending?: boolean;
   message: string;
 };
 
@@ -42,6 +45,11 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function rejectionDetail(error: unknown): string {
+  const message = uploadErrorMessage(error, "");
+  return message ? `（${message}）` : "";
+}
+
 /** begin → private PUT → complete. Byte callbacks are upload progress only. */
 export function createUploadClient(deps: UploadClientDeps) {
   return {
@@ -49,6 +57,14 @@ export function createUploadClient(deps: UploadClientDeps) {
       file: LocalUploadFile,
       progress: UploadByteProgress = {},
     ): Promise<SourceRecord | UploadRejected> {
+      if (progress.resumeSourceId && progress.completionPending) {
+        try { return await deps.complete(progress.resumeSourceId); }
+        catch (error) {
+          return { phase: "interrupted", sourceId: progress.resumeSourceId, ticket: progress.ticket,
+            completionPending: true, keptLocal: true,
+            message: `上传已暂存，但保存确认失败，仍可重试。${rejectionDetail(error)}` };
+        }
+      }
       const mime = resolveUploadMime({ name: file.name, type: file.type });
       if (!mime) {
         return {
@@ -72,14 +88,15 @@ export function createUploadClient(deps: UploadClientDeps) {
             sha256: await sha256Hex(file.bytes),
           });
         }
-      } catch {
+      } catch (error) {
+        const detail = rejectionDetail(error);
         return {
           phase: "interrupted",
           sourceId: progress.resumeSourceId,
           keptLocal: true,
           message: progress.resumeSourceId
-            ? "上传票据刷新失败，原件仍在本地。未创建第二份材料。"
-            : "上传准备失败，原件仍在本地。",
+            ? `上传票据刷新失败，原件仍在本地。未创建第二份材料。${detail}`
+            : `上传准备失败，原件仍在本地。${detail}`,
         };
       }
       if (!ticket || (progress.resumeSourceId && ticket.source.id !== progress.resumeSourceId)) {
@@ -95,10 +112,7 @@ export function createUploadClient(deps: UploadClientDeps) {
           progress.onBytes?.(loaded, file.bytes.byteLength);
         }, mime);
       } catch (error) {
-        const detail =
-          error instanceof Error && error.message.trim()
-            ? `（${error.message}）`
-            : "";
+        const detail = rejectionDetail(error);
         return {
           phase: "interrupted",
           sourceId: ticket.source.id,
@@ -109,13 +123,14 @@ export function createUploadClient(deps: UploadClientDeps) {
       }
       try {
         return await deps.complete(ticket.source.id);
-      } catch {
+      } catch (error) {
         return {
           phase: "interrupted",
           sourceId: ticket.source.id,
           ticket,
           keptLocal: true,
-          message: "上传已暂存，但保存确认失败，仍可重试。",
+          completionPending: true,
+          message: `上传已暂存，但保存确认失败，仍可重试。${rejectionDetail(error)}`,
         };
       }
     },

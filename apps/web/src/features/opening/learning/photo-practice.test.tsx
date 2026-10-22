@@ -6,6 +6,7 @@ import type { SourceRecord } from "@aistudy/contracts";
 const api = vi.hoisted(() => ({ listSources: vi.fn(), prepare: vi.fn(), attempt: vi.fn(), original: vi.fn(), tutoring: vi.fn() }));
 vi.mock("../client/api", async original => ({ ...await original<typeof import("../client/api")>(), createOpeningApi: () => api }));
 vi.mock("./photo-practice-client", () => ({ preparePhotoPractice: api.prepare }));
+vi.mock("./photo-recognition-editor", () => ({ PhotoRecognitionEditor: () => createElement("section", { "aria-label": "题干识别" }, "识别题干") }));
 vi.mock("./attempt-form", () => ({ LearningAttemptForm: (props: unknown) => { api.attempt(props); return createElement("div", null, "我的解答"); } }));
 vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: (props: unknown) => { api.original(props); return createElement("div", null, "原对话"); } }));
 vi.mock("../assistant/assistant-session", () => ({ AssistantSession: (props: unknown) => { api.tutoring(props); return createElement("div", null, "本题辅导"); } }));
@@ -45,6 +46,15 @@ it("restores confirmed question text through the idempotent service while preser
   await render();
   expect(api.prepare).toHaveBeenCalledExactlyOnceWith({ sourceId, sourceVersion: 2 });
   expect(api.attempt).toHaveBeenLastCalledWith(expect.objectContaining({ initialProblem: { sourceId, sourceVersion: 2, stem: "原题干" } }));
+});
+
+it("restores an initial uploaded image at version zero without dropping the confirmed stem", async () => {
+  api.listSources.mockResolvedValue([{ ...source, version: 0 }]);
+  api.prepare.mockResolvedValue({ sourceId, sourceVersion: 0, courseId });
+  window.sessionStorage.setItem(`study:photo-practice:v1:${sourceId}`, JSON.stringify({ sourceVersion: 0, stem: "首版题干", confirmed: true }));
+  await render();
+  expect(api.prepare).toHaveBeenCalledExactlyOnceWith({ sourceId, sourceVersion: 0 });
+  expect(api.attempt).toHaveBeenLastCalledWith(expect.objectContaining({ initialProblem: { sourceId, sourceVersion: 0, stem: "首版题干" } }));
 });
 
 it("keeps the old text and requires new confirmation when the uploaded image changes", async () => {

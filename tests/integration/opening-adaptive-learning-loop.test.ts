@@ -146,12 +146,15 @@ describe("adaptive learning loop with real evidence", () => {
     const course = await seedCourse();
     const wrong = await submitVerifiedError(course);
     const goalContext = resolveGoalLearningContext({ targetDate: null, weeklyMinutes: 300, learningMode: "exam" }, day);
-    const { activityId } = await storeTeachingFocus(course, wrong.id, { goalContext });
+    const { activityId } = await storeTeachingFocus(course, wrong.id, { goalContext,
+      recentErrors: [{ observationId: wrong.id, label: "旧题错因", feedback: "旧版本的错误解释", source: "ai_feedback" }],
+    });
     await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
     await backupRows(fixture.sql, fixture.scope).chunk(course.sourceId, 2);
     const focus = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
     expect(focus.learnerFocus).toMatchObject({ goalContext, activityKind: "diagnose", focusObservationId: null, recentAssistance: [] });
     expect(focus.focusAttempt).toBeUndefined();
+    expect(focus.learnerFocus?.recentErrors).toBeUndefined();
   });
 
   it.each(["transfer_check", "reduced_help_practice"] as const)("rechecks current evidence for %s even without a focus observation", async (activityKind) => {
@@ -194,6 +197,30 @@ describe("adaptive learning loop with real evidence", () => {
     expect(await readOpeningTeachingCompilerFocus(fixture.sql, {
       workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.otherScope.ownerUserId,
     }, activityId)).toEqual({});
+  });
+
+  it("replaces queued error teaching after a later independent answer, keeping the goal", async () => {
+    const course = await seedCourse();
+    const wrong = await submitVerifiedError(course);
+    const goalContext = resolveGoalLearningContext({ targetDate: null, weeklyMinutes: 300, learningMode: "exam" }, day);
+    const { activityId } = await storeTeachingFocus(course, wrong.id, { goalContext });
+    const right = await course.submit(await course.start());
+    expect(right.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "yes" });
+    const current = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
+    expect(current.learnerFocus).toMatchObject({ activityKind: "transfer_check", focusObservationId: null, goalContext });
+    expect(current.focusAttempt).toBeUndefined();
+    expect(current.learnerFocus?.recentErrors).toBeUndefined();
+  });
+
+  it("uses the newest wrong answer and its pinned question instead of the queued error", async () => {
+    const course = await seedCourse();
+    const first = await submitVerifiedError(course);
+    const { activityId } = await storeTeachingFocus(course, first.id);
+    const latest = await course.submit(await course.start(), { answer: "[3,2]" });
+    const [version] = await fixture.sql`SELECT stem_snapshot FROM opening_learning_item_versions WHERE id=${latest.itemVersionId!}`;
+    const current = await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, activityId);
+    expect(current.learnerFocus).toMatchObject({ activityKind: "targeted_explain", focusObservationId: latest.id });
+    expect(current.focusAttempt).toEqual({ question: version!.stem_snapshot, answer: "[3,2]" });
   });
 
   it.each([null, matrixRequirement])("requires a matching canonical requirement before compiling an error (%s)", async (requirementKey) => {

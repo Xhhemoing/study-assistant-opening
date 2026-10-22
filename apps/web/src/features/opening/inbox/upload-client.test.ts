@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import { createUploadClient, sha256Hex } from "./upload-client";
+import { OpeningApiError } from "../client/api";
 
 const ISO = "2026-09-21T00:00:00.000Z";
 const ID = "11111111-1111-4111-8111-111111111111";
@@ -184,4 +185,52 @@ describe("createUploadClient", () => {
     ).resolves.toMatchObject({ phase: "unsupported", message: "请导出为 JPG 后上传" });
     expect(begin).not.toHaveBeenCalled();
   });
+});
+
+
+it("shows an actionable server rejection from begin and refresh without a stack trace", async () => {
+  const begin = vi.fn(async () => { throw new OpeningApiError(400, "已达到材料数量上限，请删除旧材料后重试。\n    at internalFunction (/server/private.ts:12:3)", "VALIDATION"); });
+  const refreshTicket = vi.fn(async () => { throw new OpeningApiError(409, "上传凭证已过期，请重新选择文件。", "CONFLICT"); });
+  const client = createUploadClient({ begin, refreshTicket, complete: vi.fn(), put: vi.fn() });
+  const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
+  const first = await client.uploadFile(file);
+  expect(first).toMatchObject({ phase: "interrupted", keptLocal: true, message: expect.stringContaining("已达到材料数量上限") });
+  expect("message" in first && first.message).not.toContain("internalFunction");
+  const retry = await client.uploadFile(file, { resumeSourceId: ID, ticket: ticket() });
+  expect(retry).toMatchObject({ sourceId: ID, message: expect.stringContaining("上传凭证已过期") });
+  expect(begin).toHaveBeenCalledOnce();
+});
+
+it("keeps internal server failures generic and preserves completion rejection details", async () => {
+  const begin = vi.fn(async () => { throw new OpeningApiError(500, "database password=private stack", "INTERNAL"); });
+  const client = createUploadClient({ begin, complete: vi.fn(), put: vi.fn() });
+  const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
+  expect(await client.uploadFile(file)).toMatchObject({ message: "上传准备失败，原件仍在本地。" });
+  const complete = vi.fn(async () => { throw new OpeningApiError(400, "文件内容与声明的格式不一致，请检查原文件。", "VALIDATION"); });
+  const result = await createUploadClient({ begin: async () => ticket(), complete, put: async () => undefined }).uploadFile(file);
+  expect(result).toMatchObject({ sourceId: ID, ticket: ticket(), message: expect.stringContaining("文件内容与声明的格式不一致") });
+});
+
+it("does not expose unexpected private PUT exceptions", async () => {
+  const client = createUploadClient({ begin: async () => ticket(), complete: vi.fn(), put: async () => { throw new Error("https://private.example?token=secret\n at internalPut /secret"); } });
+  const result = await client.uploadFile({ name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() });
+  expect(result).toMatchObject({ phase: "interrupted", message: "上传中断，原件仍在本地。未标记为已上传。" });
+});
+
+it("reconciles a lost completion response without refreshing or uploading a second time", async () => {
+  const uploaded = source({ uploadState: "uploaded" });
+  const complete = vi.fn().mockRejectedValueOnce(new Error("response lost after commit")).mockResolvedValueOnce(uploaded);
+  const begin = vi.fn(async () => ticket()), put = vi.fn(async () => undefined);
+  const refreshTicket = vi.fn(async () => { throw new OpeningApiError(409, "Upload is no longer pending"); });
+  const client = createUploadClient({ begin, complete, put, refreshTicket });
+  const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
+  const interrupted = await client.uploadFile(file);
+  expect(interrupted).toMatchObject({ phase: "interrupted", completionPending: true, sourceId: ID });
+  if (!("ticket" in interrupted)) throw new Error("missing recovery ticket");
+  const recovered = await client.uploadFile(file, { resumeSourceId: ID, ticket: interrupted.ticket, completionPending: true });
+  expect(recovered).toEqual(uploaded);
+  expect(complete).toHaveBeenCalledTimes(2);
+  expect(begin).toHaveBeenCalledOnce();
+  expect(put).toHaveBeenCalledOnce();
+  expect(refreshTicket).not.toHaveBeenCalled();
 });

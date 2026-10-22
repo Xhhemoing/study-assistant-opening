@@ -17,7 +17,11 @@ export function canClaimJob(status: string): boolean {
   return status === "queued";
 }
 
-export function isUnknownOutcome(error: unknown): boolean {
+export function isUnknownOutcome(error: unknown, kind?: string): boolean {
+  if (kind === "recognize-photo-question") {
+    if (isBudgetReplayError(error)) return error.disposition.kind === "unknown" || error.disposition.kind === "in_flight";
+    if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "markUnknown";
+  }
   return error instanceof OpeningProviderError && UNKNOWN_OUTCOME_CODES.has(error.code);
 }
 
@@ -74,7 +78,7 @@ export async function runJob(
         }
         return repository.finish(job.id, "succeeded", result, job.claimToken);
       } catch (error) {
-        const state = isUnknownOutcome(error) ? "outcome_unknown" : "failed";
+        const state = isUnknownOutcome(error, job.kind) ? "outcome_unknown" : "failed";
         return repository.finish(job.id, state, {
           error: error instanceof Error ? error.message : "job failed",
           ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),

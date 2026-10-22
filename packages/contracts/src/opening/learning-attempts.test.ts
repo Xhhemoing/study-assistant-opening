@@ -69,3 +69,27 @@ it("accepts a canonical classroom context without pretending that its revision i
   expect(learningAttemptContextReadSchema.safeParse({ attempt, deliveredAssistance: "none" }).success).toBe(true);
   expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, requirementKey: "span:v1" }, deliveredAssistance: "none" }).success).toBe(false);
 });
+
+it("accepts pasted question text without material and refuses fabricated material locations", () => {
+  const problem = { stemSnapshot: "  计算 17 × 23  ", artifactKind: "reference_item" };
+  const input = { sessionId, clientKey: "pasted-question", problem };
+  expect(learningAttemptCreateInputSchema.parse(input).problem).toEqual({ ...problem, stemSnapshot: "计算 17 × 23" });
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problem: { ...problem, chunkId: sessionId } }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problem: { ...problem, physicalPage: 1 } }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problem: { ...problem, stemSnapshot: " " } }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problem: { ...problem, stemSnapshot: "x".repeat(2001) } }).success).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ ...input, problemId: sessionId }).success).toBe(false);
+});
+
+it("restores a sealed pasted question with no fabricated source or teaching block", () => {
+  const attempt = { ...contextAttempt, stemSnapshot: "计算 17 × 23", sourceIds: [], sourceVersions: {}, requirementKey: null,
+    contextAnchor: { ...contextAttempt.contextAnchor, sourceId: null, sourceVersion: null } };
+  expect(learningAttemptContextReadSchema.safeParse({ attempt, deliveredAssistance: "none" }).success).toBe(true);
+  expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, stemSnapshot: undefined }, deliveredAssistance: "none" }).success).toBe(false);
+});
+
+it("reads saved question snapshots in database Unicode characters", () => {
+  const attempt = { ...contextAttempt, stemSnapshot: "𝑥".repeat(2000) };
+  expect(learningAttemptContextReadSchema.safeParse({ attempt, deliveredAssistance: "none" }).success).toBe(true);
+  expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, stemSnapshot: "𝑥".repeat(2001) }, deliveredAssistance: "none" }).success).toBe(false);
+});

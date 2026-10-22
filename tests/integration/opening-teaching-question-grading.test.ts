@@ -16,7 +16,7 @@ const answer = "两列线性无关，所以秩为 2。";
 const proposal: AiGradingProposal = { outcome: "correct", confidence: 0.93, questionMatch: true, feedback: answer,
   criteria: [{ label: "矩阵秩", verdict: "correct", feedback: "秩为2。" }] };
 
-async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction, misconceptions?: TeachingMisconception[]) {
+async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction, misconceptions?: TeachingMisconception[], referenceAnswer = answer) {
   const base = await learningAttemptFixture(fixture), sourceIds = withSource ? [base.sourceId] : [];
   const activity = await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope, {
     clientKey: randomUUID(), intentKind: "topic", intentSummary: "矩阵秩", courseId: base.courseId, sourceIds, createIntent: {},
@@ -24,7 +24,7 @@ async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。
   const content = createOpeningTeachingContentRepository(fixture.sql), blockId = randomUUID(), answerId = randomUUID();
   const unit = await content.createUnit(fixture.scope, { title: "矩阵秩", blocks: [
     { id: blockId, type: "prompt", content: { text: prompt, ...(interaction ? { interaction } : {}) } },
-    { id: answerId, type: "answer_key", content: { answer, rubric: ["列向量线性无关", "秩等于2"], hidden: true,
+    { id: answerId, type: "answer_key", content: { answer: referenceAnswer, rubric: ["列向量线性无关", "秩等于2"], hidden: true,
       ...(misconceptions ? { misconceptions } : {}),
       hints: { direction: "先考察列向量。", concept: "秩是线性无关列的最大数量。", firstStep: "写出第一列 (1,0)。" } } },
   ] });
@@ -43,6 +43,12 @@ async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。
   const grader = createOpeningAiGradingRepository(fixture.sql);
   return { ...base, learning, activity, content, unit, blockId, answerId, sourceIds, session, request, start, submit, service, grader };
 }
+
+it("rejects a saved arithmetic item with a wrong reference before recording an attempt", async () => {
+  const f = await seed(false, "计算 1/2+1/2", undefined, undefined, "2");
+  await expect(f.start()).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE session_id=${f.session.id}`).toHaveLength(0);
+});
 
 it.each([false, true])("grades a canonical classroom question and preserves corrections (materials=%s)", async withSource => {
   const f = await seed(withSource), attempt = await f.start(), original = await f.submit(attempt);

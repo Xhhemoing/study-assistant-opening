@@ -283,3 +283,4 @@ export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, typ
 export { createOpeningTutorLearnerContextRepository } from "./repositories/opening-tutor-learner-context";
 
 export { gradeCardVariant } from "./repositories/opening-card-variant-grade";
+export { createOpeningPhotoRecognitionRepository } from "./repositories/opening-photo-recognition";

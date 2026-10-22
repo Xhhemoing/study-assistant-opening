@@ -67,6 +67,7 @@ const modelCatalogExample: TemplateLine = {
 
 export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "NODE_ENV", group: "runtime", doc: "development | test | production.", consumers: [...both, "compose"], kind: "enum", enumValues: ["development", "test", "production"], secret: false, dev: { value: "development" }, docker: { value: "production" } },
+  { name: "WORKER_ROLE", group: "runtime", doc: "Worker consumers: all (default), learning (no document/media parsing), or parser (document/media parsing only). all/parser require parser startup checks.", consumers: ["worker"], kind: "enum", enumValues: ["all", "learning", "parser"], secret: false, dev: { value: "all" }, docker: { value: "all" } },
   { name: "PUBLIC_BASE_URL", group: "runtime", doc: "Public web origin; cookie-auth Origin checks use it.", consumers: ["web"], kind: "url", secret: false, required: "always", dev: { value: "http://localhost:3000" }, docker: { value: "https://REPLACE_ME.example" } },
 
   { name: "OPENING_POSTGRES_USER", group: "compose", doc: "Compose Postgres user.", consumers: ["compose"], kind: "string", secret: false, docker: { value: "REPLACE_ME_pg_user" } },

@@ -27,6 +27,7 @@ import { teachingPartialHintsSchema, teachingMisconceptionsSchema, teachingStart
   type TeachingQuestionInteraction, type TeachingVectorDiagram } from "@aistudy/contracts";
 import {
   assertOutlineHonest,
+  checkArithmeticAnswer,
   normalizeBlockTypes,
   suggestPrerequisites,
   type TeachingOutline,
@@ -125,6 +126,14 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
   }
   if (!blocks.some((block) => block.type !== "prompt" && block.type !== "answer_key")) {
     throw new TeachingCompileOutputError("teaching compile output has no teaching block");
+  }
+  for (let index = 0; index < blocks.length - 1; index++) {
+    const question = blocks[index]!, answer = blocks[index + 1]!;
+    if (question.type === "prompt" && answer.type === "answer_key"
+      && (!question.interaction || question.interaction.kind === "numeric" && !question.interaction.unit)
+      && checkArithmeticAnswer(question.text, answer.text) === "incorrect") {
+      throw new TeachingCompileOutputError("arithmetic question and reference solution disagree");
+    }
   }
   const itemTitles = Array.isArray(value.itemTitles)
     ? value.itemTitles.filter((title): title is string => typeof title === "string" && title.trim().length > 0)

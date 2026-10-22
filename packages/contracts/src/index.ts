@@ -393,3 +393,7 @@ export * from "./opening/exam-integration";
 
 export * from "./opening/teaching-hints";
 export * from "./opening/course-exam";
+
+export { gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "./opening/grading-evaluation";
+export type { GradingEvaluationDataset, GradingEvaluationRun } from "./opening/grading-evaluation";
+export * from "./opening/photo-question-recognition";

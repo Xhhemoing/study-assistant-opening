@@ -3,6 +3,15 @@ import { loadEnv, loadOpeningUploadQuota, EnvValidationError } from "./env";
 import { loadOpeningTutorConfig } from "./opening-model";
 import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
+import { loadWorkerEnv } from "./worker-env";
+
+it("defaults worker consumers to all and validates explicit isolation roles", () => {
+  expect(loadWorkerEnv({}).workerRole).toBe("all");
+  for (const role of ["all", "learning", "parser"] as const) {
+    expect(loadWorkerEnv({ WORKER_ROLE: role }).workerRole).toBe(role);
+  }
+  expect(() => loadWorkerEnv({ WORKER_ROLE: "unknown" })).toThrow(/WORKER_ROLE/);
+});
 
 it("enables owned system queries by default while respecting explicit off and authentication", () => {
   expect(loadFeatureSwitches({}).systemQuery).toBe(true);

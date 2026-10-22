@@ -25,7 +25,7 @@ export type TeachingCompilerFocus = {
   focusAttempt?: { question: string; answer: string };
 };
 
-/** Non-error strategies also expire when their supporting evidence changes. */
+/** Reuse the planner's current-evidence policy, including newer attempts after task creation. */
 function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: CourseEvidence): TeachingCompilerFocus {
   const mapped = toSnapshotEvidence(evidence, new Date());
   const labelKey = normalizeSkillLabelKey(learnerFocus.skillLabel);
@@ -37,7 +37,15 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
     && (row.requirementKey ?? null) === (target.requirementKey ?? null))
     .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || a.id.localeCompare(b.id));
   const next = nextLearningStep({ status: target.status, observations, wantsFullExplanation: false });
-  if (next.activityKind !== learnerFocus.activityKind) return {};
+  if (!observations.some(row => row.usableForCurrentVersion === "yes")) return {};
+  if (next.activityKind !== learnerFocus.activityKind || next.focusObservationId !== learnerFocus.focusObservationId) {
+    const { recentErrors: _errors, prerequisiteRepair: _repair, ...base } = learnerFocus;
+    const focused = observations.find(row => row.id === next.focusObservationId);
+    return { learnerFocus: { ...base, ...next,
+      recentAssistance: observations.filter(row => row.usableForCurrentVersion === "yes").slice(0, 3).map(row => row.assistance),
+      ...(focused?.errors?.length ? { recentErrors: focused.errors } : {}),
+    } };
+  }
   return { learnerFocus: { ...learnerFocus,
     recentAssistance: observations.filter(row => row.usableForCurrentVersion === "yes").slice(0, 3).map(row => row.assistance),
   } };
@@ -46,7 +54,7 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
 /** A goal is the activity's policy snapshot; expired answer evidence must not erase it. */
 function withoutCurrentEvidence(focus: TeachingLearnerFocus): TeachingCompilerFocus {
   if (!focus.goalContext) return {};
-  const { prerequisiteRepair: _repair, ...base } = focus;
+  const { prerequisiteRepair: _repair, recentErrors: _errors, ...base } = focus;
   return { learnerFocus: { ...base, activityKind: "diagnose", reasonCode: "no_evidence",
     focusObservationId: null, recentAssistance: [] } };
 }
@@ -74,6 +82,18 @@ async function recheckPrerequisite(
   return { ...base, prerequisiteRepair: candidate };
 }
 
+async function withFocusAttempt(sql: Sql, scope: Scope, learnerFocus: TeachingLearnerFocus,
+  evidence: CourseEvidence): Promise<TeachingCompilerFocus> {
+  const observation = evidence.observations.find(row => row.id === learnerFocus.focusObservationId);
+  // Use the submitted version, never the mutable problem reference's current wording.
+  const [problem] = observation?.itemVersionId ? await sql`SELECT v.stem_snapshot FROM opening_learning_item_versions v
+    WHERE v.id=${observation.itemVersionId} AND v.problem_id=${observation.problemId!}
+      AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}` : [];
+  return { learnerFocus, ...(problem?.stem_snapshot && observation ? {
+    focusAttempt: { question: String(problem.stem_snapshot).slice(0, 2000), answer: observation.answer.slice(0, 4000) },
+  } : {}) };
+}
+
 /** Only the chosen effective observation's question and answer may enter the prompt. */
 export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, activityId: string): Promise<TeachingCompilerFocus> {
   const [activity] = await sql`SELECT a.goal_json, a.course_id FROM opening_teaching_activities a
@@ -91,7 +111,7 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   if (!evidence) return withoutCurrentEvidence(learnerFocus);
   if (!learnerFocus.focusObservationId) {
     const checked = recheckDerivedFocus(learnerFocus, evidence);
-    return checked.learnerFocus ? checked : withoutCurrentEvidence(learnerFocus);
+    return checked.learnerFocus ? withFocusAttempt(sql, scope, checked.learnerFocus, evidence) : withoutCurrentEvidence(learnerFocus);
   }
   const observation = evidence.observations.find(row => row.id === learnerFocus.focusObservationId);
   const eligibility = observation && evidence.evidenceContexts[observation.id];
@@ -103,10 +123,7 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   )) return withoutCurrentEvidence(learnerFocus);
   const qualified = evaluateEvidenceEligibility(eligibility.observation, eligibility.context);
   if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return withoutCurrentEvidence(learnerFocus);
-  const [problem] = observation.problemId ? await sql`SELECT p.stem_snapshot FROM opening_problem_refs p
-    JOIN workspaces w ON w.id=p.workspace_id AND w.owner_user_id=${scope.ownerUserId}
-    WHERE p.problem_id=${observation.problemId} AND p.workspace_id=${scope.workspaceId}` : [];
-  return { learnerFocus, ...(problem?.stem_snapshot ? {
-    focusAttempt: { question: String(problem.stem_snapshot).slice(0, 2000), answer: observation.answer.slice(0, 4000) },
-  } : {}) };
+  const refreshed = recheckDerivedFocus(learnerFocus, evidence);
+  if (!refreshed.learnerFocus) return withoutCurrentEvidence(learnerFocus);
+  return withFocusAttempt(sql, scope, refreshed.learnerFocus, evidence);
 }

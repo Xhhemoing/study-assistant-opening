@@ -7,7 +7,7 @@ type Fragment = ReturnType<Tx>;
 const TURN = "t";
 const PROBLEM = "p";
 
-const ALLOWED = new Set(["p", "p2", "t", "chunk_id", "citations", "conversation_id", "learning_session_id", "problem_id", "session_id", "source_id", "source_ids", "source_version", "source_versions", "workspace_id", "teaching_revision_id", "teaching_block_id"]);
+const ALLOWED = new Set(["p", "p2", "t", "chunk_id", "citations", "conversation_id", "learning_session_id", "problem_id", "session_id", "source_id", "source_ids", "source_version", "source_versions", "workspace_id", "teaching_revision_id", "teaching_block_id", "physical_page", "stem_snapshot"]);
 function raw(tx: Tx, reference: string): Fragment {
   const parts = reference.split(".");
   if ((parts.length !== 1 && parts.length !== 2) || parts.some((part) => !ALLOWED.has(part))) {
@@ -44,12 +44,17 @@ function sourceVersionsIncluded(tx: Tx, id: string, _turn: "t", history = false)
     )`;
 }
 
-function includedTeachingProblem(tx: Tx, id: string, alias: "p" | "p2") {
-  return tx`(${raw(tx, `${alias}.source_id`)} IS NULL AND EXISTS (
+function includedSourceFreeProblem(tx: Tx, id: string, alias: "p" | "p2") {
+  return tx`(${raw(tx, `${alias}.source_id`)} IS NULL AND (
+    (${raw(tx, `${alias}.source_version`)} IS NULL
+      AND ${raw(tx, `${alias}.teaching_revision_id`)} IS NULL AND ${raw(tx, `${alias}.teaching_block_id`)} IS NULL
+      AND ${raw(tx, `${alias}.physical_page`)} IS NULL AND ${raw(tx, `${alias}.chunk_id`)} IS NULL
+      AND btrim(${raw(tx, `${alias}.stem_snapshot`)}) <> '')
+    OR EXISTS (
     SELECT 1 FROM library_revisions r CROSS JOIN LATERAL jsonb_array_elements(r.blocks) block
     WHERE r.id=${raw(tx, `${alias}.teaching_revision_id`)} AND r.workspace_id=${id}
       AND block->>'id'=${raw(tx, `${alias}.teaching_block_id`)}::text AND block->>'type' IN ('prompt','question')
-  ))`;
+  )))`;
 }
 
 /** Migration 0017 stores citations as jsonb. Scan sourceId/sourceVersion; malformed arrays fail closed. */
@@ -136,7 +141,7 @@ export function includedProblem(
   return direct ? tx`
     ${raw(tx, "p.workspace_id")} = ${id}
     AND ${includedLearningSession(tx, id, userId, raw(tx, "p.session_id"))}
-    AND (${includedTeachingProblem(tx, id, "p")} OR EXISTS (
+    AND (${includedSourceFreeProblem(tx, id, "p")} OR EXISTS (
       SELECT 1 FROM opening_sources s
       WHERE s.id = ${raw(tx, "p.source_id")} AND s.workspace_id = ${id}
         AND (${history} OR s.version = ${raw(tx, "p.source_version")}) AND s.upload_state = 'uploaded'
@@ -153,7 +158,7 @@ export function includedProblem(
         AND (${history} OR ${raw(tx, "p2.session_id")} = ${sessionId})
         AND ${raw(tx, "p2.workspace_id")} = ${id}
         AND ${includedLearningSession(tx, id, userId, raw(tx, "p2.session_id"))}
-        AND (${includedTeachingProblem(tx, id, "p2")} OR EXISTS (
+        AND (${includedSourceFreeProblem(tx, id, "p2")} OR EXISTS (
           SELECT 1 FROM opening_sources s
           WHERE s.id = ${raw(tx, "p2.source_id")} AND s.workspace_id = ${id}
             AND (${history} OR s.version = ${raw(tx, "p2.source_version")}) AND s.upload_state = 'uploaded'

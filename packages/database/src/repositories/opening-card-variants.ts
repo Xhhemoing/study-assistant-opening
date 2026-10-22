@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import { cardReviewKind, cardVariantProposalSchema, type CardVariantReview, type Scope } from "@aistudy/contracts";
+import { checkArithmeticAnswer } from "@aistudy/domain";
 import { admitLearningSources, learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { loadCard, loadReviewStateForUpdate, lockCardForUpdate } from "./cards-ops";
 import { createOpeningTeachingActivitiesRepository, mapTeachingActivity } from "./opening-teaching-activities";
@@ -118,6 +119,9 @@ export function createOpeningCardVariantRepository(sql: Sql) {
         const ctx = await current(tx, scope, cardId, activityId);
         if (ctx.row.generate_status === "ready") return publicReview(tx, scope, ctx.row);
         if (ctx.row.generate_status !== "generating") throw conflict("变式生成已结束。");
+        if (checkArithmeticAnswer(proposal.prompt, proposal.referenceAnswer) === "incorrect") {
+          throw learningError("VALIDATION", "变式题的参考解答与程序验算不一致，请重新准备题目。");
+        }
         const old = await tx`SELECT create_intent->>'variantPrompt' AS prompt FROM opening_teaching_activities
           WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND create_intent->>'cardId'=${cardId}`;
         if ([ctx.card.front, ...old.map(item => String(item.prompt ?? ""))].some(prompt => questionText(prompt) === questionText(proposal.prompt))) {
@@ -127,7 +131,7 @@ export function createOpeningCardVariantRepository(sql: Sql) {
         const blocks = [
           { id: randomUUID(), type: "prompt", content: { text: proposal.prompt, skillLabel: ctx.card.skillLabel ?? "题目复习", estimatedMinutes: proposal.estimatedMinutes } },
           { id: randomUUID(), type: "answer_key", content: { hidden: true, generated: true, hints: proposal.hints,
-            answer: `${proposal.referenceAnswer}\n\n评分要点：\n${proposal.rubric.map(point => `- ${point}`).join("\n")}` } },
+            answer: proposal.referenceAnswer, rubric: proposal.rubric } },
         ];
         const unit = await content.createUnit(scope, { title: "变式复习", blocks, verificationStatus: "needs_check" });
         await content.publishActivitySpec(scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0,

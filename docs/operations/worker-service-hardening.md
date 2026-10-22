@@ -1,5 +1,28 @@
 # Worker 专用用户与回滚
 
+## 队列角色与解析故障隔离
+
+`WORKER_ROLE=all` 是兼容默认值，消费全部队列，启动前必须通过 Python/parser 预检。
+需要隔离解析故障时，为两个独立 worker 进程分别设置角色（沿用相同数据库、Redis 和对象存储）：
+
+| 配置 | 消费队列 | 解析预检 |
+|---|---|---|
+| `WORKER_ROLE=learning` | tutor、tutor-metadata、retest、remind、build-course-knowledge、extract-study-actions、compile-teaching-unit、index-source | 不运行、不要求 Python 可执行文件 |
+| `WORKER_ROLE=parser` | parse、parse-media | 必须通过，失败时退出 |
+
+例如在仓库根目录以已配置的基础环境分别运行 `WORKER_ROLE=learning npm run worker:dev` 和
+`WORKER_ROLE=parser npm run worker:dev`。生产服务需分别注入角色；现有发布/provision 流程仍按
+默认 `all` 管理并要求 parser 就绪，本次未修改服务器服务或部署脚本。不要在仍运行 `all` 的服务上宣称已完成进程隔离。
+
+各角色仍会投递全部类型的 outbox 消息，只有消费者按角色选择；所以学习 worker 不会误把解析任务
+标成完成或因缺少 producer 队列标成投递失败。没有 parser 进程时，解析任务保持排队，学习 worker
+也不能让尚未解析的材料变为可用。已有材料上的对话、教学与复习可继续处理。
+
+故障验收：使用隔离环境，将 `PARSER_PYTHON` 指向不存在的绝对路径，确认 learning 进程可启动并
+完成一个已解析材料的导师任务，同时 parse/parse-media 不被它消费；以相同配置启动 all 或 parser
+应失败退出。修复 Python 后启动 parser，确认原排队解析任务完成。单元测试覆盖角色选择与预检失败
+传播；真实 Redis/数据库上的多进程验收仍需执行。
+
 `infra/deploy/provision-worker.sh` 在服务器本地以 root 执行，只准备身份、权限和 systemd 配置；不启动、停止、重启或启用服务。发布脚本负责串行发布、数据库备份、切换 `current`、健康检查及失败回退。首次切换前保留旧应用目录及其中的配置、venv 和模型缓存。
 
 ## 发布接口
