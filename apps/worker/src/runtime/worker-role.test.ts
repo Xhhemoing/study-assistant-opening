@@ -12,7 +12,7 @@ describe("worker parser isolation", () => {
     expect(runtime.parserRunner).toBeNull();
     expect([...runtime.queueKinds].sort()).toEqual([
       "build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "index-source",
-      "remind", "retest", "tutor", "tutor-metadata",
+      "recognize-photo-question", "remind", "retest", "tutor", "tutor-metadata",
     ]);
   });
 

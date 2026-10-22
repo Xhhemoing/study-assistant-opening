@@ -1,0 +1,175 @@
+{
+  "protocolVersion": "grading-evaluation-v1",
+  "datasetId": "objective-arithmetic-development",
+  "datasetVersion": "1",
+  "cases": [
+    {
+      "id": "fraction-equivalent",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "计算 1/3+1/6",
+        "answer": "0.5",
+        "referenceText": "1/2",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "correct",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为1/2；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "decimal-exact",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "Evaluate 0.1+0.2=?",
+        "answer": "0.3",
+        "referenceText": "3/10",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "correct",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为3/10；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "negative-product",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "计算 2*(3-5)",
+        "answer": "-4",
+        "referenceText": "-4",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "correct",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为-4；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "valid-equality-chain",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "1/2+1/2=2/2=1",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "correct",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为1；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "wrong-result",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "2",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "incorrect",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为1；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "invalid-middle-step",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "1/2+1/2=2/4=1",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "incorrect",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为1；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "wrong-sign",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "计算 2÷(-4)",
+        "answer": "0.5",
+        "referenceText": "-1/2",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "incorrect",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为-1/2；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    },
+    {
+      "id": "not-exact",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "计算 1/3+1/6",
+        "answer": "0.4999999999999999",
+        "referenceText": "1/2",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "开发用客观算式；仅验证无单位有理数表达式及每个等式两边的值。",
+      "review": {
+        "status": "program_verified",
+        "checker": "exact-arithmetic-v1",
+        "verifiedAt": "2026-10-22T00:00:00.000Z",
+        "outcome": "incorrect",
+        "rationale": "使用BigInt有理数四则运算复算，题目期望值为1/2；核对所有等式步骤。非人工审定，非真实模型结果。"
+      }
+    }
+  ]
+}

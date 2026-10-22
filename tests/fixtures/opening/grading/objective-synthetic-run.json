@@ -1,0 +1,97 @@
+{
+  "datasetId": "objective-arithmetic-development",
+  "datasetVersion": "1",
+  "modelLabel": "synthetic-fixture-not-a-model",
+  "completedAt": "2026-10-22T00:00:00.000Z",
+  "provenance": "test_fixture",
+  "results": [
+    {
+      "caseId": "fraction-equivalent",
+      "caseVersion": "1",
+      "input": {
+        "question": "计算 1/3+1/6",
+        "answer": "0.5",
+        "referenceText": "1/2",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"incorrect\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"incorrect\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "decimal-exact",
+      "caseVersion": "1",
+      "input": {
+        "question": "Evaluate 0.1+0.2=?",
+        "answer": "0.3",
+        "referenceText": "3/10",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"correct\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"correct\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "negative-product",
+      "caseVersion": "1",
+      "input": {
+        "question": "计算 2*(3-5)",
+        "answer": "-4",
+        "referenceText": "-4",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"correct\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"correct\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "valid-equality-chain",
+      "caseVersion": "1",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "1/2+1/2=2/2=1",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"correct\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"correct\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "wrong-result",
+      "caseVersion": "1",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "2",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"correct\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"correct\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "invalid-middle-step",
+      "caseVersion": "1",
+      "input": {
+        "question": "1/2+1/2?",
+        "answer": "1/2+1/2=2/4=1",
+        "referenceText": "1",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"incorrect\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"incorrect\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "wrong-sign",
+      "caseVersion": "1",
+      "input": {
+        "question": "计算 2÷(-4)",
+        "answer": "0.5",
+        "referenceText": "-1/2",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"incorrect\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"incorrect\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    },
+    {
+      "caseId": "not-exact",
+      "caseVersion": "1",
+      "input": {
+        "question": "计算 1/3+1/6",
+        "answer": "0.4999999999999999",
+        "referenceText": "1/2",
+        "imageEvidenceRef": null
+      },
+      "rawOutput": "{\"outcome\": \"incorrect\", \"confidence\": 0.99, \"questionMatch\": true, \"feedback\": \"合成输出，仅演示评测流程。\", \"criteria\": [{\"label\": \"四则运算\", \"verdict\": \"incorrect\", \"feedback\": \"合成结果，含有意设置的误判。\"}]}"
+    }
+  ]
+}

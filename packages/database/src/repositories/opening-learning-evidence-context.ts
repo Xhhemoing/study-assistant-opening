@@ -486,7 +486,7 @@ export async function readOpeningLearningEvidenceContexts(
           ? { applicability: "exact", currentItemVersionId: record.itemVersionId } : { applicability: "changed_needs_check" };
       }
     }
-    else if (record.itemVersionId && record.problemId && item?.teaching_revision_id) {
+    else if (record.itemVersionId && record.problemId && item && item.source_id == null) {
       context.version = itemMatches ? { applicability: "exact", currentItemVersionId: record.itemVersionId }
         : { applicability: "changed_needs_check" };
     }

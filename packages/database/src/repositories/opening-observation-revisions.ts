@@ -7,7 +7,7 @@ import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, obse
 import { admitLearningSources, learnerVerdictSource, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
-import { acceptedAiGradingOutcome } from "@aistudy/domain";
+import { acceptedAiGradingOutcome, corroborateArithmeticGrade } from "@aistudy/domain";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
@@ -93,8 +93,12 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     const revision = revisions.get(courseId)!, id = randomUUID();
     const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
     const [clock] = grading ? await tx`SELECT clock_timestamp() AS at` : [];
-    const aiEvaluation = grading ? aiEvaluationSchema.parse({ ...grading.proposal,
-      outcome: acceptedAiGradingOutcome(grading.proposal), observationId: id, attemptId: previous.attemptId,
+    // Check the pinned question and sealed text inside the same transaction as the new head.
+    // Photo transcription is a model output and must never be used as an independent check.
+    const checkedProposal = grading && gradingContext && !gradingContext.workSource
+      ? corroborateArithmeticGrade(gradingContext.stem, previous.answer, grading.proposal) : grading?.proposal;
+    const aiEvaluation = grading && checkedProposal ? aiEvaluationSchema.parse({ ...checkedProposal,
+      outcome: acceptedAiGradingOutcome(checkedProposal), observationId: id, attemptId: previous.attemptId,
       problemId: previous.problemId, itemVersionId: previous.itemVersionId, requirementKey: previous.requirementKey ?? null,
       evaluatorVersion: "ai-rubric-v1", modelLabel: grading.modelLabel, evaluatedAt: new Date(clock!.at as Date).toISOString(),
       ...(gradingContext?.workSource ? { workSource: gradingContext.workSource } : {}) }) : null;

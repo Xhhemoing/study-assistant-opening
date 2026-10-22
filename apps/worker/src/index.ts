@@ -18,6 +18,8 @@ import { prepareWorkerRole } from "./runtime/worker-role";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
+import { createRecognizePhotoQuestionHandler } from "./jobs/recognize-photo-question";
+import { createOpeningPhotoRecognitionRepository } from "@aistudy/database";
 import { tutorModelTask } from "@aistudy/ai";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { createRemindHandler } from "./jobs/remind";
@@ -172,6 +174,8 @@ export async function main(): Promise<void> {
     createCompileTeachingUnitWorkerDeps(sql, { budget, chunks, privacy: privacyRepo }),
   );
   const handlers = createHandlers(parse, {
+    "recognize-photo-question": createRecognizePhotoQuestionHandler({ repository: createOpeningPhotoRecognitionRepository(sql), gateway: models,
+      budget: scope => scopeBudget(budget, scope), images: createSourcePageImages(sql, storage) }),
     "index-source": indexSource,
     "tutor-metadata": tutorMetadata,
     retest,

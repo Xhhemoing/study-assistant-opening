@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type SetStateAction } from "react";
-import type { LearningAttempt, LearningObservation, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
+import type { LearningAttempt, LearningAttemptCreateInput, LearningObservation, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
 import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
@@ -30,6 +30,11 @@ function readPracticeSkillPrefill(): string {
   } catch {
     return "";
   }
+}
+
+export function practiceQuestionInput(stem: string, sourceId: string): LearningAttemptCreateInput["problem"] {
+  const stemSnapshot = stem.trim();
+  return stemSnapshot ? { ...(sourceId ? { sourceId } : {}), stemSnapshot, artifactKind: "reference_item" } : undefined;
 }
 
 const OUTCOME_LABEL = { correct: "我认为正确", incorrect: "我认为有错", unverified: "尚未核对" } as const;
@@ -157,6 +162,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     const state = await readPracticeRecord(client, courseId, next, checkpoint.observationId);
     if (readPracticeDraft(scope, null, draft.id)?.attemptId !== next.id || readPracticeDraft(scope, null, draft.id)?.start?.clientKey !== expectedRequestKey) return;
     setAttempt(next);
+    if (next.stemSnapshot) setStem(next.stemSnapshot);
     setRecorded(state.observation);
     setAutoGrade(false);
     setReferenceChecked(Boolean(state.observation?.referenceCheck));
@@ -188,7 +194,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
           sessionId: request.sessionId, clientKey: request.clientKey,
           ...(questionAnchor ? { contextAnchor: questionAnchor } : {}),
           ...((retest?.requirementKey ?? initialFocus?.requirementKey) != null ? { requirementKey: retest?.requirementKey ?? initialFocus?.requirementKey } : {}),
-          ...(sourceId && stem.trim() ? { problem: { sourceId, stemSnapshot: stem.trim(), artifactKind: "reference_item" as const } } : {}),
+          ...(stem.trim() ? { problem: practiceQuestionInput(stem, sourceId) } : {}),
         };
         patch({ start: request });
         requireSaved();
@@ -318,6 +324,19 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             </p>
           ) : null}
           </> : <p className="whitespace-pre-wrap break-words text-sm leading-7 text-text">{stem}</p>}
+          {!initialProblem ? <>
+            <label className="block text-sm text-text">
+              本次题干（可直接粘贴）
+              <textarea
+                maxLength={2000}
+                value={stem}
+                disabled={pending || Boolean(retest?.prompt)}
+                onChange={(event) => setStem(event.target.value)}
+                className="mt-1 min-h-20 w-full rounded border border-line bg-surface px-3 py-2"
+              />
+            </label>
+            <p className="text-xs text-text-3">填入题干，保存作答后即可自动批改；无需上传材料。</p>
+          </> : null}
           <div className="sticky top-0 z-10 bg-surface py-2">
             <button
               disabled={pending || !skillLabel.trim() || (!!sourceId && !stem.trim())}
@@ -325,12 +344,12 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             >
               {pending ? "正在开始…" : retest ? "开始补测作答" : "开始本次练习"}
             </button>
-            {sourceId && !stem.trim() ? <p role="status" className="mt-1 text-xs text-warn">已选题目来源，请填写下方的本次题干后开始。</p> : null}
+            {sourceId && !stem.trim() ? <p role="status" className="mt-1 text-xs text-warn">已选题目来源，请填写本次题干后开始。</p> : null}
           </div>
           {!initialProblem ? <details className="rounded border border-line bg-bg/50 px-3 py-2">
-            <summary className="cursor-pointer text-xs font-medium text-text-2">题目材料与题干（用于 AI 批改）</summary>
+            <summary className="cursor-pointer text-xs font-medium text-text-2">关联题目或参考材料（可选）</summary>
             <div className="mt-3 space-y-3">
-              <p className="text-xs text-text-3">选好题目材料并填写题干，保存作答后即可自动批改。</p>
+              <p className="text-xs text-text-3">有原题或参考解析时，可在此关联材料。</p>
               <label className="block text-sm text-text">
                 题目来源（可选）
                 <select
@@ -339,7 +358,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                   onChange={(event) => setSourceId(event.target.value)}
                   className="mt-1 w-full rounded border border-line bg-surface px-3 py-2"
                 >
-                  <option value="">不关联资料，先记录作答</option>
+                  <option value="">不关联资料，使用粘贴题干</option>
                   {readySources.map((source) => (
                     <option key={source.id} value={source.id}>{source.name}</option>
                   ))}
@@ -358,16 +377,6 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                     <option key={source.id} value={source.id}>{source.name}</option>
                   ))}
                 </select>
-              </label>
-              <label className="block text-sm text-text">
-                本次题干（可选）
-                <textarea
-                  maxLength={2000}
-                  value={stem}
-                  disabled={pending || Boolean(retest?.prompt)}
-                  onChange={(event) => setStem(event.target.value)}
-                  className="mt-1 min-h-20 w-full rounded border border-line bg-surface px-3 py-2"
-                />
               </label>
               {!stem.trim() ? (
                 <p className="rounded border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-6 text-warn" role="status">
@@ -437,6 +446,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             {attempt.problemId ? "题目已记录。" : "本次先保存答案；需要评分时，可开始新练习并填写完整题干。"}
             {deliveredAssistance !== "none" ? ` 本次已使用的帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}。` : null}
           </p>
+          {attempt.stemSnapshot ? <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg/50 px-3 py-2 text-sm leading-7 text-text">{attempt.stemSnapshot}</p> : null}
           {draft.submission ? <p className="text-xs text-warn" role="status">正在确认上次保存结果，请先保留原答案。</p> : null}
           <form onSubmit={submit} onKeyDown={event => {
             if (event.key !== "Enter") return;

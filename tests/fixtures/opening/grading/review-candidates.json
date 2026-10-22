@@ -1,0 +1,211 @@
+{
+  "protocolVersion": "grading-evaluation-v1",
+  "datasetId": "study-grading-review-candidates",
+  "datasetVersion": "1",
+  "cases": [
+    {
+      "id": "fraction-equivalence",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "计算 1/3+1/6",
+        "answer": "0.5",
+        "referenceText": "1/2",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "0.5 与 1/2 等价。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "derivative-equivalence",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "求 f(x)=x² 的导数。",
+        "answer": "x+x",
+        "referenceText": "f'(x)=2x",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "接受等价表达，不要求模板写法。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "span-alternative",
+      "version": "1",
+      "group": "equivalent_solution",
+      "modality": "text",
+      "input": {
+        "question": "v=(1,0,1), w=(0,1,1), u=(2,3,5)。判断u是否在span{v,w}中。",
+        "answer": "2v+3w=(2,3,5)，所以属于。",
+        "referenceText": "u=2v+3w",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "correct",
+      "candidateRationale": "构造系数即可证明，不必指定消元法。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "wrong-step-right-result",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "计算 1/2+1/2",
+        "answer": "1/2+1/2=2/4=1",
+        "referenceText": "1/2+1/2=2/2=1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "最终数值正确但中间等式错误，应指出步骤问题。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "invalid-cancellation",
+      "version": "1",
+      "group": "step_error",
+      "modality": "text",
+      "input": {
+        "question": "化简 (x²-1)/(x-1)，并写出适用条件。",
+        "answer": "约去x，得到x+1，任意x都成立。",
+        "referenceText": "x+1，且x≠1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "原分式在x=1无定义，过程也不成立。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "missing-root",
+      "version": "1",
+      "group": "partial_answer",
+      "modality": "text",
+      "input": {
+        "question": "解方程 x²=1，写出所有实数解。",
+        "answer": "x=1",
+        "referenceText": "x=1 或 x=-1",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "部分正确但遗漏一个解，反馈需承认已有正确部分。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "missing-derivation",
+      "version": "1",
+      "group": "partial_answer",
+      "modality": "text",
+      "input": {
+        "question": "用乘积法则推导 (x·x) 的导数。",
+        "answer": "答案为2x。",
+        "referenceText": "(x·x)′=1·x+x·1=2x",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "incorrect",
+      "candidateRationale": "题目明确要求推导，仅结论不足；不要推广为所有题都必须指定步骤。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "photo-blur",
+      "version": "1",
+      "group": "ambiguous_photo",
+      "modality": "photo",
+      "input": {
+        "question": "计算 1/2+1/2。",
+        "answer": "",
+        "referenceText": "",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "unverified",
+      "candidateRationale": "待加入真实模糊作答照片并由人核对可读性；空占位不算已测。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "photo-crop",
+      "version": "1",
+      "group": "ambiguous_photo",
+      "modality": "photo",
+      "input": {
+        "question": "解方程 x²=1，写出所有实数解。",
+        "answer": "",
+        "referenceText": "",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "unverified",
+      "candidateRationale": "待加入关键符号/第二个根被裁掉的真实照片，不能凭空补全。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "wrong-question",
+      "version": "1",
+      "group": "question_mismatch",
+      "modality": "text",
+      "input": {
+        "question": "第1题：求 f(x)=x² 的导数。",
+        "answer": "第2题积分：x³/3+C。",
+        "referenceText": "f'(x)=2x",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "unverified",
+      "candidateRationale": "答案明确指向另一题，应要求关联正确题目，不判学习者不会求导。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "missing-condition",
+      "version": "1",
+      "group": "insufficient_information",
+      "modality": "text",
+      "input": {
+        "question": "求三角形的面积。",
+        "answer": "6",
+        "referenceText": "",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "unverified",
+      "candidateRationale": "缺少边长或高等必要条件，不能可靠判定。",
+      "review": {
+        "status": "pending"
+      }
+    },
+    {
+      "id": "inconsistent-problem",
+      "version": "1",
+      "group": "insufficient_information",
+      "modality": "text",
+      "input": {
+        "question": "已知实数x同时满足x=1和x=2，求x。",
+        "answer": "1",
+        "referenceText": "",
+        "imageEvidenceRef": null
+      },
+      "candidateOutcome": "unverified",
+      "candidateRationale": "题设相互矛盾，应先指出题目质量问题。",
+      "review": {
+        "status": "pending"
+      }
+    }
+  ]
+}

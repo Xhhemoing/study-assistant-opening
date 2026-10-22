@@ -31,6 +31,24 @@ const SRC_B = "00000000-0000-4000-8000-0000000000bb";
 const hints = { direction: "从未知量和约束入手。", concept: "解空间由满足所有齐次约束的向量组成。", firstStep: "先写出对应的齐次方程组。" };
 const SRC_HELD = "00000000-0000-4000-8000-0000000000dd";
 
+it.each(["2", "1/2+1/2=2/4=1"])("does not publish an arithmetic question with an incorrect reference: %s", answer => {
+  expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [
+    { type: "text", text: "分数相加需要先通分。" }, { type: "prompt", text: "计算 1/2+1/2" },
+    { type: "answer_key", text: answer, hints, ...rankPedagogy },
+  ] }), new Set())).toThrow("arithmetic question and reference solution disagree");
+});
+
+it("keeps unsupported references unverified rather than inferring a numeric answer for a choice or a unit", () => {
+  for (const interaction of [{ kind: "numeric", unit: "厘米" },
+    { kind: "choice", options: [{ id: "A", label: "2" }, { id: "B", label: "1" }] }]) {
+    const output = parseCompileModelOutput(JSON.stringify({ blocks: [
+      { type: "text", text: "先理解题意。" }, { type: "prompt", text: "1/2+1/2", interaction },
+      { type: "answer_key", text: "2", hints, ...rankPedagogy },
+    ] }), new Set());
+    expect(output.blocks).toHaveLength(3);
+  }
+});
+
 describe("goal-driven teaching provider context", () => {
   it("shares the teaching interaction budget and keeps retrieved evidence in one provider channel", async () => {
     const parentBudget = { id: "study-activity:test" };
