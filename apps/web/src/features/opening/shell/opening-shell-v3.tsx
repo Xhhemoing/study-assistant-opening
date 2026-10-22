@@ -18,7 +18,7 @@ import { ConnectionNotice } from "./connection-notice";
 
 const ICONS: Record<string, Feature["icon"]> = { today: "start", courses: "courses", assistant: "assistant", library: "library" };
 const feature = (id: string) => FEATURES.find(item => item.id === id)!;
-const TOOLS: Feature[] = [feature("review"), feature("sprint"), feature("cards"), feature("search")];
+const TOOLS: Feature[] = [feature("review"), feature("sprint"), feature("cards")];
 const exact = (item: Feature, pathname: string) => pathname === item.route || pathname.startsWith(`${item.route}/`);
 
 /** 生产导航沿用既有四个入口（今日/课程/助理/资料）与无障碍名称；学习工具只在桌面侧栏。每个路径只高亮一项。 */
@@ -114,6 +114,7 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
         counts={pendingCount ? { review: pendingCount } : {}}
         hideNav={focusMode}
         nav={OPENING_NAV}
+        onOpenSearch={openPalette}
         mobileTrailing={accountMenu}
         account={<div className="flex items-center gap-2 px-1.5 py-1">
           {accountMenu}

@@ -24,7 +24,8 @@ export function StatusToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={useMemo(() => notify, [notify])}>
       {children}
-      <div role="status" aria-live="polite" className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4">
+      {/* 常驻 live region（不加 role=status，空容器不应作为页面状态被查询/朗读），内容出现时由 aria-live 播报 */}
+      <div aria-live="polite" aria-atomic="true" className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4">
         {mounted && <p key={message?.id} data-state={state}
           className="rounded-pill glass px-4 py-2 text-meta font-medium text-text data-[state=open]:motion-safe:animate-toast-in data-[state=closed]:motion-safe:animate-fade-out">{message?.text ?? last}</p>}
       </div>

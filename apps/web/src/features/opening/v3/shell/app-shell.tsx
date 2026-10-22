@@ -46,6 +46,8 @@ type AppShellProps = {
   nav?: ShellNav;
   /** 手机底栏末尾（如账户按钮） */
   mobileTrailing?: ReactNode;
+  /** 打开全局搜索 / 命令面板（⌘K）；传入时在导航顶部显示搜索按钮 */
+  onOpenSearch?: () => void;
 };
 
 /**
@@ -54,7 +56,7 @@ type AppShellProps = {
  * 导航铺在柔和背景上，主区是一张圆角内容页；手机底栏为悬浮玻璃胶囊。
  * 动效：导航宽度 232↔72 过渡；激活底块带 view-transition-name，在入口间滑动；主区参与页面过渡。
  */
-export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null, nav, mobileTrailing }: AppShellProps) {
+export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null, nav, mobileTrailing, onOpenSearch }: AppShellProps) {
   const pathname = usePathname() ?? "";
   const activeId = activeNavId(pathname);
   const isActive = (item: Feature) => nav ? nav.isActive(item, pathname) : activeId === item.id;
@@ -71,7 +73,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
     <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
     <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
       <nav aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
         className="hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
@@ -80,6 +82,16 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           className={`${ui.icon} mx-4 mb-2`}>
           <PanelLeft size={18} aria-hidden="true" />
         </button>
+        {onOpenSearch ? (
+          <div className="mb-2 px-2">
+            <button type="button" onClick={onOpenSearch} aria-label="打开全局搜索" title="全局搜索与快捷导航 (Ctrl / ⌘ K)"
+              className="flex min-h-(--control-h) w-full items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/5 hover:text-text">
+              <span className="grid w-12 shrink-0 justify-items-center"><Search size={17} aria-hidden="true" /></span>
+              <span data-hidden={compact} className="flex-1 whitespace-nowrap text-left text-ui data-[hidden=true]:sr-only">搜索</span>
+              {!compact && <kbd className="mr-3 rounded-ctl border border-line px-1.5 text-cap text-text-2">⌘K</kbd>}
+            </button>
+          </div>
+        ) : null}
         <NavGroup items={nav?.core ?? NAV_CORE} isActive={isActive} compact={compact} counts={counts} />
         {navExtra ? <div className="mt-1 px-2">{navExtra}</div> : null}
         <NavGroup items={nav?.tools ?? NAV_TOOLS} isActive={isActive} compact={compact} counts={counts} divided />
@@ -95,7 +107,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <main id="main" data-scroll-root data-focus={hideNav} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable] [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card data-[focus=true]:m-0 data-[focus=true]:rounded-none data-[focus=true]:border-0">
+        <main id="main-content" tabIndex={-1} data-scroll-root data-focus={hideNav} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable] [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card data-[focus=true]:m-0 data-[focus=true]:rounded-none data-[focus=true]:border-0">
           {banner}
           <div className="flex-1">{children}</div>
         </main>
