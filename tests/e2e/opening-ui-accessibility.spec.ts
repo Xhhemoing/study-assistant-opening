@@ -51,7 +51,8 @@ async function openView(page: Page, view: View) {
     case "today":
       await page.goto("/opening/today");
       await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeAttached();
-      await expect(page.getByRole("heading", { name: "从课程继续学习", exact: true })).toBeVisible();
+      // v4：已有课程时开始页直接给出唯一主动作，而不是「选择课程」空状态。
+      await expect(page.locator('[data-today-primary-cta="true"]')).toBeVisible();
       break;
     case "courses":
       await page.goto("/opening/courses");
