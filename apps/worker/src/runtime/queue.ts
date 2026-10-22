@@ -3,6 +3,10 @@ import { Queue } from "bullmq";
 
 export type RedisOptions = { url: string };
 export type OpeningQueue = Queue;
+export const OPENING_QUEUE_KINDS = [
+  "parse", "tutor", "tutor-metadata", "retest", "remind", "build-course-knowledge",
+  "parse-media", "extract-study-actions", "compile-teaching-unit", "index-source",
+] as const;
 
 export const jobQueueId = (workspaceId: string, jobId: string): string =>
   `opening-ws-${workspaceId}-job-${jobId}`;
@@ -22,18 +26,7 @@ export function createQueue(kind: string, connection: IORedis): OpeningQueue {
 
 export function createQueues(connection: IORedis, onCreate?: (queue: OpeningQueue) => void): Record<string, OpeningQueue> {
   return Object.fromEntries(
-    [
-      "parse",
-      "tutor",
-      "tutor-metadata",
-      "retest",
-      "remind",
-      "build-course-knowledge",
-      "parse-media",
-      "extract-study-actions",
-      "compile-teaching-unit",
-      "index-source",
-    ].map((kind) => {
+    OPENING_QUEUE_KINDS.map((kind) => {
       const queue = createQueue(kind, connection);
       onCreate?.(queue);
       return [kind, queue];

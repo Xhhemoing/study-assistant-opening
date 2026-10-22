@@ -14,7 +14,7 @@ import { createRedisConnection, createProducerRedisConnection, createQueues } fr
 import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
-import { preflightParser } from "./parsers/parser-preflight";
+import { prepareWorkerRole } from "./runtime/worker-role";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
@@ -29,7 +29,7 @@ import { createSweepPendingUploadsJob, PENDING_UPLOAD_SWEEP_INTERVAL_MS } from "
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { createFeishuReminderAdapter } from "./channels/feishu-reminder";
 import { createOpeningReminderRepository } from "@aistudy/database";
-import { runJob } from "./runtime/run-job";
+import { runJob, type JobHandler } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
 import { createDbSystemQueryService, createDbAssistantProposalService } from "./runtime/system-query";
@@ -52,7 +52,7 @@ export function processSmokeJob(input: unknown): {
 export async function main(): Promise<void> {
   // PR-H: full registry validation (strict booleans, dependencies, no NEXT_PUBLIC_*) before any connection.
   const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
-  const runner = await preflightParser();
+  const { parserRunner: runner, queueKinds } = await prepareWorkerRole(env.workerRole);
   const openingModel = loadOpeningModelCatalog();
   const embeddingConfig = loadOpeningEmbeddingConfig();
   const redis = createRedisConnection({ url: env.redisUrl });
@@ -95,7 +95,8 @@ export async function main(): Promise<void> {
   const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3(env.s3);
-  const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir });
+  const parserDisabled: JobHandler = async () => { throw new Error("parser queues are disabled for WORKER_ROLE=learning"); };
+  const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir }) : parserDisabled;
   const retest = createRetestCandidateHandler({
     readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),
     readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
@@ -140,7 +141,7 @@ export async function main(): Promise<void> {
       beforeSend: () => knowledge.assertExtractionBatch(scope, batch.chunks[0]!.courseId, batch.chunks),
     }),
   });
-  const parseMedia = createParseMediaHandler({
+  const parseMedia = runner ? createParseMediaHandler({
     sources,
     chunks,
     storage,
@@ -156,7 +157,7 @@ export async function main(): Promise<void> {
         }),
       );
     },
-  });
+  }) : parserDisabled;
   const importChunks = createOpeningImportChunksRepository(sql);
   const extractStudyActions = createExtractStudyActionsHandler({
     listAuthorizedImportChunks: (scope, courseId, receiptIds) =>
@@ -221,6 +222,7 @@ export async function main(): Promise<void> {
   });
   const queues = createQueues(producer, (queue) => openedQueues.push(queue));
   for (const [kind, queue] of Object.entries(queues)) {
+    if (!queueKinds.has(kind)) continue;
     const worker = new Worker(queue.name, async (job) => {
     if (stopping) throw new Error("worker is shutting down");
     if (kind === "tutor") {
