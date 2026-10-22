@@ -20,6 +20,7 @@ import type {
   TeachingResumeJobGate,
   TeachingResumeMaterialsGate,
 } from "@aistudy/contracts";
+import { ThinkingLine } from "../v3/motion/feedback";
 import { LoaderCircle, Pause, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
@@ -62,8 +63,8 @@ const ACTION_LABEL: Record<TeachingContinuableAction, string> = {
 
 const JOB_GATE_COPY: Record<TeachingResumeJobGate, string> = {
   ready: "生成任务可用或已明确失败/取消。",
-  in_flight: "正在准备学习内容，请稍候。已保存的内容仍可查看。",
-  unknown: "暂时无法确认内容是否生成完成，请重新读取。你写的内容仍保留。",
+  in_flight: "正在准备讲解",
+  unknown: "暂时无法确认讲解是否准备好，可重新读取",
   stale: "生成结果可能已过期；请核对材料后再继续。",
 };
 
@@ -175,52 +176,27 @@ export function ResumeCardView({
       data-path-version={resume.pathVersion}
     >
       <header className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h2
-            id="teaching-resume-heading"
-            className="text-sm font-semibold text-text"
-          >
-            学习位置
-          </h2>
-          <p className="mt-1 break-words text-sm leading-6 text-text-2">
-            {activityTitle}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          <span className={`${ui.badge} ${tone.neutral}`} data-resume-status-badge="true">
-            {teachingActivityStatusLabel(activityStatus)}
-          </span>
-          <span
-            className={`${ui.badge} ${
-              jobGate === "ready"
-                ? tone.success
-                : jobGate === "stale"
-                  ? tone.danger
-                  : tone.warning
-            }`}
-          >
-            {generateStatusLabel}
-          </span>
-        </div>
+        <h2
+          id="teaching-resume-heading"
+          className="min-w-0 break-words text-ui-lg font-semibold text-text"
+        >
+          <span className="sr-only">学习位置：</span>{activityTitle}
+        </h2>
+        {activityStatus !== "active" ? <span className={`${ui.badge} ${tone.neutral}`} data-resume-status-badge="true">
+          {teachingActivityStatusLabel(activityStatus)}
+        </span> : null}
       </header>
 
-      <p className="mt-2 text-xs tabular-nums text-text-3">
-        学习位置已读取
-        {resume.clientInit
-          ? " · 可继续阅读"
-          : " · 继续时将重新读取内容"}
-      </p>
-
       {showJobBanner ? (
-        <div
-          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${
-            jobGate === "stale" ? tone.danger : tone.warning
-          }`}
+        jobGate === "stale" ? <div
+          className={`mt-3 rounded-lg px-3 py-2 text-xs leading-5 ${tone.danger}`}
           role="status"
           data-resume-gate-job={jobGate}
         >
           {jobGateBannerCopy(jobGate)}
-        </div>
+        </div> : <p className="mt-2 text-meta text-text-2" data-resume-gate-job={jobGate} title={generateStatusLabel}>
+          {jobGate === "in_flight" ? <ThinkingLine label={jobGateBannerCopy(jobGate)} /> : jobGateBannerCopy(jobGate)}
+        </p>
       ) : null}
 
       {resume.generateStatus === "needs_check" ? (
@@ -409,7 +385,7 @@ export function ResumeCardView({
             onClick={onReread}
           >
             <RefreshCw size={12} aria-hidden />
-            刷新学习位置
+            重新读取
           </button>
         ) : null}
       </div>

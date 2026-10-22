@@ -221,7 +221,7 @@ describe("ResumeCardView", () => {
     );
     expect(html).toContain('data-resume-gate-job="unknown"');
     expect(html).toContain('data-resume-gate-materials="unavailable"');
-    expect(html).toContain("暂时无法确认内容是否生成完成");
+    expect(html).toContain("暂时无法确认讲解是否准备好");
     expect(html).toContain("1 段内容已保存");
   });
   it("places technical state under the existing diagnostics switch in a closed disclosure", () => {

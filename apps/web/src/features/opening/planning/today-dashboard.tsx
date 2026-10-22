@@ -28,6 +28,30 @@ import { TaskLearningActionContext } from "./task-row-actions";
 import { ReviewView } from "./review-view";
 import { useNextStepMetrics } from "./use-next-step-metrics";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
+import { ASSISTANT_OPEN_EVENT } from "../assistant/assistant-entry";
+import { Camera, Sparkles } from "lucide-react";
+
+/** 「10月23日 周五」：比 ISO 日期更易读；时区与今日计划一致。 */
+export function friendlyTodayLabel(date: Date, timeZone?: string): string {
+  try {
+    return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short", timeZone }).format(date).replace(/\s+/g, " ");
+  } catch {
+    return localDateKey(date, timeZone);
+  }
+}
+
+/** 开始页的 AI 入口：一处输入框外观的按钮，打开学习助手；相机按钮直接进入拍题提问。 */
+export function TodayAskBar() {
+  const open = () => window.dispatchEvent(new CustomEvent(ASSISTANT_OPEN_EVENT, { detail: "/opening/assistant" }));
+  return <div className="px-4 pb-2 sm:px-5" data-today-ask="true">
+    <div className="flex items-center gap-2 rounded-panel border border-line bg-surface p-1.5 pl-4 shadow-[0_1px_2px_rgb(0_0_0/.04)]">
+      <Sparkles aria-hidden="true" size={16} className="shrink-0 text-ai-2" />
+      <button type="button" onClick={open} className="min-h-10 min-w-0 flex-1 truncate text-left text-ui text-text-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">问 AI：概念、题目或资料里的任何一段</button>
+      <button type="button" onClick={open} aria-label="拍题提问" title="拍题提问" className="inline-flex size-10 shrink-0 items-center justify-center rounded-ctl text-text-2 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><Camera aria-hidden="true" size={18} /></button>
+    </div>
+  </div>;
+}
+
 
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
@@ -325,8 +349,8 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
-  const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title="今日学习" fact={<time dateTime={localDateKey(new Date(), timeZone)}>{localDateKey(new Date(), timeZone)}</time>} /></div>;
-  const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
+  const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title="今日学习" fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
+  const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : pendingReviewCount === 0 ? "hidden" : "group-data-[focus=true]/workspace:hidden"}`}>
     <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
     <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />
   </details>;
@@ -365,7 +389,8 @@ export function TodayDashboard({
                 自由对话
               </Link>
             }
-          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取续学记录…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
+          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
+          <TodayAskBar />
           {ctaError ? (
             <p className="px-4 text-xs text-danger sm:px-5" role="alert">{ctaError}</p>
           ) : null}
@@ -397,7 +422,7 @@ export function TodayDashboard({
           </div>
           <div
             ref={teachingPaneRef}
-            className="min-h-0 min-w-0 flex-1 bg-surface"
+            className={`min-h-0 min-w-0 flex-1 ${currentActivity && ctaFocusNonce > 0 && !currentActivity.courseId ? "bg-surface" : ""}`}
             data-today-teaching-pane="true"
             data-today-cta-focus={ctaFocusNonce > 0 ? String(ctaFocusNonce) : undefined}
           >

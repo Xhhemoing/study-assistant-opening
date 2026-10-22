@@ -63,7 +63,7 @@ it("disables queue reload while a grade is being saved", () => {
   scenario.items = [item("a")];
   scenario.grading = true;
   const html = renderToStaticMarkup(createElement(CardReviewView));
-  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[\s\S]*?重新读取<\/button>/);
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*aria-label="重新读取"|<button[^>]*aria-label="重新读取"[^>]*disabled=""/);
 });
 
 it("does not submit a second grade when shortcuts fire before React updates the saving state", async () => {

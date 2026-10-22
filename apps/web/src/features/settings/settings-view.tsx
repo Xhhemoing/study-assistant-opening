@@ -17,7 +17,7 @@ import { PreferenceControls } from "../opening/teaching/preference-controls";
 import { QuickSetupPanel } from "./quick-setup-panel";
 import { AppearanceSettings } from "../opening/settings/appearance-settings";
 
-const navLinkClass = "inline-flex min-h-11 items-center text-sm text-text-2 underline-offset-2 hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm";
+const navLinkClass = "inline-flex min-h-9 shrink-0 items-center whitespace-nowrap rounded-ctl px-3 text-ui text-text-2 hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent lg:min-h-8";
 
 export function SettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
   const [learningPreferences, setLearningPreferences] = useState<LearningPreferences>(disabledLearningPreferences);
@@ -64,30 +64,20 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
 
   return (
     <div className="min-w-0 bg-bg">
-      <PageHeading
-        title="设置"
-        description="调整外观与阅读，配置 AI 模型，管理数据连接、开学排程与学习偏好。模型路由与默认入口见高级设置。"
-      />
-      <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
-        <nav aria-label="设置分区" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-3">
+      <PageHeading title="设置" />
+      <div className="mx-auto max-w-[1040px] px-5 py-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)] lg:items-start lg:gap-10">
+        <nav aria-label="设置分区" className="sticky top-[var(--topbar-h,52px)] z-10 -mx-5 mb-4 flex gap-1 overflow-x-auto bg-bg/90 px-5 py-2 backdrop-blur [scrollbar-width:none] lg:mx-0 lg:mb-0 lg:flex-col lg:bg-transparent lg:px-0 lg:py-0 lg:backdrop-blur-none">
           <a className={navLinkClass} href="#appearance">外观与阅读</a>
-          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#quick-model-setup">AI 快速配置</a>
-          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#connections">连接</a>
-          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#planning">排程</a>
-          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#preferences">学习偏好</a>
-          <span aria-hidden="true">·</span>
           <a className={navLinkClass} href="#intervention">介入偏好</a>
-          <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href="/opening/settings/learning-test">学习测试</Link>
-          <span aria-hidden="true">·</span>
           <Link className={navLinkClass} href={`${basePath}/advanced`}>高级</Link>
-          <span aria-hidden="true">·</span>
-          <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>开启 AI 每日额度</Link>
+          <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>每日 AI 用量</Link>
         </nav>
+        <div className="min-w-0 space-y-6">
 
         <AppearanceSettings />
 
@@ -190,6 +180,7 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
         </div>
 
         {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
+        </div>
       </div>
     </div>
   );

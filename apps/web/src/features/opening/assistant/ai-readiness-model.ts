@@ -17,10 +17,10 @@ export const AI_READINESS_CHECKLIST_SOFT_KEYS = new Set([
 export const BUDGET_CONFIRM_HREF = "/opening/settings/advanced#daily-budget";
 
 /** Lead copy when hard-blocked by budget / no available model (cap/confirm). */
-export const BUDGET_CONFIRM_LEAD = "日额度未开启/未确认，辅导暂不可用";
+export const BUDGET_CONFIRM_LEAD = "开启 AI 辅导前，先确认每日用量上限";
 
 /** Primary CTA label for budget confirm. */
-export const BUDGET_CONFIRM_CTA = "去确认每日额度";
+export const BUDGET_CONFIRM_CTA = "去开启";
 
 /** Soft readiness rows must not keep "AI unavailable" open (vision is photo-only; OCR is scanned-PDF only). */
 export function isAiReadinessChecklistHardBlocker(item: AiReadinessChecklistItem): boolean {

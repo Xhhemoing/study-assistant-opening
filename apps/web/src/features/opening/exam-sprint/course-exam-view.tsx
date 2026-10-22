@@ -39,12 +39,11 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
     finally { setBusy(false); }
   }
   const change = () => { pending.current = null; };
-  return <main className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6 sm:px-6">
+  return <main className="mx-auto w-full max-w-[760px] space-y-6 px-4 py-6 sm:px-6">
     <header className="space-y-2">
       <Link className={ui.quiet} href={`/opening/courses/${initial.courseId}`}>返回课程</Link>
       <h1 className="text-title font-semibold tracking-[-0.01em]">{data.courseTitle} · 考前练习</h1>
       <p className="text-sm text-text-2">{data.targetDate ? `考试目标 ${data.targetDate}` : "按课程内容准备考试"}{data.dailyMinutes ? ` · 每天约 ${data.dailyMinutes} 分钟` : ""}</p>
-      <p className="text-sm text-text-2">上传真题后，AI 帮你找考点、出一份变式练习；作答后可以批改和改评。</p>
     </header>
     <section className="space-y-4 rounded-xl border border-line bg-surface p-5" aria-label="选择真题并组卷">
       <div className="flex flex-wrap items-center gap-3">
@@ -55,10 +54,12 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
         <label className="block text-sm">选择真题或样卷<select className={ui.input} value={sourceId} disabled={busy} onChange={event => { setSourceId(event.target.value); change(); }}>
           <option value="">请选择</option>{data.sources.map(source => <option key={source.id} value={source.id}>{source.title}</option>)}
         </select></label>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="flex flex-wrap items-end gap-3">
           <label className="text-sm">题量<select className={ui.input} value={questionCount} disabled={busy} onChange={event => { setQuestionCount(Number(event.target.value)); change(); }}>{[3,5,8,10].map(count => <option key={count} value={count}>{count} 题</option>)}</select></label>
-          <label className="text-sm">起始页（可选）<input className={ui.input} type="number" min={1} value={firstPage} disabled={busy} onChange={event => { setFirstPage(event.target.value); change(); }} /></label>
-          <label className="text-sm">结束页（可选）<input className={ui.input} type="number" min={1} value={lastPage} disabled={busy} onChange={event => { setLastPage(event.target.value); change(); }} /></label>
+          <details className="text-sm" open={Boolean(firstPage || lastPage)}><summary className="min-h-10 cursor-pointer py-2 text-text-2">限定页码</summary><div className="mt-1 flex gap-2">
+          <label className="text-sm">起始页<input className={`${ui.input} w-24`} type="number" min={1} value={firstPage} disabled={busy} onChange={event => { setFirstPage(event.target.value); change(); }} /></label>
+          <label className="text-sm">结束页<input className={`${ui.input} w-24`} type="number" min={1} value={lastPage} disabled={busy} onChange={event => { setLastPage(event.target.value); change(); }} /></label>
+          </div></details>
         </div>
         <button type="button" className={ui.primary} disabled={busy || !sourceId} onClick={generate}>{busy ? "正在准备…" : pending.current ? "查看这次组卷结果" : "分析考点并组卷"}</button>
         {pending.current && !busy ? <button type="button" className={ui.quiet} onClick={() => { pending.current = null; setError("已准备另开一份；再次组卷会重新调用模型。"); }}>另开一份练习</button> : null}

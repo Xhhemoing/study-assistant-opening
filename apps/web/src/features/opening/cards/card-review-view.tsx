@@ -138,15 +138,13 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
   }, [client, current, grading, state, onGraded, onBusyChange]);
 
   const headerActions = <div className="flex flex-wrap gap-2">
-    {state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" className={secondaryButtonClass} disabled={grading} onClick={() => setRetryToken(value => value + 1)}><RefreshCw size={14} aria-hidden />重新读取</button> : null}
-    {!embedded ? <Link href="/opening/today" className={secondaryButtonClass}>返回今天</Link> : null}
+    {state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" className={ui.quiet} disabled={grading} onClick={() => setRetryToken(value => value + 1)} aria-label="重新读取" title="重新读取"><RefreshCw size={14} aria-hidden /></button> : null}
   </div>;
 
   return (
     <section aria-label={compact ? "当前记忆卡片" : undefined} className={embedded ? compact ? "space-y-3" : "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
-      {embedded ? !compact ? <header className="space-y-1"><div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{headerActions}</div><p className="text-xs leading-5 text-text-2">翻面后自评，不作为独立正确的证明。</p></header> : null : <PageHeader
+      {embedded ? !compact ? <header className="space-y-1"><div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{headerActions}</div></header> : null : <PageHeader
         title="记忆卡片"
-        description="复习手工卡片和自动整理的错题。翻面检查后，按记忆情况安排下一次复习。"
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
@@ -168,7 +166,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
         {state.kind === "ready" && state.items.length === 0 ? (
           <EmptyState
             title="今天没有到期的记忆卡片"
-            description="批改后的错题会自动整理为卡片，也可以在辅导回答中手动制卡；到期后会出现在这里。"
+            description="错题和你在对话中制作的卡片到期后会出现在这里。"
             action={
               <Link href="/opening/assistant" className={ui.primary}>
                 去助理制成卡片
@@ -179,7 +177,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
         {state.kind === "ready" && state.items.length > 0 && state.index >= state.items.length ? (
           <EmptyState
             title="这组记忆卡片已经处理完毕"
-            description={`本次完成 ${state.items.length} 张。评分已写入服务端调度，不会进入补测队列。`}
+            description={`本次完成 ${state.items.length} 张。`}
             action={
               <Link href="/opening/today" className={secondaryButtonClass}>
                 返回今天
