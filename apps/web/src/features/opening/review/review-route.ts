@@ -4,6 +4,7 @@ export const reviewTabs = [
   { id: "cards", label: "记忆卡片" },
   { id: "retests", label: "待复测" },
   { id: "reinforcement", label: "补强练习" },
+  { id: "weak", label: "易错点" },
 ] as const;
 export type ReviewTab = typeof reviewTabs[number]["id"];
 export type ReviewSearch = Record<string, string | string[] | undefined>;

@@ -8,7 +8,16 @@ import { createOpeningApi } from "../client/api";
 import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../design/ui";
 import { groupReviewTasks, loadReviewSources, type ReviewSources, type ReviewTask } from "./review-queue";
 import { MixedReviewView } from "./mixed-review-view";
+import { WeakPoints } from "./weak-points";
 import { readReviewTab, reviewTabHref, reviewTabs, type ReviewTab } from "./review-route";
+
+/** 一键学习会话的下一站：只接受站内课程学习路径，防止开放跳转。 */
+export function sessionNext(search: string): { href: string; label: string } | undefined {
+  const params = new URLSearchParams(search);
+  const href = params.get("next") ?? undefined, label = params.get("nextLabel");
+  if (!href || !/^\/opening\/courses\/[0-9a-f-]{36}\/study(?:[?#].*)?$/.test(href)) return undefined;
+  return { href, label: label && label.trim() ? label.trim().slice(0, 60) : "继续学习" };
+}
 
 function ReviewTaskList({ items, upcoming = false }: { items: ReviewTask[]; upcoming?: boolean }) {
   return <ul className="divide-y divide-line rounded-xl border border-line">{items.map(({ task, kind, href, availableAt }) => <li key={task.id} className="flex flex-wrap items-center justify-between gap-4 p-4">
@@ -62,9 +71,10 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
     <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-[880px] space-y-4 px-5 py-4">
       <nav aria-label="复习分类" className="flex gap-1 overflow-x-auto border-b border-line">{reviewTabs.map(item => <a key={item.id} className={`min-h-11 shrink-0 whitespace-nowrap border-b-2 px-2 py-3 text-sm focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ${tab === item.id ? "border-ink font-medium text-accent" : "border-transparent text-text-2"}`} href={reviewTabHref(item.id, search)} onFocus={event => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })} onClick={event => navigate(event, item.id)} aria-current={tab === item.id ? "page" : undefined}>{item.label}</a>)}</nav>
       {tab === "all" ? <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-line p-5" aria-labelledby="review-cards-heading"><div><h2 id="review-cards-heading" className="font-semibold">记忆卡片{cardCount !== null ? ` · ${cardCount} 张待复习` : ""}</h2>{cardCount === 0 ? <p className="mt-1 text-meta text-text-2">今天没有到期卡片</p> : null}{!cardsVisited && sources?.cards.kind === "error" ? <p role="alert" className="mt-2 text-sm text-danger">卡片读取失败：{sources.cards.message}</p> : null}</div><div className="flex flex-wrap gap-2"><a className={cardCount === 0 ? ui.secondary : ui.primary} href={reviewTabHref("session", search)} onClick={event => navigate(event, "session")}>开始连续复习</a><a className={ui.quiet} href={reviewTabHref("cards", search)} onClick={event => navigate(event, "cards")}>复习卡片</a></div></section> : null}
-      {tab === "session" ? <MixedReviewView cardsClient={cardsClient} taskClient={api} /> : null}
+      {tab === "session" ? <MixedReviewView cardsClient={cardsClient} taskClient={api} next={sessionNext(search)} /> : null}
       <div hidden={tab !== "cards"}>{cardsVisited ? <CardReviewView embedded client={cardsClient} onRemainingChange={setRemainingCards} /> : null}</div>
-      {tab !== "cards" && tab !== "session" ? <section className="space-y-4" aria-labelledby="review-tasks-heading">
+      {tab === "weak" ? <WeakPoints /> : null}
+      {tab !== "cards" && tab !== "session" && tab !== "weak" ? <section className="space-y-4" aria-labelledby="review-tasks-heading">
         <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="review-tasks-heading" className="font-semibold">{tab === "retests" ? "待复测" : tab === "reinforcement" ? "补强练习" : "复测与补强"}</h2><button type="button" className={ui.quiet} onClick={() => setRevision(value => value + 1)} disabled={!sources}>刷新队列</button></div>
         {!sources ? <LoadingRows label="正在读取复习任务…" /> : sources.tasks.kind === "error" ? <LoadError message={`复习任务读取失败：${sources.tasks.message}`} onRetry={() => setRevision(value => value + 1)} /> : <>
           {ready.length ? <ReviewTaskList items={ready} /> : <EmptyState title="当前没有可开始的任务" description={upcoming.length ? "接下来的任务到时间后出现在这里。" : undefined} />}
