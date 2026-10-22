@@ -6,7 +6,8 @@ import { motion } from "../motion";
 import { NAV_TOOLS, featureHref } from "../shell/features";
 
 export type ContextChip = { id: string; label: string };
-export type Suggestion = { id: string; label: string; meta?: string; href: string };
+/** 第一条为首选行动：给一句理由和预计时间（来自真实计划，不由模型临时推断） */
+export type Suggestion = { id: string; label: string; meta?: string; reason?: string; minutes?: number; href: string };
 
 type StartComposerProps = {
   greeting: string;
@@ -79,14 +80,27 @@ export function StartComposer({ greeting, suggestions, examples = [], context, o
       </form>
 
       {suggestions.length > 0 ? (
-        <ul aria-label="接下来" className={`divide-y divide-line ${motion.stagger}`}>
-          {suggestions.slice(0, 3).map(item => (
-            <li key={item.id}><TransitionLink href={item.href} className="group flex min-h-12 items-center justify-between gap-3 py-2 text-[15px] text-text transition-colors hover:text-accent">
+        <div className="space-y-1">
+        {suggestions[0] && (
+          <TransitionLink href={suggestions[0].href} direction="forward" vtSource="object-title"
+            className="group flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3 shadow-card transition-[border-color,box-shadow,transform] duration-(--duration-micro) hover:border-line-strong hover:shadow-float active:scale-[0.995]">
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12px] text-text-2">先做这个{suggestions[0].minutes ? ` · 约 ${suggestions[0].minutes} 分钟` : ""}</span>
+              <span data-vt-title className="block truncate text-[16px] font-medium text-text">{suggestions[0].label}</span>
+              {suggestions[0].reason ? <span className="block truncate text-[13px] text-text-2">{suggestions[0].reason}</span> : null}
+            </span>
+            <span aria-hidden="true" className="grid size-9 shrink-0 place-items-center rounded-pill bg-ink text-on-ink transition-transform duration-(--duration-micro) group-hover:translate-x-0.5">→</span>
+          </TransitionLink>
+        )}
+        <ul aria-label="其他继续" className={`divide-y divide-line ${motion.stagger}`}>
+          {suggestions.slice(1, 3).map(item => (
+            <li key={item.id}><TransitionLink href={item.href} className="group flex min-h-11 items-center justify-between gap-3 px-1 py-2 text-[15px] text-text-2 transition-colors hover:text-text">
               <span data-vt-title>{item.label}{item.meta ? <span className="ml-2 text-[13px] text-text-2">{item.meta}</span> : null}</span>
               <span aria-hidden="true" className="transition-transform duration-(--duration-micro) group-hover:translate-x-0.5">→</span>
             </TransitionLink></li>
           ))}
         </ul>
+        </div>
       ) : examples.length > 0 ? (
         <ul aria-label="可以这样问" className={`flex flex-wrap gap-2 ${motion.stagger}`}>
           {examples.map(example => <li key={example}><button type="button" onClick={() => onDraftChange(example)} className={`min-h-9 rounded-pill border border-line px-3 text-[13px] text-text-2 hover:bg-surface-2 ${motion.press}`}>{example}</button></li>)}

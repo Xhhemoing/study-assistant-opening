@@ -94,32 +94,53 @@
   --layout-nav-compact: 72px;
   --layout-companion: 340px;
 
-  /* 动效角色：时长与曲线沿用上方 --duration-* / --ease-*，这里只补关键帧 */
-  --animate-fade-in: fade-in var(--duration-state) var(--ease-standard) both;
-  --animate-fade-out: fade-out var(--duration-micro) var(--ease-in) both;
-  --animate-pop-out: pop-out var(--duration-state) var(--ease-in) both;
+  /* 动效角色（参考 transitions.dev 的用途刻度）：开慢关快，位移小、配轻微模糊。
+     打开/进入 --duration-enter，关闭/退出 --duration-exit；微交互仍用 --duration-micro。 */
+  --duration-enter: 250ms;
+  --duration-exit: 150ms;
+  --duration-emphasis: 500ms;
+  --ease-bounce: cubic-bezier(.34, 1.36, .64, 1);
+  --blur-soft: 2px;
+  --blur-page: 3px;
+  --distance-page: 8px;
+  --distance-text: 4px;
+  --animate-fade-in: fade-in var(--duration-enter) var(--ease-standard) both;
+  --animate-fade-out: fade-out var(--duration-exit) var(--ease-in) both;
+  --animate-pop-out: pop-out var(--duration-exit) var(--ease-in) both;
   --animate-sheet-in: sheet-in var(--duration-panel) var(--ease-out-expo) both;
   --animate-sheet-out: sheet-out var(--duration-state) var(--ease-in) both;
-  --animate-slide-in: slide-in var(--duration-panel) var(--ease-out-expo) both;
+  --animate-slide-in: slide-in var(--duration-enter) var(--ease-out-expo) both;
+  --animate-panel-in: panel-in var(--duration-panel) var(--ease-out-expo) both;
+  --animate-text-in: text-in var(--duration-enter) var(--ease-out-expo) both;
   --animate-settle: settle var(--duration-scene) var(--ease-standard) both;
-  --animate-draw: draw var(--duration-panel) var(--ease-out-expo) both;
-  --animate-toast-in: toast-in var(--duration-panel) var(--ease-spring) both;
+  --animate-draw: draw var(--duration-emphasis) var(--ease-out-expo) 80ms both;
+  --animate-check-in: check-in var(--duration-emphasis) var(--ease-bounce) both;
+  --animate-shake: shake 400ms cubic-bezier(.36, .07, .19, .97) both;
+  --animate-toast-in: toast-in var(--duration-panel) var(--ease-out-expo) both;
+  --animate-shimmer-text: shimmer-text 1.8s linear infinite;
+  --animate-badge-pop: badge-pop var(--duration-emphasis) var(--ease-bounce) both;
 
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
   @keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
   @keyframes pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(0.97); } }
   @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
   @keyframes sheet-out { from { transform: none; } to { transform: translateY(100%); } }
-  @keyframes slide-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+  @keyframes slide-in { from { opacity: 0; transform: translateX(var(--distance-page)); filter: blur(var(--blur-soft)); } to { opacity: 1; transform: none; filter: none; } }
+  @keyframes panel-in { from { opacity: 0; transform: translateX(12px); filter: blur(var(--blur-soft)); } to { opacity: 1; transform: none; filter: none; } }
+  @keyframes text-in { from { opacity: 0; transform: translateY(var(--distance-text)); filter: blur(var(--blur-soft)); } to { opacity: 1; transform: none; filter: none; } }
   @keyframes settle { from { background-color: var(--color-accent-soft); } to { background-color: transparent; } }
   @keyframes draw { from { stroke-dashoffset: 24; } to { stroke-dashoffset: 0; } }
-  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; transform: none; } }
-  @keyframes vt-fade-out { to { opacity: 0; } }
-  @keyframes vt-rise-in { from { opacity: 0; transform: translateY(8px); } }
-  @keyframes vt-forward-out { to { opacity: 0; transform: translateX(-16px); } }
-  @keyframes vt-forward-in { from { opacity: 0; transform: translateX(24px); } }
-  @keyframes vt-back-out { to { opacity: 0; transform: translateX(16px); } }
-  @keyframes vt-back-in { from { opacity: 0; transform: translateX(-24px); } }
+  @keyframes check-in { from { opacity: 0; transform: translateY(6px) rotate(-60deg) scale(0.8); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+  @keyframes shake { 0%, 100% { transform: none; } 20% { transform: translateX(-8px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(2px); } }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px) scale(0.98); filter: blur(var(--blur-soft)); } to { opacity: 1; transform: none; filter: none; } }
+  @keyframes shimmer-text { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+  @keyframes badge-pop { 0% { opacity: 0; transform: translate(-3px, 3px) scale(0.6); } 100% { opacity: 1; transform: none; } }
+  @keyframes vt-out { to { opacity: 0; filter: blur(var(--blur-soft)); } }
+  @keyframes vt-in { from { opacity: 0; filter: blur(var(--blur-soft)); } }
+  @keyframes vt-forward-out { to { opacity: 0; transform: translateX(calc(var(--distance-page) * -1)); filter: blur(var(--blur-page)); } }
+  @keyframes vt-forward-in { from { opacity: 0; transform: translateX(var(--distance-page)); filter: blur(var(--blur-page)); } }
+  @keyframes vt-back-out { to { opacity: 0; transform: translateX(var(--distance-page)); filter: blur(var(--blur-page)); } }
+  @keyframes vt-back-in { from { opacity: 0; transform: translateX(calc(var(--distance-page) * -1)); filter: blur(var(--blur-page)); } }
 }
 
 /* Existing components keep working while they migrate to the canonical names. */
@@ -235,14 +256,20 @@
 
 /* ===== UI v3：页面过渡（View Transitions）=====
    只有主内容区参与；导航、底栏保持静止；激活指示条在入口间滑动。
-   方向由 html[data-nav-direction] 给出：forward（进入更深）/ back / swap（同级切换）。 */
+   方向由 html[data-nav-direction] 给出：forward（进入更深）/ back / swap（同级切换）/ local（同页局部）。
+   参考 transitions.dev 的 page side-by-side：8px 位移 + 3px 模糊，进入 250ms、退出 150ms。 */
 ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-::view-transition-group(*) { animation-duration: var(--duration-panel); animation-timing-function: var(--ease-standard); }
-::view-transition-old(app-main) { animation: vt-fade-out var(--duration-micro) var(--ease-in) both; }
-::view-transition-new(app-main) { animation: vt-rise-in var(--duration-panel) var(--ease-out-expo) both; }
-html[data-nav-direction="forward"]::view-transition-old(app-main) { animation: vt-forward-out var(--duration-state) var(--ease-in) both; }
-html[data-nav-direction="forward"]::view-transition-new(app-main) { animation: vt-forward-in var(--duration-panel) var(--ease-out-expo) both; }
-html[data-nav-direction="back"]::view-transition-old(app-main) { animation: vt-back-out var(--duration-state) var(--ease-in) both; }
-html[data-nav-direction="back"]::view-transition-new(app-main) { animation: vt-back-in var(--duration-panel) var(--ease-out-expo) both; }
+::view-transition-group(*) { animation-duration: var(--duration-enter); animation-timing-function: var(--ease-out-expo); }
+::view-transition-old(app-main) { animation: vt-out var(--duration-exit) var(--ease-in) both; }
+::view-transition-new(app-main) { animation: vt-in var(--duration-enter) var(--ease-out-expo) both; }
+html[data-nav-direction="forward"]::view-transition-old(app-main) { animation: vt-forward-out var(--duration-exit) var(--ease-in) both; }
+html[data-nav-direction="forward"]::view-transition-new(app-main) { animation: vt-forward-in var(--duration-enter) var(--ease-out-expo) both; }
+html[data-nav-direction="back"]::view-transition-old(app-main) { animation: vt-back-out var(--duration-exit) var(--ease-in) both; }
+html[data-nav-direction="back"]::view-transition-new(app-main) { animation: vt-back-in var(--duration-enter) var(--ease-out-expo) both; }
+/* 同页局部变化（指示条滑动、专注切换）：主区不淡入淡出，只让命名元素移动 */
+html[data-nav-direction="local"]::view-transition-old(app-main), html[data-nav-direction="local"]::view-transition-new(app-main) { animation: none; }
+html[data-nav-direction="local"]::view-transition-old(*):only-child, html[data-nav-direction="local"]::view-transition-new(*):only-child { animation: none; }
+/* 滑动指示条：切换瞬间给当前组的指示块打 data-vt-pill */
+[data-vt-pill] { view-transition-name: active-pill; }
 /* 共享元素：点击来源打上 data-vt-source，目标标题用 [view-transition-name:object-title] */
 [data-vt-source="object-title"] { view-transition-name: object-title; }

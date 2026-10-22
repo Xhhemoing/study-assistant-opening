@@ -23,6 +23,8 @@ type StudyWorkspaceProps = {
   onCompanionStateChange?: (state: CompanionState) => void;
   /** 标题承接来源列表行（共享元素过渡） */
   titleSlot?: ReactNode;
+  /** 窄屏辅助区替代正文时，顶部显示的上下文摘要（如题干前一句） */
+  contextSummary?: string;
   /** 内容区布局：grid（三档宽度，默认）或 bare（画布/阅读器自管宽度） */
   content?: "grid" | "bare";
   children: ReactNode;
@@ -33,7 +35,7 @@ type StudyWorkspaceProps = {
  * 动效：辅助区宽度 0↔340 过渡、内部固定宽度不挤压；窄屏改为全宽切换并淡入；
  * 进入/退出专注用页面过渡，主区尺寸平滑变化。业务状态不因开关栏而重挂载。
  */
-export function StudyWorkspace({ location, progress, resumeNote, companion, actionBar, onBack, companionState, onCompanionStateChange, titleSlot, content = "grid", children }: StudyWorkspaceProps) {
+export function StudyWorkspace({ location, progress, resumeNote, companion, actionBar, onBack, companionState, onCompanionStateChange, titleSlot, contextSummary, content = "grid", children }: StudyWorkspaceProps) {
   const [inner, setInner] = useState<CompanionState>({ open: false, tab: "chat" });
   const state = companionState ?? inner;
   const setState = (next: CompanionState) => { if (!companionState) setInner(next); onCompanionStateChange?.(next); };
@@ -99,9 +101,15 @@ export function StudyWorkspace({ location, progress, resumeNote, companion, acti
 
       {/* 关闭时宽度收为 0 且 inert，不卸载：对话草稿与进行中的请求不丢 */}
       <div data-open={showCompanion} data-narrow={narrow} inert={!showCompanion} aria-hidden={!showCompanion || undefined}
-        className="min-w-0 overflow-hidden border-line transition-[width,opacity] duration-(--duration-panel) ease-standard data-[open=false]:w-0 data-[open=false]:opacity-0 data-[open=true]:w-(--layout-companion) data-[open=true]:border-l data-[open=true]:opacity-100 data-[narrow=true]:data-[open=false]:hidden data-[narrow=true]:data-[open=true]:w-full data-[narrow=true]:data-[open=true]:flex-1 data-[narrow=true]:border-l-0 motion-reduce:transition-none">
+        className="min-w-0 overflow-hidden border-line transition-[width,opacity] duration-(--duration-panel) ease-standard data-[open=false]:w-0 data-[open=false]:opacity-0 data-[open=true]:w-(--layout-companion) data-[open=true]:border-l data-[open=false]:duration-(--duration-exit) data-[open=true]:opacity-100 data-[narrow=true]:data-[open=false]:hidden data-[narrow=true]:data-[open=true]:w-full data-[narrow=true]:data-[open=true]:flex-1 data-[narrow=true]:border-l-0 motion-reduce:transition-none">
         <div className={`h-full ${narrow ? "w-full" : "w-(--layout-companion)"}`}>
-          <CompanionPane tab={state.tab} onTabChange={tab => setState({ ...state, tab })} onClose={() => setState({ ...state, open: false })} panels={companion} />
+          <CompanionPane tab={state.tab} onTabChange={tab => setState({ ...state, tab })} onClose={() => setState({ ...state, open: false })} panels={companion}
+            contextSummary={narrow && contextSummary ? (
+              <button type="button" onClick={() => setState({ ...state, open: false })} className="flex w-full shrink-0 items-center gap-2 border-b border-line bg-surface-2 px-4 py-2 text-left">
+                <span className="min-w-0 flex-1 truncate text-[13px] text-text-2">{contextSummary}</span>
+                <span className="shrink-0 text-[13px] font-medium text-text">回到原文</span>
+              </button>
+            ) : null} />
         </div>
       </div>
     </div>

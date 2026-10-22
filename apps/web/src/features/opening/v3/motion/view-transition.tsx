@@ -6,24 +6,45 @@ import { flushSync } from "react-dom";
 import { interactionMotionReduced } from "../../design/haptics";
 import { navDirection } from "../shell/features";
 
-export type NavDirection = "forward" | "back" | "swap";
+export type NavDirection = "forward" | "back" | "swap" | "local";
 
-type TransitionDocument = Document & { startViewTransition?: (update: () => void | Promise<void>) => { finished: Promise<void> } };
+type ViewTransitionHandle = { finished: Promise<void>; skipTransition: () => void };
+type TransitionDocument = Document & { startViewTransition?: (update: () => void | Promise<void>) => ViewTransitionHandle };
 
 let pending: (() => void) | null = null;
+let active: ViewTransitionHandle | null = null;
 const SETTLE_TIMEOUT_MS = 600; // 路由未在时限内提交时放行，避免冻结画面
 
-function start(direction: NavDirection, update: () => void | Promise<void>) {
+/**
+ * 连续操作不被动画阻塞：新过渡开始时直接跳过上一个（skipTransition 会立即完成 DOM 更新）。
+ */
+function start(direction: NavDirection, update: () => void | Promise<void>, onDone?: () => void) {
   const doc = document as TransitionDocument;
-  if (!doc.startViewTransition || interactionMotionReduced()) { void update(); return; }
+  if (!doc.startViewTransition || interactionMotionReduced()) { void Promise.resolve(update()).finally(onDone); return; }
+  active?.skipTransition();
   document.documentElement.dataset.navDirection = direction;
   const transition = doc.startViewTransition(update);
-  void transition.finished.finally(() => { delete document.documentElement.dataset.navDirection; });
+  active = transition;
+  void transition.finished.finally(() => {
+    if (active === transition) { active = null; delete document.documentElement.dataset.navDirection; }
+    onDone?.();
+  });
 }
 
-/** 同页状态变化（专注切换、计划应用后重排）用同一套过渡；不支持或减少动效时直接更新。 */
-export function runViewTransition(update: () => void, direction: NavDirection = "swap") {
+/** 同页状态变化（专注切换、计划应用后重排）。默认 local：主区不淡入淡出，只有命名元素移动。 */
+export function runViewTransition(update: () => void, direction: NavDirection = "local") {
   start(direction, () => { flushSync(update); });
+}
+
+/**
+ * 滑动指示条（标签、分段选择）：组内当前项的指示块带 data-pill；
+ * 切换前后各打一次 data-vt-pill，让它从旧位置滑到新位置。不需要测量，也不写内联样式。
+ */
+export function runIndicatorTransition(group: HTMLElement | null, update: () => void) {
+  const clear = () => document.querySelectorAll("[data-vt-pill]").forEach(node => node.removeAttribute("data-vt-pill"));
+  const mark = () => group?.querySelector("[data-pill]")?.setAttribute("data-vt-pill", "");
+  clear(); mark();
+  start("local", () => { clear(); flushSync(update); mark(); }, clear);
 }
 
 /** 路由跳转带过渡：等新路由提交（ViewTransitionBoundary 放行）后再截取新画面。 */

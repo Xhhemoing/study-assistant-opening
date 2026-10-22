@@ -15,6 +15,15 @@ const R = 5;            // 网格半径
 const P = (x: number, y: number) => `${x * U},${-y * U}`;
 const xy = (x: number, y: number) => ({ x: x * U, y: -y * U });
 
+/** 按秩描述：零矩阵压成点（秩 0），两列共线压成线（秩 1），否则张成平面（秩 2）。 */
+export function describeMatrix([a, b, c, d]: Matrix2): string {
+  const det = a * d - b * c;
+  if (a === 0 && b === 0 && c === 0 && d === 0) return "零矩阵：整个平面被压成原点，秩为 0。";
+  if (det === 0) return "行列式为 0：两列共线，平面被压成一条直线，秩为 1。";
+  if (det < 0) return "行列式为负：方向翻转，面积取绝对值。";
+  return "两列不共线，可以张成整个平面。";
+}
+
 /**
  * 交互画布（study/matrix、study/span 的布局模板）。矩阵变化时网格、基向量、单位正方形逐帧补间，
  * 面积 = |det| 实时显示。几何只写 SVG 属性，不用内联样式；减少动效时直接跳到结果。
@@ -65,7 +74,7 @@ export function LinearMapCanvas({ matrix, onChange, presets = [] }: Props) {
             ))}
           </div>
         )}
-        <p className="text-[13px] leading-6 text-text-2">{det === 0 ? "行列式为 0：两列共线，平面被压成一条线。" : det < 0 ? "行列式为负：方向翻转，面积取绝对值。" : "两列不共线，可以张成整个平面。"}</p>
+        <p className="text-[13px] leading-6 text-text-2">{describeMatrix(matrix)}</p>
       </div>
     </div>
   );

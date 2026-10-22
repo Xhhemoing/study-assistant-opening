@@ -76,7 +76,7 @@ function NavGroup({ items, active, compact, counts, divided = false }: { items: 
                 {compact && <span className="text-[12px] leading-4 motion-safe:animate-fade-in">{item.label}</span>}
               </span>
               <span data-hidden={compact} className="relative flex-1 whitespace-nowrap text-[15px] transition-opacity duration-(--duration-micro) data-[hidden=true]:sr-only">{item.label}</span>
-              {count ? <span className={`tabular-nums text-[12px] text-accent ${compact ? "absolute right-2 top-1" : "relative mr-3"}`}>{count}<span className="sr-only">项待完成</span></span> : null}
+              {count ? <span key={count} className={`tabular-nums text-[12px] text-accent motion-safe:animate-badge-pop ${compact ? "absolute right-2 top-1" : "relative mr-3"}`}>{count}<span className="sr-only">项待完成</span></span> : null}
             </TransitionLink>
           </li>
         );

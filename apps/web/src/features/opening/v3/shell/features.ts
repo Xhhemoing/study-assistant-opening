@@ -7,7 +7,7 @@ export type FeatureIcon =
   | "start" | "courses" | "review" | "library" | "sprint" | "cards" | "search" | "settings"
   | "assistant" | "add" | "exam" | "upload" | "connections" | "export" | "advanced" | "measure" | "canvas";
 
-export type FeatureLayout = "start" | "thread" | "list" | "course" | "workspace" | "reader" | "canvas" | "form" | "settings" | "auth" | "redirect";
+export type FeatureLayout = "start" | "thread" | "list" | "course" | "workspace" | "reader" | "canvas" | "form" | "settings" | "auth" | "redirect" | "summary" | "session";
 
 export type Feature = {
   id: string;
@@ -37,6 +37,8 @@ export const FEATURES: Feature[] = [
   { id: "study", route: "/opening/courses/[id]/study", label: "学习", icon: "courses", placement: "none", depth: 2, layout: "workspace", parent: "courses", source: "features/opening/study/*" },
   { id: "study-span", route: "/opening/courses/[id]/study/span", label: "向量张成", icon: "canvas", placement: "none", depth: 2, layout: "canvas", parent: "courses", source: "features/opening/teaching/span/span-lesson-session" },
   { id: "study-matrix", route: "/opening/courses/[id]/study/matrix", label: "矩阵变换", icon: "canvas", placement: "none", depth: 2, layout: "canvas", parent: "courses", source: "features/courses/course-matrix-lesson" },
+  { id: "study-summary", route: "/opening/courses/[id]/study/summary", label: "本次小结", icon: "courses", placement: "none", depth: 2, layout: "summary", parent: "courses", source: "新增：读取学习会话汇总（练习服务）" },
+  { id: "review-session", route: "/opening/review/session", label: "复习会话", icon: "review", placement: "none", depth: 2, layout: "session", parent: "review", source: "新增：复用 features/opening/review 复习服务与 cards/card-review-view 的评分接口" },
   { id: "review", route: "/opening/review", label: "复习", icon: "review", placement: "core", depth: 0, layout: "list", source: "features/opening/review/review-hub" },
   { id: "library", route: "/opening/library", label: "资料", icon: "library", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/library/page" },
   { id: "library-new", route: "/opening/library/new", label: "上传资料", icon: "upload", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/editor/new-document" },

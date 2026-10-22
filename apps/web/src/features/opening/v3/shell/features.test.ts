@@ -8,6 +8,8 @@ describe("UI v3 feature registry", () => {
     expect(resolveFeature("/opening/courses/abc/study/matrix")?.id).toBe("study-matrix");
     expect(resolveFeature("/opening/library/new")?.id).toBe("library-new");
     expect(resolveFeature("/opening/library/doc-1?pos=3")?.id).toBe("document");
+    expect(resolveFeature("/opening/courses/abc/study/summary")?.id).toBe("study-summary");
+    expect(resolveFeature("/opening/review/session")?.id).toBe("review-session");
   });
 
   it("highlights exactly one navigation entry per path", () => {

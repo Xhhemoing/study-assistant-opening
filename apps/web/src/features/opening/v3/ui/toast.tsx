@@ -26,7 +26,7 @@ export function StatusToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div role="status" aria-live="polite" className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4">
         {mounted && <p key={message?.id} data-state={state}
-          className="rounded-pill bg-ink px-4 py-2 text-[13px] text-on-ink shadow-float data-[state=open]:motion-safe:animate-toast-in data-[state=closed]:animate-fade-out">{message?.text ?? last}</p>}
+          className="rounded-pill bg-ink px-4 py-2 text-[13px] text-on-ink shadow-float data-[state=open]:motion-safe:animate-toast-in data-[state=closed]:motion-safe:animate-fade-out">{message?.text ?? last}</p>}
       </div>
     </ToastContext.Provider>
   );
