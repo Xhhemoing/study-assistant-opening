@@ -1,11 +1,8 @@
-import { createElement, type ReactNode } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vitest";
 const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
 vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnosticPreference.enabled }));
-// Focus portal behavior is covered by its real-browser tests; these checks own
-// the lesson content independent of the portal's client-only mount point.
-vi.mock("@aistudy/ui", async original => ({ ...await original<typeof import("@aistudy/ui")>(), LessonFocusDialog: ({ children }: { children: ReactNode }) => children }));
 beforeEach(() => { diagnosticPreference.enabled = false; });
 import { SpanLesson } from "./span-lesson";
 it.each(["self_study", "overview", "challenge"] as const)("opens new evidence at the actual reserved step for %s", purpose => {

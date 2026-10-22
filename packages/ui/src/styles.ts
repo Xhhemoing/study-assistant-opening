@@ -1,10 +1,10 @@
 /** Shared utility classes keep the opening compatibility API and primitives aligned. */
-export const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+export const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
 const motion = "transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out-expo active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100";
 const control = "inline-flex min-h-11 select-none items-center justify-center gap-2 rounded-md px-3 text-sm font-medium disabled:pointer-events-none disabled:opacity-50";
 export const fieldClass = `min-h-11 min-w-0 w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm text-text placeholder:text-text-3 disabled:opacity-50 ${focusRing}`;
 export const ui = {
-  primary: `${control} bg-ink text-on-ink hover:bg-ink/90 ${motion} ${focusRing}`,
+  primary: `${control} bg-accent text-on-accent hover:bg-accent/90 ${motion} ${focusRing}`,
   secondary: `${control} border border-text-3 bg-surface text-text hover:bg-surface-2 ${motion} ${focusRing}`,
   quiet: `${control} text-text-2 hover:bg-surface-2 hover:text-text ${motion} ${focusRing}`,
   danger: `${control} border border-danger bg-surface text-danger hover:bg-danger/10 ${motion} ${focusRing}`,

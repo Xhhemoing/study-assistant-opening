@@ -15,7 +15,7 @@
     "preview:build": "node scripts/run-heavy.mjs node scripts/web-preview.mjs build",
     "preview:start": "node scripts/web-preview.mjs start",
     "preview": "npm run preview:build && npm run preview:start",
-    "lint": "node scripts/check-server-boundary.mjs && node scripts/run-heavy.mjs eslint .",
+    "lint": "node scripts/check-new-fixed-colors.mjs && node scripts/check-server-boundary.mjs && node scripts/run-heavy.mjs eslint .",
     "lint:boundary": "node scripts/check-server-boundary.mjs",
     "typecheck": "node scripts/typecheck.mjs",
     "test": "node scripts/run-heavy.mjs vitest run",

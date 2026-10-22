@@ -13,15 +13,24 @@ const noteSchema = z.object({
 export type StudyNoteDraft = z.infer<typeof noteSchema>;
 const memory = new Map<string, StudyNoteDraft>();
 const flights = new Map<string, Promise<StudyNoteDraft>>();
-const storageKey = (context: StudyConversationContext) => `aistudy.study-note.v1:${studyConversationIdentity(context)}`;
+const listeners = new Map<string, Set<() => void>>();
+const publish = (key: string) => listeners.get(key)?.forEach(listener => listener());
+const storageKey = (context: StudyConversationContext, scope?: string) => `aistudy.study-note.v1:${scope ? `${scope}:` : ""}${studyConversationIdentity(context)}`;
 
-export function readStudyNote(context: StudyConversationContext): StudyNoteDraft {
-  const key = storageKey(context);
+export function subscribeStudyNote(context: StudyConversationContext, listener: () => void, scope?: string) {
+  const key = storageKey(context, scope);
+  const entries = listeners.get(key) ?? new Set<() => void>();
+  entries.add(listener); listeners.set(key, entries);
+  return () => { entries.delete(listener); if (!entries.size) listeners.delete(key); };
+}
+
+export function readStudyNote(context: StudyConversationContext, scope?: string): StudyNoteDraft {
+  const key = storageKey(context, scope);
   const cached = memory.get(key);
   if (cached) return cached;
   try {
     let raw = sessionStorage.getItem(key);
-    if (!raw && context.activityId && context.blockId && (context.attemptId || context.itemVersionId || context.kcMappingVersion !== undefined)) {
+    if (!scope && !raw && context.activityId && context.blockId && (context.attemptId || context.itemVersionId || context.kcMappingVersion !== undefined)) {
       const legacyKey = `aistudy.study-note.v1:${legacyStudyConversationIdentity(context)}`;
       const previous = memory.get(legacyKey);
       if (previous) {
@@ -30,7 +39,7 @@ export function readStudyNote(context: StudyConversationContext): StudyNoteDraft
         memory.set(key, migrated);
         if (flight) {
           flights.set(key, flight);
-          void flight.then(result => { writeStudyNote(context, result); }).finally(() => flights.delete(key));
+          void flight.then(result => { writeStudyNote(context, result, scope); }).finally(() => flights.delete(key));
         }
         return migrated;
       }
@@ -61,9 +70,9 @@ export function readStudyNote(context: StudyConversationContext): StudyNoteDraft
 }
 
 /** Memory stays newest after a storage failure; a stale disk value cannot replace it. */
-export function writeStudyNote(context: StudyConversationContext, draft: StudyNoteDraft): boolean {
-  const key = storageKey(context);
-  memory.set(key, draft);
+export function writeStudyNote(context: StudyConversationContext, draft: StudyNoteDraft, scope?: string): boolean {
+  const key = storageKey(context, scope);
+  memory.set(key, draft); publish(key);
   try { sessionStorage.setItem(key, JSON.stringify(draft)); return true; }
   catch { return false; }
 }
@@ -83,16 +92,16 @@ export function studyNoteDocument(context: StudyConversationContext, draft: Pick
 }
 
 /** One explicit create. An unknown response locks this draft across remounts. */
-export function saveStudyNote(context: StudyConversationContext, draft: StudyNoteDraft, api: Pick<EditorApi, "createDocument">, associate: (courseId: string, documentId: string) => Promise<void>): Promise<StudyNoteDraft> {
-  const key = storageKey(context);
+export function saveStudyNote(context: StudyConversationContext, draft: StudyNoteDraft, api: Pick<EditorApi, "createDocument">, associate: (courseId: string, documentId: string) => Promise<void>, scope?: string): Promise<StudyNoteDraft> {
+  const key = storageKey(context, scope);
   const pending = flights.get(key);
   if (pending) return pending;
-  const current = readStudyNote(context);
+  const current = readStudyNote(context, scope);
   if (current.status !== "editing" || !draft.title.trim() || !draft.text.trim()) return Promise.resolve(current);
   const captured: StudyNoteDraft = { ...draft, status: "pending", storageError: false };
-  if (!writeStudyNote(context, captured)) {
+  if (!writeStudyNote(context, captured, scope)) {
     const unsent: StudyNoteDraft = { ...draft, status: "editing", storageError: true };
-    memory.set(key, unsent);
+    memory.set(key, unsent); publish(key);
     return Promise.resolve(unsent);
   }
   const flight = (async () => {
@@ -100,16 +109,18 @@ export function saveStudyNote(context: StudyConversationContext, draft: StudyNot
     try {
       const document = await api.createDocument(studyNoteDocument(context, captured));
       const documentId = z.string().uuid().parse(document.id);
-      result = { ...captured, status: "saved", documentId };
-      writeStudyNote(context, result);
+      result = { ...captured, status: "saved", documentId, associationFailed: Boolean(context.courseId) };
+      writeStudyNote(context, result, scope);
       if (context.courseId) {
-        try { await associate(context.courseId, documentId); }
-        catch { result = { ...result, associationFailed: true }; }
+        try { await associate(context.courseId, documentId); result = { ...result, associationFailed: false }; }
+        catch { /* Keep the saved document and report its unconfirmed association. */ }
       }
     } catch (error) {
       result = { ...captured, status: error instanceof EditorApiError && error.status >= 400 && error.status < 500 && error.status !== 408 ? "editing" : "unknown" };
     }
-    writeStudyNote(context, result);
+    // An explicit “another note” after document creation is a new intent. A late
+    // membership response must not replace that newer editable draft.
+    if (result.status !== "saved" || readStudyNote(context, scope).documentId === result.documentId) writeStudyNote(context, result, scope);
     return result;
   })().finally(() => flights.delete(key));
   flights.set(key, flight);

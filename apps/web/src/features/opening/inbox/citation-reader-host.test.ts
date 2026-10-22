@@ -11,6 +11,12 @@ describe("in-place citation reading", () => {
   it("preserves the exact source/version and all supported citation locators", () => {
     expect(citationReaderTarget(click)).toEqual({ sourceId, version: 0, page: 3, slideLabel: "A-1", startMs: 65000 });
   });
+  it("carries only an explicitly valid original conversation without changing material locators", () => {
+    const conversation = "22222222-2222-4222-8222-222222222222";
+    expect(citationReaderTarget({ ...click, href: `${click.href}&conversation=${conversation}` })).toEqual({ sourceId, version: 0, page: 3, slideLabel: "A-1", startMs: 65000, conversationId: conversation });
+    expect(citationReaderTarget({ ...click, href: `${click.href}&conversation=invalid` })).toEqual(citationReaderTarget(click));
+    expect(citationReaderTarget({ ...click, href: `${click.href}&conversation=` })).toEqual(citationReaderTarget(click));
+  });
   it.each([
     { button: 1 }, { modified: true }, { defaultPrevented: true }, { download: true }, { target: "_blank" },
     { inLibrary: true }, { withinReader: true }, { href: `https://external.example${click.href}` },

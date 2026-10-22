@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantEntry, assistantRedirect, isAssistantShortcut } from "./assistant-entry";
+import { assistantEntry, assistantRedirect } from "./assistant-entry";
 import { studyContextReturnHref, studyConversationHref } from "./study-conversation-context";
 const id = "11111111-1111-4111-8111-111111111111";
 
@@ -39,13 +39,6 @@ describe("global assistant entry", () => {
   it("blocks a course-only study entry and isolates language support from mathematical help", () => {
     expect(assistantEntry("/opening/assistant", `/opening/courses/${id}/study/span`).error).toContain("本次作答");
     expect(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=language_support`).key).not.toBe(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=learning_help`).key);
-  });
-  it("keeps Cmd/Ctrl J out of text entry, composition and already handled events", () => {
-    const event = { key: "j", metaKey: true, ctrlKey: false, altKey: false, isComposing: false, defaultPrevented: false };
-    expect(isAssistantShortcut(event, false)).toBe(true);
-    expect(isAssistantShortcut(event, true)).toBe(false);
-    expect(isAssistantShortcut({ ...event, isComposing: true }, false)).toBe(false);
-    expect(isAssistantShortcut({ ...event, defaultPrevented: true }, false)).toBe(false);
   });
   it("starts an explicitly unbound conversation without restoring course history, but keeps study protection", () => {
     const entry = assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}`);

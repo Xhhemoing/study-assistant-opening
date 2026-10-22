@@ -11,9 +11,9 @@ vi.mock("./preference-controls", () => ({
 
 // The shared panel owns its dialog/mount lifecycle tests; inspect this workspace's wiring here.
 vi.mock("./study-tools-panel", () => ({
-  StudyToolsPanel: ({ children, panels }: { children: ReactNode; panels: { id: string; label: string; content: ReactNode }[] }) => createElement("div", { "data-tools-layout": "true" },
+  StudyToolsPanel: ({ children, panels }: { children: ReactNode; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" },
     createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
-    panels.map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
+    panels.filter((panel, index) => panels.findIndex(item => (item.mountKey ?? item.id) === (panel.mountKey ?? panel.id)) === index).map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
 }));
 
 vi.mock("./block-commands", async () => {
@@ -232,11 +232,11 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain(`data-block-id="${BID2}"`);
     expect(html).not.toContain(`data-block-id="${BID3}"`);
     expect(html).not.toContain("data-teaching-past-collapsed");
-    expect(html).toContain("提纲与回看");
+    expect(html).toContain("目录");
     expect(html).toContain("资料与引用");
     expect(html).toContain("自由探索");
     expect(html).toContain("学习设置");
-    expect(html).toContain('data-panel="settings"');
+    expect(html).toContain('data-panel="outline"');
     expect(html).toContain('data-testid="block-commands-mock"');
     expect(html).toContain(`data-block-id="${BID}"`);
     expect(html).toContain('data-return-disabled="true"');
@@ -266,7 +266,7 @@ describe("TeachingWorkspace", () => {
     expect(html).toContain(`data-study-unit="${BID2}"`);
     expect(html).toContain("<details");
     expect(html).toContain("<summary");
-    expect(html).toContain("提纲与回看");
+    expect(html).toContain("目录");
     expect(html).not.toContain("矩阵的秩表示线性无关行的最大个数。");
     expect(html).not.toContain('data-teaching-block-focus="skipped"');
     expect(html).not.toContain(`data-block-id="${BID3}"`);
@@ -375,7 +375,8 @@ describe("TeachingWorkspace", () => {
       blockId: BID2, contentVersion: 3, isQuestion: true, learningAttempt: null,
       unitText: "写出一个秩为 2 的 3×3 矩阵例子。", sourceRefs: [],
     }));
-    expect(html).toContain("提问与笔记");
+    expect(html).toContain("对话");
+    expect(html).toContain("笔记");
     expect(html).toContain('data-study-question="true"');
     expect(html).not.toContain("data-teaching-primary-advance=\"true\"");
   });
@@ -476,7 +477,7 @@ describe("TeachingContinueEntry", () => {
       }),
     );
     expect(html).toContain('data-return-disabled="false"');
-    expect(html).toContain('data-panel="settings"');
+    expect(html).toContain('data-panel="outline"');
     expect(html).toContain("自由探索");
   });
 });
@@ -497,7 +498,7 @@ describe("waitInitActionVisibility (S6)", () => {
 });
 
 
-it("keeps the next-unit action disabled until this question has a saved observation", () => {
+it("keeps the question's next action inside its result stage rather than exposing a competing unit advance", () => {
   const nextBlockId = "88888888-8888-4888-8888-888888888888";
   const initial = clientInit();
   const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
@@ -506,6 +507,7 @@ it("keeps the next-unit action disabled until this question has a saved observat
       blockId: nextBlockId, position: 3, blockType: "text", role: "teach", content: { text: "下一知识单元" },
     }] },
   }));
-  expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-teaching-primary-advance="false"[^>]*>先提交本题，再继续/);
-  expect(html).toContain("提纲与回看");
+  expect(html).not.toContain("data-teaching-primary-advance");
+  expect(html).toContain('data-attempt-stage="draft"');
+  expect(html).toContain("目录");
 });

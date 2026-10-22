@@ -18,6 +18,8 @@ vi.mock("next/link", () => ({
     createElement("a", { href, className }, children as never),
 }));
 
+import { ObjectConversationContext } from "../opening/assistant/conversation-object-context";
+import { CourseSpaceHeader } from "./course-space";
 import { CourseStudyActions } from "./course-study-actions";
 
 const COURSE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -58,6 +60,16 @@ it("makes actual study primary and keeps plan seeding as a visible secondary act
   expect(html.indexOf("开始独立练习")).toBeLessThan(html.indexOf("设为今日计划"));
   expect(html).not.toContain("<details");
   expect(html).toMatch(/确认今日安排/);
+});
+
+it("keeps the explicit original conversation in both course continuation actions", () => {
+  const conversation = "11111111-1111-4111-8111-111111111111";
+  const html = renderToStaticMarkup(createElement(ObjectConversationContext.Provider, { value: conversation },
+    createElement(CourseSpaceHeader, { courseId: COURSE_ID, title: "数学" }),
+    createElement(CourseStudyActions, { assetCount: 0, opening: true, courseId: COURSE_ID }),
+  ));
+  expect(html.split(`href="/opening/courses/${COURSE_ID}/study?conversation=${conversation}"`).length - 1).toBe(2);
+  expect(html).toContain(`/opening/library?tab=materials&amp;courseId=${COURSE_ID}&amp;conversation=${conversation}`);
 });
 
 it("links practice and record actions to existing sections while records are still loading", () => {

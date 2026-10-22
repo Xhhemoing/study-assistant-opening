@@ -39,9 +39,9 @@ export function ActivityEndControl({ activity, api, onActivityUpdated }: {
     finally { inFlight.current = false; setPending(false); }
   }
   if (activity.status === "completed") return <ActivitySummaryCard activityId={activity.id} api={api} />;
-  return <div className="space-y-2 border-t border-zinc-100 pt-4">
+  return <div className="space-y-2 border-t border-line pt-4">
     <button type="button" className={ui.secondary} disabled={pending || uncertain} onClick={() => { void end(); }}>{pending ? "正在确认状态…" : "结束本次学习"}</button>
-    {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
+    {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
     {uncertain ? <button type="button" className={ui.quiet} disabled={pending} onClick={() => { void reread(); }}>重新读取学习状态</button> : null}
   </div>;
 }

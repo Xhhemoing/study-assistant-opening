@@ -20,6 +20,7 @@ const shortcuts = vi.hoisted(() => ({ set: vi.fn() }));
 vi.mock("../../design/haptics", () => ({ successfulInteractionHaptic: mocks.haptic }));
 vi.mock("../../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
 vi.mock("../lesson-shortcuts", () => ({ useLessonArrowKeys: shortcuts.set }));
+vi.mock("../../shell/workspace-layout-context", () => ({ useWorkspaceLayout: () => ({ focusMode: false, toggleFocusMode: vi.fn() }) }));
 vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("../../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));

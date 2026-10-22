@@ -61,6 +61,14 @@ describe("composer keyboard shortcut", () => {
     expect(shouldSubmitShortcut({ key: "Enter", ctrlKey: false, metaKey: true, isComposing: false })).toBe(true);
     expect(shouldSubmitShortcut({ key: "a", ctrlKey: true, metaKey: false, isComposing: false })).toBe(false);
   });
+  it("uses Enter for a question while preserving Shift Enter and Chinese IME", () => {
+    const event = { key: "Enter", ctrlKey: false, metaKey: false, isComposing: false };
+    expect(shouldSubmitShortcut(event, true)).toBe(true);
+    expect(shouldSubmitShortcut({ ...event, shiftKey: true }, true)).toBe(false);
+    expect(shouldSubmitShortcut({ ...event, keyCode: 229 }, true)).toBe(false);
+    expect(shouldSubmitShortcut({ ...event, isComposing: true }, true)).toBe(false);
+    expect(shouldSubmitShortcut({ ...event, ctrlKey: true, keyCode: 229 })).toBe(false);
+  });
 });
 
 describe("composer logical-send idempotency", () => {

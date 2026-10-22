@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningAiGradingRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createOpeningStudyExposureRepository } from "@aistudy/database";
 import { nextLearningStep } from "@aistudy/domain";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -39,9 +39,43 @@ async function seed(hints: unknown = generatedHints) {
 }
 
 describe("generic teaching hint ledger", () => {
+  it("restores only released stages with their original receipts, without new exposure or history mutations", async () => {
+    const f = await seed(), hints = createOpeningTeachingHintRepository(fixture.sql);
+    const readReleased = () => hints.readReleased(fixture.scope, { attemptId: f.attempt.id });
+    expect(await readReleased()).toEqual([]);
+    const first = await f.read(1);
+    const generated = await createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, {
+      releaseKey: `teaching-hint-v1:${f.attempt.id}:2`,
+      contextAnchor: { attemptId: f.attempt.id, itemVersionId: f.attempt.itemVersionId, courseId: f.courseId, activityId: f.activity.id, blockId: f.blockId, contentVersion: 1, purpose: "learning_help" },
+      sessionId: f.attempt.sessionId, origin: "assistant", kind: "hint", level: "hinted", supportDomain: "unknown",
+    });
+    expect(generated.releasedAt).toBeNull();
+    const before = await fixture.sql`SELECT id,release_key,released_at,acknowledged_at,history_revision FROM opening_help_exposures WHERE attempt_id=${f.attempt.id} ORDER BY release_key`;
+    const [historyBefore] = await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+    expect(await readReleased()).toEqual([first]);
+    expect(await readReleased()).toEqual([first]);
+    const after = await fixture.sql`SELECT id,release_key,released_at,acknowledged_at,history_revision FROM opening_help_exposures WHERE attempt_id=${f.attempt.id} ORDER BY release_key`;
+    const [historyAfter] = await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+    expect(after).toEqual(before); expect(historyAfter).toEqual(historyBefore);
+    expect(JSON.stringify(await readReleased())).not.toContain(generatedHints.concept);
+    expect(JSON.stringify(await readReleased())).not.toContain("所以秩为 2");
+    const observation = await f.submit();
+    const state = await createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
+    expect(state.features.find(row => row.observationId === observation.id)?.eligibility.independentAttempt).toBe("no");
+    const full = await f.read(4);
+    expect(await readReleased()).toEqual([first, full]);
+    await expect(hints.readReleased(fixture.otherScope, { attemptId: f.attempt.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
+    await backupRows(fixture.sql, fixture.scope).chunk(f.sourceId, 2);
+    await expect(readReleased()).rejects.toMatchObject({ code: "CONFLICT" });
+    await fixture.sql`UPDATE opening_sources SET version=1 WHERE id=${f.sourceId}`;
+    await fixture.sql`UPDATE opening_teaching_activities SET content_version=2 WHERE id=${f.activity.id}`;
+    await expect(readReleased()).rejects.toMatchObject({ code: "CONFLICT" });
+  });
   it.each([false, true])("feeds a graded classroom answer into the next step and preserves help history (hinted=%s)", async hinted => {
     const f = await seed();
     if (hinted) await f.read(1);
+    expect(await createOpeningTeachingHintRepository(fixture.sql).readReleased(fixture.scope, { attemptId: f.attempt.id })).toHaveLength(hinted ? 1 : 0);
     const original = await f.submit();
     const grader = createOpeningAiGradingRepository(fixture.sql);
     expect((await grader.context(fixture.scope, { observationId: original.id })).stem).toBe("求二阶单位矩阵的秩。");

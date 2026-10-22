@@ -1,7 +1,7 @@
 "use client";
 
 import type { MediaSegment, MediaSegmentsResponse, SourceRecord } from "@aistudy/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { LoadError, secondaryButtonClass } from "../design/ui";
 import { sourceStatusLabel } from "../inbox/upload-state";
@@ -76,16 +76,24 @@ export function MediaReader({
   onSeek?: (startMs: number) => void;
 }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
+  const requestSequence = useRef(0);
   const [payload, setPayload] = useState<MediaSegmentsResponse | null>(null);
   const [error, setError] = useState("");
   const [unavailable, setUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
-    setLoading(true); setError(""); setUnavailable(false);
+    const sequence = ++requestSequence.current;
+    setLoading(true); setPayload(null); setError(""); setUnavailable(false);
     try {
-      setPayload(await api.getSourceSegments(sourceId));
+      const result = await api.getSourceSegments(sourceId);
+      if (sequence !== requestSequence.current) return;
+      if (result.sourceId !== sourceId || result.segments.some(segment => segment.sourceId !== sourceId || segment.sourceVersion !== result.sourceVersion)) {
+        throw new Error("片段的材料来源或版本已失效，请重新读取材料。");
+      }
+      setPayload(result);
     } catch (reason) {
+      if (sequence !== requestSequence.current) return;
       const message = reason instanceof Error ? reason.message : "媒体片段暂时无法读取";
       if (/503|不可用|CONFIGURATION|not configured/i.test(message)) {
         setUnavailable(true);
@@ -95,11 +103,11 @@ export function MediaReader({
         setError(message);
       }
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, [api, sourceId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { requestSequence.current++; }; }, [load]);
 
   const kind = classifyMediaReaderState({
     source: source ?? (payload ? { mime: "video/mp4", parseState: "ready", uploadState: "uploaded" } : null),

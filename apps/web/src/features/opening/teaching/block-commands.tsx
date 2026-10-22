@@ -21,10 +21,12 @@ import {
   type TeachingCommandSuccess,
 } from "@aistudy/contracts";
 import { ChevronDown, CircleHelp, LoaderCircle, RefreshCw } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui, tone } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import type { StudyConversationContext } from "../assistant/study-conversation-context";
+import { InlineExplain } from "./inline-explain";
 
 export const TEACHING_COMMAND_KINDS: TeachingCommandKind[] = [
   "why",
@@ -123,6 +125,8 @@ export type BlockCommandsBarViewProps = {
   onCommand: (kind: TeachingCommandKind) => void;
   onReread?: () => void;
   rereadBusy?: boolean;
+  explanationContext?: StudyConversationContext;
+  onAskExplanation?: (text: string) => void;
 };
 
 /**
@@ -142,6 +146,8 @@ export function BlockCommandsBarView({
   onCommand,
   onReread,
   rereadBusy = false,
+  explanationContext,
+  onAskExplanation,
 }: BlockCommandsBarViewProps) {
   const diagnostics = useDiagnosticsEnabled();
   const busy = busyKind != null || rereadBusy;
@@ -224,7 +230,9 @@ export function BlockCommandsBarView({
         </div>
       </details>
 
-      {showAssist ? (
+      {showAssist && assist?.kind === "why" && explanationContext && onAskExplanation ? <InlineExplain
+        context={{ ...explanationContext, blockId }} content={assist!.summary!}
+        onContinueInChat={() => onAskExplanation(assist!.summary!)} /> : showAssist ? (
         <div
           className={`rounded-lg px-3 py-2 text-xs leading-5 ${tone.success}`}
           role="status"
@@ -302,6 +310,8 @@ export type BlockCommandsProps = {
   onSuccess?: (result: TeachingCommandSuccess) => void;
   onConflict?: (conflict: TeachingCommandConflict) => void;
   onReread?: () => void | Promise<void>;
+  explanationContext?: StudyConversationContext;
+  onAskExplanation?: (text: string) => void;
 };
 
 /**
@@ -321,19 +331,33 @@ export function BlockCommands({
   onSuccess,
   onConflict,
   onReread,
+  explanationContext,
+  onAskExplanation,
 }: BlockCommandsProps) {
   const api = apiProp ?? createOpeningApi();
   const [busyKind, setBusyKind] = useState<TeachingCommandKind | null>(null);
   const [rereadBusy, setRereadBusy] = useState(false);
   const [conflict, setConflict] = useState<TeachingCommandConflict | null>(null);
-  const [assist, setAssist] = useState<TeachingCommandAssist | null>(null);
+  const [assist, setAssist] = useState<{ binding: string; value: TeachingCommandAssist; context?: StudyConversationContext } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const binding = JSON.stringify([activityId, blockId, contentVersion]);
+  const currentBinding = useRef({ key: binding });
+  if (currentBinding.current.key !== binding) currentBinding.current = { key: binding };
+  const operation = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    setAssist(null); setConflict(null); setError(null); setBusyKind(null); setRereadBusy(false);
+  }, [binding]);
 
   const runCommand = useCallback(
     async (kind: TeachingCommandKind) => {
       if (busyKind) return;
       if (kind === "return" && returnDisabled) return;
       if (kind === "why" && !whyAvailable) return;
+      const snapshot = currentBinding.current;
+      const request = ++operation.current;
+      const isCurrent = () => mounted.current && currentBinding.current === snapshot && operation.current === request;
       setBusyKind(kind);
       setError(null);
       setConflict(null);
@@ -352,11 +376,13 @@ export function BlockCommands({
           activityId,
           body,
         );
+        if (!isCurrent()) return;
         if (result.ok) {
           setConflict(null);
-          if (result.assist) setAssist(result.assist);
+          if (result.assist) setAssist({ binding: snapshot.key, value: result.assist, context: explanationContext });
           onSuccess?.(result);
         } else {
+          setAssist(null);
           // Discriminated conflict — never treat as success / never LWW retry.
           const parsed = teachingCommandConflictCodeSchema.safeParse(
             result.conflict,
@@ -369,9 +395,9 @@ export function BlockCommands({
           }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "命令失败");
+        if (isCurrent()) setError(err instanceof Error ? err.message : "命令失败");
       } finally {
-        setBusyKind(null);
+        if (isCurrent()) setBusyKind(null);
       }
     },
     [
@@ -385,20 +411,25 @@ export function BlockCommands({
       pathVersion,
       returnDisabled,
       whyAvailable,
+      explanationContext,
     ],
   );
 
   const handleReread = useCallback(async () => {
     if (!onReread || rereadBusy) return;
+    const snapshot = currentBinding.current;
+    const request = ++operation.current;
+    const isCurrent = () => mounted.current && currentBinding.current === snapshot && operation.current === request;
     setRereadBusy(true);
     setError(null);
+    setAssist(null);
     try {
       await onReread();
-      setConflict(null);
+      if (isCurrent()) setConflict(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "重新拉取失败");
+      if (isCurrent()) setError(err instanceof Error ? err.message : "重新拉取失败");
     } finally {
-      setRereadBusy(false);
+      if (isCurrent()) setRereadBusy(false);
     }
   }, [onReread, rereadBusy]);
 
@@ -409,7 +440,7 @@ export function BlockCommands({
         busyKind={busyKind}
         returnDisabled={returnDisabled}
         conflict={conflict}
-        assist={assist}
+        assist={assist?.binding === binding ? assist.value : null}
         disabled={disabled}
         compact={compact}
         defaultOpen={defaultOpen}
@@ -417,6 +448,8 @@ export function BlockCommands({
         onCommand={(kind) => void runCommand(kind)}
         onReread={onReread ? () => void handleReread() : undefined}
         rereadBusy={rereadBusy}
+        explanationContext={assist?.binding === binding ? assist.context : explanationContext}
+        onAskExplanation={onAskExplanation}
       />
       {error ? (
         <p className={`mt-2 text-xs ${tone.danger}`} role="alert" data-command-error="true">

@@ -21,10 +21,11 @@ import { ObservationRevisionCard } from "../learning/observation-revision-card";
 import { LearnerStatePanel } from "./learner-state-panel";
 import { createInlineAttemptPreparation, type InlineAttemptPreparationCheckpoint } from "./inline-attempt-prepare";
 import { HintLadder } from "./hint-ladder";
-import { requestTeachingHint, TEACHING_HINT_LABELS } from "./teaching-hint-client";
+import { readReleasedTeachingHints, requestTeachingHint, TEACHING_HINT_LABELS } from "./teaching-hint-client";
 import { acknowledgeStudyExposure } from "../assistant/study-exposure-ack";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
+import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "../learning/stage-action-bar";
 
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
@@ -36,6 +37,7 @@ export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "s
   onAttemptReady?: (blockId: string, attempt: LearningAttempt) => void;
   /** Called only for a durably saved observation, including restored work. */
   onObservationReady?: (blockId: string, observation: LearningObservation) => void;
+  completionAction?: AttemptPrimaryAction;
 };
 
 /** Full reference content is fetched only by an explicit action after the original is saved. */
@@ -100,6 +102,9 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const [hints, setHints] = useState<TeachingHintResponse[]>([]);
   const [hintPending, setHintPending] = useState(false);
   const [hintUnavailable, setHintUnavailable] = useState(false);
+  const [hintRestoring, setHintRestoring] = useState(false);
+  const [hintRestoreError, setHintRestoreError] = useState("");
+  const [hintRestoreRetry, setHintRestoreRetry] = useState(0);
   const [restoring, setRestoring] = useState(true);
   const [restoreFailed, setRestoreFailed] = useState(false);
   const [restoreRetry, setRestoreRetry] = useState(0);
@@ -154,6 +159,21 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     return () => { active = false; };
   // initialDraft is the form's fixed restoration checkpoint; edits must not replay recovery.
   }, [ready, teaching, context.id, context.courseId, blockId, context.contentVersion, prompt, restoreRetry]);
+
+  useEffect(() => {
+    if (!ready || restoring || restoreFailed || draftConflict || !attempt) return;
+    let active = true;
+    setHintRestoring(true); setHintRestoreError("");
+    void readReleasedTeachingHints(attempt, { activityId: context.id, blockId, contentVersion: context.contentVersion }).then(released => {
+      if (!active) return;
+      setHints(previous => [...new Map([...released, ...previous].map(hint => [hint.level, hint])).values()].sort((a, b) => a.level - b.level));
+      const full = released.find(hint => hint.level === 4);
+      if (full) setAnswerKey({ answer: full.text, referenceSourceId: full.referenceSourceId });
+    }).catch((reason: unknown) => {
+      if (active) setHintRestoreError(reason instanceof Error ? reason.message : "已读提示暂时无法恢复，原答案保留。");
+    }).finally(() => { if (active) setHintRestoring(false); });
+    return () => { active = false; };
+  }, [ready, restoring, restoreFailed, draftConflict, attempt?.id, context.id, context.courseId, blockId, context.contentVersion, hintRestoreRetry]);
 
   useEffect(() => {
     if (!ready || restoring || restoreFailed || context.courseId || context.status === "completed"
@@ -211,7 +231,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     finally { inFlight.current = false; setPending(false); }
   }
   async function readHint(level: TeachingHintLevel) {
-    if (!attempt || inFlight.current || draftConflict || restoring || restoreFailed || level === 4 && !recorded || !recorded && submission.current) return;
+    if (!attempt || inFlight.current || hintRestoring || hintRestoreError || draftConflict || restoring || restoreFailed || level === 4 && !recorded || !recorded && submission.current) return;
     inFlight.current = true; setPending(true); setHintPending(true); setError("");
     try {
       const hint = await requestTeachingHint(attempt, { activityId: context.id, blockId, contentVersion: context.contentVersion }, level);
@@ -287,22 +307,32 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   return <div className="mt-3 space-y-3 border-t border-line pt-3" data-inline-attempt={blockId}>
     <LessonFlow phase={hintPending ? "hint" : recorded ? checked ? "next" : "feedback" : pending && submission.current ? "submit" : "attempt"}>
     {!context.courseId && context.status !== "completed" ? <div className="space-y-2"><p role="status" className="text-xs text-text-2">正在准备本次学习…</p>{error ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => void bindCourse()}>{studentCopy.retry}</button> : null}</div> : null}
-    {ready && restoring ? <p role="status" className="text-xs text-text-2">正在恢复已保存的作答…</p> : restoreFailed ? <button type="button" className={ui.secondary} onClick={() => setRestoreRetry(value => value + 1)}>重新读取已保存的作答</button> : !recorded && context.status === "completed" ? <p className="text-xs text-text-2">本题没有可恢复的已提交作答。{initialDraft?.answer ? "本页保留的答案尚未确认保存：" : ""}{initialDraft?.answer ? <span className="block whitespace-pre-wrap">{initialDraft.answer}</span> : null}</p> : !recorded ? <form className="space-y-2" onSubmit={(event) => { void submit(event); }}>
+    {ready && restoring ? <p role="status" className="text-xs text-text-2">正在恢复已保存的作答…</p> : restoreFailed ? <button type="button" className={ui.secondary} onClick={() => setRestoreRetry(value => value + 1)}>重新读取已保存的作答</button> : !recorded && context.status === "completed" ? <p className="text-xs text-text-2">本题没有可恢复的已提交作答。{initialDraft?.answer ? "本页保留的答案尚未确认保存：" : ""}{initialDraft?.answer ? <span className="block whitespace-pre-wrap">{initialDraft.answer}</span> : null}</p> : !recorded ? <form className="space-y-2" onKeyDown={event => {
+      if (event.key !== "Enter") return;
+      if (event.nativeEvent.isComposing || event.keyCode === 229) { event.preventDefault(); return; }
+      if ((event.ctrlKey || event.metaKey) && event.target instanceof HTMLTextAreaElement) {
+        event.preventDefault(); event.currentTarget.requestSubmit();
+      }
+    }} onSubmit={(event) => { void submit(event); }}>
       {draftConflict ? <div role="status" className="space-y-1 text-xs text-warn"><p>{draftConflict === "course_changed" ? "此答案提交时所属课程已改变。原答案和提交请求已保留为只读，请到原课程的学习记录核实保存结果。" : "当前题目与之前作答的题目不一致。原答案已保留为只读，请重新读取活动，再继续作答。"}</p><p className="whitespace-pre-wrap">原题目：{initialDraft?.prompt}</p></div> : null}
       {initialDraft?.submission && !draftConflict ? <p role="status" className="text-xs text-text-2">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
       {diagnostics ? <details open={skillEditorOpen} onToggle={event => setSkillEditorOpen(event.currentTarget.open)}>
-        <summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-emerald-700">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
+        <summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
         <div className="space-y-2 pt-2">
           <label className="block text-xs text-text-2">记录的技能<input className="mt-1 block w-full rounded-md border border-line bg-surface px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); persistDraft({ answer, skillLabel: event.target.value, prompt }); }} /></label>
           <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
           {skillReuseHint ? <p className="text-xs leading-6 text-warn" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-accent underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); persistDraft({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
         </div>
       </details> : null}
+      <p className="text-xs font-medium text-text-2">我的解答</p>
       <InlineAnswerInput interaction={context.interaction} value={answer} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt }); }} />
-      <button type="submit" className={ui.primary} disabled={!ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed"}>{draftConflict ? "原答案已保留（只读）" : pending ? "正在保存…" : submission.current ? "重新确认原答案已保存" : studentCopy.submit}</button>
+      <StageActionBar stage={pending && submission.current ? "processing" : error ? "failed" : "draft"}
+        message={pending && submission.current ? "正在保存原答案…" : undefined}
+        primary={{ type: "submit", label: draftConflict ? "原答案已保留（只读）" : submission.current ? "重新确认原答案已保存" : studentCopy.submit,
+          disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed" }} />
     </form> : <FeedbackPanel verdict={feedbackVerdict} title={studentCopy.saved} evidence={recorded.aiEvaluation ? "批改结果已记录，可以查看评分要点，或纠正不准确的判断。" : canGradeObservation(recorded) ? "答案保存后可自动批改，也可以手动记录自己的判断。" : checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
       <LearnerStatePanel observation={recorded} />
-      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade}
+      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} completionAction={context.completionAction}
         onUpdated={observation => { revisionReturnedHead.current = true; updatedObservation(observation); }} onChanged={() => {
           // Successful edits already returned the current head. Only withdrawal or
           // unavailability needs a read; a second read could overwrite a later edit.
@@ -310,6 +340,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           void rereadComparison();
         }} />
         : <><p className="text-xs font-medium text-text-2">{studentCopy.originalAnswer}</p><p className="whitespace-pre-wrap text-sm text-text">{recorded.answer}</p><AiGradingResult record={recorded} /></>}
+      {context.status !== "completed" && !canGradeObservation(recorded) && !recorded.aiEvaluation && canCompleteObservation(recorded) ? <StageActionBar stage={observationStage(recorded)} primary={context.completionAction} /> : null}
       {answerKey ? <div className="rounded-lg bg-surface p-3 ring-1 ring-line"><p className="mb-2 text-xs font-medium text-text-2">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-text-3">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <p className="text-xs text-text-2">{studentCopy.referenceAvailable}</p>}
       {context.status !== "completed" && !assessed && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
@@ -319,10 +350,11 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     {!restoring && !restoreFailed && !draftConflict && !unavailable ? attempt ? <HintLadder
       delivered={hints.filter(hint => hint.level < 4).map(hint => ({ id: hint.exposureReceipt.id, label: TEACHING_HINT_LABELS[hint.level], text: hint.text }))}
       next={nextHint ? { label: TEACHING_HINT_LABELS[nextHint], pending: hintPending,
-        disabled: pending || !recorded && (nextHint === 4 || Boolean(submission.current) || hintUnavailable || context.status === "completed"),
+        disabled: pending || hintRestoring || Boolean(hintRestoreError) || !recorded && (nextHint === 4 || Boolean(submission.current) || hintUnavailable || context.status === "completed"),
         blockedReason: !recorded && submission.current ? "先确认原答案的保存结果，再继续查看提示。" : !recorded && nextHint === 4 ? studentCopy.referenceGate : hintUnavailable && !recorded ? "此版提示不可用；仍可提交作答。" : undefined,
         request: () => { void readHint(nextHint); } } : undefined} />
       : context.status !== "completed" && !submission.current ? <button type="button" className={ui.secondary} disabled={!ready || pending || !context.courseId || !skillLabel.trim()} onClick={() => { void prepare(); }}>{pending ? "正在准备本题…" : preparation.current ? studentCopy.retry : studentCopy.prepare}</button> : null : null}
+    {hintRestoring ? <p role="status" className="text-xs text-text-2">正在读取已查看的提示…</p> : hintRestoreError ? <div className="space-y-1"><p role="status" className="text-xs text-warn">{hintRestoreError}</p><button type="button" className={ui.quiet} onClick={() => setHintRestoreRetry(value => value + 1)}>重新读取已查看的提示</button></div> : null}
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
     </LessonFlow>
   </div>;

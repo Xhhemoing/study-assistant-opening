@@ -1,24 +1,32 @@
 export type OpeningNavigationItem = {
   href: string;
   label: string;
-  icon: "today" | "courses" | "assistant" | "library";
-  group: "core";
+  icon: "start" | "courses" | "review" | "library" | "sprint" | "cards" | "search";
+  group: "core" | "tools";
 };
 
-/** The same four destinations on desktop and mobile. Tools live in the account menu. */
+/** One source for the four primary destinations and their stable tool entries. */
 export function openingNavigation(): OpeningNavigationItem[] {
   return [
-    { href: "/opening/today", label: "今日", icon: "today", group: "core" },
+    { href: "/opening/today", label: "开始", icon: "start", group: "core" },
     { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
-    { href: "/opening/assistant", label: "助理", icon: "assistant", group: "core" },
+    { href: "/opening/review", label: "复习", icon: "review", group: "core" },
     { href: "/opening/library", label: "资料", icon: "library", group: "core" },
+    { href: "/opening/sprint", label: "冲刺", icon: "sprint", group: "tools" },
+    { href: "/opening/cards", label: "卡组", icon: "cards", group: "tools" },
+    { href: "/opening/search", label: "搜索", icon: "search", group: "tools" },
   ];
 }
 
-export function navigationIsActive(href: string, pathname: string): boolean {
+export function navigationIsActive(href: string, pathname: string, search = ""): boolean {
   const hrefPath = href.split("?")[0] ?? href;
-  if (hrefPath === "/opening/today" && ["/opening/review", "/opening/cards", "/opening/suggestions"].some(path => pathname === path || pathname.startsWith(`${path}/`))) return true;
-  if (hrefPath === "/opening/courses" && (pathname === "/opening/sprint" || pathname.startsWith("/opening/sprint/"))) return true;
-  if (hrefPath === "/opening/review" && (pathname === "/opening/cards" || pathname.startsWith("/opening/cards/"))) return true;
-  return pathname === hrefPath || pathname.startsWith(`${hrefPath}/`);
+  const path = pathname.split("?")[0] ?? pathname;
+  const params = new URLSearchParams(search || pathname.split("?")[1] || "");
+  // Legacy entries intentionally redirect into these shared pages. Their selected
+  // section still belongs to the original tool, with exactly one active owner.
+  const section = path === "/opening/review" && params.getAll("tab").length === 1 && params.get("tab") === "cards" ? "/opening/cards"
+    : /^\/opening\/courses\/[^/]+\/?$/.test(path) && params.getAll("mode").length === 1 && params.get("mode") === "sprint" ? "/opening/sprint" : null;
+  if (section) return hrefPath === section;
+  if (hrefPath === "/opening/today" && ["/opening/assistant", "/opening/suggestions"].some(owner => path === owner || path.startsWith(`${owner}/`))) return true;
+  return path === hrefPath || path.startsWith(`${hrefPath}/`);
 }

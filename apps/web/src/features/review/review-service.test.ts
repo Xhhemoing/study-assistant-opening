@@ -3,6 +3,7 @@ import type { LearningEvent, ReviewCard, ReviewState } from "@aistudy/contracts"
 import type { Principal } from "../../lib/authorization";
 import {
   createCardForPrincipal,
+  countDueReviewsForPrincipal,
   gradeReviewForPrincipal,
   listReviewQueueForPrincipal,
   updateCardControlsForPrincipal,
@@ -63,6 +64,13 @@ function runtime(cards: Record<string, ReturnType<typeof vi.fn>>) {
 }
 
 describe("review service", () => {
+  it("returns only a due count without exposing questions or solutions", async () => {
+    const listQueue = vi.fn().mockResolvedValue([{ card, state, goalPriority: 0 }]);
+    const result = await countDueReviewsForPrincipal(runtime({ listQueue }), principal, { now: () => new Date(now), resolveTimeZone: async () => "Asia/Shanghai" });
+    expect(result).toEqual({ count: 1 });
+    expect(listQueue).toHaveBeenCalledWith({ workspaceId, ownerUserId, now: new Date(now), timeZone: "Asia/Shanghai", mode: "auto" });
+    expect(JSON.stringify(result)).not.toContain(card.back);
+  });
   it("rejects self-grading for a question card before scheduling", async () => {
     const grade = vi.fn(), getCard = vi.fn().mockResolvedValue({ ...card, tags: ["review:question"] });
     await expect(gradeReviewForPrincipal(runtime({ grade, getCard }), principal, {

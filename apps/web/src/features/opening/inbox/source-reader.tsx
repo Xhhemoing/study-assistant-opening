@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "@aistudy/ui";
 import { ArrowLeft } from "lucide-react";
 import type { SourceRecord } from "@aistudy/contracts";
@@ -10,8 +10,10 @@ import { SourceContent } from "./source-content";
 import { sourceReaderInitialPage } from "./source-reader-position";
 import { buildSourceDownloadView, SourceViewer } from "./source-viewer";
 import { captureReaderReturnPoint, restoreReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
+import { selectedReaderExcerpt, type ReaderSelection } from "./source-reader-selection";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
 import { StudyContextTools } from "../teaching/study-context-tools";
+import { OriginalConversationSlot } from "../assistant/conversation-companion";
 import { studyConversationIdentity } from "../assistant/study-conversation-context";
 
 export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint, children }: {
@@ -56,7 +58,7 @@ export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint
   </Dialog.Portal></Dialog.Root>;
 }
 
-export function SourceReader({ record, latestRecord = record, requestedVersion, page, startMs, slideLabel, returnPoint, onClose, onRetry, courseId, questionProtected = false }: {
+function SourceReaderContent({ record, latestRecord = record, requestedVersion, page, startMs, slideLabel, returnPoint, onClose, onRetry, courseId, originalConversationId, questionProtected = false }: {
   record: SourceRecord;
   latestRecord?: SourceRecord;
   requestedVersion: number;
@@ -67,16 +69,19 @@ export function SourceReader({ record, latestRecord = record, requestedVersion, 
   onClose: () => void;
   onRetry?: () => Promise<void>;
   courseId?: string | null;
+  originalConversationId?: string;
   questionProtected?: boolean;
 }) {
   const [readingPage] = useState(() => sourceReaderInitialPage(record.id, requestedVersion, page));
   const preferExtractedText = sourcePreviewKind(record.mime) == null && latestRecord.parseState === "ready";
-  const [tool, setTool] = useState<string | null>(null);
+  const [tool, setTool] = useState<string | null>(originalConversationId ? "conversation" : null);
   const [questionPage, setQuestionPage] = useState(readingPage);
   const [initialQuestion, setInitialQuestion] = useState("");
   const [excerpt, setExcerpt] = useState("");
   const [selectionNotice, setSelectionNotice] = useState("");
+  const [selection, setSelection] = useState<ReaderSelection | null>(null);
   const body = useRef<HTMLDivElement>(null);
+  const selectionAnchor = useRef<Element | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState("");
   const latest = requestedVersion === latestRecord.version;
@@ -87,17 +92,32 @@ export function SourceReader({ record, latestRecord = record, requestedVersion, 
     setInitialQuestion(`请解释这份材料的物理第 ${selectedPage} 页，说明关键关系，并指出需要核对的地方。`);
     setTool("context");
   }
+  useEffect(() => {
+    const update = () => {
+      if (!body.current) return;
+      const next = selectedReaderExcerpt(body.current, record.id, requestedVersion, window.getSelection());
+      selectionAnchor.current?.classList.remove("[anchor-name:--reader-selection]");
+      const node = window.getSelection()?.anchorNode;
+      const element = node instanceof Element ? node : node?.parentElement;
+      selectionAnchor.current = next ? element ?? null : null;
+      selectionAnchor.current?.classList.add("[anchor-name:--reader-selection]");
+      setSelection(next);
+    };
+    setSelection(null); setExcerpt(""); setSelectionNotice("");
+    document.addEventListener("selectionchange", update);
+    return () => { document.removeEventListener("selectionchange", update); selectionAnchor.current?.classList.remove("[anchor-name:--reader-selection]"); };
+  }, [record.id, requestedVersion]);
   function selectExcerpt() {
-    const selection = window.getSelection();
-    const anchor = selection?.anchorNode?.parentElement?.closest("[data-study-reading-text]");
-    const focus = selection?.focusNode?.parentElement?.closest("[data-study-reading-text]");
-    const text = selection?.toString().trim();
-    if (!anchor || anchor !== focus || !body.current?.contains(anchor) || !text) {
-      setSelectionNotice("请先在提取正文中选中文字；原件中的选区不会自动传入。"); return;
+    const selected = selection;
+    if (!selected || selected.sourceId !== record.id || selected.version !== requestedVersion) {
+      setSelectionNotice("选区已失效，请在当前材料中重新选择文字。"); return;
     }
-    if (text.length > 4000) { setSelectionNotice("选中内容较长，请缩小到 4,000 字以内。"); return; }
-    const selectedPage = anchor.getAttribute("data-page-kind") === "physical" ? Number(anchor.getAttribute("data-source-page")) : NaN;
-    setExcerpt(text); setQuestionPage(Number.isSafeInteger(selectedPage) && selectedPage > 0 ? selectedPage : undefined); setInitialQuestion(""); setSelectionNotice("选中文字已带入提问与笔记，尚未发送。"); setTool("context");
+    if (selected.text.length > 4000) { setSelectionNotice("选中内容较长，请缩小到 4,000 字以内。"); return; }
+    // Retain the captured source revision and physical page even when opening
+    // the companion changes focus and clears the browser's native selection.
+    setExcerpt(selected.text); setQuestionPage(selected.page); setInitialQuestion("");
+    setSelectionNotice(`已带入选中文字 · v${selected.version}${selected.page ? ` · 第 ${selected.page} 页` : ""}，尚未发送。`);
+    setTool("context");
   }
   async function retry() {
     if (!onRetry || retrying) return;
@@ -113,16 +133,26 @@ export function SourceReader({ record, latestRecord = record, requestedVersion, 
   }}>
     {startMs != null || slideLabel ? <p className="text-sm text-warn">引用定位：{slideLabel ? `幻灯片 ${slideLabel}` : ""}{slideLabel && startMs != null ? " · " : ""}{startMs != null ? `${Math.floor(startMs / 60000)}:${String(Math.floor(startMs / 1000) % 60).padStart(2, "0")}` : ""}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
     <div ref={body} className="flex min-h-0 flex-1 flex-col">
-      <StudyToolsPanel fillHeight activePanel={tool} onPanelChange={setTool} panels={[
-        { id: "text", label: preferExtractedText ? "原件信息" : "提取文字 / OCR 核对", content: preferExtractedText ? <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion} download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading /> : <div className="space-y-3"><SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /><button type="button" className={ui.quiet} onClick={selectExcerpt}>引用选中文字</button></div> },
-        { id: "context", label: "提问与笔记", content: <StudyContextTools key={`${studyConversationIdentity(context)}:${initialQuestion}`} context={context} initialQuestion={initialQuestion} questionBlockedReason={questionProtected ? "这是当前练习的参考资料。请返回原题下保存自己的答案，并从原题的提问入口继续，以保留实际获得的帮助记录。" : undefined} /> },
+      <StudyToolsPanel fillHeight preferContentOnNarrowEntry={Boolean(originalConversationId)} activePanel={tool} onPanelChange={setTool} panels={[
+        { id: "text", label: preferExtractedText ? "原件信息" : "提取文字 / OCR 核对", content: preferExtractedText ? <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion} download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading /> : <div className="space-y-3"><SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /></div> },
+        ...(originalConversationId ? [{ id: "conversation", label: "原对话", content: <OriginalConversationSlot conversationId={originalConversationId} className="min-h-0 min-w-0 flex-1" /> }] : []),
+        { id: "context", label: originalConversationId ? "本材料提问与笔记" : "提问与笔记", content: <StudyContextTools key={`${studyConversationIdentity(context)}:${initialQuestion}`} context={context} initialQuestion={initialQuestion} questionBlockedReason={questionProtected ? "这是当前练习的参考资料。请返回原题下保存自己的答案，并从原题的提问入口继续，以保留实际获得的帮助记录。" : undefined} /> },
       ]}>
         {preferExtractedText ? <SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /> : <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion}
-          download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading fillHeight toolsOpen={tool !== null} />}
+          download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading fillHeight toolsOpen={tool !== null} onExplain={explain} />}
       </StudyToolsPanel>
-      <div className="mt-2 shrink-0 space-y-1">{preferExtractedText ? <button type="button" className={ui.quiet} onClick={selectExcerpt}>引用选中文字</button> : null}{selectionNotice ? <p role="status" className="text-xs leading-6 text-text-2">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-text-3">提问定位：指定物理第 {questionPage} 页。原件阅读器的当前滚动页不会自动同步。</p> : null}</div>
+      {selection ? <div className="sticky bottom-0 z-[70] flex shrink-0 flex-wrap items-center gap-2 rounded border border-line bg-popover p-2 text-xs text-text-2 [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:fixed [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-anchor:--reader-selection] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-area:block-end] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-try-fallbacks:flip-block,flip-inline] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:bottom-auto" data-reader-selection-actions="true">
+        <button type="button" className={ui.secondary} onPointerDown={event => event.preventDefault()} onClick={selectExcerpt}>问选中内容</button>
+        <span>v{selection.version}{selection.page ? ` · 第 ${selection.page} 页` : ""} · {selection.text.length} 字</span>
+      </div> : null}
+      <div className="mt-2 shrink-0 space-y-1">{selectionNotice ? <p role="status" className="text-xs leading-6 text-text-2">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-text-3">提问定位：物理第 {questionPage} 页 · v{requestedVersion}。</p> : null}</div>
     </div>
     {latest && latestRecord.parseState === "failed" && latestRecord.error?.retryable !== false && onRetry ? <button type="button" className={ui.secondary} disabled={retrying} onClick={() => void retry()}>{retrying ? "正在重新解析…" : "重新解析"}</button> : null}
     {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
   </SourceReaderFrame>;
+}
+
+/** A different material, revision, or explicit locator starts a new reader binding. */
+export function SourceReader(props: Parameters<typeof SourceReaderContent>[0]) {
+  return <SourceReaderContent key={`${props.record.id}:${props.requestedVersion}:${props.page ?? ""}:${props.originalConversationId ?? ""}`} {...props} />;
 }

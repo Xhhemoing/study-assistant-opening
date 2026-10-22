@@ -8,7 +8,7 @@ import { SpanLesson } from "./span-lesson";
 import { spanLessonDetailsSchema, spanLessonRequest, type SpanLessonDetails } from "./span-session-client";
 import { SpanSessionSummary } from "./span-session-summary";
 
-type Props = { courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string; initialActivityId?: string };
+type Props = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string; initialActivityId?: string };
 const endpoint = "/api/opening/teaching/span/lesson";
 export function SpanLessonSession(props: Props) {
   const [details, setDetails] = useState<SpanLessonDetails | null>(null);

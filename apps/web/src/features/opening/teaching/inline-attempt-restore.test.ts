@@ -18,13 +18,14 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
 }));
 const api = vi.hoisted(() => ({ getSubmittedAttempt: vi.fn(), getAnswerKey: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn() }));
 const studyBinding = vi.hoisted(() => ({ set: vi.fn() }));
-const hintApi = vi.hoisted(() => ({ request: vi.fn(), ack: vi.fn() }));
-vi.mock("./teaching-hint-client", async original => ({ ...await original<typeof import("./teaching-hint-client")>(), requestTeachingHint: hintApi.request }));
+const hintApi = vi.hoisted(() => ({ request: vi.fn(), read: vi.fn(), ack: vi.fn() }));
+vi.mock("./teaching-hint-client", async original => ({ ...await original<typeof import("./teaching-hint-client")>(), requestTeachingHint: hintApi.request, readReleasedTeachingHints: hintApi.read }));
 vi.mock("../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: hintApi.ack }));
 const haptic = vi.hoisted(() => vi.fn());
 vi.mock("../design/haptics", () => ({ successfulInteractionHaptic: haptic }));
 const shortcuts = vi.hoisted(() => ({ set: vi.fn() }));
 vi.mock("../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
+vi.mock("../shell/workspace-layout-context", () => ({ useWorkspaceLayout: () => ({ focusMode: false, toggleFocusMode() {}, setFocusMode() {} }) }));
 vi.mock("./lesson-shortcuts", () => ({ useLessonArrowKeys: shortcuts.set }));
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("./activity-client", () => ({ createTeachingActivityClient: () => api }));
@@ -54,7 +55,7 @@ function render(status: InlineAttemptContext["status"] = "active", initialDraft?
 }
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function unmount() { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); hooks.values = []; hooks.effects = []; }
-beforeEach(() => { unmount(); vi.clearAllMocks(); api.getSubmittedAttempt.mockResolvedValue(saved); api.getAnswerKey.mockResolvedValue({ answer: "参考", referenceSourceId: id }); api.createSession.mockResolvedValue({ id }); api.createAttempt.mockResolvedValue(canonicalAttempt); api.submitAttempt.mockResolvedValue(saved.observation); hintApi.ack.mockResolvedValue(undefined); });
+beforeEach(() => { unmount(); vi.clearAllMocks(); api.getSubmittedAttempt.mockResolvedValue(saved); api.getAnswerKey.mockResolvedValue({ answer: "参考", referenceSourceId: id }); api.createSession.mockResolvedValue({ id }); api.createAttempt.mockResolvedValue(canonicalAttempt); api.submitAttempt.mockResolvedValue(saved.observation); hintApi.ack.mockResolvedValue(undefined); hintApi.read.mockResolvedValue([]); });
 it.each(["active", "completed"] as const)("restores durable answer on fresh %s mount without replaying submission", async status => {
   expect(text(render(status))).toContain("正在恢复"); await settle();
   const output = text(render(status)); expect(output).toContain(saved.observation.answer); expect(output).toContain(studentCopy.referenceAvailable);
@@ -188,21 +189,22 @@ it("allows a pure teaching unit to advance before any answer exists", () => {
   expect(advance(renderWorkspace(workspaceProps(id))).disabled).toBe(false);
 });
 it("unlocks only the current question's durable observation and rejects an old version callback", () => {
+  const completed = { ...saved.observation, revisionKind: "replace", verdictSource: "self_report", outcome: "correct" } as LearningObservation;
+  const blocked = (tree: ReactNode) => text(tree).includes("先提交你的想法，再继续下一单元");
   const props = workspaceProps(); const first = renderWorkspace(props), callback = observed(first);
-  expect(advance(first).disabled).toBe(true);
-  expect(shortcuts.set.mock.lastCall![1]).toMatchObject({ previous: expect.any(Function), next: undefined });
-  callback(followingId, saved.observation as LearningObservation);
-  expect(advance(renderWorkspace(props)).disabled).toBe(true);
-  callback(questionId, saved.observation as LearningObservation);
-  expect(advance(renderWorkspace(props)).disabled).toBe(false);
-  expect(shortcuts.set.mock.lastCall![1].next).toBeTypeOf("function");
+  expect(blocked(first)).toBe(true);
+  callback(followingId, completed);
+  expect(blocked(renderWorkspace(props))).toBe(true);
+  callback(questionId, { ...saved.observation, outcome: "unverified" } as LearningObservation);
+  expect(text(renderWorkspace(props))).toContain("先核对本题结果，再继续下一单元");
+  callback(questionId, completed);
+  expect(blocked(renderWorkspace(props))).toBe(false);
   const revised = workspaceProps(questionId, 2); renderWorkspace(revised);
-  expect(advance(renderWorkspace(revised)).disabled).toBe(true);
-  expect(shortcuts.set.mock.lastCall![1].next).toBeUndefined();
-  callback(questionId, saved.observation as LearningObservation);
-  expect(advance(renderWorkspace(revised)).disabled).toBe(true);
-  observed(renderWorkspace(revised))(questionId, saved.observation as LearningObservation);
-  expect(advance(renderWorkspace(revised)).disabled).toBe(false);
+  expect(blocked(renderWorkspace(revised))).toBe(true);
+  callback(questionId, completed);
+  expect(blocked(renderWorkspace(revised))).toBe(true);
+  observed(renderWorkspace(revised))(questionId, completed);
+  expect(blocked(renderWorkspace(revised))).toBe(false);
 });
 it("registers only the current question and replaces its bound attempt when the version changes", () => {
   const props = workspaceProps(), tree = renderWorkspace(props);

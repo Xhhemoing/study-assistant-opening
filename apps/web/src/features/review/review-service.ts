@@ -98,6 +98,13 @@ export async function createCardForPrincipal(
   return { card };
 }
 
+export async function countDueReviewsForPrincipal(runtime: AuthRuntime, principal: Principal, deps: ListReviewQueueDeps = {}): Promise<{ count: number }> {
+  // Reuse the same scoped queue and workspace-day rules without calling the
+  // content-delivery boundary. No card content or exposure receipt is returned.
+  const queue = await listReviewQueueForPrincipal(runtime, principal, { mode: "auto" }, deps);
+  return { count: queue.items.length };
+}
+
 export async function updateCardControlsForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,

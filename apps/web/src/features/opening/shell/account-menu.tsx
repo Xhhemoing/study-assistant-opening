@@ -1,29 +1,38 @@
 "use client";
 
+import type { ConversationSummary } from "@aistudy/contracts";
 import { Drawer } from "@aistudy/ui";
-import { ClipboardCheck, Focus, LogOut, Maximize2, Settings } from "lucide-react";
+import { ClipboardCheck, Focus, LogOut, Maximize2, MoreHorizontal, Settings } from "lucide-react";
 import { useState } from "react";
 import { ui } from "../design/ui";
 import { ShellNavLink } from "./shell-nav-link";
 import { FocusTimer } from "./focus-timer";
+import { navigationIsActive, openingNavigation } from "./navigation";
+import { openingNavigationIcons } from "./navigation-icons";
+import { RecentConversations } from "./recent-conversations";
+import { AppearanceControl } from "./appearance-control";
 
-export function OpeningAccountMenu({ userLabel, pendingCount, focusMode, onToggleFocus, onLogout, logoutPending }: {
+export function OpeningAccountMenu({ userLabel, pendingCount, focusMode, onToggleFocus, onLogout, logoutPending, recent = [], recentUnavailable = false, pathname = "", search = "" }: {
   userLabel: string; pendingCount: number | null; focusMode: boolean;
   onToggleFocus: () => void; onLogout: () => void; logoutPending: boolean;
+  recent?: ConversationSummary[]; recentUnavailable?: boolean; pathname?: string; search?: string;
 }) {
   const [open, setOpen] = useState(false);
   return <>
-    <button type="button" className={`${ui.icon} relative rounded-full bg-accent-soft text-accent`} aria-label="账户与学习工具" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>
-      <span aria-hidden="true" className="text-sm font-semibold">{(userLabel || "我").slice(0, 1).toUpperCase()}</span>
-      {pendingCount !== null && pendingCount > 0 ? <span className="absolute -right-1 -top-1 rounded-full bg-accent px-1.5 text-xs text-on-ink" aria-label={`${pendingCount} 项待审核`}>{pendingCount > 99 ? "99+" : pendingCount}</span> : null}
-    </button>
-    <Drawer open={open} onClose={() => setOpen(false)} title={userLabel || "学习工具"} keepMounted description="AI 建议、专注计时与账户设置">
-      <nav aria-label="账户与学习工具" className="space-y-2">
-        <ShellNavLink className={`${ui.secondary} w-full justify-start`} href="/opening/settings/planning#suggestions" onClick={() => { window.dispatchEvent(new Event("opening:show-suggestions")); setOpen(false); }}><ClipboardCheck size={16} aria-hidden="true" />待确认建议{pendingCount ? ` · ${pendingCount}` : ""}</ShellNavLink>
-        <button className={`${ui.secondary} w-full justify-start`} type="button" aria-pressed={focusMode} onClick={() => { onToggleFocus(); setOpen(false); }}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}{focusMode ? "退出专注模式" : "进入专注模式"}</button>
-        <div className="rounded-xl border border-line p-3"><p className="mb-2 text-xs text-text-2">专注计时 · 仅当前页面有效</p><FocusTimer /></div>
-        <ShellNavLink className={`${ui.secondary} w-full justify-start`} href="/opening/settings" onClick={() => setOpen(false)}><Settings size={16} aria-hidden="true" />设置</ShellNavLink>
-        <button type="button" className={`${ui.quiet} w-full justify-start`} onClick={onLogout} disabled={logoutPending}><LogOut size={16} aria-hidden="true" />{logoutPending ? "正在退出…" : "退出登录"}</button>
+    <button type="button" className={ui.icon} aria-label="更多" aria-haspopup="dialog" aria-expanded={open} onClick={event => { event.currentTarget.focus({ preventScroll: true }); setOpen(true); }}><MoreHorizontal size={20} aria-hidden="true" /></button>
+    <Drawer open={open} onClose={() => setOpen(false)} title="更多" keepMounted>
+      <nav aria-label="学习工具与账户" className="space-y-2">
+        {openingNavigation().filter(item => item.group === "tools").map(item => {
+          const Icon = openingNavigationIcons[item.icon];
+          return <ShellNavLink key={item.href} aria-current={navigationIsActive(item.href, pathname, search) ? "page" : undefined} className={`${ui.secondary} min-h-11 w-full justify-start aria-[current=page]:bg-surface-2 aria-[current=page]:font-medium aria-[current=page]:text-text`} href={item.href} onClick={() => setOpen(false)}><Icon size={18} aria-hidden="true" />{item.label}</ShellNavLink>;
+        })}
+        <RecentConversations recent={recent} unavailable={recentUnavailable} onNavigate={() => setOpen(false)} />
+        <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/settings/planning#suggestions" onClick={() => { window.dispatchEvent(new Event("opening:show-suggestions")); setOpen(false); }}><ClipboardCheck size={16} aria-hidden="true" />待确认建议{pendingCount ? ` · ${pendingCount}` : ""}</ShellNavLink>
+        <button className={`${ui.secondary} min-h-11 w-full justify-start`} type="button" aria-pressed={focusMode} onClick={() => { onToggleFocus(); setOpen(false); }}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}{focusMode ? "退出专注模式" : "进入专注模式"}</button>
+        <div className="rounded-md border border-line p-3"><p className="mb-2 text-xs text-text-2">专注计时</p><FocusTimer /></div>
+        <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/settings" onClick={() => setOpen(false)}><Settings size={16} aria-hidden="true" />设置</ShellNavLink>
+        <AppearanceControl />
+        <button type="button" className={`${ui.quiet} min-h-11 w-full justify-start`} onClick={onLogout} disabled={logoutPending}><LogOut size={16} aria-hidden="true" />{logoutPending ? "正在退出…" : `${userLabel ? `${userLabel} · ` : ""}退出登录`}</button>
       </nav>
     </Drawer>
   </>;

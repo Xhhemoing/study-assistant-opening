@@ -50,8 +50,9 @@ async function openView(page: Page, view: View) {
   switch (view) {
     case "today":
       await page.goto("/opening/today");
-      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeAttached();
-      await expect(page.getByRole("heading", { name: "从课程继续学习", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
+      await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "拍题", exact: true })).toBeVisible();
       break;
     case "courses":
       await page.goto("/opening/courses");
@@ -62,7 +63,7 @@ async function openView(page: Page, view: View) {
     case "progress": {
       await page.goto(`${courseHref}?tab=${view}`);
       await expect(page.getByRole("heading", { name: courseTitle, exact: true })).toBeVisible();
-      const label = { overview: "概览", units: "单元", progress: "进展" }[view];
+      const label = { overview: "学习", units: "学习", progress: "进展" }[view];
       await expect(page.getByRole("navigation", { name: "课程分区" }).getByRole("link", { name: label, exact: true })).toHaveAttribute("aria-current", "page");
       if (view === "overview") await expect(page.getByRole("heading", { name: "本课内容", exact: true })).toBeVisible();
       if (view === "units") await expect(page.getByRole("heading", { name: "课程单元", exact: true })).toBeVisible();
@@ -95,10 +96,10 @@ async function openView(page: Page, view: View) {
       break;
     case "assistant": {
       await page.goto("/opening/assistant?context=none");
-      const drawer = page.getByRole("dialog", { name: "学习助手", exact: true });
-      await expect(drawer).toBeVisible();
-      await expect(drawer.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
-      await expect(drawer.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
+      const conversation = page.getByRole("region", { name: "学习对话", exact: true });
+      await expect(conversation).toBeVisible();
+      await expect(conversation.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
+      await expect(conversation.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
       break;
     }
   }
@@ -171,8 +172,11 @@ for (const condition of conditions) {
         await page.screenshot({ path: screenshotPath, fullPage: true });
         await testInfo.attach("view", { path: screenshotPath, contentType: "image/png" });
         if (view === "assistant") {
-          await page.getByRole("dialog", { name: "学习助手", exact: true }).getByRole("button", { name: "关闭抽屉", exact: true }).click();
-          await expect(page.getByRole("dialog", { name: "学习助手", exact: true })).toHaveCount(0);
+          // The assistant is a full-page conversation. Returning to a fresh start
+          // must release any modal/inert state just as closing the old drawer did.
+          await page.getByRole("link", { name: "新对话", exact: true }).click();
+          await expect(page).toHaveURL(/\/opening\/today$/);
+          await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
           await expect(page.getByRole("main")).toBeVisible();
           await expect.poll(() => page.locator("main").evaluate(main => {
             return Boolean(main.closest('[aria-hidden="true"],[inert],[hidden]'));

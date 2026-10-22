@@ -26,7 +26,7 @@ export function useLessonArrowKeys(root: RefObject<HTMLElement | null>, actions:
         selection: window.getSelection()?.isCollapsed === false,
         hidden: document.visibilityState === "hidden" || !visible(element),
         modal: [...document.querySelectorAll('dialog[open],[role="dialog"][data-state="open"],[role="alertdialog"][data-state="open"]')].some(visible),
-        withinLesson: Boolean(target && (element.contains(target) || (target === document.body && [...document.querySelectorAll('[data-lesson-shortcuts="true"]')].filter(visible).length === 1))),
+        withinLesson: Boolean(target && element.contains(target)),
         busy: current.current.busy?.() ?? false,
         previous: Boolean(current.current.previous), next: Boolean(current.current.next),
       });

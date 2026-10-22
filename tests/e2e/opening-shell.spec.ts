@@ -18,17 +18,17 @@ test.describe("opening shell", () => {
         await page.setViewportSize(viewport);
         await page.goto("/opening/today");
         const nav = page.getByRole("navigation", {
-          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "学习工作台导航",
+          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "主导航",
           exact: true,
         });
         await expect(
           nav,
         ).toBeVisible();
-        await expect(nav.getByRole("link", { name: "今日" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "开始" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "助理" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "复习" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "资料" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "今日" })).toHaveAttribute(
+        await expect(nav.getByRole("link", { name: "开始" })).toHaveAttribute(
           "aria-current",
           "page",
         );
@@ -41,7 +41,7 @@ test.describe("opening shell", () => {
     }
   });
 
-  test("today page shows an honest empty state instead of fabricated data", async ({
+  test("start page offers direct questions and examples instead of fabricated resume data", async ({
     browser,
     baseURL,
   }) => {
@@ -50,12 +50,15 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      // An owner without courses gets the real course entry, without invented resume data.
-      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
-      await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
+      // A new owner can ask immediately; examples are not invented learning records.
+      await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
+      await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeEnabled();
+      await expect(page.getByRole("list", { name: "可以这样问", exact: true }).getByRole("button")).toHaveCount(3);
+      await expect(page.getByRole("button", { name: "拍题", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "上传", exact: true })).toBeVisible();
       await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
       await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
-      const start = page.getByRole("link", { name: "添加第一门课", exact: true });
+      const start = page.getByRole("navigation", { name: "学习工具", exact: true }).filter({ has: page.getByRole("link", { name: "新建课程", exact: true }) }).getByRole("link", { name: "新建课程", exact: true });
       await expect(start).toBeVisible();
       await expect(start).toHaveAttribute("href", "/opening/courses/new");
     } finally {
@@ -69,11 +72,11 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      const today = page.getByRole("navigation", { name: "学习工作台导航", exact: true }).getByRole("link", { name: "今日" });
+      const today = page.getByRole("navigation", { name: "主导航", exact: true }).getByRole("link", { name: "开始" });
       await today.focus();
       await expect(today).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("navigation", { name: "学习工作台导航", exact: true }).getByRole("link", { name: "课程" })).toBeFocused();
+      await expect(page.getByRole("navigation", { name: "主导航", exact: true }).getByRole("link", { name: "课程" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(page).toHaveURL(/\/opening\/courses$/);
     } finally {
@@ -112,10 +115,10 @@ test.describe("opening shell", () => {
         await page.goto("/opening/today");
         await shellReady;
         const nav = page.getByRole("navigation", {
-          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "学习工作台导航",
+          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "主导航",
           exact: true,
         });
-        await expect(nav.getByRole("link", { name: "今日", exact: true })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "开始", exact: true })).toBeVisible();
         const documentRequests: string[] = [];
         page.on("request", request => {
           if (request.isNavigationRequest() && request.frame() === page.mainFrame()) documentRequests.push(request.url());

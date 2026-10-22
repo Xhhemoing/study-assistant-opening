@@ -12,9 +12,9 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     const page = await context.newPage();
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto("/opening/assistant");
-    await expect(page).toHaveURL(/\/opening\/today\?ai=1$/);
-    const assistant = page.getByRole("dialog", { name: "学习助手", exact: true });
+    await page.goto("/opening/today");
+    await expect(page).toHaveURL(/\/opening\/today$/);
+    const assistant = page.getByRole("region", { name: /^(开始|学习对话)$/ });
     await expect(assistant).toBeVisible();
     const fixture = path.resolve("tests/fixtures/opening/parser-two-page.pdf");
     await assistant.getByRole("button", { name: "选择参考材料", exact: true }).click();
@@ -45,7 +45,8 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });
     await expect(reader).toBeVisible();
     await reader.getByRole("button", { name: "提取文字 / OCR 核对", exact: true }).click();
-    const readingTools = page.getByRole("dialog", { name: "提取文字 / OCR 核对", exact: true });
+    const readingTools = reader.getByRole("dialog", { name: "学习辅助区", exact: true });
+    await expect(readingTools.getByRole("tab", { name: "提取文字 / OCR 核对", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(readingTools.getByRole("region", { name: "解析正文", exact: true }).getByText(/Opening parser page one/)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("reader-desktop-text.png"), fullPage: true });
     const desktopViewport = page.viewportSize()!;

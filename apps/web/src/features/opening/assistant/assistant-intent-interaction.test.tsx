@@ -22,6 +22,7 @@ vi.mock("./ai-readiness", async () => {
 vi.mock("./proposal-panel", () => ({ ProposalPanel: () => null }));
 
 import { AssistantView } from "./assistant-view";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 const conversationId = "11111111-1111-4111-8111-111111111111";
 const courseId = "22222222-2222-4222-8222-222222222222";
@@ -173,4 +174,25 @@ it("sends an automatically detected record query through the real workspace desp
   }
   // Initial source listing only: record reads never revalidate the unavailable attachment.
   expect(listSources).toHaveBeenCalledOnce();
+});
+
+it("appends each native selection request once to the restored draft without sending or rebinding context", async () => {
+  const clearIdentity = publishVerifiedSessionIdentity({ id: "selection-owner", workspaceId: "selection-workspace" });
+  const submitTurn = vi.fn(), createConversation = vi.fn();
+  const api = { listSources: vi.fn(async () => []), submitTurn, createConversation } as unknown as OpeningApi;
+  const context = { activityId: crypto.randomUUID(), blockId: crypto.randomUUID(), contentVersion: 2, label: "原段落" };
+  const props = { api, embedded: true, startFresh: true, studyContext: context, initialDraft: "我的未完成推导" };
+  await act(async () => root.render(<AssistantView {...props} />));
+  const field = () => host.querySelector<HTMLTextAreaElement>("textarea")!;
+  const request = { id: "selection-1", text: "请补充解释这段内容：\n原文第一段" };
+  await act(async () => root.render(<AssistantView {...props} promptRequest={request} />));
+  expect(field().value).toBe(`我的未完成推导\n\n${request.text}`);
+  await act(async () => root.render(<AssistantView {...props} promptRequest={{ ...request }} />));
+  expect(field().value).toBe(`我的未完成推导\n\n${request.text}`);
+  await act(async () => root.render(null));
+  const next = { id: "selection-2", text: "请补充解释这段内容：\n新选区" };
+  await act(async () => root.render(<AssistantView {...props} promptRequest={next} />));
+  expect(field().value).toBe(`我的未完成推导\n\n${request.text}\n\n${next.text}`);
+  expect(submitTurn).not.toHaveBeenCalled(); expect(createConversation).not.toHaveBeenCalled();
+  clearIdentity();
 });

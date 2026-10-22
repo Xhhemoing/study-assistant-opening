@@ -35,9 +35,9 @@ const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 
-export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }): string {
+export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
-  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : [])]);
+  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []), ...(!retest && problem ? [{ sourceId: problem.sourceId, sourceVersion: problem.sourceVersion }] : [])]);
 }
 
 export function emptyPracticeDraft(scope: string, fields: Partial<PracticeFields> = {}): PracticeDraft {
@@ -50,13 +50,17 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
   const draft: PracticeDraft = { ...parsed.data, id: parsed.data.id ?? crypto.randomUUID() };
   let context: unknown;
   try { context = JSON.parse(scope); } catch { return null; }
-  if (!Array.isArray(context) || ![7, 8, 9].includes(context.length)) return null;
+  if (!Array.isArray(context) || ![7, 8, 9, 10].includes(context.length)) return null;
   // The eighth span element identifies a new-evidence request. It is not the
   // ordinary practice focus pair (elements eight and nine).
   if (context.length === 8 && (context[1] !== "span" || !z.string().uuid().safeParse(context[7]).success)) return null;
   const [courseId, mode, retestId, , requirementKey] = context;
+  if (context.length === 10) {
+    const question = z.object({ sourceId: z.string().uuid(), sourceVersion: z.number().int().positive() }).strict().safeParse(context[9]);
+    if (!question.success || mode !== "ordinary" || draft.fields.sourceId !== question.data.sourceId) return null;
+  }
   const start = draft.start;
-  if (context.length === 9 && (draft.fields.skillLabel !== context[7] || start?.sessionInput && (start.sessionInput.requirementKey ?? null) !== context[8])) return null;
+  if (context.length >= 9 && (draft.fields.skillLabel !== context[7] || start?.sessionInput && (start.sessionInput.requirementKey ?? null) !== context[8])) return null;
   if (start) {
     if (!start.sessionInput && !start.createInput) return null;
     if (start.sessionInput && start.sessionInput.courseId !== courseId) return null;

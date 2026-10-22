@@ -10,6 +10,11 @@ import { captureReaderReturnPoint, type ReaderReturnPoint } from "./reader-retur
 import { SaveSnippetDialog } from "../assistant/save-snippet-dialog";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
 
+const originalConversation = vi.hoisted(() => ({ render: vi.fn() }));
+vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: (props: { conversationId: string; className?: string }) => {
+  originalConversation.render(props); return createElement("input", { "data-original-conversation": props.conversationId, defaultValue: "原对话草稿" });
+} }));
+vi.mock("./native-pdf-runtime", () => ({ loadPdfRuntime: async () => { throw new Error("PDF test transport unavailable"); } }));
 vi.mock("./source-content", () => ({ SourceContent: () => createElement("section", { "aria-label": "解析正文" }, "提取文字") }));
 const record = { id: "11111111-1111-4111-8111-111111111111", name: "讲义.pdf", mime: "application/pdf", version: 2, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
 let host: HTMLDivElement;
@@ -49,10 +54,44 @@ describe("dedicated material reader", () => {
     expect(html).toContain("#page=3");
     expect(html).toContain("这份材料之后已有更新");
     expect(html).toContain("第 3 页");
-    expect(html).toContain("无法同步确认当前显示页");
+    expect(html).toContain('data-source-page="3"');
+    expect(html).toContain("PDF 阅读工具");
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain('aria-label="解析正文"');
     expect(html).not.toContain("上传材料");
+  });
+  it("mounts the explicitly selected original conversation in the single companion without a material binding", async () => {
+    originalConversation.render.mockClear();
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 1200 } as DOMRect);
+    const conversationId = "22222222-2222-4222-8222-222222222222";
+    const reader = await render({ originalConversationId: conversationId, courseId: "33333333-3333-4333-8333-333333333333" });
+    const original = reader.querySelector<HTMLInputElement>("[data-original-conversation]")!;
+    expect(original).not.toBeNull();
+    expect(originalConversation.render.mock.lastCall?.[0]).toEqual({ conversationId, className: "min-h-0 min-w-0 flex-1" });
+    original.value = "仍在写的原对话";
+    const text = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "提取文字 / OCR 核对")!;
+    await click(text);
+    expect(reader.querySelector("[data-original-conversation]")).toBe(original);
+    expect(original.value).toBe("仍在写的原对话");
+    expect(reader.querySelectorAll("dialog")).toHaveLength(1);
+  });
+  it("shows the material first on a narrow reader, with the original conversation available on demand", async () => {
+    originalConversation.render.mockClear();
+    const reader = await render({ originalConversationId: "22222222-2222-4222-8222-222222222222" });
+    const original = reader.querySelector<HTMLInputElement>("[data-original-conversation]")!;
+    expect(original).not.toBeNull();
+    expect(original.closest("[hidden]")).not.toBeNull();
+    expect(reader.querySelector('[data-study-content]')?.classList.contains("hidden")).toBe(false);
+    const open = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "原对话")!;
+    await click(open);
+    expect(reader.querySelector("[data-original-conversation]")).toBe(original);
+    expect(original.closest("[hidden]")).toBeNull();
+  });
+  it("does not mount or restore an original conversation without an explicit identity", async () => {
+    originalConversation.render.mockClear();
+    await render();
+    expect(originalConversation.render).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-original-conversation]")).toBeNull();
   });
   it("keeps media and slide citation positions explicit when the preview cannot synchronize them", async () => {
     const html = (await render({ startMs: 65000, slideLabel: "A-1" })).outerHTML;
@@ -64,7 +103,7 @@ describe("dedicated material reader", () => {
     const html = (await render({ record: { ...record, parseState: "failed", error: { code: "PARSE_FAILED", message: "解析失败", retryable: true } }, onRetry: async () => {} })).outerHTML;
     expect(html).toContain("解析失败");
     expect(html).toContain("重新解析");
-    expect(html).toContain("<iframe");
+    expect(html).toContain("<canvas");
   });
   it("starts reading extracted content for parsed formats without an inline original viewer", async () => {
     const html = (await render({ record: { ...record, name: "slides.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" } })).outerHTML;

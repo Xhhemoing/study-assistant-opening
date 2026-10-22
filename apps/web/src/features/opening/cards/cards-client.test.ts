@@ -1,6 +1,8 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createOpeningCardsClient, resolveCardGradeIdentity } from "./cards-client";
 import { OpeningApiError } from "../client/api";
+
+afterEach(() => vi.unstubAllGlobals());
 
 const CARD = "11111111-1111-4111-8111-111111111111";
 const DOC = "22222222-2222-4222-8222-222222222222";
@@ -115,4 +117,21 @@ it("posts course/skill attribution and stable card identity without forcing a so
     return Response.json({ card: { ...sampleCard, sourceDocumentId: null, courseId: WORKSPACE, skillLabel: "fractions" } });
   });
   expect((await client.createCard({ cardId: CARD, front: "Q", back: "A", courseId: WORKSPACE, skillLabel: "fractions" })).card.courseId).toBe(WORKSPACE);
+});
+
+it.each(["grade", "completeVariant"] as const)("refreshes review metadata only after a successful %s", async method => {
+  const target = new EventTarget();
+  const changed = vi.fn();
+  target.addEventListener("opening:reviews-changed", changed);
+  vi.stubGlobal("window", target);
+  const transport = vi.fn().mockResolvedValueOnce(Response.json({ state: sampleState, event: sampleEvent }))
+    .mockResolvedValueOnce(Response.json({ error: { message: "failed" } }, { status: 503 }))
+    .mockResolvedValueOnce(Response.json({ invalid: true }));
+  const client = createOpeningCardsClient(transport);
+  const run = () => method === "grade" ? client.grade({ cardId: CARD, grade: "good", idempotencyKey: "review-key-01" }) : client.completeVariant(CARD, EVENT);
+  await run();
+  expect(changed).toHaveBeenCalledOnce();
+  await expect(run()).rejects.toThrow();
+  await expect(run()).rejects.toThrow();
+  expect(changed).toHaveBeenCalledOnce();
 });

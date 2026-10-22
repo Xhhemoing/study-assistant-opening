@@ -80,14 +80,19 @@ test.describe("Opening span durable teaching flow", () => {
       // Keyboard editing must not navigate; focus mode must preserve the same form.
       await practice.getByLabel("α（候选系数）", { exact: true }).press("ArrowRight");
       await expect(steps.getByRole("button", { name: "3. 独立新题", exact: true })).toHaveAttribute("aria-current", "step");
+      const originalInput = practice.getByLabel("α（候选系数）", { exact: true });
+      const originalInputNode = await originalInput.elementHandle();
+      expect(originalInputNode).not.toBeNull();
       const focusTrigger = page.getByRole("button", { name: "专注学习", exact: true });
       await focusTrigger.focus();
       await page.keyboard.press("Enter");
-      const focusDialog = page.getByRole("dialog", { name: "线性组合与 span", exact: true });
-      await expect(focusDialog).toBeVisible();
-      await expect(focusDialog.getByLabel("α（候选系数）", { exact: true })).toHaveValue("2");
+      await expect(page.locator("[data-app-shell]")).toHaveAttribute("data-focus", "true");
+      await expect(page.locator('[data-shell-navigation="desktop"]')).not.toBeVisible();
+      await expect(originalInput).toHaveValue("2");
+      expect(await originalInput.evaluate((element, previous) => element === previous, originalInputNode)).toBe(true);
       await page.keyboard.press("Escape");
-      await expect(focusDialog).toHaveCount(0);
+      await expect(page.locator("[data-app-shell]")).toHaveAttribute("data-focus", "false");
+      expect(await originalInput.evaluate((element, previous) => element === previous, originalInputNode)).toBe(true);
       await expect(focusTrigger).toBeFocused();
       await expect(practice.getByLabel("我的理由（如无解冲突、几何约束）", { exact: true })).toHaveValue(/强制 α=β=2/);
 

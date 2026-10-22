@@ -44,7 +44,7 @@ export function ReviewView({ api: supplied, embedded = false, onPendingCountChan
   }
   const refreshButton = state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" onClick={() => void refresh()} className={secondaryButtonClass}><RefreshCw size={14} aria-hidden="true" />重新读取</button> : null;
   return <section className={embedded ? "w-full bg-surface" : "flex h-full min-h-0 w-full flex-col bg-surface"} aria-label={embedded ? "待确认建议" : undefined}>
-    {embedded ? <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4"><p className="text-xs text-text-3">选择要加入学习安排的任务，或决定助理可以记住什么。</p>{refreshButton}</div> : <PageHeader title={state.kind === "ready" && pendingCount ? `待确认建议 · ${pendingCount} 项` : "待确认建议"} description="选择要加入学习安排的任务，或决定助理可以记住什么。" action={<div className="flex flex-wrap gap-2">{refreshButton}<Link href="/opening/today" className={secondaryButtonClass}>返回今天</Link></div>} />}
+    {embedded ? <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4"><p className="text-xs text-text-3">选择要加入学习安排的任务，或决定助理可以记住什么。</p>{refreshButton}</div> : <PageHeader title={state.kind === "ready" && pendingCount ? `待确认建议 · ${pendingCount} 项` : "待确认建议"} action={<div className="flex flex-wrap gap-2">{refreshButton}<Link href="/opening/today" className={secondaryButtonClass}>返回开始</Link></div>} />}
     <div className={embedded ? "px-5 py-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
     {state.kind === "loading" ? <p role="status" className="text-sm text-text-2">正在读取待审核建议…</p> : null}
     {state.kind === "loggedOut" ? <><EmptyState title="尚未登录" description="登录后查看属于你的待审核建议。" /><Link href="/login" className={secondaryButtonClass}>去登录</Link></> : null}

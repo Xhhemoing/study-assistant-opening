@@ -147,7 +147,7 @@ export function UploadDropzone({ compact = false, disabled = false, multiple = t
           <span className={`${ui.secondary} pointer-events-none mt-3 inline-flex`}>选择文件</span>
         </> : null}
       </div>
-      {rejection ? <p className="text-xs text-rose-700" role="alert">{rejection}</p> : null}
+      {rejection ? <p className="text-xs text-danger" role="alert">{rejection}</p> : null}
       <input
         ref={inputRef}
         accept={accept}

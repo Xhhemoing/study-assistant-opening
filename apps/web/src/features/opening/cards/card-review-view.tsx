@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
-import { EmptyState, LoadError, LoadingRows, PageHeader, secondaryButtonClass, ui } from "../design/ui";
+import { EmptyState, LoadError, LoadingRows, PageHeader, ContentBlock, secondaryButtonClass, ui } from "../design/ui";
 import { interactionMotionReduced, successfulInteractionHaptic } from "../design/haptics";
 import { CardVariantReview } from "./card-variant-review";
 import { CardStack } from "./card-stack";
@@ -151,14 +151,13 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
 
   const headerActions = <div className="flex flex-wrap gap-2">
     {state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" className={secondaryButtonClass} disabled={grading} onClick={() => setRetryToken(value => value + 1)}><RefreshCw size={14} aria-hidden />重新读取</button> : null}
-    {!embedded ? <Link href="/opening/today" className={secondaryButtonClass}>返回今天</Link> : null}
+    {!embedded ? <Link href="/opening/today" className={secondaryButtonClass}>返回开始</Link> : null}
   </div>;
 
   return (
     <section aria-label={compact ? "当前记忆卡片" : undefined} className={embedded ? compact ? "space-y-3" : "space-y-5" : "flex h-full min-h-0 w-full flex-col bg-bg"}>
-      {embedded ? !compact ? <header className="space-y-1"><div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">记忆卡片</h2>{headerActions}</div><p className="text-xs leading-5 text-text-2">定义翻卡回忆，题目换一道再练。</p></header> : null : <PageHeader
+      {embedded ? !compact ? <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">记忆卡片</h2>{headerActions}</header> : null : <PageHeader
         title="记忆卡片"
-        description="定义与术语用卡片回忆，题目通过新变式复习。"
         action={headerActions}
       />}
       <div className={embedded ? "space-y-4" : "min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7"}>
@@ -194,13 +193,13 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
             description={`本次完成 ${state.items.length} 张。下次复习已安排。`}
             action={
               <Link href="/opening/today" className={secondaryButtonClass}>
-                返回今天
+                返回开始
               </Link>
             }
           />
         ) : null}
         {state.kind === "ready" && current ? (
-          <div className={`mx-auto flex w-full max-w-3xl flex-col ${compact ? "gap-2" : "gap-5"}`}>
+          <ContentBlock width="wide"><div className={`flex w-full min-w-0 flex-col ${compact ? "gap-2" : "gap-5"}`}>
             <progress value={state.index} max={state.items.length} aria-label="本组卡片已完成" className="h-[3px] w-full overflow-hidden rounded-full border-0 bg-surface-2 text-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" />
             <div className="flex items-end justify-between gap-3">
               <p className="text-xs text-text-3">{cardReviewKind(current.card) === "question" ? "做一道新变式" : "回忆这个知识点"}</p>
@@ -252,9 +251,9 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
               ))}
             </div>
             </>}
-          </div>
+          </div></ContentBlock>
         ) : null}
-        {state.kind === "ready" && !compact && cardReviewKind(current?.card ?? { tags: [] }) === "concept" ? <details className="mx-auto max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-2">复习安排</summary><p className="py-2 leading-5">根据这次回忆的情况安排下一次复习，逐步记牢这个知识点。</p><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
+        {state.kind === "ready" && !compact && cardReviewKind(current?.card ?? { tags: [] }) === "concept" ? <ContentBlock width="wide"><details className="text-xs text-text-2"><summary className="cursor-pointer py-2">复习安排</summary><p className="py-2 leading-5">根据这次回忆的情况安排下一次复习，逐步记牢这个知识点。</p><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details></ContentBlock> : null}
       </div>
     </section>
   );

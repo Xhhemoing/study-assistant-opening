@@ -62,7 +62,7 @@ describe("inline teaching attempt", () => {
     expect(result.attempt.submittedAt).toBeNull(); // The submit receipt does not rewrite the canonical projection.
     expect(client.createSession).toHaveBeenCalledWith({ activityId: id, courseId: id, skillLabel: "矩阵秩", sourceIds: [id] });
     expect(client.createAttempt).toHaveBeenCalledWith(expect.objectContaining({ sessionId: id, teachingBlock: { blockId: id, contentVersion: 3 } }));
-    expect(client.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: identity.answer, outcome: "unverified", assistance: "independent", verdictSource: "self_report" }));
+    expect(client.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: identity.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report" }));
     await session.submit();
     expect(client.submitAttempt).toHaveBeenCalledTimes(1);
   });
@@ -137,4 +137,23 @@ describe("inline teaching attempt", () => {
       submitAttempt: vi.fn().mockResolvedValue({ ...savedObservation, attemptId: "22222222-2222-4222-8222-222222222222" }) };
     await expect(createInlineAttemptSubmission(identity, client).submit()).rejects.toThrow("保存回执");
   });
+});
+
+
+it("publishes shared submission identity to the returning form even when the first attempt reply fails", async () => {
+  let resolve!: (value: { id: string }) => void;
+  const client = { createSession: vi.fn().mockReturnValue(new Promise(value => { resolve = value; })),
+    createAttempt: vi.fn().mockRejectedValueOnce(new Error("lost reply")).mockResolvedValue(canonicalAttempt),
+    submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
+  let original!: import("./inline-attempt-submission").InlineAttemptSubmissionCheckpoint;
+  let restored!: import("./inline-attempt-submission").InlineAttemptSubmissionCheckpoint;
+  const first = createInlineAttemptSubmission(identity, client, { onCheckpoint: value => { original = value; } }).submit();
+  const returning = createInlineAttemptSubmission(identity, client, { checkpoint: JSON.parse(JSON.stringify(original)), onCheckpoint: value => { restored = value; } });
+  const second = returning.submit();
+  resolve({ id }); await Promise.allSettled([first, second]);
+  expect(restored.sessionId).toBe(id);
+  await returning.submit();
+  expect(client.createSession).toHaveBeenCalledOnce();
+  expect(client.createAttempt.mock.calls[1]).toEqual(client.createAttempt.mock.calls[0]);
+  expect(restored).toMatchObject({ sessionId: id, attemptId: id, status: "saved" });
 });

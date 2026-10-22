@@ -68,9 +68,11 @@ export function createOpeningCardsClient(transport: FetchLike = fetch) {
       }, fetchImpl));
     },
     async completeVariant(cardId: string, observationId: string): Promise<GradeReviewResponse> {
-      return gradeReviewResponseSchema.parse(await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
+      const result = gradeReviewResponseSchema.parse(await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
         method: "POST", body: JSON.stringify({ action: "complete", observationId }),
       }, fetchImpl));
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("opening:reviews-changed"));
+      return result;
     },
     async classify(cardId: string, reviewKind: "question" | "concept") {
       await request(`/api/cards/${encodeURIComponent(cardId)}/variant`, {
@@ -116,7 +118,9 @@ export function createOpeningCardsClient(transport: FetchLike = fetch) {
         },
         fetchImpl,
       );
-      return gradeReviewResponseSchema.parse(body);
+      const result = gradeReviewResponseSchema.parse(body);
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("opening:reviews-changed"));
+      return result;
     },
   };
 }

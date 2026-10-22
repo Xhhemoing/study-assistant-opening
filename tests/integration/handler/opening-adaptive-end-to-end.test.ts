@@ -137,7 +137,7 @@ it("carries a verified error through Today selection into a server-derived targe
     course_id: chosen.courseId, source_ids: [chosen.sourceId],
     goal_json: { learnerFocus: {
       skillLabel: matrixSkill, requirementKey: matrixRequirement, activityKind: "targeted_explain", reasonCode: "verified_incorrect",
-      focusObservationId: chosen.observation.id, recentAssistance: ["independent"], strategyVersion: ADAPTIVE_STRATEGY_VERSION,
+      focusObservationId: chosen.observation.id, recentAssistance: ["independent"], recentErrors: [], strategyVersion: ADAPTIVE_STRATEGY_VERSION,
       goalContext: { mode: "understand", targetDate: null, daysRemaining: null, priority: 0, prerequisiteBudgetMinutes: 10, reasonCode: "long_term" },
     } },
   });

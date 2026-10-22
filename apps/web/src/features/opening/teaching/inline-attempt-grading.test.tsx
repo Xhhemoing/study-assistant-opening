@@ -37,6 +37,7 @@ const graded: LearningObservation = { ...record, id: gradedId, rootObservationId
 const context: InlineAttemptContext = { id: blockId, courseId: record.courseId, sourceIds: record.sourceIds,
   contentVersion: 3, status: "active", intentSummary: "分数练习", onCourseAssociated: vi.fn(),
   onObservationReady: vi.fn(), onAttemptReady: vi.fn() };
+context.completionAction = { label: "下一题", onClick: vi.fn() };
 const initialDraft = { prompt: "1/2 + 1/2 = ?", skillLabel: record.skillLabel, answer: record.answer };
 
 let container: HTMLDivElement, root: Root, head: LearningObservation;
@@ -142,4 +143,48 @@ it("prepares a question without an extra click and does not submit or grade it",
   expect(api.gradeObservation).not.toHaveBeenCalled();
   expect(container.textContent).not.toMatch(/封存|曝光|回执|资格|记录的技能|开始本题并启用提示/);
   expect(container.querySelector("form")).not.toBeNull();
+});
+
+it("offers the one completion action only after grading, and removes it for an uncertain correction", async () => {
+  let finishGrade!: (result: LearningObservation) => void;
+  api.gradeObservation.mockImplementation(() => new Promise<LearningObservation>(resolve => { finishGrade = resolve; }));
+  await render(); await submit();
+  expect(container.querySelector('[data-attempt-stage="processing"]')).not.toBeNull();
+  expect(container.textContent).not.toContain("下一题");
+  await act(async () => { head = graded; finishGrade(graded); });
+  const complete = Array.from(container.querySelectorAll('[data-attempt-stage="reliable"] button')).filter(button => button.textContent === "下一题");
+  expect(complete).toHaveLength(1);
+  await act(async () => (complete[0] as HTMLButtonElement).click());
+  expect(context.completionAction?.onClick).toHaveBeenCalledOnce();
+
+  api.reviseObservation.mockImplementation(async () => {
+    head = { ...record, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", rootObservationId: record.id,
+      revisesObservationId: graded.id, revisionKind: "replace", outcome: "unverified" };
+    return { disposition: "applied", observation: head };
+  });
+  await click("判错了"); await click("保存纠正");
+  expect(container.textContent).not.toContain("下一题");
+  expect(api.gradeObservation).toHaveBeenCalledOnce();
+});
+
+it("keeps completion absent after a failed or low-confidence grade", async () => {
+  api.gradeObservation.mockRejectedValue(new Error("批改服务未完成"));
+  await render(); await submit();
+  expect(container.textContent).toContain("重试批改");
+  expect(container.textContent).not.toContain("下一题");
+  api.gradeObservation.mockImplementation(async () => ({ ...graded, outcome: "unverified", aiEvaluation: { ...graded.aiEvaluation!, confidence: 0.2 } }));
+  await click("重试批改");
+  expect(container.textContent).toContain("修改这一步");
+  expect(container.textContent).not.toContain("下一题");
+});
+
+it("offers completion for a known learner correction without regrading or claiming an assessed answer", async () => {
+  const corrected = { ...record, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", rootObservationId: record.id,
+    revisionKind: "replace" as const, outcome: "incorrect" as const };
+  api.getSubmittedAttempt.mockResolvedValue({ attempt, observation: corrected });
+  await render();
+  expect(container.querySelector('[data-attempt-stage="corrected"]')?.textContent).toContain("下一题");
+  expect(container.textContent).toContain("重新批改");
+  expect(container.querySelector('[data-feedback-verdict="unverified"]')).not.toBeNull();
+  expect(api.gradeObservation).not.toHaveBeenCalled();
 });

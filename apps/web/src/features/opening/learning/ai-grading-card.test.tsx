@@ -26,6 +26,14 @@ it("shows the effective uncertain verdict even when the raw model proposed corre
   expect(html).not.toContain("自评置信度");
 });
 
+it.each([record, { ...record, aiEvaluation: null, verdictSource: "self_report" as const, revisionKind: "replace" as const }])("uses one explicit finish link for a reliable or known corrected photo result", observation => {
+  const html = renderToStaticMarkup(createElement(AiGradingCard, { record: observation, onGraded() {}, completionAction: { label: "结束练习", href: "/opening/today" } }));
+  expect(html.match(/href="\/opening\/today"/g)).toHaveLength(1);
+  expect(html).toContain("结束练习");
+  const uncertain = renderToStaticMarkup(createElement(AiGradingCard, { record: { ...observation, outcome: "unverified" }, onGraded() {}, completionAction: { label: "结束练习", href: "/opening/today" } }));
+  expect(uncertain).not.toContain("结束练习");
+});
+
 it("keeps photo transcription separate from the original answer and offers dispute correction", () => {
   const graded = { ...record, aiEvaluation: { ...evaluation, transcription: "图片识别出的答案" } };
   const html = renderToStaticMarkup(createElement(ObservationRevisionCard, { record: graded, onChanged() {} }));

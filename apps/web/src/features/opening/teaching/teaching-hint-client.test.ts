@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { requestTeachingHint } from "./teaching-hint-client";
+import { readReleasedTeachingHints, requestTeachingHint } from "./teaching-hint-client";
 const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8222-222222222222";
 const attempt = { id, courseId: id, itemVersionId: null };
 const context = { activityId: id, blockId: id, contentVersion: 3 };
@@ -22,4 +22,21 @@ it.each([{ supportDomain: "language" }, { origin: "history_solution" }, { releas
 });
 it("preserves the old-content unavailable reason instead of inventing missing hint levels", async () => {
   await expect(requestTeachingHint(attempt, context, 1, vi.fn().mockResolvedValue(Response.json({ error: { message: "此版教学内容没有分级提示，仍可提交作答" } }, { status: 409 })))).rejects.toMatchObject({ status: 409, message: expect.stringContaining("仍可提交") });
+});
+it("restores only released hints with a GET and retains their original receipts", async () => {
+  const hints = [response(4), response(1)], fetcher = vi.fn().mockResolvedValue(Response.json({ hints }));
+  expect(await readReleasedTeachingHints(attempt, context, fetcher)).toEqual([hints[1], hints[0]]);
+  expect(fetcher).toHaveBeenCalledExactlyOnceWith(`/api/opening/teaching/hint?attemptId=${id}`, { cache: "no-store" });
+});
+it.each([{ attemptId: other }, { courseId: other }, { itemVersionId: other }, { activityId: other }, { blockId: other }, { contentVersion: 4 }])("rejects restored hints for a different canonical identity", async patch => {
+  const hint = response(); hint.exposureReceipt.contextAnchor = { ...hint.exposureReceipt.contextAnchor, ...patch };
+  await expect(readReleasedTeachingHints(attempt, context, vi.fn().mockResolvedValue(Response.json({ hints: [hint] })))).rejects.toThrow();
+});
+it.each([{ origin: "history_solution" }, { releasedAt: null }, { releaseKey: `teaching-hint-v1:${other}:1` }])("rejects mismatched release provenance on recovery", async patch => {
+  const hint = response(); Object.assign(hint.exposureReceipt, patch);
+  await expect(readReleasedTeachingHints(attempt, context, vi.fn().mockResolvedValue(Response.json({ hints: [hint] })))).rejects.toThrow();
+});
+it("accepts no released help without fabricating a stage and refuses duplicate levels", async () => {
+  expect(await readReleasedTeachingHints(attempt, context, vi.fn().mockResolvedValue(Response.json({ hints: [] })))).toEqual([]);
+  await expect(readReleasedTeachingHints(attempt, context, vi.fn().mockResolvedValue(Response.json({ hints: [response(), response()] })))).rejects.toThrow();
 });

@@ -9,8 +9,6 @@ import { SEARCH_DEBOUNCE_MS, filterPaletteCommands, getNextPaletteIndex, getPale
 import { openingSearchHitHref, searchHitTypeLabel } from "./search-results-model";
 import { createSearchApi } from "./search-api";
 
-import { openAssistantDrawer } from "../opening/assistant/assistant-entry";
-
 interface PaletteOption { id: string; label: string; description: string; href: string; kind: "page" | "command" | "result" }
 function buildOptions(query: string, hits: SearchHit[]): PaletteOption[] {
   return [
@@ -40,7 +38,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
 
   useEffect(() => {
     function handleGlobalKeyDown(event: globalThis.KeyboardEvent) {
-      if (!event.defaultPrevented && !event.isComposing && !document.querySelector('[role="dialog"][data-state="open"]') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); onOpen(); }
+      if (!event.defaultPrevented && !event.isComposing && event.keyCode !== 229 && !event.altKey && !event.shiftKey && !document.querySelector('dialog[open]:not([data-study-companion]),[role="dialog"][data-state="open"]') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); onOpen(); }
     }
     document.addEventListener("keydown", handleGlobalKeyDown);
     return () => document.removeEventListener("keydown", handleGlobalKeyDown);
@@ -78,7 +76,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
     const option = options[activeIndex];
     if (open && option) document.getElementById(`command-option-${option.id}`)?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, open, options]);
-  function selectOption(index: number) { const option = options[index]; if (!option) return; onClose(); if (option.href.startsWith("/opening/assistant")) openAssistantDrawer(option.href); else router.push(option.href); }
+  function selectOption(index: number) { const option = options[index]; if (!option) return; onClose(); router.push(option.href); }
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
     const action = getPaletteKeyAction(event.key, event.nativeEvent.isComposing);
     if (action === "none") return;

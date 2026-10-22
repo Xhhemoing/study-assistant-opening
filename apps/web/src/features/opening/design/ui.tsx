@@ -12,13 +12,26 @@ export const inputClass = ui.input;
 export const selectClass = ui.input;
 export const textareaClass = `${fieldClass} min-h-24 resize-y text-sm leading-7`;
 export const panelClass = ui.panel;
-export function PageHeading({ title, description, action, actions }: { title: string; description?: ReactNode; action?: ReactNode; actions?: ReactNode }) {
-  return <header className="flex min-h-16 flex-wrap items-end justify-between gap-3 border-b border-line px-5 pb-4 pt-5 sm:px-7">
-    <div className="min-w-0 motion-safe:animate-enter"><h1 className="font-serif text-[26px] font-medium leading-[34px] text-text sm:text-[30px] sm:leading-10">{title}</h1>
+export function PageHeading({ title, description, action, actions }: { title: ReactNode; description?: ReactNode; action?: ReactNode; actions?: ReactNode }) {
+  return <header className="flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-8">
+    <div className="min-w-0"><h1 className="break-words text-xl font-semibold leading-7 text-text">{title}</h1>
       {description ? <p className="mt-1 max-w-3xl text-[13px] leading-6 text-text-2">{description}</p> : null}</div>{action ?? actions}
   </header>;
 }
-export const PageHeader = PageHeading;
+/** New pages keep explanations beside the relevant content, never in a second heading row. */
+export function PageHeader({ title, action, actions }: { title: ReactNode; action?: ReactNode; actions?: ReactNode }) {
+  return <PageHeading title={title} action={action ?? actions} />;
+}
+
+/** The workspace itself stays full width. Only individual content blocks have a reading measure. */
+export function ContentGrid({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`w-full min-w-0 space-y-6 ${className}`}>{children}</div>;
+}
+
+export function ContentBlock({ children, width = "prose", className = "" }: { children: ReactNode; width?: "prose" | "wide" | "full"; className?: string }) {
+  const measure = { prose: "max-w-[680px]", wide: "max-w-[1040px]", full: "max-w-none" }[width];
+  return <div data-content-width={width} className={`mx-auto w-full min-w-0 ${measure} ${className}`}>{children}</div>;
+}
 export function EntryLinks() {
   return <nav aria-label="学习闭环入口" className="flex flex-wrap gap-1">{[
     { title: "今日", href: "/opening/today", icon: Sun },
