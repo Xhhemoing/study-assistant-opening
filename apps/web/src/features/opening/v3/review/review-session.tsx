@@ -1,8 +1,9 @@
 "use client";
 import { useState, type ReactNode } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { ArrowLeft } from "lucide-react";
 import { TransitionLink } from "../motion/view-transition";
+import { TopBar } from "../shell/top-bar";
 import { ProgressSteps } from "../ui/progress-steps";
 
 export type ReviewItem = { id: string; kind: "card" | "redo" | "variant"; prompt: ReactNode; answer: ReactNode; source: string };
@@ -38,26 +39,24 @@ export function ReviewSession({ items, onRate, backHref, done }: Props) {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="relative flex h-12 shrink-0 items-center gap-2 border-b border-line px-2 md:px-4">
-        <TransitionLink href={backHref} direction="back" aria-label="结束复习" className={ui.icon}><ArrowLeft size={18} aria-hidden="true" /></TransitionLink>
-        <h1 className="text-[15px] font-medium">复习</h1>
-        <span className="ml-auto px-2 text-[13px] tabular-nums text-text-2">{Math.min(index + 1, items.length)} / {items.length}</span>
-        <div className="absolute inset-x-0 -bottom-px"><ProgressSteps value={index} max={items.length} label="本次复习进度" /></div>
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto py-8">
+    <div data-scroll-root className="h-full overflow-y-auto [scrollbar-gutter:stable]">
+      <TopBar leading={<TransitionLink href={backHref} direction="back" aria-label="结束复习" className={ui.icon}><ArrowLeft size={18} aria-hidden="true" /></TransitionLink>}
+        title={<h1 className="text-ui font-medium">复习</h1>}
+        actions={<span className="rounded-pill glass px-3 py-1 text-meta tabular-nums text-text-2">{Math.min(index + 1, items.length)} / {items.length}</span>}
+        progress={<ProgressSteps value={index} max={items.length} label="本次复习进度" />} />
+      <div className="py-8">
         <div className="content-grid">
           {!item ? <div className="motion-safe:animate-slide-in">{done}</div> : (
             <article key={item.id} className="space-y-4 motion-safe:animate-slide-in">
-              <p className="text-[12px] text-text-2">{KIND[item.kind]} · {item.source}</p>
-              <div className="prose-reading text-[19px] leading-8">{item.prompt}</div>
+              <p className="text-cap text-text-2">{KIND[item.kind]} · {item.source}</p>
+              <div className="prose-reading text-read-lg">{item.prompt}</div>
               {revealed
-                ? <div className="rounded-card border border-line bg-surface p-4 prose-reading motion-safe:animate-text-in">{item.answer}</div>
+                ? <div className="rounded-panel border border-line bg-surface p-5 prose-reading shadow-card motion-safe:animate-text-in">{item.answer}</div>
                 : <button type="button" className={`${ui.secondary} w-full`} onClick={() => setRevealed(true)}>显示答案</button>}
               {revealed && <div role="group" aria-label="这次回忆得怎么样" className="grid grid-cols-2 gap-2 sm:grid-cols-4 motion-safe:stagger">
                 {RATINGS.map(rating => <button key={rating.value} type="button" disabled={saving} onClick={() => rate(rating.value)} className={rating.value === "good" ? ui.primary : ui.secondary}>{rating.label}</button>)}
               </div>}
-              {error && <p role="alert" className="text-[13px] text-danger motion-safe:animate-text-in">没有记录上，再点一次</p>}
+              {error && <p role="alert" className="text-meta text-danger motion-safe:animate-text-in">没有记录上，再点一次</p>}
             </article>
           )}
         </div>

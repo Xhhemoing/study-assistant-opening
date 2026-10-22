@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { Sheet } from "../ui/sheet";
 import { Field, TextArea } from "../ui/field";
 
@@ -34,13 +34,13 @@ export function CardDraftSheet({ open, onOpenChange, initial, decks, onSave }: P
       <div className="space-y-3">
         <Field label="问题">{({ id }) => <TextArea id={id} rows={2} value={front} onChange={e => setFront(e.target.value)} />}</Field>
         <Field label="答案">{({ id }) => <TextArea id={id} rows={3} value={back} onChange={e => setBack(e.target.value)} />}</Field>
-        <div className="flex flex-wrap items-center gap-3 text-[13px] text-text-2">
+        <div className="flex flex-wrap items-center gap-3 text-meta text-text-2">
           <span>来源：{initial.source}</span>
           <label className="ml-auto flex items-center gap-2 whitespace-nowrap">卡组
             <select value={deck} onChange={e => setDeck(e.target.value)} className={`${ui.input} w-auto`}>{decks.map(name => <option key={name}>{name}</option>)}</select>
           </label>
         </div>
-        {state === "failed" && <p role="alert" className="text-[13px] text-danger motion-safe:animate-enter">没有保存，草稿还在，可以再试一次</p>}
+        {state === "failed" && <p role="alert" className="text-meta text-danger motion-safe:animate-enter">没有保存，草稿还在，可以再试一次</p>}
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className={ui.quiet} onClick={() => onOpenChange(false)}>取消</button>
           <button type="button" className={ui.primary} onClick={save} disabled={state === "saving" || !front.trim() || !back.trim()}>{state === "saving" ? "保存中…" : "加入卡组"}</button>

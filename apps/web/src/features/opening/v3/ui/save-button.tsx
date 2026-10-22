@@ -1,5 +1,5 @@
 "use client";
-import { ui } from "@aistudy/ui";
+import { ui } from "./controls";
 import { SuccessCheck, TextSwap } from "../motion/feedback";
 
 /** 保存状态：本机草稿、已提交服务端、保存失败要分开表达，只有服务端确认后才显示「已保存」。 */

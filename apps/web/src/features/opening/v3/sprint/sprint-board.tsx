@@ -1,6 +1,6 @@
 "use client";
 import { useState, type ReactNode } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { Collapse } from "../motion/collapse";
 import { TransitionLink } from "../motion/view-transition";
 import { ListRow, ListSection } from "../ui/list";
@@ -38,13 +38,13 @@ export function SprintBoard({ courseTitle, examDateLabel, todayBudgetLabel, curr
   const preview = options.find(option => option.id === previewId) ?? null;
 
   return (
-    <div className="flex h-full flex-col">
+    <div data-scroll-root className="h-full overflow-y-auto [scrollbar-gutter:stable]">
       <PageHeader title="考前冲刺" tools={tools} fact={[courseTitle, `${examDateLabel}考试`, todayBudgetLabel].filter(Boolean).join(" · ")}
         action={next ? <TransitionLink href={next.href} direction="forward" className={ui.primary}>开始：{next.title}</TransitionLink> : null} />
-      <div className="min-h-0 flex-1 overflow-y-auto py-6">
+      <div className="pb-10 pt-4">
         <div className="content-grid">
           {planStatus !== "ready" || !current ? (
-            <p className="text-[15px] text-text-2">{planStatus === "generating" ? "正在生成计划。课程里的学习和复习照常可用。" : "暂时无法读取计划。可以先从课程继续学习。"}</p>
+            <p className="text-ui text-text-2">{planStatus === "generating" ? "正在生成计划。课程里的学习和复习照常可用。" : "暂时无法读取计划。可以先从课程继续学习。"}</p>
           ) : (
             <ListSection title="今天" framed ordered>
               {current.tasks.map(task => <ListRow key={task.id} framed href={task.href} title={task.title} meta={task.reason} trailing={task.minutes ? `约 ${task.minutes} 分钟` : undefined} highlight={freshTaskIds.includes(task.id)} />)}
@@ -60,20 +60,20 @@ export function SprintBoard({ courseTitle, examDateLabel, todayBudgetLabel, curr
                 <div className="space-y-2 pt-2">
                   <div role="radiogroup" aria-label="候选安排" className="space-y-2">
                     {options.map(option => (
-                      <label key={option.id} className="flex cursor-pointer items-start gap-3 rounded-md border border-line bg-surface p-3 transition-colors duration-(--duration-micro) hover:border-line-strong has-[:checked]:border-accent has-[:checked]:bg-accent-soft/40">
+                      <label key={option.id} className="flex cursor-pointer items-start gap-3 rounded-ctl border border-line bg-surface p-3 transition-colors duration-(--duration-micro) hover:border-line-strong has-[:checked]:border-accent has-[:checked]:bg-accent-soft/40">
                         <input type="radio" name="sprint-option" value={option.id} checked={previewId === option.id} onChange={() => setPreviewId(option.id)} className="mt-1 accent-accent" />
-                        <span className="text-[15px] text-text">{option.summary}{option.minutesNote ? <span className="block text-[13px] text-text-2">{option.minutesNote}（估计）</span> : null}</span>
+                        <span className="text-ui text-text">{option.summary}{option.minutesNote ? <span className="block text-meta text-text-2">{option.minutesNote}（估计）</span> : null}</span>
                       </label>
                     ))}
                   </div>
                   {preview && (
-                    <div key={preview.id} className="rounded-md bg-surface-2 p-3 motion-safe:animate-enter">
-                      <p className="text-[13px] text-text-2">预览，尚未生效</p>
-                      <ul className="mt-1 text-[15px] text-text">{preview.changes.map((change, index) => <li key={index}>{CHANGE_LABEL[change.kind]}：{change.title}</li>)}</ul>
+                    <div key={preview.id} className="rounded-ctl bg-surface-2 p-3 motion-safe:animate-enter">
+                      <p className="text-meta text-text-2">预览，尚未生效</p>
+                      <ul className="mt-1 text-ui text-text">{preview.changes.map((change, index) => <li key={index}>{CHANGE_LABEL[change.kind]}：{change.title}</li>)}</ul>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <button type="button" onClick={() => onApply(preview.id)} disabled={applyState === "applying"} className={ui.primary}>{applyState === "applying" ? "正在应用…" : "应用这个安排"}</button>
                         <button type="button" onClick={() => setPreviewId(null)} className={ui.quiet}>取消</button>
-                        {applyState === "failed" && <p role="alert" className="text-[13px] text-danger motion-safe:animate-enter">没有生效，当前计划不变</p>}
+                        {applyState === "failed" && <p role="alert" className="text-meta text-danger motion-safe:animate-enter">没有生效，当前计划不变</p>}
                       </div>
                     </div>
                   )}

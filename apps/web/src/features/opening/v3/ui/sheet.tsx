@@ -21,7 +21,7 @@ type SheetProps = {
  */
 export function Sheet({ open, onOpenChange, title, hideTitle = false, children, variant = "dialog", closeLabel = "关闭" }: SheetProps) {
   const desktop = variant === "dialog"
-    ? "sm:inset-auto sm:left-1/2 sm:top-1/2 sm:w-[min(520px,calc(100vw-32px))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-card sm:data-[state=open]:animate-pop sm:data-[state=closed]:animate-pop-out"
+    ? "sm:inset-auto sm:left-1/2 sm:top-1/2 sm:w-[min(520px,calc(100vw-32px))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-sheet sm:data-[state=open]:animate-pop sm:data-[state=closed]:animate-pop-out"
     : "";
   // 触发处不一定是 Dialog.Trigger（如操作条里的按钮），自行记录并在关闭后归还焦点
   const returnTo = useRef<HTMLElement | null>(null);
@@ -29,12 +29,12 @@ export function Sheet({ open, onOpenChange, title, hideTitle = false, children, 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-ink/35 data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-ink/25 backdrop-blur-[2px] data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out" />
         <Dialog.Content aria-describedby={undefined} onCloseAutoFocus={event => { if (returnTo.current?.isConnected) { event.preventDefault(); returnTo.current.focus(); } }}
-          className={`fixed inset-x-0 bottom-0 z-50 max-h-[85dvh] overflow-y-auto rounded-t-card bg-popover p-5 pb-[calc(20px+env(safe-area-inset-bottom))] text-text shadow-overlay outline-none data-[state=open]:animate-sheet-in data-[state=closed]:animate-sheet-out ${desktop}`}>
+          className={`fixed inset-x-0 bottom-0 z-50 max-h-[85dvh] overflow-y-auto rounded-t-sheet glass [--glass-bg:var(--glass-bg-strong)] p-5 pb-[calc(20px+env(safe-area-inset-bottom))] text-text shadow-overlay outline-none data-[state=open]:animate-sheet-in data-[state=closed]:animate-sheet-out ${desktop}`}>
           <div className={`mb-4 flex items-center justify-between gap-3 ${hideTitle ? "sr-only" : ""}`}>
-            <Dialog.Title className="text-[17px] font-semibold">{title}</Dialog.Title>
-            <Dialog.Close aria-label={closeLabel} className="grid size-11 place-items-center rounded-md text-text-3 hover:bg-surface-2 hover:text-text"><X size={18} aria-hidden="true" /></Dialog.Close>
+            <Dialog.Title className="text-read font-semibold">{title}</Dialog.Title>
+            <Dialog.Close aria-label={closeLabel} className="grid size-(--control-h-sm) place-items-center rounded-pill text-text-3 hover:bg-text/6 hover:text-text"><X size={18} aria-hidden="true" /></Dialog.Close>
           </div>
           {children}
         </Dialog.Content>

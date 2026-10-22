@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { Sheet } from "../ui/sheet";
 import { TextArea } from "../ui/field";
 import type { PhotoItem } from "./photo-attachments";
@@ -13,12 +13,12 @@ export function RecognitionCheck({ open, onOpenChange, photos, recognized, onCon
     <Sheet open={open} onOpenChange={onOpenChange} title="核对识别内容">
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
-          <p className="text-[13px] text-text-2">原图</p>
-          {photos.length ? photos.map(photo => <img key={photo.id} src={photo.url} alt={photo.name} className="w-full rounded-md border border-line object-contain" />)
-            : <p className="rounded-md bg-surface-2 p-3 text-[13px] text-text-2">没有图片，只核对文字</p>}
+          <p className="text-meta text-text-2">原图</p>
+          {photos.length ? photos.map(photo => <img key={photo.id} src={photo.url} alt={photo.name} className="w-full rounded-ctl border border-line object-contain" />)
+            : <p className="rounded-ctl bg-surface-2 p-3 text-meta text-text-2">没有图片，只核对文字</p>}
         </div>
         <div className="space-y-2">
-          <label htmlFor="recognized" className="block text-[13px] text-text-2">识别出的解答（可修改）</label>
+          <label htmlFor="recognized" className="block text-meta text-text-2">识别出的解答（可修改）</label>
           <TextArea id="recognized" rows={6} value={text} onChange={event => setText(event.target.value)} />
         </div>
       </div>

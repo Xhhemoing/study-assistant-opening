@@ -8,8 +8,8 @@ export function ListSection({ title, children, framed = false, ordered = false }
   const Tag = ordered ? "ol" : "ul";
   return (
     <section aria-label={title}>
-      {title ? <h2 className="mb-2 text-[13px] font-medium text-text-2">{title}</h2> : null}
-      <Tag className={`${motion.stagger} divide-y divide-line ${framed ? "overflow-hidden rounded-card border border-line bg-surface" : ""}`}>{children}</Tag>
+      {title ? <h2 className="mb-2 text-meta font-medium text-text-2">{title}</h2> : null}
+      <Tag className={`${motion.stagger} divide-y divide-line ${framed ? "overflow-hidden rounded-panel border border-line bg-surface/80" : ""}`}>{children}</Tag>
     </section>
   );
 }
@@ -33,17 +33,17 @@ export function ListRow({ href, title, meta, trailing, leading, sharedTitle = fa
   const body = <>
     {leading}
     <span className="min-w-0 flex-1">
-      <span data-vt-title className="block truncate text-[15px] text-text">{title}</span>
-      {meta ? <span className="block truncate text-[13px] text-text-2">{meta}</span> : null}
+      <span data-vt-title className="block truncate text-ui text-text">{title}</span>
+      {meta ? <span className="block truncate text-meta text-text-2">{meta}</span> : null}
     </span>
-    {trailing ? <span className="shrink-0 text-[13px] tabular-nums text-text-2">{trailing}</span> : null}
+    {trailing ? <span className="shrink-0 text-meta tabular-nums text-text-2">{trailing}</span> : null}
     {href ? <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-(--duration-micro) ease-standard group-hover:translate-x-0.5" /> : null}
   </>;
   const cls = `group flex min-h-14 items-center gap-3 py-2 ${framed ? "px-4" : ""} ${highlight ? motion.settle : ""}`;
   return (
     <li>
       {href
-        ? <TransitionLink href={href} vtSource={sharedTitle ? "object-title" : undefined} className={`${cls} ${motion.colors} hover:bg-surface-2/60 rounded-sm`}>{body}</TransitionLink>
+        ? <TransitionLink href={href} vtSource={sharedTitle ? "object-title" : undefined} className={`${cls} ${motion.colors} hover:bg-surface-2/60 rounded-ctl`}>{body}</TransitionLink>
         : <div className={cls}>{body}</div>}
     </li>
   );

@@ -13,10 +13,10 @@ import { FEATURE_ICONS } from "../shell/icons";
 export function SettingsLayout({ title, tools, children }: { title: string; tools?: ReactNode; children: ReactNode }) {
   const pathname = usePathname() ?? "";
   return (
-    <div className="flex h-full flex-col">
+    <div data-scroll-root className="h-full overflow-y-auto [scrollbar-gutter:stable]">
       <PageHeader title={title} tools={tools} />
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <nav aria-label="设置分类" className="shrink-0 overflow-x-auto border-b border-line px-2 py-2 md:w-52 md:border-b-0 md:border-r md:py-4">
+      <div className="flex flex-col gap-2 px-2 pb-10 pt-3 md:flex-row md:px-6">
+        <nav aria-label="设置分类" className="shrink-0 overflow-x-auto md:sticky md:top-(--topbar-h) md:w-48 md:self-start">
           <ul className="flex gap-1 md:flex-col">
             {SETTINGS_PAGES.map(page => {
               const Icon = FEATURE_ICONS[page.icon];
@@ -24,8 +24,8 @@ export function SettingsLayout({ title, tools, children }: { title: string; tool
               return (
                 <li key={page.id}>
                   <TransitionLink href={page.route} direction="swap" aria-current={current ? "page" : undefined}
-                    className="relative flex min-h-11 items-center gap-2 whitespace-nowrap rounded-md px-3 text-[15px] text-text-2 transition-colors hover:text-text aria-[current=page]:font-medium aria-[current=page]:text-text">
-                    {current && <span aria-hidden="true" className="absolute inset-0 rounded-md bg-surface-2 [view-transition-name:settings-active]" />}
+                    className="relative flex h-(--control-h) items-center gap-2 whitespace-nowrap rounded-pill px-3 text-ui text-text-2 transition-colors hover:text-text aria-[current=page]:font-medium aria-[current=page]:text-text">
+                    {current && <span aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card [view-transition-name:settings-active]" />}
                     <Icon size={16} aria-hidden="true" className="relative" /><span className="relative">{page.id === "settings" ? "通用" : page.label}</span>
                   </TransitionLink>
                 </li>
@@ -33,7 +33,7 @@ export function SettingsLayout({ title, tools, children }: { title: string; tool
             })}
           </ul>
         </nav>
-        <div className="min-h-0 flex-1 overflow-y-auto py-6"><div className="content-grid motion-safe:stagger">{children}</div></div>
+        <div className="min-w-0 flex-1"><div className="content-grid motion-safe:stagger">{children}</div></div>
       </div>
     </div>
   );
@@ -43,16 +43,16 @@ export function SettingsLayout({ title, tools, children }: { title: string; tool
 export function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section aria-label={title} className="space-y-2">
-      <h2 className="text-[13px] font-medium text-text-2">{title}</h2>
-      <div className="divide-y divide-line rounded-card border border-line bg-surface px-4">{children}</div>
+      <h2 className="text-meta font-medium text-text-2">{title}</h2>
+      <div className="divide-y divide-line rounded-tile border border-line bg-surface/80 px-4">{children}</div>
     </section>
   );
 }
 
 export function SettingsRow({ label, hint, control }: { label: string; hint?: string; control: ReactNode }) {
   return (
-    <div className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-2">
-      <div className="min-w-0"><p className="text-[15px] text-text">{label}</p>{hint ? <p className="text-[13px] text-text-2">{hint}</p> : null}</div>
+    <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 py-2">
+      <div className="min-w-0"><p className="text-ui text-text">{label}</p>{hint ? <p className="text-meta text-text-2">{hint}</p> : null}</div>
       {control}
     </div>
   );

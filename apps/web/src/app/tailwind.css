@@ -93,6 +93,37 @@
   --layout-nav: 232px;
   --layout-nav-compact: 72px;
   --layout-companion: 340px;
+  --layout-side: 400px;
+  --layout-side-wide: 560px;
+
+  /* UI v3 字号角色（默认紧凑档，约为旧尺寸的 85%，最小 12px；舒适档见 [data-density="comfortable"]）。
+     用法 text-ui / text-meta / text-read…；行高随角色给出 */
+  --text-micro: 11px;
+  --text-micro--line-height: 16px;
+  --text-cap: 12px;
+  --text-cap--line-height: 16px;
+  --text-meta: 12px;
+  --text-meta--line-height: 18px;
+  --text-ui: 13px;
+  --text-ui--line-height: 20px;
+  --text-ui-lg: 14px;
+  --text-ui-lg--line-height: 22px;
+  --text-read: 15px;
+  --text-read--line-height: 26px;
+  --text-read-lg: 16px;
+  --text-read-lg--line-height: 28px;
+  --text-title: 17px;
+  --text-title--line-height: 24px;
+  --text-display: 21px;
+  --text-display--line-height: 28px;
+  --text-hero: 28px;
+  --text-hero--line-height: 36px;
+
+  /* 圆角角色（v3 专用名，不改旧页面的 sm/md/card） */
+  --radius-ctl: 12px;
+  --radius-tile: 16px;
+  --radius-panel: 22px;
+  --radius-sheet: 28px;
 
   /* 动效角色（参考 transitions.dev 的用途刻度）：开慢关快，位移小、配轻微模糊。
      打开/进入 --duration-enter，关闭/退出 --duration-exit；微交互仍用 --duration-micro。 */
@@ -240,7 +271,7 @@
 @utility col-full { &:is(.content-grid > *) { grid-column: full; } }
 @utility prose-reading {
   font-family: var(--font-reading);
-  font-size: 17px;
+  font-size: var(--text-read);
   line-height: 1.75;
   color: var(--color-text);
 }
@@ -253,6 +284,87 @@
   & > :nth-child(5) { animation-delay: 120ms; }
   & > :nth-child(n + 6) { animation-delay: 150ms; }
 }
+
+
+/* ===== UI v3：外观层（皮肤 / 密度 / 圆角）=====
+   所有可换的视觉决定都在这里：AppShell 根节点带 data-ui="v3" data-skin data-density data-corner。
+   只在 v3 根节点内生效，旧页面不受影响。新皮肤 = 新增一个 [data-skin="…"] 块，组件不用改。 */
+[data-ui="v3"] {
+  /* 边框更轻：线色透明度约降 30%，视觉重量随字号一起缩小 */
+  --color-line: rgb(31 30 27 / .075);
+  --color-line-strong: rgb(31 30 27 / .13);
+  --color-shell: #f1efe8;
+  --control-h: 36px;
+  --control-h-sm: 30px;
+  --control-px: 14px;
+  --topbar-h: 52px;
+  --glass-bg: color-mix(in srgb, var(--color-surface) 68%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--color-surface) 84%, transparent);
+  --glass-bar-bg: color-mix(in srgb, var(--color-bg) 90%, transparent);
+  --glass-blur: 20px;
+  --glass-line: rgb(255 255 255 / .6);
+  --glass-edge: rgb(31 30 27 / .07);
+  --glass-shadow: inset 0 1px 0 rgb(255 255 255 / .55), 0 1px 2px rgb(31 30 27 / .04), 0 12px 32px -12px rgb(31 30 27 / .16);
+  --app-backdrop:
+    radial-gradient(1200px 600px at 85% -10%, rgb(123 164 255 / .10), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgb(4 120 87 / .07), transparent 60%),
+    var(--color-shell);
+}
+[data-ui="v3"][data-theme="dark"], [data-theme="dark"] [data-ui="v3"] {
+  --color-line: rgb(236 234 227 / .08);
+  --color-line-strong: rgb(236 234 227 / .14);
+  --color-shell: #181816;
+  --glass-line: rgb(255 255 255 / .08);
+  --glass-edge: rgb(0 0 0 / .4);
+  --glass-shadow: inset 0 1px 0 rgb(255 255 255 / .06), 0 12px 32px -12px rgb(0 0 0 / .6);
+  --app-backdrop:
+    radial-gradient(1200px 600px at 85% -10%, rgb(123 164 255 / .12), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgb(95 203 156 / .06), transparent 60%),
+    var(--color-shell);
+}
+/* 舒适档：恢复旧字号与 44px 控件 */
+[data-ui="v3"][data-density="comfortable"] {
+  --text-meta: 13px; --text-ui: 15px; --text-ui--line-height: 24px; --text-ui-lg: 16px; --text-ui-lg--line-height: 24px;
+  --text-read: 17px; --text-read--line-height: 30px; --text-read-lg: 19px; --text-read-lg--line-height: 32px;
+  --text-title: 20px; --text-title--line-height: 28px; --text-display: 24px; --text-display--line-height: 32px; --text-hero: 32px; --text-hero--line-height: 40px;
+  --control-h: 44px; --control-h-sm: 36px; --control-px: 16px; --topbar-h: 56px;
+}
+/* 触屏始终保证 44px 主要触控目标（只放大点击区域，不放大字号） */
+@media (pointer: coarse) { [data-ui="v3"] { --control-h: 44px; --control-h-sm: 40px; } }
+/* 圆角：round（默认，参考 Gemini / Hark 的圆润卡片）/ crisp（更利落） */
+[data-ui="v3"][data-corner="crisp"] { --radius-ctl: 8px; --radius-tile: 10px; --radius-panel: 14px; --radius-sheet: 18px; }
+/* 纸面皮肤：去掉玻璃，回到实色表面 */
+[data-ui="v3"][data-skin="paper"] {
+  --glass-bg: var(--color-surface); --glass-bg-strong: var(--color-surface); --glass-bar-bg: var(--color-bg); --glass-blur: 0px;
+  --glass-line: var(--color-line); --glass-shadow: var(--shadow-card); --app-backdrop: var(--color-bg);
+}
+/* 系统要求降低透明度时自动用实色 */
+@media (prefers-reduced-transparency: reduce) {
+  [data-ui="v3"] { --glass-bg: var(--color-surface); --glass-bg-strong: var(--color-surface); --glass-blur: 0px; }
+}
+
+/* 玻璃表面：浮层、顶栏、工具条、输入框。不支持 backdrop-filter 时用较实的底色。 */
+@utility glass {
+  background-color: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  border: 1px solid var(--glass-line);
+  box-shadow: 0 0 0 1px var(--glass-edge), var(--glass-shadow);
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { background-color: var(--glass-bg-strong); }
+}
+/* 顶栏：页面顶部时透明无边，滚动后变为玻璃（data-scrolled 由 TopBar 设置） */
+@utility glass-bar {
+  background-color: transparent;
+  border-bottom: 1px solid transparent;
+  transition: background-color var(--duration-state) var(--ease-standard), border-color var(--duration-state) var(--ease-standard);
+  &[data-scrolled="true"] {
+    background-color: var(--glass-bar-bg);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+    border-bottom-color: var(--color-line);
+  }
+}
+@utility app-backdrop { background: var(--app-backdrop); }
 
 /* ===== UI v3：页面过渡（View Transitions）=====
    只有主内容区参与；导航、底栏保持静止；激活指示条在入口间滑动。

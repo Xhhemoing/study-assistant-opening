@@ -8,17 +8,17 @@ export function AuthLayout({ title, step, footer, children }: { title: string; s
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center bg-bg px-4 py-10 text-text">
       <div className="w-full max-w-[400px] space-y-6">
-        <p className="text-[15px] font-semibold tracking-tight">AIstudy</p>
+        <p className="text-ui font-semibold tracking-tight">AIstudy</p>
         {step && (
           <div role="progressbar" aria-label={`第 ${step.index} 步，共 ${step.total} 步`} aria-valuemin={1} aria-valuemax={step.total} aria-valuenow={step.index} className="flex gap-1">
             {Array.from({ length: step.total }, (_, i) => <span key={i} data-done={i < step.index} className="h-1 flex-1 rounded-pill bg-line transition-colors duration-(--duration-panel) data-[done=true]:bg-accent" />)}
           </div>
         )}
         <div key={step?.index ?? title} className="space-y-5 motion-safe:animate-slide-in">
-          <h1 className="text-[24px] font-semibold leading-8">{title}</h1>
+          <h1 className="text-display font-semibold">{title}</h1>
           {children}
         </div>
-        {footer ? <div className="text-[13px] text-text-2">{footer}</div> : null}
+        {footer ? <div className="text-meta text-text-2">{footer}</div> : null}
       </div>
     </div>
   );

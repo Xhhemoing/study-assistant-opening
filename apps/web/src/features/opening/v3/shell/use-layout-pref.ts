@@ -1,10 +1,16 @@
 "use client";
 import { useCallback, useSyncExternalStore } from "react";
 
-/** 布局偏好只存本地，不写 URL；手机不读取桌面宽度偏好。 */
-export type LayoutPref = { nav: "expanded" | "compact" };
+/**
+ * 布局与外观偏好只存本地，不写 URL；手机不读取桌面宽度偏好。
+ * skin / density / corner 写到 AppShell 根节点的 data-* 上，由 tailwind.css 外观层解释。
+ */
+export type Skin = "glass" | "paper";
+export type Density = "compact" | "comfortable";
+export type Corner = "round" | "crisp";
+export type LayoutPref = { nav: "expanded" | "compact"; skin: Skin; density: Density; corner: Corner; side: "md" | "lg" };
 const KEY = "aistudy.layout.v1";
-const DEFAULT: LayoutPref = { nav: "expanded" };
+const DEFAULT: LayoutPref = { nav: "expanded", skin: "glass", density: "compact", corner: "round", side: "md" };
 const listeners = new Set<() => void>();
 let cache: LayoutPref | null = null;
 

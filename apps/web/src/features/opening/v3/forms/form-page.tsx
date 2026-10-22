@@ -1,7 +1,8 @@
 import type { FormEvent, ReactNode } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { ArrowLeft } from "lucide-react";
 import { TransitionLink } from "../motion/view-transition";
+import { TopBar } from "../shell/top-bar";
 
 type FormPageProps = {
   title: string;
@@ -20,15 +21,12 @@ type FormPageProps = {
  */
 export function FormPage({ title, backHref, onSubmit, submitLabel, submitting = false, error, children }: FormPageProps) {
   return (
-    <form onSubmit={onSubmit} className="flex h-full flex-col" noValidate>
-      <header className="flex h-14 shrink-0 items-center gap-1 border-b border-line px-2 md:px-4">
-        <TransitionLink href={backHref} direction="back" aria-label="返回" className={ui.icon}><ArrowLeft size={18} aria-hidden="true" /></TransitionLink>
-        <h1 className="text-[17px] font-semibold text-text">{title}</h1>
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto py-6"><div className="content-grid motion-safe:stagger">{children}</div></div>
-      <footer className="shrink-0 border-t border-line bg-surface px-4 py-2 pb-[calc(8px+env(safe-area-inset-bottom))] md:px-8">
-        <div className="mx-auto flex max-w-(--layout-prose) items-center justify-end gap-2">
-          {error && <p role="alert" className="mr-auto text-[13px] text-danger motion-safe:animate-enter">{error}</p>}
+    <form onSubmit={onSubmit} data-scroll-root className="flex h-full flex-col overflow-y-auto [scrollbar-gutter:stable]" noValidate>
+      <TopBar leading={<TransitionLink href={backHref} direction="back" aria-label="返回" className={ui.icon}><ArrowLeft size={18} aria-hidden="true" /></TransitionLink>} title={title} collapsedTitle />
+      <div className="content-grid flex-1 pb-6 pt-1 motion-safe:stagger"><h1 className="text-display font-semibold text-text">{title}</h1>{children}</div>
+      <footer className="sticky bottom-0 z-10 px-3 pb-[calc(12px+env(safe-area-inset-bottom))] pt-2">
+        <div className="mx-auto flex max-w-(--layout-prose) items-center justify-end gap-2 rounded-pill glass p-1.5 pl-4">
+          {error && <p role="alert" className="mr-auto text-meta text-danger motion-safe:animate-enter">{error}</p>}
           <TransitionLink href={backHref} direction="back" className={ui.quiet}>取消</TransitionLink>
           <button type="submit" disabled={submitting} className={ui.primary}>{submitting ? "正在保存…" : submitLabel}</button>
         </div>

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, type ReactNode } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { successfulInteractionHaptic } from "../../design/haptics";
 import { SuccessCheck, TextSwap, ThinkingLine } from "../motion/feedback";
 
@@ -67,47 +67,48 @@ export function StageActionBar(props: StageActionBarProps) {
   const reviewButton = <button type="button" className={ui.quiet} onClick={props.onRequestReview}>申请改评</button>;
 
   return (
-    <footer className="relative shrink-0 border-t border-line bg-surface px-3 py-1.5 pb-[calc(6px+env(safe-area-inset-bottom))] md:px-6">
+    <footer className="sticky bottom-0 z-10 shrink-0 px-2 pb-[calc(10px+env(safe-area-inset-bottom))] pt-2 md:px-4">
+      <div className="relative mx-auto max-w-[calc(var(--layout-wide)+16px)] overflow-hidden rounded-panel glass px-1.5 py-1">
       {(stage.kind === "processing" || stage.kind === "submitting") && (
-        <div aria-hidden="true" className="absolute inset-x-0 -top-px h-0.5 overflow-hidden">
+        <div aria-hidden="true" className="absolute inset-x-6 top-0 h-px overflow-hidden">
           <span className="absolute inset-0 bg-linear-to-r from-transparent via-ai-1 to-transparent motion-safe:animate-shimmer" />
         </div>
       )}
-      <div key={stage.kind === "result" ? `${stage.kind}-${stage.verdict}` : stage.kind} className="flex min-h-11 flex-wrap items-center gap-1 motion-safe:animate-text-in" aria-live="polite">
+      <div key={stage.kind === "result" ? `${stage.kind}-${stage.verdict}` : stage.kind} className="flex min-h-(--control-h) flex-wrap items-center gap-1 motion-safe:animate-text-in" aria-live="polite">
         {stage.kind === "draft" && <>
           <button type="button" className={ui.quiet} onClick={props.onExplainFirst}>我还不会，先讲一下</button>
           <button type="button" className={ui.quiet} onClick={props.onHint} disabled={props.hintsUsed >= props.hintsTotal}>
             提示{props.hintsUsed > 0 ? <TextSwap value={` ${props.hintsUsed}/${props.hintsTotal}`} /> : null}
           </button>
-          <span className="flex-1 truncate px-2 text-right text-[12px] text-text-3">{stage.attemptNo > 1 ? `第 ${stage.attemptNo} 次作答 · ` : ""}<TextSwap value={DRAFT_LABEL[stage.draft]} /></span>
+          <span className="flex-1 truncate px-2 text-right text-cap text-text-3">{stage.attemptNo > 1 ? `第 ${stage.attemptNo} 次作答 · ` : ""}<TextSwap value={DRAFT_LABEL[stage.draft]} /></span>
           <button type="button" className={ui.primary} onClick={props.onSubmit}>提交</button>
         </>}
 
-        {stage.kind === "submitting" && <p className="px-3 text-[15px]"><ThinkingLine label="正在提交" /></p>}
-        {stage.kind === "processing" && <p className="px-3 text-[15px]"><ThinkingLine label={stage.step} /></p>}
+        {stage.kind === "submitting" && <p className="px-3 text-ui"><ThinkingLine label="正在提交" /></p>}
+        {stage.kind === "processing" && <p className="px-3 text-ui"><ThinkingLine label={stage.step} /></p>}
 
         {stage.kind === "needs_recognition_check" && <>
-          <p className="flex-1 px-3 text-[15px] text-warn">识别结果需要你确认，不会按识别错误算你答错</p>
+          <p className="flex-1 px-3 text-ui text-warn">识别结果需要你确认，不会按识别错误算你答错</p>
           <button type="button" className={ui.primary} onClick={props.onCheckRecognition}>核对识别内容</button>
         </>}
 
         {stage.kind === "failed" && <>
-          <p role="alert" className="flex-1 px-3 text-[15px] text-danger">{stage.message}，答案和图片都还在</p>
+          <p role="alert" className="flex-1 px-3 text-ui text-danger">{stage.message}，答案和图片都还在</p>
           <button type="button" className={ui.primary} onClick={props.onRetrySubmit}>重新提交</button>
         </>}
 
         {stage.kind === "review_requested" && <>
-          <p className="flex-1 px-3 text-[15px] text-text-2">改评已提交，复核前保留原结果</p>
+          <p className="flex-1 px-3 text-ui text-text-2">改评已提交，复核前保留原结果</p>
           <button type="button" className={ui.primary} onClick={props.onNext}>{nextLabel}</button>
         </>}
 
         {stage.kind === "result" && <>
-          <p className="flex min-w-0 flex-1 items-center gap-2 px-3 text-[15px] text-text">
+          <p className="flex min-w-0 flex-1 items-center gap-2 px-3 text-ui text-text">
             {stage.verdict === "correct_independent" || stage.verdict === "correct_assisted"
               ? <SuccessCheck play={fresh} label={stage.verdict === "correct_independent" ? "独立答对" : "提示后答对"} />
               : stage.verdict === "undetermined" ? <span role="img" aria-label="无法判断" className="text-warn">?</span>
               : <span role="img" aria-label={stage.verdict === "partial" ? "部分正确" : "答错"} className={stage.verdict === "partial" ? "text-warn" : "text-danger"}>{stage.verdict === "partial" ? "◐" : "✕"}</span>}
-            <span className="min-w-0">{stage.summary}{stage.source === "reviewed" ? <span className="ml-2 text-[12px] text-text-2">复核后</span> : null}</span>
+            <span className="min-w-0">{stage.summary}{stage.source === "reviewed" ? <span className="ml-2 text-cap text-text-2">复核后</span> : null}</span>
           </p>
           {props.secondary}
           {stage.verdict === "correct_independent" && <>{reviewButton}<button type="button" className={ui.primary} onClick={props.onNext}>{nextLabel}</button></>}
@@ -116,6 +117,7 @@ export function StageActionBar(props: StageActionBarProps) {
           {stage.verdict === "incorrect" && <>{reviewButton}<button type="button" className={ui.quiet} onClick={props.onExplain}>看讲解</button><button type="button" className={ui.primary} onClick={() => props.onNewAttempt("blank")}>再试一次</button></>}
           {stage.verdict === "undetermined" && <><button type="button" className={ui.quiet} onClick={props.onExplain}>说明我的解法</button><button type="button" className={ui.primary} onClick={props.onCheckRecognition}>核对内容</button></>}
         </>}
+      </div>
       </div>
     </footer>
   );

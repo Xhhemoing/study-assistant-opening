@@ -25,6 +25,22 @@
 | `reader/` `canvas/` | PDF/照片阅读与选区提问（引用保留完整选段与页码）；交互画布（按秩区分点/线/面）与 `PredictPrompt`（先预测 → 操作 → 解释 → 验证） |
 | `course/` `sprint/` `forms/` | T5 课程空间、T7 冲刺、T8 表单页、T9 设置、T10 无壳层页、上传区 |
 
+## 外观层（参考 Gemini、Hark、bencho.dev；换样式只改这里）
+
+AppShell 根节点：`data-ui="v3" data-skin data-density data-corner`，由 `tailwind.css` 的「UI v3：外观层」解释；只在 v3 根节点内生效，旧页面不变。
+
+| 维度 | 取值 | 作用 |
+|---|---|---|
+| `data-skin` | `glass`（默认）/ `paper` | 玻璃：顶栏滚动后半透明、工具胶囊、操作条、辅助区、右侧面板、弹层、手机底栏为玻璃；纸面：同位置换实色。系统「降低透明度」时自动实色 |
+| `data-density` | `compact`（默认，约小 15%，最小 12px）/ `comfortable` | 字号角色 `text-micro/cap/meta/ui/ui-lg/read/read-lg/title/display/hero`、控件高度 `--control-h`(36/44)、顶栏 `--topbar-h`(52/56)；触屏始终 44px |
+| `data-corner` | `round`（默认）/ `crisp` | `rounded-ctl/tile/panel/sheet`：12/16/22/28 ↔ 8/10/14/18 |
+
+- 控件样式统一在 `ui/controls.ts`（`ui.primary/secondary/quiet/icon/iconSm/chip/toolbar/toolbarButton/segment` 等），全部读外观层变量；新增皮肤只需加一个 `[data-skin="…"]` 变量块。
+- 边框：v3 内线色透明度降低约 30%（`--color-line` .075、`--color-line-strong` .13）。
+- 玻璃：`glass`（浮层）与 `glass-bar`（顶栏，滚动后出现）两个 utility；不支持 `backdrop-filter` 时退化为较实底色。
+- 顶栏 `TopBar`：粘在滚动区（`data-scroll-root`）顶部；列表页大标题在内容里，滚出后顶栏淡入小标题；右侧工具放 `TopBarTools` 玻璃胶囊；进度贴底。
+- 右侧打开 `SidePanel` + 对话页 `ConversationLayout`：回答里的题目/资料默认在右侧打开（400/560px 可切换并记住），面板内可进完整页面；窄屏为底部抽屉；Esc 关闭。
+
 ## 动效规范（参考 transitions.dev 的用途刻度）
 
 | 用途 | 时长 | 曲线 | 位移 / 模糊 |

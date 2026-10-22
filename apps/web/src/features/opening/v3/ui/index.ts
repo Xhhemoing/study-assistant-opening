@@ -1,5 +1,6 @@
-/** v3 界面原语：基础按钮/输入/样式直接用 @aistudy/ui，这里只补 v3 新增的组合件。 */
-export { Button, ui, tone, focusRing, fieldClass } from "@aistudy/ui";
+/** v3 界面原语：控件样式来自 ./controls（读外观层变量），弹层基于 @aistudy/ui 的 Radix 封装。 */
+export { Button, tone, focusRing } from "@aistudy/ui";
+export { ui, fieldClass } from "./controls";
 export { Sheet } from "./sheet";
 export { ListSection, ListRow } from "./list";
 export { ProgressSteps } from "./progress-steps";

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Minus, Plus, SunDim } from "lucide-react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { SelectionAsk, useTextSelection, type TextSelection } from "./selection-ask";
 
 export type ReaderZoom = "fit" | 0.75 | 1 | 1.25 | 1.5 | 2;
@@ -77,7 +77,7 @@ export function useDocumentReader({ pages, zoom, onZoomChange, dim, onDimChange,
       {coarse && selection && <button type="button" onClick={ask} className={`${ui.primary} motion-safe:animate-pop`}>问选中内容</button>}
       <button type="button" onClick={() => onZoomChange("fit")} aria-pressed={zoom === "fit"} className={`${ui.quiet} aria-pressed:bg-surface-2 aria-pressed:text-text`}>适合宽度</button>
       <button type="button" aria-label="缩小" className={ui.icon} disabled={!smaller} onClick={() => smaller && onZoomChange(smaller)}><Minus size={16} aria-hidden="true" /></button>
-      <span className="w-12 text-center text-[13px] tabular-nums text-text-2">{Math.round(scale * 100)}%</span>
+      <span className="w-12 text-center text-meta tabular-nums text-text-2">{Math.round(scale * 100)}%</span>
       <button type="button" aria-label="放大" className={ui.icon} disabled={!larger} onClick={() => larger && onZoomChange(larger)}><Plus size={16} aria-hidden="true" /></button>
       <button type="button" aria-label="降低原页亮度" aria-pressed={dim} onClick={() => onDimChange(!dim)} className={ui.icon}><SunDim size={16} aria-hidden="true" /></button>
     </div>

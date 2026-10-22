@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { ui } from "@aistudy/ui";
+import { ui } from "../ui/controls";
 import { SuccessCheck, useReplay } from "../motion/feedback";
 
 type Choice = { id: string; label: string };
@@ -31,8 +31,8 @@ export function PredictPrompt({ question, choices, correctId, explanation, onRev
     onResult?.(id === correctId);
   }
   return (
-    <section aria-label="先预测" className="space-y-3 rounded-card border border-line bg-surface p-4">
-      <p className="text-[15px] text-text">{question}</p>
+    <section aria-label="先预测" className="space-y-3 rounded-tile border border-line bg-surface p-4">
+      <p className="text-ui text-text">{question}</p>
       <div role="group" aria-label="你的预测" className={`flex flex-wrap gap-2 ${shaking ? "motion-safe:animate-shake" : ""}`}>
         {choices.map(choice => (
           <button key={choice.id} type="button" aria-pressed={picked === choice.id} onClick={() => pick(choice.id)} disabled={revealed && picked !== choice.id}
@@ -40,7 +40,7 @@ export function PredictPrompt({ question, choices, correctId, explanation, onRev
         ))}
       </div>
       {revealed && (
-        <div className="flex items-start gap-2 text-[15px] text-text motion-safe:animate-text-in">
+        <div className="flex items-start gap-2 text-ui text-text motion-safe:animate-text-in">
           {correct ? <SuccessCheck play label="预测正确" /> : <span className="text-warn" role="img" aria-label="预测不对">↺</span>}
           <p><span className="font-medium">{correct ? "预测对了。" : "和预测不一样。"}</span>{explanation}</p>
         </div>

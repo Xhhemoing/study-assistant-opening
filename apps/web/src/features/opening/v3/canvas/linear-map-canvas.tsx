@@ -40,7 +40,7 @@ export function LinearMapCanvas({ matrix, onChange, presets = [] }: Props) {
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
-      <figure className="overflow-hidden rounded-card border border-line bg-surface">
+      <figure className="overflow-hidden rounded-tile border border-line bg-surface">
         <svg viewBox={`${-R * U} ${-R * U} ${2 * R * U} ${2 * R * U}`} role="img" aria-labelledby={`${id}-cap`} className="mx-auto block h-auto w-full max-w-[520px] text-text-2">
           <g stroke="currentColor" strokeOpacity=".12">{lines.map(n => <g key={n}><line x1={n * U} y1={-R * U} x2={n * U} y2={R * U} /><line x1={-R * U} y1={n * U} x2={R * U} y2={n * U} /></g>)}</g>
           <g stroke="var(--color-obj-1)" strokeOpacity=".35">{lines.map(n => <g key={n}><line {...seg(pt(n, -R), pt(n, R))} /><line {...seg(pt(-R, n), pt(R, n))} /></g>)}</g>
@@ -49,16 +49,16 @@ export function LinearMapCanvas({ matrix, onChange, presets = [] }: Props) {
           <line x1="0" y1="0" x2={b * U} y2={-d * U} stroke="var(--color-obj-2)" strokeWidth="3" strokeLinecap="round" />
           <circle r="3" fill="currentColor" />
         </svg>
-        <figcaption id={`${id}-cap`} className="flex items-center justify-between border-t border-line px-4 py-2 text-[13px] text-text-2">
+        <figcaption id={`${id}-cap`} className="flex items-center justify-between border-t border-line px-4 py-2 text-meta text-text-2">
           <span>单位正方形变为平行四边形</span>
           <span className="tabular-nums text-text">面积 = |det| = <span key={det} className="inline-block motion-safe:animate-pop">{Math.abs(det).toFixed(2).replace(/\.00$/, "")}</span></span>
         </figcaption>
       </figure>
       <div className="space-y-4">
         <fieldset className="grid grid-cols-2 gap-3">
-          <legend className="mb-2 text-[13px] font-medium text-text-2">矩阵</legend>
+          <legend className="mb-2 text-meta font-medium text-text-2">矩阵</legend>
           {names.map((name, index) => (
-            <label key={name} className="space-y-1 text-[13px] text-text-2">
+            <label key={name} className="space-y-1 text-meta text-text-2">
               <span className="flex justify-between"><span>{name}</span><span className="tabular-nums text-text">{matrix[index] ?? 0}</span></span>
               <input type="range" min={-3} max={3} step={0.5} value={matrix[index] ?? 0} aria-label={`矩阵元素 ${name}`}
                 onChange={event => { const next = [...matrix] as [number, number, number, number]; next[index] = Number(event.target.value); onChange(next); }}
@@ -70,11 +70,11 @@ export function LinearMapCanvas({ matrix, onChange, presets = [] }: Props) {
           <div className="flex flex-wrap gap-2">
             {presets.map(preset => (
               <button key={preset.label} type="button" onClick={() => onChange(preset.matrix)}
-                className="min-h-9 rounded-pill border border-line px-3 text-[13px] text-text-2 transition-[background-color,transform] duration-(--duration-micro) hover:bg-surface-2 active:scale-95">{preset.label}</button>
+                className="min-h-9 rounded-pill border border-line px-3 text-meta text-text-2 transition-[background-color,transform] duration-(--duration-micro) hover:bg-surface-2 active:scale-95">{preset.label}</button>
             ))}
           </div>
         )}
-        <p className="text-[13px] leading-6 text-text-2">{describeMatrix(matrix)}</p>
+        <p className="text-meta text-text-2">{describeMatrix(matrix)}</p>
       </div>
     </div>
   );

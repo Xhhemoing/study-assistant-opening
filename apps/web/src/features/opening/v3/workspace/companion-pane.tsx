@@ -38,21 +38,21 @@ export function CompanionPane({ tab, onTabChange, onClose, panels, contextSummar
   }
 
   return (
-    <aside aria-label="辅助区" className="flex h-full min-h-0 w-full flex-col bg-surface">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-line px-2">
-        <div ref={list} role="tablist" aria-label="辅助内容" className="relative flex gap-1" onKeyDown={onKeyDown}>
+    <aside aria-label="辅助区" className="flex h-full min-h-0 w-full flex-col bg-transparent">
+      <div className="flex h-(--topbar-h) shrink-0 items-center justify-between px-2">
+        <div ref={list} role="tablist" aria-label="辅助内容" className="relative flex gap-0.5 rounded-pill bg-text/5 p-0.5" onKeyDown={onKeyDown}>
           {TABS.map(key => (
             <button key={key} ref={node => { refs.current[key] = node; }}
               id={`${base}-tab-${key}`} role="tab" type="button"
               aria-selected={tab === key} aria-controls={`${base}-panel-${key}`} tabIndex={tab === key ? 0 : -1}
               onClick={() => select(key)}
-              className="relative h-8 rounded-sm px-3 text-[13px] text-text-2 transition-colors duration-(--duration-micro) hover:text-text aria-selected:font-medium aria-selected:text-text">
-              {tab === key && <span data-pill aria-hidden="true" className="absolute inset-0 rounded-sm bg-surface-2" />}
+              className="relative h-(--control-h-sm) rounded-pill px-3 text-meta text-text-2 transition-colors duration-(--duration-micro) hover:text-text aria-selected:font-medium aria-selected:text-text">
+              {tab === key && <span data-pill aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card" />}
               <span className="relative">{LABELS[key]}</span>
             </button>
           ))}
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭辅助区" className="grid size-9 place-items-center rounded-sm text-text-3 transition-colors hover:bg-surface-2 hover:text-text">
+        <button type="button" onClick={onClose} aria-label="关闭辅助区" className="grid size-(--control-h-sm) place-items-center rounded-pill text-text-3 transition-colors hover:bg-text/6 hover:text-text">
           <X size={16} aria-hidden="true" />
         </button>
       </div>

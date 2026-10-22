@@ -34,7 +34,7 @@ export function SelectionAsk({ selection, onAsk, label = "问选中内容" }: { 
   if (!selection || coarse) return null;
   return createPortal(
     <button type="button" onMouseDown={event => event.preventDefault()} onClick={onAsk}
-      className="absolute -top-11 left-0 z-10 h-9 rounded-md bg-ink px-3 font-sans text-[13px] font-medium text-on-ink shadow-float motion-safe:animate-pop">
+      className="absolute -top-11 left-0 z-10 h-9 rounded-ctl bg-ink px-3 font-sans text-meta font-medium text-on-ink shadow-float motion-safe:animate-pop">
       {label}
     </button>,
     selection.block,
