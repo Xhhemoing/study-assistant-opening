@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../../../../../../../features/opening/v3/motion/view-transition";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { uuidSchema, type StudySessionIntent } from "@aistudy/contracts";

@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import { z } from "zod";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { learningAttemptSchema, type LearningAttempt, type SpanLessonSnapshot, type LearningObservation, type SpanAnswer, type SpanHintLevel, type SpanHintResponse, type StudySessionIntent, type StudyIntentEvent } from "@aistudy/contracts";

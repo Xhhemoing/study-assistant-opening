@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import type { ReactNode } from "react";
 import type { TeachingResumeMaterialsGate } from "@aistudy/contracts";
 import { ui } from "../opening/design/ui";

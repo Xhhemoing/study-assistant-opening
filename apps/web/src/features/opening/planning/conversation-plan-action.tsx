@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { ConversationPlanInspection, PlanDraft, TaskItem } from "@aistudy/contracts";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { createConversationPlanController, type ConversationPlanApi } from "./conversation-plan-controller";

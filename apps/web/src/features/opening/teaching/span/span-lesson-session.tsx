@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { spanLessonSnapshotSchema, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, spanModeForIntent } from "@aistudy/domain";

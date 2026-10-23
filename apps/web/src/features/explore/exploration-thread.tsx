@@ -2,7 +2,7 @@
 
 import { ui } from "../opening/design/ui";
 import { ArrowLeft, Bot, Send, UserRound } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { AIRole, ChatTurn, PromotionCandidate } from "@aistudy/contracts";
 import { useStudyProvider } from "../../lib/data/react";

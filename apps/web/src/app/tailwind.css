@@ -90,8 +90,8 @@
   /* 布局：正文 / 宽内容 / 导航 / 辅助区。用法 w-(--layout-companion) */
   --layout-prose: 680px;
   --layout-wide: 1040px;
-  --layout-nav: 232px;
-  --layout-nav-compact: 72px;
+  --layout-nav: 208px;
+  --layout-nav-compact: 56px;
   --layout-companion: 340px;
   --layout-side: 400px;
   --layout-side-wide: 560px;
@@ -344,6 +344,20 @@
 @media (pointer: coarse) { [data-ui="v3"] { --control-h: 44px; --control-h-sm: 40px; } }
 /* 圆角：round（默认，参考 Gemini / Hark 的圆润卡片）/ crisp（更利落） */
 [data-ui="v3"][data-corner="crisp"] { --radius-ctl: 8px; --radius-tile: 10px; --radius-panel: 14px; --radius-sheet: 18px; --radius-md: 8px; --radius-lg: 8px; --radius-xl: 10px; --radius-2xl: 14px; --radius-card: 12px; --radius-pill-ctl: 8px; }
+/* 材质三档：paper（实色）/ frost（轻玻璃，默认：更实的底、较小模糊，保证正文旁的浮层仍易读）/ glass（通透玻璃）。
+   玻璃只给浮在上层的东西（顶栏、命令面板、抽屉、分栏工具条、助手输入框）；正文与讲解始终是实底。 */
+[data-ui="v3"][data-skin="frost"] {
+  --glass-bg: color-mix(in srgb, var(--color-surface) 82%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  --glass-bar-bg: color-mix(in srgb, var(--color-bg) 94%, transparent);
+  --glass-blur: 14px;
+}
+[data-ui="v3"][data-skin="glass"] {
+  --glass-bg: color-mix(in srgb, var(--color-surface) 58%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--color-surface) 76%, transparent);
+  --glass-bar-bg: color-mix(in srgb, var(--color-bg) 82%, transparent);
+  --glass-blur: 28px;
+}
 /* 纸面皮肤：去掉玻璃，回到实色表面 */
 [data-ui="v3"][data-skin="paper"] {
   --glass-bg: var(--color-surface); --glass-bg-strong: var(--color-surface); --glass-bar-bg: var(--color-bg); --glass-blur: 0px;
@@ -394,5 +408,35 @@ html[data-nav-direction="local"]::view-transition-old(app-main), html[data-nav-d
 html[data-nav-direction="local"]::view-transition-old(*):only-child, html[data-nav-direction="local"]::view-transition-new(*):only-child { animation: none; }
 /* 滑动指示条：切换瞬间给当前组的指示块打 data-vt-pill */
 [data-vt-pill] { view-transition-name: active-pill; }
-/* 共享元素：点击来源打上 data-vt-source，目标标题用 [view-transition-name:object-title] */
-[data-vt-source="object-title"] { view-transition-name: object-title; }
+/* 共享元素：页面标题在页面间平滑过渡；点击带 vtSource 的来源行时，标题从那一行飞到新页面（由 view-transition.tsx 打标记，保证同名唯一） */
+[data-vt-source="object-title"], [data-vt-title-active] { view-transition-name: page-title; }
+::view-transition-group(page-title) { animation-duration: var(--duration-panel); animation-timing-function: var(--ease-out-expo); }
+
+
+/* ===== UI v5：原生进出场（@starting-style）与折叠 =====
+   命令面板等原生 <dialog>：打开时从 97% 缩放 + 模糊淡入，关闭快（开慢关快 250/150）。
+   不支持 @starting-style 的浏览器直接出现，不影响功能；减少动效时全局规则把时长压到 1ms。 */
+[data-ui="v3"] dialog[open], [data-ui="v3"] dialog[open]::backdrop {
+  transition: opacity var(--duration-enter) var(--ease-out-expo), transform var(--duration-enter) var(--ease-out-expo), filter var(--duration-enter) var(--ease-out-expo), overlay var(--duration-exit) allow-discrete, display var(--duration-exit) allow-discrete;
+}
+[data-ui="v3"] dialog[open] { opacity: 1; transform: none; filter: none; }
+@starting-style {
+  [data-ui="v3"] dialog[open] { opacity: 0; transform: translateY(6px) scale(0.97); filter: blur(var(--blur-soft)); }
+  [data-ui="v3"] dialog[open]::backdrop { opacity: 0; }
+}
+/* 折叠块（<details>）按内容真实高度展开；不支持 ::details-content 时保持原样瞬时展开 */
+@supports selector(::details-content) {
+  [data-ui="v3"] { interpolate-size: allow-keywords; }
+  [data-ui="v3"] details::details-content {
+    block-size: 0; overflow-y: clip; opacity: 0;
+    transition: block-size var(--duration-state) var(--ease-out-expo), opacity var(--duration-state) var(--ease-standard), content-visibility var(--duration-state) allow-discrete;
+  }
+  [data-ui="v3"] details[open]::details-content { block-size: auto; opacity: 1; }
+}
+/* 分栏：新打开的栏从右侧轻推入；拖动分隔线时去掉过渡，松手后宽度回到吸附点用弹簧曲线 */
+@keyframes column-in { from { opacity: 0; transform: translateX(16px); filter: blur(var(--blur-soft)); } to { opacity: 1; transform: none; filter: none; } }
+@utility animate-column-in { animation: column-in var(--duration-enter) var(--ease-out-expo) both; }
+[data-split-separator] { transition: background-color var(--duration-micro) var(--ease-standard); }
+[data-split-group][data-settling="true"] > [data-panel] { transition: flex-grow var(--duration-panel) var(--ease-spring), flex-basis var(--duration-panel) var(--ease-spring); }
+/* 导航宽度可拖：拖动时关闭宽度过渡，跟手 */
+[data-app-shell][data-nav-dragging="true"] nav { transition: none !important; }

@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
+import { ArrowLeft, FolderOpen, NotebookPen, Sparkles } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { LearningResume, MatrixExerciseSpec } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../opening/client/api";
@@ -15,6 +16,11 @@ import { CourseStudyMaterials } from "./course-study-materials";
 import { CourseStudyContextTools } from "./course-study-context-tools";
 import { TopBar, TopBarTools } from "../opening/v3/shell/top-bar";
 import { ui as v3ui } from "../opening/v3/ui/controls";
+import { SplitControls, SplitView, type SplitPanes } from "../opening/v3/workspace/split-view";
+import { AssistantSession } from "../opening/assistant/assistant-session";
+import { assistantEntry } from "../opening/assistant/assistant-entry";
+import { StudyNotePanel } from "../opening/teaching/study-context-tools";
+import { MaterialLibrary } from "../opening/library/material-library";
 
 export function CourseRetestReview({ courseId, task }: { courseId: string; task: CompletedRetestTask }) {
   return <section className="space-y-3 px-5 py-6" aria-labelledby="course-retest-review-heading">
@@ -68,6 +74,14 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
     return () => { active = false; };
   }, [activityId, api, archived, course, courseId, revision, sourceIds, sourceLoadError, taskId, retestId, teachingCompileEnabled, teachingEnabled, initialMode, practiceEntryError]);
 
+  const pathname = usePathname() ?? "";
+  const courseTitle = course?.title ?? "本课";
+  // 右侧分栏：对话（本课背景）/ 笔记 / 资料。内容按需渲染，关掉的栏不占资源。
+  const panes = useMemo<SplitPanes>(() => ({
+    assistant: { label: "对话", icon: <Sparkles size={14} />, render: () => <div className="flex h-full min-h-0 flex-col"><AssistantSession entry={assistantEntry(`/opening/assistant?courseId=${encodeURIComponent(courseId)}`, pathname)} /></div> },
+    notes: { label: "笔记", icon: <NotebookPen size={14} />, render: () => <div className="px-4 pb-4"><StudyNotePanel key={courseId} context={{ courseId, label: courseTitle }} /></div> },
+    sources: { label: "资料", icon: <FolderOpen size={14} />, render: () => <div className="px-4 pb-4"><MaterialLibrary api={api} courseId={courseId} /></div> },
+  }), [api, courseId, courseTitle, pathname]);
   if (loading) return <LoadingRows label="正在读取课程…" />;
   if (error || !course) return <div className="p-5"><Link className={ui.quiet} href={courseHref}>返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></div>;
   const retest = entry?.kind === "practice" ? entry.task?.retest : null;
@@ -80,9 +94,9 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       title={<h1 className="truncate text-title font-semibold tracking-[-0.01em]">{course.title}</h1>}
       actions={<TopBarTools label="学习工具">
         {teachingEnabled ? <Link className={`${v3ui.toolbarButton} hidden sm:inline-flex`} href={`/opening/courses/${encodeURIComponent(courseId)}/study/span`}>自学 / 串讲 / 挑战</Link> : null}
-        <Link className={v3ui.toolbarButton} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>课程材料</Link>
+        <SplitControls panes={panes} />
       </TopBarTools>} />
-    <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-[880px] pb-10">
+    <div className="min-h-0 flex-1"><SplitView panes={panes}><div className="h-full overflow-y-auto"><div className="mx-auto w-full max-w-[880px] pb-10">
       {archived ? <div className="space-y-3 px-5 pt-4"><p className="text-sm leading-6 text-text-2">课程已归档。</p><Link className={ui.secondary} href={`${courseHref}#course-settings-heading`}>返回课程设置以恢复</Link></div> : null}
       {sourceLoadError ? <p className="px-5 pt-4 text-xs leading-6 text-warn" role="status">课程材料暂时无法核实，暂不创建新讲解。可独立练习，或重新进入本页。</p> : null}
       {busy ? <LoadingRows label="正在恢复本课程的学习位置…" /> : null}
@@ -95,6 +109,6 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       {!busy && entry?.kind === "retest-review" ? <CourseRetestReview courseId={courseId} task={entry.task} /> : null}
       {!busy && !archived && entry?.kind !== "retest-review" && (practice || !teachingEnabled) ? <section id="course-practice" className="space-y-4 px-5 py-6" aria-labelledby="course-practice-heading"><h2 className="text-ui-lg font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2>{retest?.requirementKey === "span:linear-combination:v1" ? <Link className={ui.primary} href={`/opening/courses/${courseId}/study/span?retest=${retest.candidateId}`}>开始 span 正式延迟复测</Link> : <LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill} initialFocus={initialFocus} initialMode={initialMode} initialMatrixKey={initialMatrixKey} initialMatrixVariant={initialMatrixVariant} onRecorded={() => undefined} />}</section> : null}
       {!practice && teachingEnabled && !archived && entry?.kind !== "retest-review" ? <details className="mx-5 mt-4 border-t border-line pt-3"><summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-emerald-700">其他学习方式</summary><div className="mt-3 flex flex-wrap gap-2"><button type="button" className={ui.secondary} onClick={() => setPractice(true)}>独立练习</button><Link className={ui.quiet} href={`/opening/assistant?courseId=${encodeURIComponent(courseId)}`}>自由探索</Link></div></details> : null}
-    </div></div>
+    </div></div></SplitView></div>
   </section>;
 }

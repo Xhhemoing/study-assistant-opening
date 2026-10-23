@@ -11,7 +11,7 @@ import {
   RotateCcw,
   Sparkles,
 } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReviewGrade } from "@aistudy/contracts";
 import type { LucideIcon } from "lucide-react";

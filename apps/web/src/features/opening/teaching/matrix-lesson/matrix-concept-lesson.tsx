@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningLearningClient } from "../../client/learning-client";

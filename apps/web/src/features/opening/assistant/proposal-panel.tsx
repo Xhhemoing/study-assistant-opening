@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { AssistantProposalCreate, AssistantProposalRecord, AssistantProposalTool, LearningObservation } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";

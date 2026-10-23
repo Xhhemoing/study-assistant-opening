@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowDownLeft, Clock3 } from "lucide-react";
 import type { OpeningApi } from "../client/api";
 import { TaskReminder } from "./task-reminder";

@@ -2,7 +2,7 @@
 
 import { ui } from "../opening/design/ui";
 import { ArrowLeft, Check, Clock3, Eye, Lightbulb, LoaderCircle, RefreshCw } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useEffect, useRef, useState } from "react";
 import type { ErrorCause, PracticeItem } from "@aistudy/contracts";
 import { useRouter } from "next/navigation";

@@ -1,7 +1,7 @@
 "use client";
 
 import { Link2, RefreshCw } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { KnowledgeLink } from "@aistudy/contracts";
 import { createKnowledgeLinksApi } from "./knowledge-links-api";

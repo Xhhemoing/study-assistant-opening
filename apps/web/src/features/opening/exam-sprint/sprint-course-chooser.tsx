@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../design/ui";
 import { hasStringFields, useJsonList } from "../design/use-json-list";
 import { sprintCourseHref } from "./sprint-course-route";

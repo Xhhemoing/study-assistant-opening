@@ -2,7 +2,7 @@
 
 import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { ArrowLeft, LoaderCircle, RefreshCw, Save } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useState } from "react";
 import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings/guidance-mode-picker";
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";

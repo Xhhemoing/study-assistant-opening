@@ -10,7 +10,7 @@ export function openingNavigation(): OpeningNavigationItem[] {
   return [
     { href: "/opening/today", label: "今日", icon: "today", group: "core" },
     { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
-    { href: "/opening/assistant", label: "助理", icon: "assistant", group: "core" },
+    { href: "/opening/agent", label: "助理", icon: "assistant", group: "core" },
     { href: "/opening/library", label: "资料", icon: "library", group: "core" },
   ];
 }

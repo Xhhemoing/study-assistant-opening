@@ -1,6 +1,6 @@
 import { ConnectionSettings } from "../../../../../features/opening/connections/connection-settings";
 import { PageHeading, ui } from "../../../../../features/opening/design/ui";
-import Link from "next/link";
+import { TransitionLink as Link } from "../../../../../features/opening/v3/motion/view-transition";
 
 export default function OpeningConnectionsSettingsPage() {
   return (

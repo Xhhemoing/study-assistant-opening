@@ -10,7 +10,7 @@ describe("Opening mobile navigation", () => {
     const html = renderToStaticMarkup(createElement(OpeningMobileNavigation, { pathname: "/opening/today" }));
     expect(html.match(/<a /g)).toHaveLength(4);
     expect(html).not.toContain("更多");
-    expect(html).toContain("/opening/assistant");
+    expect(html).toContain("/opening/agent");
     expect(html).toContain("资料");
   });
   it("keeps Today selected for legacy card URLs", () => {

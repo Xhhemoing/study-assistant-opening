@@ -3,7 +3,7 @@
 import type { LearningPreferences } from "@aistudy/contracts";
 import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useState } from "react";
 import { SemesterSettingsForm } from "../opening/timetable/semester-settings-form";
 import { TimetableImport } from "../opening/timetable/timetable-import";

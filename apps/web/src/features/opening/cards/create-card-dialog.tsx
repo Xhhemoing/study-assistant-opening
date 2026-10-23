@@ -2,7 +2,7 @@
 
 import type { ObservationCardDraft, SnippetCreateInput } from "@aistudy/contracts";
 import { Check, LoaderCircle, X } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { OpeningApi } from "../client/api";
 import { OpeningApiError } from "../client/api";

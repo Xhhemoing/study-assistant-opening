@@ -1,12 +1,12 @@
 "use client";
 import { usePathname } from "next/navigation";
-import { Suspense, createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { Suspense, createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { MessageSquare, MoreHorizontal, PanelLeft, Search } from "lucide-react";
 import { TransitionLink, ViewTransitionBoundary } from "../motion/view-transition";
 import { Sheet } from "../ui/sheet";
 import { NAV_CORE, NAV_SYSTEM, NAV_TOOLS, activeNavId, featureHref, type Feature } from "./features";
 import { FEATURE_ICONS } from "./icons";
-import { useLayoutPref } from "./use-layout-pref";
+import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN, clampNavWidth, useLayoutPref } from "./use-layout-pref";
 import { HeaderToolsSlot } from "./header-tools-slot";
 import { ui } from "../ui/controls";
 
@@ -68,32 +68,40 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
     root.dataset.ui = "v3"; root.dataset.skin = pref.skin; root.dataset.density = pref.density; root.dataset.corner = pref.corner;
     return () => { delete root.dataset.ui; delete root.dataset.skin; delete root.dataset.density; delete root.dataset.corner; };
   }, [pref.skin, pref.density, pref.corner]);
+  // 导航宽度是用户拖出来的连续值：写成根元素上的 CSS 变量，导航仍用 w-(--layout-nav)
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const navWidth = dragWidth ?? pref.navWidth;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--layout-nav", `${navWidth}px`);
+    return () => { root.style.removeProperty("--layout-nav"); };
+  }, [navWidth]);
 
   return (
     <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
-    <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
+    <div data-app-shell data-focus={hideNav} data-nav-dragging={dragWidth !== null} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
-      <nav aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
+      <nav id="app-nav" aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
         className="hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
         <button type="button" onClick={() => setPref({ nav: compact ? "expanded" : "compact" })}
           aria-label={compact ? "展开导航" : "收起导航"} aria-expanded={!compact}
-          className={`${ui.icon} mx-4 mb-2`}>
+          className={`${ui.icon} mx-2.5 mb-2`}>
           <PanelLeft size={18} aria-hidden="true" />
         </button>
         {onOpenSearch ? (
-          <div className="mb-2 px-2">
+          <div className="mb-2 px-1.5">
             <button type="button" onClick={onOpenSearch} aria-label="打开全局搜索" title="全局搜索与快捷导航 (Ctrl / ⌘ K)"
               className="flex min-h-(--control-h) w-full items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/5 hover:text-text">
-              <span className="grid w-12 shrink-0 justify-items-center"><Search size={17} aria-hidden="true" /></span>
+              <span className="grid w-11 shrink-0 justify-items-center"><Search size={17} aria-hidden="true" /></span>
               <span data-hidden={compact} className="flex-1 whitespace-nowrap text-left text-ui data-[hidden=true]:sr-only">搜索</span>
               {!compact && <kbd className="mr-3 rounded-ctl border border-line px-1.5 text-cap text-text-2">⌘K</kbd>}
             </button>
           </div>
         ) : null}
         <NavGroup items={nav?.core ?? NAV_CORE} isActive={isActive} compact={compact} counts={counts} />
-        {navExtra ? <div className="mt-1 px-2">{navExtra}</div> : null}
+        {navExtra ? <div className="mt-1 px-1.5">{navExtra}</div> : null}
         <NavGroup items={nav?.tools ?? NAV_TOOLS} isActive={isActive} compact={compact} counts={counts} divided />
         <section aria-label="最近对话" data-hidden={compact || recent.length === 0} inert={compact}
           className="mt-4 min-h-0 flex-1 overflow-y-auto px-2 pt-1 transition-opacity duration-(--duration-state) data-[hidden=true]:pointer-events-none data-[hidden=true]:opacity-0">
@@ -103,8 +111,9 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           ))}</ul>
           {recent.length > 0 && <TransitionLink href={featureHref("assistant")} className="block whitespace-nowrap px-3 py-2 text-meta text-text-2 hover:text-text">全部对话</TransitionLink>}
         </section>
-        <div className="mt-auto"><NavGroup items={nav?.system ?? NAV_SYSTEM} isActive={isActive} compact={compact} counts={counts} />{account ? <div className="mt-1 px-2">{account}</div> : null}</div>
+        <div className="mt-auto"><NavGroup items={nav?.system ?? NAV_SYSTEM} isActive={isActive} compact={compact} counts={counts} />{account ? <div className="mt-1 px-1.5">{account}</div> : null}</div>
       </nav>
+      {!hideNav && !compact ? <NavResizer width={navWidth} onDrag={setDragWidth} onCommit={width => { setDragWidth(null); setPref({ navWidth: width }); }} /> : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <main id="main-content" tabIndex={-1} data-scroll-root data-focus={hideNav} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable] [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card data-[focus=true]:m-0 data-[focus=true]:rounded-none data-[focus=true]:border-0">
@@ -126,11 +135,11 @@ function NavGroup({ items, isActive, compact, counts, divided = false }: { items
         const current = isActive(item);
         const count = counts[item.id];
         return (
-          <li key={item.id} className="px-2">
+          <li key={item.id} className="px-1.5">
             <TransitionLink href={item.route} aria-current={current ? "page" : undefined}
               className="group relative flex min-h-(--control-h) items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/5 hover:text-text aria-[current=page]:font-medium aria-[current=page]:text-text">
               {current && <span aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card [view-transition-name:nav-active]" />}
-              <span className={`relative grid w-12 shrink-0 justify-items-center ${compact ? "gap-0.5 py-1.5" : ""}`}>
+              <span className={`relative grid w-11 shrink-0 justify-items-center ${compact ? "gap-0.5 py-1.5" : ""}`}>
                 <Icon size={17} aria-hidden="true" />
                 {compact && <span className="text-cap motion-safe:animate-fade-in">{item.label}</span>}
               </span>
@@ -196,6 +205,33 @@ function MobileHeaderToolsInner({ recent = [] }: { recent?: RecentThread[] }) {
         ))}</ul>}
         {extra ? <div className="mt-2 border-t border-line pt-2" onClickCapture={() => setOpen(false)}>{extra}</div> : null}
       </Sheet>
+    </div>
+  );
+}
+
+/**
+ * 导航宽度分隔条（WAI-ARIA window splitter）：拖动、←/→（Shift 加大步长）、Home/End、双击恢复默认。
+ * 只在桌面展开态出现；收起为图标栏用顶部按钮。
+ */
+function NavResizer({ width, onDrag, onCommit }: { width: number; onDrag: (width: number | null) => void; onCommit: (width: number) => void }) {
+  const start = useRef<{ x: number; width: number; pointerId: number } | null>(null);
+  return (
+    <div role="separator" aria-orientation="vertical" aria-label="调整导航宽度" aria-controls="app-nav" tabIndex={0}
+      aria-valuenow={width} aria-valuemin={NAV_WIDTH_MIN} aria-valuemax={NAV_WIDTH_MAX} aria-valuetext={`${width} 像素`}
+      title="拖动调整宽度，双击恢复默认"
+      className="group relative z-10 -ml-1.5 hidden w-3 shrink-0 cursor-col-resize touch-none outline-none md:block"
+      onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); start.current = { x: event.clientX, width, pointerId: event.pointerId }; onDrag(width); }}
+      onPointerMove={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; onDrag(clampNavWidth(from.width + event.clientX - from.x)); }}
+      onPointerUp={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; start.current = null; onCommit(clampNavWidth(from.width + event.clientX - from.x)); }}
+      onPointerCancel={() => { start.current = null; onDrag(null); }}
+      onDoubleClick={() => onCommit(NAV_WIDTH_DEFAULT)}
+      onKeyDown={event => {
+        const step = event.shiftKey ? 24 : 8;
+        const next = event.key === "ArrowLeft" ? width - step : event.key === "ArrowRight" ? width + step : event.key === "Home" ? NAV_WIDTH_MIN : event.key === "End" ? NAV_WIDTH_MAX : event.key === "Enter" ? NAV_WIDTH_DEFAULT : null;
+        if (next === null) return;
+        event.preventDefault(); onCommit(clampNavWidth(next));
+      }}>
+      <span aria-hidden="true" className="absolute inset-y-3 left-1/2 w-px -translate-x-1/2 rounded-pill bg-transparent transition-colors duration-(--duration-micro) group-hover:bg-line-strong group-focus-visible:bg-accent group-active:bg-accent" />
     </div>
   );
 }

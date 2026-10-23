@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssistantCandidateRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 
 export function memorySourceSummary(sourceTurnIds: string[], sourceIds?: string[]): string {

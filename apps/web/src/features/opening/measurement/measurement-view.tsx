@@ -2,7 +2,7 @@
 
 import type { MeasurementOverview } from "@aistudy/contracts";
 import { ArrowLeft, Pause, Play, RefreshCw } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LoadError, LoadingRows, PageHeading, ui } from "../design/ui";
 import { MeasurementAttemptCard, type MeasurementAction } from "./attempt-card";

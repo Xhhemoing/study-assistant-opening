@@ -1,7 +1,7 @@
 "use client";
 
 import { BookOpen, Download, FilePlus2, Files, Import, Upload } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@aistudy/ui";
 import { createOpeningApi, type OpeningApi } from "../client/api";

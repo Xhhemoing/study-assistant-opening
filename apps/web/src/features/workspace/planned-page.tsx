@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { EmptyState, EntryLinks, PageHeading, ui } from "../opening/design/ui";
 
 export function PlannedPage({ title, description }: { title: string; description: string }) {

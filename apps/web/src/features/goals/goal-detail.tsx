@@ -2,7 +2,7 @@
 
 import { PageHeading, ui } from "../opening/design/ui";
 import { Archive, ArrowLeft, Check, LoaderCircle, RefreshCw, Save } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useStudyProvider } from "../../lib/data/react";

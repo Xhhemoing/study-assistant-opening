@@ -2,7 +2,7 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { FolderInput, Plus, Upload, X } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi } from "../opening/client/api";
 import { LoadError, ui } from "../opening/design/ui";

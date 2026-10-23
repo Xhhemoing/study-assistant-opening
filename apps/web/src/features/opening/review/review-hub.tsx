@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { CardReviewView } from "../cards/card-review-view";
 import { createOpeningCardsClient } from "../cards/cards-client";

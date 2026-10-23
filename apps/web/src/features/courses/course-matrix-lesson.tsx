@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCourseBundle } from "./course-detail";
 import { LoadError, LoadingRows, ui } from "../opening/design/ui";
 import { MatrixConceptLesson } from "../opening/teaching/matrix-lesson/matrix-concept-lesson";

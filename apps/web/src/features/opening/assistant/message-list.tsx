@@ -116,6 +116,14 @@ export const MessageList = memo(function MessageList({ messages, compact = false
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-surface-2 px-4 py-3 text-text sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className={`mb-2 flex items-center gap-2 text-xs font-medium text-text-2`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
+      {message.role === "assistant" && message.querySteps?.length ? <details className="mb-2 text-xs text-text-2" data-query-steps>
+        <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded-pill px-2 hover:bg-text/5 [&::-webkit-details-marker]:hidden">
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-accent" />先查了 {message.querySteps.map(step => step.label).join("、")}
+        </summary>
+        <ol aria-label="助理查询步骤" className="mt-1 space-y-0.5 border-l border-line pl-3">
+          {message.querySteps.map((step, stepIndex) => <li key={`${step.name}-${stepIndex}`} className="flex items-center gap-2"><span className={step.ok ? "text-text" : "text-warn"}>{step.label}</span><span className="text-text-3">· {step.outcome}</span></li>)}
+        </ol>
+      </details> : null}
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
         ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse text={message.text} citationLinks={(message.citations ?? []).map((citation) => citationLink(citation, sourceNames))} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}

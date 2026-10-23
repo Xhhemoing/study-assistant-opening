@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import type { summarizeDraftDiff } from "./document-editor-model";
 import { ui } from "../opening/design/ui";
 

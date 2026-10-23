@@ -23,3 +23,22 @@ export function queryEvidenceLinks(receipt?: SystemQueryReceipt | null): QueryEv
   }
   return [...links.values()];
 }
+
+/** Agent 步骤行：助理在回答前读了哪些记录。只来自服务端回执，不由回答正文推断。 */
+export type QueryStep = { name: string; label: string; outcome: string; ok: boolean };
+const QUERY_LABELS: Record<string, string> = {
+  courses: "课程", learning: "学习记录", recommendation: "学习建议", materials: "资料", planning: "学习计划", jobs: "后台任务",
+  settings: "设置", teaching: "讲解", learner_state: "掌握情况", explain_decision: "决策依据", notes: "笔记", cards: "卡片", exam_sprint: "考前冲刺", rejected: "未执行的查询",
+};
+const REASON_LABELS: Record<string, string> = {
+  no_data: "没有记录", not_available: "暂不可用", invalid_arguments: "条件不完整", clarification_required: "需要你补充", truncated: "只取了一部分",
+  stale: "可能不是最新", timeout: "超时", unavailable: "暂不可用", limit: "达到上限", repeated_query: "重复查询已合并", model_unavailable: "模型不可用", model_unsupported: "模型不支持",
+};
+export function querySteps(receipt?: SystemQueryReceipt | null): QueryStep[] {
+  return (receipt?.results ?? []).map(result => {
+    const count = result.data.length;
+    const ok = result.status === "ok" && result.reason === "read";
+    const outcome = ok ? (count ? `${count} 条` : "没有记录") : REASON_LABELS[result.reason] ?? (count ? `${count} 条` : "没有记录");
+    return { name: result.name, label: QUERY_LABELS[result.name] ?? "记录", outcome, ok: ok || result.reason === "no_data" };
+  });
+}
