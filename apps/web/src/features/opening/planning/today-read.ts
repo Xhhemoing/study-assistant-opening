@@ -18,7 +18,9 @@ export function currentTodayCourse(state: TodayResumeState, activity?: { courseI
     const id = activity ? activity.courseId : state.continueItem?.courseId;
     return state.courses.items.find(course => course.id === id) ?? null;
   }
-  return state.courses.items.find(course => !course.archivedAt && (course.targetDate != null || course.weeklyMinutes !== undefined)) ?? null;
+  const active = state.courses.items.filter(course => !course.archivedAt);
+  // 有目标的课程优先；没有目标时用第一门进行中的课程，避免有课却显示「选择课程」。
+  return active.find(course => course.targetDate != null || course.weeklyMinutes !== undefined) ?? active[0] ?? null;
 }
 export function hasNoTodayCourses(state: TodayResumeState): boolean {
   return (state.kind === "ready" || state.kind === "empty") && state.courses?.status === "ready" && state.courses.items.length === 0;

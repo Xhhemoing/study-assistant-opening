@@ -21,14 +21,14 @@ export function MaterialSpaceNav({ sources, organization, space, onSpace, onCrea
     catch (reason) { setError(reason instanceof Error ? reason.message : "课程创建失败"); }
   }
   return <div className="min-w-0 lg:border-r lg:border-line lg:pr-4">
-    <h2 className="mb-2 text-xs font-semibold text-text-3">资料视图</h2>
-    <nav aria-label="资料视图" className="flex gap-1 overflow-x-auto lg:flex-col">
+    <h2 className="mb-2 hidden text-xs font-semibold text-text-3 lg:block">资料视图</h2>
+    <nav aria-label="资料视图" className="flex gap-1 overflow-x-auto lg:flex-col [scrollbar-width:none] [mask-image:linear-gradient(to_right,black_88%,transparent)] lg:[mask-image:none]">
       {views.filter(view => view.id !== "attention" || space === "attention" || materialsInSpace(sources, organization, "attention").length > 0).map(({ id, title: label, icon: Icon }) => <button key={id} disabled={disabled} type="button" aria-pressed={space === id}
         className={`${ui.quiet} shrink-0 justify-between gap-3 lg:w-full ${space === id ? "bg-accent-soft text-accent" : ""}`} onClick={() => onSpace(id)}>
         <span className="flex items-center gap-2"><Icon size={14} aria-hidden="true" />{label}</span><span className="tabular-nums">{materialsInSpace(sources, organization, id).length}</span>
       </button>)}
     </nav>
-    <div className="mb-2 mt-6 flex items-center justify-between"><h2 className="text-xs font-semibold text-text-3">课程空间</h2>
+    <div className="mb-2 mt-4 flex items-center justify-between lg:mt-6"><h2 className="text-xs font-semibold text-text-3">课程空间</h2>
       <button type="button" className={ui.icon} aria-label="新建课程空间" title="新建课程空间" disabled={disabled} onClick={() => setCreating(value => !value)}><Plus size={14} aria-hidden="true" /></button>
     </div>
     {creating ? <form className="mb-3 space-y-2" onSubmit={event => { event.preventDefault(); void create(); }}>
@@ -36,7 +36,7 @@ export function MaterialSpaceNav({ sources, organization, space, onSpace, onCrea
       <div className="flex gap-1"><button type="submit" disabled={!title.trim() || disabled} className={ui.primary}>创建</button><button type="button" disabled={disabled} className={ui.quiet} onClick={() => setCreating(false)}>取消</button></div>
       {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
     </form> : null}
-    <nav aria-label="课程资料空间" className="flex gap-1 overflow-x-auto lg:flex-col">
+    <nav aria-label="课程资料空间" className="flex gap-1 overflow-x-auto lg:flex-col [scrollbar-width:none] [mask-image:linear-gradient(to_right,black_88%,transparent)] lg:[mask-image:none]">
       {organization.courses.map(course => <button key={course.id} type="button" disabled={disabled} aria-pressed={space === `course:${course.id}`} title={course.title}
         className={`${ui.quiet} shrink-0 justify-between gap-2 lg:w-full ${space === `course:${course.id}` ? "bg-accent-soft text-accent" : ""}`} onClick={() => onSpace(`course:${course.id}`)}>
         <BookOpen size={14} className="shrink-0" aria-hidden="true" /><span className="min-w-0 flex-1 break-words text-left">{course.title}{course.archived ? "（已归档）" : ""}</span>

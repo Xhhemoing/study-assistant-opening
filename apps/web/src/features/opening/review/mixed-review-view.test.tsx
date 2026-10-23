@@ -38,13 +38,13 @@ it("advances from a confirmed card to the actual task, and returning does not co
   const link = container.querySelector<HTMLAnchorElement>('a[target="_blank"]')!;
   expect(link.getAttribute("href")).toBe(`/opening/courses/${taskId}/study?task=${taskId}`);
   expect(link.rel).toBe("noopener noreferrer");
-  expect(container.textContent).toContain("打开练习不会把任务标为完成");
+  expect(container.textContent).toContain("打开练习（新标签）");
   await act(async () => window.dispatchEvent(new Event("focus")));
   expect(container.textContent).toContain("独立复测");
-  expect(container.textContent).toContain("服务端已完成任务 0 项");
+  expect(container.textContent).toContain("已完成任务 0 项");
   listTasks.mockResolvedValue({ tasks: [{ ...task, status: "done" }] });
   await act(async () => button("核对最新进度").click());
-  expect(container.textContent).toContain("服务端已完成任务 1 项");
+  expect(container.textContent).toContain("已完成任务 1 项");
   expect(container.textContent).toContain("本轮当前没有可继续的项目");
 });
 
@@ -56,7 +56,7 @@ it("restores the locally skipped navigation on remount without changing a task",
   await act(async () => root.unmount()); root = createRoot(container);
   await render();
   expect(container.textContent).toContain("本轮略过 1 项");
-  expect(container.textContent).not.toContain("服务端已完成任务 1 项");
+  expect(container.textContent).not.toContain("已完成任务 1 项");
   expect(task.status).toBe("pending");
   await act(async () => button("重新安排本轮").click());
   expect(container.textContent).toContain("独立复测");

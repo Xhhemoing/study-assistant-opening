@@ -54,22 +54,23 @@ export function SearchWorkspace() {
   }
 
   return (
-    <section className="min-w-0 bg-surface"><PageHeading title="全局搜索" description="查找你的笔记和课程。" /><div className="mx-auto max-w-5xl space-y-5 px-5 py-5">
+    <section className="min-h-full min-w-0 bg-surface"><PageHeading title="搜索" /><div className="mx-auto max-w-[760px] space-y-5 px-5 py-5">
 
-      <form className="flex flex-col gap-3 sm:flex-row" onSubmit={submitSearch} role="search">
+      <form className="flex gap-2" onSubmit={submitSearch} role="search">
         <label className="sr-only" htmlFor="global-search-input">搜索内容</label>
-        <div className="flex min-w-0 flex-1 items-center gap-3 rounded-lg border border-line bg-surface px-3 focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-line">
+        <div className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-panel border border-line bg-surface px-4 focus-within:border-line-strong focus-within:ring-2 focus-within:ring-accent/30">
           <Search aria-hidden="true" className="shrink-0 text-text-2" size={18} />
           <input
             className="min-w-0 flex-1 bg-transparent py-2 text-sm text-text md:py-1.5 outline-none placeholder:text-text-2"
             id="global-search-input"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索关键词"
+            placeholder="搜索笔记、课程与资料，回车搜索"
+            autoFocus
+            enterKeyHint="search"
             value={query}
           />
         </div>
-        <button className={ui.primary} disabled={!query.trim()} type="submit">
-          <Search aria-hidden="true" size={17} />
+        <button className={`${ui.primary} ${query.trim() ? "" : "sr-only"}`} disabled={!query.trim()} type="submit">
           搜索
         </button>
       </form>

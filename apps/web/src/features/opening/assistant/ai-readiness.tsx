@@ -65,13 +65,13 @@ export function AiReadinessChecklistView({
 
   return (
     <section
-      className={`shrink-0 border-l-2 border-warn/40 bg-warn-soft px-3 py-1 ${className}`}
+      className={`shrink-0 rounded-tile bg-surface-2 px-3 py-1 ${className}`}
       aria-labelledby="ai-readiness-heading"
       data-ai-readiness="hard-blocked"
       data-budget-confirm={showBudgetCta ? "needed" : "not-needed"}
     >
       <div className="flex items-start justify-between gap-2" role="status" data-testid={showBudgetCta ? "ai-readiness-budget-banner" : undefined}>
-      <details className="min-w-0 flex-1"><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-warn focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><span id="ai-readiness-heading">{showBudgetCta ? BUDGET_CONFIRM_LEAD : "AI 辅导暂不可用"}</span><span className="ml-2 font-normal">查看原因</span></summary>
+      <details className="min-w-0 flex-1"><summary className="min-h-9 cursor-pointer rounded py-2 text-xs font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><span id="ai-readiness-heading">{showBudgetCta ? BUDGET_CONFIRM_LEAD : "AI 辅导暂不可用"}</span><span className="ml-2 font-normal text-text-3">原因</span></summary>
       <div className="max-h-32 overflow-y-auto overscroll-contain pb-2">
       <ul className="space-y-2 text-xs leading-6 text-warn">
         {displayItems.map(item => (
@@ -94,7 +94,7 @@ export function AiReadinessChecklistView({
         </p>
       )}
       </div></details>
-      <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-9 shrink-0 items-center text-xs text-accent underline underline-offset-2" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
+      <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-8 shrink-0 items-center self-center rounded-pill bg-ink px-3 text-xs font-medium text-on-ink" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
       </div>
     </section>
   );

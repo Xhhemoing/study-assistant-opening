@@ -54,7 +54,7 @@ describe("settings page split structure", () => {
     expect(html).toContain('data-testid="timetable"');
     expect(html).toContain('href="/settings/advanced"');
     expect(html).toContain('href="/settings/advanced#daily-budget"');
-    expect(html).toContain("开启 AI 每日额度");
+    expect(html).toContain("每日 AI 用量");
     expect(html).toContain("AI 模型与每日额度");
     expect(html).not.toContain("data-advanced-section");
     expect(html).not.toContain("更多 / 高级");

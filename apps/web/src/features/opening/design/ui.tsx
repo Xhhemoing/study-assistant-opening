@@ -18,11 +18,9 @@ export const panelClass = ui.panel;
  * description 作为一行事实显示；手机自动带搜索/更多。
  */
 export function PageHeading({ title, description, action, actions }: { title: string; description?: ReactNode; action?: ReactNode; actions?: ReactNode }) {
-  const long = typeof description === "string" && description.length > 36;
-  return <>
-    <V3PageHeader title={title} fact={long ? undefined : description} action={action ?? actions} />
-    {long ? <p className="max-w-3xl px-4 pb-1 text-xs leading-5 text-text-2 md:px-6">{description}</p> : null}
-  </>;
+  // 文字说明不再陈列（v4 降噪）：只保留结构化事实（日期、计数等非纯文本节点）。
+  const fact = typeof description === "string" ? undefined : description;
+  return <V3PageHeader title={title} fact={fact} action={action ?? actions} />;
 }
 export const PageHeader = PageHeading;
 export function EntryLinks() {

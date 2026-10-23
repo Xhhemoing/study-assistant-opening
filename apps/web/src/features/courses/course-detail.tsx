@@ -28,7 +28,7 @@ function revealCourseMaterials() {
   while (node) { if (node instanceof HTMLDetailsElement) node.open = true; node = node.parentElement; }
 }
 
-export function CourseContents({ courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
+export function CourseContents({ courseId: _courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -45,7 +45,6 @@ export function CourseContents({ courseId, assets }: { courseId: string; assets:
     {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-accent underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent" href={sourceViewerHref(asset.source.id, versions[asset.source.id]!)}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-accent underline underline-offset-4" href={`/opening/library/${encodeURIComponent(asset.document.id)}`}>{asset.document.title}</Link> : <span className="break-words text-text-2">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <a className={ui.secondary} href="#course-assets" onClick={revealCourseMaterials}>添加本课材料</a>}
     {assets.length > 5 ? <a className={ui.quiet} href="#course-assets" onClick={revealCourseMaterials}>查看全部 {assets.length} 份材料</a> : null}
     {error ? <p className="text-xs leading-6 text-warn" role="status">{error}<button className={ui.quiet} type="button" onClick={() => setRevision(value => value + 1)}>重试</button></p> : null}
-    <Link className={ui.quiet} href={`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`}>打开课程材料库</Link>
   </section>;
 }
 
@@ -260,7 +259,6 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
         {studyActions}<CourseLearningView courseId={id} />
         <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>
       </>}
-      <Link className={ui.quiet} href={paths.today}><BookOpen aria-hidden="true" size={14} />返回今日学习</Link>
     </div></div>
   </section>;
 }
