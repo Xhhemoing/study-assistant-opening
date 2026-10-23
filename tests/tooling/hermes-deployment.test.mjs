@@ -274,6 +274,91 @@ test("Study releases retain ordinary rollback to another compatible Study releas
   assert(!existsSync(f.env.MOCK_STOPPED));
 });
 
+test("Study v1 upgrades to text-question/photo-recognition support but cannot roll back to its old readers", t => {
+  const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2" });
+  writeFileSync(join(f.server, ".worker-protocol"), "delivery-leases-study-v1\n");
+  const deployed = f.run();
+  assert.equal(deployed.status, 0, deployed.stderr);
+  const current = readlinkSync(f.current);
+  assert.equal(readFileSync(join(current, ".worker-protocol"), "utf8"), "delivery-leases-study-v2\n");
+  const rejected = f.run("rollback");
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /Refusing rollback.*text-question and photo-recognition support/);
+  assert.equal(readlinkSync(f.current), current);
+  assert.doesNotMatch(rejected.deltaLog, /systemctl stop|systemctl restart|worker --restore/);
+  assert(!existsSync(f.env.MOCK_STOPPED));
+});
+
+for (const scenario of [
+  { worker: "active", failure: "worker" },
+  { worker: "disabled", failure: "health" },
+  { worker: "disabled", failure: "web-start" },
+]) {
+  test(`Study v2 ${scenario.failure} with ${scenario.worker} worker cannot automatically restore Study v1 readers`, t => {
+    const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2", MOCK_WORKER: scenario.worker });
+    writeFileSync(join(f.server, ".worker-protocol"), "delivery-leases-study-v1\n");
+    const failed = f.run("deploy", { MOCK_FAIL: scenario.failure });
+    assert.notEqual(failed.status, 0);
+    assert.notEqual(readlinkSync(f.current), f.server);
+    assert.match(failed.stderr, /Refusing recovery.*text-question and photo-recognition support/);
+    assert(existsSync(join(f.state, "activation-incomplete")));
+    assert(existsSync(f.env.MOCK_STOPPED));
+    assert.doesNotMatch(failed.deltaLog, /worker --restore/);
+    assert.equal(failed.deltaLog.match(/systemctl restart aistudy-web.service/g)?.length, 1);
+    const transition = readdirSync(join(f.state, "releases"))[0];
+    assert(existsSync(join(f.state, "releases", transition, "study-v2-app-start-attempted")));
+    assert.equal(f.run("restart").status, 3);
+  });
+}
+
+for (const failure of ["migrate", "provision"]) {
+  test(`Study v2 ${failure} failure before process startup can restore Study v1`, t => {
+    const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2" });
+    writeFileSync(join(f.server, ".worker-protocol"), "delivery-leases-study-v1\n");
+    const failed = f.run("deploy", { MOCK_FAIL: failure });
+    assert.notEqual(failed.status, 0);
+    assert.equal(readlinkSync(f.current), f.server);
+    assert.match(failed.deltaLog, /worker --restore/);
+    assert.match(failed.deltaLog, /systemctl restart aistudy-worker.service/);
+    assert.match(failed.stderr, /Previous release restored/);
+    assert(!existsSync(join(f.state, "activation-incomplete")));
+    assert(!existsSync(f.env.MOCK_STOPPED));
+  });
+}
+
+test("Study v2 releases retain ordinary rollback and automatic recovery to another Study v2 release", t => {
+  const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2" });
+  assert.equal(f.run().status, 0);
+  const previous = readlinkSync(f.current);
+  assert.equal(f.run().status, 0);
+  const rollback = f.run("rollback");
+  assert.equal(rollback.status, 0, rollback.stderr);
+  assert.equal(readlinkSync(f.current), previous);
+  assert.match(rollback.deltaLog, /systemctl restart aistudy-worker.service/);
+  const failed = f.run("deploy", { MOCK_FAIL: "health", MOCK_HEALTHY_TARGET: previous });
+  assert.notEqual(failed.status, 0);
+  assert.equal(readlinkSync(f.current), previous);
+  assert.match(failed.stderr, /Previous release restored/);
+  assert(!existsSync(join(f.state, "activation-incomplete")));
+  assert(!existsSync(f.env.MOCK_STOPPED));
+});
+
+test("Study v2 rejects deployment of a Study v1 artifact before build or activation", t => {
+  const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2" });
+  assert.equal(f.run().status, 0);
+  const current = readlinkSync(f.current);
+  writeFileSync(join(f.repo, ".worker-protocol"), "delivery-leases-study-v1\n");
+  f.git("add", ".worker-protocol");
+  f.git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "commit", "-m", "older Study artifact");
+  const head = f.git("rev-parse", "HEAD");
+  f.setRuns([f.ciRun({ head_sha: head })]);
+  const rejected = f.run("deploy", { MOCK_RELEASE_SHA: head });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /Refusing deployment.*text-question and photo-recognition support/);
+  assert.equal(readlinkSync(f.current), current);
+  assert.doesNotMatch(rejected.deltaLog, /npm|migrate|systemctl stop|systemctl restart|worker --restore/);
+});
+
 for (const protocol of ["delivery-leases-v1", null]) {
   test(`Study deploy rejects ${protocol ?? "unmarked"} artifacts before building or changing services`, t => {
     const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v1" });
