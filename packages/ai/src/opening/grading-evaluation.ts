@@ -1,6 +1,10 @@
 import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "@aistudy/contracts";
 import { acceptedAiGradingOutcome, checkArithmeticAnswer, corroborateArithmeticGrade } from "@aistudy/domain";
 
+function ratio(numerator: number, denominator: number) {
+  return { numerator, denominator, rate: denominator ? numerator / denominator : null };
+}
+
 /** Offline evaluation only: never imports scores into a learner's history or treats AI labels as truth. */
 export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
   const dataset = gradingEvaluationDatasetSchema.parse(rawDataset), run = gradingEvaluationRunSchema.parse(rawRun);
@@ -41,9 +45,26 @@ export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
     const accepted = judged.filter(row => row.acceptedOutcome !== "unverified");
     const correct = accepted.filter(row => row.acceptedOutcome === row.expected).length;
     const rawBinary = judged.filter(row => row.modelOutcome !== "unverified");
+    const expectedCorrect = reviewed.filter(row => row.expected === "correct");
+    const expectedIncorrect = reviewed.filter(row => row.expected === "incorrect");
+    const unverifiable = reviewed.filter(row => row.expected === "unverified");
+    const gradeable = [...expectedCorrect, ...expectedIncorrect];
+    // Every reviewed case stays in its expected class, including missing/invalid results.
+    const decisionRates = (field: "modelOutcome" | "acceptedOutcome") => ({
+      falseCorrectOnIncorrect: ratio(expectedIncorrect.filter(row => row[field] === "correct").length, expectedIncorrect.length),
+      falseIncorrectOnCorrect: ratio(expectedCorrect.filter(row => row[field] === "incorrect").length, expectedCorrect.length),
+      binaryCoverageOnGradeable: ratio(gradeable.filter(row => row[field] === "correct" || row[field] === "incorrect").length, gradeable.length),
+      abstentionOnGradeable: ratio(gradeable.filter(row => row[field] === "unverified").length, gradeable.length),
+      missingOrInvalidOnGradeable: ratio(gradeable.filter(row => row[field] === null).length, gradeable.length),
+      correctAbstentionOnUnverifiable: ratio(unverifiable.filter(row => row[field] === "unverified").length, unverifiable.length),
+      unsafeBinaryOnUnverifiable: ratio(unverifiable.filter(row => row[field] === "correct" || row[field] === "incorrect").length, unverifiable.length),
+      missingOrInvalidOnUnverifiable: ratio(unverifiable.filter(row => row[field] === null).length, unverifiable.length),
+    });
     return { total: rows.length, verified: reviewed.length,
       humanReviewed: reviewed.filter(row => row.reviewStatus === "human_reviewed").length,
       programVerified: reviewed.filter(row => row.reviewStatus === "program_verified").length, validResults: judged.length,
+      expectedCounts: { correct: expectedCorrect.length, incorrect: expectedIncorrect.length, unverified: unverifiable.length },
+      decisionRates: decisionRates("acceptedOutcome"),
       missingOrInvalidResults: reviewed.length - judged.length, acceptedBinary: accepted.length,
       coverage: reviewed.length ? accepted.length / reviewed.length : null,
       acceptedAccuracy: accepted.length ? correct / accepted.length : null,
@@ -59,6 +80,7 @@ export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
         falseCorrect: rawBinary.filter(row => row.expected === "incorrect" && row.modelOutcome === "correct").length,
         falseIncorrect: rawBinary.filter(row => row.expected === "correct" && row.modelOutcome === "incorrect").length,
         unsafeBinaryOnUnverifiable: rawBinary.filter(row => row.expected === "unverified").length,
+        decisionRates: decisionRates("modelOutcome"),
       } };
   }
   return { protocolVersion: dataset.protocolVersion, datasetId: dataset.datasetId, datasetVersion: dataset.datasetVersion,

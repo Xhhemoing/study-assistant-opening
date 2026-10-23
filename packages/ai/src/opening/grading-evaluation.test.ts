@@ -20,6 +20,10 @@ const run = (results: GradingEvaluationRun["results"]): GradingEvaluationRun => 
 it("never turns assistant draft labels or self-reported confidence into accuracy", () => {
   const report = evaluateGradingRun(dataset([{ ...testCase("a", "correct"), review: { status: "pending" } }]), run([prediction("a", "correct")]));
   expect(report.summary).toMatchObject({ humanReviewed: 0, acceptedAccuracy: null, coverage: null });
+  expect(report.summary.expectedCounts).toEqual({ correct: 0, incorrect: 0, unverified: 0 });
+  for (const metric of Object.values(report.summary.decisionRates)) {
+    expect(metric).toEqual({ numerator: 0, denominator: 0, rate: null });
+  }
   expect(report.calibrated).toBe(false);
 });
 
@@ -31,6 +35,62 @@ it("keeps missing and malformed results in coverage and separates wrong grades f
   ]));
   expect(report.summary).toMatchObject({ humanReviewed: 6, validResults: 4, missingOrInvalidResults: 2, acceptedBinary: 3,
     coverage: 0.5, acceptedAccuracy: 0, falseCorrect: 1, falseIncorrect: 1, unsafeBinaryOnUnverifiable: 1, abstentions: 1 });
+  expect(report.summary.decisionRates).toMatchObject({
+    falseCorrectOnIncorrect: { numerator: 1, denominator: 1, rate: 1 },
+    falseIncorrectOnCorrect: { numerator: 1, denominator: 4, rate: 0.25 },
+    binaryCoverageOnGradeable: { numerator: 2, denominator: 5, rate: 0.4 },
+    abstentionOnGradeable: { numerator: 1, denominator: 5, rate: 0.2 },
+    missingOrInvalidOnGradeable: { numerator: 2, denominator: 5, rate: 0.4 },
+  });
+});
+
+it("reports class-specific denominators when correct answers dominate the dataset", () => {
+  const correctCases = Array.from({ length: 9 }, (_, index) => testCase(`correct-${index}`, "correct"));
+  const unknownCases = ["unknown-0", "unknown-1"].map(id => ({ ...testCase(id, "unverified"), group: "question_mismatch" as const }));
+  const report = evaluateGradingRun(dataset([...correctCases, testCase("wrong", "incorrect"), ...unknownCases]), run([
+    ...correctCases.map((test, index) => prediction(test.id, index === 0 ? "incorrect" : index === 1 ? "correct" : "unverified")),
+    prediction("wrong", "correct"), prediction("unknown-0", "unverified"), prediction("unknown-1", "correct"),
+  ]));
+  expect(report.summary.expectedCounts).toEqual({ correct: 9, incorrect: 1, unverified: 2 });
+  expect(report.summary.decisionRates).toMatchObject({
+    falseCorrectOnIncorrect: { numerator: 1, denominator: 1, rate: 1 },
+    falseIncorrectOnCorrect: { numerator: 1, denominator: 9, rate: 1 / 9 },
+    binaryCoverageOnGradeable: { numerator: 3, denominator: 10, rate: 0.3 },
+    abstentionOnGradeable: { numerator: 7, denominator: 10, rate: 0.7 },
+    correctAbstentionOnUnverifiable: { numerator: 1, denominator: 2, rate: 0.5 },
+    unsafeBinaryOnUnverifiable: { numerator: 1, denominator: 2, rate: 0.5 },
+  });
+  expect(report.groups.question_mismatch?.decisionRates.binaryCoverageOnGradeable)
+    .toEqual({ numerator: 0, denominator: 0, rate: null });
+  expect(report.groups.question_mismatch?.decisionRates.correctAbstentionOnUnverifiable)
+    .toEqual({ numerator: 1, denominator: 2, rate: 0.5 });
+  expect(report.byReviewSource.humanReviewed.decisionRates).toEqual(report.summary.decisionRates);
+  expect(report.byReviewSource.programVerified.decisionRates.falseCorrectOnIncorrect)
+    .toEqual({ numerator: 0, denominator: 0, rate: null });
+});
+
+it("shows low effective coverage even when abstaining makes accepted accuracy perfect", () => {
+  const cases = Array.from({ length: 20 }, (_, index) => testCase(`correct-${index}`, "correct"));
+  const report = evaluateGradingRun(dataset(cases), run(cases.map((test, index) => prediction(test.id, index ? "unverified" : "correct"))));
+  expect(report.summary.acceptedAccuracy).toBe(1);
+  expect(report.summary.decisionRates.binaryCoverageOnGradeable).toEqual({ numerator: 1, denominator: 20, rate: 0.05 });
+  expect(report.summary.decisionRates.abstentionOnGradeable).toEqual({ numerator: 19, denominator: 20, rate: 0.95 });
+  expect(report.summary.decisionRates.correctAbstentionOnUnverifiable).toEqual({ numerator: 0, denominator: 0, rate: null });
+});
+
+it("does not count missing results as abstentions or successful handling", () => {
+  const report = evaluateGradingRun(dataset([testCase("right", "correct"), testCase("wrong", "incorrect"), testCase("unknown", "unverified")]), run([]));
+  expect(report.summary).toMatchObject({ validResults: 0, missingOrInvalidResults: 3, acceptedAccuracy: null, coverage: 0 });
+  expect(report.summary.decisionRates).toMatchObject({
+    falseCorrectOnIncorrect: { numerator: 0, denominator: 1, rate: 0 },
+    falseIncorrectOnCorrect: { numerator: 0, denominator: 1, rate: 0 },
+    binaryCoverageOnGradeable: { numerator: 0, denominator: 2, rate: 0 },
+    abstentionOnGradeable: { numerator: 0, denominator: 2, rate: 0 },
+    missingOrInvalidOnGradeable: { numerator: 2, denominator: 2, rate: 1 },
+    correctAbstentionOnUnverifiable: { numerator: 0, denominator: 1, rate: 0 },
+    missingOrInvalidOnUnverifiable: { numerator: 1, denominator: 1, rate: 1 },
+  });
+  expect(report.summary.rawModel.decisionRates).toEqual(report.summary.decisionRates);
 });
 
 it("refuses results for a different input, version, duplicate or unknown case", () => {
@@ -55,6 +115,8 @@ it("scores the same arithmetic abstention policy used by persistence, while keep
   expect(report.cases[0]).toMatchObject({ modelOutcome: "incorrect", acceptedOutcome: "unverified" });
   expect(report.summary).toMatchObject({ falseIncorrect: 0, abstentions: 1, acceptedAccuracy: null });
   expect(report.summary.rawModel).toMatchObject({ accuracy: 0, falseIncorrect: 1 });
+  expect(report.summary.decisionRates.abstentionOnGradeable).toEqual({ numerator: 1, denominator: 1, rate: 1 });
+  expect(report.summary.rawModel.decisionRates.falseIncorrectOnCorrect).toEqual({ numerator: 1, denominator: 1, rate: 1 });
 });
 
 it("verifies objective labels at evaluation time without calling them human reviews", () => {

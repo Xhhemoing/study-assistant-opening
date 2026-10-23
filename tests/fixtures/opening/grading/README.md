@@ -16,4 +16,19 @@ node --import tsx scripts/study-grading-eval.ts \
 
 For a real run, capture each case's exact input, case version and raw grading JSON in the `gradingEvaluationRunSchema` format, with an explicit model label, completion time and `real_provider` provenance. Never relabel the synthetic file as a provider run. Versions and inputs must match the dataset; missing, malformed or mismatched results remain in the coverage denominator. Results preserve raw outcomes and accepted outcomes separately, show false correct/incorrect and unsafe binary judgments on unjudgeable cases, and separate human-reviewed from program-verified metrics. Confidence is an uncalibrated model self-report and is never treated as accuracy.
 
+Reports retain the existing `coverage`, `acceptedAccuracy` and error counts. `acceptedAccuracy` describes only accepted binary decisions; it can be perfect when almost every answer is left ungraded. Read it together with the new `expectedCounts` and `decisionRates`, available in the summary, error-group and review-source breakdowns. Each rate includes its `numerator`, `denominator` and `rate`; zero-denominator rates are `null`, not zero.
+
+| `decisionRates` field | Numerator | Denominator |
+| --- | --- | --- |
+| `falseCorrectOnIncorrect` | Incorrect student answers judged correct | All reviewed incorrect answers |
+| `falseIncorrectOnCorrect` | Correct student answers judged incorrect | All reviewed correct answers |
+| `binaryCoverageOnGradeable` | Correct/incorrect decisions on gradeable answers | All reviewed correct or incorrect answers |
+| `abstentionOnGradeable` | Explicit `unverified` decisions on gradeable answers | All reviewed correct or incorrect answers |
+| `missingOrInvalidOnGradeable` | Missing, malformed or mismatched results on gradeable answers | All reviewed correct or incorrect answers |
+| `correctAbstentionOnUnverifiable` | Explicit `unverified` decisions where no reliable judgment is possible | All reviewed answers labelled `unverified` |
+| `unsafeBinaryOnUnverifiable` | Correct/incorrect decisions where no reliable judgment is possible | All reviewed answers labelled `unverified` |
+| `missingOrInvalidOnUnverifiable` | Missing, malformed or mismatched results where no reliable judgment is possible | All reviewed answers labelled `unverified` |
+
+The corresponding `rawModel.decisionRates` uses the same class denominators before the acceptance policy and arithmetic corroboration. Pending candidates never enter these denominators. Missing/invalid results are a separate category, not abstentions or successful handling. Consequently, the binary coverage, abstention and missing/invalid rates partition gradeable cases; the correct abstention, unsafe binary and missing/invalid rates partition unverifiable cases. Error incidence rates include missing results in their class denominators and must be interpreted alongside these coverage and failure rates, not as evidence that an unprocessed answer was correctly graded.
+
 Use `--output NEW_FILE` to create a private report; the script refuses to overwrite an existing file. No reports or scores are imported into learning history. Human semantic labels, real provider runs, photo verification and delayed learning outcomes remain to be collected.
