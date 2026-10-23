@@ -17,7 +17,7 @@ export const AI_READINESS_CHECKLIST_SOFT_KEYS = new Set([
 export const BUDGET_CONFIRM_HREF = "/opening/settings/advanced#daily-budget";
 
 /** Lead copy when hard-blocked by budget / no available model (cap/confirm). */
-export const BUDGET_CONFIRM_LEAD = "开启 AI 辅导前，先确认每日用量上限";
+export const BUDGET_CONFIRM_LEAD = "开启 AI 辅导前，先确认每日额度";
 
 /** Primary CTA label for budget confirm. */
 export const BUDGET_CONFIRM_CTA = "去开启";
