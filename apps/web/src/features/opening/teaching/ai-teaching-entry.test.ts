@@ -23,7 +23,7 @@ import { StartPage } from "../start/start-page";
 import OpeningTodayPage from "../../../app/(opening)/opening/today/page";
 import { loadTodayPage } from "../planning/load-today-page";
 
-vi.mock("../planning/load-today-page", () => ({ loadTodayPage: vi.fn(async () => ({ state: { kind: "empty" }, timeZone: "Etc/UTC" })) }));
+vi.mock("../planning/load-today-page", () => ({ loadTodayPage: vi.fn(async () => ({ state: { kind: "empty", courses: { status: "ready", items: [] } }, timeZone: "Etc/UTC" })) }));
 vi.mock("../start/start-page", () => ({ StartPage: () => null }));
 vi.mock("../cards/cards-client", () => ({ createOpeningCardsClient: () => ({ listDue: async () => [] }) }));
 vi.mock("../planning/today-view", async importOriginal => ({
@@ -83,7 +83,7 @@ describe("AI 主讲 entry path", () => {
     const page = await OpeningTodayPage({ searchParams: Promise.resolve({}) });
     expect(loadTodayPage).toHaveBeenCalledOnce();
     expect(page.type).toBe(StartPage);
-    expect(page.props).toEqual({ state: { kind: "empty" }, timeZone: "Etc/UTC" });
+    expect(page.props).toEqual({ state: { kind: "empty", courses: { status: "ready", items: [] } }, timeZone: "Etc/UTC" });
   });
 
   it.each([true, false])("Today keeps unscoped activity continuation honest when the trial gate is %s", async enabled => {

@@ -153,7 +153,7 @@ it("locks reload during variant completion and ignores its late result after a r
     listDue: vi.fn().mockResolvedValue([question]) }, onGraded })));
   const save = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "保存变式复习")!;
   await act(async () => save.click());
-  const refresh = Array.from(container.querySelectorAll("button")).find(button => button.textContent?.includes("重新读取"))!;
+  const refresh = container.querySelector<HTMLButtonElement>('button[aria-label="重新读取"]')!;
   expect(refresh.disabled).toBe(true);
   expect(completeVariant).toHaveBeenCalledTimes(1);
   await render({ ...client, listDue: vi.fn().mockResolvedValue([item("replacement")]) });
