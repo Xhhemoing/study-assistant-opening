@@ -150,7 +150,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   }
 
   async function saveDocument() {
-    if (!document || !draft || saveState === "saving" || saveInFlight.current || conflictRef.current) return;
+    if (!document || !draft || saveState === "saved" || saveState === "saving" || saveInFlight.current || conflictRef.current) return;
     saveInFlight.current = true;
     const requestVersion = editVersionRef.current;
     setSaveState("saving");
