@@ -33,8 +33,10 @@ export function AssistantDrawer() {
     if (!href && active && !studySurface) { setOpen(true); return; }
     const next: AssistantEntry & { learningAttempt?: LearningAttempt } = assistantEntry(href ?? (bound ? studyConversationHref(bound.context) : "/opening/assistant"), pathname);
     const matching = bound && sameStudyItem(next.context, bound.context);
-    if (studySurface && (!matching || bound?.blockedReason || (bound?.isQuestion && !bound.learningAttempt))) {
-      next.error = bound?.blockedReason || "先保存自己的原答案，再围绕这道题提问。帮助会关联本次作答。";
+    // 只有当前确实是一道尚未开始的题（或题目明确不可提问）才拦下；讲解、示范、页面加载中都按课程背景直接提问。
+    const questionPending = Boolean(bound && (bound.blockedReason || (bound.isQuestion && !bound.learningAttempt)));
+    if (studySurface && (questionPending || (bound?.isQuestion && !matching))) {
+      next.error = bound?.blockedReason || "先开始这道题，再围绕它提问。帮助会关联本次作答。";
       next.key += `:${next.error}`;
     } else if (matching && bound.learningAttempt) next.learningAttempt = bound.learningAttempt;
     setEntries(current => current.some(entry => entry.key === next.key) ? current : [...current, next]);

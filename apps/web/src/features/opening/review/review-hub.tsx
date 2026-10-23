@@ -79,7 +79,7 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
       {tab !== "cards" && tab !== "session" && tab !== "weak" ? <section className="space-y-4" aria-labelledby="review-tasks-heading">
         <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="review-tasks-heading" className="font-semibold">{tab === "retests" ? "待复测" : tab === "reinforcement" ? "补强练习" : "复测与补强"}</h2><button type="button" className={ui.quiet} onClick={() => setRevision(value => value + 1)} disabled={!sources}>刷新队列</button></div>
         {!sources ? <LoadingRows label="正在读取复习任务…" /> : sources.tasks.kind === "error" ? <LoadError message={`复习任务读取失败：${sources.tasks.message}`} onRetry={() => setRevision(value => value + 1)} /> : <>
-          {ready.length ? <ReviewTaskList items={ready} /> : <EmptyState title="当前没有可开始的任务" description={upcoming.length ? "接下来的任务到时间后出现在这里。" : undefined} />}
+          {ready.length ? <ReviewTaskList items={ready} /> : tab === "all" ? <p className="text-meta text-text-2">{upcoming.length ? "复测与补强到时间后出现在这里。" : "暂时没有复测或补强。"}</p> : <EmptyState title="当前没有可开始的任务" description={upcoming.length ? "接下来的任务到时间后出现在这里。" : undefined} />}
           {upcoming.length ? <section className="space-y-3"><h3 className="text-sm font-semibold">接下来 · {upcoming.length}</h3><ReviewTaskList items={upcoming} upcoming /></section> : null}
           {unavailable.length ? <section className="space-y-3"><h3 className="text-sm font-semibold">暂不可开始</h3><ReviewTaskList items={unavailable} /><Link className={ui.quiet} href="/opening/today">到今天查看任务</Link></section> : null}
         </>}
