@@ -291,16 +291,16 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
           let assist: TeachingCommandSuccess["assist"];
           let nextSpec = spec;
 
-          if (request.kind === "why") {
+          if (request.kind === "why" || request.kind === "confused") {
             const ref = blockOrder.find((b) => b.blockId === request.blockId);
-            assist = buildWhyAssist({
+            assist = request.kind === "confused" ? { kind: "confused", summary: "已记下这里需要讲清楚。你可以查看提示，或选中具体一句继续提问。" } : buildWhyAssist({
               blockId: request.blockId!,
               prompt: request.prompt,
               blockType: ref?.blockType,
             });
             const entry: TeachingCommandLogEntry = {
               clientKey: request.clientKey,
-              kind: "why",
+              kind: request.kind,
               blockId: request.blockId,
               at,
               result: "ok",
@@ -312,6 +312,12 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             nextCheckpoint = mergeCheckpointPreservingPrefs(nextCheckpoint, {
               commandLog: appendCommandLog(commandLog, entry),
             });
+            if (request.kind === "confused") {
+              // Keep the per-session count after the bounded command log rotates.
+              const count = checkpoint.confusionCount;
+              nextCheckpoint.confusionCount = (typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0) + 1;
+              nextCheckpoint.lastConfusion = { at, blockId: request.blockId, contentVersion };
+            }
           } else if (isTeachingRewriteKind(request.kind)) {
             const pinnedRev = Number(spec.revision_number);
             const documentId = String(spec.document_id);

@@ -1,19 +1,20 @@
 import type { Sql, TransactionSql } from "postgres";
-import { teachingPartialHintsSchema, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
+import { teachingHintResponseSchema, teachingPartialHintsSchema, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { generateOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
+import { generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
 
 type Question = {
   attemptId: string; activityId: string; blockId: string; contentVersion: number;
   courseId: string; sessionId: string; itemVersionId: string | null;
   answer: string | null; referenceSourceId: string | null; hints: unknown;
+  submitted: boolean;
 };
 
 /** Resolve only the bound question and its adjacent hidden answer at the pinned revision.
  * Workspace lock precedes activity/attempt locks, matching answer/exposure writes. */
 async function readQuestion(tx: TransactionSql, scope: Scope,
-  input: { attemptId: string; activityId?: string; blockId?: string }, requireSubmitted: boolean): Promise<Question> {
-  await lockWorkspaceLearningHistory(tx, scope);
+  input: { attemptId: string; activityId?: string; blockId?: string }, requireSubmitted: boolean, readOnly = false): Promise<Question> {
+  if (!readOnly) await lockWorkspaceLearningHistory(tx, scope);
   await lockLearningOwner(tx, scope);
   const [attempt] = await tx`SELECT * FROM opening_learning_attempts WHERE id=${input.attemptId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -29,7 +30,7 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
     WHERE a.id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} FOR SHARE OF a`;
   if (!activity) throw learningError("NOT_FOUND", "teaching activity not found");
   if (Number(activity.content_version) !== contentVersion) throw learningError("CONFLICT", "teaching content changed; the attempt belongs to an earlier version");
-  const admitted = await admitLearningSources(tx, scope, activity.source_ids as string[]);
+  const admitted = await admitLearningSources(tx, scope, activity.source_ids as string[], { recordVersions: !readOnly });
   const currentVersions = new Map(admitted.map(source => [String(source.id), Number(source.version)]));
   const [spec] = await tx`SELECT * FROM opening_teaching_activity_specs WHERE activity_id=${activityId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -66,7 +67,17 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
     && String(chunk.source_id) === ref.sourceId && Number(chunk.source_version) === Number(ref.version)));
   return { attemptId: input.attemptId, activityId, blockId, contentVersion, courseId: String(attempt.course_id),
     sessionId: String(attempt.session_id), itemVersionId: attempt.item_version_id == null ? null : String(attempt.item_version_id),
-    answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null, hints: body?.hints };
+    answer: answer?.slice(0, 20_000) ?? null, referenceSourceId: reference?.sourceId ?? null, hints: body?.hints, submitted: Boolean(attempt.submitted_at) };
+}
+
+function hintText(question: Question, level: TeachingHintLevel): string {
+  if (level === 4) {
+    if (!question.answer) throw learningError("CONFLICT", "此题没有可读取的完整参考答案；原作答已保留，仍可继续学习。");
+    return question.answer;
+  }
+  const hints = teachingPartialHintsSchema.safeParse(question.hints);
+  if (!hints.success) throw learningError("CONFLICT", "此版教学内容没有分级提示，仍可提交作答；需要提示时请重新生成教学内容。");
+  return hints.data[({ 1: "direction", 2: "concept", 3: "firstStep" } as const)[level]];
 }
 
 async function release(tx: TransactionSql, scope: Scope, question: Question, level: TeachingHintLevel) {
@@ -91,17 +102,33 @@ export async function readOpeningTeachingAnswerKey(tx: TransactionSql, scope: Sc
 }
 
 export function createOpeningTeachingHintRepository(sql: Sql) {
-  return { read: (scope: Scope, input: { attemptId: string; level: TeachingHintLevel }): Promise<TeachingHintResponse> => sql.begin(async tx => {
+  return {
+    readReleased: (scope: Scope, input: { attemptId: string }): Promise<TeachingHintResponse[]> => sql.begin(async tx => {
+      const question = await readQuestion(tx, scope, input, false, true);
+      const levels = [1, 2, 3, 4] as const;
+      const rows = await tx`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND attempt_id=${input.attemptId} AND released_at IS NOT NULL
+        AND release_key=ANY(${levels.map(level => `teaching-hint-v1:${input.attemptId}:${level}`)}::text[]) FOR SHARE`;
+      return levels.flatMap(level => {
+        if (level === 4 && !question.submitted) return [];
+        const row = rows.find(row => row.release_key === `teaching-hint-v1:${input.attemptId}:${level}`);
+        if (!row) return [];
+        const receipt = mapOpeningStudyExposure(row), anchor = receipt.contextAnchor, full = level === 4;
+        if (!receipt.releasedAt || anchor.attemptId !== question.attemptId || anchor.courseId !== question.courseId
+          || anchor.itemVersionId !== question.itemVersionId || anchor.activityId !== question.activityId
+          || anchor.blockId !== question.blockId || anchor.contentVersion !== question.contentVersion
+          || anchor.purpose !== (full ? "history_solution" : "learning_help")
+          || receipt.origin !== (full ? "history_solution" : "assistant") || receipt.supportDomain === "language"
+          || row.kind !== (full ? "solution" : "hint") || row.level !== (full ? "revealed" : "hinted")) {
+          throw learningError("CONFLICT", "已释放提示的题目回执已改变，请重新读取原作答。");
+        }
+        return [teachingHintResponseSchema.parse({ attemptId: input.attemptId, level, text: hintText(question, level), exposureReceipt: receipt,
+          referenceSourceId: full ? question.referenceSourceId : null })];
+      });
+    }) as Promise<TeachingHintResponse[]>,
+    read: (scope: Scope, input: { attemptId: string; level: TeachingHintLevel }): Promise<TeachingHintResponse> => sql.begin(async tx => {
     const question = await readQuestion(tx, scope, input, input.level === 4);
-    let text: string;
-    if (input.level === 4) {
-      if (!question.answer) throw learningError("CONFLICT", "此题没有可读取的完整参考答案；原作答已保留，仍可继续学习。");
-      text = question.answer;
-    } else {
-      const hints = teachingPartialHintsSchema.safeParse(question.hints);
-      if (!hints.success) throw learningError("CONFLICT", "此版教学内容没有分级提示，仍可提交作答；需要提示时请重新生成教学内容。");
-      text = hints.data[({ 1: "direction", 2: "concept", 3: "firstStep" } as const)[input.level]];
-    }
+    const text = hintText(question, input.level);
     // No release row is written until a real, validated response is available.
     const exposureReceipt = await release(tx, scope, question, input.level);
     return { attemptId: input.attemptId, level: input.level, text, exposureReceipt,

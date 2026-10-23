@@ -1,6 +1,7 @@
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => true }));
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 it("offers real start controls, labels the built-in source honestly and blocks an empty material selection", () => {

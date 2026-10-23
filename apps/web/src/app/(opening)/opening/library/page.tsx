@@ -5,7 +5,7 @@ import { parseSourceViewerSearchParams } from "../../../../features/opening/inbo
 export default async function OpeningLibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; courseId?: string; source?: string; version?: string; page?: string; startMs?: string; slide?: string }>;
+  searchParams: Promise<{ tab?: string; courseId?: string; source?: string; version?: string; page?: string; startMs?: string; slide?: string; conversation?: string }>;
 }) {
   const params = await searchParams;
   const { tab, courseId } = params;

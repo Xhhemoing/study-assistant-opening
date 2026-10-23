@@ -31,6 +31,7 @@ export * from "./repositories/opening-sources";
 export { reserveOpeningSourceQuota } from "./repositories/opening-source-quota";
 export { readOpeningMaterialOrganization } from "./repositories/opening-material-organization";
 export { createOpeningCourseExamRepository, type CourseExamContext } from "./repositories/opening-course-exam";
+export { createOpeningCardVariantRepository } from "./repositories/opening-card-variants";
 export {
   listReadySourceIdsForCourse,
   createOpeningCourseReadySourcesRepository,
@@ -280,3 +281,6 @@ export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
 export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";
 
 export { createOpeningTutorLearnerContextRepository } from "./repositories/opening-tutor-learner-context";
+
+export { gradeCardVariant } from "./repositories/opening-card-variant-grade";
+export { createOpeningPhotoRecognitionRepository } from "./repositories/opening-photo-recognition";

@@ -36,10 +36,6 @@ export function assistantRedirect(query: Record<string, string | string[] | unde
   return `/opening/today?${params}`;
 }
 
-export function isAssistantShortcut(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "isComposing" | "defaultPrevented">, editing: boolean): boolean {
-  return !editing && !event.isComposing && !event.defaultPrevented && !event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j";
-}
-
 export const ASSISTANT_OPEN_EVENT = "aistudy:open-assistant";
 export function openAssistantDrawer(href = "/opening/assistant"): void {
   window.dispatchEvent(new CustomEvent(ASSISTANT_OPEN_EVENT, { detail: href }));

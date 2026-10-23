@@ -1,3 +1,4 @@
+import { validConversationId } from "../assistant/conversation-links";
 import { NativePdfPreview } from "./native-pdf-preview";
 import type { SourceRecord } from "@aistudy/contracts";
 import { z } from "zod";
@@ -23,6 +24,7 @@ export type SourceViewerLocators = {
 };
 
 export type SourceViewerTarget = {
+  conversationId?: string;
   sourceId: string;
   version: number;
   page?: number;
@@ -65,6 +67,7 @@ export function parseSourceViewerSearchParams(input: {
   page?: string;
   startMs?: string;
   slide?: string;
+  conversation?: string;
 }): SourceViewerTarget | null {
   const parsed = z.object({
     source: z.string().uuid(),
@@ -80,7 +83,9 @@ export function parseSourceViewerSearchParams(input: {
     ...(input.slide?.trim() ? { slide: input.slide.trim() } : {}),
   });
   if (!parsed.success) return null;
+  const conversationId = input.conversation && validConversationId(input.conversation) ? input.conversation : undefined;
   return {
+    ...(conversationId ? { conversationId } : {}),
     sourceId: parsed.data.source,
     version: parsed.data.version,
     ...(parsed.data.page != null ? { page: parsed.data.page } : {}),
@@ -144,7 +149,9 @@ function SourcePreviewPane({
   name,
   fillHeight,
   toolsOpen,
+  sourceId, version, onExplain,
 }: {
+  sourceId: string; version: number; onExplain?: (page: number) => void;
   mime: string;
   previewHref: string;
   name: string;
@@ -153,14 +160,14 @@ function SourcePreviewPane({
 }) {
   const kind = sourcePreviewKind(mime);
   if (kind === "pdf") {
-    return <NativePdfPreview href={previewHref} name={name} fillHeight={fillHeight} toolsOpen={toolsOpen} />;
+    return <NativePdfPreview href={previewHref} name={name} fillHeight={fillHeight} toolsOpen={toolsOpen} sourceId={sourceId} version={version} onExplain={onExplain} />;
   }
   if (kind === "image") {
     return (
       <img
         src={previewHref}
         alt={`${name} 预览`}
-        className="max-h-[calc(100dvh-15rem)] w-full rounded-md border border-line object-contain bg-white"
+        className="max-h-[calc(100dvh-15rem)] w-full rounded-md border border-line object-contain bg-reader-mat [color-scheme:light]"
       />
     );
   }
@@ -179,6 +186,7 @@ export function SourceViewer({
   hideHeading = false,
   fillHeight = false,
   toolsOpen = false,
+  onExplain,
 }: {
   record: Pick<SourceRecord, "id" | "name" | "uploadState" | "parseState" | "version"> &
     Partial<Pick<SourceRecord, "mime">>;
@@ -191,6 +199,7 @@ export function SourceViewer({
   hideHeading?: boolean;
   fillHeight?: boolean;
   toolsOpen?: boolean;
+  onExplain?: (page: number) => void;
 }) {
   const currentVersion = Math.max(latestRecord.version, download.currentVersion);
   const versionMismatch = download.versionMismatch || currentVersion !== requestedVersion;
@@ -206,17 +215,16 @@ export function SourceViewer({
   const previewable = sourcePreviewKind(mime) != null;
   const previewHref = sourcePreviewHref(record.id, download.version, page);
   return (
-    <section className={fillHeight ? "flex min-h-0 flex-1 flex-col gap-2 bg-surface" : "space-y-3 bg-surface"} aria-label="材料原件">
+    <section className={fillHeight ? "flex h-full min-h-0 flex-1 flex-col gap-2 bg-surface" : "space-y-3 bg-surface"} aria-label="材料原件">
       {!hideHeading ? <h2 className="text-base font-semibold text-text">{latestRecord.name}</h2> : null}
       <div className="shrink-0 text-xs text-text-2">
         <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
           <p className={versionMismatch ? "text-warn" : ""}>{copy}</p>
           {!versionMismatch && latestRecord.parseState !== "ready" ? <span role="status">{sourceStatusLabel(latestRecord)}</span> : null}
           <details open={!previewable} className="min-w-0 max-w-full">
-            <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-accent focus-visible:ring-2 focus-visible:ring-emerald-700">原件与处理信息</summary>
+            <summary className="min-h-8 cursor-pointer rounded py-1.5 text-xs text-accent focus-visible:ring-2 focus-visible:ring-focus-ring">原件与处理信息</summary>
             <div className="max-h-36 space-y-2 overflow-y-auto overscroll-contain py-2">
               <p>{!versionMismatch ? sourceStatusLabel(latestRecord) : "这里保留引用时的内容；资料库中可查看更新后的材料。"}</p>
-              {sourcePreviewKind(mime) === "pdf" ? <p className="text-warn">内嵌 PDF 无法同步确认当前显示页。解释操作只针对明确指定的页码。</p> : null}
               <div className="flex flex-wrap gap-2">
                 {previewable ? (
                   <a className={ui.secondary} href={previewHref} target="_blank" rel="noreferrer">
@@ -242,7 +250,7 @@ export function SourceViewer({
       </div>
       {previewable ? (
         <div className={fillHeight ? "flex min-h-0 flex-1 flex-col" : "space-y-2"} aria-label="原件预览">
-          <SourcePreviewPane mime={mime} previewHref={previewHref} name={latestRecord.name} fillHeight={fillHeight} toolsOpen={toolsOpen} />
+          <SourcePreviewPane sourceId={record.id} version={requestedVersion} onExplain={onExplain} mime={mime} previewHref={previewHref} name={latestRecord.name} fillHeight={fillHeight} toolsOpen={toolsOpen} />
         </div>
       ) : null}
     </section>

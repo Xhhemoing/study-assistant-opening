@@ -138,3 +138,15 @@ describe("MessageList prose switch", () => {
     expect(user).not.toMatch(/<li[^>]*>第一/);
   });
 });
+
+it("carries conversation identity only on server-approved internal object links and keeps external links external", () => {
+  const href = "/opening/courses/11111111-1111-4111-8111-111111111111/study";
+  const html = renderToStaticMarkup(createElement(LearningProse, {
+    text: `[打开任务](${href}) [未授权对象](/opening/courses/22222222-2222-4222-8222-222222222222/study) [外部](https://example.com)`,
+    queryEvidenceLinks: [{ href, label: "已授权任务" }],
+    objectHref: value => `${value}?conversation=33333333-3333-4333-8333-333333333333`,
+  }));
+  expect(html).toContain(`href="${href}?conversation=33333333-3333-4333-8333-333333333333"`);
+  expect(html).not.toContain('href="/opening/courses/22222222-2222-4222-8222-222222222222/study');
+  expect(html).toContain('href="https://example.com" target="_blank"');
+});

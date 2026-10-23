@@ -1,6 +1,9 @@
-import { createElement } from "react";
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TodayResumeBody } from "./today-resume-view";
 import { TeachingActivityEmpty, TeachingActivityPanel } from "../teaching/activity-panel";
 import type { ActivitySpecClientInit, TeachingActivity } from "@aistudy/contracts";
@@ -163,7 +166,7 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     expect(isTeachingWorkspaceContentUsable(activity, readyInit)).toBe(false);
   });
 
-  it("workspace does not add a competing primary CTA (C5)", () => {
+  it("workspace keeps settings behind the outline and a closed disclosure (C5)", async () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
         activity: { ...activity, generateStatus: "ready" },
@@ -173,10 +176,38 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     expect(html).toContain("data-teaching-workspace=\"true\"");
     expect(html).not.toContain("data-today-primary-cta");
     expect(html).toContain("主讲正文");
-    // Free exploration is now inside the on-demand settings panel. The initial
-    // lesson keeps that panel closed and does not compete with Today's entry.
-    expect(html).toMatch(/<button\b[^>]*aria-expanded="false"[^>]*>学习设置<\/button>/);
+    // The initial lesson does not mount the outline's settings content.
+    expect(html).toMatch(/<button\b[^>]*aria-expanded="false"[^>]*>目录<\/button>/);
+    expect(html).not.toContain("学习设置");
     expect(html).not.toMatch(/<a\b[^>]*href="\/opening\/assistant/);
+
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const show = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "show");
+    const close = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+    Object.defineProperty(HTMLDialogElement.prototype, "show", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ error: { message: "Preferences unavailable in this fixture" } }, { status: 503 })));
+    try {
+      await act(async () => root.render(createElement(TeachingWorkspace, { activity: { ...activity, generateStatus: "ready" }, clientInit: readyInit, sourceNameById: {} })));
+      const outline = Array.from(host.querySelectorAll("button")).find(button => button.textContent === "目录" && !button.hasAttribute("role"))!;
+      await act(async () => outline.click());
+      const summary = Array.from(host.querySelectorAll("summary")).find(item => item.textContent === "学习设置")!;
+      expect(summary).toBeDefined();
+      expect(summary.parentElement?.tagName).toBe("DETAILS");
+      expect((summary.parentElement as HTMLDetailsElement).open).toBe(false);
+      expect(summary.parentElement?.querySelector('a[href="/opening/assistant"]')?.textContent).toBe("自由探索");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      for (const [method, descriptor] of [["show", show], ["close", close]] as const) {
+        if (descriptor) Object.defineProperty(HTMLDialogElement.prototype, method, descriptor);
+        else Reflect.deleteProperty(HTMLDialogElement.prototype, method);
+      }
+      vi.unstubAllGlobals();
+    }
   });
 });
 

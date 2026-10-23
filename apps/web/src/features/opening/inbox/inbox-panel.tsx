@@ -11,6 +11,7 @@ import { type SourceViewerTarget } from "./source-viewer";
 import { SourceReader } from "./source-reader";
 import { captureReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { createUploadClient } from "./upload-client";
+import { UploadUserError, uploadErrorMessage } from "./upload-error";
 import { canDeleteSourceShortcut, sourceStatusLabel } from "./upload-state";
 import { createUploadQueue, type UploadQueueItem } from "./upload-queue";
 import { shouldRefreshSources, startSourceRefresh } from "./source-refresh";
@@ -75,10 +76,11 @@ export function InboxPanel({
   initialOpen?: SourceViewerTarget | null;
 }) {
   const consumedFileBatch = useRef<LibraryFileBatch | null>(null);
+  const pendingPublication = useRef(new Map<string, UploadQueueItem>());
   const [managedId, setManagedId] = useState<string | null>(null);
   const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [view, setView] = useState<{ record: SourceRecord; requestedVersion: number; page?: number; startMs?: number; slideLabel?: string; returnPoint?: ReaderReturnPoint } | null>(null);
+  const [view, setView] = useState<{ record: SourceRecord; requestedVersion: number; page?: number; startMs?: number; slideLabel?: string; conversationId?: string; returnPoint?: ReaderReturnPoint } | null>(null);
   const [queueItems, setQueueItems] = useState<UploadQueueItem[]>([]);
   const [refreshError, setRefreshError] = useState(false);
   const [openedInitialKey, setOpenedInitialKey] = useState<string | null>(null);
@@ -94,7 +96,7 @@ export function InboxPanel({
   const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
   useEffect(() => {
     if (!initialOpen) return;
-    const key = `${initialOpen.sourceId}:${initialOpen.version}:${initialOpen.page ?? ""}:${initialOpen.startMs ?? ""}:${initialOpen.slideLabel ?? ""}`;
+    const key = `${initialOpen.sourceId}:${initialOpen.version}:${initialOpen.page ?? ""}:${initialOpen.startMs ?? ""}:${initialOpen.slideLabel ?? ""}:${initialOpen.conversationId ?? ""}`;
     if (openedInitialKey === key) return;
     const record = sources.find((item) => item.id === initialOpen.sourceId);
     if (!record || record.uploadState !== "uploaded" || initialOpen.version > record.version) {
@@ -108,6 +110,7 @@ export function InboxPanel({
       ...(initialOpen.page != null ? { page: initialOpen.page } : {}),
       ...(initialOpen.startMs != null ? { startMs: initialOpen.startMs } : {}),
       ...(initialOpen.slideLabel ? { slideLabel: initialOpen.slideLabel } : {}),
+      ...(initialOpen.conversationId ? { conversationId: initialOpen.conversationId } : {}),
     });
     setOpenedInitialKey(key);
   }, [initialOpen, sources, openedInitialKey]);
@@ -130,7 +133,7 @@ export function InboxPanel({
 
   const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
     onBytes,
-    ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket } : {}),
+    ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
   const uploading = queueItems.some((item) => item.state === "idle" || item.state === "uploading");
 
@@ -140,37 +143,39 @@ export function InboxPanel({
       .filter((item) => item.state === "saved" && item.source)
       .map((item) => item.source!.id);
     if (!ids.length) return;
-    await createMaterialOrganizationClient().addToCourse(courseId, ids, courseRole);
+    const result = await createMaterialOrganizationClient().addToCourse(courseId, ids, courseRole);
+    if (result.failed.length) throw new UploadUserError("原件已保存，但归入课程未完成，请重试；无需重新上传。");
   }, [courseId, courseRole]);
+
+  const publishSaved = useCallback(async () => {
+    const saved = [...pendingPublication.current.values()];
+    if (!saved.length) return;
+    await onChanged();
+    await attachSavedToCourse(saved);
+    if (courseId) await onChanged();
+    saved.forEach(item => pendingPublication.current.delete(item.id));
+  }, [attachSavedToCourse, courseId, onChanged]);
 
   const uploadFiles = useCallback(async (files: File[]) => {
     onUploadBusyChange?.(true);
     try {
-      const localFiles = await Promise.all(files.map(async (file) => ({
-        name: file.name,
-        type: file.type,
-        bytes: new Uint8Array(await file.arrayBuffer()),
-      })));
-      const added = uploadQueue.add(localFiles);
+      const added = uploadQueue.addFiles(files);
       const addedIds = new Set(added.map((item) => item.id));
       setQueueItems(uploadQueue.snapshot());
       await uploadQueue.start(setQueueItems);
       const snapshot = uploadQueue.snapshot();
       const newlySaved = snapshot.filter((item) => addedIds.has(item.id) && item.state === "saved");
-      if (newlySaved.length) {
-        await onChanged();
-        await attachSavedToCourse(newlySaved);
-        if (courseId) await onChanged();
-      }
-    } finally { onUploadBusyChange?.(false); }
-  }, [attachSavedToCourse, courseId, onChanged, onUploadBusyChange, uploadQueue]);
+      newlySaved.forEach(item => pendingPublication.current.set(item.id, item));
+      await publishSaved();
+    } finally { onUploadBusyChange?.(uploadQueue.snapshot().some(item => item.state === "idle" || item.state === "uploading")); }
+  }, [publishSaved, onUploadBusyChange, uploadQueue]);
 
   useEffect(() => {
     if (!incomingFiles || consumedFileBatch.current === incomingFiles) return;
     consumedFileBatch.current = incomingFiles;
     onIncomingFilesAccepted?.();
     void uploadFiles(incomingFiles.files).catch(reason => {
-      setNotice({ text: reason instanceof Error ? reason.message : "文件添加未完成，请重新选择文件。" });
+      setNotice({ text: uploadErrorMessage(reason, "文件添加未完成，请重新选择文件。") });
     });
   }, [incomingFiles, onIncomingFilesAccepted, uploadFiles]);
 
@@ -179,19 +184,17 @@ export function InboxPanel({
     try {
       await uploadQueue.retry(id, setQueueItems);
       const item = uploadQueue.snapshot().find((row) => row.id === id);
-      if (item?.state === "saved") {
-        await onChanged();
-        await attachSavedToCourse([item]);
-        if (courseId) await onChanged();
-      }
-    } finally { onUploadBusyChange?.(false); }
+      if (item?.state === "saved") pendingPublication.current.set(item.id, item);
+      await publishSaved();
+    } finally { onUploadBusyChange?.(uploadQueue.snapshot().some(item => item.state === "idle" || item.state === "uploading")); }
   }
 
   function showOperationFailure(reason: unknown) {
-    setNotice({ text: reason instanceof Error ? reason.message : "操作未能完成，请核对材料状态后重试。" });
+    setNotice({ text: uploadErrorMessage(reason, "操作未能完成，请核对材料状态后重试。") });
   }
 
   function dismissQueuedUpload(id: string) {
+    pendingPublication.current.delete(id);
     uploadQueue.dismiss(id, setQueueItems);
   }
 
@@ -220,7 +223,7 @@ export function InboxPanel({
       if (record.uploadState === "pending") await retryPendingSource(record);
       else { await api.retryParse(record.id); await onChanged(); }
     } catch (reason) {
-      setNotice({ sourceId: record.id, text: reason instanceof Error ? reason.message : "重试未能完成，请稍后重试。" });
+      setNotice({ sourceId: record.id, text: uploadErrorMessage(reason, "重试未能完成，请稍后重试。") });
     }
   }
 
@@ -256,7 +259,7 @@ export function InboxPanel({
     <section className="space-y-3">
       {!hideUploadPicker && (sources.length > 0 || !showEmptyState) ? <CaptureDialog compact disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} /> : null}
       {refreshError ? <p className="text-sm text-warn" role="status">材料状态暂时无法更新，已保留现有信息；正在重试读取。</p> : null}
-      {notice ? <p className="text-sm text-warn" role="status">{notice.text}</p> : null}
+      {notice ? <p className="text-sm text-warn" role="status">{notice.text}{pendingPublication.current.size ? <button type="button" disabled={uploading} className={ui.secondary} onClick={() => void publishSaved().then(() => setNotice(null)).catch(showOperationFailure)}>重试保存材料信息</button> : null}</p> : null}
       {queueItems.some(item => item.state !== "saved") ? (
         <ul className="space-y-3" aria-label="上传队列">
           {queueItems.filter(item => item.state !== "saved").map(item => <li key={item.id}><LiveTaskCard title={item.file.name} failed={item.state === "failed"} phase={item.state === "idle" ? "等待上传" : item.state === "uploading" ? item.progress === 100 ? "文件已传输，正在确认" : "正在上传文件" : item.message ?? "上传失败"} byteProgress={item.state === "uploading" ? item.progress : undefined}>
@@ -311,7 +314,7 @@ export function InboxPanel({
       </ul>
       {!sources.length && showEmptyState ? <EmptyState title="还没有材料" description="添加第一份材料，上传后的处理状态会显示在这里。" action={hideUploadPicker ? onUploadRequested ? <button type="button" className={ui.primary} disabled={uploading} onClick={onUploadRequested}>上传材料</button> : undefined : <CaptureDialog disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />} /> : sources.length > 0 && !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
-        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId}
+        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId} originalConversationId={view.conversationId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}
     </section>
   );

@@ -31,7 +31,7 @@ async function render(courseId: string | null, incomingFiles?: LibraryFileBatch)
 }
 function button(text: string) { return Array.from(container.querySelectorAll("button")).find(item => item.textContent?.includes(text))!; }
 function fileBatch(id: number): LibraryFileBatch {
-  return { id, files: [{ name: `notes-${id}.pdf`, type: "application/pdf", arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } as File] };
+  return { id, files: [{ name: `notes-${id}.pdf`, type: "application/pdf", size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } as File] };
 }
 
 it("clears an inbound course without rebinding an upload already in flight or the next upload", async () => {

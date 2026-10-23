@@ -29,7 +29,7 @@ describe("BlockRenderer", () => {
         outlineTitle: "整节练习标题", onCourseAssociated: () => undefined },
     }));
     expect(html).toContain("矩阵秩");
-    expect(html).toContain('value="矩阵秩"');
+    expect(html).not.toContain("记录的技能");
     expect(html).not.toContain('value="整节练习标题"');
   });
   it("renders text / math / step allowlist blocks as plain React text", () => {

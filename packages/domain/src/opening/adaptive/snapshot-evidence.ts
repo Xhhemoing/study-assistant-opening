@@ -49,6 +49,14 @@ export function toSnapshotEvidence(
       independentAttempt: eligibility.independentAttempt,
       usableForCurrentVersion: eligibility.usableForCurrentVersion,
       problemId: row.problemId ?? null,
+      ...(row.outcome === "incorrect" && eligibility.verifiedCorrect === "no" && eligibility.usableForCurrentVersion === "yes" ? {
+        errors: row.verdictSource === "ai_graded" && row.aiEvaluation
+          ? row.aiEvaluation.criteria.filter(criterion => criterion.verdict === "incorrect").slice(0, 3)
+            .map(criterion => ({ observationId: row.id, label: criterion.label.slice(0, 200), feedback: criterion.feedback.slice(0, 1000), source: "ai_feedback" as const,
+              ...(row.aiEvaluation?.misconceptionId && row.aiEvaluation.misconceptionId !== "other" ? { misconceptionId: row.aiEvaluation.misconceptionId } : {}) }))
+          : row.serverEvaluation?.evaluatorVersion === "span-exact-v1" && row.serverEvaluation.skills ? Object.entries(row.serverEvaluation.skills).filter(([, value]) => value === "incorrect").slice(0, 3)
+            .map(([label]) => ({ observationId: row.id, label, feedback: "这一步在先前作答中有误，结合原题确认原因。", source: "verified_steps" as const })) : [],
+      } : {}),
     };
   });
   return { summaries, observations };

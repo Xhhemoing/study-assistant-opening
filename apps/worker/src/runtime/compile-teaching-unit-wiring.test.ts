@@ -1,3 +1,4 @@
+import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus, TeachingPartialHints } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
@@ -147,7 +148,12 @@ function modelAnswer(input: { text: string; chunks?: SourceChunk[] }, options: {
         { type: "text", text: grounded ? "矩阵的秩与零空间维数之和等于列数，这就是秩—零化度定理。" : "秩与零空间的关系可以从线性方程组的解来理解。", citedChunkIds: cite },
         ...(options.formula === false ? [] : [{ type: "formula", text: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: cite }]),
         { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: [] },
-        { type: "answer_key", text: "5 − 2 = 3", hints: rankHints, citedChunkIds: [] },
+        { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", hints: rankHints, citedChunkIds: [] },
+        ...(!input.text.includes('"prerequisiteRepair"') ? [
+          { type: "text", text: "现在改变列数，检查自由变量是否随之变化。", citedChunkIds: cite },
+          { type: "prompt", text: "一个 3×4 矩阵的秩为 2，零空间维数是多少？" },
+          { type: "answer_key", ...rankPedagogy, text: "4 − 2 = 2", hints: rankHints },
+        ] : []),
       ],
     }),
     citedChunkIds: [], requestId: "req-1", candidates: [], inputTokens: 100, outputTokens: 100,
@@ -190,7 +196,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       const answer = modelAnswer(input);
       const parsed = JSON.parse(answer.text);
       parsed.blocks.splice(1, 0, { type: "prompt", text: "先做一道线性方程组题" }, {
-        type: "answer_key", text: "前置题答案", hints: {
+        type: "answer_key", ...rankPedagogy, text: "前置题答案", hints: {
           direction: "先把每个条件写成关于未知数的等式。",
           concept: "方程组的解必须同时满足全部方程。",
           firstStep: "先为第一个条件写出等式，保留其他条件供后续核对。",

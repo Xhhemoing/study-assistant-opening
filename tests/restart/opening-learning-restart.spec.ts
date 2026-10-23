@@ -120,9 +120,9 @@ test("same-version graceful Web and worker restart restores the persisted learni
     await expect(page.getByRole("heading", { name: "本次学习已暂停", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "继续原来的步骤", exact: true }).click();
     const practice = page.getByRole("region", { name: "span 真实作答", exact: true });
-    await expect(practice.getByRole("heading", { name: "本题精确核对通过", exact: true })).toBeVisible();
+    await expect(practice.getByRole("heading", { name: "做对了！", exact: true })).toBeVisible();
     await expect(page.getByLabel("时间预算（分钟）", { exact: true })).toHaveValue("12");
-    await practice.getByText("封存的原答案", { exact: true }).click();
+    await practice.getByText("我刚才的答案", { exact: true }).click();
     await expect(practice.locator("pre")).toHaveText(submission.answer);
     await expect(practice.getByRole("region", { name: "已收到的提示", exact: true }).locator(":scope > ol > li")).toHaveCount(2);
     expect(await readTeachingEvidence(course, attempt.id)).toEqual(before);

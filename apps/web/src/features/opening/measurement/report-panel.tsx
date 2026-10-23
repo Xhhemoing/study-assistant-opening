@@ -32,7 +32,7 @@ function AnswerRecord({ attempt, overview, busy, readOnly, onRetract }: {
   const delay = actualDelay(attempt, overview);
   const result = attempt.retractedAt ? "已标记无效" : attempt.outcome === "correct" ? "答对" : attempt.outcome === "incorrect" ? "答错" : attempt.outcome === "skipped" ? "已跳过" : "本轮结果待公布";
   return <details className="border-t border-line py-3">
-    <summary className="cursor-pointer rounded text-xs leading-6 text-text-2 focus-visible:ring-2 focus-visible:ring-emerald-600">第 {attempt.ordinal} 题 · {measurementPhaseLabels[attempt.item.phase]} · {attempt.item.skillLabel} · {result}</summary>
+    <summary className="cursor-pointer rounded text-xs leading-6 text-text-2 focus-visible:ring-2 focus-visible:ring-focus-ring">第 {attempt.ordinal} 题 · {measurementPhaseLabels[attempt.item.phase]} · {attempt.item.skillLabel} · {result}</summary>
     <div className="mt-3 space-y-3 text-xs leading-6 text-text-2">
       <p className="whitespace-pre-wrap">{attempt.item.prompt}</p>
       <p>我的选择：{attempt.item.options.find(option => option.id === attempt.answer)?.label ?? "未选择"}</p>
@@ -53,7 +53,7 @@ export function MeasurementReportPanel({ overview, busy, readOnly, onRetract }: 
 }) {
   const label = (id: string) => overview.trial?.models.find(model => model.id === id)?.label ?? id;
   return <details className={`${ui.panel} p-5`}>
-    <summary className="cursor-pointer rounded text-sm font-medium text-text focus-visible:ring-2 focus-visible:ring-emerald-600">测试数据与作答记录</summary>
+    <summary className="cursor-pointer rounded text-sm font-medium text-text focus-visible:ring-2 focus-visible:ring-focus-ring">测试数据与作答记录</summary>
     <div className="mt-5 space-y-6">
       <p className="text-xs leading-6 text-text-2">固定题目让两种模型预测同一次作答。以下指标越低，代表这批数据的预测误差越小；小样本差异不能证明教学效果提升。参数尚未用你的数据校准。</p>
       <ModelScores models={overview.report.models} label={label} />

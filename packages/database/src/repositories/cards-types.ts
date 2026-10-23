@@ -54,6 +54,7 @@ export type CardRepository = {
     front: string;
     back: string;
     tags?: string[];
+    reviewKind?: "question" | "concept";
     courseId?: string | null;
     observationId?: string;
     skillLabel?: string | null;
@@ -88,6 +89,8 @@ export type CardRepository = {
     idempotencyKey: string;
     occurredAt: string;
     assisted?: boolean;
+    /** Server-owned variant attempt; its accepted verdict determines the grade. */
+    variantObservationId?: string;
     now?: Date;
   }): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean; evidence: "recorded" | "skipped_no_course" | "skipped_course_archived" | "skipped_source_unavailable" | "skipped_unknown" }>;
   listQueue(input: {

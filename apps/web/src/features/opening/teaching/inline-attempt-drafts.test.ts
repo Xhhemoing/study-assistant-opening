@@ -144,9 +144,13 @@ describe("inline attempt draft continuity", () => {
     const client = { createSession: vi.fn().mockImplementation(() => new Promise<{ id: string }>(resolve => { resolveSession = resolve; })), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
     const first = createInlineAttemptSubmission(input, client, { onCheckpoint: checkpoint => drafts.set(key, withSubmission(checkpoint)) }).submit();
     const remounted = createInlineAttemptSubmission(input, client, { checkpoint: drafts.get(key)!.submission }).submit();
-    expect(remounted).toBe(first);
+    expect(client.createSession).toHaveBeenCalledTimes(1);
+    expect(client.createAttempt).not.toHaveBeenCalled();
+    expect(client.submitAttempt).not.toHaveBeenCalled();
     resolveSession({ id });
-    await remounted;
+    const [originalResult, restoredResult] = await Promise.all([first, remounted]);
+    expect(restoredResult).toBe(originalResult);
+    expect(restoredResult).toMatchObject({ attempt: canonicalAttempt, observation: savedObservation });
     expect(client.createSession).toHaveBeenCalledTimes(1);
     expect(client.createAttempt).toHaveBeenCalledTimes(1);
     expect(client.submitAttempt).toHaveBeenCalledTimes(1);

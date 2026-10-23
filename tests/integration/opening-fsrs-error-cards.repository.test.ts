@@ -63,7 +63,9 @@ it("creates one source-linked error card, suspends it on correction/retraction a
   const [raw] = await f.sql`SELECT source_ids FROM cards WHERE id=${auto.id}`;
   expect(raw!.source_ids).toEqual([setup.sourceId]);
   const manual = await cards.createCard({ ...f.scope, observationId: graded.id, front: "My note", back: "My answer", courseId: setup.courseId });
-  await cards.grade({ ...f.scope, cardId: auto.id, grade: "good", idempotencyKey: randomUUID(), occurredAt: now.toISOString() });
+  await expect(cards.grade({ ...f.scope, cardId: auto.id, grade: "good", idempotencyKey: randomUUID(), occurredAt: now.toISOString() })).rejects.toMatchObject({ code: "CONFLICT" });
+  // Seed a historical review to verify correction preserves scheduling history.
+  await cards.upsertState({ ...f.scope, state: scheduleReview(createInitialState(auto.id, now), "good", now) });
   const corrected = await reviseOpeningLearningObservation(f.sql, f.scope, { rootObservationId: original.id, revisesObservationId: graded.id,
     expectedHead: graded.id, revisionKind: "replace", reason: "判错了", clientKey: randomUUID(), replacement: { answer: graded.answer, outcome: "correct", assistance: graded.assistance } });
   expect((await cards.getCard({ workspaceId: f.scope.workspaceId, cardId: auto.id })).autoPaused).toBe(true);

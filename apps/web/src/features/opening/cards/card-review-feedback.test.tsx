@@ -6,12 +6,19 @@ import type { GradeReviewResponse, ReviewQueueItem } from "@aistudy/contracts";
 import type { OpeningCardsClient } from "./cards-client";
 
 vi.mock("../teaching/learner-state-card", () => ({ LearnerStateCard: () => null }));
+vi.mock("./card-variant-review", () => ({ CardVariantReview: ({ cardId, client, onComplete, onBusyChange }: {
+  cardId: string; client: OpeningCardsClient; onComplete(result: GradeReviewResponse): void; onBusyChange?(busy: boolean): void;
+}) => createElement("button", { onClick: async () => {
+  onBusyChange?.(true);
+  const result = await client.completeVariant(cardId, "observation");
+  onComplete(result); onBusyChange?.(false);
+} }, "保存变式复习") }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: { children: React.ReactNode; href: string }) => createElement("a", props, children) }));
 import { CardReviewView } from "./card-review-view";
 
 function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
-  return { card: { id, ownerUserId: "owner", front: `题目 ${id}`, back: `答案 ${id}`, sourceDocumentId: null, syllabusPointId: null, courseId: null, skillLabel: null, tags: [], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
+  return { card: { id, ownerUserId: "owner", front: `题目 ${id}`, back: `答案 ${id}`, sourceDocumentId: null, syllabusPointId: null, courseId: null, skillLabel: null, tags: ["review:concept"], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
     state: { cardId: id, ease: 2.5, intervalDays: 1, dueAt: at, reps: 0, lapses: 0, lastGrade: null, updatedAt: at }, goalPriority: 0 };
 }
 const result = { evidence: "recorded" } as GradeReviewResponse;
@@ -134,4 +141,24 @@ it("notifies the mixed queue only after a saved grade and keeps navigation busy 
   await tick();
   expect(onGraded).toHaveBeenCalledExactlyOnceWith("a", result);
   expect(onBusyChange).toHaveBeenLastCalledWith(false);
+});
+
+
+it("locks reload during variant completion and ignores its late result after a replacement queue", async () => {
+  let confirm!: (value: GradeReviewResponse) => void;
+  const question = item("question"); question.card.tags = ["review:question"];
+  const completeVariant = vi.fn(() => new Promise<GradeReviewResponse>(resolve => { confirm = resolve; }));
+  const onGraded = vi.fn();
+  await act(async () => root.render(createElement(CardReviewView, { client: { ...client, completeVariant,
+    listDue: vi.fn().mockResolvedValue([question]) }, onGraded })));
+  const save = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "保存变式复习")!;
+  await act(async () => save.click());
+  const refresh = Array.from(container.querySelectorAll("button")).find(button => button.textContent?.includes("重新读取"))!;
+  expect(refresh.disabled).toBe(true);
+  expect(completeVariant).toHaveBeenCalledTimes(1);
+  await render({ ...client, listDue: vi.fn().mockResolvedValue([item("replacement")]) });
+  await act(async () => confirm(result));
+  expect(card().textContent).toContain("题目 replacement");
+  expect(card().disabled).toBe(false);
+  expect(onGraded).not.toHaveBeenCalled();
 });

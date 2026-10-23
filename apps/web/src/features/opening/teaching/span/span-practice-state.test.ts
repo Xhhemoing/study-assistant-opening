@@ -20,6 +20,7 @@ const shortcuts = vi.hoisted(() => ({ set: vi.fn() }));
 vi.mock("../../design/haptics", () => ({ successfulInteractionHaptic: mocks.haptic }));
 vi.mock("../../assistant/current-study-context", () => ({ useStudyAssistantContext: studyBinding.set }));
 vi.mock("../lesson-shortcuts", () => ({ useLessonArrowKeys: shortcuts.set }));
+vi.mock("../../shell/workspace-layout-context", () => ({ useWorkspaceLayout: () => ({ focusMode: false, toggleFocusMode: vi.fn() }) }));
 vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("../../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
@@ -57,7 +58,7 @@ function response(level: SpanHintLevel) {
     contextAnchor: { attemptId: id, itemVersionId: id, courseId: id, purpose: level === 4 ? "history_solution" : "learning_help" }, origin: level === 4 ? "history_solution" : "assistant", supportDomain: level === 4 ? "unknown" : "math",
     generatedAt: "2026-10-21T00:00:00Z", releasedAt: "2026-10-21T00:00:00Z", acknowledgedAt: null, historyRevision: level } });
 }
-async function start() { const button = find(render(), node => node.type === "button" && node.props.children === "开始这道题")!; (button.props.onClick as () => void)(); await settle(); render(); }
+async function start() { render(); await settle(); render(); }
 beforeEach(() => {
   for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); hooks.values = []; hooks.effects = []; vi.clearAllMocks();
   mocks.draft = emptyPracticeDraft(practiceScope(id, "span", null), { spanProblemId: props.problemId, sourceId: id, answer: JSON.stringify({ membership: "in_span" }), assistance: "independent" });
@@ -154,7 +155,7 @@ it("shows pending restored answers as needing verification while retaining the e
   await start();
   const tree = render();
   expect(mocks.draft!.attemptId).toBe(attempt.id);
-  expect(find(tree, node => node.type === "button" && node.props.children === "封存首答（待重新核对）")).toBeDefined();
+  expect(find(tree, node => node.type === "button" && node.props.children === "提交答案（稍后核对）")).toBeDefined();
 });
 it("does not replace an unavailable historical question with a new practice entry", () => {
   hooks.cursor = 0;

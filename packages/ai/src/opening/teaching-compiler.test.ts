@@ -1,3 +1,4 @@
+import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,24 @@ const SRC_A = "00000000-0000-4000-8000-0000000000aa";
 const SRC_B = "00000000-0000-4000-8000-0000000000bb";
 const hints = { direction: "从未知量和约束入手。", concept: "解空间由满足所有齐次约束的向量组成。", firstStep: "先写出对应的齐次方程组。" };
 const SRC_HELD = "00000000-0000-4000-8000-0000000000dd";
+
+it.each(["2", "1/2+1/2=2/4=1"])("does not publish an arithmetic question with an incorrect reference: %s", answer => {
+  expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [
+    { type: "text", text: "分数相加需要先通分。" }, { type: "prompt", text: "计算 1/2+1/2" },
+    { type: "answer_key", text: answer, hints, ...rankPedagogy },
+  ] }), new Set())).toThrow("arithmetic question and reference solution disagree");
+});
+
+it("keeps unsupported references unverified rather than inferring a numeric answer for a choice or a unit", () => {
+  for (const interaction of [{ kind: "numeric", unit: "厘米" },
+    { kind: "choice", options: [{ id: "A", label: "2" }, { id: "B", label: "1" }] }]) {
+    const output = parseCompileModelOutput(JSON.stringify({ blocks: [
+      { type: "text", text: "先理解题意。" }, { type: "prompt", text: "1/2+1/2", interaction },
+      { type: "answer_key", text: "2", hints, ...rankPedagogy },
+    ] }), new Set());
+    expect(output.blocks).toHaveLength(3);
+  }
+});
 
 describe("goal-driven teaching provider context", () => {
   it("shares the teaching interaction budget and keeps retrieved evidence in one provider channel", async () => {
@@ -76,10 +95,10 @@ describe("goal-driven teaching provider context", () => {
     const writeLibraryBlocks = vi.fn();
     const publish = createCompilerBuildPublishInput({ learnerFocus: focus, writeLibraryBlocks, requireModelOutput: true });
     const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 };
-    const target = [{ type: "prompt", text: "完成分部积分" }, { type: "answer_key", hints, text: "完整积分步骤" }];
+    const target = [{ type: "prompt", text: "完成分部积分" }, { type: "answer_key", hints, ...rankPedagogy, text: "完整积分步骤" }];
     await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
       { type: "text", text: "先提醒必要的求导规则，再回到分部积分。" },
-      { type: "prompt", text: "先完成求导小题" }, { type: "answer_key", hints, text: "导数" }, ...target,
+      { type: "prompt", text: "先完成求导小题" }, { type: "answer_key", hints, ...rankPedagogy, text: "导数" }, ...target,
     ] }) })).rejects.toThrow("one original-target prompt");
     expect(writeLibraryBlocks).not.toHaveBeenCalled();
     await expect(publish({}, payload, { text: JSON.stringify({ blocks: [
@@ -392,13 +411,13 @@ describe("teaching-compiler", () => {
       blocks: [
         { type: "text", text: "rank", citedChunkIds: ["c1", "invented"] },
         { type: "html", text: "<script>" },
-        { type: "answer_key", hints, text: "3" },
+        { type: "answer_key", hints, ...rankPedagogy, text: "3" },
       ],
     }), new Set(["c1"]));
     expect(parsed.itemTitles).toEqual(["秩", "零空间"]);
     expect(parsed.blocks).toEqual([
       { type: "text", text: "rank", citedChunkIds: ["c1"] },
-      { type: "answer_key", hints, text: "3", citedChunkIds: [] },
+      { type: "answer_key", hints, ...rankPedagogy, text: "3", citedChunkIds: [] },
     ]);
     expect(() => parseCompileModelOutput("not json", new Set())).toThrow(TeachingCompileOutputError);
     expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "prompt", text: "q?" }] }), new Set())).toThrow(/no teaching block/);
@@ -421,10 +440,13 @@ describe("teaching-compiler", () => {
         { type: "text", text: "零空间是 $Ax=0$ 的解集。", citedChunkIds: ["c1"] },
         { type: "steps", text: "1. 写出方程\n2. 化简" },
         { type: "prompt", text: "求零空间维数？" },
-        { type: "answer_key", hints, text: "n − rank", citedChunkIds: ["c1"] },
+        { type: "answer_key", hints, ...rankPedagogy, text: "n − rank", citedChunkIds: ["c1"] },
+        { type: "text", text: "自由变量的数量就是解空间的维数。" },
+        { type: "prompt", text: "若有三个未知量和两个主元，零空间维数？" },
+        { type: "answer_key", hints, ...rankPedagogy, text: "1" },
       ] }),
     });
-    expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key"]);
+    expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key", "text", "prompt", "answer_key"]);
     expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
     expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hints, hidden: true, citedChunkIds: ["c1"] } });
     expect(JSON.stringify(projectClientSafeLibraryBlocks(written as Parameters<typeof projectClientSafeLibraryBlocks>[0]))).not.toContain(hints.firstStep);
@@ -462,13 +484,13 @@ describe("teaching-compiler", () => {
         { type: "text", text: "The nullspace is the solution set of A x = 0.", citedChunkIds: ["c1"] },
         { type: "formula", text: "A x = 0", citedChunkIds: ["c1"] },
         { type: "example", text: "For the identity matrix, x = 0.", citedChunkIds: ["c1"] },
-        { type: "answer_key", hints, text: "A x = 0", citedChunkIds: ["c1"] },
+        { type: "answer_key", hints, ...rankPedagogy, text: "A x = 0", citedChunkIds: ["c1"] },
       ] }), new Set(["c1"])),
     });
     expect(compiled.libraryBlocks.find((block) => block.type === "formula")?.content)
       .toEqual({ latex: "A x = 0", citedChunkIds: ["c1"] });
     expect(compiled.libraryBlocks.find((block) => block.type === "answer_key")?.content)
-      .toEqual({ answer: "A x = 0", hints, hidden: true, citedChunkIds: ["c1"] });
+      .toEqual({ answer: "A x = 0", hints, ...rankPedagogy, hidden: true, citedChunkIds: ["c1"] });
 
     const input = {
       activityId: ACTIVITY,
@@ -515,4 +537,45 @@ describe("teaching-compiler", () => {
     expect(publishInput.generationConfig?.extras).not.toHaveProperty("stub");
     expect(publishInput.verificationStatus).toBe("needs_check");
   });
+});
+
+it("publishes three interleaved checks while keeping all answer keys out of the client projection", async () => {
+  let blocks: Parameters<typeof projectClientSafeLibraryBlocks>[0] = [];
+  const build = createCompilerBuildPublishInput({ requireModelOutput: true, writeLibraryBlocks: async values => { blocks = values; } });
+  const items: Record<string, unknown>[] = [1, 2, 3].flatMap(n => [{ type: "text", text: `短讲解${n}` },
+    { type: "prompt", text: `检查${n}`, interaction: n === 2 ? { kind: "numeric" } : { kind: "choice", options: [{ id: "A", label: "向量" }, { id: "B", label: "系数" }] } },
+    { type: "answer_key", hints, ...rankPedagogy, text: `secret-solution-${n}` }]);
+  items.push({ type: "vector_diagram", text: "组合向量", vectors: { v: [1, 0], w: [0, 1] } });
+  await build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 }, { text: JSON.stringify({ blocks: items }) });
+  expect(blocks.filter(block => block.role === "prompt")).toHaveLength(3);
+  expect(blocks.find(block => block.type === "vector_diagram")?.content.vectors).toEqual({ v: [1, 0], w: [0, 1] });
+  const client = JSON.stringify(projectClientSafeLibraryBlocks(blocks));
+  expect(client).not.toContain("secret-solution");
+  expect(client).toContain('"kind":"numeric"');
+});
+it("rejects invalid interactive content rather than rendering an answer-bearing option payload", () => {
+  for (const interaction of [{ kind: "choice", options: [{ id: "A", label: "1" }, { id: "A", label: "2" }] }, { kind: "numeric", answer: "secret" }]) {
+    expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [{ type: "text", text: "解释" }, { type: "prompt", text: "题目", interaction }] }), new Set())).toThrow();
+  }
+});
+
+it("rejects missing or unrelated misconception teaching data", () => {
+  for (const pedagogy of [{}, { ...rankPedagogy, misconceptions: [rankPedagogy.misconceptions[0]] },
+    { ...rankPedagogy, startChoice: { ...rankPedagogy.startChoice, misconception: { ...rankPedagogy.startChoice.misconception, misconceptionId: "unrelated" } } }]) {
+    expect(() => parseCompileModelOutput(JSON.stringify({ blocks: [
+      { type: "text", text: "解释" }, { type: "prompt", text: "求零空间维数" },
+      { type: "answer_key", text: "3", hints, ...pedagogy },
+    ] }), new Set())).toThrow(/misconceptions/);
+  }
+});
+
+it("does not publish a one-check or mismatched lesson as a complete current item", async () => {
+  const writeLibraryBlocks = vi.fn();
+  const build = createCompilerBuildPublishInput({ requireModelOutput: true, writeLibraryBlocks });
+  const pair = [{ type: "prompt", text: "求零空间维数" }, { type: "answer_key", text: "3", hints, ...rankPedagogy }];
+  for (const blocks of [[{ type: "text", text: "解释" }, ...pair],
+    [{ type: "text", text: "解释" }, pair[0], pair[0], pair[1], pair[1]]]) {
+    await expect(build({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0 }, { text: JSON.stringify({ blocks }) })).rejects.toBeInstanceOf(TeachingCompileOutputError);
+  }
+  expect(writeLibraryBlocks).not.toHaveBeenCalled();
 });

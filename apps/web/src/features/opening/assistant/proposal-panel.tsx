@@ -43,7 +43,7 @@ export function PlanProposalPreview({ row }: { row: AssistantProposalRecord }) {
 const localDate = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; };
 
 /** Suggestions stay reviewable drafts. Each retry keeps its original intent key. */
-export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api: OpeningApi; sourceTurnId: string | null; courseId: string | null; refreshKey?: string }) {
+export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectHref = href => href }: { objectHref?: (href: string) => string; api: OpeningApi; sourceTurnId: string | null; courseId: string | null; refreshKey?: string }) {
   const learning = useMemo(() => createOpeningLearningClient(), []);
   const [rows, setRows] = useState<AssistantProposalRecord[]>([]);
   const [observations, setObservations] = useState<LearningObservation[]>([]);
@@ -123,7 +123,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey }: { api
       <h3 className="text-sm font-semibold">{labels[row.tool.name]}</h3><p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>
       {row.tool.name === "propose_plan_change" ? <PlanProposalPreview row={row} /> : null}
       {row.status === "draft" ? <div className="mt-2 flex gap-2"><button className={buttonClass} disabled={busy || (row.tool.name === "propose_plan_change" && !row.prepared?.preview)} onClick={() => void decide(row, "accept")}>接受</button><button className={secondaryButtonClass} disabled={busy} onClick={() => void decide(row, "reject")}>不采用</button></div> : <p className="mt-2 text-xs text-text-3">{row.status === "accepted" ? "已接受" : "未采用"}</p>}
-      {row.result?.href.startsWith("/") && !row.result.href.startsWith("//") ? <Link href={row.result.href} className={`${secondaryButtonClass} mt-2`}>查看结果</Link> : null}
+      {row.result?.href.startsWith("/") && !row.result.href.startsWith("//") ? <Link href={objectHref(row.result.href)} className={`${secondaryButtonClass} mt-2`}>查看结果</Link> : null}
     </li>)}</ul>
   </section>;
 }

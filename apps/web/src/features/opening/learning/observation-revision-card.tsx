@@ -10,6 +10,7 @@ import { ObservationRevisionFields } from "./observation-revision-fields";
 import { currentHistoryRecord, observationRevisionCommand, observationRevisionDraft, observationRevisionFailure, reloadObservationRevisionEditor, type ObservationRevisionEditor } from "./observation-revision-model";
 import { AiGradingCard, aiOutcomeLabels } from "./ai-grading-card";
 import type { GradingPhotoSelection } from "./ai-grading-photo";
+import type { AttemptPrimaryAction } from "./stage-action-bar";
 
 const outcomeLabels = { correct: "自报正确", incorrect: "自报错误", unverified: "尚未评分" };
 function outcomeLabel(record: LearningObservation): string {
@@ -18,7 +19,7 @@ function outcomeLabel(record: LearningObservation): string {
     : record.serverEvaluation.decision === "incorrect" ? "自动核算有误" : "自动核算拒判" : outcomeLabels[record.outcome];
 }
 const helpLabels = { independent: "自报独立", hinted: "使用过提示", revealed: "看过讲解", unknown: "帮助情况未知" };
-const buttonClass = "border-b border-line px-2 py-2 text-sm text-text disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700";
+const buttonClass = "border-b border-line px-2 py-2 text-sm text-text disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring";
 
 type HistoryPanel = { history: ObservationHistory | null; open: boolean };
 type HistoryPanelAction = { type: "loaded"; history: ObservationHistory } | { type: "close" | "clear" };
@@ -29,16 +30,24 @@ export function observationHistoryPanelReducer(state: HistoryPanel, action: Hist
   return { history: null, open: false };
 }
 
-export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrade = false, gradingPhoto }: {
+type ObservationRevisionCardProps = {
   record: LearningObservation; onChanged: () => void; onUpdated?: (record: LearningObservation) => void;
   autoGrade?: boolean; gradingPhoto?: GradingPhotoSelection;
-}) {
+  completionAction?: AttemptPrimaryAction;
+};
+
+export function ObservationRevisionCard(props: ObservationRevisionCardProps) {
+  return <RevisionCard key={props.record.id} {...props} />;
+}
+
+function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, gradingPhoto, completionAction }: ObservationRevisionCardProps) {
   const diagnostics = useDiagnosticsEnabled();
   const [{ history, open: historyOpen }, updateHistory] = useReducer(observationHistoryPanelReducer, { history: null, open: false });
   const [editor, setEditor] = useState<ObservationRevisionEditor | null>(null);
   const [courses, setCourses] = useState<Array<{ id: string; title: string }>>([]);
-  const [cardDraft, setCardDraft] = useState<ObservationCardDraft | null>(null);
+  const [cardDraft, setCardDraft] = useState<{ observationId: string; draft: ObservationCardDraft } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [gradingPending, setGradingPending] = useState(false);
   const [message, setMessage] = useState("");
   const [unavailable, setUnavailable] = useState(false);
   const [latest, setLatest] = useState<LearningObservation | null>(null);
@@ -52,13 +61,14 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
   useEffect(() => {
     historyRequest.current += 1;
     setLatest(null); updateHistory({ type: "clear" }); setEditor(null); setBusy(false);
+    setCardDraft(null); setMessage(""); setUnavailable(false); retry.current = null;
     return () => { historyRequest.current += 1; };
   }, [record.id]);
 
   function updated(next: LearningObservation) {
     // A history read started before this grade/correction cannot restore its old head.
     historyRequest.current += 1;
-    setBusy(false); setEditor(null); setLatest(next); updateHistory({ type: "clear" }); onUpdated?.(next); onChanged();
+    setBusy(false); setEditor(null); setCardDraft(null); setLatest(next); updateHistory({ type: "clear" }); onUpdated?.(next); onChanged();
   }
 
   const fail = (error: unknown) => {
@@ -71,10 +81,13 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
   };
 
   async function makeCard() {
+    const request = ++historyRequest.current;
+    const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
     setBusy(true); setMessage("");
     try {
-      setCardDraft(await createOpeningCardsClient().observationDraft(current.id));
-    } catch (error) { fail(error); } finally { setBusy(false); }
+      const draft = await createOpeningCardsClient().observationDraft(current.id);
+      if (isCurrent()) setCardDraft({ observationId: current.id, draft });
+    } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
   async function load(kind?: "replace" | "retract", dispute = false) {
@@ -113,15 +126,18 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!editor || editor.conflict || busy) return;
+    const request = ++historyRequest.current;
+    const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
     setBusy(true); setMessage("");
     try {
       const intent = JSON.stringify([editor.expectedHead, editor.revisionKind, editor.draft, editor.reason]);
       if (retry.current?.intent !== intent) retry.current = { intent, clientKey: crypto.randomUUID() };
       const result = await client.reviseObservation(observationRevisionCommand({ ...editor, clientKey: retry.current.clientKey }));
-      setEditor(null); updateHistory({ type: "clear" }); retry.current = null;
+      if (!isCurrent()) return;
+      setEditor(null); setCardDraft(null); updateHistory({ type: "clear" }); retry.current = null;
       setMessage(editor.revisionKind === "retract" ? "已撤回，历史仍保留。" : "已保存纠正，未新增练习次数。");
       if (result.observation) updated(result.observation); else onChanged();
-    } catch (error) { fail(error); } finally { setBusy(false); }
+    } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
   if (unavailable) return <p role="status" className="text-sm text-text-3">{message}</p>;
@@ -130,14 +146,15 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
       <h4 className="text-sm font-medium text-text">{current.skillLabel}</h4>
       <span className="text-xs text-text-3">{current.revisionKind === "retract" ? "已撤回" : `${outcomeLabel(current)} · ${helpLabels[current.assistance]}`}</span>
     </div>
+    <p className="text-xs font-medium text-text-2">我的解答 · 原答案</p>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
-    {current.revisionKind !== "retract" ? <AiGradingCard record={current} autoGrade={autoGrade} photo={gradingPhoto} disabled={busy || Boolean(editor)} onGraded={updated} onDispute={() => void load("replace", true)} /> : null}
+    {current.revisionKind !== "retract" ? <AiGradingCard record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} /> : null}
     <p className="text-xs text-text-3">作答时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{diagnostics && current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
     <div className="flex flex-wrap gap-2">
-      {current.outcome === "incorrect" && current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
+      {current.outcome === "incorrect" && current.revisionKind !== "retract" && (!current.aiEvaluation || current.verdictSource !== "ai_graded" || current.aiEvaluation.questionMatch) ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
       <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => historyOpen ? updateHistory({ type: "close" }) : void load()}>{historyOpen ? "收起历史" : "查看历史"}</button>
-      <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void load("replace")}>{current.revisionKind === "retract" ? "纠正并重新纳入" : "纠正记录"}</button>
-      {current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => void load("retract")}>撤回记录</button> : null}
+      <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void load("replace")}>{current.revisionKind === "retract" ? "纠正并重新纳入" : "纠正记录"}</button>
+      {current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void load("retract")}>撤回记录</button> : null}
     </div>
     {historyOpen && history ? <ol className="space-y-3 border-l border-line pl-4" aria-label="观察修订历史">{history.revisions.map((item, index) => <li key={item.id} className="space-y-1 text-xs text-text-3">
       <p className="font-medium text-text">第 {index + 1} 次记录 · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前记录" : " · 历史记录（不重复计数）"}</p>
@@ -153,7 +170,7 @@ export function ObservationRevisionCard({ record, onChanged, onUpdated, autoGrad
       {editor.conflict ? <button type="button" className={buttonClass} disabled={busy} onClick={() => void reload()}>重新载入记录并保留输入</button> : null}
       <div className="flex gap-2"><button type="submit" className={buttonClass} disabled={busy || editor.conflict || !editor.reason.trim()}>{busy ? "正在保存…" : editor.revisionKind === "retract" ? "确认撤回" : "保存纠正"}</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setEditor(null)}>取消</button></div>
     </form> : null}
-    {cardDraft ? <CreateCardDialog initial={cardDraft} onClose={() => setCardDraft(null)} /> : null}
+    {cardDraft?.observationId === current.id ? <CreateCardDialog initial={cardDraft.draft} onClose={() => setCardDraft(null)} /> : null}
     {message ? <p role="status" className="text-sm leading-6 text-text-3">{message}</p> : null}
     {busy && !editor ? <p role="status" className="text-sm text-text-3">正在读取记录…</p> : null}
   </article>;

@@ -88,7 +88,7 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
   if (!request) return null;
   const close = () => { sequence.current++; setRequest(null); setRecord(null); setError(""); };
   return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} slideLabel={request.target.slideLabel}
-    returnPoint={request.returnPoint} courseId={request.courseId} questionProtected={request.questionProtected} onClose={close} onRetry={async () => {
+    returnPoint={request.returnPoint} courseId={request.courseId} originalConversationId={request.target.conversationId} questionProtected={request.questionProtected} onClose={close} onRetry={async () => {
       const current = sequence.current;
       await api.retryParse(record.id);
       const value = await loadCitationReaderRecord(api, request.target);

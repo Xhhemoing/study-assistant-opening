@@ -136,7 +136,7 @@ describe("source preview panes", () => {
     return sourcePreviewHref(sourceId, version, page).replaceAll("&", "&amp;");
   }
 
-  it("renders an iframe preview for PDF with an inline disposition URL", () => {
+  it("renders a selectable PDF canvas with its fixed revision and an inline original fallback", () => {
     const html = renderToStaticMarkup(createElement(SourceViewer, {
       record,
       latestRecord: { ...record, parseState: "ready", version: 2 },
@@ -144,9 +144,10 @@ describe("source preview panes", () => {
       download: buildSourceDownloadView(record.id, 2, 2),
     }));
     expect(html).toContain("预览");
-    expect(html).toContain(`src="${escapedPreviewHref(record.id, 2)}#view=FitH&amp;navpanes=0"`);
+    expect(html).toContain(`href="${escapedPreviewHref(record.id, 2)}"`);
     expect(html).toContain("disposition=inline");
-    expect(html).toContain("<iframe");
+    expect(html).toContain("<canvas");
+    expect(html).toContain('data-source-version="2"');
     expect(html).toContain("打开原件");
     expect(html).toContain(`href="${sourceDownloadHref(record.id, 2)}"`);
     expect(html).not.toContain("页面标签随原件查看");

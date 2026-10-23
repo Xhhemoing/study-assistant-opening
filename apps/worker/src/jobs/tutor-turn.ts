@@ -228,7 +228,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       );
       const mode = claimed.mode as TutorMode;
       const baseInstruction = instructionWithMemories(
-        makeTutorInstruction(mode),
+        makeTutorInstruction(mode, { text: turn.text }),
         memoryContext.memories,
         contextNow,
       );

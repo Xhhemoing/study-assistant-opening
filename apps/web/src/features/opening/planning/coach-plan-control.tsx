@@ -65,7 +65,7 @@ export function CoachPlanControl({ date, draft, api, onChanged, settingsRevision
   }
 
   if (!summary && !enabled && !error) return null;
-  return <section className="space-y-2 border-b border-sky-200 bg-sky-50/30 px-4 py-3" aria-label="教练安排摘要">
+  return <section className="space-y-2 border-b border-line bg-surface-2 px-4 py-3" aria-label="教练安排摘要">
     {summary ? <><p className="text-xs leading-6 text-text-2">{summary.undone ? "这次教练安排已撤销，学习记录保留。" : `教练安排了${summary.scheduledMinutes}分钟，新增${summary.createdTaskIds.length}项任务。`}</p>
       {!summary.undone && summary.undoAvailable ? <button type="button" className={secondaryButtonClass} disabled={pending || Boolean(error)} onClick={() => setConfirmUndo(true)}>撤销这次安排</button> : null}
       {!summary.undone && !summary.undoAvailable ? <p className="text-xs text-text-3">安排已开始或已有后续调整，保留当前计划；可手动调整尚未完成的任务。</p> : null}

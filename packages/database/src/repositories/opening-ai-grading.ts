@@ -11,9 +11,13 @@ export function createOpeningAiGradingRepository(sql: Sql) {
   return {
     context,
     async apply(scope: Scope, raw: AiGradingInput, rawProposal: AiGradingProposal, modelLabel: string | null): Promise<LearningObservation> {
-      const input = aiGradingInputSchema.parse(raw), proposal = aiGradingProposalSchema.parse(rawProposal);
+      const input = aiGradingInputSchema.parse(raw), parsed = aiGradingProposalSchema.parse(rawProposal);
       const current = await context(scope, input);
       if (current.existing) return current.existing;
+      // IDs are scoped to the immutable server-owned question, never invented by the model.
+      const proposal: AiGradingProposal = { ...parsed, misconceptionId: acceptedAiGradingOutcome(parsed) === "incorrect"
+        ? current.misconceptions.some(item => item.id === parsed.misconceptionId) ? parsed.misconceptionId : "other"
+        : null };
       const original = current.observation;
       const result = await reviseOpeningLearningObservation(sql, scope, {
         rootObservationId: original.rootObservationId ?? original.id, revisesObservationId: original.id, expectedHead: original.id,

@@ -13,6 +13,16 @@ export const aiGradingProposalSchema = z.object({
     feedback: z.string().trim().min(1).max(2000),
   }).strict()).min(1).max(30),
   transcription: z.string().max(20_000).optional(),
+  /** Checked against the saved question's dictionary by the grading repository. */
+  misconceptionId: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/).nullable().optional(),
+  /** A teaching exercise only; its client-side answer never becomes mastery evidence. */
+  followUp: z.object({
+    prompt: z.string().trim().min(1).max(1200),
+    options: z.array(z.object({ id: z.string().min(1).max(20), label: z.string().min(1).max(500) }).strict()).min(2).max(4),
+    answerId: z.string().min(1).max(20),
+    explanation: z.string().trim().min(1).max(2000),
+  }).strict().refine(value => new Set(value.options.map(option => option.id)).size === value.options.length
+    && value.options.some(option => option.id === value.answerId), "follow-up requires distinct options and a matching answer").optional(),
 }).strict();
 
 /** Only an existing saved answer is graded; the client never supplies its verdict. */

@@ -6,6 +6,7 @@ import { jsonError, mapDomainError, requirePrincipal } from "../../../features/a
 import { getAuthRuntime } from "../../../server/runtime";
 import { openingContentDelivery } from "../../../features/opening/server/content-delivery";
 import { contentDeliveryHeaders, contentDeliveryReleaseKey } from "../../../features/opening/content-delivery";
+import { cardReviewKind } from "@aistudy/contracts";
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -14,7 +15,7 @@ export async function GET(request: Request): Promise<Response> {
     const mode = new URL(request.url).searchParams.get("mode");
     const key = contentDeliveryReleaseKey(request);
     const result = await listReviewQueueForPrincipal(runtime, principal, mode ? { mode } : {});
-    const exposureReceipts = await openingContentDelivery(runtime.sql).cards({ workspaceId: principal.workspaceId, ownerUserId: principal.userId }, key, result.items.map(item => item.card));
+    const exposureReceipts = await openingContentDelivery(runtime.sql).cards({ workspaceId: principal.workspaceId, ownerUserId: principal.userId }, key, result.items.map(item => item.card).filter(card => cardReviewKind(card) !== "question"));
     return Response.json({ ...result, exposureReceipts }, { headers: contentDeliveryHeaders(exposureReceipts) });
   } catch (error) {
     return jsonError(mapDomainError(error));

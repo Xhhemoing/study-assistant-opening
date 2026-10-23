@@ -41,7 +41,7 @@ export function AppearancePreferencesProvider({ children }: { children: ReactNod
   const current = useRef<AppearancePreferences | null>(null);
 
   useEffect(() => {
-    const defaults: AppearancePreferences = { ...defaultPreferences, readingFont: /Win/i.test(navigator.platform) ? "sans" : "serif" };
+    const defaults: AppearancePreferences = defaultPreferences;
     let storage: Storage | null = null;
     let preferences = defaults;
     let persistenceError = false;

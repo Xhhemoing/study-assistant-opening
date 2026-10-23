@@ -310,6 +310,29 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           FOR UPDATE`;
         if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
         const current = rows[0] as Record<string, unknown>;
+        if ("auto" in input) {
+          if (current.course_id) return mapTeachingActivity(current);
+          if (current.status === "completed") throw learningError("CONFLICT", "已结束的学习不能自动更换课程");
+          const sourceIds = (current.source_ids ?? []) as string[];
+          await admitLearningSources(tx, scope, sourceIds);
+          // Infer only an unambiguous material association. Otherwise give this
+          // topic its own course, atomically with the activity binding.
+          const candidates = sourceIds.length ? await tx`SELECT DISTINCT c.id FROM courses c
+            JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=c.workspace_id
+            WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
+              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[]) LIMIT 2` : [];
+          const courseId = candidates.length === 1 ? String(candidates[0]!.id) : randomUUID();
+          if (candidates.length !== 1) {
+            const title = String(current.intent_summary).split("\n")[0]!.trim().slice(0, 120) || "自主学习";
+            await tx`INSERT INTO courses(id,workspace_id,title,slug,description)
+              VALUES(${courseId},${scope.workspaceId},${title},${`study-${courseId}`},'由本次学习自动整理')`;
+            for (const [index, sourceId] of sourceIds.entries()) await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+              VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
+          }
+          const [updated] = await tx`UPDATE opening_teaching_activities SET course_id=${courseId},updated_at=now()
+            WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
+          return mapTeachingActivity(updated!);
+        }
         if (input.expectedUpdatedAt) {
           const currentUpdated = learningIso(current.updated_at);
           if (currentUpdated !== input.expectedUpdatedAt) {

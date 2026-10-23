@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BudgetReplayError, OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
 import type { AiGradingProposal, LearningObservation, Scope } from "@aistudy/contracts";
 import { createOpeningAiGradingService } from "./ai-grading-service";
+import { rankPedagogy } from "../../../../../../tests/fixtures/opening/teaching/rank-pedagogy";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const scope: Scope = { workspaceId: id(1), ownerUserId: id(2) };
@@ -44,6 +45,13 @@ describe("saved answer AI grading", () => {
     expect(repository.apply).toHaveBeenCalledWith(scope, input, proposal, "test-grader");
     expect(images).not.toHaveBeenCalled();
     expect(original.answer).toBe("u=2v+3w");
+  });
+
+  it("passes only the repository's misconception dictionary into the grader", async () => {
+    const { service, context, call } = setup();
+    Object.assign(context, { misconceptions: rankPedagogy.misconceptions });
+    await service.grade(scope, input);
+    expect(JSON.parse(call.mock.calls[0]![2].input.text).misconceptions).toEqual(rankPedagogy.misconceptions);
   });
 
   it("uses the captured image version with vision routing, keeping the original text", async () => {

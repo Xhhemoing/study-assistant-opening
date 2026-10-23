@@ -20,12 +20,12 @@ export function updateSpanDraftAnswer(value: string, change: Partial<SpanDraftAn
   return JSON.stringify({ membership: "in_span", recognition: "confirmed", ...readSpanDraftAnswer(value), ...change });
 }
 export const SPAN_FEEDBACK_LABELS: Record<string, string> = {
-  core_steps_unobserved: "本次结论可核对，但建立等式或全部坐标过程尚未观察到，整体 span 表现仍待检查。",
-  no_solution_proof_unobserved: "不属于 span 的结论尚缺无解证据，未计作数学错误。",
-  verified_exactly: "判断与已提交的数学步骤通过精确核对。",
-  membership_incorrect: "是否属于 span 的判断与方程组相容性不一致。",
-  coefficients_do_not_satisfy_all_coordinates: "这组系数没有同时满足所有坐标。",
-  process_incorrect: "结论与过程需要分别核对：至少一个已填写步骤不一致。",
+  core_steps_unobserved: "请写出 αv+βw=u，并把求出的系数代回每个坐标。只有结论，还看不出你的解题思路。",
+  no_solution_proof_unobserved: "要说明不属于 span，请指出哪个坐标出现矛盾。",
+  verified_exactly: "你写出的等式、系数和坐标检查彼此一致，因此这个判断成立。",
+  membership_incorrect: "判断的关键是：同一组系数能否让所有坐标同时成立？请把求出的系数代回最后一个坐标。",
+  coefficients_do_not_satisfy_all_coordinates: "这组系数没有同时满足所有坐标。逐个算 αvᵢ+βwᵢ，并和 uᵢ 比较，找出第一个不相等的位置。",
+  process_incorrect: "先看下面标出的步骤。检查是否抄错向量、系数的符号，或漏查了一个坐标。",
   answer_unparseable: "结构或数字无法识别，未计作数学错误。",
   unparseable_structure: "答案结构无法识别，未计作数学错误。",
   recognition_uncertain: "识别尚未确认，未计作数学错误。",

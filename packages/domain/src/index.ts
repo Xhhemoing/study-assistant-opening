@@ -520,3 +520,5 @@ export * from "./opening/composer-intent";
 export { matrixErrorCardReference } from "./srs/error-card";
 
 export { tutorLearnerContextInstruction } from "./opening/tutor-learner-context";
+
+export { checkArithmeticAnswer, corroborateArithmeticGrade } from "./opening/arithmetic-check";

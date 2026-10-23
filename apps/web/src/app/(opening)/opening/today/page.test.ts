@@ -6,9 +6,10 @@ import OpeningTodayPage from "./page";
 import TodayLoading from "./loading";
 
 const mocks = vi.hoisted(() => ({
-  authenticate: vi.fn(), resume: vi.fn(), preference: vi.fn(), reader: vi.fn(),
+  redirect: vi.fn(), authenticate: vi.fn(), resume: vi.fn(), preference: vi.fn(), reader: vi.fn(),
   scope: { workspaceId: "workspace", ownerUserId: "owner" }, sql: {},
 }));
+vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 vi.mock("@aistudy/ai", () => ({ isTeachingCompilerEnabled: () => false }));
 vi.mock("../../../../features/opening/planning/today-dashboard", () => ({ TodayDashboard: () => null }));
@@ -20,7 +21,7 @@ vi.mock("../../../../features/opening/server/data-services", () => ({
   getPlanningSettingsService: () => ({ get: mocks.preference }),
 }));
 
-const page = () => OpeningTodayPage({ searchParams: Promise.resolve({ task: "task-1" }) });
+const page = () => OpeningTodayPage({ searchParams: Promise.resolve({}) });
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.authenticate.mockResolvedValue({ scope: mocks.scope, sql: mocks.sql });
@@ -29,6 +30,12 @@ beforeEach(() => {
 });
 
 describe("Today server reads", () => {
+  it("keeps old task links pointed at the scheduling page", async () => {
+    mocks.redirect.mockImplementation(() => { throw new Error("redirect"); });
+    await expect(OpeningTodayPage({ searchParams: Promise.resolve({ task: "task-1" }) })).rejects.toThrow("redirect");
+    expect(mocks.redirect).toHaveBeenCalledWith("/opening/settings/planning?task=task-1");
+    expect(mocks.authenticate).not.toHaveBeenCalled();
+  });
   it("starts both scoped reads without waiting for the resume query", async () => {
     let finishResume!: (value: { kind: "empty" }) => void;
     let markStarted!: () => void;
@@ -46,7 +53,13 @@ describe("Today server reads", () => {
     expect(mocks.preference).toHaveBeenCalledWith(mocks.scope);
     expect(mocks.reader).toHaveBeenCalledWith(mocks.sql);
     expect(mocks.resume).toHaveBeenCalledWith(expect.objectContaining({ scope: mocks.scope }));
-    expect(result.props).toMatchObject({ state: { kind: "empty" }, timeZone: "America/New_York", focusTaskId: "task-1" });
+    expect(result.props).toMatchObject({ state: { kind: "empty" }, timeZone: "America/New_York" });
+  });
+
+  it("keeps the one-click learning dashboard for an existing course", async () => {
+    mocks.resume.mockResolvedValue({ kind: "ready", courses: { status: "ready", items: [{ id: "course", title: "线性代数", archivedAt: null }] } });
+    const result = await page();
+    expect(result.props).toMatchObject({ state: { kind: "ready" }, teachingCompileEnabled: false });
   });
 
   it("does not start either read before authentication completes", async () => {
@@ -77,11 +90,13 @@ describe("Today server reads", () => {
     expect((await page()).props).toMatchObject({ state: { kind: "error" }, timeZone: "Asia/Shanghai" });
   });
 
-  it("announces the pending Today read without presenting it as completed", () => {
+  it("renders the pending start-page shell before the shared delayed loading announcement mounts", () => {
     const html = renderToStaticMarkup(createElement(TodayLoading));
     expect(html).toContain('aria-busy="true"');
-    expect(html).toContain('role="status"');
-    expect(html).toContain("正在读取学习进度与今日安排…");
-    expect(html).toContain("今日学习");
+    expect(html).toContain('aria-labelledby="today-loading-title"');
+    expect(html).toMatch(/<h1\b[^>]*id="today-loading-title"[^>]*>开始<\/h1>/);
+    // LoadingRows announces after its client-side delay; its timer and unmount
+    // behavior are covered by the shared UI component's interaction tests.
+    expect(html).not.toContain('role="status"');
   });
 });

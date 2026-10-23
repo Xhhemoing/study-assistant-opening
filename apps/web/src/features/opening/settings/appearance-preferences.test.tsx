@@ -108,11 +108,11 @@ describe("local appearance preferences", () => {
     expect(storage.setItem).not.toHaveBeenCalled();
   });
 
-  it("uses sans on Windows only when no explicit reading font is stored", () => {
+  it("uses the reading serif on every platform while preserving an explicit font choice", () => {
     vi.stubGlobal("navigator", { platform: "Win32" });
-    expect(mount().props.value.preferences.readingFont).toBe("sans");
-    emitStorage(appearanceStorageKey, JSON.stringify({ version: 1, preferences: { ...defaults, readingFont: "serif" } }));
-    expect(refresh().props.value.preferences.readingFont).toBe("serif");
+    expect(mount().props.value.preferences.readingFont).toBe("serif");
+    emitStorage(appearanceStorageKey, JSON.stringify({ version: 1, preferences: { ...defaults, readingFont: "sans" } }));
+    expect(refresh().props.value.preferences.readingFont).toBe("sans");
   });
 
   it("tracks OS preferences and preserves explicit theme and reduced motion choices", () => {

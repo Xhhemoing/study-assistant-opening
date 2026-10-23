@@ -1,7 +1,9 @@
+const diagnostics = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnostics.enabled }));
 import type { ExamForecastOverview, ExamIntegrationOverview, ExamSprintOverview, ExamWorkReview } from "@aistudy/contracts";
 import { createElement, isValidElement, type ReactNode, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BktPanel } from "./bkt-panel";
 import { ForecastResults } from "./forecast-panel";
 import { integrationSchema } from "./client-schemas";
@@ -55,6 +57,11 @@ describe("exam integration evidence presentation", () => {
     expect(html).toContain("version=1");
   });
 
+  it("keeps model probabilities out of the student view", () => {
+    diagnostics.enabled = false;
+    expect(renderToStaticMarkup(createElement(BktPanel, { integration, overview }))).toBe("");
+    diagnostics.enabled = true;
+  });
   it("labels model probabilities as uncalibrated next-answer estimates rather than mastery", () => {
     const html = renderToStaticMarkup(createElement(BktPanel, { integration, overview }));
     expect(html).toContain("下一题表现估计 · 未校准");

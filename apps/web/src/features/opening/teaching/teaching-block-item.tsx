@@ -11,13 +11,18 @@ import { BlockRenderer } from "./block-renderer";
 import { BlockCommands } from "./block-commands";
 import type { ClientInitBlock } from "./component-catalog";
 import type { InlineAttemptContext } from "./inline-attempt";
+import type { StudyConversationContext } from "../assistant/study-conversation-context";
+import { InlineExplain } from "./inline-explain";
+import { teachingStudyUnitText } from "./study-unit-focus";
+import { normalizeToCatalogId } from "./component-catalog";
+import { ui } from "../design/ui";
 
 /** Chrome classes for focus status — keep past/skipped dimmed, current ringed. */
 export function teachingBlockItemClassName(
   focusStatus: TeachingBlockFocusStatus,
 ): string {
   if (focusStatus === "current") {
-    return "space-y-1 rounded-lg ring-2 ring-emerald-500/55 ring-offset-2";
+    return "space-y-1 rounded-lg ring-2 ring-accent/55 ring-offset-2";
   }
   if (focusStatus === "past" || focusStatus === "skipped") {
     return "space-y-1 opacity-90";
@@ -44,6 +49,8 @@ export type TeachingBlockItemProps = {
   onReread: () => void | Promise<void>;
   /** A complete unit supplies its own hierarchy; individual blocks need no competing frame. */
   unitChrome?: boolean;
+  explanationContext?: StudyConversationContext;
+  onAskExplanation?: (text: string) => void;
 };
 
 /**
@@ -67,7 +74,12 @@ export function TeachingBlockItem({
   onConflict,
   onReread,
   unitChrome = false,
+  explanationContext,
+  onAskExplanation,
 }: TeachingBlockItemProps) {
+  const catalog = normalizeToCatalogId(block.blockType, block.role);
+  const explanation = explanationContext && ["text", "math", "step", "example"].includes(catalog)
+    ? teachingStudyUnitText({ id: block.blockId, title: "", blocks: [block], questionBlockId: null }) : "";
   return (
     <div
       className={unitChrome ? "min-w-0 space-y-3" : teachingBlockItemClassName(focusStatus)}
@@ -80,6 +92,11 @@ export function TeachingBlockItem({
         sourceRefs={sourceRefs}
         attemptContext={attemptContext}
       />
+      {explanation && explanationContext && onAskExplanation ? <div className="space-y-1">
+        <button type="button" className={ui.quiet} onClick={() => onAskExplanation(explanation)}>补充解释</button>
+        <InlineExplain context={{ ...explanationContext, blockId: block.blockId }} content={explanation}
+          heading="保存这段讲解" initiallyCollapsed onContinueInChat={() => onAskExplanation(explanation)} />
+      </div> : null}
       {showCommands ? (
         <BlockCommands
           activityId={activityId}
@@ -92,6 +109,8 @@ export function TeachingBlockItem({
           onSuccess={onSuccess}
           onConflict={onConflict}
           onReread={onReread}
+          explanationContext={explanationContext}
+          onAskExplanation={onAskExplanation}
         />
       ) : null}
     </div>

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { OpeningApi } from "../client/api";
 import type { TodayResumeState } from "./today-read";
 
-vi.mock("../cards/cards-client", () => ({ createOpeningCardsClient: () => ({ listDue: async () => [] }) }));
+vi.mock("./today-progress", () => ({ TodayProgress: () => <div aria-label="今天的进度"><a href="/opening/review">复习</a></div> }));
 vi.mock("./today-view", async () => {
   const actual = await vi.importActual<typeof import("./today-view")>("./today-view");
   return { ...actual, TodayPlanView: ({ reloadToken, onSelect }: { reloadToken: number; onSelect: (task: unknown) => void }) => <div data-queue-revision={reloadToken}><button type="button" onClick={() => onSelect({ id: "task", title: "线性代数" })}>选择任务</button></div> };
@@ -48,20 +48,20 @@ function visibleControls(host: HTMLElement) {
   });
 }
 
-it("keeps one next action, hides the queue by default and retains the start action in focus mode", async () => {
-  const host = await render(makeApi());
+it("keeps one next action without mounting planning or suggestion requests on Today", async () => {
+  const api = makeApi();
+  const host = await render(api);
   expect(host.querySelectorAll('[data-continue-card="true"]')).toHaveLength(1);
   expect(host.querySelector('[data-inline-lesson]')).toBeNull();
-  expect((host.querySelector("#today-queue") as HTMLElement).hidden).toBe(true);
+  expect(host.querySelector("#today-queue")).toBeNull();
+  expect(host.querySelector("#suggestions")).toBeNull();
+  expect(api.listCandidates).not.toHaveBeenCalled();
   const main = host.querySelector('[data-today-primary-cta="true"]')!;
   host.dataset.focus = "true";
   expect(visibleControls(host)).toContain(main);
   host.dataset.focus = "false";
   expect(host.querySelector('a[href="/opening/review"]')).not.toBeNull();
-  await act(async () => button(host, "查看今日安排").click());
-  expect((host.querySelector("#today-queue") as HTMLElement).hidden).toBe(false);
-  await act(async () => button(host, "选择任务").click());
-  expect((host.querySelector("#today-queue") as HTMLElement).hidden).toBe(false);
+  expect(host.querySelector('a[href="/opening/settings/planning"]')).not.toBeNull();
 });
 
 it.each(["first-course", "no-courses"])("keeps the default %s main area within eight controls in the rendered tree", async scenario => {
@@ -72,7 +72,7 @@ it.each(["first-course", "no-courses"])("keeps the default %s main area within e
 });
 
 it("opens a task deep link and keeps review discoverable even with no course", async () => {
-  const host = await render(makeApi(), { focusTaskId: "task" });
+  const host = await render(makeApi(), { planning: true, focusTaskId: "task" });
   expect((host.querySelector("#today-queue") as HTMLElement).hidden).toBe(false);
   const empty = await render(makeApi(), { state: { kind: "empty", courses: { status: "ready", items: [] } } });
   expect(empty.querySelector('a[href="/opening/review"]')).not.toBeNull();
@@ -80,7 +80,7 @@ it("opens a task deep link and keeps review discoverable even with no course", a
 
 it("preserves an uncertain review request across collapse and refreshes the queue/count only after success", async () => {
   const api = makeApi(); api.createTask.mockRejectedValueOnce(new Error("网络中断"));
-  const host = await render(api);
+  const host = await render(api, { planning: true });
   const details = host.querySelector<HTMLDetailsElement>("#suggestions")!;
   host.dataset.focus = "true";
   await act(async () => window.dispatchEvent(new Event("opening:show-suggestions")));

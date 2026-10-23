@@ -114,13 +114,13 @@ function opaqueSourceIds(row: Record<string, unknown>): string[] | null {
 }
 
 /** Undefined optional lineage is allowed here; full row validation belongs to apply. */
-export function sourceReferences(row: Record<string, unknown>): string[] | null {
+export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQuestion = false): string[] | null {
   const refs: string[] = [];
   if (row.asset_type === "source") {
     if (!isUuid(row.asset_id)) return null;
     refs.push(row.asset_id);
   }
-  if (row.source_id !== undefined) {
+  if (row.source_id !== undefined && !(allowSourceFreeQuestion && row.source_id === null)) {
     if (!isUuid(row.source_id)) return null;
     refs.push(row.source_id);
   }

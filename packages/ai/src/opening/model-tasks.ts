@@ -30,6 +30,7 @@ export const MODEL_TASKS = {
   "practice.grade-text": { label: "文字作答批改", group: "practice", purpose: "grade-text" },
   "practice.exam": { label: "真题考点与模拟练习", group: "practice", purpose: "course-exam" },
   "practice.grade-photo": { label: "拍照作答评阅", group: "practice", purpose: "grade-photo", needs: ["vision"] },
+  "practice.recognize-photo": { label: "题目照片文字识别", group: "practice", purpose: "recognize-photo-question", needs: ["vision"] },
   "settings.probe": { label: "模型连通性测试", group: "settings", purpose: "probe" },
   "media.transcribe": { label: "音视频转写", group: "materials", purpose: "transcribe", needs: ["audio"] },
 } as const satisfies Record<string, ModelTaskSpec>;

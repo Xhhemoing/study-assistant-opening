@@ -5,7 +5,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
 import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
-import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { readOpeningLearningEvidenceContext, readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { refreshOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
@@ -226,37 +226,29 @@ export async function listObservationHeadsByActivity(
   }>
 > {
   const capped = Math.min(Math.max(1, limit), 100);
-  const rows = await sql`
-    SELECT DISTINCT ON (o.problem_id)
-      o.problem_id,
-      o.item_version_id,
-      o.outcome
-    FROM opening_learning_observations o
-    JOIN workspaces w ON w.id = o.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
-    WHERE o.workspace_id = ${scope.workspaceId}
-      AND o.owner_user_id = ${scope.ownerUserId}
-      AND o.activity_id = ${activityId}
-      AND o.problem_id IS NOT NULL
-      AND (
-        o.effective_head_id IS NOT DISTINCT FROM o.id
-        OR (o.effective_head_id IS NULL AND o.root_observation_id IS NULL)
-      )
-    ORDER BY o.problem_id, o.occurred_at DESC, o.id DESC
-    LIMIT ${capped}`;
-  const out: Array<{
-    problemId: string;
-    itemVersionId: string | null;
-    outcome: "correct" | "incorrect" | "unverified";
-  }> = [];
-  for (const row of rows) {
-    const r = row as Record<string, unknown>;
-    const outcome = r.outcome;
-    if (outcome !== "correct" && outcome !== "incorrect" && outcome !== "unverified") continue;
-    out.push({
-      problemId: String(r.problem_id),
-      itemVersionId: (r.item_version_id ?? null) as string | null,
-      outcome,
-    });
-  }
-  return out;
+  return sql.begin("isolation level repeatable read read only", async tx => {
+    const rows = await tx`
+      SELECT DISTINCT ON (o.problem_id) o.*
+      FROM opening_learning_observations o
+      JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
+        AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
+        AND COALESCE(root.effective_head_id,root.id)=o.id
+      JOIN workspaces w ON w.id=o.workspace_id AND w.owner_user_id=o.owner_user_id
+      JOIN courses c ON c.id=o.course_id AND c.workspace_id=o.workspace_id AND c.archived_at IS NULL
+      WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
+        AND o.activity_id=${activityId} AND o.problem_id IS NOT NULL
+        AND COALESCE(o.revision_kind,'original') <> 'retract'
+      ORDER BY o.problem_id,o.submitted_at DESC NULLS LAST,o.occurred_at DESC,root.id DESC
+      LIMIT ${capped}`;
+    const observations = rows.map(mapLearningObservation);
+    const contexts = await readOpeningLearningEvidenceContexts(tx, scope, observations);
+    return observations.filter(row => contexts[row.id]?.context.version?.applicability !== "privacy_excluded")
+      .map(row => {
+        const facts = contexts[row.id]!;
+        const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
+        const outcome = eligibility.usableForCurrentVersion !== "yes" || eligibility.verifiedCorrect === "unknown"
+          ? "unverified" as const : eligibility.verifiedCorrect === "yes" ? "correct" as const : "incorrect" as const;
+        return { problemId: row.problemId!, itemVersionId: row.itemVersionId ?? null, outcome };
+      });
+  });
 }
