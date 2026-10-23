@@ -10,8 +10,9 @@ import {
   type TurnRecord,
   type StudyContextAnchor,
   type StudyIntentEvent,
+  type QueryHistory,
 } from "@aistudy/contracts";
-import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
+import { composerMessageText, inferComposerIntent, requestsFinalAnswer } from "@aistudy/domain";
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
@@ -167,7 +168,20 @@ export function createTutorService(deps: {
 
       const owned = await deps.conversations.getOwned(scope, request.conversationId);
       const existing = await deps.conversations.findTurnByClientKey(scope, request.clientKey, request.conversationId);
-      const queryHistory = isRecordFollowup(composerMessageText(request.text)) ? await deps.conversations.loadContinuityTurns(scope, request.conversationId) : [];
+      let queryHistory: QueryHistory = [];
+      if (!existing?.mode && isRecordFollowup(composerMessageText(request.text))) {
+        queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+      } else if (!existing?.mode && request.mode === undefined && requestsFinalAnswer(request.text)) {
+        const anchor = request.contextAnchor;
+        const attemptId = request.attemptId ?? anchor?.attemptId;
+        if (!attemptId && !anchor) queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+        else if (attemptId || anchor?.blockId) {
+          // A second request belongs to the same issued question, never a different block or attempt.
+          queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId, {
+            attemptId, activityId: anchor?.activityId, blockId: anchor?.blockId, contentVersion: anchor?.contentVersion,
+          });
+        }
+      }
       const resolved = inferComposerIntent({ ...request, history: queryHistory,
         mode: request.mode ?? existing?.mode,
         practiceMode: Boolean(request.attemptId || request.contextAnchor?.attemptId || request.contextAnchor?.activityId),

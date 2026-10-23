@@ -11,19 +11,19 @@ test("compact mobile navigation and settings retain every destination and predic
   await page.goto("/opening/today");
   const navigation = page.getByRole("navigation", { name: "学习工作台导航（移动端）", exact: true });
   await expect(navigation.getByRole("link")).toHaveCount(4);
-  for (const [label, href] of [["今日", "/opening/today"], ["课程", "/opening/courses"], ["助理", "/opening/agent"], ["资料", "/opening/library"]] as const) {
+  for (const [label, href] of [["开始", "/opening/today"], ["课程", "/opening/courses"], ["助理", "/opening/agent"], ["资料", "/opening/library"]] as const) {
     await expect(navigation.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
-  const account = page.getByRole("button", { name: "账户与学习工具", exact: true });
+  const account = page.getByRole("button", { name: "更多", exact: true });
   await account.click();
-  const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "账户与学习工具", exact: true }) });
+  const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "学习工具与账户", exact: true }) });
   await expect(more).toBeVisible();
-  for (const [label, href] of [[/^待确认建议/, "/opening/today#suggestions"], [/^设置$/, "/opening/settings"]] as const) {
+  for (const [label, href] of [[/^待确认建议/, "/opening/settings/planning#suggestions"], [/^设置$/, "/opening/settings"], [/^冲刺$/, "/opening/sprint"], [/^卡组$/, "/opening/cards"], [/^搜索$/, "/opening/search"], [/^全部对话$/, "/opening/assistant"]] as const) {
     await expect(more.getByRole("link", { name: label })).toHaveAttribute("href", href);
   }
   await expect(more.getByRole("link", { name: "连接", exact: true })).toHaveCount(0);
-  await expect(more.getByRole("link", { name: "考前冲刺", exact: true })).toHaveCount(0);
+  await expect(more.getByRole("link", { name: "冲刺", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(more).not.toBeVisible();
   await expect(account).toBeFocused();

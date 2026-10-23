@@ -178,8 +178,8 @@ function MatrixTable({
 }) {
   return (
     <div className="space-y-1" data-matrix-label={label}>
-      <p className="text-xs font-medium text-zinc-600">{label}</p>
-      <table className="border-collapse font-mono text-xs tabular-nums text-zinc-900">
+      <p className="text-xs font-medium text-text-2">{label}</p>
+      <table className="border-collapse font-mono text-xs tabular-nums text-text">
         <tbody>
           {rows.map((row, ri) => (
             <tr key={ri}>
@@ -195,8 +195,8 @@ function MatrixTable({
                     key={ci}
                     className={
                       hi
-                        ? "border border-emerald-300 bg-emerald-50 px-2 py-1"
-                        : "border border-zinc-200 bg-white px-2 py-1"
+                        ? "border border-accent/40 bg-accent-soft px-2 py-1"
+                        : "border border-line bg-surface px-2 py-1"
                     }
                     data-cell={`${ri},${ci}`}
                   >
@@ -223,8 +223,8 @@ function VectorRow({
 }) {
   return (
     <div className="space-y-1" data-vector-label={label}>
-      <p className="text-xs font-medium text-zinc-600">{label}</p>
-      <table className="border-collapse font-mono text-xs tabular-nums text-zinc-900">
+      <p className="text-xs font-medium text-text-2">{label}</p>
+      <table className="border-collapse font-mono text-xs tabular-nums text-text">
         <tbody>
           <tr>
             {cells.map((cell, i) => (
@@ -232,8 +232,8 @@ function VectorRow({
                 key={i}
                 className={
                   highlight
-                    ? "border border-emerald-300 bg-emerald-50 px-2 py-1"
-                    : "border border-zinc-200 bg-white px-2 py-1"
+                    ? "border border-accent/40 bg-accent-soft px-2 py-1"
+                    : "border border-line bg-surface px-2 py-1"
                 }
                 data-cell={i}
               >
@@ -261,21 +261,21 @@ export function MatrixTransformStaticView({
 }) {
   return (
     <div
-      className="space-y-3 rounded-lg border border-zinc-200 bg-white px-3 py-3"
+      className="space-y-3 rounded-lg border border-line bg-surface px-3 py-3"
       data-catalog="matrix_transform"
       data-matrix-mode="static"
       role="group"
       aria-label={title ?? model.title ?? "矩阵变换（静态）"}
     >
       {(title ?? model.title) ? (
-        <p className="text-sm font-medium text-zinc-900">{title ?? model.title}</p>
+        <p className="text-sm font-medium text-text">{title ?? model.title}</p>
       ) : null}
       {model.expression ? (
-        <p className="font-mono text-xs text-zinc-700">{model.expression}</p>
+        <p className="font-mono text-xs text-text-2">{model.expression}</p>
       ) : null}
       {parseErrors && parseErrors.length > 0 ? (
         <div
-          className="rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-900 ring-1 ring-amber-600/20"
+          className="rounded-md bg-warn-soft px-2 py-1.5 text-xs text-warn ring-1 ring-warn/20"
           role="status"
           data-math-params-error={parseErrors.join("; ")}
         >
@@ -288,15 +288,15 @@ export function MatrixTransformStaticView({
         <VectorRow label={model.labelY} cells={model.rowY} highlight />
       </div>
       {model.prose ? (
-        <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-800">{model.prose}</p>
+        <p className="whitespace-pre-wrap text-sm leading-6 text-text">{model.prose}</p>
       ) : null}
       <pre
-        className="overflow-x-auto whitespace-pre-wrap rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-xs leading-5 text-zinc-700 ring-1 ring-zinc-900/5"
+        className="overflow-x-auto whitespace-pre-wrap rounded-md bg-surface-2 px-2 py-1.5 font-mono text-xs leading-5 text-text-2 ring-1 ring-line"
         data-text-alternative="true"
       >
         {textAlt}
       </pre>
-      <p className="text-xs leading-5 text-zinc-500" data-matrix-honesty="true">
+      <p className="text-xs leading-5 text-text-3" data-matrix-honesty="true">
         {MATRIX_TRANSFORM_HONESTY_COPY}
       </p>
     </div>
@@ -346,7 +346,7 @@ export function MatrixTransformView({
 
   return (
     <div
-      className="space-y-3 rounded-lg border border-zinc-200 bg-white px-3 py-3"
+      className="space-y-3 rounded-lg border border-line bg-surface px-3 py-3"
       data-catalog="matrix_transform"
       data-matrix-mode="interactive"
       data-step-index={state.stepIndex}
@@ -371,10 +371,10 @@ export function MatrixTransformView({
       }}
     >
       {params.title ? (
-        <p className="text-sm font-medium text-zinc-900">{params.title}</p>
+        <p className="text-sm font-medium text-text">{params.title}</p>
       ) : null}
       {params.expression ? (
-        <p className="font-mono text-xs text-zinc-700">{params.expression}</p>
+        <p className="font-mono text-xs text-text-2">{params.expression}</p>
       ) : null}
 
       <div
@@ -435,7 +435,7 @@ export function MatrixTransformView({
       </div>
 
       <p
-        className="text-xs leading-5 text-zinc-500"
+        className="text-xs leading-5 text-text-3"
         data-matrix-step-label="true"
         aria-live="polite"
       >
@@ -461,14 +461,14 @@ export function MatrixTransformView({
 
       {state.showTextAlt ? (
         <pre
-          className="overflow-x-auto whitespace-pre-wrap rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-xs leading-5 text-zinc-700 ring-1 ring-zinc-900/5"
+          className="overflow-x-auto whitespace-pre-wrap rounded-md bg-surface-2 px-2 py-1.5 font-mono text-xs leading-5 text-text-2 ring-1 ring-line"
           data-text-alternative="true"
         >
           {textAlt}
         </pre>
       ) : null}
 
-      <p className="text-xs leading-5 text-zinc-500" data-matrix-honesty="true">
+      <p className="text-xs leading-5 text-text-3" data-matrix-honesty="true">
         {MATRIX_TRANSFORM_HONESTY_COPY}
       </p>
     </div>
@@ -531,21 +531,21 @@ export function MatrixTransformBlock({
     // Parse fail: honesty + retain error; no invented matrices.
     return (
       <div
-        className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/40 px-3 py-2"
+        className="space-y-2 rounded-lg border border-warn/25 bg-warn-soft px-3 py-2"
         data-catalog="matrix_transform"
         data-matrix-mode="parse-fail"
         data-math-params-error={parsed.errors.join("; ")}
         role="status"
       >
-        <p className="text-xs font-medium text-amber-900">
+        <p className="text-xs font-medium text-warn">
           矩阵参数无法解析，已跳过交互图示（不伪造数值）。
         </p>
-        <ul className="list-disc pl-4 text-xs text-amber-900">
+        <ul className="list-disc pl-4 text-xs text-warn">
           {parsed.errors.map((err, i) => (
             <li key={i}>{err}</li>
           ))}
         </ul>
-        <p className="text-xs text-zinc-500">{MATRIX_TRANSFORM_HONESTY_COPY}</p>
+        <p className="text-xs text-text-3">{MATRIX_TRANSFORM_HONESTY_COPY}</p>
       </div>
     );
   }

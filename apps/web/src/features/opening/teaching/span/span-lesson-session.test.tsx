@@ -25,7 +25,7 @@ function render() { hooks.cursor = 0; const tree = SpanLessonSession(props); hoo
 function lesson() { return find(render(), element => element.type === SpanLesson)! as ReactElement<ComponentProps<typeof SpanLesson>>; }
 function unmount() { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); }
 const settle = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };
-beforeEach(() => { unmount(); hooks.values = []; hooks.effects = []; vi.clearAllMocks(); mocks.request.mockResolvedValue(details(snapshot)); vi.stubGlobal("window", { location: { href: `http://example.test/opening/courses/${id}/study/span` }, history: { state: null, replaceState: mocks.replaceState } }); });
+beforeEach(() => { unmount(); hooks.values = []; hooks.effects = []; vi.clearAllMocks(); mocks.request.mockReset(); mocks.request.mockResolvedValue(details(snapshot)); vi.stubGlobal("window", { location: { href: `http://example.test/opening/courses/${id}/study/span` }, history: { state: null, replaceState: mocks.replaceState } }); });
 it("applies an explicit recovery snapshot to the lesson while ordinary progress saves retain its editing tree", async () => {
   render(); await settle(); const first = lesson();
   expect(first.props.sourceIds).toEqual([sourceId]);
@@ -35,7 +35,7 @@ it("applies an explicit recovery snapshot to the lesson while ordinary progress 
   mocks.request.mockRejectedValueOnce(new Error("另一页面已更新学习进度"));
   await lesson().props.onProgress!(snapshot.intent, "self-independent", "active");
   mocks.request.mockResolvedValueOnce(details({ ...snapshot, revision: 9, moveId: "self-independent", intent: { ...snapshot.intent, timeBudgetMinutes: 7 } }));
-  const retry = find(render(), element => element.type === "button" && element.props.children === "重新读取已保存进度")!;
+  const retry = find(render(), element => element.type === "button" && element.props.children === "继续加载")!;
   (retry.props.onClick as () => void)(); render(); await settle(); const restored = lesson();
   expect(restored.key).not.toBe(first.key);
   expect(restored.props.initialMoveId).toBe("self-independent"); expect(restored.props.initialIntent?.timeBudgetMinutes).toBe(7);
@@ -47,8 +47,7 @@ it.each(["start", "save"] as const)("does not let an interrupted %s request rewr
   let resolve!: (value: SpanLessonSnapshot) => void;
   mocks.request.mockImplementationOnce(() => new Promise<SpanLessonSnapshot>(done => { resolve = done; }));
   if (action === "start") {
-    const start = find(render(), element => element.type === "button" && element.props.children === "开始本次学习")!;
-    (start.props.onClick as () => void)();
+    render(); // A successful recovery read starts a new session without a click.
   } else void lesson().props.onProgress!(snapshot.intent, "self-faded", "active");
   unmount(); resolve({ ...snapshot, revision: 2 }); await settle();
   expect(mocks.replaceState).not.toHaveBeenCalled();

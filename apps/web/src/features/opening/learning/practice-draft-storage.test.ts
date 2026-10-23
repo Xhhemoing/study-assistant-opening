@@ -147,3 +147,15 @@ it("reads older drafts without photo fields without losing the frozen answer", (
   expect(restored?.drafts[0]?.fields).toMatchObject({ answer: saved.fields.answer, workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 });
   expect(restored?.drafts[0]?.submission).toEqual(saved.submission);
 });
+
+it("restores a pasted question without a source and still rejects changes to its frozen text", () => {
+  const scope = practiceScope(courseId, "ordinary", null, { skillLabel: "pasted", requirementKey: null });
+  const draft = emptyPracticeDraft(scope, { skillLabel: "pasted", stem: "17 × 23", sourceId: "" });
+  const clientKey = "pasted-question-key";
+  const saved = { ...draft, attemptId, start: { sessionId, sessionInput: { courseId, skillLabel: "pasted", sourceIds: [] }, clientKey,
+    createInput: { sessionId, clientKey, problem: { stemSnapshot: "17 × 23", artifactKind: "reference_item" as const } } } };
+  const collection = { version: 2, scope, activeId: saved.id, drafts: [saved] };
+  expect(parsePracticeDraftCollection(collection, scope)?.drafts[0]).toEqual(saved);
+  expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, stem: "changed" } }] }, scope)).toBeNull();
+  expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, sourceId: attemptId } }] }, scope)).toBeNull();
+});

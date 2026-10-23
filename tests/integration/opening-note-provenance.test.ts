@@ -48,6 +48,14 @@ async function save(refs: ContextSourceRef[] = []) {
   const result = await notes.saveSnippet(scope, { title: "Linked snippet", text: "ONLY-CONFIRMED-EXCERPT", provenanceId: proof.id });
   return { ...result, proof };
 }
+async function savedReply(refs: unknown, owner = scope) {
+  const conversationId = randomUUID(), savedTurnId = randomUUID();
+  await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+    VALUES(${conversationId},${owner.workspaceId},${owner.ownerUserId},'Saved explanation')`;
+  await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+    VALUES(${savedTurnId},${owner.workspaceId},${conversationId},'assistant','Server answer','listen','complete',${refs === null ? null : sql.json(refs as never)})`;
+  return { conversationId, savedTurnId };
+}
 async function exclude(sourceId: string, permanent = false) {
   await sql.begin(async tx => {
     await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -58,6 +66,85 @@ async function exclude(sourceId: string, permanent = false) {
 }
 
 describe("Opening linked note persistence", () => {
+  it("saves an owned completed answer with structured content and durable server source lineage", async () => {
+    const sourceId = await source(), refs = [{ sourceId, sourceVersion: 0 }];
+    const origin = await savedReply(refs);
+    const { documentId } = await notes.saveSnippet(scope, { title: "Saved answer", text: "## Edited excerpt", savedTurnId: origin.savedTurnId }, [
+      { type: "heading", props: { level: 2 }, content: "Edited excerpt", children: [] },
+    ]);
+    expect((await library.getDocument({ workspaceId: scope.workspaceId, documentId })).blocks[0]).toMatchObject({ type: "heading", content: { blockNoteContent: "Edited excerpt" } });
+    await sql`DELETE FROM opening_conversations WHERE id=${origin.conversationId}`;
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual(refs);
+    await exclude(sourceId, true);
+    await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it.each(["pending", "failed", "clarify", "outcome_unknown", "user", "system-query", "query-receipt", "query-purpose", "state-purpose", "foreign-conversation"])("rejects a %s saved origin without writing a note", async kind => {
+    const { savedTurnId, conversationId } = await savedReply([]);
+    if (["pending", "failed", "clarify", "outcome_unknown"].includes(kind)) await sql`UPDATE opening_turns SET status=${kind} WHERE id=${savedTurnId}`;
+    if (kind === "user") await sql`UPDATE opening_turns SET role='user' WHERE id=${savedTurnId}`;
+    if (kind === "system-query") await sql`UPDATE opening_turns SET query_system=true WHERE id=${savedTurnId}`;
+    if (kind === "query-receipt") await sql`UPDATE opening_turns SET query_system=true,system_query='{}'::jsonb WHERE id=${savedTurnId}`;
+    if (kind === "query-purpose" || kind === "state-purpose") await sql`UPDATE opening_turns SET composer_purpose=${kind === "query-purpose" ? "query" : "explain_state"} WHERE id=${savedTurnId}`;
+    if (kind === "foreign-conversation") await sql`UPDATE opening_conversations SET owner_user_id=${randomUUID()} WHERE id=${conversationId}`;
+    await expect(notes.saveSnippet(scope, { title: "Denied", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+  });
+
+  it("rejects foreign turn identity and foreign source lineage, while admitting a known empty lineage", async () => {
+    const other = await createIdentityRepository(sql).createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Other snippet owner", passwordHash: "unused" });
+    const otherScope = { workspaceId: other.workspace.id, ownerUserId: other.user.id }; scopes.push(otherScope);
+    const foreign = await savedReply([], otherScope);
+    await expect(notes.saveSnippet(scope, { title: "Foreign", text: "must not save", savedTurnId: foreign.savedTurnId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const sourceId = await source();
+    const contaminated = await savedReply([{ sourceId, sourceVersion: 0 }], otherScope);
+    await expect(notes.saveSnippet(otherScope, { title: "Foreign source", text: "must not save", savedTurnId: contaminated.savedTurnId })).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+    const clean = await savedReply([]);
+    const { documentId } = await notes.saveSnippet(scope, { title: "No sources", text: "own explanation", savedTurnId: clean.savedTurnId });
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([]);
+  });
+
+  it("does not treat a legacy unflagged assistant reply to a system query as an ordinary explanation", async () => {
+    const { savedTurnId, conversationId } = await savedReply([]), userTurnId = randomUUID();
+    await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,query_system)
+      VALUES(${userTurnId},${scope.workspaceId},${conversationId},'user','Look up my records','listen','complete',true)`;
+    await sql`INSERT INTO opening_tutor_jobs(id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status,mode)
+      VALUES(${randomUUID()},${scope.workspaceId},${conversationId},${userTurnId},${savedTurnId},'succeeded','listen')`;
+    await expect(notes.saveSnippet(scope, { title: "Query snapshot", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+  });
+
+  it.each([{ refs: null }, { refs: [{ sourceId: "unknown" }] }, { refs: [{ sourceId: "not-uuid", sourceVersion: 0 }] }])("rejects unknown or malformed saved lineage %#", async ({ refs }) => {
+    const { savedTurnId } = await savedReply(refs);
+    await expect(notes.saveSnippet(scope, { title: "Unknown", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "PROVENANCE_UNKNOWN" });
+    expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+  });
+
+  it("rejects a saved answer whose lineage omits its citation", async () => {
+    const sourceId = await source(), { savedTurnId } = await savedReply([]);
+    await sql`UPDATE opening_turns SET citations=${sql.json([{ sourceId, sourceVersion: 0 }])} WHERE id=${savedTurnId}`;
+    await expect(notes.saveSnippet(scope, { title: "Incomplete", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "PROVENANCE_UNKNOWN" });
+    expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+  });
+
+  it("keeps actual consumed lineage instead of promoting an unretrieved source selection", async () => {
+    const sourceId = await source(), { savedTurnId } = await savedReply([]);
+    await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],source_versions=${sql.json({ [sourceId]: 0 })} WHERE id=${savedTurnId}`;
+    const { documentId } = await notes.saveSnippet(scope, { title: "Source-free answer", text: "general explanation", savedTurnId });
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([]);
+  });
+
+  it.each(["changed", "excluded", "deleted", "unavailable"])("rejects %s sources captured by a saved answer", async state => {
+    const sourceId = await source(), { savedTurnId } = await savedReply([{ sourceId, sourceVersion: 0 }]);
+    if (state === "changed") await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+    if (state === "excluded") await exclude(sourceId);
+    if (state === "deleted") await sql`DELETE FROM opening_sources WHERE id=${sourceId}`;
+    if (state === "unavailable") await sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,bytes,sha256,availability)
+      VALUES(${sourceId},${scope.workspaceId},0,1,${'a'.repeat(64)},'unavailable')`;
+    await expect(notes.saveSnippet(scope, { title: "Unavailable", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+    expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+  });
+
   it("resolves complete history from owned receipt rows, with missing, foreign and unknown receipts isolated", async () => {
     const sourceId = await source();
     const proof = await receipt([{ sourceId, sourceVersion: 0 }]);

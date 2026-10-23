@@ -75,6 +75,10 @@ export const teachingLearnerFocusSchema = z
     focusObservationId: uuidSchema.nullable(),
     /** Assistance on the latest observations, newest first. */
     recentAssistance: z.array(assistanceLevelSchema).max(3),
+    /** Historical feedback, not a diagnosis or proof of mastery. */
+    recentErrors: z.array(z.object({ observationId: uuidSchema, label: z.string().min(1).max(200),
+      feedback: z.string().max(1000), source: z.enum(["ai_feedback", "verified_steps"]),
+      misconceptionId: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/).optional() }).strict()).max(3).optional(),
     strategyVersion: z.string().min(1).max(40),
     goalContext: goalLearningContextSchema.optional(),
     prerequisiteRepair: prerequisiteRepairSchema.optional(),
@@ -103,12 +107,12 @@ export const teachingActivitySchema = z
   })
   .strict();
 
-export const teachingActivityAssociateCourseInputSchema = z
+export const teachingActivityAssociateCourseInputSchema = z.union([z
   .object({
     courseId: uuidSchema.nullable(),
     expectedUpdatedAt: isoDateTimeSchema.optional(),
   })
-  .strict();
+  .strict(), z.object({ auto: z.literal(true) }).strict()]);
 
 /**
  * Sketch for v2 observation adapters (formal writes still go through observation services).
@@ -129,6 +133,19 @@ export type TeachingActivityCreateInput = z.infer<typeof teachingActivityCreateI
 export type TeachingActivity = z.infer<typeof teachingActivitySchema>;
 export type LearningActivityKind = z.infer<typeof learningActivityKindSchema>;
 export type TeachingLearnerFocus = z.infer<typeof teachingLearnerFocusSchema>;
+
+/** Public question controls contain no correct answer or scoring authority. */
+export const teachingQuestionInteractionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("choice"), options: z.array(z.object({ id: z.string().min(1).max(20), label: z.string().min(1).max(500) }).strict()).min(2).max(6)
+    .refine(options => new Set(options.map(option => option.id)).size === options.length, "选项编号不能重复") }).strict(),
+  z.object({ kind: z.literal("numeric"), unit: z.string().max(40).optional() }).strict(),
+]);
+export type TeachingQuestionInteraction = z.infer<typeof teachingQuestionInteractionSchema>;
+export const teachingVectorDiagramSchema = z.object({
+  v: z.tuple([z.number().finite().min(-100).max(100), z.number().finite().min(-100).max(100)]),
+  w: z.tuple([z.number().finite().min(-100).max(100), z.number().finite().min(-100).max(100)]),
+}).strict();
+export type TeachingVectorDiagram = z.infer<typeof teachingVectorDiagramSchema>;
 export type TeachingActivityAssociateCourseInput = z.infer<
   typeof teachingActivityAssociateCourseInputSchema
 >;

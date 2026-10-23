@@ -3,6 +3,7 @@ import type { LearningEvent, ReviewCard, ReviewState } from "@aistudy/contracts"
 import type { Principal } from "../../lib/authorization";
 import {
   createCardForPrincipal,
+  countDueReviewsForPrincipal,
   gradeReviewForPrincipal,
   listReviewQueueForPrincipal,
   updateCardControlsForPrincipal,
@@ -59,10 +60,34 @@ const event: LearningEvent = {
 };
 
 function runtime(cards: Record<string, ReturnType<typeof vi.fn>>) {
-  return { cards } as never;
+  return { cards: { getCard: vi.fn().mockResolvedValue(card), ...cards } } as never;
 }
 
 describe("review service", () => {
+  it("returns only a due count without exposing questions or solutions", async () => {
+    const listQueue = vi.fn().mockResolvedValue([{ card, state, goalPriority: 0 }]);
+    const result = await countDueReviewsForPrincipal(runtime({ listQueue }), principal, { now: () => new Date(now), resolveTimeZone: async () => "Asia/Shanghai" });
+    expect(result).toEqual({ count: 1 });
+    expect(listQueue).toHaveBeenCalledWith({ workspaceId, ownerUserId, now: new Date(now), timeZone: "Asia/Shanghai", mode: "auto" });
+    expect(JSON.stringify(result)).not.toContain(card.back);
+  });
+  it("rejects self-grading for a question card before scheduling", async () => {
+    const grade = vi.fn(), getCard = vi.fn().mockResolvedValue({ ...card, tags: ["review:question"] });
+    await expect(gradeReviewForPrincipal(runtime({ grade, getCard }), principal, {
+      cardId, grade: "easy", idempotencyKey: "variant-self-grade",
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(grade).not.toHaveBeenCalled();
+  });
+
+  it("does not send the original question and solution in a variant review queue", async () => {
+    const listQueue = vi.fn().mockResolvedValue([{ card: { ...card, tags: ["review:question"] }, state, goalPriority: 0 }]);
+    const result = await listReviewQueueForPrincipal(runtime({ listQueue }), principal, { mode: "auto" }, {
+      resolveTimeZone: async () => "Asia/Shanghai",
+    });
+    expect(result.items[0]!.card.front).not.toBe(card.front);
+    expect(result.items[0]!.card.back).not.toBe(card.back);
+  });
+
   it("grades through the card repository using the session principal workspace", async () => {
     const grade = vi.fn().mockResolvedValue({
       state: { ...state, workspaceId, ownerUserId },

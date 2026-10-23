@@ -45,5 +45,6 @@ export async function startFirstLearning(deps: FirstLearningDependencies, scope:
   return { activityId: activity.id, taskId, courseId: initialized.courseId, planDate,
     planStartDate: initialized.startDate, planEndDate: initialized.endDate, plannedDays: initialized.legacy ? 0 : initialized.tasks.length,
     generateStatus: activity.generateStatus, contentVersion: activity.contentVersion,
-    draftCreated: Boolean(plan.dailyDraft), scheduleInitialized, href: "/opening/today" as const };
+    draftCreated: Boolean(plan.dailyDraft), scheduleInitialized,
+    href: initialized.courseId ? `/opening/courses/${initialized.courseId}/study?activity=${activity.id}` : "/opening/today" };
 }

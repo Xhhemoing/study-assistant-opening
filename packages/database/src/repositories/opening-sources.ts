@@ -200,8 +200,29 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   return {
     async create(scope, input) {
       return sql.begin(async tx => {
+        if (input.uploadId) {
+          // A replay must not reserve quota again. The existing workspace lock
+          // serializes same-owner requests before consulting the source PK.
+          const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} FOR NO KEY UPDATE`;
+          if (!owner.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
+          const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
+            WHERE source_id=${input.uploadId} LIMIT 1`;
+          if (excluded.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
+          const existing = await tx`SELECT * FROM opening_sources
+            WHERE id=${input.uploadId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
+          if (existing.length) {
+            const source = mapSource(existing[0] as Record<string, unknown>);
+            if (source.name !== input.name || source.mime !== input.mime || source.bytes !== input.bytes
+              || source.sha256.toLowerCase() !== input.sha256.toLowerCase()
+              || source.version !== 0 || source.uploadState !== "pending") {
+              throw new OpeningSourceError("CONFLICT", "上传请求已变化或结束，请重新选择文件。");
+            }
+            return source;
+          }
+        }
         await reserveOpeningSourceQuota(tx, scope, input.bytes, quota);
-        const id = randomUUID();
+        const id = input.uploadId ?? randomUUID();
         const rows = await tx`
           INSERT INTO opening_sources (
             id, workspace_id, name, mime, bytes, sha256, version,
@@ -210,8 +231,18 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
             ${id}, ${scope.workspaceId}, ${input.name}, ${input.mime}, ${input.bytes},
             ${input.sha256}, 0, 'pending', 'not_started', NULL
           )
+          ON CONFLICT (id) DO NOTHING
           RETURNING *
         `;
+        if (!rows.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
+        if (input.uploadId) {
+          // A deletion can commit between the initial read and INSERT. Fence
+          // its durable journals again before this new identity can commit,
+          // including historical references belonging to another workspace.
+          const history = await tx`SELECT source_id FROM opening_privacy_exclusions WHERE source_id=${id}
+            UNION ALL SELECT source_id FROM opening_source_versions WHERE source_id=${id} LIMIT 1`;
+          if (history.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
+        }
         return mapSource(rows[0] as Record<string, unknown>);
       });
     },

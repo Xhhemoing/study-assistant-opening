@@ -77,10 +77,14 @@ report_incomplete() {
 }
 lease_worker() {
   [[ -f "$1/.worker-protocol" ]] || return 1
-  case "$(cat "$1/.worker-protocol")" in delivery-leases-v1|delivery-leases-study-v1) return 0 ;; *) return 1 ;; esac
+  case "$(cat "$1/.worker-protocol")" in delivery-leases-v1|delivery-leases-study-v1|delivery-leases-study-v2) return 0 ;; *) return 1 ;; esac
 }
 study_release() {
-  [[ -f "$1/.worker-protocol" && "$(cat "$1/.worker-protocol")" == delivery-leases-study-v1 ]]
+  [[ -f "$1/.worker-protocol" ]] || return 1
+  case "$(cat "$1/.worker-protocol")" in delivery-leases-study-v1|delivery-leases-study-v2) return 0 ;; *) return 1 ;; esac
+}
+study_v2_release() {
+  [[ -f "$1/.worker-protocol" && "$(cat "$1/.worker-protocol")" == delivery-leases-study-v2 ]]
 }
 worker_pause_file() {
   local hash
@@ -120,6 +124,10 @@ report_worker_pause() {
 }
 restoration_worker_requirement() {
   local target=$1 required=$2 saved=$3
+  if [[ -f "$saved/study-v2-app-start-attempted" ]] && ! study_v2_release "$target"; then
+    echo 'Refusing recovery to an application without Study text-question and photo-recognition support after Study v2 startup; retain the compatible release and inspect the incomplete activation.' >&2
+    return 1
+  fi
   if [[ -f "$saved/study-app-start-attempted" ]] && ! study_release "$target"; then
     echo 'Refusing recovery to a pre-Study application after Study Web startup; retain the compatible release and inspect the incomplete activation.' >&2
     return 1
@@ -179,6 +187,9 @@ restart_services() {
   install_worker_guard "$target" || return 1
   # Web can persist Study answer conditions even when the worker is disabled.
   if study_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-app-start-attempted" || return 1; fi
+  # 0091 pasted questions and 0092 recognition jobs are unreadable by Study v1.
+  # Persist before either process can run, including a failed startup command.
+  if study_v2_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-v2-app-start-attempted" || return 1; fi
   systemctl restart aistudy-web.service || return 1
   if [[ "$required" == 1 ]]; then
     if worker_paused "$target"; then report_worker_pause "$target"; return 1; fi
@@ -299,6 +310,9 @@ if [[ "$ACTION" == rollback ]]; then
   [[ "$PREVIOUS_STATE" == "$STATE/releases/"* && ( -f "$PREVIOUS_STATE/succeeded" || -f "$PREVIOUS_STATE/degraded" ) ]] || fail 'Previous release metadata is incomplete.'
   RELEASE=$(cat "$PREVIOUS_STATE/from-target")
   validate_target "$RELEASE"
+  if study_v2_release "$OLD_TARGET" && ! study_v2_release "$RELEASE"; then
+    fail 'Refusing rollback to an application without Study text-question and photo-recognition support; keep a Study v2 release.'
+  fi
   if study_release "$OLD_TARGET" && ! study_release "$RELEASE"; then
     fail 'Refusing rollback to a pre-Study application; use a release that preserves Study answer conditions.'
   fi
@@ -336,8 +350,11 @@ else
   # retain their original delivery-leases protocol, never acquire Study support.
   release_protocol=$WORKER_PROTOCOL
   if [[ -f "$RELEASE/.worker-protocol" ]]; then release_protocol=$(cat "$RELEASE/.worker-protocol"); fi
-  case "$release_protocol" in delivery-leases-v1|delivery-leases-study-v1) ;; *) fail 'Unknown release data protocol.' ;; esac
-  if study_release "$OLD_TARGET" && [[ "$release_protocol" != delivery-leases-study-v1 ]]; then
+  case "$release_protocol" in delivery-leases-v1|delivery-leases-study-v1|delivery-leases-study-v2) ;; *) fail 'Unknown release data protocol.' ;; esac
+  if study_v2_release "$OLD_TARGET" && ! study_v2_release "$RELEASE"; then
+    fail 'Refusing deployment of an application without Study text-question and photo-recognition support; keep a Study v2 release.'
+  fi
+  if study_release "$OLD_TARGET" && ! study_release "$RELEASE"; then
     fail 'Refusing deployment of a pre-Study application; preserve Study answer conditions.'
   fi
   chmod -R a+rX -- "$RELEASE"

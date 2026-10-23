@@ -1,5 +1,6 @@
 import {
   createCardRequestSchema,
+  cardReviewKind,
   gradeReviewRequestSchema,
   listReviewQueueQuerySchema,
   updateCardControlsRequestSchema,
@@ -8,6 +9,7 @@ import {
   type ListReviewQueueResponse,
 } from "@aistudy/contracts";
 import { createOpeningPlanningSettingsRepository } from "@aistudy/database";
+import { CardRepositoryError } from "@aistudy/database";
 import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Principal } from "../../lib/authorization";
 import type { AuthRuntime } from "../auth/service";
@@ -18,6 +20,8 @@ export async function gradeReviewForPrincipal(
   body: unknown,
 ): Promise<GradeReviewResponse> {
   const parsed = gradeReviewRequestSchema.parse(body);
+  const card = await runtime.cards.getCard({ workspaceId: principal.workspaceId, cardId: parsed.cardId });
+  if (cardReviewKind(card) === "question") throw new CardRepositoryError("CONFLICT", "这是一张题目卡，请完成新变式后复习。");
   const result = await runtime.cards.grade({
     workspaceId: principal.workspaceId,
     ownerUserId: principal.userId,
@@ -64,7 +68,7 @@ export async function listReviewQueueForPrincipal(
   });
   return {
     items: items.map((item) => ({
-      card: item.card,
+      card: cardReviewKind(item.card) === "question" ? { ...item.card, front: `${item.card.skillLabel ?? "题目"} · 变式复习`, back: "完成变式后查看解答" } : item.card,
       state: item.state,
       goalPriority: item.goalPriority,
     })),
@@ -84,6 +88,7 @@ export async function createCardForPrincipal(
     front: parsed.front,
     back: parsed.back,
     tags: parsed.tags,
+    reviewKind: parsed.reviewKind,
     sourceDocumentId: parsed.sourceDocumentId,
     syllabusPointId: parsed.syllabusPointId,
     courseId: parsed.courseId,
@@ -91,6 +96,13 @@ export async function createCardForPrincipal(
     skillLabel: parsed.skillLabel,
   });
   return { card };
+}
+
+export async function countDueReviewsForPrincipal(runtime: AuthRuntime, principal: Principal, deps: ListReviewQueueDeps = {}): Promise<{ count: number }> {
+  // Reuse the same scoped queue and workspace-day rules without calling the
+  // content-delivery boundary. No card content or exposure receipt is returned.
+  const queue = await listReviewQueueForPrincipal(runtime, principal, { mode: "auto" }, deps);
+  return { count: queue.items.length };
 }
 
 export async function updateCardControlsForPrincipal(

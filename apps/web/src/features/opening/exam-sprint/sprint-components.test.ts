@@ -1,3 +1,5 @@
+const diagnostics = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnostics.enabled }));
 import type { ExamAttemptView, ExamSprintOverview } from "@aistudy/contracts";
 import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -200,6 +202,20 @@ describe("exam sprint UI boundaries", () => {
     expect(html).toContain("未作答");
     expect(html).toContain("含帮助，不计独立正确");
     expect(html).not.toContain("这次卡在哪里");
+  });
+
+  it("encourages help and hides measurement bookkeeping in the student view", () => {
+    diagnostics.enabled = false;
+    try {
+      const overview = fixture();
+      overview.activeRun!.mode = "practice";
+      overview.currentAttempt = { ...attempt, answer: null, answeredAt: null, feedback: null };
+      const html = renderToStaticMarkup(createElement(ActiveRun, { overview, disabled: false, send() {} }));
+      expect(html).toContain("卡住了就看提示");
+      expect(html).not.toMatch(/不计独立|题族|曝光|资格/);
+      overview.activeRun = null; overview.state.runs[0]!.completedAt = "2026-10-21T00:00:00Z";
+      expect(renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send() {} }))).not.toMatch(/不计独立|题族|曝光|资格/);
+    } finally { diagnostics.enabled = true; }
   });
 
   it("distinguishes repeated question-family evidence from using help", () => {

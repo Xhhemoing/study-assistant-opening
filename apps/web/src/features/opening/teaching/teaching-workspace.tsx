@@ -1,7 +1,7 @@
 "use client";
 
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, Focus, Maximize2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ActivitySpecClientInit,
@@ -17,7 +17,11 @@ import {
   WHY_ASSIST_AVAILABLE,
   resolveTeachingBlockFocus,
 } from "@aistudy/domain";
-import { ui, tone } from "../design/ui";
+import { ContentBlock, ContentGrid, ui, tone } from "../design/ui";
+import { useWorkspaceLayout } from "../shell/workspace-layout-context";
+import { ConversationCompanionTabs } from "./conversation-companion-tabs";
+import { conversationObjectHref } from "../assistant/conversation-links";
+import { canCompleteObservation } from "../learning/stage-action-bar";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import {
   BlockCommands,
@@ -27,6 +31,7 @@ import { TeachingBlockItem } from "./teaching-block-item";
 import {
   isKnownSchemaVersion,
   readSchemaVersion,
+  normalizeToCatalogId,
 } from "./component-catalog";
 import {
   canRequestTeachingCompile,
@@ -40,11 +45,12 @@ import { ActivityEndControl } from "./activity-end-control";
 import { TeachingGoalGuidance } from "./goal-guidance";
 import { sourceViewerHref } from "../inbox/source-viewer";
 import { StudyToolsPanel } from "./study-tools-panel";
+import { StudyContextTools } from "./study-context-tools";
 import { useStudyAssistantContext } from "../assistant/current-study-context";
 import { teachingAssistantContext } from "./lesson-assistant-context";
 import { SelectionAsk } from "./selection-ask";
-import { useLessonArrowKeys } from "./lesson-shortcuts";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
 
 export type TeachingToolsContext = {
@@ -57,6 +63,8 @@ export type TeachingToolsContext = {
   sourceNameById?: Record<string, string>;
   isQuestion: boolean;
   learningAttempt?: LearningAttempt | null;
+  companionSection?: "chat" | "notes";
+  askRequest?: { id: string; text: string };
 };
 
 type ContextualTeachingTools = ReactNode | ((context: TeachingToolsContext) => ReactNode);
@@ -93,6 +101,8 @@ export type TeachingWorkspaceProps = {
    */
   sourceNameById?: Record<string, string> | null;
   contextualTools?: ContextualTeachingTools;
+  /** The originating ordinary conversation stays separate from this activity or attempt. */
+  originalConversationId?: string | null;
 };
 
 /**
@@ -154,8 +164,11 @@ export function TeachingWorkspace({
   onActivityUpdated,
   sourceNameById: sourceNameByIdProp = null,
   contextualTools,
+  originalConversationId = null,
 }: TeachingWorkspaceProps) {
   const diagnostics = useDiagnosticsEnabled();
+  const { focusMode, toggleFocusMode, setFocusMode } = useWorkspaceLayout();
+  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [liveActivity, setLiveActivity] = useState(activity);
   const [liveInit, setLiveInit] = useState<ActivitySpecClientInit>(clientInitProp);
@@ -167,7 +180,12 @@ export function TeachingWorkspace({
     useState<TeachingCommandConflict | null>(null);
   const [rereadError, setRereadError] = useState<string | null>(null);
   const [fetchedSourceNames, setFetchedSourceNames] = useState<Record<string, string>>({});
-  const [panel, setPanel] = useState<string | null>(null);
+  const [panel, setPanel] = useState<string | null>(originalConversationId !== null ? "chat" : null);
+  const [askRequest, setAskRequest] = useState<{ id: string; text: string; scope: string } | null>(null);
+  const askSequence = useRef(0);
+  useEffect(() => {
+    if (originalConversationId !== null) setPanel("chat");
+  }, [originalConversationId]);
   const [showAll, setShowAll] = useState(false);
   const [positionBusy, setPositionBusy] = useState(false);
   const [positionError, setPositionError] = useState<string | null>(null);
@@ -373,13 +391,10 @@ export function TeachingWorkspace({
   const onObservationReady = useCallback((blockId: string, observation: LearningObservation) => {
     setObservations(previous => ({ ...previous, [`${liveActivity.id}:${blockId}:${contentVersion}`]: observation }));
   }, [contentVersion, liveActivity.id]);
-  const questionSubmitted = !currentQuestionId || Boolean(observations[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`]);
+  const currentObservation = observations[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`];
+  const questionSubmitted = !currentQuestionId || Boolean(currentObservation && canCompleteObservation(currentObservation));
   const canAdvance = questionSubmitted || liveActivity.status === "completed";
-  useLessonArrowKeys(contentRef, {
-    previous: schemaOk && currentIndex > 0 ? () => { const previous = units[currentIndex - 1]; if (previous) void navigateUnit(previous); } : undefined,
-    next: schemaOk && canAdvance && units[currentIndex + 1] ? () => { void navigateUnit(units[currentIndex + 1]!); } : undefined,
-    busy: () => positionBusy || positionInFlight.current || commandInFlight.current,
-  });
+
 
   const attemptContext = useMemo(
     () => ({
@@ -392,11 +407,23 @@ export function TeachingWorkspace({
       },
       onAttemptReady,
       onObservationReady,
+      completionAction: units[currentIndex + 1] ? {
+        label: units[currentIndex + 1]?.questionBlockId ? "下一题" : "下一单元",
+        disabled: positionBusy,
+        onClick: () => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); },
+      } : { label: "结束练习", href: conversationObjectHref(liveActivity.courseId ? `/opening/courses/${liveActivity.courseId}` : "/opening/today", originalConversationId) },
     }),
-    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady],
+    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady, units, currentIndex, positionBusy, navigateUnit, originalConversationId],
   );
 
   const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
+  const askScope = `${liveActivity.id}:${contentVersion}:${currentUnit?.id ?? ""}`;
+  const currentAskRequest = askRequest?.scope === askScope ? askRequest : undefined;
+  const askInCompanion = (text: string) => {
+    setAskRequest({ id: `${askScope}:${++askSequence.current}`, text: `请补充解释这段内容：\n${text}`, scope: askScope });
+    setFocusMode(false);
+    setPanel("chat");
+  };
   const toolsContext = useMemo<TeachingToolsContext>(() => ({
     activity: { ...liveActivity, contentVersion, pathVersion },
     blockId: currentQuestionId ?? blockFocus.currentBlockId,
@@ -406,8 +433,10 @@ export function TeachingWorkspace({
     sourceRefs: liveInit.sourceRefs,
     sourceNameById,
     isQuestion: Boolean(currentQuestionId),
+    companionSection: panel === "notes" ? "notes" : "chat",
+    askRequest: currentAskRequest,
     learningAttempt: currentQuestionId ? attempts[`${liveActivity.id}:${currentQuestionId}:${contentVersion}`] ?? null : null,
-  }), [liveActivity, contentVersion, pathVersion, currentQuestionId, blockFocus.currentBlockId, currentUnit, liveInit.sourceRefs, sourceNameById, attempts]);
+  }), [liveActivity, contentVersion, pathVersion, currentQuestionId, blockFocus.currentBlockId, currentUnit, liveInit.sourceRefs, sourceNameById, attempts, panel, currentAskRequest]);
   const assistantContext = useMemo(() => ({ ...teachingAssistantContext(toolsContext), ...(!schemaOk ? { blockedReason: "当前学习内容暂不可核实，请重新读取后再提问。" } : {}) }), [toolsContext, schemaOk]);
   useStudyAssistantContext(assistantContext);
   const contextualContent = typeof contextualTools === "function" ? contextualTools(toolsContext) : contextualTools;
@@ -415,32 +444,32 @@ export function TeachingWorkspace({
     if (!showAll) setVisitedUnits(previous => new Set([...previous, ...units.map(unit => unit.id)]));
     setShowAll(value => !value);
   };
-  const panels = [
-    { id: "outline", label: "提纲与回看", content: <div className="space-y-4">
+  const legacyPanels = [
+    { id: "outline", label: "目录", content: <div className="space-y-4">
       <p className="text-xs leading-6 text-text-3">回看完整知识单元，切换位置会保存阅读断点。</p>
-      <ol className="space-y-1">{units.map((unit, index) => <li key={unit.id}><button type="button" className={`${ui.quiet} h-auto w-full justify-start whitespace-normal py-2 text-left ${unit.id === currentUnitId ? "bg-emerald-50 text-emerald-900" : ""}`} aria-current={unit.id === currentUnitId ? "step" : undefined} disabled={positionBusy} onClick={() => { void navigateUnit(unit); }}>{index + 1}. {unit.title}</button></li>)}</ol>
+      <ol className="space-y-1">{units.map((unit, index) => <li key={unit.id}><button type="button" className={`${ui.quiet} h-auto w-full justify-start whitespace-normal py-2 text-left ${unit.id === currentUnitId ? "bg-accent-soft text-accent" : ""}`} aria-current={unit.id === currentUnitId ? "step" : undefined} disabled={positionBusy} onClick={() => { void navigateUnit(unit); }}>{index + 1}. {unit.title}</button></li>)}</ol>
       <button type="button" className={ui.secondary} onClick={toggleWholeLesson} aria-pressed={showAll}>{showAll ? "只看当前单元" : "查看整节内容"}</button>
       {liveInit.goals.length ? <details className="text-xs leading-6 text-text-2"><summary className="cursor-pointer">本节目标</summary><ul className="mt-2 list-disc space-y-1 pl-4">{liveInit.goals.map(goal => <li key={goal.goalId}>{goal.statement}</li>)}</ul></details> : null}
     </div> },
-    { id: "help", label: "学习帮助", content: currentUnit && showBlockCommands ? <BlockCommands key={toolsContext.blockId} activityId={liveActivity.id} blockId={toolsContext.blockId ?? currentUnit.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} disabled={positionBusy} whyAvailable={WHY_ASSIST_AVAILABLE} api={commandApi} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} defaultOpen compact /> : <p className="text-xs leading-6 text-text-3">当前没有可以调整的学习内容。</p> },
+    { id: "help", label: "学习帮助", content: currentUnit && showBlockCommands ? <BlockCommands key={toolsContext.blockId} activityId={liveActivity.id} blockId={toolsContext.blockId ?? currentUnit.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} disabled={positionBusy} whyAvailable={WHY_ASSIST_AVAILABLE} api={commandApi} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} explanationContext={assistantContext.context} onAskExplanation={askInCompanion} defaultOpen compact /> : <p className="text-xs leading-6 text-text-3">当前没有可以调整的学习内容。</p> },
     { id: "materials", label: "资料与引用", content: <div className="space-y-3">
       {liveInit.sourceRefs.length ? <ul className="space-y-3">{liveInit.sourceRefs.map((ref, index) => {
         const label = formatTeachingSourceLabel(ref, sourceNameById);
         const numericVersion = ref.version == null || (typeof ref.version === "string" && !/^\d+$/.test(ref.version.trim())) ? null : Number(ref.version);
         const version = numericVersion != null && Number.isInteger(numericVersion) && numericVersion >= 0 ? numericVersion : null;
         return <li key={`${ref.sourceId}:${index}`} className="space-y-1 text-xs leading-6" data-source-ref={ref.sourceId}>
-          {version != null ? <a className="break-words font-medium text-emerald-800 underline underline-offset-4" href={sourceViewerHref(ref.sourceId, version, { page: ref.page })}>{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""}</a> : <p className="break-words font-medium text-text">{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""} · 引用版本待确认</p>}
+          {version != null ? <a className="break-words font-medium text-accent underline underline-offset-4" href={sourceViewerHref(ref.sourceId, version, { page: ref.page })}>{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""}</a> : <p className="break-words font-medium text-text">{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""} · 引用版本待确认</p>}
           <details className="text-text-3"><summary className="cursor-pointer">来源详情</summary><p className="break-all">资料标识：{ref.sourceId}</p><p>引用版本：{ref.version ?? "未知"}</p>{ref.chunkId ? <p className="break-all">原始片段：{ref.chunkId}</p> : null}</details>
         </li>;
       })}</ul> : <p className="text-xs leading-6 text-text-3">本节没有附带可定位的资料引用。</p>}
       <p className="text-xs leading-6 text-text-3">打开引用后可返回原学习单元。历史引用使用原来的资料版本。</p>
     </div> },
-    ...(contextualContent ? [{ id: "context", label: "提问与笔记", content: contextualContent }] : []),
     { id: "settings", label: "学习设置", content: <div className="space-y-4">
       <TeachingGoalGuidance focus={liveActivity.learnerFocus} />
       <PreferenceControls scope="session" activityId={liveActivity.id} courseId={liveActivity.courseId} expectedUpdatedAt={liveActivity.updatedAt} compact />
-      <p className="text-xs leading-6 text-text-3">阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
+      <p className="text-xs leading-6 text-text-3">按自己的节奏来，卡住时可以看提示或换个例子。</p>
       {diagnostics ? <details className="space-y-2 text-xs leading-6 text-text-3"><summary className="cursor-pointer">诊断信息</summary>
+        <p>阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
         <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p><p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
         <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
         <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
@@ -449,35 +478,56 @@ export function TeachingWorkspace({
     </div> },
   ];
 
-  return <section className="min-w-0 px-4 py-5 sm:px-6" aria-labelledby="teaching-workspace-heading" data-teaching-workspace="true" data-study-question={currentQuestionId ? "true" : "false"} data-content-version={contentVersion} data-path-version={pathVersion}>
-    <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-emerald-700" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">本次学习</h2><span className="text-xs text-text-3">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
-      <span className={`${ui.badge} ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "needs_check" ? "需要核查" : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span>
+  const sharedContextContent = <ConversationCompanionTabs conversationId={originalConversationId} section={panel === "notes" ? "notes" : "chat"} tutorRequestKey={currentAskRequest?.id} tutorLabel={currentQuestionId ? "本题辅导" : "本节提问"}>
+    <div className="flex h-full min-h-0 flex-col gap-4">{contextualContent ?? <StudyContextTools context={assistantContext.context} isQuestion={assistantContext.isQuestion}
+      learningAttempt={assistantContext.learningAttempt} questionBlockedReason={assistantContext.blockedReason}
+      section={panel === "notes" ? "notes" : "chat"} askRequest={currentAskRequest} />}
+      <details hidden={panel === "notes"} className="shrink-0"><summary className="cursor-pointer py-2 text-xs text-text-2">学习帮助</summary><div className="pt-2">{legacyPanels.find(item => item.id === "help")?.content}</div></details>
+    </div>
+  </ConversationCompanionTabs>;
+  const panels = [
+    { id: "chat", label: "对话", mountKey: "context", content: sharedContextContent },
+    { id: "outline", label: "目录", content: <div className="space-y-5">
+      {legacyPanels.find(item => item.id === "outline")?.content}
+      <details><summary className="cursor-pointer py-2 text-xs text-text-2">资料与引用</summary><div className="pt-2">{legacyPanels.find(item => item.id === "materials")?.content}</div></details>
+      <details><summary className="cursor-pointer py-2 text-xs text-text-2">学习设置</summary><div className="pt-2">{legacyPanels.find(item => item.id === "settings")?.content}</div></details>
+    </div> },
+    { id: "notes", label: "笔记", mountKey: "context", content: sharedContextContent },
+  ];
+  const changePanel = (next: string | null) => {
+    if (next && focusMode) setFocusMode(false);
+    setPanel(next);
+  };
+
+  return <section className="flex h-full min-h-0 min-w-0 flex-col" aria-labelledby="teaching-workspace-heading" data-teaching-workspace="true" data-study-question={currentQuestionId ? "true" : "false"} data-content-version={contentVersion} data-path-version={pathVersion}>
+    <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-8">
+      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-accent" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">{currentUnit?.title ?? "本次学习"}</h2><span className="text-xs text-text-3">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
+      <div className="flex items-center gap-2"><span className={`text-xs ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "needs_check" ? "需要核查" : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span><button type="button" className={ui.icon} aria-label={focusMode ? "退出专注" : "专注"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}</button></div>
     </header>
-    <div className="mb-4 max-w-3xl space-y-1"><p className="text-sm font-medium leading-7 text-text">本次目标：{liveActivity.intentSummary}</p><p className="text-xs leading-6 text-text-3">读当前讲解 → 完成自己的尝试 → 保存并核对。结束本节后查看小结；记录位置和任务完成不等于掌握。</p></div>
+    <div role="progressbar" aria-label="学习位置" aria-valuemin={0} aria-valuemax={Math.max(1, units.length)} aria-valuenow={Math.max(0, currentIndex + 1)} className="grid h-0.5 shrink-0 grid-flow-col auto-cols-fr gap-px bg-line">{units.map((unit, index) => <span key={unit.id} className={index <= currentIndex ? "bg-accent" : "bg-line"} />)}</div>
+    {!recoveryDismissed && clientInitProp.checkpointJson?.currentBlockId ? <div role="status" className="flex shrink-0 items-center justify-between gap-2 px-4 py-2 text-xs text-text-3 sm:px-8"><span>已恢复学习位置</span><button type="button" className={ui.quiet} onClick={() => setRecoveryDismissed(true)}>知道了</button></div> : null}
     {liveActivity.generateStatus === "needs_check" ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-teaching-needs-check="true">主讲内容需要核查：内容已发布，来源校验尚未完成，可先学习。</div> : null}
-    {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>学习内容已更新，请重新读取后对照草稿。</p><p>{workspaceConflict.message}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>重新读取学习内容</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}</p></details> : null}</div> : null}
-    {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-red-700" role="alert"><p>{rereadError ?? positionError}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>重新读取，保留草稿</button></div> : null}
-    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">教学内容的格式暂不受支持。学习记录仍保留，请重新读取或查看活动小结。{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
-    <StudyToolsPanel panels={panels} activePanel={panel} onPanelChange={setPanel}>
-      <div ref={contentRef} className="min-w-0 space-y-6" data-teaching-blocks="true" data-lesson-shortcuts="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
+    {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>{studentCopy.lessonUpdated}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>继续学习</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}：{workspaceConflict.message}</p></details> : null}</div> : null}
+    {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-danger" role="alert"><p>{studentCopy.lessonRetry}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>{studentCopy.retry}</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{rereadError ?? positionError}</p></details> : null}</div> : null}
+    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
+    <div className="min-h-0 flex-1 pb-4"><StudyToolsPanel fillHeight preferContentOnNarrowEntry={originalConversationId !== null} contentClassName="px-4 sm:px-8" toolbarClassName="px-4 sm:px-8" panels={panels} activePanel={panel} onPanelChange={changePanel} suspended={focusMode}>
+      <ContentGrid><div ref={contentRef} className="min-w-0 space-y-6 pb-4" data-teaching-blocks="true" data-lesson-shortcuts="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
         {schemaOk ? units.map(unit => {
           const current = unit.id === currentUnitId;
           if (!showAll && !current && !visitedUnits.has(unit.id)) return null;
           return <div key={unit.id} hidden={!showAll && !current} className={current ? "space-y-5" : "space-y-5 [&_[data-inline-attempt]]:hidden"} data-study-unit={unit.id} data-study-unit-current={current ? "true" : "false"}>
-            <h3 tabIndex={-1} className="break-words text-lg font-semibold leading-8 text-text outline-none focus-visible:ring-2 focus-visible:ring-emerald-700">{unit.title}</h3>
-            <SelectionAsk binding={current ? assistantContext : null}>{unit.blocks.filter(block => block.role !== "answer_key" && block.blockType !== "answer_key").map(block => <TeachingBlockItem key={block.blockId} block={block} focusStatus={blockFocus.statusById.get(block.blockId) ?? "upcoming"} schemaVersion={schemaVersion} sourceRefs={liveInit.sourceRefs} attemptContext={attemptContext} showCommands={false} activityId={liveActivity.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} whyAvailable={WHY_ASSIST_AVAILABLE} api={api} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} unitChrome />)}</SelectionAsk>
+            <ContentBlock width="prose"><h3 tabIndex={-1} className="break-words text-lg font-semibold leading-8 text-text outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{unit.title}</h3></ContentBlock>
+            <SelectionAsk binding={current ? assistantContext : null} onAsk={askInCompanion}>{unit.blocks.filter(block => block.role !== "answer_key" && block.blockType !== "answer_key").map(block => <ContentBlock key={block.blockId} width={["math", "matrix_transform", "vector_diagram"].includes(normalizeToCatalogId(block.blockType, block.role)) ? "wide" : "prose"}><TeachingBlockItem block={block} focusStatus={blockFocus.statusById.get(block.blockId) ?? "upcoming"} schemaVersion={schemaVersion} sourceRefs={liveInit.sourceRefs} attemptContext={attemptContext} showCommands={false} activityId={liveActivity.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} whyAvailable={WHY_ASSIST_AVAILABLE} api={api} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} explanationContext={current && !unit.questionBlockId ? assistantContext.context : undefined} onAskExplanation={askInCompanion} unitChrome /></ContentBlock>)}</SelectionAsk>
           </div>;
         }) : null}
         {schemaOk && currentUnit ? <nav aria-label="学习单元导航" className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
           {currentIndex > 0 ? <button type="button" className={ui.quiet} disabled={positionBusy} onClick={() => { const previous = units[currentIndex - 1]; if (previous) void navigateUnit(previous); }}><ArrowLeft size={14} aria-hidden />回看上一单元</button> : <span />}
-          {units[currentIndex + 1] ? <button type="button" className={currentQuestionId ? ui.secondary : ui.primary} disabled={positionBusy || !canAdvance} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance={currentQuestionId ? "false" : "true"}>{positionBusy ? "正在保存位置…" : !canAdvance ? "先提交本题，再继续" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
+          {!currentQuestionId && units[currentIndex + 1] ? <button type="button" className={ui.primary} disabled={positionBusy || !canAdvance} onClick={() => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); }} data-teaching-primary-advance="true">{positionBusy ? "正在保存位置…" : units[currentIndex + 1]?.questionBlockId ? "进入练习" : "下一单元"}<ArrowRight size={14} aria-hidden /></button> : null}
         </nav> : null}
-        {currentQuestionId && units[currentIndex + 1] ? <p className="text-xs leading-6 text-text-3">保存原答案后可继续；也可从提纲回看其他内容。原草稿保留，浏览位置不代表题目已完成。</p> : null}
-        <p className="text-xs leading-6 text-text-3">可用 ← / → 切换单元；填写答案或选中文字时不会触发。</p>
+        {currentQuestionId && units[currentIndex + 1] && !canAdvance ? <p className="text-xs leading-6 text-text-3">{currentObservation ? "先核对本题结果，再继续下一单元；也可以从提纲回看讲解。" : "先提交你的想法，再继续下一单元；也可以从提纲回看讲解。"}</p> : null}
         <details open={currentIndex === units.length - 1 || liveActivity.status === "completed"} className="border-t border-line pt-4"><summary className="cursor-pointer text-xs font-medium text-text-2">本次学习与小结</summary><div className="mt-3"><ActivityEndControl activity={liveActivity} api={api} onActivityUpdated={updateLiveActivity} /></div></details>
-      </div>
-    </StudyToolsPanel>
+      </div></ContentGrid>
+    </StudyToolsPanel></div>
   </section>;
 }
 
@@ -518,6 +568,8 @@ export type TeachingContinueEntryProps = {
    */
   teachingCompileEnabled?: boolean;
   contextualTools?: ContextualTeachingTools;
+  /** The originating ordinary conversation stays separate from this activity or attempt. */
+  originalConversationId?: string | null;
 };
 
 export function TeachingContinueEntry({
@@ -532,6 +584,7 @@ export function TeachingContinueEntry({
   onActivityUpdated,
   teachingCompileEnabled = true,
   contextualTools,
+  originalConversationId = null,
 }: TeachingContinueEntryProps) {
   const diagnostics = useDiagnosticsEnabled();
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
@@ -649,7 +702,7 @@ export function TeachingContinueEntry({
   }
   if (phase === "workspace" && workspaceInit) {
     return (
-      <div data-teaching-continue-entry="workspace">
+      <div className="flex h-full min-h-0 flex-1 flex-col" data-teaching-continue-entry="workspace">
         <TeachingWorkspace
           activity={activity}
           clientInit={workspaceInit}
@@ -657,6 +710,7 @@ export function TeachingContinueEntry({
           timeZone={timeZone}
           api={api}
           contextualTools={contextualTools}
+          originalConversationId={originalConversationId}
           onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }}
         />
       </div>
@@ -683,8 +737,8 @@ export function TeachingContinueEntry({
         </h2>
         <p className="mt-2 text-xs leading-5 text-text-2">
           {waitingInFlight
-            ? "学习位置与草稿已保留，内容仍在准备中。稍后可刷新状态。"
-            : "学习位置与草稿已保留，当前还没有可用的讲解。可以重新准备内容，或返回学习断点。"}
+            ? "正在为你准备讲解，稍后就可以继续。"
+            : "这节讲解还没准备好，可以再试一次或先回去。"}
         </p>
         {liveResume && diagnostics ? (
           <details className="mt-2 text-xs tabular-nums text-text-3"><summary className="cursor-pointer">诊断信息</summary><p>
@@ -693,9 +747,10 @@ export function TeachingContinueEntry({
           </p></details>
         ) : null}
         {waitError ? (
-          <p className={`mt-3 text-xs ${tone.danger}`} role="alert">
-            {waitError}
-          </p>
+          <div className={`mt-3 text-xs ${tone.danger}`} role="alert">
+            <p>{studentCopy.lessonRetry}</p>
+            {diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{waitError}</p></details> : null}
+          </div>
         ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           {actions.showCompile ? (

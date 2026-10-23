@@ -1,7 +1,11 @@
+"use client";
+import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { LearningEvidenceEligibility } from "@aistudy/contracts";
 import { ELIGIBILITY_VALUE_LABEL, eligibilityReasonLabels } from "./eligibility-presentation";
 
 export function LearningEvidenceEligibilityDetails({ eligibility, versionApplicability, expanded = false }: { eligibility: LearningEvidenceEligibility; versionApplicability?: string; expanded?: boolean }) {
+  const diagnostics = useDiagnosticsEnabled();
+  if (!diagnostics) return null;
   const automatic = eligibility.reasonCodes.some(reason => reason.startsWith("deterministic_") || reason.startsWith("server_evaluation_"));
   const content = <>
       <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">

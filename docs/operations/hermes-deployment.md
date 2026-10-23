@@ -41,7 +41,7 @@ bash infra/deploy/deploy-hermes.sh rollback
 4. 从生产配置解析 `DATABASE_URL`，用 `pg_dump --format=custom` 写备份并执行 `pg_restore --list`；成功后才将 `.partial` 命名为 `.dump`。清除继承的 `PG*` 路由变量，只从 URL 重建连接参数。未知或重复 URL 查询参数直接拒绝，避免猜测备份目标。
 5. 构建、parser 检查、备份归档校验完成后，保存 web override 与 worker 配置快照并启用故障恢复，然后对已存在的旧 worker unit 执行 stop，即便它处于 failed / auto-restart 等待期，以取消待执行的自动重启；确认其不再 active 后才执行迁移。首次安装确认 unit 不存在时跳过 stop。旧 worker 在构建和备份期间继续服务，但不能跨越 claim-token / 迟到写入保护的协议切换继续写回。迁移失败会恢复旧 worker 和配置、保留原软链、备份与新目录；已提交的 additive 变更不会被撤销。
 6. 迁移成功后，worker helper 对实际新 release 以专用用户进行预检，配置服务使用 current 路径。不会在迁移阶段重新启动旧 worker。
-7. 新 release 沿用源码中已审查的 `.worker-protocol=delivery-leases-study-v1`；历史无标记制品仍视为 `delivery-leases-v1`。两者均具备 delivery lease 保护，Study 版本额外识别 0081 作答条件。用同目录临时软链加 `mv -T` 原子切换 current，重启 web 与原来运行或启用的 worker；尝试启动 worker 前，先持久记录本轮 `lease-worker-start-attempted`，因为启动命令失败也可能已执行任务。禁用且未运行的 worker 保持关闭。
+7. 新 release 沿用源码中已审查的 `.worker-protocol=delivery-leases-study-v2`；历史无标记制品仍视为 `delivery-leases-v1`。三种受支持版本均具备 delivery lease 保护，`delivery-leases-study-v1` 额外识别 0081 作答条件，`delivery-leases-study-v2` 同时支持 0091 无材料题目身份及 0092 拍照识题任务。用同目录临时软链加 `mv -T` 原子切换 current，重启 web 与原来运行或启用的 worker；尝试启动 worker 前，先持久记录本轮 `lease-worker-start-attempted`，因为启动命令失败也可能已执行任务。禁用且未运行的 worker 保持关闭。
 8. `/api/health` 成功后，还检查 `systemctl show` 的有效 MainPID / User / ExecStart / WorkingDirectory 与 `/proc` 中真实 cwd、可执行文件、UID，读取前后 MainPID 与启动配置必须一致。Next 会改写 process.title，所以 web 不依赖会消失的命令行参数；它的有效 ExecStart、真实 Node 可执行文件和 cwd 必须属于该 release。worker 必须是 `aistudy-worker`、UID 与该账号一致且非 root，在该 release 中执行 worker。高优先级 drop-in 把进程指回旧代码时不能通过。
 9. 仅输出并核对明示允许的开关：adaptive planning、chat prose / answer style / artifacts、四个 teaching 开关和 daily cap。运行进程中的值必须与解析后的配置一致；不输出其余环境、连接串或密钥。最后原子记录成功 transition。
 
@@ -58,6 +58,8 @@ Worker unit 的 `WorkingDirectory`、`EnvironmentFile` 是单路径设置，不�
 Study Web 会写入 0081 的 `copied_answer` / `guessed` 条件，旧 Web 不读取这些字段，可能错误计入独立作答资格。因此复用已有 `.worker-protocol` 版本字段区分兼容应用；Git SHA 和迁移成功本身不能使旧代码理解新数据。普通回归覆盖失败后的实际服务顺序和指针，不新增 hash、baseline 或独立 gate。
 
 在尝试启动 Study Web 前持久记录 `study-app-start-attempted`，即使 worker 禁用也执行。此后自动恢复拒绝不兼容旧应用，停止 worker，保留当前兼容应用、配置及 `activation-incomplete`，明确返回失败；人工检查后以兼容 Study release 修复。显式 rollback 或 deploy 从 Study 降为旧 v1 / 无标记制品，也在服务变更前拒绝。相同 Study 版本之间正常回退；新 Web 尚未尝试启动时仍允许按旧配置恢复。0081 已记录的学习事实不逆向迁移、不自动还原旧数据库。
+
+本轮 0091/0092 使用同一字段的 `delivery-leases-study-v2` 区分新增读写能力，不再把旧 Study v1 当作兼容回退目标。旧 Study 不能读取已保存的无来源题目身份，也不能投递 `recognize-photo-question` 任务；启动旧 worker 会反复消耗识题 outbox 的投递次数，最终把任务置为失败。因此在尝试启动 Study v2 Web 或 worker 前，还须在本轮 transition 中持久记录 `study-v2-app-start-attempted`。此后自动恢复禁止切回旧 Study v1 或更早应用，保留兼容版本、停止 worker 与 `activation-incomplete`；worker 禁用时，新 Web 的启动尝试同样生效。显式 rollback 或 deploy 从当前 Study v2 降为旧版本也会在服务变更前拒绝。同为 Study v2 的应用正常回退，升级在任何新进程尝试启动前失败时，仍可恢复旧 Study 配置和服务。DDL、原题、作答、识题结果及未知费用记录继续保留；不能通过恢复旧约束、删除任务或将 unknown 改为 queued 来降级。
 
 切换或配置阶段失败时，脚本停止新 worker（也取消待执行的自动重启），恢复旧 current、web override、worker unit 与固定运行参数，再核验恢复结果。数据库备份和失败状态保留。相同数据协议的 release 之间可以正常恢复 worker；首次迁移或配置失败、且尚未尝试启动新 worker 时，也允许恢复原 legacy worker。部署前保留其有效用户与 UID，只有恢复匹配快照才允许使用该身份；旧 root 身份恢复会明确提示加固尚未生效。正常新发布始终要求专用非 root 用户，没有通用允许 root 开关。
 

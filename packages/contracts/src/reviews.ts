@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { learningEventSchema } from "./learning-events";
+import { courseExamProposalSchema } from "./opening/course-exam";
+import { teachingActivitySchema } from "./opening/teaching-activity";
+import { activitySpecClientInitSchema } from "./opening/teaching-content";
 import {
   reviewCardSchema,
   reviewGradeSchema,
@@ -32,10 +35,29 @@ export const createCardRequestSchema = z.object({
   sourceDocumentId: z.string().uuid().nullable().optional(),
   syllabusPointId: z.string().uuid().nullable().optional(),
   tags: z.array(z.string().min(1)).optional(),
+  reviewKind: z.enum(["question", "concept"]).optional(),
   courseId: z.string().uuid().nullable().optional(),
   observationId: z.string().uuid().optional(),
   skillLabel: z.string().trim().min(1).max(200).nullable().optional(),
 });
+
+/** An observation-backed wrong-answer card always needs a new question. */
+export function cardReviewKind(card: { originObservationRootId?: string | null; tags: readonly string[] }): "question" | "concept" | null {
+  if (card.originObservationRootId || card.tags.includes("review:question") || card.tags.includes("错题")) return "question";
+  return card.tags.includes("review:concept") ? "concept" : null;
+}
+
+export const cardVariantProposalSchema = courseExamProposalSchema.shape.questions.element.omit({ evidenceChunkIds: true, topic: true });
+export type CardVariantProposal = z.infer<typeof cardVariantProposalSchema>;
+
+export const cardVariantRequestSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("start") }).strict(),
+  z.object({ action: z.literal("retry") }).strict(),
+  z.object({ action: z.literal("complete"), observationId: z.string().uuid() }).strict(),
+  z.object({ action: z.literal("classify"), reviewKind: z.enum(["question", "concept"]) }).strict(),
+]);
+export const cardVariantReviewSchema = z.object({ activity: teachingActivitySchema, clientInit: activitySpecClientInitSchema.nullable() }).strict();
+export type CardVariantReview = z.infer<typeof cardVariantReviewSchema>;
 
 /** Editable suggestions from a submitted, current incorrect observation. No card is created here. */
 export const observationCardDraftSchema = z.object({

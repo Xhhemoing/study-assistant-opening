@@ -7,7 +7,7 @@ import { ui } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 const resultSchema = z.object({ event: studyIntentEventSchema, currentEvent: studyIntentEventSchema, currentIntent: studySessionIntentSchema, currentVersion: z.number().int().positive(),
   move: z.object({ id: z.string(), presentation: z.object({ instructions: z.string() }), studentAction: z.string() }) });
-export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: LearningAttempt; desiredIntent?: StudySessionIntent;
+export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: Pick<LearningAttempt, "sessionId" | "courseId"> & { id?: string }; desiredIntent?: StudySessionIntent;
   onApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"], newEvidenceEventId?: string) => void }) {
   const diagnostics = useDiagnosticsEnabled();
   const [pending, setPending] = useState(false), [error, setError] = useState("");
@@ -76,9 +76,11 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
     void apply({ kind: "preference", intent: desiredIntent });
   }, [desiredIntent, desiredKey, apply]);
   return <section className="space-y-3 rounded-lg border border-line p-3" aria-label="调整本次学习">
-    <p className="text-xs leading-6 text-text-2">直接说明需要什么；只改变教学安排与本次作答条件，不直接上调或下调能力。</p>
-    <div className="flex flex-wrap gap-2">{([ ["confused", "我不懂"], ["too_easy", "太简单"], ["guessed", "我是猜的"], ["copied_answer", "这次抄了答案"] ] as const).map(([signal, label]) => <button key={signal} type="button" className={ui.quiet} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "signal", signal })}>{label}</button>)}</div>
+    <button type="button" className={ui.secondary} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "signal", signal: "confused" })}>这里没看懂</button>
+    <details><summary className="cursor-pointer text-xs text-text-2">调整讲解和练习</summary><div className="mt-3 space-y-3">
+    <div className="flex flex-wrap gap-2">{([ ["too_easy", "太简单"], ["guessed", "我是猜的"], ["copied_answer", "这次参考了答案"] ] as const).map(([signal, label]) => <button key={signal} type="button" className={ui.quiet} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "signal", signal })}>{label}</button>)}</div>
     <div className="flex flex-wrap gap-2">{["快速串讲", "直接给关键步骤", "一步一步等我"].map(text => <button type="button" key={text} className={ui.secondary} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "explicit_request", text })}>{text}</button>)}</div>
+    </div></details>
     {pending ? <p role="status" className="text-xs text-text-3">正在调整学习安排…</p> : null}
     {receipt && receipt.event.version < receipt.currentVersion ? <p role="status" className="text-xs leading-6">上次的选择已恢复，接下来继续按你最新的选择学习。</p> : receipt ? <div role="status" className="space-y-1 text-xs leading-6"><p>{receipt.event.action === "diagnose" ? "放慢一点，先从一个小步骤开始。" : receipt.event.action === "increase_challenge" ? "接下来试一道更有挑战的新题。" : receipt.event.action === "clarify_intent" ? "你想快速串讲，还是挑战更难的题？" : "已保存你的学习偏好。"}</p><p>{receipt.move.presentation.instructions}</p><p>{receipt.move.studentAction}</p>{receipt.event.signals.includes("copied_answer") ? <p>已记下这次参考过答案，之后可以试着独立做一道新题。</p> : null}{receipt.event.action !== "clarify_intent" ? <Link className={ui.quiet} href={`/opening/courses/${attempt.courseId}/study/span?intentEvent=${receipt.event.id}&move=${receipt.move.id}`}>按这个安排继续</Link> : null}</div> : null}
     {diagnostics && knownEvent ? <details className="text-xs leading-6 text-text-3"><summary className="cursor-pointer">当前意图版本与依据</summary><p>版本 {knownEvent.version} · {knownEvent.intent.purpose} · {knownEvent.intent.pace} · {knownEvent.intent.timeBudgetMinutes} 分钟</p><p>记录时间 {knownEvent.createdAt}；新的意图事件会让旧意图版本的决策失效。</p></details> : null}

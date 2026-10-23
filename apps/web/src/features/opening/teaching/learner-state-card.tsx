@@ -44,7 +44,7 @@ export function LearnerStateCard({ courseId, revision = 0, proactive = false }: 
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold">学习进展</h2><span className="text-xs text-text-2">{selected ? labels[selected.status] : "继续练习"}</span></div>
     <div role="group" className="space-y-2" aria-label="练习进展">
       <p className="text-sm font-medium">已记录 {validCount} 次作答{state.display.total > 0 ? ` · 练习了 ${state.display.total} 项内容` : ""}</p>
-      {state.display.total > 0 ? <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(Object.keys(displayLabels) as Array<keyof typeof displayLabels>).map(key => <div className="rounded-lg bg-surface-2 p-3" key={key}><dt className="text-xs text-text-2">{displayLabels[key]}</dt><dd className="mt-1 font-serif text-2xl tabular-nums text-text">{state.display.counts[key]}</dd></div>)}</dl> : null}
+      {diagnostics && state.display.total > 0 ? <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(Object.keys(displayLabels) as Array<keyof typeof displayLabels>).map(key => <div className="rounded-lg bg-surface-2 p-3" key={key}><dt className="text-xs text-text-2">{displayLabels[key]}</dt><dd className="mt-1 font-serif text-2xl tabular-nums text-text">{state.display.counts[key]}</dd></div>)}</dl> : null}
     </div>
     <p className="text-sm leading-7">{selected ? `${selected.skillLabel}：${selected.status === "needs_review" ? "先复习出错的步骤，再试一道新题。" : selected.status === "needs_check" || selected.status === "unobserved" ? "再做一道题，看看哪些步骤还需要帮助。" : "试试不同情境的新题，之后再回来复习。"}` : "做一道新题，看看接下来该练什么。"}</p>
     {proactive && selected ? <Link className={ui.secondary} href={`/opening/courses/${selected.courseId}/study`}>继续学习</Link> : null}

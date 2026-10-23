@@ -27,6 +27,13 @@ describe("first-learning draft recovery", () => {
     expect(first).toEqual({ ...draft, targetDate: null });
     expect(fetcher.mock.calls[1]![1].body).toBe(fetcher.mock.calls[0]![1].body);
   });
+  it("opens the exact created course activity directly", async () => {
+    const href = `/opening/courses/${id}/study?activity=${id}`;
+    await expect(submitFirstLearningDraft(draft, vi.fn().mockResolvedValue(Response.json({ activityId: id, taskId: id, courseId: id, href })))).resolves.toMatchObject({ href });
+  });
+  it.each(["https://example.com", "//example.com", `/opening/courses/${id}/study?activity=other`])("rejects an unrelated or external destination", async href => {
+    await expect(submitFirstLearningDraft(draft, vi.fn().mockResolvedValue(Response.json({ activityId: id, taskId: id, courseId: id, href })))).rejects.toThrow();
+  });
   it("treats a malformed successful response as uncertain, retaining the retry key", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true }));
     await expect(submitFirstLearningDraft(draft, fetcher)).rejects.toThrow("确认");

@@ -13,8 +13,9 @@ it("prefills a wrong-answer card with editable question/reference and course/ski
   expect(html).toContain("Reference: a limit.");
   expect(html).toContain(`value="${learningObservation.courseId}"`);
   expect(html).toContain('value="derivatives"');
-  expect(html).toContain("确认制成卡片");
-  expect(html).toContain("结果按自报保存");
+  expect(html).toContain("加入卡组");
+  expect(html).toContain("题目会换一道新变式来复习");
+  expect(html).toContain('value="question" selected=""');
 });
 
 it("offers card creation only for a current incorrect observation, without creating before confirmation", () => {
@@ -23,5 +24,5 @@ it("offers card creation only for a current incorrect observation, without creat
   expect(render("incorrect")).toContain("做成记忆卡片");
   expect(render("correct")).not.toContain("做成记忆卡片");
   expect(render("incorrect", "retract")).not.toContain("做成记忆卡片");
-  expect(render("incorrect")).not.toContain("确认制成卡片");
+  expect(render("incorrect")).not.toContain("加入卡组");
 });

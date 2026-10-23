@@ -96,6 +96,11 @@ it.each([false, true])("saved tutor generation stays inert until actual conversa
       turnId: saved.assistantTurnId, kind: "hint", level: "hinted", delivered: true, contextAnchor: attempt.contextAnchor } });
   const [generated] = await fixture.sql`SELECT delivered,released_at,acknowledged_at FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
   expect(generated).toEqual({ delivered: false, released_at: null, acknowledged_at: null });
+  const history = await conversations.loadContinuityTurns(fixture.scope, conversation.id, { attemptId: attempt.id });
+  expect(history.some(turn => turn.id === saved.turnId)).toBe(true);
+  expect(await conversations.loadContinuityTurns(fixture.scope, conversation.id, { attemptId: randomUUID() })).toEqual([]);
+  const [afterRoutingRead] = await fixture.sql`SELECT delivered,released_at,acknowledged_at FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
+  expect(afterRoutingRead).toEqual(generated);
   if (readBeforeAnswer) {
     const turns = await conversations.listTurns(fixture.scope, conversation.id);
     expect(turns.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt?.releasedAt).not.toBeNull();

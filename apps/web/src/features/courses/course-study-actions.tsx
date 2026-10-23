@@ -7,12 +7,15 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 import { ArrowRight, CalendarPlus } from "lucide-react";
 import { createOpeningApi, type OpeningApi } from "../opening/client/api";
 import { useOpeningCapabilities } from "../opening/capabilities/capabilities-provider";
+import { useConversationObjectHref } from "../opening/assistant/conversation-object-context";
 import { ui } from "../opening/design/ui";
 import { runSeedTodayPlan } from "../opening/planning/seed-today-plan";
 import { courseStudyActivities, courseStudyHref, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 import { useCourseStudy } from "./use-course-study";
 
 const CourseStudyContext = createContext<ReturnType<typeof useCourseStudy> | null>(null);
+
+export function useCourseStudySummary() { return useContext(CourseStudyContext); }
 
 /** One real course read feeds the overview and unit list across tab changes. */
 export function CourseStudyProvider({ courseId, children }: { courseId: string; children: ReactNode }) {
@@ -23,6 +26,7 @@ export function CourseStudyProvider({ courseId, children }: { courseId: string; 
 }
 
 export function CourseStudyAlternatives({ courseId, archived }: { courseId: string; archived: boolean }) {
+  const objectHref = useConversationObjectHref();
   const study = useContext(CourseStudyContext);
   if (!study || archived) return null;
   const tasks = courseStudyTasks(study.tasks, courseId);
@@ -30,7 +34,7 @@ export function CourseStudyAlternatives({ courseId, archived }: { courseId: stri
   if (!tasks.length && !activities.length && !study.error && !study.taskError) return null;
   return <section className="space-y-3" aria-label="课程任务与学习活动">
     <h2 className="text-base font-semibold">课程任务与学习活动</h2>
-    <ul className="space-y-2 text-sm">{tasks.map(task => <li key={task.id}><Link className={ui.quiet} href={`${courseStudyHref(courseId)}?task=${encodeURIComponent(task.id)}`}>{task.title} · {task.minutes} 分钟</Link></li>)}{activities.map(item => <li key={item.id}><Link className={ui.quiet} href={courseStudyHref(courseId, item.id)}>继续：{item.intentSummary}</Link></li>)}</ul>
+    <ul className="space-y-2 text-sm">{tasks.map(task => <li key={task.id}><Link className={ui.quiet} href={objectHref(`${courseStudyHref(courseId)}?task=${encodeURIComponent(task.id)}`)}>{task.title} · {task.minutes} 分钟</Link></li>)}{activities.map(item => <li key={item.id}><Link className={ui.quiet} href={objectHref(courseStudyHref(courseId, item.id))}>继续：{item.intentSummary}</Link></li>)}</ul>
     {study.error || study.taskError ? <p className="text-xs text-warn" role="status">{study.error || study.taskError}<button type="button" className={ui.quiet} onClick={study.reload}>重新读取</button></p> : null}
   </section>;
 }
@@ -54,6 +58,7 @@ export function CourseStudyActions({
   api?: OpeningApi;
 }) {
   const router = useRouter();
+  const objectHref = useConversationObjectHref();
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
   const capabilities = useOpeningCapabilities();
   const enabled = opening && Boolean(courseId) && capabilities.teachingLoop.api && capabilities.teachingLoop.ui;
@@ -98,13 +103,13 @@ export function CourseStudyActions({
       <p className="mt-2 max-w-2xl text-sm leading-6 text-text-2">
         {archived ? "课程已归档。" : current ? current.intentSummary : tasks[0]?.title ?? "从第一个主题开始。"}
       </p>
-            {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : null}
-      {opening && courseId && !archived && goalContext?.mode === "exam" ? <p className="mt-2 text-sm text-accent">已进入考前练习{goalContext.daysRemaining !== null ? ` · 距目标 ${goalContext.daysRemaining} 天` : ""} <Link className={ui.quiet} href={`/opening/courses/${courseId}/exam`}>开始考前练习</Link></p> : null}
+      {study.goal ? <p className="mt-1 text-xs leading-6 text-text-3">课程目标：{study.goal.targetDate ? `截至 ${study.goal.targetDate}` : "长期学习"} · 每周 {study.goal.weeklyMinutes} 分钟{study.goal.milestones?.length ? ` · ${study.goal.milestones.filter(item => item.status === "confirmed_by_learner").length}/${study.goal.milestones.length} 项成果由你确认` : ""}</p> : null}
+      {opening && courseId && !archived && goalContext?.mode === "exam" ? <p className="mt-2 text-sm text-accent">已进入考前练习{goalContext.daysRemaining !== null ? ` · 距目标 ${goalContext.daysRemaining} 天` : ""} <Link className={ui.quiet} href={objectHref(`/opening/courses/${courseId}/exam`)}>开始考前练习</Link></p> : null}
       <nav aria-label="课程学习方式" className="mt-3 flex flex-wrap items-center gap-2">
-        {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : studyHref}>
+        {opening && courseId ? <Link className={ui.primary} href={archived ? "#course-learning-records" : objectHref(studyHref)}>
           {archived ? "查看学习记录" : study.loading ? "打开学习" : current ? "继续学习" : enabled ? "开始学习" : "开始独立练习"}<ArrowRight size={14} aria-hidden="true" />
         </Link> : <a className={ui.primary} href="#course-practice">开始独立练习<ArrowRight size={14} aria-hidden="true" /></a>}
-        <Link className={ui.quiet} href={opening ? `/opening/library?tab=materials${courseId ? `&courseId=${encodeURIComponent(courseId)}` : ""}` : "/library?tab=materials"}>读材料</Link>
+        <Link className={ui.quiet} href={objectHref(opening ? `/opening/library?tab=materials${courseId ? `&courseId=${encodeURIComponent(courseId)}` : ""}` : "/library?tab=materials")}>读材料</Link>
         <Link className={ui.quiet} href={opening ? `/opening/library/new${courseId ? `?courseId=${encodeURIComponent(courseId)}` : ""}` : "/library/new"}>写笔记</Link>
         {canSeed ? <button type="button" className={ui.quiet} disabled={busy} onClick={() => void seedTodayPlan()}><CalendarPlus size={14} aria-hidden="true" />{busy ? "正在设置…" : "设为今日计划"}</button> : null}
       </nav>

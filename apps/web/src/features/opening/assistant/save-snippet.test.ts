@@ -124,3 +124,13 @@ it("shows the unmapped-selection notice at the top of the dialog", () => {
   expect(html.indexOf(UNMAPPED_SELECTION_NOTICE)).toBeGreaterThan(-1);
   expect(html.indexOf(UNMAPPED_SELECTION_NOTICE)).toBeLessThan(html.indexOf("<textarea"));
 });
+
+it("uses the real complete saved assistant turn as exactly one origin and never invents source references", () => {
+  const savedTurnId = "55555555-5555-4555-8555-555555555555";
+  const saved: ChatMessageView = { ...message, origin: "saved", savedTurnId };
+  expect(snippetSaveAvailability(saved)).toBe("available");
+  expect(prepareSnippetDraft(saved, { text: "选择的解释" })).toEqual({ input: { title: "选择的解释", text: "选择的解释", savedTurnId } });
+  expect(snippetSaveAvailability({ ...saved, systemQuery: true })).toBe("query_not_supported");
+  expect(snippetSaveAvailability({ ...saved, status: "pending" })).toBe("hidden");
+  expect(snippetSaveAvailability({ ...saved, role: "user" })).toBe("hidden");
+});

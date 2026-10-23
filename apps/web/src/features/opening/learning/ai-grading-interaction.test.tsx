@@ -7,9 +7,12 @@ import { learningObservation } from "../../../../../../packages/domain/src/openi
 
 // These exercise React interactions against mocked HTTP-client boundaries, not a live service.
 const api = vi.hoisted(() => ({
-  gradeObservation: vi.fn(), getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(),
+  observationDraft: vi.fn(), gradeObservation: vi.fn(), getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(),
 }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => api }));
+vi.mock("../cards/cards-client", () => ({ createOpeningCardsClient: () => api }));
+vi.mock("../cards/create-card-dialog", () => ({ CreateCardDialog: () => createElement("div", { "data-card-draft": true }, "卡片草稿") }));
+import { saveGradingPhotoDraft } from "./ai-grading-photo-draft";
 import { AiGradingCard } from "./ai-grading-card";
 import { ObservationRevisionCard } from "./observation-revision-card";
 
@@ -144,4 +147,64 @@ it("disputes the grade using the original answer and chosen outcome, never the O
   expect(api.listRevisionCourses).not.toHaveBeenCalled();
   expect(onUpdated).toHaveBeenCalledExactlyOnceWith(corrected);
   expect(container.textContent).toContain(record.answer);
+});
+
+
+it("rejoins an in-flight grade after returning without starting another request", async () => {
+  const request = deferred<LearningObservation>();
+  api.gradeObservation.mockReturnValue(request.promise);
+  const onGraded = vi.fn();
+  await act(async () => root.render(createElement(AiGradingCard, { record, autoGrade: true, onGraded })));
+  await act(async () => root.render(null));
+  await act(async () => root.render(createElement(AiGradingCard, { record, autoGrade: false, onGraded })));
+  expect(api.gradeObservation).toHaveBeenCalledOnce();
+  expect(container.querySelector('[data-attempt-stage="processing"]')).not.toBeNull();
+  expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent === "AI 批改")).toBe(false);
+  await act(async () => request.resolve(graded));
+  expect(onGraded).toHaveBeenCalledExactlyOnceWith(graded);
+});
+
+it("restores a selected answer photo for its observation and isolates the next question", async () => {
+  const selected = { workSourceId: "44444444-4444-4444-8444-444444444444", workSourceVersion: 3, physicalPage: 2 };
+  saveGradingPhotoDraft(record.id, selected);
+  const nextRecord = { ...record, id: "55555555-5555-4555-8555-555555555555" };
+  api.gradeObservation.mockResolvedValue(graded);
+  const onGraded = vi.fn();
+  await act(async () => root.render(createElement(AiGradingCard, { record, onGraded })));
+  expect(container.textContent).toContain("查看作答照片");
+  await click("AI 批改");
+  expect(api.gradeObservation).toHaveBeenLastCalledWith({ observationId: record.id, ...selected });
+  await act(async () => root.render(createElement(AiGradingCard, { record: nextRecord, onGraded })));
+  expect(container.textContent).not.toContain("查看作答照片");
+  await click("AI 批改");
+  expect(api.gradeObservation).toHaveBeenLastCalledWith({ observationId: nextRecord.id });
+  saveGradingPhotoDraft(record.id, { workSourceId: "", workSourceVersion: 0, physicalPage: 1 });
+});
+
+it("discards a card draft generated from an observation superseded by a correction", async () => {
+  const draft = deferred<never>();
+  api.observationDraft.mockReturnValue(draft.promise);
+  const original = { ...graded, outcome: "incorrect" as const };
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record: original, onChanged() {} })));
+  await click("做成记忆卡片");
+  const corrected = { ...record, id: "66666666-6666-4666-8666-666666666666", revisionKind: "replace" as const, outcome: "correct" as const };
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record: corrected, onChanged() {} })));
+  await act(async () => draft.resolve({ question: "旧错因" } as never));
+  expect(container.querySelector("[data-card-draft]")).toBeNull();
+  expect(container.textContent).not.toContain("AI 批改 ·");
+});
+
+it("keeps correction input safe by waiting for an in-flight grade before opening the editor", async () => {
+  const grading = deferred<LearningObservation>(); api.gradeObservation.mockReturnValue(grading.promise);
+  api.getObservationHistory.mockResolvedValue({ rootObservationId: record.id, headObservationId: record.id, revisions: [graded] });
+  api.listRevisionCourses.mockResolvedValue([]);
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record, autoGrade: true, onChanged() {} })));
+  const correct = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "纠正记录")!;
+  expect(correct.disabled).toBe(true);
+  await act(async () => correct.click());
+  expect(api.getObservationHistory).not.toHaveBeenCalled();
+  await act(async () => grading.resolve(graded));
+  await click("纠正记录");
+  expect(api.getObservationHistory).toHaveBeenCalledOnce();
+  expect(container.querySelector("form textarea")).not.toBeNull();
 });

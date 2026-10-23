@@ -31,7 +31,7 @@ test.describe("opening release redirects", () => {
       for (const path of ["/learn", "/learn/review", "/learn/practice/mock-item", "/learn/goals", "/learn/exams", "/learn/marketplace", "/explore", "/preview/notebook"]) {
         await page.goto(path);
         await expect(page).toHaveURL(new URL("/opening/today", baseURL ?? "http://127.0.0.1:3000").toString());
-        await expect(page.getByRole("navigation", { name: "学习工作台导航" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
       }
     } finally {
       await context.close();

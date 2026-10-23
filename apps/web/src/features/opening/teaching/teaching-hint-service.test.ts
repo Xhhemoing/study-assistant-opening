@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 const read = vi.hoisted(() => vi.fn());
-vi.mock("@aistudy/database", () => ({ createOpeningTeachingHintRepository: () => ({ read }) }));
+const readReleased = vi.hoisted(() => vi.fn());
+vi.mock("@aistudy/database", () => ({ createOpeningTeachingHintRepository: () => ({ read, readReleased }) }));
 import { createTeachingHintService } from "./teaching-hint-service";
 const id = "11111111-1111-4111-8111-111111111111", scope = { workspaceId: id, ownerUserId: id };
 describe("teaching hint request boundary", () => {
+  it("allows only an owned attempt reference for read-only recovery", () => {
+    const service = createTeachingHintService({} as Sql);
+    service.readReleased(scope, { attemptId: id });
+    expect(readReleased).toHaveBeenCalledWith(scope, { attemptId: id });
+    for (const input of [{ attemptId: id, level: 4 }, { attemptId: "invalid" }, { attemptId: id, released: true }]) expect(() => service.readReleased(scope, input)).toThrow();
+    expect(readReleased).toHaveBeenCalledTimes(1);
+  });
   it("passes explicit attempt and stage to the owned repository", () => {
     createTeachingHintService({} as Sql).read(scope, { attemptId: id, level: 3 });
     expect(read).toHaveBeenCalledWith(scope, { attemptId: id, level: 3 });

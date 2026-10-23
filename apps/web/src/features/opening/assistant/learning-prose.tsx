@@ -1,6 +1,7 @@
 "use client";
 
 import "katex/dist/katex.min.css";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { Element, ElementContent, Root, RootContent } from "hast";
 import type { Parent as MdastParent, Root as MdastRoot, Text as MdastText } from "mdast";
 import { Component, memo, useContext, useMemo, type ReactNode } from "react";
@@ -132,7 +133,7 @@ const components: Components = {
   ol: ({ children, ...props }) => <ol {...src(props)} className="my-3 list-decimal space-y-1 pl-6 marker:text-text-2">{children}</ol>,
   blockquote: ({ children, ...props }) => <blockquote {...src(props)} className="my-3 border-l-2 border-line-strong pl-4 text-text-2">{children}</blockquote>,
   a: ({ href, children }) => href
-    ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline decoration-emerald-700/30 underline-offset-2 hover:decoration-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{children}</a>
+    ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</a>
     : <span>{children}</span>,
   // No remote images in answers: they would leak the reader to arbitrary hosts.
   img: ({ alt }) => alt ? <span className="text-text-2">[图片：{alt}]</span> : null,
@@ -156,13 +157,13 @@ export class PlainTextFallback extends Component<{ text: string; children: React
   }
 }
 
-const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-accent no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-accent no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring";
 const NO_CITATIONS: readonly CitationLink[] = [];
-type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[] };
+type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[]; objectHref?: (href: string) => string };
 
 /** Citation links are derived by the message list; equivalent links do not require reparsing math. */
 export function sameLearningProseContent(previous: LearningProseProps, next: LearningProseProps): boolean {
-  if (previous.text !== next.text) return false;
+  if (previous.text !== next.text || previous.objectHref !== next.objectHref) return false;
   const beforeEvidence = previous.queryEvidenceLinks ?? NO_CITATIONS;
   const afterEvidence = next.queryEvidenceLinks ?? NO_CITATIONS;
   if (beforeEvidence.length !== afterEvidence.length || beforeEvidence.some((link, index) =>
@@ -177,18 +178,21 @@ export function sameLearningProseContent(previous: LearningProseProps, next: Lea
  * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
-export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS }: LearningProseProps) {
+export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS, objectHref }: LearningProseProps) {
   const reveal = useContext(ReplyRevealEnabled);
   const approvedHrefs = useMemo(() => new Set(queryEvidenceLinks.map(link => link.href).filter(isQueryEvidenceHref)), [queryEvidenceLinks]);
-  const withCitations = useMemo<Components>(() => citationLinks.length ? {
+  const withCitations = useMemo<Components>(() => ({
     ...components,
+    a: ({ href, children }) => href && approvedHrefs.has(href)
+      ? <Link href={objectHref?.(href) ?? href} className="text-accent underline decoration-accent/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</Link>
+      : href ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline decoration-accent/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</a> : <span>{children}</span>,
     sup: ({ children, ...props }) => {
       const link = citationLinks[Number((props as { "data-cite"?: number })["data-cite"]) - 1];
       return link
         ? <sup className="text-xs"><a href={link.href} title={link.label} aria-label={`来源 ${String(children)}：${link.label}`} className={CITE_LINK_CLASS}>{children}</a></sup>
         : <sup>{children}</sup>;
     },
-  } : components, [citationLinks]);
+  }), [citationLinks, approvedHrefs, objectHref]);
   return <PlainTextFallback text={text}>
     <div className="font-reading text-[17px] leading-[30px] break-words [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown

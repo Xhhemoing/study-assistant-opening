@@ -33,6 +33,9 @@ const nextConfig = {
     "@aistudy/jingwei",
   ],
   output: useOpeningE2e || useLocalPreview ? undefined : "standalone",
+  outputFileTracingIncludes: {
+    "/api/opening/pdfjs-assets/**": ["../../node_modules/pdfjs-dist/{package.json,LICENSE,cmaps/**,standard_fonts/**,wasm/**,iccs/**}"],
+  },
 };
 
 export default nextConfig;

@@ -9,9 +9,9 @@ import { ShellHeaderTools } from "./header-tools-slot";
  * 有意不提供长 description：必要说明放在相关内容旁。
  * 页面切换时标题平滑过渡到新标题；从带 vtSource 的列表行进入时，标题从那一行「飞」过来（共享元素）。
  */
-export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false }: { title: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
+export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false, label }: { title: ReactNode; label?: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
   return (
-    <TopBar label={`${title} 顶栏`}
+    <TopBar label={label ?? (typeof title === "string" || typeof title === "number" ? `${title} 顶栏` : "页面顶栏")}
       title={
         <div className="flex min-w-0 flex-col sm:flex-row sm:items-baseline sm:gap-3">
           <h1 data-page-title={sharedTitle ? "shared" : "page"} className="truncate text-title font-semibold tracking-[-0.01em] text-text">{title}</h1>

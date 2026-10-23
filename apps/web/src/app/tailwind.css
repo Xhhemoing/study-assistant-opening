@@ -26,6 +26,12 @@
   --color-on-ink: #faf9f5;
   --color-accent: #047857;
   --color-accent-soft: #e6f2eb;
+  --color-on-accent: #ffffff;
+  --color-danger-soft: #fbeceb;
+  --color-popover: #ffffff;
+  --color-reader-mat: #ebe8df;
+  --color-focus-ring: #2b6cb0;
+  --color-selection: rgb(43 108 176 / .18);
   --color-warn: #a4501f;
   --color-warn-soft: #f6ece2;
   --color-danger: #b42318;
@@ -35,6 +41,7 @@
   --color-obj-1: #2b6cb0;
   --color-obj-2: #c2571a;
   --color-obj-3: #047857;
+  --color-obj-4: #6d28d9;
 
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -197,6 +204,12 @@
   --color-on-ink: #1f1e1c;
   --color-accent: #5fcb9c;
   --color-accent-soft: rgb(95 203 156 / .13);
+  --color-on-accent: #1f1e1c;
+  --color-danger-soft: rgb(255 155 145 / .13);
+  --color-popover: #30302d;
+  --color-reader-mat: #161614;
+  --color-focus-ring: #7ba4ff;
+  --color-selection: rgb(123 164 255 / .28);
   --color-warn: #eba06a;
   --color-warn-soft: rgb(235 160 106 / .13);
   --color-danger: #ff9b91;
@@ -214,6 +227,7 @@
   --color-reader-mat: #161614;
   --color-focus-ring: #7ba4ff;
   --color-selection: rgb(123 164 255 / .28);
+  --color-obj-4: #c4b5fd;
 }
 
 @layer base {
@@ -272,6 +286,7 @@
 @utility prose-reading {
   font-family: var(--font-reading);
   font-size: var(--text-read);
+  overflow-wrap: anywhere;
   line-height: 1.75;
   color: var(--color-text);
 }
@@ -440,3 +455,69 @@ html[data-nav-direction="local"]::view-transition-old(*):only-child, html[data-n
 [data-split-group][data-settling="true"] > [data-panel] { transition: flex-grow var(--duration-panel) var(--ease-spring), flex-basis var(--duration-panel) var(--ease-spring); }
 /* 导航宽度可拖：拖动时关闭宽度过渡，跟手 */
 [data-app-shell][data-nav-dragging="true"] nav { transition: none !important; }
+/* PDF.js 5.4.624 text-layer geometry. Library-owned transforms match the canvas viewport. */
+.study-pdf-text-layer{
+  --csstools-color-scheme--light:initial;
+  color-scheme:only light;
+
+  position:absolute;
+  text-align:initial;
+  inset:0;
+  overflow:clip;
+  opacity:1;
+  line-height:1;
+  -webkit-text-size-adjust:none;
+     -moz-text-size-adjust:none;
+          text-size-adjust:none;
+  forced-color-adjust:none;
+  transform-origin:0 0;
+  caret-color:CanvasText;
+  z-index:0;
+}
+
+.study-pdf-text-layer.highlighting{
+    touch-action:none;
+  }
+
+.study-pdf-text-layer :is(span,br){
+    color:transparent;
+    position:absolute;
+    white-space:pre;
+    cursor:text;
+    transform-origin:0% 0%;
+  }
+
+.study-pdf-text-layer{
+  --min-font-size:1;
+  --text-scale-factor:calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv:calc(1 / var(--min-font-size));
+}
+
+.study-pdf-text-layer  > :not(.markedContent),.study-pdf-text-layer .markedContent span:not(.markedContent){
+    z-index:1;
+
+    --font-height:0;
+    font-size:calc(var(--text-scale-factor) * var(--font-height));
+
+    --scale-x:1;
+    --rotate:0deg;
+    transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+
+.study-pdf-text-layer .markedContent{
+    display:contents;
+  }
+
+.study-pdf-text-layer span[role="img"]{
+    -webkit-user-select:none;
+       -moz-user-select:none;
+            user-select:none;
+    cursor:default;
+  }
+
+
+.study-pdf-text-layer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.study-pdf-text-layer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.study-pdf-text-layer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.study-pdf-text-layer ::selection { background: var(--color-selection); }
+.hiddenCanvasElement { position: absolute; top: 0; left: 0; width: 0; height: 0; display: block; visibility: hidden; }

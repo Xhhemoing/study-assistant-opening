@@ -36,4 +36,10 @@ describe("X01 capability contracts", () => {
   it("keeps legacy PDF source input valid", () => {
     expect(uploadInputSchema.safeParse({ name: "notes.pdf", mime: "application/pdf", bytes: 12, sha256: SHA }).success).toBe(true);
   });
+
+  it("accepts an optional stable upload identity and rejects malformed identities", () => {
+    const input = { name: "notes.pdf", mime: "application/pdf", bytes: 12, sha256: SHA };
+    expect(uploadInputSchema.parse({ ...input, uploadId: U }).uploadId).toBe(U);
+    expect(uploadInputSchema.safeParse({ ...input, uploadId: "retry" }).success).toBe(false);
+  });
 });

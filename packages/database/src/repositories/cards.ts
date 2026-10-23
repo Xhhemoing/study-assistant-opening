@@ -63,7 +63,9 @@ export function createCardRepository(sql: Sql): CardRepository {
             ) VALUES (
               ${cardId}, ${input.workspaceId}, ${input.ownerUserId}, ${input.front.trim()},
               ${input.back.trim()}, ${input.sourceDocumentId ?? null},
-              ${input.syllabusPointId ?? null}, ${input.tags ?? []},
+              ${input.syllabusPointId ?? null}, ${[...(input.tags ?? []).filter(tag => !tag.startsWith("review:")),
+                ...(input.observationId ? ["错题"] : []),
+                ...(input.observationId || input.reviewKind === "question" ? ["review:question"] : input.reviewKind === "concept" ? ["review:concept"] : [])]},
               ${input.courseId ?? null}, ${input.skillLabel?.trim() || null}, ${sourceIds}
             )
             RETURNING *

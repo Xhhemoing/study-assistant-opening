@@ -1,5 +1,5 @@
 /** Shared utility classes keep the opening compatibility API and primitives aligned. */
-export const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+export const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
 const motion = "transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out-expo active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100";
 /** 高度读 --control-h（v3 外观层：紧凑 36px、触屏/舒适 44px），没有外观层时仍是 44px。 */
 const control = "inline-flex min-h-[var(--control-h,44px)] select-none items-center justify-center gap-2 rounded-[var(--radius-pill-ctl,var(--radius-md))] px-[var(--control-px,12px)] text-sm font-medium disabled:pointer-events-none disabled:opacity-50";

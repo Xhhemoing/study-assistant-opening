@@ -21,6 +21,7 @@ describe("createQueues", () => {
       "index-source",
       "parse",
       "parse-media",
+      "recognize-photo-question",
       "remind",
       "retest",
       "tutor",

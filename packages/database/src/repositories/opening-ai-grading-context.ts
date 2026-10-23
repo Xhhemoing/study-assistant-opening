@@ -1,6 +1,6 @@
 import { readTeachingQuestionForGrading } from "./opening-teaching-question";
 import { isDeepStrictEqual } from "node:util";
-import { aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope } from "@aistudy/contracts";
+import { aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { admitLearningSources, learningError, lockLearningOwner } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
@@ -9,6 +9,7 @@ export interface OpeningAiGradingContext {
   observation: LearningObservation;
   stem: string;
   referenceText: string;
+  misconceptions: TeachingMisconception[];
   sourceIds: string[];
   sourceVersions: Record<string, number>;
   workSource: { id: string; version: number; physicalPage: number } | null;
@@ -97,6 +98,7 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
         OR c.source_id=${item.source_id as string | null} AND c.page IS NOT DISTINCT FROM ${item.physical_page as number | null})
     ORDER BY (c.source_id=${observation.referenceSourceId}) DESC NULLS LAST,c.page,c.id LIMIT 24` : [];
   return { observation, stem: teaching?.stem ?? item.stem_snapshot,
+    misconceptions: teaching?.misconceptions ?? [],
     referenceText: [teaching?.referenceText, ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
     sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null };
 }

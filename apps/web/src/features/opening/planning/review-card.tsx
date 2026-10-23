@@ -31,7 +31,7 @@ export function ReviewCard({ item, actions, conversationApi, onDecision }: { ite
     {outcome ? <div className="space-y-3" role="status">
       <p className="flex items-center gap-2 text-sm font-medium text-accent"><Check size={16} aria-hidden="true" />{outcome.label}</p>
       {outcome.kind === "memory" ? <><p className="whitespace-pre-wrap break-words text-sm text-text">{outcome.memory.text}</p><Link className={secondaryButtonClass} href="/opening/assistant">打开助理的记忆管理<ArrowRight size={14} aria-hidden="true" /></Link></> : null}
-      {outcome.kind === "task" || outcome.kind === "retest" ? <Link className={secondaryButtonClass} href={`/opening/today?task=${outcome.kind === "task" ? outcome.task.id : outcome.taskId}#task-${outcome.kind === "task" ? outcome.task.id : outcome.taskId}`}>查看生成的任务<ArrowRight size={14} aria-hidden="true" /></Link> : null}
+      {outcome.kind === "task" || outcome.kind === "retest" ? <Link className={secondaryButtonClass} href={`/opening/settings/planning?task=${outcome.kind === "task" ? outcome.task.id : outcome.taskId}#task-${outcome.kind === "task" ? outcome.task.id : outcome.taskId}`}>查看生成的任务<ArrowRight size={14} aria-hidden="true" /></Link> : null}
     </div> : <>
       {!planning ? <ReviewFields item={item} draft={draft} onChange={setDraft} disabled={busy || Boolean(pending)} /> : null}
       {error ? <p className="mt-3 text-sm text-danger" role="alert">{error}</p> : null}

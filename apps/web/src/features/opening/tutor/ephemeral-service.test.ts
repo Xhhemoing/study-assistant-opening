@@ -273,6 +273,15 @@ describe("ephemeral tutor service", () => {
 });
 
 describe("ephemeral content-free provenance", () => {
+  it.each([true, false])("only uses verified temporary history to recognize a repeat (verified=%s)", async verified => {
+    const f = deps({ provenance: { resolveHistory: async () => verified ? [] : null, record: async () => chunkId } });
+    await f.service.replyEphemeral(scope, { text: "这题答案是什么", sourceIds: [], historyPrivacyEpoch: 0,
+      history: [{ role: "user", text: "这题答案是什么" }, { role: "assistant", text: "先想起步方向", provenanceId: chunkId }] });
+    const call = f.complete.mock.calls[0]![0];
+    expect(call.mode).toBe(verified ? "explain" : "hint");
+    if (verified) expect(call.instruction).not.toContain("两个简短的起步方向");
+    else expect(call.instruction).toContain("两个简短的起步方向");
+  });
   it("uses server history lineage when the current selection has no sources", async () => {
     const historyRefs = [{ sourceId, sourceVersion: 1 }];
     const provenance = { resolveHistory: vi.fn(async () => historyRefs), record: vi.fn(async () => chunkId) };

@@ -14,6 +14,8 @@ import { MatrixTransformBlock } from "./blocks/matrix-transform";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { LearningProse } from "../assistant/learning-prose";
 import { InlineAttempt, type InlineAttemptContext } from "./inline-attempt";
+import { teachingQuestionInteractionSchema, teachingVectorDiagramSchema } from "@aistudy/contracts";
+import { VectorDiagram } from "./blocks/vector-diagram";
 import { ProblemCard } from "./problem-card";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
@@ -95,6 +97,10 @@ function CatalogBody({
 }): ReactNode {
   const text = asText(params.text) || asText(params);
   switch (catalogId) {
+    case "vector_diagram": {
+      const parsed = teachingVectorDiagramSchema.safeParse(params.vectors);
+      return parsed.success ? <><LearningProse text={text} /><VectorDiagram vectors={parsed.data} /></> : <p role="status">图形暂时无法显示，请先看文字讲解。</p>;
+    }
     case "text":
       return (
         <div className="text-sm leading-6 text-text" data-catalog="text">
@@ -148,6 +154,7 @@ function CatalogBody({
       return (
         <ProblemCard prompt={text || "（空提问）"}>
           {attemptContext ? <InlineAttempt blockId={String(params.blockId)} prompt={text} context={{ ...attemptContext,
+            interaction: teachingQuestionInteractionSchema.safeParse(params.interaction).data,
             ...(typeof params.skillLabel === "string" && params.skillLabel.trim() ? { questionSkillLabel: params.skillLabel.trim().slice(0, 200) } : {}) }} /> : <p className="text-xs text-text-2">请从教学工作区打开本题以保存作答。</p>}
         </ProblemCard>
       );

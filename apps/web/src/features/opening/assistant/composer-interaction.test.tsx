@@ -12,6 +12,35 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); })
 const send = () => act(async () => { host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
 const undo = () => act(async () => { host.querySelector<HTMLButtonElement>('[aria-label="撤回本轮选择，恢复自动判断"]')!.click(); });
 
+it.each([false, true])("forces saved practice submissions and preserves retry/double-send protection (compact: %s)", async compact => {
+  let finish!: (result: ComposerSubmitResult) => void;
+  const first = new Promise<ComposerSubmitResult>(resolve => { finish = resolve; });
+  const submit = vi.fn<(input: ComposerSubmit) => Promise<ComposerSubmitResult>>()
+    .mockReturnValueOnce(first)
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({ accepted: true });
+  await act(async () => root.render(<Composer compact={compact} practiceMode privacy="ephemeral"
+    draft="给我一个提示" onDraftChange={() => undefined} onSubmit={submit} onPrivacyChange={() => undefined} />));
+  expect(host.textContent).toContain("练习辅导会保存对话并记录帮助");
+  expect(host.querySelector('[aria-label="隐私模式"]')).toBeNull();
+  await act(async () => {
+    const form = host.querySelector("form")!;
+    for (let i = 0; i < 2; i++) form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  expect(submit).toHaveBeenCalledOnce();
+  expect(submit.mock.calls[0]?.[0]).toMatchObject({ text: "给我一个提示", privacy: "saved" });
+  await act(async () => finish({ accepted: false }));
+  await send(); // Network failure must retain the same logical request too.
+  await send();
+  expect(submit).toHaveBeenCalledTimes(3);
+  expect(submit.mock.calls[1]?.[0]).toEqual(submit.mock.calls[0]?.[0]);
+  expect(submit.mock.calls[2]?.[0]).toEqual(submit.mock.calls[0]?.[0]);
+  await send(); // An accepted send ends the retry chain.
+  expect(submit).toHaveBeenCalledTimes(4);
+  expect(submit.mock.lastCall?.[0].clientKey).not.toBe(submit.mock.calls[0]?.[0].clientKey);
+  expect(submit.mock.lastCall?.[0].privacy).toBe("saved");
+});
+
 it("sends an ordinary question without required routing choices and leaves only attachment/send below the input", async () => {
   const submit = vi.fn<(input: ComposerSubmit) => Promise<ComposerSubmitResult>>().mockResolvedValue({ accepted: true });
   await act(async () => root.render(<Composer draft="请解释矩阵乘法" onDraftChange={() => undefined} onSubmit={submit} onContext={() => undefined} onPrivacyChange={() => undefined} />));

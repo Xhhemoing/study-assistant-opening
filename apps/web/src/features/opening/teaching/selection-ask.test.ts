@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, effects: [] as Array<() => void> }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
+  useContext: () => null,
   useState: (initial: unknown) => { const i = hooks.cursor++; if (!(i in hooks.values)) hooks.values[i] = initial;
     return [hooks.values[i], (next: unknown) => { hooks.values[i] = next; }]; },
   useRef: (initial: unknown) => { const i = hooks.cursor++; if (!(i in hooks.values)) hooks.values[i] = { current: initial }; return hooks.values[i]; },
@@ -21,12 +22,14 @@ function dom(text = "选中的真实题干", excluded = false, crossRegion = fal
     selection: { anchorNode: start, focusNode: end, isCollapsed: false, toString: () => text } };
 }
 let update: () => void = () => undefined;
+const onAsk = vi.fn();
 beforeEach(() => {
   hooks.values = []; hooks.effects = [];
+  onAsk.mockReset();
   vi.stubGlobal("document", { addEventListener: (_event: string, callback: () => void) => { update = callback; }, removeEventListener: vi.fn() });
 });
 afterEach(() => { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); vi.unstubAllGlobals(); });
-function render(value: CurrentStudyContext = binding) { hooks.cursor = 0; const tree = SelectionAsk({ binding: value, children: "题干" }); hooks.effects.splice(0).forEach(effect => effect()); return tree; }
+function render(value: CurrentStudyContext = binding) { hooks.cursor = 0; const tree = SelectionAsk({ binding: value, children: "题干", onAsk }); hooks.effects.splice(0).forEach(effect => effect()); return tree; }
 function find(node: ReactNode, type: string): Record<string, unknown> | undefined {
   if (Array.isArray(node)) return node.map(value => find(value, type)).find(Boolean);
   if (!isValidElement<Record<string, unknown>>(node)) return undefined;
@@ -43,16 +46,16 @@ it("accepts only one visible instructional region, excluding answer fields and c
   expect(selectedLessonExcerpt(valid.root, { ...valid.selection, isCollapsed: true })).toBe("");
   expect(selectedLessonExcerpt({ contains: () => false } as unknown as HTMLElement, valid.selection)).toBe("");
 });
-it("opens the exact registered question with only the selected fragment changed", () => {
-  const link = find(select(), "a")!; const href = new URL(String(link.href), "https://study.invalid");
-  expect(href.pathname).toBe("/opening/assistant");
-  for (const key of ["courseId", "activityId", "blockId", "attemptId", "itemVersionId"] as const) expect(href.searchParams.get(key)).toBe(id);
-  expect(href.searchParams.get("contentVersion")).toBe("2"); expect(href.searchParams.get("fragment")).toBe("选中的真实题干");
-  const preventDefault = vi.fn(); (link.onPointerDown as (event: { preventDefault: () => void }) => void)({ preventDefault }); expect(preventDefault).toHaveBeenCalledOnce();
+it("opens the existing companion with the selected text without navigating away or changing attempt binding", () => {
+  const tree = select(), button = find(tree, "button")!;
+  expect(find(tree, "a")).toBeUndefined();
+  (button.onClick as () => void)(); expect(onAsk).toHaveBeenCalledWith("选中的真实题干");
+  expect(binding.context.attemptId).toBe(id);
+  const preventDefault = vi.fn(); (button.onPointerDown as (event: { preventDefault: () => void }) => void)({ preventDefault }); expect(preventDefault).toHaveBeenCalledOnce();
 });
 it("does not carry a selected fragment into a changed question before a new selection", () => {
   select(); const next = { ...binding, context: { ...binding.context, attemptId: other } };
-  expect(find(render(next), "a")).toBeUndefined();
+  expect(find(render(next), "button")).toBeUndefined();
 });
 it("retains the original-answer guard and refuses an oversized selection", () => {
   const blocked = { ...binding, learningAttempt: null };

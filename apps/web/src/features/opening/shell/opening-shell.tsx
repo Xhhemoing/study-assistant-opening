@@ -1,22 +1,24 @@
 "use client";
 
 import { AppShell, getWorkspaceEntry, SIDEBAR_COLLAPSED_STORAGE_KEY } from "@aistudy/ui";
-import { Library, Notebook, Sparkles, Sun } from "lucide-react";
 import { ShellNavLink } from "./shell-nav-link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { CommandPalette } from "../../search/command-palette";
-import { ui } from "../design/ui";
 import { ConnectionNotice } from "./connection-notice";
 import { OpeningAccountMenu } from "./account-menu";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
-import { openAssistantDrawer } from "../assistant/assistant-entry";
+import { ConversationCompanionProvider } from "../assistant/conversation-companion";
 import { OpeningMobileNavigation } from "./mobile-navigation";
 import { navigationIsActive, openingNavigation } from "./navigation";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 
-const icons = { today: Sun, library: Library, courses: Notebook, assistant: Sparkles };
+import { openingNavigationIcons } from "./navigation-icons";
+import { RecentConversations, useRecentConversations } from "./recent-conversations";
+import { OpeningSidebarFooter } from "./appearance-control";
+import { useDueReviewCount } from "./review-count";
+import { WorkspaceLayoutContext } from "./workspace-layout-context";
 
 function readSidebarCollapsed(): boolean {
   if (typeof window === "undefined") return false;
@@ -29,6 +31,7 @@ function readSidebarCollapsed(): boolean {
 
 export function OpeningShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const search = useSearchParams().toString();
   const router = useRouter();
   const [userLabel, setUserLabel] = useState("");
   const [logoutPending, setLogoutPending] = useState(false);
@@ -37,18 +40,13 @@ export function OpeningShell({ children }: { children: ReactNode }) {
   const [focusMode, setFocusMode] = useState(false);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [dismissedFocusPath, setDismissedFocusPath] = useState<string | null>(null);
+  const { recent, unavailable: recentUnavailable } = useRecentConversations(pathname);
+  const dueCount = useDueReviewCount(pathname);
   const studySurface = /^\/opening\/courses\/[^/]+\/study(?:\/(?:matrix|span))?\/?$/.test(pathname);
-  // Entering a lesson is a layout choice, never a change to AI intervention settings.
-  const effectiveFocusMode = focusMode || (studySurface && dismissedFocusPath !== pathname);
-  const exitFocusMode = useCallback(() => {
-    setFocusMode(false);
-    if (studySurface) setDismissedFocusPath(pathname);
-  }, [pathname, studySurface]);
-  const toggleFocusMode = useCallback(() => {
-    if (effectiveFocusMode) exitFocusMode();
-    else setFocusMode(true);
-  }, [effectiveFocusMode, exitFocusMode]);
+  // Focus is always an explicit choice; route entry never hides navigation.
+  const effectiveFocusMode = focusMode;
+  const exitFocusMode = useCallback(() => setFocusMode(false), []);
+  const toggleFocusMode = useCallback(() => setFocusMode(current => !current), []);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const toggleSidebar = useCallback(() => {
@@ -62,14 +60,14 @@ export function OpeningShell({ children }: { children: ReactNode }) {
       return next;
     });
   }, []);
-  const activeItem = openingNavigation().find(item => navigationIsActive(item.href, pathname));
+  const activeItem = openingNavigation().find(item => navigationIsActive(item.href, pathname, search));
   useEffect(() => {
     setSidebarCollapsed(readSidebarCollapsed());
   }, []);
   useEffect(() => {
     if (!effectiveFocusMode) return;
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || document.querySelector('dialog[open],[role="dialog"][data-state="open"]')) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 || document.querySelector('dialog[open],[role="dialog"][data-state="open"]')) return;
       exitFocusMode();
     };
     // Run after document-level dismiss handlers so an open panel gets Escape first.
@@ -115,17 +113,22 @@ export function OpeningShell({ children }: { children: ReactNode }) {
     } catch { setLogoutError("网络连接异常，请重试退出。"); }
     finally { setLogoutPending(false); }
   }
-  const navigation = <nav aria-label="学习工作台导航" className="flex flex-col gap-1 px-2 lg:px-0">{openingNavigation().map(item => {
-    const Icon = icons[item.icon];
-    const active = navigationIsActive(item.href, pathname);
-    return <ShellNavLink key={item.href} href={item.href} aria-current={active ? "page" : undefined} title={item.label} className={`flex min-h-11 min-w-11 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent motion-reduce:transition-none ${sidebarCollapsed ? "" : "lg:flex-row lg:justify-start lg:gap-3 lg:px-3"} ${active ? "bg-accent-soft font-semibold text-accent" : "text-text-2 hover:bg-surface-2 hover:text-text"}`}><Icon size={18} aria-hidden="true" /><span className={sidebarCollapsed ? "md:sr-only" : undefined}>{item.label}</span></ShellNavLink>;
-  })}</nav>;
-  return <>
-    <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={studySurface ? "课程学习" : activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} mobileNavigation={<OpeningMobileNavigation pathname={pathname} pendingCount={pendingCount} />} settingsHref="/opening/settings" focusMode={effectiveFocusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} accountMenu={<OpeningAccountMenu userLabel={userLabel} pendingCount={pendingCount} focusMode={effectiveFocusMode} onToggleFocus={toggleFocusMode} onLogout={logout} logoutPending={logoutPending} />} topbar={<button type="button" className={ui.icon} aria-label="打开学习助手" title="学习助手 (Ctrl / ⌘ J)" onClick={() => openAssistantDrawer()}><Sparkles size={18} aria-hidden="true" /></button>}>
+  const navigation = <div>
+    {(["core", "tools"] as const).map(group => <nav key={group} aria-label={group === "core" ? "主导航" : "学习工具"} className={`flex flex-col gap-1 ${group === "tools" ? "mt-3 border-t border-line pt-3" : ""}`}>
+      {openingNavigation().filter(item => item.group === group).map(item => {
+        const Icon = openingNavigationIcons[item.icon];
+        const active = navigationIsActive(item.href, pathname, search);
+        return <ShellNavLink key={item.href} href={item.href} aria-current={active ? "page" : undefined} title={item.label} className={`flex min-h-11 min-w-0 rounded-md px-2 py-2 text-[15px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring motion-reduce:transition-none ${sidebarCollapsed ? "flex-col items-center justify-center gap-1 text-xs" : "items-center gap-3 px-3"} ${active ? "bg-surface-2 font-medium text-text" : "text-text-2 hover:bg-surface-2 hover:text-text"}`}><Icon size={18} aria-hidden="true" /><span>{item.label}</span>{item.icon === "review" && dueCount ? <span className={`tabular-nums text-xs text-accent ${sidebarCollapsed ? "" : "ml-auto"}`}>{dueCount}<span className="sr-only">项待复习</span></span> : null}</ShellNavLink>;
+      })}
+    </nav>)}
+    <RecentConversations recent={recent} compact={sidebarCollapsed} unavailable={recentUnavailable} />
+  </div>;
+  return <ConversationCompanionProvider><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode }}>
+    <AppShell activeEntry={getWorkspaceEntry(pathname.split("/")[1])} title={studySurface ? "课程学习" : activeItem?.label ?? (pathname.startsWith("/opening/settings") ? "设置" : "学习工作台")} navigation={navigation} sidebarFooter={<OpeningSidebarFooter compact={sidebarCollapsed} pathname={pathname} />} mobileNavigation={<OpeningMobileNavigation pathname={pathname} search={search} dueCount={dueCount} />} settingsHref="/opening/settings" focusMode={effectiveFocusMode} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} userLabel={userLabel} logoutPending={logoutPending} onLogout={logout} onOpenCommandPalette={openPalette} accountMenu={<OpeningAccountMenu pathname={pathname} search={search} userLabel={userLabel} pendingCount={pendingCount} focusMode={effectiveFocusMode} onToggleFocus={toggleFocusMode} onLogout={logout} logoutPending={logoutPending} recent={recent} recentUnavailable={recentUnavailable} />}>
       {logoutError ? <div className="border-b border-danger/30 bg-danger/10 px-5 py-2 text-xs text-danger" role="alert">{logoutError}</div> : null}<ConnectionNotice /><OpeningCapabilityNotice />{children}
     </AppShell>
     <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
     <Suspense fallback={null}><AssistantDrawer /></Suspense>
     <CitationReaderHost />
-  </>;
+  </WorkspaceLayoutContext.Provider></ConversationCompanionProvider>;
 }

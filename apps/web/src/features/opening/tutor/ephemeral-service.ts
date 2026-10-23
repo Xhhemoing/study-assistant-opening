@@ -99,8 +99,8 @@ export type EphemeralTutorDeps = {
   requestKey?: () => string;
 };
 
-function instructionFor(mode: TutorMode): string {
-  const base = makeTutorInstruction(mode);
+function instructionFor(mode: TutorMode, message: Parameters<typeof makeTutorInstruction>[1]): string {
+  const base = makeTutorInstruction(mode, message);
   if (!canProposeTask(mode)) return `${base} Do not create tasks.`;
   return base;
 }
@@ -237,6 +237,10 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
       const historyDiscarded = epochChanged || historyRefs === null;
       const history = historyDiscarded ? [] : historyToResolve;
+      // Discarded/unverified temporary history cannot turn a first request into a repeat.
+      if (request.mode === undefined) input = { ...input, mode: inferComposerIntent({ ...request, history,
+        practiceMode: Boolean(contextAnchor?.attemptId || contextAnchor?.activityId), studyIntent: sessionIntent,
+      }).mode };
       const learnerContext = deps.learnerContext ? await withLearnerContextError(() => deps.learnerContext!.read(scope, {
         courseId: input.courseId ?? contextAnchor?.courseId, sourceIds: allowedSourceIds })) : null;
       const contextSourceRefs = mergeContextSourceRefs(
@@ -277,7 +281,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
         ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
       const providerInput: ProviderInput = {
-        instruction: instructionFor(input.mode)+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
+        instruction: instructionFor(input.mode, { text: input.text })+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
         text: input.text,
         history: history.map(({ role, text }) => ({ role, text })),
         chunks: context,

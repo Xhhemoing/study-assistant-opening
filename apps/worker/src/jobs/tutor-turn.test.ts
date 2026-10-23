@@ -60,6 +60,19 @@ describe("tutor turn handler", () => {
     return { deps, tutorJobs, chunks, budget, provider };
   }
 
+  it.each([
+    ["这题答案是什么", "hint", "两个简短的起步方向"],
+    ["我算出来 x=2，对吗", "hint", "第一个出错步骤"],
+    ["完全不会，好烦", "listen", "换一道简单题"],
+    ["跳过这道题", "listen", "不要声称已修改学习记录"],
+  ])("carries the learning response for %s into the actual provider call", async (text, mode, instruction) => {
+    const { deps, tutorJobs, provider } = setup({ claim: { ...claimedJob, mode } });
+    tutorJobs.getUserTurn.mockResolvedValue({ ...turn, text, mode, sourceIds: [], sourceVersions: {} });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(provider.complete.mock.calls[0]![0]).toMatchObject({ mode, instruction: expect.stringContaining(instruction) });
+  });
+
   it("publishes actual Markdown deltas, settles the answer, and returns with optional metadata queued separately", async () => {
     const { deps, tutorJobs, budget, provider } = setup();
     const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };

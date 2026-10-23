@@ -20,13 +20,13 @@ const excludedLabels: Record<string, string> = { missing_family_or_target: "缺�
 const score = (value: number | null) => value === null ? "样本不足" : value.toFixed(3);
 
 export function LearnerShadowComparisonBody({ report }: { report: LearnerShadowComparison }) {
-  return <div className="space-y-3 pt-3 text-xs leading-6 text-zinc-600">
+  return <div className="space-y-3 pt-3 text-xs leading-6 text-text-2">
     <p>仅实验，三个模型均未校准。这里只比较作答前保存的预测，不用于调整学习安排、判断掌握或签发证据资格。</p>
     <p>可比较样本：{report.count} 次，覆盖 {report.families.length} 个题族。预先设置的“可独立推进”预测阈值为 {(report.advanceThreshold * 100).toFixed(0)}%；此阈值不是经验证的学习能力界线。</p>
     <div className="overflow-x-auto"><table className="w-full min-w-[36rem] border-collapse text-left">
       <caption className="sr-only">未校准模型在同一组保留作答上的实验比较</caption>
-      <thead><tr className="border-b border-zinc-200"><th scope="col" className="p-2">模型</th><th scope="col" className="p-2">样本</th><th scope="col" className="p-2">Brier</th><th scope="col" className="p-2">Log loss</th><th scope="col" className="p-2">阈值以上失败 / 样本</th><th scope="col" className="p-2">失败率</th></tr></thead>
-      <tbody>{report.models.map(model => <tr key={model.modelId} className="border-b border-zinc-100"><th scope="row" className="p-2 font-medium">{names[model.modelId]}</th><td className="p-2 tabular-nums">{model.count}</td><td className="p-2 tabular-nums">{score(model.brier)}</td><td className="p-2 tabular-nums">{score(model.logLoss)}</td><td className="p-2 tabular-nums">{model.failedAboveThreshold} / {model.aboveThresholdCount}</td><td className="p-2 tabular-nums">{model.failureRateAboveThreshold === null ? "样本不足" : `${(model.failureRateAboveThreshold * 100).toFixed(1)}%`}</td></tr>)}</tbody>
+      <thead><tr className="border-b border-line"><th scope="col" className="p-2">模型</th><th scope="col" className="p-2">样本</th><th scope="col" className="p-2">Brier</th><th scope="col" className="p-2">Log loss</th><th scope="col" className="p-2">阈值以上失败 / 样本</th><th scope="col" className="p-2">失败率</th></tr></thead>
+      <tbody>{report.models.map(model => <tr key={model.modelId} className="border-b border-line"><th scope="row" className="p-2 font-medium">{names[model.modelId]}</th><td className="p-2 tabular-nums">{model.count}</td><td className="p-2 tabular-nums">{score(model.brier)}</td><td className="p-2 tabular-nums">{score(model.logLoss)}</td><td className="p-2 tabular-nums">{model.failedAboveThreshold} / {model.aboveThresholdCount}</td><td className="p-2 tabular-nums">{model.failureRateAboveThreshold === null ? "样本不足" : `${(model.failureRateAboveThreshold * 100).toFixed(1)}%`}</td></tr>)}</tbody>
     </table></div>
     <p>Brier 和 Log loss 越低，表示这组已发生答案上的预测误差越小；少量数据不能证明哪个模型更好。没有对应分母时，指标保留为空，不按零失败率解释。</p>
     <p>隔离规则：只使用预测截止点之前、同课程与目标的已核验独立记录；训练排除待预测题族。比较使用三个模型共同合格的作答，并排除当前工作区此前已发放的题族、助答、撤回与已失效的依据。</p>
@@ -47,7 +47,7 @@ export function LearnerShadowPanel({ courseId, revision = 0 }: { courseId?: stri
       .catch(() => { if (!controller.signal.aborted) setError("影子实验比较暂时无法读取"); });
     return () => controller.abort();
   }, [expanded, courseId, revision]);
-  return <details className="border-t border-zinc-100 pt-3 text-xs text-zinc-600" onToggle={event => setExpanded(event.currentTarget.open)}>
+  return <details className="border-t border-line pt-3 text-xs text-text-2" onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="cursor-pointer py-1 font-medium">影子预测比较 · 仅实验，未校准</summary>
     {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取实验回执…</p> : null}
   </details>;

@@ -54,4 +54,9 @@ describe("AppShell utility cluster", () => {
     expect(html.match(/完整导航/g)).toHaveLength(1);
     expect(html.match(/核心导航/g)).toHaveLength(1);
   });
+  it("supports settings and theme in a sidebar footer", () => {
+    const expanded = renderToStaticMarkup(createElement(AppShell, { activeEntry: "learn", children: "内容", sidebarFooter: createElement("div", null, "主题设置") }));
+    expect(expanded).toContain("主题设置");
+  });
+
 });

@@ -45,3 +45,18 @@ it("rejects forged AI authority from grading, submission, observation and revisi
     expect(aiGradingInputSchema.safeParse({ observationId: id, ...forged }).success).toBe(false);
   }
 });
+
+it("validates a follow-up answer against its own distinct choices", () => {
+  const followUp = { prompt: "2+3=?", options: [{ id: "A", label: "5" }, { id: "B", label: "6" }], answerId: "A", explanation: "2+3=5。" };
+  expect(aiGradingProposalSchema.parse({ ...proposal, followUp }).followUp).toEqual(followUp);
+  for (const change of [{ answerId: "C" }, { options: [followUp.options[0], followUp.options[0]] }]) {
+    expect(aiGradingProposalSchema.safeParse({ ...proposal, followUp: { ...followUp, ...change } }).success).toBe(false);
+  }
+});
+
+it("reads historical grading without a misconception and accepts only bounded identifiers", () => {
+  expect(aiGradingProposalSchema.parse(proposal)).not.toHaveProperty("misconceptionId");
+  expect(aiGradingProposalSchema.parse({ ...proposal, misconceptionId: null }).misconceptionId).toBeNull();
+  expect(aiGradingProposalSchema.parse({ ...proposal, misconceptionId: "rows_for_columns" }).misconceptionId).toBe("rows_for_columns");
+  expect(aiGradingProposalSchema.safeParse({ ...proposal, misconceptionId: "<script>" }).success).toBe(false);
+});

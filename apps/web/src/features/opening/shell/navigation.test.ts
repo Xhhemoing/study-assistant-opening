@@ -4,10 +4,28 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 
 describe("workspace navigation", () => {
   it("uses four shared destinations and keeps secondary tools out of primary navigation", () => {
-    expect(openingNavigation().map(item => [item.href, item.label])).toEqual([
-      ["/opening/today", "今日"], ["/opening/courses", "课程"],
+    expect(openingNavigation().filter(item => item.group === "core").map(item => [item.href, item.label])).toEqual([
+      ["/opening/today", "开始"], ["/opening/courses", "课程"],
       ["/opening/agent", "助理"], ["/opening/library", "资料"],
     ]);
+  });
+  it("highlights only the matching primary or tool entry", () => {
+    for (const pathname of ["/opening/review", "/opening/cards/session", "/opening/sprint", "/opening/search", "/opening/courses/id/study", "/opening/assistant", "/opening/suggestions"]) {
+      const active = openingNavigation().filter(item => navigationIsActive(item.href, pathname));
+      expect(active).toHaveLength(1);
+      const expected = pathname.startsWith("/opening/assistant") || pathname.startsWith("/opening/suggestions") ? "/opening/today" : pathname.startsWith("/opening/cards") ? "/opening/cards" : pathname.startsWith("/opening/courses") ? "/opening/courses" : pathname;
+      expect(active[0]?.href).toBe(expected);
+    }
+  });
+  it.each([
+    ["/opening/review", "tab=cards", "/opening/cards"],
+    ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
+    ["/opening/review", "tab=session", "/opening/review"],
+    ["/opening/courses/course-a/study", "mode=sprint", "/opening/courses"],
+    ["/opening/review", "tab=cards&tab=all", "/opening/review"],
+    ["/opening/courses/course-a", "mode=sprint&mode=practice", "/opening/courses"],
+  ])("keeps one owner after a shared-page redirect: %s?%s", (pathname, search, expected) => {
+    expect(openingNavigation().filter(item => navigationIsActive(item.href, pathname, search)).map(item => item.href)).toEqual([expected]);
   });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);

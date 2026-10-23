@@ -46,8 +46,8 @@ describe("inline teaching attempt", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const onAttemptReady = vi.fn();
     const html = renderToStaticMarkup(createElement(InlineAttempt, { blockId: id, prompt: identity.prompt, context: { id, courseId: id, sourceIds: [id], contentVersion: 3, intentSummary: "矩阵秩", status: "active", onCourseAssociated: vi.fn(), onAttemptReady } }));
-    expect(html).toContain("我的原答案");
-    expect(html).toContain("提交原答案，再看参考");
+    expect(html).toContain("我的想法");
+    expect(html).toContain("提交答案");
     expect(html).not.toContain("参考答案 · 请自行核对");
     expect(html).not.toContain("我答对了");
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -62,12 +62,12 @@ describe("inline teaching attempt", () => {
     expect(result.attempt.submittedAt).toBeNull(); // The submit receipt does not rewrite the canonical projection.
     expect(client.createSession).toHaveBeenCalledWith({ activityId: id, courseId: id, skillLabel: "矩阵秩", sourceIds: [id] });
     expect(client.createAttempt).toHaveBeenCalledWith(expect.objectContaining({ sessionId: id, teachingBlock: { blockId: id, contentVersion: 3 } }));
-    expect(client.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: identity.answer, outcome: "unverified", assistance: "independent", verdictSource: "self_report" }));
+    expect(client.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: identity.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report" }));
     await session.submit();
     expect(client.submitAttempt).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the skill label empty by default and uses the prompt only as placeholder", () => {
+  it("keeps technical skill selection out of the student form", () => {
     const prompt = "求极限定义";
     const intentSummary = "今日主题学习";
     const html = renderToStaticMarkup(createElement(InlineAttempt, {
@@ -75,11 +75,11 @@ describe("inline teaching attempt", () => {
       prompt,
       context: { id, courseId: id, sourceIds: [id], contentVersion: 3, intentSummary, status: "active", onCourseAssociated: vi.fn() },
     }));
-    expect(html).toContain(`placeholder="${prompt}"`);
-    expect(html).toContain('value=""');
+    expect(html).not.toContain("记录的技能");
+    expect(html).toContain("<textarea");
     expect(html).not.toContain(`value="${prompt}"`);
     expect(html).not.toContain(`value="${intentSummary}"`);
-    expect(html).toContain("<datalist");
+    expect(html).not.toContain("<datalist");
     // Options hydrate via client.getSummary → collectSkillLabelOptions (effects skip in static markup).
     expect(collectSkillLabelOptions(summaryRows)).toEqual(["极限定义", "矩阵秩"]);
   });
@@ -97,7 +97,7 @@ describe("inline teaching attempt", () => {
         learnerFocus: { skillLabel: "矩阵秩", activityKind: "targeted_explain", reasonCode: "verified_incorrect",
           focusObservationId: id, recentAssistance: ["independent"], strategyVersion: "adaptive-1" } },
     }));
-    expect(html).toContain('value="矩阵秩"');
+    expect(html).not.toContain("记录的技能");
     expect(html).not.toContain('value="巩固练习"');
   });
 
@@ -107,7 +107,7 @@ describe("inline teaching attempt", () => {
       context: { id, courseId: id, sourceIds: [id], contentVersion: 3,
         intentSummary: "今日主题学习", status: "active", onCourseAssociated: vi.fn(), outlineTitle: "矩阵秩" },
     }));
-    expect(html).toContain('value="矩阵秩"');
+    expect(html).not.toContain("记录的技能");
   });
 
   it("uses one in-flight submission and reuses its identity and client key after an unknown result", async () => {
@@ -137,4 +137,23 @@ describe("inline teaching attempt", () => {
       submitAttempt: vi.fn().mockResolvedValue({ ...savedObservation, attemptId: "22222222-2222-4222-8222-222222222222" }) };
     await expect(createInlineAttemptSubmission(identity, client).submit()).rejects.toThrow("保存回执");
   });
+});
+
+
+it("publishes shared submission identity to the returning form even when the first attempt reply fails", async () => {
+  let resolve!: (value: { id: string }) => void;
+  const client = { createSession: vi.fn().mockReturnValue(new Promise(value => { resolve = value; })),
+    createAttempt: vi.fn().mockRejectedValueOnce(new Error("lost reply")).mockResolvedValue(canonicalAttempt),
+    submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
+  let original!: import("./inline-attempt-submission").InlineAttemptSubmissionCheckpoint;
+  let restored!: import("./inline-attempt-submission").InlineAttemptSubmissionCheckpoint;
+  const first = createInlineAttemptSubmission(identity, client, { onCheckpoint: value => { original = value; } }).submit();
+  const returning = createInlineAttemptSubmission(identity, client, { checkpoint: JSON.parse(JSON.stringify(original)), onCheckpoint: value => { restored = value; } });
+  const second = returning.submit();
+  resolve({ id }); await Promise.allSettled([first, second]);
+  expect(restored.sessionId).toBe(id);
+  await returning.submit();
+  expect(client.createSession).toHaveBeenCalledOnce();
+  expect(client.createAttempt.mock.calls[1]).toEqual(client.createAttempt.mock.calls[0]);
+  expect(restored).toMatchObject({ sessionId: id, attemptId: id, status: "saved" });
 });

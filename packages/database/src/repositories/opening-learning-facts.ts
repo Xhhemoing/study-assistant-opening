@@ -78,7 +78,7 @@ export async function nextLearningActivityHistoryRevision(tx: TransactionSql, sc
     ON CONFLICT (workspace_id,owner_user_id,activity_id) DO UPDATE SET revision = opening_learning_activity_history_revisions.revision + 1 RETURNING revision`;
   return Number(rows[0]!.revision);
 }
-export async function admitLearningSources(tx: TransactionSql, scope: Scope, sourceIds: readonly string[]) {
+export async function admitLearningSources(tx: TransactionSql, scope: Scope, sourceIds: readonly string[], options: { recordVersions?: boolean } = {}) {
   const ids = [...new Set(sourceIds)].sort();
   if (!ids.length) return [];
   const rows = await tx`SELECT s.id,s.version,s.bytes,s.sha256 FROM opening_sources s
@@ -88,7 +88,7 @@ export async function admitLearningSources(tx: TransactionSql, scope: Scope, sou
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)
     ORDER BY s.id FOR SHARE`;
   if (rows.length !== ids.length) throw learningError("VALIDATION", "source unavailable or privacy-excluded");
-  for (const row of rows) await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+  if (options.recordVersions !== false) for (const row of rows) await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
     VALUES (${row.id},${row.version},${scope.workspaceId},${row.bytes},${row.sha256},'available') ON CONFLICT(source_id,version) DO NOTHING`;
   return rows;
 }

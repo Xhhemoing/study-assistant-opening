@@ -89,3 +89,43 @@ it("does not create an empty course note and keeps drafts isolated between two c
   expect(readStudyNote(b).text).toBe("");
   expect(JSON.stringify(studyNoteDocument(a, readStudyNote(a)))).toContain(`/opening/courses/${courseId}`);
 });
+
+it("saves an inline explanation without replacing the student's editable note or its receipt", async () => {
+  storage(); const ctx = context();
+  const studentDraft = { ...readStudyNote(ctx), text: "我自己还没保存的推导" };
+  writeStudyNote(ctx, studentDraft);
+  const scope = "inline-explanation";
+  const api = { createDocument: vi.fn().mockResolvedValue(document) };
+  const explanation = { ...readStudyNote(ctx, scope), text: "当前显示的讲解" };
+  expect(await saveStudyNote(ctx, explanation, api, vi.fn(), scope)).toMatchObject({ status: "saved", text: "当前显示的讲解" });
+  expect(readStudyNote(ctx)).toEqual(studentDraft);
+  await saveStudyNote(ctx, explanation, api, vi.fn(), scope);
+  expect(api.createDocument).toHaveBeenCalledOnce();
+});
+
+it("notifies a newly mounted subscriber when a shared save completes", async () => {
+  storage(); const ctx = context();
+  let finish!: (value: typeof document) => void;
+  const api = { createDocument: vi.fn(() => new Promise<typeof document>(resolve => { finish = resolve; })) };
+  const { subscribeStudyNote } = await import("./study-note-draft");
+  const previous = vi.fn(), unsubscribe = subscribeStudyNote(ctx, previous);
+  const pending = saveStudyNote(ctx, { ...readStudyNote(ctx), text: "保存中原稿" }, api, vi.fn());
+  unsubscribe(); const states: string[] = [];
+  const stop = subscribeStudyNote(ctx, () => states.push(readStudyNote(ctx).status));
+  expect(readStudyNote(ctx).status).toBe("pending");
+  finish(document); await pending;
+  expect(states.at(-1)).toBe("saved"); expect(previous).toHaveBeenCalledOnce();
+  expect(api.createDocument).toHaveBeenCalledOnce(); stop();
+});
+
+it("does not overwrite a new note with a late course-association response for the saved previous note", async () => {
+  storage(); const ctx = context();
+  let finish!: () => void;
+  const associate = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  const pending = saveStudyNote(ctx, { ...readStudyNote(ctx), text: "第一篇" }, { createDocument: vi.fn().mockResolvedValue(document) }, associate);
+  await Promise.resolve();
+  expect(readStudyNote(ctx)).toMatchObject({ status: "saved", documentId });
+  writeStudyNote(ctx, { ...readStudyNote(ctx), status: "editing", text: "正在写第二篇", documentId: null, associationFailed: false });
+  finish(); await pending;
+  expect(readStudyNote(ctx)).toMatchObject({ status: "editing", text: "正在写第二篇", documentId: null });
+});

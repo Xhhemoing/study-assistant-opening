@@ -1,10 +1,12 @@
 "use client";
 
-import { LogOut, Minimize2, Sparkles } from "lucide-react";
-import { usePathname, useRouter } from "next/navigation";
+import { LogOut, Minimize2, RotateCcw, Sparkles } from "lucide-react";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { CommandPalette } from "../../search/command-palette";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
+import { ConversationCompanionProvider } from "../assistant/conversation-companion";
 import { openAssistantDrawer } from "../assistant/assistant-entry";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
@@ -15,25 +17,20 @@ import { StatusToastProvider } from "../v3/ui/toast";
 import { ui } from "../v3/ui/controls";
 import { OpeningAccountMenu } from "./account-menu";
 import { ConnectionNotice } from "./connection-notice";
+import { useRecentConversations } from "./recent-conversations";
+import { useDueReviewCount } from "./review-count";
+import { WorkspaceLayoutContext } from "./workspace-layout-context";
 
-const ICONS: Record<string, Feature["icon"]> = { today: "start", courses: "courses", assistant: "assistant", library: "library" };
-const feature = (id: string) => FEATURES.find(item => item.id === id)!;
-const TOOLS: Feature[] = [feature("review"), feature("sprint"), feature("cards")];
-const exact = (item: Feature, pathname: string) => pathname === item.route || pathname.startsWith(`${item.route}/`);
-
-/** 生产导航沿用既有四个入口（今日/课程/助理/资料）与无障碍名称；学习工具只在桌面侧栏。每个路径只高亮一项。 */
-const OPENING_NAV: ShellNav = {
+const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
+  ...FEATURES.find(item => item.route === href)!, label, placement,
+});
+const navigation = openingNavigation();
+const OPENING_NAV = {
   label: "学习工作台导航",
   mobileLabel: "学习工作台导航（移动端）",
-  core: openingNavigation().map(item => ({ id: item.icon, route: item.href, label: item.label, icon: ICONS[item.icon] ?? "start", placement: "core", depth: 0, layout: "list", source: "features/opening/shell/navigation" })),
-  tools: TOOLS,
-  system: [feature("settings")],
-  isActive: (item, pathname) => {
-    const tool = TOOLS.find(candidate => exact(candidate, pathname));
-    if (item.placement === "tool" || item.id === "settings") return exact(item, pathname);
-    if (tool || pathname.startsWith("/opening/settings")) return false;
-    return navigationIsActive(item.route, pathname);
-  },
+  core: navigation.filter(item => item.group === "core").map(item => navigationFeature(item.href, item.label, "core")),
+  tools: navigation.filter(item => item.group === "tools").map(item => navigationFeature(item.href, item.label, "tool")),
+  system: [FEATURES.find(item => item.id === "settings")!],
 };
 
 /**
@@ -43,6 +40,7 @@ const OPENING_NAV: ShellNav = {
  */
 export function OpeningShellV3({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const search = useSearchParams().toString();
   const router = useRouter();
   const [userLabel, setUserLabel] = useState("");
   const [logoutPending, setLogoutPending] = useState(false);
@@ -50,6 +48,9 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const { recent, unavailable: recentUnavailable } = useRecentConversations(pathname);
+  const dueCount = useDueReviewCount(pathname);
+  const shellNav: ShellNav = { ...OPENING_NAV, isActive: (item, path) => navigationIsActive(item.route, path, search) };
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const toggleFocus = useCallback(() => setFocusMode(value => !value), []);
@@ -57,7 +58,7 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!focusMode) return;
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || document.querySelector('dialog[open],[role="dialog"][data-state="open"]')) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 || document.querySelector('dialog[open],[role="dialog"][data-state="open"]')) return;
       setFocusMode(false);
     };
     window.addEventListener("keydown", handleEscape);
@@ -106,14 +107,15 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
     finally { setLogoutPending(false); }
   }
 
-  const accountMenu = <OpeningAccountMenu userLabel={userLabel} pendingCount={pendingCount} focusMode={focusMode} onToggleFocus={toggleFocus} onLogout={logout} logoutPending={logoutPending} />;
+  const accountMenu = <OpeningAccountMenu pathname={pathname} search={search} recent={recent} recentUnavailable={recentUnavailable} userLabel={userLabel} pendingCount={pendingCount} focusMode={focusMode} onToggleFocus={toggleFocus} onLogout={logout} logoutPending={logoutPending} />;
 
   return (
-    <StatusToastProvider>
+    <ConversationCompanionProvider><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode: toggleFocus }}><StatusToastProvider>
       <AppShell
-        counts={pendingCount ? { review: pendingCount } : {}}
+        counts={dueCount ? { review: dueCount } : {}}
+        recent={recent.map(thread => ({ id: thread.id, title: thread.title, href: `/opening/assistant?conversation=${encodeURIComponent(thread.id)}` }))}
         hideNav={focusMode}
-        nav={OPENING_NAV}
+        nav={shellNav}
         onOpenSearch={openPalette}
         mobileTrailing={accountMenu}
         account={<div className="flex items-center gap-2 px-1.5 py-1">
@@ -121,6 +123,7 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
           <span className="truncate text-meta text-text-2 in-data-[compact=true]:sr-only">{userLabel}</span>
         </div>}
         mobileMenuExtra={<div className="grid gap-1">
+          <Link href="/opening/review" className={`${ui.quiet} justify-start`}><RotateCcw size={16} aria-hidden="true" />复习{dueCount ? ` · ${dueCount}` : ""}</Link>
           <button type="button" className={`${ui.quiet} justify-start`} onClick={() => openAssistantDrawer()}><Sparkles size={16} aria-hidden="true" />问 AI</button>
           <button type="button" className={`${ui.quiet} justify-start`} onClick={toggleFocus}>{focusMode ? "退出专注" : "进入专注"}</button>
           <button type="button" className={`${ui.quiet} justify-start`} onClick={logout} disabled={logoutPending}><LogOut size={16} aria-hidden="true" />{logoutPending ? "正在退出…" : "退出登录"}</button>
@@ -139,6 +142,6 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
       <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
       <Suspense fallback={null}><AssistantDrawer /></Suspense>
       <CitationReaderHost />
-    </StatusToastProvider>
+    </StatusToastProvider></WorkspaceLayoutContext.Provider></ConversationCompanionProvider>
   );
 }

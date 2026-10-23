@@ -18,9 +18,11 @@ export function restoredPracticeAssistance(fields: Pick<PracticeFields, "assista
 export function assertPracticeAttempt(draft: PracticeDraft, attempt: LearningAttempt, expectedRequestKey?: string) {
   const context = JSON.parse(draft.scope) as unknown[];
   const [courseId, mode, retestId, , requirementKey] = context;
-  const [focusSkill, focusRequirement] = context.length === 9 ? context.slice(7) : [];
+  const [focusSkill, focusRequirement] = context.length >= 9 ? context.slice(7, 9) : [];
   if ((expectedRequestKey && draft.start?.clientKey !== expectedRequestKey) || attempt.courseId !== courseId || (draft.attemptId && attempt.id !== draft.attemptId) || attempt.sessionId !== draft.start?.createInput?.sessionId) throw new Error("练习身份已改变，原草稿已保留。");
   if (focusSkill && (attempt.skillLabel !== focusSkill || (attempt.requirementKey ?? null) !== focusRequirement)) throw new Error("针对练习的主题或要求已改变，原草稿已保留。");
+  const question = context.length === 10 ? context[9] as { sourceId: string; sourceVersion: number } : null;
+  if (question && (!attempt.sourceIds.includes(question.sourceId) || attempt.sourceVersions[question.sourceId] !== question.sourceVersion)) throw new Error("题图版本已改变，原题干和答案已保留，请重新核对题图。");
   if (mode === "matrix") {
     const input = draft.start?.createInput?.matrixExercise;
     if (!input || !attempt.matrixExercise || attempt.matrixExercise.exerciseKey !== input.exerciseKey || attempt.matrixExercise.variant !== input.variant || !attempt.sourceIds.includes(input.sourceId)) throw new Error("矩阵题目已改变，原答案已保留，请到课程历史核对。");
@@ -77,6 +79,11 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
 }
 
 export type PracticeContinuity = ReturnType<typeof usePracticeDraft>;
+
+/** A returning view can subscribe without initiating another write. */
+export function pendingPracticeRequest<T>(key: string): Promise<T> | undefined {
+  return inFlight.get(key) as Promise<T> | undefined;
+}
 
 /** Share a write already in flight across route unmount/remount within this document. */
 export async function runPracticeRequest<T>(key: string, operation: () => Promise<T>): Promise<T> {
