@@ -62,7 +62,7 @@ test.describe("Opening span durable teaching flow", () => {
       expect(created.ok()).toBe(true);
       const lesson = spanLessonSnapshotSchema.parse(await created.json());
       await expect(page).toHaveURL(new RegExp(`lesson=${lesson.activityId}`));
-      await page.getByText(/调整学习方式 ·/).click();
+      await expect(page.getByRole("group", { name: "本次学习意图", exact: true })).toBeVisible();
       await page.getByLabel("时间预算（分钟）", { exact: true }).fill("12");
       await page.getByRole("button", { name: "揭示如何建立方程", exact: true }).click();
       await expect(page.getByText("第1坐标：1α + 0β = 3", { exact: true })).toBeVisible();

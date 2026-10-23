@@ -172,11 +172,12 @@ for (const condition of conditions) {
         await page.screenshot({ path: screenshotPath, fullPage: true });
         await testInfo.attach("view", { path: screenshotPath, contentType: "image/png" });
         if (view === "assistant") {
-          // The assistant is a full-page conversation. Returning to a fresh start
+          // The assistant is a full-page conversation. Starting a fresh conversation
           // must release any modal/inert state just as closing the old drawer did.
           await page.getByRole("link", { name: "新对话", exact: true }).click();
-          await expect(page).toHaveURL(/\/opening\/today$/);
-          await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
+          await expect(page).toHaveURL(/\/opening\/assistant\?context=none$/);
+          const conversation = page.getByRole("region", { name: "学习对话", exact: true });
+          await expect(conversation.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
           await expect(page.getByRole("main")).toBeVisible();
           await expect.poll(() => page.locator("main").evaluate(main => {
             return Boolean(main.closest('[aria-hidden="true"],[inert],[hidden]'));
@@ -185,6 +186,10 @@ for (const condition of conditions) {
             const focused = document.activeElement;
             return focused instanceof HTMLElement && Boolean(focused.closest('[inert],[hidden],[aria-hidden="true"]'));
           })).toBe(false);
+          const composer = conversation.getByRole("textbox", { name: "消息输入", exact: true });
+          await expect(composer).toBeEnabled();
+          await composer.focus();
+          await expect(composer).toBeFocused();
         }
       });
     }

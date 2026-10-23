@@ -22,7 +22,7 @@ async function expectOpeningTodayEmptySurface(page: import("@playwright/test").P
   await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "学习闭环快捷入口", exact: true })).toHaveCount(0);
   await expect(
-    page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "开始" }),
+    page.getByRole("navigation", { name: "学习工作台导航", exact: true }).getByRole("link", { name: "开始" }),
   ).toBeVisible();
 }
 

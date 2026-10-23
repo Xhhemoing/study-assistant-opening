@@ -18,7 +18,7 @@ test.describe("opening shell", () => {
         await page.setViewportSize(viewport);
         await page.goto("/opening/today");
         const nav = page.getByRole("navigation", {
-          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "主导航",
+          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "学习工作台导航",
           exact: true,
         });
         await expect(
@@ -72,11 +72,12 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      const today = page.getByRole("navigation", { name: "主导航", exact: true }).getByRole("link", { name: "开始" });
+      const nav = page.getByRole("navigation", { name: "学习工作台导航", exact: true });
+      const today = nav.getByRole("link", { name: "开始" });
       await today.focus();
       await expect(today).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("navigation", { name: "主导航", exact: true }).getByRole("link", { name: "课程" })).toBeFocused();
+      await expect(nav.getByRole("link", { name: "课程" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(page).toHaveURL(/\/opening\/courses$/);
     } finally {
@@ -115,7 +116,7 @@ test.describe("opening shell", () => {
         await page.goto("/opening/today");
         await shellReady;
         const nav = page.getByRole("navigation", {
-          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "主导航",
+          name: viewport.width < 768 ? "学习工作台导航（移动端）" : "学习工作台导航",
           exact: true,
         });
         await expect(nav.getByRole("link", { name: "开始", exact: true })).toBeVisible();
