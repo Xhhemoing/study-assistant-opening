@@ -81,7 +81,9 @@ export function ConversationCompanionProvider({ children }: { children: ReactNod
         interactionDisabled={blocked}
         isActiveConversation={() => session.mounts.length > 0}
         objectHref={href => conversationObjectHref(href, session.conversationId)}
-        onStartNew={() => setFreshRevision(value => value + 1)}
+        // A saved identity must leave its fixed slot through the explicit fresh route.
+        // Unsaved starts can fork locally while their first creation remains parked.
+        onStartNew={session.conversationId ? undefined : () => setFreshRevision(value => value + 1)}
         onRetainStateChange={state => {
           if (session.retained.pending === state.pending && session.retained.volatile === state.volatile) return;
           session.retained = state; evictIdle(); render();

@@ -32,7 +32,7 @@ function revealCourseMaterials() {
   while (node) { if (node instanceof HTMLDetailsElement) node.open = true; node = node.parentElement; }
 }
 
-export function CourseContents({ courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
+export function CourseContents({ assets }: { courseId: string; assets: CourseAsset[] }) {
   const objectHref = useConversationObjectHref();
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [error, setError] = useState("");

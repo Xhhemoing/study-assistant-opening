@@ -19,7 +19,7 @@ export function ConversationHistory({ api: apiProp }: { api?: OpeningApi }) {
     return () => { active = false; };
   }, [api, revision]);
   return <section className="mx-auto w-full max-w-[720px]">
-    <PageHeader title="全部对话" action={<Link href="/opening/today" className={ui.secondary}>新对话</Link>} />
+    <PageHeader title="全部对话" action={<Link href="/opening/assistant?context=none" className={ui.secondary}>新对话</Link>} />
     {error ? <p role="alert" className="px-5 py-4 text-sm text-danger">{error}<button type="button" className={ui.quiet} onClick={() => setRevision(value => value + 1)}>重新读取</button></p>
       : rows === null ? <div className="p-5"><LoadingRows label="正在读取对话…" /></div>
         : rows.length ? <ul className="divide-y divide-line px-5" aria-label="对话历史">{rows.map(row => <li key={row.id}>
@@ -27,6 +27,6 @@ export function ConversationHistory({ api: apiProp }: { api?: OpeningApi }) {
             <span className="block text-[15px] font-medium text-text">{row.title}</span>
             {row.lastTurnPreview ? <span className="mt-1 line-clamp-2 block text-[13px] leading-6 text-text-2">{row.lastTurnPreview}</span> : null}
           </Link>
-        </li>)}</ul> : <p className="px-5 py-8 text-sm text-text-2">还没有保存的对话。<Link href="/opening/today" className={ui.quiet}>开始提问</Link></p>}
+        </li>)}</ul> : <p className="px-5 py-8 text-sm text-text-2">还没有保存的对话。<Link href="/opening/assistant?context=none" className={ui.quiet}>开始提问</Link></p>}
   </section>;
 }

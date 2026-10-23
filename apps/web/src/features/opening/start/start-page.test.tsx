@@ -7,7 +7,9 @@ import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh() {} }) }));
 vi.mock("next/link", () => ({ default: ({ href, onClick, ...props }: ComponentProps<"a">) => <a {...props} href={href} onClick={event => {
-  onClick?.(event); event.preventDefault(); if (href && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) window.history.pushState(window.history.state, "", href);
+  onClick?.(event);
+  if (!event.defaultPrevented && href && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) window.history.pushState(window.history.state, "", href);
+  event.preventDefault();
 }} /> }));
 vi.mock("../capabilities/capabilities-provider", async () => {
   const { CLOSED_CAPABILITIES } = await import("@aistudy/config/public");
@@ -22,6 +24,8 @@ vi.mock("../assistant/ai-readiness", async () => {
 vi.mock("../assistant/proposal-panel", () => ({ ProposalPanel: () => null }));
 vi.mock("../assistant/use-job-stream", () => ({ useJobStream: () => ({ reply: null, cancel() {} }) }));
 import { StartPage } from "./start-page";
+import { ConversationHistory } from "./conversation-history";
+import { assistantEntry } from "../assistant/assistant-entry";
 import { AssistantView } from "../assistant/assistant-view";
 import { ConversationCompanionProvider, ConversationSurface, OriginalConversationSlot } from "../assistant/conversation-companion";
 import { assistantContextScope } from "../assistant/assistant-view";
@@ -77,7 +81,7 @@ it("reads only metadata for due suggestions and preserves one mounted conversati
   await act(async () => host.querySelector<HTMLAnchorElement>('[aria-label="新对话"]')!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true })));
   expect(host.querySelector("textarea")).toBe(textarea); expect(host.querySelector('[aria-label="停止回答"]')).not.toBeNull();
   await act(async () => host.querySelector<HTMLAnchorElement>('[aria-label="新对话"]')!.click());
-  expect(window.location.pathname + window.location.search).toBe("/opening/today");
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
   expect(host.textContent).toContain("你好，今天想学什么？"); expect(host.textContent).not.toContain("为什么？");
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("");
   expect(api.cancelJob).not.toHaveBeenCalled(); expect(api.createConversation).toHaveBeenCalledOnce();
@@ -114,7 +118,7 @@ it("does not let a late conversation creation remove the next start session's dr
   await act(async () => host.querySelector<HTMLAnchorElement>('[aria-label="新对话"]')!.click());
   await edit("新对话的未发送草稿");
   await act(async () => finishCreate({ id: conversationId, title: "上一条", courseId: null }));
-  expect(window.location.search).toBe("");
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("新对话的未发送草稿");
   await act(async () => root.render(<StartPage key="refresh" state={{ kind: "empty" }} timeZone="Asia/Shanghai" api={api} />));
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("新对话的未发送草稿");
@@ -245,7 +249,7 @@ it("keeps the new start draft in storage when a parked first creation and its mi
   expect(host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')?.value).toBe("");
   await edit("新开始页的独立草稿");
   await act(async () => finishCreate({ id: conversationId, title: "先前的问题", courseId: null }));
-  expect(window.location.search).toBe("");
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
   expect(host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')?.value).toBe("新开始页的独立草稿");
   expect(createQuestionDraftStore().read(`${assistantContextScope()}:::::`)).toBe("新开始页的独立草稿");
   expect(Object.values(sessionStorage).some(value => String(value).includes("新开始页的独立草稿"))).toBe(true);
@@ -280,4 +284,94 @@ it("protects a saved conversation's unsent page selection from idle eviction wit
   expect(host.querySelector<HTMLInputElement>('[aria-label="当前物理页码"]')?.value).toBe("7");
   expect(host.querySelector<HTMLSelectElement>('[aria-label="资料使用方式"]')?.value).toBe("selected");
   expect(api.submitTurn).not.toHaveBeenCalled(); expect(api.createConversation).not.toHaveBeenCalled();
+});
+
+
+it("starts an independent chat from a saved identity and restores the old editor, draft and sources on return", async () => {
+  const api = apiFixture(false);
+  const sourceId = "44444444-4444-4444-8444-444444444444";
+  const courseId = "55555555-5555-4555-8555-555555555555";
+  const newId = "66666666-6666-4666-8666-666666666666";
+  vi.mocked(api.listSources).mockResolvedValue([{ id: sourceId, name: "原课程材料", mime: "text/plain", version: 1, uploadState: "uploaded", parseState: "ready" }] as Awaited<ReturnType<OpeningApi["listSources"]>>);
+  vi.mocked(api.resumeConversation).mockResolvedValue({ conversationId, courseId, sourceIds: [sourceId], boundedHistory: [], historyTruncated: false });
+  vi.mocked(api.listTurns).mockResolvedValue([]);
+  vi.mocked(api.createConversation).mockResolvedValue({ id: newId, title: "独立新对话", courseId: null });
+  function Route({ fresh = false }: { fresh?: boolean }) {
+    return <ConversationCompanionProvider>{fresh ? <ConversationSurface api={api} startFresh /> : <ConversationSurface api={api} initialConversationId={conversationId} />}</ConversationCompanionProvider>;
+  }
+  await act(async () => root.render(<Route />));
+  const oldInput = host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')!;
+  await edit("原会话尚未发送的追问");
+  await act(async () => host.querySelector<HTMLAnchorElement>('[data-conversation-surface] [aria-label="新对话"]')!.click());
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
+  await act(async () => root.render(<Route fresh />));
+  const freshInput = host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')!;
+  expect(freshInput).not.toBe(oldInput); expect(freshInput.value).toBe("");
+  expect(host.querySelector('[data-conversation-parking] textarea')).toBe(oldInput);
+  expect(oldInput.value).toBe("原会话尚未发送的追问");
+  expect(api.resumeConversation).toHaveBeenCalledOnce(); expect(api.createConversation).not.toHaveBeenCalled();
+  await edit("独立新问题");
+  const freshForm = freshInput.closest("form")!;
+  await act(async () => freshForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(vi.mocked(api.submitTurn).mock.lastCall?.[0]).toMatchObject({ conversationId: newId, sourceIds: [] });
+  expect(oldInput.value).toBe("原会话尚未发送的追问");
+  await act(async () => root.render(<Route />));
+  expect(host.querySelector('[data-conversation-surface] textarea')).toBe(oldInput);
+  expect(vi.mocked(api.resumeConversation).mock.calls.filter(([id]) => id === conversationId)).toHaveLength(1);
+  await act(async () => oldInput.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(vi.mocked(api.submitTurn).mock.lastCall?.[0]).toMatchObject({ conversationId, sourceIds: [sourceId] });
+  expect(api.cancelJob).not.toHaveBeenCalled();
+});
+
+it("parks a saved in-flight answer when starting a fresh chat and resumes that same request on return", async () => {
+  const api = apiFixture();
+  function Route({ fresh = false }: { fresh?: boolean }) {
+    return <ConversationCompanionProvider>{fresh ? <ConversationSurface api={api} startFresh /> : <ConversationSurface api={api} initialConversationId={conversationId} />}</ConversationCompanionProvider>;
+  }
+  await act(async () => root.render(<Route />));
+  const oldInput = host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')!;
+  expect(oldInput.disabled).toBe(true);
+  await act(async () => host.querySelector<HTMLAnchorElement>('[data-conversation-surface] [aria-label="新对话"]')!.click());
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
+  await act(async () => root.render(<Route fresh />));
+  expect(host.querySelector('[data-conversation-parking] textarea')).toBe(oldInput);
+  expect(host.querySelector('[data-conversation-parking] [aria-label="停止回答"]')).not.toBeNull();
+  expect(host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')?.disabled).toBe(false);
+  await act(async () => root.render(<Route />));
+  expect(host.querySelector('[data-conversation-surface] textarea')).toBe(oldInput);
+  expect(oldInput.disabled).toBe(true);
+  expect(api.resumeConversation).toHaveBeenCalledOnce(); expect(api.cancelJob).not.toHaveBeenCalled();
+  expect(api.submitTurn).not.toHaveBeenCalled();
+});
+
+it("uses the explicit fresh route after a start chat is promoted to a saved identity", async () => {
+  const api = apiFixture(false);
+  function Route({ fresh = false }: { fresh?: boolean }) {
+    return <ConversationCompanionProvider>{fresh ? <ConversationSurface api={api} startFresh /> : <StartPage state={{ kind: "empty" }} timeZone="Asia/Shanghai" api={api} />}</ConversationCompanionProvider>;
+  }
+  await act(async () => root.render(<Route />));
+  const oldInput = host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')!;
+  await edit("创建并保存这个问题"); await send(); await edit("保存后未发出的追问");
+  expect(new URLSearchParams(window.location.search).get("conversation")).toBe(conversationId);
+  await act(async () => host.querySelector<HTMLAnchorElement>('[data-conversation-surface] [aria-label="新对话"]')!.click());
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
+  await act(async () => root.render(<Route fresh />));
+  expect(host.querySelector('[data-conversation-surface] textarea')).not.toBe(oldInput);
+  expect(host.querySelector<HTMLTextAreaElement>('[data-conversation-surface] textarea')?.value).toBe("");
+  expect(host.querySelector('[data-conversation-parking] textarea')).toBe(oldInput); expect(oldInput.value).toBe("保存后未发出的追问");
+  expect(api.createConversation).toHaveBeenCalledOnce(); expect(api.submitTurn).toHaveBeenCalledOnce(); expect(api.cancelJob).not.toHaveBeenCalled();
+});
+
+it.each([{ rows: [] }, { rows: [{ id: conversationId, title: "已保存的对话", courseId: "55555555-5555-4555-8555-555555555555" }] }])("opens an explicit fresh session from conversation history regardless of existing courses: %j", async ({ rows }) => {
+  const api = { listConversations: vi.fn(async () => rows) } as unknown as OpeningApi;
+  await act(async () => root.render(<ConversationHistory api={api} />));
+  const actions = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => ["新对话", "开始提问"].includes(link.textContent ?? ""));
+  expect(actions.length).toBe(rows.length ? 1 : 2);
+  for (const link of actions) {
+    expect(link.getAttribute("href")).toBe("/opening/assistant?context=none");
+    const entry = assistantEntry(link.getAttribute("href")!);
+    expect(entry.fresh).toBe(true); expect(entry.conversation).toBeNull(); expect(entry.context).toBeUndefined();
+  }
+  await act(async () => actions[0]!.click());
+  expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
 });

@@ -989,11 +989,20 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         title={<Heading className="min-w-0 truncate text-ui-lg font-semibold text-text">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "对话")}</Heading>}
         actions={<TopBarTools label="对话工具">
           <button type="button" className={v3ui.toolbarButton} aria-expanded={contextOpen} aria-controls="exploration-context" aria-pressed={contextOpen} disabled={interactionDisabled} onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>
-          {!learningAttempt ? <Link href="/opening/today" onClick={event => {
+          {!learningAttempt ? <Link href="/opening/assistant?context=none" onClick={event => {
             if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-            if (pending || loading || recoveryRequired || interactionDisabled || (draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。"))) { event.preventDefault(); return; }
-            if (start || onStartNew) { event.preventDefault(); if (onStartNew && !conversationId) draftStore.remove(draftScopeRef.current); (onStartNew ?? onNew)(); }
-          }} className={v3ui.iconSm} aria-label="新对话" aria-disabled={pending || loading || recoveryRequired || interactionDisabled} title="新对话"><Plus size={15} aria-hidden /></Link> : null}
+            const hosted = Boolean(isActiveConversation);
+            if (interactionDisabled || (!hosted && !start && !onStartNew && (pending || loading || recoveryRequired))
+              || (!hosted && !start && draft.trim() && !window.confirm("开始新对话？当前未发送的输入将被清空。"))) { event.preventDefault(); return; }
+            if (onStartNew || (start && !hosted)) {
+              event.preventDefault();
+              // Unsaved starts share one current-start slot. The host retains the old
+              // editor and its late identity migration; saved conversation drafts stay intact.
+              if (!conversationId) draftStore.remove(draftScopeRef.current);
+              window.history.replaceState(window.history.state, "", "/opening/assistant?context=none");
+              (onStartNew ?? onNew)();
+            }
+          }} className={v3ui.iconSm} aria-label="新对话" aria-disabled={interactionDisabled || (!isActiveConversation && !start && !onStartNew && (pending || loading || recoveryRequired))} title="新对话"><Plus size={15} aria-hidden /></Link> : null}
         </TopBarTools>} /> : null}
       {!start && !embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
       {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
