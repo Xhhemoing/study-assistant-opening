@@ -108,7 +108,9 @@ it("registers the sole active span entry and never carries a previous step's att
   const navigation = find(lesson(), node => node.type === "nav" && node.props["aria-label"] === "span 教学步骤")!;
   const steps = navigation.props.children as ReactElement<{ onClick: () => void }>[];
   steps[0]!.props.onClick(); lesson();
-  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: false, learningAttempt: null, blockedReason: expect.any(String) }));
+  // 示范步骤可以直接围绕课程提问，但绝不携带上一题的作答。
+  expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: false, learningAttempt: null, blockedReason: undefined }));
+  expect(studyBinding.set.mock.lastCall![0].context).not.toHaveProperty("attemptId");
   steps[1]!.props.onClick(); lesson();
   expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ isQuestion: true, learningAttempt: null }));
   expect(studyBinding.set.mock.lastCall![0].context).not.toHaveProperty("attemptId");

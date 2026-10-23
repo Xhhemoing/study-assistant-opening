@@ -15,6 +15,7 @@ import { useCourseBundle } from "./course-detail";
 import { CourseStudyMaterials } from "./course-study-materials";
 import { conversationObjectHref } from "../opening/assistant/conversation-links";
 import { CourseStudyContextTools } from "./course-study-context-tools";
+import { builtInLessonsForCourse } from "./built-in-lessons";
 import { TopBar, TopBarTools } from "../opening/v3/shell/top-bar";
 import { ui as v3ui } from "../opening/v3/ui/controls";
 import { SplitControls, SplitView, type SplitPanes } from "../opening/v3/workspace/split-view";
@@ -56,6 +57,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
   const openPractice = () => { setPracticeVisited(true); setPractice(true); };
   const courseHref = conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}`, originalConversationId);
   const archived = Boolean(course?.archivedAt);
+  const spanLesson = builtInLessonsForCourse(courseId, course).find(lesson => lesson.id === "span");
   useEffect(() => {
     if (!course) { setBusy(false); return; }
     if (practiceEntryError) { setBusy(false); setEntryError(practiceEntryError); return; }
@@ -97,7 +99,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       leading={<Link className={v3ui.icon} href={courseHref} aria-label="返回课程"><ArrowLeft aria-hidden="true" size={18} /></Link>}
       title={<h1 className="truncate text-title font-semibold tracking-[-0.01em]">{course.title}</h1>}
       actions={<TopBarTools label="学习工具">
-        {teachingEnabled ? <Link className={`${v3ui.toolbarButton} hidden sm:inline-flex`} href={conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}/study/span`, originalConversationId)}>自学 / 串讲 / 挑战</Link> : null}
+        {teachingEnabled && spanLesson ? <Link className={`${v3ui.toolbarButton} hidden sm:inline-flex`} href={conversationObjectHref(spanLesson.href, originalConversationId)}>自学 / 串讲 / 挑战</Link> : null}
         <SplitControls panes={panes} />
       </TopBarTools>} />
     <div className="min-h-0 flex-1"><SplitView panes={panes}><div className={`h-full min-h-0 ${activity && !practice ? "flex flex-col overflow-hidden" : "overflow-y-auto [scrollbar-gutter:stable]"}`}><div className={activity && !practice ? "flex min-h-0 w-full flex-1 flex-col" : "w-full pb-10"}>
@@ -113,7 +115,11 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       {!busy && entry?.kind === "retest-review" ? <CourseRetestReview courseId={courseId} task={entry.task} /> : null}
 
       {!busy && !archived && entry?.kind !== "retest-review" && practiceVisited ? <section hidden={!practice && teachingEnabled} id="course-practice" className={!practice && teachingEnabled ? "hidden" : "space-y-4 px-5 py-6"} aria-labelledby="course-practice-heading"><ContentBlock width={initialMode === "matrix" ? "wide" : "prose"}><div className="flex items-center justify-between gap-3"><h2 className="text-ui-lg font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2>{activity ? <button type="button" className={ui.quiet} onClick={() => setPractice(false)}>返回讲解</button> : null}</div>{retest?.requirementKey === "span:linear-combination:v1" ? <Link className={ui.primary} href={`/opening/courses/${courseId}/study/span?retest=${retest.candidateId}`}>开始 span 正式延迟复测</Link> : <LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill} initialFocus={initialFocus} initialMode={initialMode} initialMatrixKey={initialMatrixKey} initialMatrixVariant={initialMatrixVariant} onRecorded={() => undefined} />}</ContentBlock></section> : null}
-      {!practice && teachingEnabled && !archived && entry?.kind !== "retest-review" ? <details className="mx-5 mt-2 shrink-0 border-t border-line pb-3 pt-2"><summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">其他学习方式</summary><div className="mt-3 flex flex-wrap gap-2"><button type="button" className={ui.secondary} onClick={openPractice}>独立练习</button><Link className={ui.quiet} href={conversationObjectHref(`/opening/assistant?courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>自由探索</Link></div></details> : null}
+      {!practice && teachingEnabled && !archived && entry?.kind !== "retest-review" ? (() => {
+        // 讲解还没准备好（排队、生成中或本环境未开放生成）时，不让学习者对着状态卡干等：把能马上开始的事直接摆出来。
+        const waiting = !busy && !entryError && !resume?.clientInit;
+        return <details key={waiting ? "waiting" : "ready"} open={waiting} className="mx-5 mt-2 shrink-0 border-t border-line pb-3 pt-2" data-study-alternatives={waiting ? "waiting" : "ready"}><summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{waiting ? "讲解准备好之前，可以先做这些" : "其他学习方式"}</summary><div className="mt-3 flex flex-wrap gap-2">{spanLesson ? <Link className={waiting ? ui.primary : ui.secondary} href={conversationObjectHref(spanLesson.href, originalConversationId)}>学现成的一节：{spanLesson.label}</Link> : <Link className={waiting ? ui.primary : ui.secondary} href={conversationObjectHref(`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>先读课程材料</Link>}<button type="button" className={ui.secondary} onClick={openPractice}>独立练习</button><Link className={ui.quiet} href={conversationObjectHref(`/opening/assistant?courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>问 AI</Link></div></details>;
+      })() : null}
     </div></div></SplitView></div>
   </section>;
 }

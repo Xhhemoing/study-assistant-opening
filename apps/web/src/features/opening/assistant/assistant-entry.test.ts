@@ -36,15 +36,17 @@ describe("global assistant entry", () => {
     expect(assistantEntry("/opening/assistant", `/opening/courses/${id}/study`).context).toEqual({ courseId: id });
     expect(assistantEntry(`/opening/assistant?courseId=${id}&activityId=${id}`).key).not.toBe(assistantEntry(`/opening/assistant?courseId=${id}`).key);
   });
-  it("blocks a course-only study entry and isolates language support from mathematical help", () => {
-    expect(assistantEntry("/opening/assistant", `/opening/courses/${id}/study/span`).error).toContain("本次作答");
+  it("lets a course-only study entry ask with course context and isolates language support", () => {
+    const studyEntry = assistantEntry("/opening/assistant", `/opening/courses/${id}/study/span`);
+    expect(studyEntry.error).toBeUndefined();
+    expect(studyEntry.context).toEqual({ courseId: id });
     expect(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=language_support`).key).not.toBe(assistantEntry(`/opening/assistant?attemptId=${id}&purpose=learning_help`).key);
   });
-  it("starts an explicitly unbound conversation without restoring course history, but keeps study protection", () => {
+  it("starts an explicitly unbound conversation without restoring course history", () => {
     const entry = assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}`);
     expect(entry.context).toBeUndefined();
     expect(entry.fresh).toBe(true);
     expect(entry.conversation).toBeNull();
-    expect(assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}/study`).error).toBeTruthy();
+    expect(assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}/study`).error).toBeUndefined();
   });
 });
