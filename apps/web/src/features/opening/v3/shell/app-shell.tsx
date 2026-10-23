@@ -84,7 +84,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
       <nav id="app-nav" aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
-        className="hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
+        className="relative hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
         <button type="button" onClick={() => setPref({ nav: compact ? "expanded" : "compact" })}
           aria-label={compact ? "展开导航" : "收起导航"} aria-expanded={!compact}
           className={`${ui.icon} mx-2.5 mb-2`}>
@@ -112,8 +112,8 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           {recent.length > 0 && <TransitionLink href={featureHref("assistant")} className="block whitespace-nowrap px-3 py-2 text-meta text-text-2 hover:text-text">全部对话</TransitionLink>}
         </section>
         <div className="mt-auto"><NavGroup items={nav?.system ?? NAV_SYSTEM} isActive={isActive} compact={compact} counts={counts} />{account ? <div className="mt-1 px-1.5">{account}</div> : null}</div>
+        {!compact ? <NavResizer width={navWidth} onDrag={setDragWidth} onCommit={width => { setDragWidth(null); setPref({ navWidth: width }); }} /> : null}
       </nav>
-      {!hideNav && !compact ? <NavResizer width={navWidth} onDrag={setDragWidth} onCommit={width => { setDragWidth(null); setPref({ navWidth: width }); }} /> : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <main id="main-content" tabIndex={-1} data-scroll-root data-focus={hideNav} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable] [view-transition-name:app-main] md:my-2 md:mr-2 md:rounded-panel md:border md:border-line md:shadow-card data-[focus=true]:m-0 data-[focus=true]:rounded-none data-[focus=true]:border-0">
@@ -219,7 +219,7 @@ function NavResizer({ width, onDrag, onCommit }: { width: number; onDrag: (width
     <div role="separator" aria-orientation="vertical" aria-label="调整导航宽度" aria-controls="app-nav" tabIndex={0}
       aria-valuenow={width} aria-valuemin={NAV_WIDTH_MIN} aria-valuemax={NAV_WIDTH_MAX} aria-valuetext={`${width} 像素`}
       title="拖动调整宽度，双击恢复默认"
-      className="group relative z-10 -ml-1.5 hidden w-3 shrink-0 cursor-col-resize touch-none outline-none md:block"
+      className="group absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize touch-none outline-none"
       onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); start.current = { x: event.clientX, width, pointerId: event.pointerId }; onDrag(width); }}
       onPointerMove={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; onDrag(clampNavWidth(from.width + event.clientX - from.x)); }}
       onPointerUp={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; start.current = null; onCommit(clampNavWidth(from.width + event.clientX - from.x)); }}

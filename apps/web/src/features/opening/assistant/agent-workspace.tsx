@@ -57,7 +57,7 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
 
   return (
     <div className="flex h-full min-h-0" data-agent-workspace>
-      <aside aria-label="会话" data-open={railOpen}
+      <section aria-label="会话" data-open={railOpen}
         className="hidden w-64 shrink-0 flex-col border-r border-line bg-bg/60 transition-[width,opacity] duration-(--duration-panel) ease-out-expo data-[open=false]:w-0 data-[open=false]:opacity-0 lg:flex"
         inert={!railOpen}>
         <div className="flex h-(--topbar-h) shrink-0 items-center gap-1 px-3">
@@ -83,7 +83,7 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
                   </li>
                 ))}</ul>}
         </nav>
-      </aside>
+      </section>
       <div className="relative flex min-w-0 flex-1 flex-col">
         {!railOpen ? <button type="button" className={`${ui.iconSm} absolute left-2 top-2 z-30 hidden lg:inline-grid`} aria-label="展开会话列表" onClick={() => setRailOpen(true)}><PanelLeftOpen size={15} aria-hidden="true" /></button> : null}
         <AssistantView key={selection.key} agent initialConversationId={selection.id} startFresh={selection.id === null && selection.key > 0}

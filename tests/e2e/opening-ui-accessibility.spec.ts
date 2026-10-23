@@ -35,8 +35,8 @@ test.beforeEach(async ({ context, baseURL }) => {
   });
 });
 
-type View = "today" | "courses" | "overview" | "units" | "progress" | "review" | "library" | "settings" | "lesson" | "assistant";
-const views: readonly View[] = ["today", "courses", "overview", "units", "progress", "review", "library", "settings", "lesson", "assistant"];
+type View = "today" | "courses" | "overview" | "units" | "progress" | "review" | "library" | "settings" | "lesson" | "assistant" | "agent";
+const views: readonly View[] = ["today", "courses", "overview", "units", "progress", "review", "library", "settings", "lesson", "assistant", "agent"];
 const conditions = [
   { name: "desktop light", viewport: { width: 1366, height: 900 }, colorScheme: "light", reducedMotion: "no-preference" },
   { name: "desktop dark", viewport: { width: 1366, height: 900 }, colorScheme: "dark", reducedMotion: "no-preference" },
@@ -94,6 +94,11 @@ async function openView(page: Page, view: View) {
       await page.getByRole("navigation", { name: "本课步骤" }).getByRole("button", { name: "3. 自己尝试", exact: true }).click();
       await expect(page.getByRole("textbox", { name: "我的原始思考", exact: true })).toBeEnabled();
       break;
+    case "agent": {
+      await page.goto("/opening/agent");
+      await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
+      break;
+    }
     case "assistant": {
       await page.goto("/opening/assistant?context=none");
       const drawer = page.getByRole("dialog", { name: "学习助手", exact: true });
